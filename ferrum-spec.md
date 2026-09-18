@@ -1592,22 +1592,156 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 >   stringified sort) and now refuse as unorderable; `dict` labels leaked
 >   `TypeError: unhashable type: 'dict'` and now refuse by name too.
 >
-> `confusion_matrix_chart` does **not** move with any of these: measured on
-> the identical inputs, it still renders the mixed union (16 cells), still
-> renders a null `y_pred` as a `'None'`/`'nan'` class, and still orders its
-> own axis `10, 2`. The asymmetry is deliberate — #224a is about the
-> report's class axis, and widening these refusals to the confusion family
-> would move a second figure's behavior under a fix that is not about it —
-> but it means the two figures answer the same malformed input differently
-> until that family is revisited. In the same vein, `ModelSource`'s
-> no-`classes_` confusion branch still derives its labels with a bare
-> `sorted(set(...))`: T1's disposition for that branch (its labels are the
-> `y_true`/`y_pred` union, so no row can fall outside them and it needs no
-> stray-value guard) still holds, but its sort's totality does not — a
-> `classes_`-less model predicting numbers against a string `y` raises
-> `TypeError: '<' not supported between instances of 'str' and 'int'`
-> (measured 2026-09-13), the same unowned shape `report_labels` closes for
-> the report. Disclosed, tracked as a follow-up, not closed here.
+> `confusion_matrix_chart` did **not** move with any of these when #224a
+> shipped: measured on the identical inputs, it still rendered the mixed
+> union (16 cells), rendered a null `y_pred` as a `'None'`/`'nan'` class,
+> and ordered its own axis `10, 2`. The asymmetry was deliberate — #224a is
+> about the report's class axis, and widening these refusals to the
+> confusion family moves a second figure's behavior — but it meant two
+> figures answered one malformed input differently, which is what #203 set
+> out to end. **Superseded in part on 2026-09-17; see the note directly
+> below.**
+
+> **2026-09-17 (wave 3 close remediation, finding 2 — the confusion family
+> joins the cells it sat outside):** the wave's whole-change design review
+> read the target-hygiene header's claim ("one contract ... applied by
+> every binary and multiclass diagnostic on both source paths") against the
+> disclosure above and returned it as a concern: the claim was not true, and
+> the gap was user-visible inside one figure family. Three cells move, on
+> **malformed inputs only** — clean targets are byte-identical and no golden
+> moved:
+>
+> - **A null prediction refuses** on both `confusion_matrix`
+>   implementations, model path and precomputed, through the same
+>   `require_no_null_predictions` guard `classification_report_chart` uses,
+>   in every dtype family a null arrives in. Measured 2026-09-13 on
+>   `y_true=["a","b","a","b"]` with `y_pred=["a",None,"a","b"]`: the
+>   `predicted` axis held `['None', 'a', 'b']`, a class nothing ever
+>   predicted, and the row holding the null was scored against it; the
+>   float twin (`[0.0, nan, 0.0, 1.0]`) rendered `'nan'` the same way. The
+>   fabricated class is gone.
+> - **A fully disjoint translated class vocabulary refuses** on
+>   `confusion_matrix_chart` and `class_prediction_error_chart`, through
+>   the same `check_translated_classes` guard the report path runs
+>   (#206 cycle 5). `classes_ = [0, 1, 2]` against `y = ["c0", "c1", "c2"]`
+>   translated every prediction to `"0"`/`"1"`/`"2"`, values `y` never
+>   holds, so every row encoded out of vocabulary and the kernel dropped
+>   all of them: the matrix rendered every cell as zero behind a warning
+>   saying 300 of 300 rows had been dropped. A **partial** overlap still
+>   warns and drops, unchanged — it is the ordinary stray-value case.
+> - **`ModelSource.confusion_matrix`'s no-`classes_` branch derives its
+>   class axis through `report_labels`**, closing the totality gap the note
+>   above disclosed: the bare `sorted(set(...))` leaked
+>   `TypeError: '<' not supported between instances of 'str' and 'int'` on
+>   a mixed target and `TypeError: unhashable type` one statement later on
+>   a `dict`-valued prediction; both now refuse by name, in the report
+>   family's own voice. The order is unchanged for every input the old rule
+>   accepted, so only the malformed cases move. T1's disposition for that
+>   branch (its labels are the `y_true`/`y_pred` union, so no row can fall
+>   outside them and it needs no stray-value guard) still holds.
+>
+> One thing was left standing at this point and is **superseded by the note
+> directly below**: `_PrecomputedSource.confusion_matrix` kept its
+> `sorted(..., key=str)` class order, described here as a presentation
+> difference rather than a hygiene one. The close review's second cycle
+> measured what that rule rendered and the characterization did not
+> survive.
+
+> **2026-09-17 (wave 3 close remediation cycle 2, finding A — one class axis
+> for the whole label-domain family):** `_PrecomputedSource.confusion_matrix`
+> derives its class axis from `_target_hygiene.report_labels`, the same
+> partition `classification_report_chart` uses on both paths and
+> `ModelSource.confusion_matrix`'s no-`classes_` branch joined above. The
+> rule it replaces, `sorted(set(y_true) | set(y_pred), key=str)`, was carried
+> for two cycles as an *ordering* preference. It was not only an ordering
+> rule: stringifying before comparing makes `str` totally order every value,
+> which is why it accepted every input — including ones the chart cannot
+> draw.
+>
+> Measured 2026-09-17 against the pre-fix code on `y_true = [0, 1, 0, 1]`
+> with `y_pred = ["0", "1", "0", "1"]` (object dtype): it derived four labels
+> `[0, '0', 1, '1']` that stringify to two, returned a **16-row** frame
+> carrying only **4 distinct** `(actual, predicted)` keys — each repeated
+> four times, with the true diagonal mass split across visually identical
+> cells — and `confusion_matrix_chart` rendered **four superimposed `<text>`
+> nodes at each of four identical pixel positions** (four nodes at
+> `x=178.166, y=133.537`, and the same at three further positions).
+> `class_prediction_error_chart`, which renders the same frame, drew the same
+> thing. `classification_report_chart` refused that input by name throughout.
+> Overplotted duplicate class labels are not an ordering preference, and
+> under the standing REFUSE-MALFORMED policy the correct end state is a
+> refusal.
+>
+> Two user-visible moves, both on `confusion_matrix_chart` and
+> `class_prediction_error_chart`:
+>
+> - **Inputs that rendered now refuse**, by name and in the report's own
+>   voice: a mixed-family union, `complex` labels, and
+>   `list`/`set`/`bytearray` labels (the last previously leaked an unowned
+>   `TypeError: unhashable type` out of the old rule's own `set()`).
+> - **Numeric class labels order by value rather than by digit count.**
+>   Measured: `{1, 2, 10}` moves from `['1', '10', '2']` to
+>   `['1', '2', '10']` — which is what `classification_report_chart` and the
+>   model path already rendered, so this retires the last divergence in the
+>   family's class axis rather than creating one. Two classes of unequal
+>   digit count are enough to see it.
+>
+> String-labelled matrices sort identically under both rules and do not move;
+> that is every confusion golden in the repo, and no golden moved. The
+> earlier note's "presentation difference, not a hygiene one" reading is
+> retired: there is no label-rule difference left between the four
+> label-domain surfaces.
+
+> **2026-09-17 (wave 3 close remediation cycle 2 — three smaller contract
+> notes):**
+>
+> - *`classification_report_chart`'s model path refuses a null-bearing
+>   prediction vector.* An estimator whose `predict` returns a null produced
+>   scikit-learn's own `ValueError: Classification metrics can't handle a mix
+>   of binary and unknown targets` (measured), naming neither the array nor
+>   the entry, while `confusion_matrix_chart` and
+>   `class_prediction_error_chart` refused typed on the identical input. The
+>   guard now runs in `report_predictions_in_y_domain`, which both report
+>   consumers share, so the null-prediction cell is answered the same way by
+>   all three label-domain figures.
+> - *A model-path refusal names a lever the caller holds.* When `y_pred` is
+>   `model.predict`'s output rather than an array the caller passed, "drop or
+>   impute the null rows" and "use one consistent value type for y_true and
+>   y_pred" name something the caller cannot do. Those refusals now close
+>   with a clause naming the model instead. The diagnosis, counts and
+>   observed values are unchanged, and the precomputed path's wording is
+>   byte-identical.
+> - *One spelling for the entry name.* The precomputed adapter's shape and
+>   arity guards took `chart_name=` while every hygiene guard took
+>   `diagnostic=` — two keywords for one concept, passed the same local value
+>   three lines apart. They are now all `diagnostic=`. Internal only
+>   (`_PrecomputedSource` is private); no message text changed.
+
+> **2026-09-17 (wave 3 close remediation, finding 4 — a refusal names the
+> entry you called):** every target-hygiene refusal and warning opens with
+> the name of *the public entry the caller actually invoked*. That is what
+> the contract always said; the model path did not honor it. Measured:
+> `fm.roc_chart(model, X, y_with_nulls)` raised `"roc_curve: y has 10 null
+> row(s) ... Drop or impute the null rows before calling roc_curve."`,
+> naming a source method the figure-function caller never invoked and
+> telling them to fix it there, while the precomputed
+> `fm.roc_chart(y_true=, y_pred=)` on the same defect raised
+> `"roc_chart: ..."`. A caller who switched input paths saw one defect
+> reported under two names.
+>
+> Every classification method on both source kinds now takes a
+> `diagnostic=` keyword that defaults to the method's own name, and each
+> public entry passes its own: a message raised through `roc_chart` opens
+> `roc_chart:`, through `ROCVisualizer` opens `ROCVisualizer:` (matching
+> `ClassificationReportVisualizer`, which named itself from the start), and
+> a direct `source.roc_curve()` call still opens `roc_curve:`. The most
+> visible instance is the one that could not be fixed by baking a name into
+> the source method: `confusion_matrix` serves two figure functions, so its
+> stray-drop warning now opens `class_prediction_error_chart:` when that is
+> what was called, and `confusion_matrix_chart:` when that was. This is a
+> **message-text change only** — no number, no frame, and no rendered
+> geometry moves — and the name is deliberately not part of the cache key,
+> since it labels messages rather than changing what is computed.
 >
 > **2026-09-13 (fix cycle 4 — cell 4 extends from unorderable to
 > unkeyable, and `y_true`'s shape joins `y_pred`'s).** The prose above
@@ -3852,10 +3986,11 @@ ferrum.classification_report_chart(model=None, X=None, y=None, *,
 # naming the diagnostic and the fix, replacing what used to be a leaked
 # sklearn shape error (`"Expected 2D array, got scalar array instead"`) or
 # a foreign `InvalidParameterError` naming `y_true`. Both paths order the
-# class axis identically (#224a, 2026-09-13): the precomputed path's former
-# `sorted(..., key=str)` rule — still `confusion_matrix`'s own convention,
-# and unchanged there — retired for this figure, so the documented
-# divergence between the two paths no longer exists. `y_true` and `y_pred`
+# class axis identically (#224a, 2026-09-13): the precomputed path's
+# `sorted(..., key=str)` rule — since retired for `confusion_matrix` too
+# (close remediation, 2026-09-17; see the dated note) — retired for this
+# figure, so the documented divergence between the two paths no longer
+# exists. `y_true` and `y_pred`
 # must each be 1-D (a 2-D `y_true` now refuses by name, mirroring the
 # `y_pred` shape check #208 already had). The label derivation
 # (`_curve_frames.report_labels`) is total by partition over the *values*
