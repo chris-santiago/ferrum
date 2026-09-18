@@ -17,7 +17,6 @@ _prediction_error_chart_from_source.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -457,6 +456,8 @@ def _fit_chart_from_named_transform(
     ci: float | None,
     line_kwargs: dict,
     chart_x: Any,
+    x_title: str,
+    y_title: str,
     neutral_stroke: bool = False,
     metrics: bool = False,
 ) -> Chart:
@@ -507,6 +508,13 @@ def _fit_chart_from_named_transform(
     ``_propagate_layer_scale`` returns each layer unchanged when the channel
     carries no explicit scale, so the ordinary case is a no-op rather than a
     branch.
+
+    ``x_title``/``y_title`` are the caller's own column names, which the
+    layers need because they are bound to the transform's output columns and
+    the renderer titles each axis from layer 0 (see ``build_fit_layers``).
+    Required, not defaulted: ``lmplot``'s ``x``/``y`` are required ``str``
+    parameters, so every call site has them, and when ``scatter=False``
+    leaves the fit alone there is no sibling layer to fall back on (#199).
     """
     chart = Chart(data)._clone()
     chart._transforms = [transform]
@@ -516,6 +524,8 @@ def _fit_chart_from_named_transform(
             kind,
             data_source=kind,
             ci=ci,
+            x_title=x_title,
+            y_title=y_title,
             line_kwargs=line_kwargs,
             neutral_stroke=neutral_stroke,
             metrics=metrics,
@@ -923,6 +933,12 @@ def lmplot(
         scatter_layer = s
 
     # ---- Fit layer (per method) ----------------------------------------
+    # Every branch below forwards `lkw` at CONSTRUCTION, to the fit line
+    # alone. It used to be rewritten onto the finished chart's `_layers` for
+    # the `mark_smooth`-routed methods instead, which dropped it silently
+    # whenever those layers were not materialized yet -- the `scatter=False`
+    # branch, whose chart still carries a pending stat mark until render
+    # (#199).
     lkw = dict(line_kws) if line_kws else {}
 
     # Every `_SMOOTH_ROUTED_METHODS` member takes ONE call: the parameters
@@ -956,10 +972,18 @@ def lmplot(
             # No sibling layer: the fit IS the chart, so `mark_smooth`'s own
             # shape is the right one -- including the single-line shortcut it
             # takes for `ci=None, show_metrics=False`, whose chain-advancing
-            # (unnamed) `Smooth` correctly becomes the chart's data, and whose
-            # chart-level encoding is what titles the axes with the caller's
-            # own column names.
-            fit = Chart(data).mark_smooth(**smooth_kwargs)
+            # (unnamed) `Smooth` correctly becomes the chart's data.
+            #
+            # `line_kws` is handed to `mark_smooth` as `line_kwargs=`, its own
+            # fit-line slot, rather than spread as mark kwargs (which would
+            # repaint the CI band too) or rewritten onto `out._layers` after
+            # the fact. The post-hoc rewrite is what dropped it here: on this
+            # branch the chart still carries a pending stat mark, so
+            # `out._layers` is empty until the desugar runs at render time
+            # (#199). Forwarding at construction reaches both shapes
+            # `desugar_smooth` can return without forcing that desugar early,
+            # which would cost the single-line shortcut.
+            fit = Chart(data).mark_smooth(**smooth_kwargs, line_kwargs=lkw)
             fit = (
                 fit.encode(x=x_enc, y=y, color=hue_ch)
                 if hue is not None
@@ -998,10 +1022,10 @@ def lmplot(
                 # does for the three dedicated methods below.
                 kind="smooth",
                 ci=ci_frac,
-                # `line_kws` is applied to the emitted line layer below, in the
-                # one block that already owns it for these methods.
-                line_kwargs={},
+                line_kwargs=lkw,
                 chart_x=x_enc,
+                x_title=_field_name(x),
+                y_title=_field_name(y),
                 metrics=metrics_applied,
             )
     elif method == "logistic":
@@ -1012,6 +1036,8 @@ def lmplot(
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
+            x_title=_field_name(x),
+            y_title=_field_name(y),
             neutral_stroke=color_active,
         )
     elif method == "glm":
@@ -1022,6 +1048,8 @@ def lmplot(
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
+            x_title=_field_name(x),
+            y_title=_field_name(y),
             neutral_stroke=color_active,
         )
     elif method == "robust":
@@ -1040,6 +1068,8 @@ def lmplot(
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
+            x_title=_field_name(x),
+            y_title=_field_name(y),
             neutral_stroke=color_active,
             metrics=metrics_applied,
         )
@@ -1063,18 +1093,6 @@ def lmplot(
         out = fit
     else:
         out = _merge_layers(scatter_layer, fit, scatter_name="scatter", fit_name="fit")
-
-    # Apply line_kws to the `mark_smooth`-routed methods, where it cannot be
-    # passed through `mark_smooth` directly (its mark kwargs reach every
-    # emitted layer, band included). The dedicated fit-family methods already
-    # applied it as the line layer's own mark_kwargs, in `build_fit_layers`.
-    if lkw and method in _SMOOTH_ROUTED_METHODS and out._layers:
-        out._layers = [
-            replace(layer, mark_kwargs={**(layer.mark_kwargs or {}), **lkw})
-            if getattr(layer, "mark", None) == "line"
-            else layer
-            for layer in out._layers
-        ]
 
     # Faceting.
     if col is not None or row is not None:
@@ -1343,7 +1361,17 @@ def residplot(
     point_kwargs: dict = {} if color_arg.paint is None else {"fill": color_arg.paint}
 
     chart = Chart(data).transform(resid_transform).mark_point(**point_kwargs)
-    enc: dict = {"x": _resid_x, "y": "residual"}
+    # Both channels are bound to the residual batch's own column names, which
+    # are the axis titles the renderer reads off layer 0 -- so without a
+    # `title=` this chart announced its x axis as "x" and its value axis as
+    # "residual" on its DEFAULT path, losing the caller's columns entirely
+    # (#199, the same layer-0 mechanism `build_fit_layers` carries). The value
+    # axis names the response it residualizes, since "residual" alone leaves
+    # the reader no way back to the fitted column.
+    enc: dict = {
+        "x": X(_resid_x, title=x),
+        "y": Y("residual", title=f"{y} residual"),
+    }
     if color is not None:
         enc["color"] = color
     elif label_paint_channel is not None:

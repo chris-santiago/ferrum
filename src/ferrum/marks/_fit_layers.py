@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
+from ferrum.encoding import X, Y
 
 #: The theme token that keeps a POOLED fit from impersonating a color level.
 #: ``marks/composite.py``'s boxplot whisker/median layers use the same one;
@@ -41,6 +42,8 @@ def build_fit_layers(
     *,
     data_source: str,
     ci: float | None,
+    x_title: str,
+    y_title: str,
     line_kwargs: dict | None = None,
     neutral_stroke: bool = False,
     metrics: bool = False,
@@ -62,8 +65,31 @@ def build_fit_layers(
         The confidence level the transform was built with. ``None`` omits the
         band layer; the value itself is not read here (the transform computes
         the interval), only its presence.
+    x_title, y_title : str
+        The caller-facing column names the axes are titled with. The layers
+        below are bound to the TRANSFORM's output columns (``x``, ``y``,
+        ``ci_lower``), and the renderer resolves each axis title from layer 0
+        only -- spec-level channel ``title``, then layer-0 channel ``title``,
+        then layer-0 field name (``build_axis_input``,
+        ``crates/ferrum-core/src/render/prepare/mod.rs``). So a chart whose
+        only layers are these titled its value axis ``ci_lower`` -- the
+        band's lower bound -- whenever no sibling scatter happened to be
+        layer 0 (#199). Both the band and the line carry the titles, because
+        which of the two lands at index 0 depends on ``ci``. The metrics
+        layer does not: ``line`` is unconditional, so metrics is never first.
+        ``y2`` does not either -- the renderer reads only the primary
+        positional channel for an axis title.
+
+        Required, with no ``None`` default: both call sites always have the
+        caller's field names (``mark_smooth``'s desugar refuses an unencoded
+        x or y before reaching here, and ``lmplot``/``regplot`` type ``x``
+        and ``y`` as required ``str``), so an optional spelling would only
+        add an untestable arm that silently reintroduces the defect.
     line_kwargs : dict, optional
-        Mark kwargs for the fit line (``lmplot``'s ``line_kws``).
+        Mark kwargs the caller aimed at the fit line (``lmplot``'s
+        ``line_kws``). Recorded on the line layer's ``caller_style_keys`` as
+        well as its ``mark_kwargs``, so the chart-level catch-all
+        ``**mark_kwargs`` cannot override them.
     neutral_stroke : bool, default False
         Paint the band and the line with the neutral theme token instead of
         the chart's color resolution. Set when the transform produces ONE
@@ -92,21 +118,37 @@ def build_fit_layers(
             _Layer(
                 name="ribbon",
                 mark="ribbon",
-                encoding={"x": cols["x"], "y": cols["ci_lower"], "y2": cols["ci_upper"]},
+                encoding={
+                    "x": X(cols["x"], title=x_title),
+                    "y": Y(cols["ci_lower"], title=y_title),
+                    "y2": cols["ci_upper"],
+                },
                 mark_kwargs=ribbon_kwargs,
                 data_source=data_source,
             )
         )
 
     resolved_line_kwargs = dict(line_kwargs) if line_kwargs else {}
+    # Recorded BEFORE the neutral-stroke default below, so it names the
+    # caller's keys and only those: the two precedences this layer is subject
+    # to run in opposite directions, and both fall out of that distinction.
+    # `setdefault` lets a caller-supplied `stroke` beat the library's neutral
+    # token, and `caller_style_keys` lets it beat the chart-level catch-all
+    # `**mark_kwargs` (see `_Layer.caller_style_keys`). A key the caller did
+    # not name is a library default on both counts.
+    caller_named = frozenset(line_kwargs) if line_kwargs else frozenset()
     if neutral_stroke:
         resolved_line_kwargs.setdefault("stroke", _NEUTRAL_PAINT)
     layers.append(
         _Layer(
             name="line",
             mark="line",
-            encoding={"x": cols["x"], "y": cols["y"]},
+            encoding={
+                "x": X(cols["x"], title=x_title),
+                "y": Y(cols["y"], title=y_title),
+            },
             mark_kwargs=resolved_line_kwargs or None,
+            caller_style_keys=caller_named,
             data_source=data_source,
         )
     )

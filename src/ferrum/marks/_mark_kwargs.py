@@ -98,6 +98,19 @@ def apply_user_mark_kwargs(layers: list, user_kwargs: dict) -> list:
     kwargs that don't apply to a given mark type, so spreading across all
     layers is safe even when only one layer can use the kwarg.
 
+    That user-wins rule is unconditional here, which is NOT the rule
+    ``_desugar._catch_all_over`` applies to the same question for the two
+    merges ``_resolve_pending_impl`` performs: there, a key the caller aimed
+    at one layer through a named desugar parameter (recorded on
+    ``_Layer.caller_style_keys``) is not overridden by the chart-level
+    catch-all. The two agree wherever ``caller_style_keys`` is empty. The
+    only two sites that set it are ``marks/_fit_layers.build_fit_layers``
+    and ``marks/statistical.desugar_smooth`` (``grep -rn
+    'caller_style_keys=' src/ferrum``), and neither module imports this
+    function. A desugar that starts recording it and still routes through
+    here would get this older rule; point it at ``_catch_all_over``
+    instead, or unify the two.
+
     Parameters
     ----------
     layers : list[_Layer]

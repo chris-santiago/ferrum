@@ -319,13 +319,27 @@ class StatisticalMarksMixin:
             computed independently per group and the group column is
             preserved at its original dtype in the output
             so downstream ``color=`` encoding maps to it.
+        line_kwargs : dict, optional
+            Mark-style overrides for the FIT LINE alone -- what ``lmplot``'s
+            ``line_kws`` forwards here. Distinct from ``**mark_kwargs``
+            below, which reach every emitted layer: a bare ``stroke=`` on a
+            ``ci``-bearing call repaints the confidence band too, so styling
+            just the line needs its own slot.
+
+            **Precedence:** this WINS over a broad ``**mark_kwargs`` naming
+            the same key, because it is the more specific instruction --
+            ``mark_smooth(stroke="#0000ff", line_kwargs={"stroke":
+            "#ff0000"})`` draws the fit line red and the CI band blue, on the
+            layered shape and the no-CI single-line shape alike. The broad
+            value still applies everywhere nothing narrower was said.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
             Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
             ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
             ``alpha``→``opacity``) forwarded to all emitted layers (the regression
-            line, plus the CI ribbon when ``ci`` is set).
+            line, plus the CI ribbon when ``ci`` is set). See ``line_kwargs``
+            above to style the line without the band.
 
         Returns
         -------

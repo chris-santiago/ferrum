@@ -27,6 +27,24 @@ class _Layer:
     encoding: dict = field(default_factory=dict)
     transforms: list = field(default_factory=list)
     mark_kwargs: Optional[dict] = None
+    #: Keys of ``mark_kwargs`` that came from a caller parameter aimed at THIS
+    #: layer specifically -- ``mark_smooth(line_kwargs=...)`` / ``lmplot(
+    #: line_kws=...)`` on the fit line today (#199). The chart-level catch-all
+    #: ``**mark_kwargs``, which the pending dispatcher spreads across every
+    #: emitted layer, does not override them: a value the caller aimed at one
+    #: layer is more specific than one they aimed at the mark as a whole.
+    #: Read by ``_desugar._apply_style_to_layer`` and by nothing else, and
+    #: never serialized (``_spec_build._build_layers_list`` reads named
+    #: fields). A layer that never passes through that function -- one
+    #: assembled outside the pending dispatcher, e.g.
+    #: ``plots/regression._fit_chart_from_named_transform`` -- is therefore
+    #: unaffected by this field either way; it is NOT a claim that no other
+    #: merger exists (``marks/_mark_kwargs.apply_user_mark_kwargs`` is one,
+    #: and ignores this field -- see ``_desugar._catch_all_over``). Carries
+    #: KEYS, not values: the values live in ``mark_kwargs`` with every other
+    #: style, so nothing has to be folded in later and no layer can lose its
+    #: styling by skipping a fold step.
+    caller_style_keys: frozenset = frozenset()
     data_source: Optional[str] = None
     position: Any = None
     blend: Optional[str] = None
@@ -63,44 +81,55 @@ class MarkDesugarResult:
     the per-mark transform chain, ``position`` is an optional position
     adjustment, ``data`` carries a synthetic table when the desugar
     materialises its own data (only ``desugar_function`` does so today), and
-    ``mark_kwargs`` carries a constant mark-style override the desugar itself
-    computes (as opposed to the caller's own style kwargs, which the pending
-    dispatcher handles separately via ``_split_style_kwargs``) -- only
-    ``desugar_function`` sets it today, to thread ``clip=False`` onto the
-    synthesized line layer. ``__post_init__`` rejects ``mark_kwargs`` set
-    together with ``layers`` (single-mark-only, mechanically enforced, not
-    just documented).
+    ``mark_kwargs`` carries the style this desugar resolved for the mark it
+    emits, whatever its source: a constant the desugar computes for itself
+    (``desugar_function``'s ``clip=False``) or a value the caller aimed at
+    that mark through one of the desugar's own named parameters
+    (``desugar_smooth``'s ``line_kwargs=``, i.e. ``lmplot``'s ``line_kws``,
+    #199). What it is NOT is the caller's chart-level catch-all
+    ``**mark_kwargs`` -- those are partitioned out by ``_split_style_kwargs``
+    and applied by the pending dispatcher, which is a different slot with a
+    different reach (every emitted layer, not this one mark).
+    ``caller_style_keys`` names the subset of these keys that came from the
+    caller rather than from the desugar, and is what decides precedence
+    against that catch-all; see below. ``__post_init__`` rejects
+    ``mark_kwargs`` set together with ``layers`` (single-mark-only,
+    mechanically enforced, not just documented).
 
     Both ``mark_kwargs`` and ``data`` are read by every single-mark consumer:
     ``Chart.mark_function`` (``marks/_chart_methods_statistical.py``), which
     calls ``desugar_function`` directly, and ``_desugar._resolve_pending_impl``
     -- the dispatcher every OTHER composite/diagnostic ``mark_*()`` goes
     through via ``Chart._set_composite_mark``. Both merge ``mark_kwargs``
-    onto the chart's own inherited ``_mark_kwargs`` (caller's style kwargs
-    win over the desugar-computed value, which in turn wins over whatever
-    the chart already carried -- e.g. a prior ``.mark_line(stroke_width=7)``
-    survives a later dispatcher-routed desugar's own ``mark_kwargs``/style),
-    and the dispatcher applies ``data`` as the resolved chart's replacement
+    onto the chart's own inherited ``_mark_kwargs`` rather than replacing it,
+    so a key the chart already carried and this desugar does not name
+    survives, and the dispatcher applies ``data`` as the resolved chart's replacement
     data in the plain branch; the prior-layer (``smooth_layer``) branch
     raises rather than silently dropping ``data``, since a ``_Layer`` has no
     per-layer raw-data slot to attach a synthetic table to without
     corrupting the prior layer's own data (see ``_resolve_pending_impl``'s
     comment).
 
-    **The "caller's style wins over the desugar-computed value" precedence
-    is documented but currently inert in production** (mutation-tester
-    finding, close-remediation cycle 2): exactly one desugar sets
-    ``mark_kwargs`` today (``desugar_function``), and it never reaches the
-    dispatcher -- ``Chart.mark_function`` always calls it directly, bypassing
-    ``_resolve_pending_impl`` entirely (see that function's own module for
-    why: its signature is incompatible with the dispatcher's calling
-    convention). So in shipped code the dispatcher's merge branch always
-    has ``result.mark_kwargs is None`` on one side; the precedence is
-    exercised only by a synthetic test adapter
-    (``tests/marks/test_heavy_stats.py``'s
-    ``_function_desugar_via_dispatcher``), not by any real caller. It stays
-    documented -- and mechanically correct when reached -- for the day a
-    second dispatcher-routed desugar sets ``mark_kwargs``.
+    **Precedence against the chart-level catch-all is decided by
+    ``caller_style_keys``, not by prose.** When both slots name the same
+    style key, the more specific instruction wins, and specificity is read
+    off the slot rather than guessed at:
+
+    - a key NOT in ``caller_style_keys`` is the desugar's own computed
+      default, so the caller's catch-all ``**mark_kwargs`` overrides it --
+      this is what lets ``mark_boxplot(opacity=0.8)`` beat a ribbon's
+      built-in ``opacity=0.3``;
+    - a key IN ``caller_style_keys`` is something the caller aimed at this
+      one mark through a named parameter, so the catch-all does NOT override
+      it -- ``mark_smooth(stroke="#0000ff", line_kwargs={"stroke":
+      "#ff0000"})`` draws the fit line ``#ff0000`` and the CI band
+      ``#0000ff``, since only the line was named.
+
+    Both merge sites read the same field, so the two shapes cannot drift:
+    ``_apply_style_to_layer`` for a layered result (per ``_Layer``) and
+    ``_merge_desugar_mark_kwargs`` for a single-mark one. The ordering is
+    therefore a property of where a value came from, which the code records,
+    rather than of which desugar happened to set it.
 
     Attributes
     ----------
@@ -121,8 +150,16 @@ class MarkDesugarResult:
         Synthetic data table.  Single-mark mode only; ``None`` unless the
         desugar materialises its own data.
     mark_kwargs : dict or None
-        Constant mark-style override computed by the desugar itself.
-        Single-mark mode only; ``None`` unless the desugar has one to set.
+        The style this desugar resolved for the mark it emits -- its own
+        computed constants and any value the caller aimed at that mark
+        through one of its named parameters. Single-mark mode only; ``None``
+        unless the desugar has one to set.
+    caller_style_keys : frozenset of str
+        Which ``mark_kwargs`` keys came from the caller rather than from the
+        desugar. Decides precedence against the chart-level catch-all (see
+        above); empty means every key is a desugar default. Single-mark mode
+        only -- a layered result records the same thing per layer, on
+        ``_Layer.caller_style_keys``.
 
     Examples
     --------
@@ -176,7 +213,8 @@ class MarkDesugarResult:
     position: Any = None
     layers: Optional[list] = None
     data: Any = None  # synthetic data (e.g. desugar_function)
-    mark_kwargs: Optional[dict] = None  # desugar-computed style (e.g. desugar_function's clip)
+    mark_kwargs: Optional[dict] = None  # style resolved for the emitted mark
+    caller_style_keys: frozenset = frozenset()  # which of those keys the caller named
 
     def __post_init__(self) -> None:
         """Enforce the layered-XOR-single-mark invariant, plus the
@@ -191,6 +229,9 @@ class MarkDesugarResult:
         own per-layer ``_Layer.mark_kwargs``); setting both ``layers`` and
         ``mark_kwargs`` is rejected here rather than left to silently do
         nothing, since layered mode ignores the top-level field entirely.
+        ``caller_style_keys`` rides the same rule for the same reason -- it
+        annotates ``mark_kwargs``, so it is meaningless without one, and a
+        layered result records it per layer instead.
         """
         if (self.layers is not None) == (self.mark is not None):
             raise ValueError(
@@ -205,6 +246,14 @@ class MarkDesugarResult:
                 "result (layers set) must put per-layer style on each "
                 "_Layer.mark_kwargs instead, not on the top-level field, "
                 f"got mark_kwargs={self.mark_kwargs!r}."
+            )
+        if self.layers is not None and self.caller_style_keys:
+            raise ValueError(
+                "MarkDesugarResult.caller_style_keys is single-mark-only; it "
+                "annotates the top-level mark_kwargs, so a layered result "
+                "(layers set) must record it per layer on "
+                "_Layer.caller_style_keys instead, got "
+                f"caller_style_keys={set(self.caller_style_keys)!r}."
             )
 
 

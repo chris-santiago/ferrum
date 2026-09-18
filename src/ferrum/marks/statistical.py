@@ -378,6 +378,7 @@ def desugar_smooth(
     groupby: Any = None,
     name: str | None = None,
     x_range: list[float] | None = None,
+    line_kwargs: dict | None = None,
 ) -> MarkDesugarResult:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
@@ -489,6 +490,19 @@ def desugar_smooth(
         ``Smooth`` transform.  When set, the fit line is evaluated over
         this range rather than the observed data range — used by
         ``lmplot(truncate=False)`` to extend the fit beyond the data.
+    line_kwargs : dict or None, default None
+        Mark kwargs for the FIT LINE alone (``lmplot``'s ``line_kws``).
+        Distinct from the caller's own ``**mark_kwargs``, which
+        ``_resolve_pending`` spreads across every emitted layer -- a
+        ``stroke=`` passed that way repaints the CI band too, so styling
+        just the line needs its own slot. Reaches the rendered mark on both
+        shapes this function returns: the ``line`` layer's ``mark_kwargs``
+        on the layered path, and ``MarkDesugarResult.mark_kwargs`` on the
+        single-line shortcut (which has no layer to carry it). On both, this
+        value WINS over a broad ``**mark_kwargs`` naming the same key -- an
+        instruction aimed at the line is more specific than one aimed at the
+        mark as a whole -- carried by ``caller_style_keys``; see
+        ``MarkDesugarResult``'s precedence section.
 
     Returns
     -------
@@ -546,7 +560,22 @@ def desugar_smooth(
             smooth_kwargs["x_range"] = x_range
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": _smooth_cols["x"], "y": _smooth_cols["y"]}
-        return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
+        # This shape keeps the chart's own encoding (the remap only renames
+        # the fields), so the axis titles are the caller's columns already --
+        # no `x_title`/`y_title` to thread, unlike the layered path below.
+        # The single mark IS the fit line, so `line_kwargs` rides
+        # `MarkDesugarResult.mark_kwargs`, the single-mark slot
+        # `_resolve_pending_impl` merges onto the resolved chart, with
+        # `caller_style_keys` naming it as the caller's so the chart-level
+        # catch-all cannot override it -- the same rule the layered path gets
+        # from `_Layer.caller_style_keys`.
+        return MarkDesugarResult(
+            mark="line",
+            transforms=transforms,
+            remap=encoding_remap,
+            mark_kwargs=dict(line_kwargs) if line_kwargs else None,
+            caller_style_keys=frozenset(line_kwargs) if line_kwargs else frozenset(),
+        )
 
     # Layered path: ci band and/or metrics-corner overlay. `bandwidth`,
     # `degree` and `k` are forwarded only when explicit — see the no-CI path
@@ -573,7 +602,18 @@ def desugar_smooth(
         # OLS duplication.
         smooth_kwargs["inject_metrics"] = True
     transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
-    layers = build_fit_layers("smooth", data_source="smooth", ci=ci, metrics=show_metrics)
+    # The layers read the transform's output columns, so without the caller's
+    # own field names as titles layer 0 would title the axes `x`/`ci_lower`
+    # (#199). See `build_fit_layers`' `x_title`/`y_title`.
+    layers = build_fit_layers(
+        "smooth",
+        data_source="smooth",
+        ci=ci,
+        x_title=x_field,
+        y_title=y_field,
+        line_kwargs=line_kwargs,
+        metrics=show_metrics,
+    )
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 

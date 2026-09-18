@@ -1099,7 +1099,7 @@ Marks are constructors that accept visual property overrides as keyword argument
 
 | Mark | Stat Computed | Key Parameters |
 |---|---|---|
-| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`, + aliases), `ci`, `bandwidth` (loess-only — explicit values on other methods raise, 2026-09-06), `degree`, `k` (gam-only basis dimension, 2026-09-06), `n` |
+| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`, + aliases), `ci`, `bandwidth` (loess-only — explicit values on other methods raise, 2026-09-06), `degree`, `k` (gam-only basis dimension, 2026-09-06), `n`, `line_kwargs` (mark kwargs for the fit line alone, 2026-09-17 — a bare style kwarg reaches the CI band too, and `line_kwargs` outranks it on the line) |
 | `mark_density(...)` | KDE | `bandwidth` (`"scott"`\|`"silverman"`\|float), `kernel`, `extent`, `cumulative`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
@@ -3834,9 +3834,13 @@ parameter is forwarded to `lmplot` unchanged.
 > `x`/`y`. The fit now binds to a NAMED transform through `data_source=`
 > whenever a scatter layer is present, the same shape the `ci=` path and the
 > `logistic`/`glm`/`robust` methods already used; with `scatter=False` the
-> single-mark shape is kept, since there is no sibling layer to corrupt and
-> its chart-level encoding is what titles the axes with the caller's own
-> column names. **One layer renames:** on that combination the fit layer is
+> single-mark shape is kept, since there is no sibling layer to corrupt.
+> (That shape's chart-level encoding titles the axes with the caller's own
+> column names -- but it is reached only at `ci=None, show_metrics=False`
+> on a `mark_smooth`-routed method, i.e. 7 of the 40 `scatter=False` cells,
+> so it was never what titled the other 33; see the 2026-09-17 note below.)
+> **One layer
+> renames:** on that combination the fit layer is
 > `"line"` rather than `"fit"` -- which every other `lmplot` shape already
 > called it -- so a per-layer `mark={"fit": ...}` override for it becomes
 > `mark={"line": ...}`. Separately, `x_jitter=` on a non-Float64 predictor
@@ -3845,6 +3849,46 @@ parameter is forwarded to `lmplot` unchanged.
 > four `ci`/`show_metrics` combinations and was masked on the fourth by the
 > corruption above; the predictor is widened before either chart is built,
 > and the cast is deleted once `apply_jitter` coerces the column it writes.
+
+> **2026-09-17 (wave 4, #199):** every fit path titles its axes with the
+> caller's own columns, and honors `line_kws` on every method. The fit
+> layers (ribbon / line / metrics) are bound to the transform's output
+> columns, and the renderer resolves an axis title from layer 0 only
+> (spec-level channel `title`, then layer-0 channel `title`, then layer-0
+> field name), so whenever no scatter happened to sit at layer 0 the value
+> axis was titled `ci_lower` -- the confidence band's LOWER BOUND -- and the
+> predictor axis `x`. Measured over the full 40-cell `method × ci ×
+> show_metrics` matrix under `scatter=False` (all ten `lmplot` methods ×
+> `ci ∈ {95, None}` × `show_metrics ∈ {True, False}`), only 7 cells were
+> right — the seven `mark_smooth`-routed methods at `ci=None,
+> show_metrics=False`, where the single-line shortcut keeps the chart-level
+> encoding; the other 33 were wrong. All 40 are correct now.
+> The fit-layer builder now carries the caller's field names as layer
+> titles, which fixes `lmplot(scatter=False)`, `regplot(scatter=False)` and
+> a standalone `Chart(df).mark_smooth(...)` from one site; an explicit
+> channel `title=` still outranks it. `residplot` gets the same treatment on
+> its DEFAULT path, where no flag was needed to reach the defect: its axes
+> were titled `x` and `residual`, and are now the caller's x column and
+> `"<y> residual"` (the one golden this moves is
+> `tests/test_phase_9_e2e/goldens/residplot_lowess.svg`, whose y-axis title
+> changes and nothing else). Separately, `line_kws` was silently discarded
+> for the seven `mark_smooth`-routed methods (`lm`, `loess`, `quadratic`,
+> `cubic`, `log`, `sqrt`, `gam`) under `scatter=False` — 28 of the 40 cells;
+> the three dedicated methods (`logistic`, `glm`, `robust`) already forwarded
+> it at construction and were never affected. It was
+> applied by rewriting the finished chart's layers, which on that branch are
+> still unmaterialized (the chart carries a pending stat mark until render).
+> Every branch now forwards it at construction, to the fit line alone, and
+> `mark_smooth` gained a `line_kwargs=` parameter for the same purpose --
+> its own `**mark_kwargs` reach every emitted layer, so a `stroke=` passed
+> that way repaints the CI band too. **Precedence between the two is by
+> specificity:** when both name the same style key, the one aimed at the fit
+> line wins, and the catch-all still applies wherever nothing narrower was
+> said — measured, `mark_smooth(ci=0.95, stroke="#0000ff",
+> line_kwargs={"stroke": "#ff0000"})` draws the line `#ff0000` and the band
+> `#0000ff`, on the layered shape and the single-line shortcut alike. Charts
+> with a scatter present and the single-line shortcut render
+> byte-identically.
 
 #### Matrix / Pairwise
 

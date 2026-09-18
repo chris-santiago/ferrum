@@ -41,14 +41,29 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum.plots.regression import _DEDICATED_FIT_METHODS, _SMOOTH_ROUTED_METHODS
 
 from _svg_extents import y_axis_units_per_pixel
 
 #: Every method `lmplot` routes through `mark_smooth`, i.e. every method whose
-#: fit chart could collapse to the single-line shortcut. `robust` is included
-#: as the control: it takes the dedicated-transform path, which was already
-#: correct, so it must stay correct.
-SMOOTH_ROUTED = ["lm", "loess", "quadratic", "gam", "log", "sqrt"]
+#: fit chart could collapse to the single-line shortcut.
+#:
+#: DERIVED from the production constant, not restated: it is itself
+#: `transform_registry("smooth")["methods"] - {"linear", "glm"}`, so a new
+#: registry smooth method joins this matrix the day it lands. The hand-written
+#: literal this replaced is exactly how `cubic` stayed uncovered through a
+#: batch close -- a comment naming the derivation is not a derivation. Same
+#: import as `tests/test_lmplot_valid_methods_registry_pin.py`, which pins the
+#: two constants against the registry itself.
+SMOOTH_ROUTED = sorted(_SMOOTH_ROUTED_METHODS)
+#: The methods with their own fit-family transform, which `lmplot` builds
+#: directly rather than through `mark_smooth`. Controls for the scatter-data
+#: claims above; full participants in the axis-title / `line_kws` claims below,
+#: which are properties of the fit layers whoever built them. Derived on the
+#: same terms.
+DEDICATED = sorted(_DEDICATED_FIT_METHODS)
+#: `robust` joins the scatter-data claims as the dedicated-path control: that
+#: path was already correct, so it must stay correct.
 FIT_METHODS = SMOOTH_ROUTED + ["robust"]
 
 #: Deliberately NOT 200 (`Smooth`'s default grid size) and deliberately not
@@ -60,16 +75,32 @@ _N_ROWS = 60
 
 @pytest.fixture
 def obs_df() -> pl.DataFrame:
-    """60 noisy observations of a monotone relationship, plus a hue column."""
+    """60 noisy observations of a monotone relationship, plus a hue column.
+
+    ``binary`` is the response ``method="logistic"`` needs (its transform
+    refuses anything but 0/1); every other method reads ``response``. See
+    :func:`response_column`.
+    """
     rng = np.random.default_rng(0)
     predictor = np.linspace(2.0, 8.0, _N_ROWS)
     return pl.DataFrame(
         {
             "predictor": predictor,
             "response": 1.5 * predictor + 3.0 + rng.normal(0, 0.4, _N_ROWS),
+            # Drawn from a logistic model rather than thresholded, so the two
+            # classes overlap: a clean split makes `Logistic` refuse outright
+            # ("perfect separation detected").
+            "binary": (rng.random(_N_ROWS) < 1.0 / (1.0 + np.exp(-(predictor - 5.0)))).astype(
+                float
+            ),
             "grp": rng.choice(["a", "b"], _N_ROWS),
         }
     )
+
+
+def response_column(method: str) -> str:
+    """The response column *method* can be fit against (see ``obs_df``)."""
+    return "binary" if method == "logistic" else "response"
 
 
 def circle_centers(svg: str) -> list[tuple[float, float]]:
@@ -175,27 +206,85 @@ def test_scatter_keeps_its_spread_about_the_fit(obs_df, figure, method):
     )
 
 
-@pytest.mark.parametrize("method", SMOOTH_ROUTED)
-def test_scatter_false_still_renders_the_fit_alone(obs_df, method):
+@pytest.mark.parametrize("method", SMOOTH_ROUTED + DEDICATED)
+@pytest.mark.parametrize("ci", [95, None])
+@pytest.mark.parametrize("show_metrics", [True, False])
+def test_scatter_false_titles_the_axes_with_the_callers_columns(obs_df, method, ci, show_metrics):
     """With no scatter layer there is nothing to corrupt, and nothing to lose.
 
-    The single-line shortcut is correct for this shape -- the fit IS the chart
-    -- so it is kept, including its chart-level encoding, which is what titles
-    the axes with the caller's own column names rather than the fit output's.
+    The fit IS the chart here, so its own layers are what the renderer reads
+    the axis titles off -- and those layers are bound to the TRANSFORM's
+    output columns (``x``, ``y``, ``ci_lower``). Measured pre-fix over this
+    whole 40-cell matrix (10 methods × 2 ``ci`` × 2 ``show_metrics``), only
+    7 cells titled the axes with the caller's columns -- the seven
+    ``mark_smooth``-routed methods at ``ci=None, show_metrics=False``, where
+    the single-line shortcut keeps the chart-level encoding and so never had
+    the problem. The other 33 announced their value axis as ``ci_lower``
+    (the CI band's lower bound) or as ``y``, and their predictor axis as
+    ``x`` (#199).
+
+    Parameterized over the full method × ci × show_metrics product precisely
+    because the earlier version of this test pinned ONE of those seven lucky
+    cells, and the defect survived a batch close behind it.
     """
+    y_col = response_column(method)
     svg = fm.lmplot(
         obs_df,
         x="predictor",
-        y="response",
+        y=y_col,
         method=method,
-        ci=None,
-        show_metrics=False,
+        ci=ci,
+        show_metrics=show_metrics,
         scatter=False,
     ).to_svg()
     assert len(polyline_vertices(svg)) > 50
     assert not circle_centers(svg)
     titles = re.findall(r"<text[^>]*>([^<]*)</text>", svg)
-    assert "predictor" in titles and "response" in titles
+    assert "predictor" in titles and y_col in titles, (
+        f"lmplot(method={method!r}, ci={ci!r}, show_metrics={show_metrics!r}, "
+        f"scatter=False) must title its axes with the caller's own columns; "
+        f"rendered text was {titles}"
+    )
+    for internal in ("ci_lower", "ci_upper"):
+        assert internal not in titles, (
+            f"lmplot(method={method!r}, ci={ci!r}, scatter=False) titled an "
+            f"axis {internal!r} -- a transform output column, and for "
+            "'ci_lower' the wrong quantity entirely"
+        )
+
+
+@pytest.mark.parametrize("method", SMOOTH_ROUTED + DEDICATED)
+@pytest.mark.parametrize("ci", [95, None])
+def test_scatter_false_honors_line_kws(obs_df, method, ci):
+    """``line_kws`` reaches the rendered fit line when the fit is alone.
+
+    All seven smooth-routed methods dropped it here -- 28 of the 40
+    ``scatter=False`` cells, measured pre-fix: ``lmplot`` used to apply
+    ``line_kws`` by rewriting the finished chart's ``_layers``, which on this
+    branch are still empty -- the chart carries a pending stat mark whose
+    desugar does not run until render. The three dedicated methods (which
+    forward at construction) were unaffected on all 12 of theirs, which is
+    what made the gap look like a method quirk rather than a branch one
+    (#199).
+
+    Asserted on the rendered stroke, not on the chart object: the point is
+    that the caller's color reaches the SVG.
+    """
+    svg = fm.lmplot(
+        obs_df,
+        x="predictor",
+        y=response_column(method),
+        method=method,
+        ci=ci,
+        scatter=False,
+        line_kws={"stroke": "#dc143c", "stroke_width": 9},
+    ).to_svg()
+    fit_strokes = re.findall(r'<polyline[^>]*stroke="([^"]+)"', svg)
+    assert any(stroke.lower() == "#dc143c" for stroke in fit_strokes), (
+        f"lmplot(method={method!r}, ci={ci!r}, scatter=False, "
+        f"line_kws={{'stroke': '#dc143c'}}) must paint the fit line crimson; "
+        f"rendered polyline strokes were {set(fit_strokes)}"
+    )
 
 
 @pytest.mark.parametrize("figure", [fm.lmplot, fm.regplot], ids=["lmplot", "regplot"])

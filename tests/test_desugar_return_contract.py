@@ -183,3 +183,17 @@ def test_layered_result_rejects_mark_kwargs():
     default `pytest` run -- this closes that gap with a direct test."""
     with pytest.raises(ValueError, match="mark_kwargs is single-mark-only"):
         MarkDesugarResult(layers=[], mark_kwargs={"clip": False})
+
+
+def test_layered_result_rejects_caller_style_keys():
+    """The sibling guard, for the field that annotates ``mark_kwargs``.
+
+    ``caller_style_keys`` records which ``mark_kwargs`` keys the caller named
+    (#199), so it is meaningless without one and a layered result records it
+    per layer instead. Pinned here rather than left to the class docstring:
+    the ``mark_kwargs`` guard beside it needed exactly this test after a
+    mutation-tester advisory found it killed only by a doctest, and a guard
+    nothing exercises is a claim rather than a guarantee.
+    """
+    with pytest.raises(ValueError, match="caller_style_keys is single-mark-only"):
+        MarkDesugarResult(layers=[], caller_style_keys=frozenset({"stroke"}))
