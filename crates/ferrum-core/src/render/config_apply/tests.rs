@@ -374,10 +374,7 @@ mod chart_config_application_tests {
     // ── D6/F-L04-05: categorical `values` filter + order ──────────────────
 
     fn legend_entry(label: &str) -> crate::layout::LegendEntry {
-        crate::layout::LegendEntry {
-            label: label.to_string(),
-            symbol: crate::layout::SymbolKind::Circle,
-        }
+        crate::layout::LegendEntry::new(label, crate::layout::SymbolKind::Circle)
     }
 
     fn labels_of(entries: &[crate::layout::LegendEntry]) -> Vec<&str> {
@@ -1527,7 +1524,7 @@ mod chart_config_application_tests {
     fn color_config_domain_omitting_a_data_category_warns() {
         use crate::layout::{LegendEntry, SymbolKind};
 
-        let entry = |label: &str| LegendEntry { label: label.into(), symbol: SymbolKind::Circle };
+        let entry = |label: &str| LegendEntry::new(label, SymbolKind::Circle);
         let theme_fallback = color::from_rgba(1, 2, 3, 255);
         let data_categories = ["a", "b", "c"];
 
@@ -1630,7 +1627,7 @@ mod chart_config_application_tests {
     #[test]
     fn legend_entries_resync_to_the_overridden_categorical_domain() {
         use crate::layout::{LegendEntry, SymbolKind};
-        let entry = |label: &str, symbol| LegendEntry { label: label.into(), symbol };
+        let entry = |label: &str, symbol| LegendEntry::new(label, symbol);
         let mut entries = vec![
             entry("a", SymbolKind::Square),
             entry("b", SymbolKind::Circle),
@@ -1657,6 +1654,71 @@ mod chart_config_application_tests {
         let mut empty: Vec<LegendEntry> = Vec::new();
         resync_categorical_legend_entries(&mut empty, Some(&reordered));
         assert!(empty.is_empty(), "a suppressed legend stays suppressed");
+    }
+
+    /// A reordered `configure_color(domain=…)` keeps each category's FOLDED
+    /// identity, not merely its swatch kind (#111, spec §4.6).
+    ///
+    /// The sibling test above builds every entry through `LegendEntry::new`,
+    /// so both folded slots are `None` on each side and it passes identically
+    /// against a resync that rebuilds each entry from label + symbol. That
+    /// rebuild is precisely what strips a folded `stroke_dash`/`shape`
+    /// channel: `SymbolKind::Line` survives it, because it IS the symbol,
+    /// while the dasharray and the glyph name do not. The chart then renders
+    /// solid line swatches beside marks drawing three different patterns —
+    /// the #111 defect, reintroduced through a config override rather than
+    /// through the suppression path.
+    ///
+    /// Every assertion here fails against that rebuild form, which is what
+    /// makes the clone in `resync_categorical_legend_entries` load-bearing
+    /// rather than incidental.
+    #[test]
+    fn resync_keeps_each_categorys_folded_identity_across_a_reorder() {
+        use crate::layout::{LegendEntry, SymbolKind};
+        // A color entry a same-field `stroke_dash` was folded into: the swatch
+        // kind became `Line` and the pattern rides along per label.
+        let dashed = |label: &str, dash: &[f64]| LegendEntry {
+            label: label.into(),
+            symbol: SymbolKind::Line,
+            shape_name: None,
+            dash_pattern: (!dash.is_empty()).then(|| dash.to_vec()),
+        };
+        let mut entries = vec![
+            dashed("a", &[2.0, 3.0]),
+            dashed("b", &[6.0, 3.0]),
+            // `c` took the dash palette's SOLID slot and additionally carries a
+            // folded shape glyph, so both slots are exercised — and the solid
+            // slot is the one a rebuild reproduces by accident, which is why it
+            // is paired with a glyph that a rebuild cannot.
+            LegendEntry {
+                shape_name: Some("cross".into()),
+                ..dashed("c", &[])
+            },
+        ];
+
+        let reordered = categorical_scale(&["c", "a"]);
+        resync_categorical_legend_entries(&mut entries, Some(&reordered));
+        assert_eq!(
+            entries,
+            vec![
+                LegendEntry { shape_name: Some("cross".into()), ..dashed("c", &[]) },
+                dashed("a", &[2.0, 3.0]),
+            ],
+            "each surviving category keeps the pattern and glyph it was folded with"
+        );
+
+        // A category the override NAMES but the data never produced has no
+        // marks behind it, so it takes the first entry's symbol and no folded
+        // identity — inventing one would promise a pattern nothing draws.
+        let mut with_newcomer = vec![dashed("a", &[2.0, 3.0]), dashed("b", &[6.0, 3.0])];
+        let with_ghost = categorical_scale(&["b", "ghost"]);
+        resync_categorical_legend_entries(&mut with_newcomer, Some(&with_ghost));
+        assert_eq!(
+            with_newcomer,
+            vec![dashed("b", &[6.0, 3.0]), dashed("ghost", &[])],
+            "a newly listed category inherits the swatch kind and nothing else"
+        );
+        assert_eq!(with_newcomer[1].shape_name, None);
     }
 
     /// `configure_color(range=…)` repaints a discretizing scale's swatches when

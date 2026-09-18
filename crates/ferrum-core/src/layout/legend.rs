@@ -62,10 +62,46 @@ pub enum SymbolKind {
     Line,
 }
 
+/// One categorical color-legend entry.
+///
+/// Beyond the label and swatch kind, an entry may carry the identity of a
+/// channel that was folded INTO the color legend rather than given its own
+/// block — a `shape`/`stroke_dash` channel encoding the same field (#111,
+/// spec §4.6). The color legend is then the only place that field is
+/// enumerated, so its swatches have to show everything the marks draw, not
+/// just their color.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LegendEntry {
     pub label: String,
     pub symbol: SymbolKind,
+    /// Point-glyph name (e.g. `"square"`) of a same-field `shape` channel
+    /// folded into this entry. `None` on every entry standing for color
+    /// alone — which is every entry on a chart without that merge, so those
+    /// scenes are byte-identical.
+    pub shape_name: Option<String>,
+    /// Dasharray of a same-field `stroke_dash` channel folded into this
+    /// entry. `None` both for entries standing for color alone and for a
+    /// merged entry landing on the palette's SOLID slot, mirroring
+    /// [`LegendEntryLayout::dash_pattern`]'s own empty-means-solid
+    /// convention. A merged entry's [`symbol`](Self::symbol) is set to
+    /// [`SymbolKind::Line`] by the producer (`render::prepare::legend`) —
+    /// solid slot included — so the whole block reads as one family of line
+    /// swatches, and so a user `symbol_type=` override still wins here the
+    /// same way it wins over any other entry symbol.
+    pub dash_pattern: Option<Vec<f64>>,
+}
+
+impl LegendEntry {
+    /// A plain color entry: a label and its swatch kind, carrying no folded
+    /// same-field channel identity.
+    pub fn new(label: impl Into<String>, symbol: SymbolKind) -> LegendEntry {
+        LegendEntry {
+            label: label.into(),
+            symbol,
+            shape_name: None,
+            dash_pattern: None,
+        }
+    }
 }
 
 /// Input shape passed to `compute_layout` for a continuous colorbar legend.
@@ -624,6 +660,39 @@ fn carve_legend_strip(
     }
 }
 
+/// Place one color-legend entry at anchors its direction arm already computed.
+///
+/// The vertical and horizontal arms of [`layout_legend`] differ only in how
+/// they derive `symbol_anchor` and `label_anchor`; the `LegendEntryLayout` they
+/// then build is the same one, carrying the same fields off the same
+/// [`LegendEntry`]. Building it here rather than twice is what keeps an entry's
+/// folded same-field identity (#111) from being threaded into one arm and
+/// forgotten in the other — the failure mode the two hand-copied literals were
+/// one edit away from.
+///
+/// `symbol_radius`/`color_hex` stay `None`: they are the graduated size
+/// legend's slots, which `layout_aux_legends` fills for its own blocks and a
+/// color entry never has.
+fn place_color_entry(
+    entry: &LegendEntry,
+    override_symbol: Option<SymbolKind>,
+    symbol_anchor: (f64, f64),
+    label_anchor: (f64, f64),
+) -> LegendEntryLayout {
+    LegendEntryLayout {
+        label: entry.label.clone(),
+        label_anchor_x: label_anchor.0,
+        label_anchor_y: label_anchor.1,
+        symbol_anchor_x: symbol_anchor.0,
+        symbol_anchor_y: symbol_anchor.1,
+        symbol_kind: override_symbol.unwrap_or(entry.symbol),
+        symbol_radius: None,
+        shape_name: entry.shape_name.clone(),
+        color_hex: None,
+        dash_pattern: entry.dash_pattern.clone(),
+    }
+}
+
 /// Compute the legend rect on the given orient and the remaining inner rect for
 /// the rest of the chart. Returns `(None, inner)` for empty entries.
 /// Returns `(Some(legend_with_dropped_entries), reduced_inner)` if the legend
@@ -699,7 +768,7 @@ pub fn layout_legend(
             .iter()
             .map(|e| LegendEntry {
                 label: truncate_label(&e.label, limit, label_font_size, metrics),
-                symbol: e.symbol,
+                ..e.clone()
             })
             .collect();
         &entries_owned
@@ -796,18 +865,7 @@ pub fn layout_legend(
                         + (row as f64) * row_pitch + line_h / 2.0;
                     let symbol_x = col_origin_x + symbol_width / 2.0;
                     let label_x = col_origin_x + symbol_width + SYMBOL_LABEL_GAP;
-                    LegendEntryLayout {
-                        label: e.label.clone(),
-                        label_anchor_x: label_x,
-                        label_anchor_y: y,
-                        symbol_anchor_x: symbol_x,
-                        symbol_anchor_y: y,
-                        symbol_kind: override_symbol.unwrap_or(e.symbol),
-                        symbol_radius: None,
-                        shape_name: None,
-                        color_hex: None,
-                        dash_pattern: None,
-                    }
+                    place_color_entry(e, override_symbol, (symbol_x, y), (label_x, y))
                 })
                 .collect()
         }
@@ -835,18 +893,7 @@ pub fn layout_legend(
                     let cy = legend_rect.y + legend_rect.h / 2.0;
                     let symbol_x = entry_x + symbol_width / 2.0;
                     let label_x = entry_x + symbol_width + SYMBOL_LABEL_GAP;
-                    LegendEntryLayout {
-                        label: e.label.clone(),
-                        label_anchor_x: label_x,
-                        label_anchor_y: cy,
-                        symbol_anchor_x: symbol_x,
-                        symbol_anchor_y: cy,
-                        symbol_kind: override_symbol.unwrap_or(e.symbol),
-                        symbol_radius: None,
-                        shape_name: None,
-                        color_hex: None,
-                        dash_pattern: None,
-                    }
+                    place_color_entry(e, override_symbol, (symbol_x, cy), (label_x, cy))
                 })
                 .collect()
         }
@@ -1738,9 +1785,10 @@ mod tests {
 
     fn entries(n: usize, label_chars: usize) -> Vec<LegendEntry> {
         (0..n)
-            .map(|i| LegendEntry {
-                label: "X".repeat(label_chars).chars().chain(format!("{i}").chars()).collect(),
-                symbol: SymbolKind::Circle,
+            .map(|i| {
+                let label: String =
+                    "X".repeat(label_chars).chars().chain(format!("{i}").chars()).collect();
+                LegendEntry::new(label, SymbolKind::Circle)
             })
             .collect()
     }
@@ -1748,8 +1796,8 @@ mod tests {
     #[test]
     fn legend_size_right_orient_vertical() {
         let es = vec![
-            LegendEntry { label: "abcd".into(), symbol: SymbolKind::Circle },
-            LegendEntry { label: "abcdef".into(), symbol: SymbolKind::Circle },
+            LegendEntry::new("abcd", SymbolKind::Circle),
+            LegendEntry::new("abcdef", SymbolKind::Circle),
         ];
         let m = mock(10.0);
         let size = estimate_legend_size(
@@ -1925,10 +1973,7 @@ mod tests {
     #[test]
     fn legend_label_limit_truncates_with_ellipsis() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
-        let es = vec![LegendEntry {
-            label: "a-very-long-category-label".into(),
-            symbol: SymbolKind::Circle,
-        }];
+        let es = vec![LegendEntry::new("a-very-long-category-label", SymbolKind::Circle)];
         let m = mock(10.0); // 10 px per char
         let base = layout_legend(
             &es, LegendOrient::Right, inner, 11.0, &m, LegendDirection::Vertical, None, 13.0, None, None,
@@ -1958,7 +2003,7 @@ mod tests {
     #[test]
     fn legend_label_limit_keeps_short_label() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
-        let es = vec![LegendEntry { label: "ab".into(), symbol: SymbolKind::Circle }];
+        let es = vec![LegendEntry::new("ab", SymbolKind::Circle)];
         let m = mock(10.0);
         let limited = layout_legend(
             &es, LegendOrient::Right, inner, 11.0, &m, LegendDirection::Vertical, None, 13.0, None, None,

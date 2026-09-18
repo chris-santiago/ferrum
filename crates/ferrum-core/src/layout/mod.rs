@@ -2393,8 +2393,8 @@ mod tests {
         let axes = dummy_axes();
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
         let entries = vec![
-            LegendEntry { label: "alpha".into(), symbol: SymbolKind::Circle },
-            LegendEntry { label: "beta".into(), symbol: SymbolKind::Circle },
+            LegendEntry::new("alpha", SymbolKind::Circle),
+            LegendEntry::new("beta", SymbolKind::Circle),
         ];
 
         let baseline = compute_layout(
@@ -3830,9 +3830,9 @@ mod tests {
         let spec = faceted_spec(3);
         let groups = three_groups();
         let legend = vec![
-            LegendEntry { label: "setosa".into(), symbol: SymbolKind::Circle },
-            LegendEntry { label: "versicolor".into(), symbol: SymbolKind::Circle },
-            LegendEntry { label: "virginica".into(), symbol: SymbolKind::Circle },
+            LegendEntry::new("setosa", SymbolKind::Circle),
+            LegendEntry::new("versicolor", SymbolKind::Circle),
+            LegendEntry::new("virginica", SymbolKind::Circle),
         ];
         let axes = dummy_axes();
         let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };

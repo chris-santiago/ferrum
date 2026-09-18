@@ -275,10 +275,14 @@ pub fn build_legend(
                 SymbolKind::Line => {
                     // A line swatch has no fill; `symbol_stroke_width` overrides the
                     // theme line width when set so the legend line thickens too.
-                    // `dash_pattern` (T12) is `Some` only for a stroke-dash aux
-                    // legend entry — every other `Line`-kind entry (color legend
-                    // for Mark::Line, etc.) carries `None` and draws solid,
-                    // byte-identical to pre-T12.
+                    // `dash_pattern` (T12) is `Some` on a stroke-dash aux legend
+                    // entry, and on a color-legend entry that a same-field
+                    // `stroke_dash` channel folded into (#111) — both of which
+                    // reach this arm because their producer set the entry's kind
+                    // to `Line`, which is what makes the dash visible at all (a
+                    // `Circle` carrying a dash draws byte-identically to one
+                    // without). Every other `Line`-kind entry carries `None` and
+                    // draws solid, byte-identical to pre-T12.
                     let line_w = symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width);
                     let half_len = 6.0 * swatch_scale;
                     nodes.push(SceneNode::Line {

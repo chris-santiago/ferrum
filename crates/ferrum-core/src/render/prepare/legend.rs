@@ -203,17 +203,14 @@ pub(crate) fn build_color_legend(
     // `"time"` genuinely needs the new path (a colorbar with no explicit
     // spec still needs SOME way to know its domain is temporal).
 
-    let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) = if legend_disabled {
+    let (mut legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) = if legend_disabled {
         (Vec::new(), None)
     } else {
         match &provisional_scales.color {
             Some(ColorScale::Categorical { domain, .. }) => {
                 let entries = domain
                     .iter()
-                    .map(|v| LegendEntry {
-                        label: v.clone(),
-                        symbol: SymbolKind::Circle,
-                    })
+                    .map(|v| LegendEntry::new(v.clone(), SymbolKind::Circle))
                     .collect();
                 (entries, None)
             }
@@ -314,47 +311,12 @@ pub(crate) fn build_color_legend(
                 } else {
                     let entries = cond_domain
                         .iter()
-                        .map(|v| LegendEntry {
-                            label: v.clone(),
-                            symbol: SymbolKind::Circle,
-                        })
+                        .map(|v| LegendEntry::new(v.clone(), SymbolKind::Circle))
                         .collect();
                     (entries, None)
                 }
             }
         }
-    };
-
-    // Legend title (Themes-T2.5b, #90): three-state per spec §6 "Legend title
-    // resolution" — `encoding.color.title` resolves through the same
-    // `resolve_axis_title` helper the axis path uses (present+blank →
-    // suppress with no fallback, present+non-blank → verbatim, absent →
-    // field name). When entries were built from a conditional color field
-    // (no base encoding), derive the title from the first conditional Color
-    // Field branch instead — the conditional branch carries no `title` of
-    // its own, so that leg is unaffected by #90.
-    let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
-        match spec.encoding.color.as_ref() {
-            Some(c) => resolve_axis_title(c.title.as_deref(), Some(c.field.clone())),
-            None => {
-                // Conditional-color case: find the first Color conditional with a
-                // Field branch and use its field name as the title.
-                use ferrum_scene::EncodingValue;
-                spec.conditionals.iter().find_map(|cond| {
-                    if cond.channel != ChannelName::Color {
-                        return None;
-                    }
-                    for ev in [&cond.if_selected, &cond.if_not] {
-                        if let EncodingValue::Field { name } = ev {
-                            return Some(name.clone());
-                        }
-                    }
-                    None
-                })
-            }
-        }
-    } else {
-        None
     };
 
     // D13 (B5-typed): extract legend style overrides from the typed per-channel
@@ -431,10 +393,65 @@ pub(crate) fn build_color_legend(
         composite_color_has_non_line_ribbon_sibling,
     );
 
-    // Multivariate B1: build size/shape auxiliary legends from the resolved
-    // scales. A size/shape channel that shares its field with the color channel
-    // is merged into the color legend rather than emitted as a separate block.
-    let aux_legends = build_aux_legends(spec, provisional_scales, inert_consumer_marks.is_some());
+    // Multivariate B1: build size/shape/dash auxiliary legends from the
+    // resolved scales. A size/shape/dash channel that shares its field with a
+    // color legend that ALREADY enumerates that field is folded into that
+    // legend rather than emitted as a separate block (#111, spec §4.6) — and
+    // folding means the color entries take the folded channel's identity, not
+    // that the identity is dropped.
+    let AuxLegends { blocks: aux_legends, folded } = build_aux_legends(
+        spec,
+        provisional_scales,
+        ColorLegendState {
+            inert_on_line_or_ribbon: inert_consumer_marks.is_some(),
+            enumerates_field: !legend_entries.is_empty(),
+        },
+    );
+    fold_identity_into_color_entries(&mut legend_entries, &folded, warnings);
+
+    // Legend title (Themes-T2.5b, #90): three-state per spec §6 "Legend title
+    // resolution" — `encoding.color.title` resolves through the same
+    // `resolve_axis_title` helper the axis path uses (present+blank →
+    // suppress with no fallback, present+non-blank → verbatim, absent →
+    // field name). When entries were built from a conditional color field
+    // (no base encoding), derive the title from the first conditional Color
+    // Field branch instead — the conditional branch carries no `title` of
+    // its own, so that leg is unaffected by #90.
+    //
+    // #111 / spec §4.6: a folded channel's own EXPLICIT title addresses this
+    // same (now shared) surface, so it fills in where color stated none
+    // rather than being silently discarded, and a genuine disagreement is
+    // reported. Resolved after `build_aux_legends` because only that call
+    // knows which channels were actually folded.
+    let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
+        let color_title = match spec.encoding.color.as_ref() {
+            Some(c) => resolve_axis_title(c.title.as_deref(), Some(c.field.clone())),
+            None => {
+                // Conditional-color case: find the first Color conditional with a
+                // Field branch and use its field name as the title.
+                use ferrum_scene::EncodingValue;
+                spec.conditionals.iter().find_map(|cond| {
+                    if cond.channel != ChannelName::Color {
+                        return None;
+                    }
+                    for ev in [&cond.if_selected, &cond.if_not] {
+                        if let EncodingValue::Field { name } = ev {
+                            return Some(name.clone());
+                        }
+                    }
+                    None
+                })
+            }
+        };
+        let color_said = spec
+            .encoding
+            .color
+            .as_ref()
+            .map_or(ColorTitle::Unstated, color_title_state);
+        resolve_shared_legend_title(color_said, color_title, &folded.titles, warnings)
+    } else {
+        None
+    };
 
     // Same-field merge: when color (continuous) and size share a field, the
     // combined block is the size legend whose symbols also carry color
@@ -565,6 +582,216 @@ fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String>
     resolve_axis_title(legend_title, channel_fallback)
 }
 
+/// The title a channel STATED, as opposed to the one it falls back to.
+///
+/// [`aux_legend_title`] answers "what does this channel's own block say",
+/// which for a silent channel is its field name. This answers the narrower
+/// question a folded channel poses (#111, spec §4.6): did the user say
+/// anything about this legend's title at all? The field name is a default, and
+/// a default must never displace or contradict another channel's statement, so
+/// the field-name rung is deliberately absent here.
+fn explicit_channel_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
+    resolve_axis_title(
+        enc.legend.as_ref().and_then(|l| l.title.as_deref()),
+        resolve_axis_title(enc.title.as_deref(), None),
+    )
+}
+
+/// What a same-field channel hands to the color legend when it is folded in
+/// rather than given its own block (#111, spec §4.6).
+///
+/// Keyed by LABEL, never by position: the color domain and the shape/dash
+/// domain are both built by `sorted_categorical_domain` over the same field
+/// but with that channel's OWN `sort=` spec, so `stroke_dash=StrokeDash('g',
+/// sort='descending')` beside `color='g'` yields two correct domains in
+/// opposite orders. Pairing them by index would transpose every pattern
+/// silently.
+#[derive(Debug, Default)]
+struct FoldedChannels {
+    /// Category label → the point-glyph name its `shape` channel assigned.
+    shapes: std::collections::HashMap<String, String>,
+    /// Category label → the dasharray its `stroke_dash` channel assigned. The
+    /// solid slot is present with an EMPTY pattern: the entry still has to
+    /// become a line swatch, it just draws undashed.
+    dashes: std::collections::HashMap<String, Vec<f64>>,
+    /// Explicit titles the folded channels stated, in channel order.
+    titles: Vec<String>,
+}
+
+impl FoldedChannels {
+    /// Nothing to give the color ENTRIES. [`titles`](Self::titles) is
+    /// deliberately not consulted: a folded channel whose domain came back
+    /// empty still stated a title, and the title cascade reads that field
+    /// directly rather than through this gate.
+    fn has_no_entry_identity(&self) -> bool {
+        self.shapes.is_empty() && self.dashes.is_empty()
+    }
+}
+
+/// What the color legend already shows — the two facts that decide how a
+/// same-field aux channel is treated.
+#[derive(Debug, Clone, Copy)]
+struct ColorLegendState {
+    /// The color scale was judged inert on line/ribbon (spec §4.0), so a
+    /// merged size legend must not sample swatch colors from it.
+    inert_on_line_or_ribbon: bool,
+    /// The color legend renders categorical ENTRIES enumerating its field. A
+    /// same-field shape/dash block would duplicate that enumeration, so it
+    /// folds into it instead. When this is `false` there is no enumeration to
+    /// duplicate — `Color(…, legend=None)`, or a colorbar — and the aux block
+    /// renders on its own (spec §4.6).
+    enumerates_field: bool,
+}
+
+/// The aux blocks to render, plus whatever was folded into the color legend.
+struct AuxLegends {
+    blocks: Vec<AuxLegendInput>,
+    folded: FoldedChannels,
+}
+
+/// Give each color entry the identity of the same-field channels folded into
+/// it, matched by label (#111).
+///
+/// A dash-carrying entry also becomes a LINE swatch: `dash_pattern` is only
+/// read on the line arm of the renderer's swatch match, so a circle carrying a
+/// dash renders byte-identically to one without — the whole reason the issue's
+/// own prescribed "thread the pattern through" fix measured as a no-op. Set on
+/// the entry (not forced in the renderer) so a user `symbol_type=` override
+/// still wins, exactly as it does over any other entry symbol.
+///
+/// # When BOTH `shape` and `stroke_dash` fold onto one field
+///
+/// One swatch cannot be a glyph and a dash pattern at once, and the two
+/// channels here describe different marks anyway (the glyph is what a point
+/// draws, the dash what a line draws). The GLYPH wins, for the reason every
+/// other choice in this task was made: it is what a standalone `shape` aux
+/// block already draws, so a folded legend agrees with an unfolded one rather
+/// than drifting from it. A dash threaded onto a glyph would not help — the
+/// legend's glyphs are painted `fill`-only (`stroke: None`, `stroke_width:
+/// 0.0`), so a dasharray on them paints nothing at all on `circle`/`square`
+/// and merely frays a 5px cross arm on the stroke-drawn glyphs.
+///
+/// The losing channel's pattern is therefore NOT written onto the entry. It is
+/// not that the renderer happens to ignore it: an entry that carried a dash it
+/// cannot draw would serialize `dash_pattern` into the scene for a swatch
+/// nothing paints, leaving the SVG and WASM walkers free to disagree about it.
+/// The entry carries exactly what it draws, and the precedence lives in the
+/// data model rather than in the renderer's branch order.
+///
+/// Silence is the one thing this must not do. An unshowable *title* already
+/// reports through [`RenderWarning::LegendTitleConflict`](crate::render::RenderWarning::LegendTitleConflict);
+/// an unshowable *identity* reports the same way, or the two halves of one
+/// merge disagree about whether losing information is worth mentioning.
+fn fold_identity_into_color_entries(
+    entries: &mut [LegendEntry],
+    folded: &FoldedChannels,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) {
+    if folded.has_no_entry_identity() {
+        return;
+    }
+    // Both maps are built by `sorted_categorical_domain` over the SAME field —
+    // that is the precondition for folding at all — so their label sets are
+    // equal and a collision on one entry is a collision on every entry. That
+    // makes this a property of the CHART, reported once, rather than one
+    // warning per category (the rollup discipline `LegendValuesUnknown` and
+    // `AnnotationSuppressedByBreak` already follow).
+    let glyph_beats_dash = !folded.shapes.is_empty() && !folded.dashes.is_empty();
+    if glyph_beats_dash {
+        warnings.push(crate::render::RenderWarning::LegendFoldNotShown {
+            kept: "shape".to_string(),
+            dropped: "stroke_dash".to_string(),
+        });
+    }
+    for entry in entries.iter_mut() {
+        if let Some(shape_name) = folded.shapes.get(&entry.label) {
+            entry.shape_name = Some(shape_name.clone());
+        }
+        if glyph_beats_dash {
+            continue;
+        }
+        if let Some(dash) = folded.dashes.get(&entry.label) {
+            entry.symbol = SymbolKind::Line;
+            entry.dash_pattern = (!dash.is_empty()).then(|| dash.clone());
+        }
+    }
+}
+
+/// What the color channel SAID about the title of the legend surface it owns
+/// — as distinct from what that title resolves to (#111, spec §4.6).
+enum ColorTitle {
+    /// A non-blank title at either rung (`Color(title=)` or
+    /// `Color(legend=Legend(title=))`). It wins outright.
+    Stated(String),
+    /// A blank title, which is this codebase's suppression spelling. It wins
+    /// too: "no title" is a statement, and a folded channel does not overturn
+    /// it.
+    Suppressed,
+    /// Nothing. The title is the field name, a default — which is the one
+    /// case a folded channel's own title fills in.
+    Unstated,
+}
+
+/// Read [`ColorTitle`] off the color encoding.
+fn color_title_state(enc: &crate::spec::encoding::EncodingSpec) -> ColorTitle {
+    let stated = enc
+        .legend
+        .as_ref()
+        .and_then(|l| l.title.as_deref())
+        .or(enc.title.as_deref());
+    match stated {
+        None => ColorTitle::Unstated,
+        Some(t) if t.trim().is_empty() => ColorTitle::Suppressed,
+        Some(t) => ColorTitle::Stated(t.to_string()),
+    }
+}
+
+/// Resolve the title of a legend that now answers for more than one channel
+/// (#111, spec §4.6).
+///
+/// `color_default` is the title the color channel resolves to on its own — the
+/// value this function returns whenever nothing was folded in, or whenever the
+/// color channel stated a title of its own, so every chart outside the merge
+/// is untouched. Only where color said NOTHING does a folded channel's
+/// explicit title fill in, because a field-name default must not outrank a
+/// user's statement; that silent discard is the shipped behavior this closes.
+/// There is one title slot, so any folded title that disagrees with the winner
+/// cannot be shown, and it is named in a warning rather than vanishing.
+fn resolve_shared_legend_title(
+    color: ColorTitle,
+    color_default: Option<String>,
+    folded_titles: &[String],
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Option<String> {
+    if folded_titles.is_empty() {
+        return color_default;
+    }
+    let kept = match &color {
+        ColorTitle::Stated(t) => Some(t.clone()),
+        ColorTitle::Suppressed => None,
+        ColorTitle::Unstated => folded_titles.first().cloned(),
+    };
+    let discarded: Vec<String> = folded_titles
+        .iter()
+        .filter(|t| Some(*t) != kept.as_ref())
+        .cloned()
+        .collect();
+    if !discarded.is_empty() {
+        warnings.push(crate::render::RenderWarning::LegendTitleConflict {
+            kept: kept.clone(),
+            discarded,
+        });
+    }
+    match color {
+        ColorTitle::Unstated => kept.or(color_default),
+        // A stated title resolves through `color_default` exactly as it did
+        // before this merge existed: the `Color(title=)` rung IS that value,
+        // and the `Legend(title=)` rung outranks it downstream in
+        // `config_apply::effective_legend_title`.
+        ColorTitle::Stated(_) | ColorTitle::Suppressed => color_default,
+    }
+}
+
 /// Whether the size channel shares its field with a Numeric-keyed
 /// (`Continuous`/`Discretizing`) color encoding — the same-field merge
 /// FIELD/SCALE-KIND condition, computed once so [`build_aux_legends`]
@@ -604,13 +831,19 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 /// Same-field merge (Vega-Lite behavior): when the size channel shares its
 /// field with a *continuous* color encoding, the size legend's symbols also
 /// carry the color the shared field maps to (`color_hex`), and the colorbar is
-/// expected to be suppressed by the caller — a single combined block. A size,
-/// shape, or stroke-dash channel that shares its field with a categorical
-/// color encoding is suppressed entirely (the color legend already labels
-/// that field) — stroke-dash mirrors shape's suppression condition exactly,
-/// it has no same-field color+dash merge of its own.
+/// expected to be suppressed by the caller — a single combined block.
 ///
-/// `color_is_inert_on_line_or_ribbon` (spec-review 2026-08-28, cycle-3
+/// A size, shape, or stroke-dash channel that shares its field with a color
+/// legend ALREADY ENUMERATING that field emits no block of its own, because
+/// the color legend labels every one of its categories. Shape and stroke-dash
+/// then hand their glyph/pattern back through [`AuxLegends::folded`] so those
+/// color swatches show what the marks actually draw (#111, spec §4.6); size's
+/// graduated radii have no per-entry slot on a categorical color legend and
+/// are genuinely dropped, unchanged. Where the color legend enumerates
+/// NOTHING — `Color(…, legend=None)`, or a colorbar — there is no duplication
+/// to avoid, so the aux block renders on its own.
+///
+/// `state.inert_on_line_or_ribbon` (spec-review 2026-08-28, cycle-3
 /// finding): when `true`, the same-field merge still emits the size legend
 /// (its own semantics on line/ribbon are a separate follow-up, out of this
 /// wave — size is NOT suppressed) but never samples `color_hex` from the
@@ -622,8 +855,8 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 fn build_aux_legends(
     spec: &ChartSpec,
     scales: &ResolvedScales,
-    color_is_inert_on_line_or_ribbon: bool,
-) -> Vec<AuxLegendInput> {
+    state: ColorLegendState,
+) -> AuxLegends {
     use crate::render::format::format_value_with_spec;
     use crate::scale::ticks::nice_ticks;
 
@@ -644,12 +877,23 @@ fn build_aux_legends(
     let numeric_merge = same_field_numeric_size_color_merge(spec, scales);
 
     let mut out = Vec::new();
+    let mut folded = FoldedChannels::default();
 
     // ── Size legend ──────────────────────────────────────────────────────
     if let (Some(size_scale), Some(size_enc)) = (&scales.size, &spec.encoding.size) {
         let disabled = legend_channel_disabled(spec.encoding.size.as_ref());
         let same_field_as_color = color_field == Some(size_enc.field.as_str());
         // Merge into a categorical color legend → suppress (color labels it).
+        //
+        // Size keeps the SCALE-KIND condition rather than shape/dash's
+        // "does the color legend enumerate this field" one (#111 scoped
+        // itself to those two channels): a graduated radius has no per-entry
+        // slot on a categorical color legend to fold into, so there is
+        // nothing for the generalized gate to preserve here. The residual —
+        // `Color(…, legend=None)` plus a same-field categorical size, which
+        // still erases both — is reachable only for a size scale over a
+        // string field, which `size=` refuses outright, and is logged rather
+        // than changed here.
         let suppressed = disabled || (same_field_as_color && !color_is_numeric);
         if !suppressed {
             let format_spec = size_enc.legend.as_ref().and_then(|l| l.format.as_deref());
@@ -674,7 +918,7 @@ fn build_aux_legends(
                         // both radius and color — UNLESS that color scale was
                         // judged inert on line/ribbon (spec-review cycle-3),
                         // in which case swatches stay the neutral default.
-                        let color_hex = if numeric_merge && !color_is_inert_on_line_or_ribbon {
+                        let color_hex = if numeric_merge && !state.inert_on_line_or_ribbon {
                             scales
                                 .color
                                 .as_ref()
@@ -701,60 +945,110 @@ fn build_aux_legends(
     }
 
     // ── Shape legend ─────────────────────────────────────────────────────
+    // Shape always maps a categorical field; where color enumerates the same
+    // field, the shape glyphs fold into that enumeration instead of repeating
+    // it (#111).
     if let (Some(shape_scale), Some(shape_enc)) = (&scales.shape, &spec.encoding.shape) {
-        let disabled = legend_channel_disabled(spec.encoding.shape.as_ref());
-        let same_field_as_color = color_field == Some(shape_enc.field.as_str());
-        // Shape always maps a categorical field; if color encodes the same
-        // categorical field, the color legend already enumerates it — suppress.
-        let suppressed = disabled || same_field_as_color;
-        if !suppressed {
-            let entries: Vec<ShapeLegendEntry> = shape_scale
-                .domain
-                .iter()
-                .zip(shape_scale.shapes.iter())
-                .map(|(label, kind)| ShapeLegendEntry {
-                    label: label.clone(),
-                    shape_name: kind.name().to_string(),
-                })
-                .collect();
-            if !entries.is_empty() {
-                out.push(AuxLegendInput::Shape {
-                    title: aux_legend_title(shape_enc),
-                    entries,
-                });
+        match categorical_aux_fate(shape_enc, color_field, state) {
+            AuxBlockFate::Drop => {}
+            AuxBlockFate::FoldIntoColor => {
+                folded.shapes.extend(
+                    shape_scale
+                        .domain
+                        .iter()
+                        .zip(shape_scale.shapes.iter())
+                        .map(|(label, kind)| (label.clone(), kind.name().to_string())),
+                );
+                folded.titles.extend(explicit_channel_title(shape_enc));
+            }
+            AuxBlockFate::Emit => {
+                let entries: Vec<ShapeLegendEntry> = shape_scale
+                    .domain
+                    .iter()
+                    .zip(shape_scale.shapes.iter())
+                    .map(|(label, kind)| ShapeLegendEntry {
+                        label: label.clone(),
+                        shape_name: kind.name().to_string(),
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    out.push(AuxLegendInput::Shape {
+                        title: aux_legend_title(shape_enc),
+                        entries,
+                    });
+                }
             }
         }
     }
 
     // ── Stroke-dash legend (T12) ─────────────────────────────────────────
+    // Stroke-dash always maps a categorical field (a quantitative field
+    // resolves no scale and stays index-based, see StrokeDashScale's own doc),
+    // so it takes shape's fate rule unchanged — the two are deliberate
+    // mirrors.
     if let (Some(dash_scale), Some(dash_enc)) = (&scales.stroke_dash, &spec.encoding.stroke_dash) {
-        let disabled = legend_channel_disabled(spec.encoding.stroke_dash.as_ref());
-        let same_field_as_color = color_field == Some(dash_enc.field.as_str());
-        // Stroke-dash always maps a categorical field (a quantitative field
-        // resolves no scale and stays index-based, see StrokeDashScale's own
-        // doc); if color encodes the same categorical field, the color legend
-        // already enumerates it — suppress, mirroring shape's condition above.
-        let suppressed = disabled || same_field_as_color;
-        if !suppressed {
-            let entries: Vec<StrokeDashLegendEntry> = dash_scale
-                .domain
-                .iter()
-                .zip(dash_scale.patterns.iter())
-                .map(|(label, pattern)| StrokeDashLegendEntry {
-                    label: label.clone(),
-                    dash: pattern.clone(),
-                })
-                .collect();
-            if !entries.is_empty() {
-                out.push(AuxLegendInput::StrokeDash {
-                    title: aux_legend_title(dash_enc),
-                    entries,
-                });
+        match categorical_aux_fate(dash_enc, color_field, state) {
+            AuxBlockFate::Drop => {}
+            AuxBlockFate::FoldIntoColor => {
+                folded.dashes.extend(
+                    dash_scale
+                        .domain
+                        .iter()
+                        .zip(dash_scale.patterns.iter())
+                        .map(|(label, pattern)| (label.clone(), pattern.clone())),
+                );
+                folded.titles.extend(explicit_channel_title(dash_enc));
+            }
+            AuxBlockFate::Emit => {
+                let entries: Vec<StrokeDashLegendEntry> = dash_scale
+                    .domain
+                    .iter()
+                    .zip(dash_scale.patterns.iter())
+                    .map(|(label, pattern)| StrokeDashLegendEntry {
+                        label: label.clone(),
+                        dash: pattern.clone(),
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    out.push(AuxLegendInput::StrokeDash {
+                        title: aux_legend_title(dash_enc),
+                        entries,
+                    });
+                }
             }
         }
     }
 
-    out
+    AuxLegends { blocks: out, folded }
+}
+
+/// What becomes of a categorical aux channel's block — the one gate the shape
+/// and stroke-dash arms of [`build_aux_legends`] share, so their deliberate
+/// mirroring cannot drift on the condition that matters most (#111).
+enum AuxBlockFate {
+    /// Emit the channel's own block.
+    Emit,
+    /// Hand the channel's per-category identity to the color legend, which
+    /// already enumerates this field, and emit no block.
+    FoldIntoColor,
+    /// The user turned this channel's legend off (`legend=None` /
+    /// `orient="none"`). Nothing is emitted and nothing is folded: opting out
+    /// of a block is not a request to repaint another one.
+    Drop,
+}
+
+fn categorical_aux_fate(
+    enc: &crate::spec::encoding::EncodingSpec,
+    color_field: Option<&str>,
+    state: ColorLegendState,
+) -> AuxBlockFate {
+    if legend_channel_disabled(Some(enc)) {
+        AuxBlockFate::Drop
+    } else if color_field == Some(enc.field.as_str()) && state.enumerates_field {
+        AuxBlockFate::FoldIntoColor
+    } else {
+        AuxBlockFate::Emit
+    }
 }
 
 /// The mark set of every layer that consumes the resolved color scale, when
@@ -1858,5 +2152,168 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(aux_legend_title(&enc), None);
+    }
+
+    /// The merged-legend title cascade (#111, spec §4.6), rung by rung.
+    ///
+    /// The end-to-end pins live in `tests/test_legend_same_field_swatches.py`;
+    /// this covers the two rungs a rendered chart cannot show apart — a color
+    /// channel that SUPPRESSED its title versus one that never stated one,
+    /// which both render no field-name title but must treat a folded
+    /// channel's title differently.
+    #[test]
+    fn merged_legend_title_prefers_a_statement_over_a_default() {
+        let mut warnings = Vec::new();
+        let folded = ["Style".to_string()];
+
+        // Color said nothing: its title is the field-name default, which a
+        // folded channel's statement outranks. No conflict — one statement.
+        assert_eq!(
+            resolve_shared_legend_title(
+                ColorTitle::Unstated,
+                Some("g".into()),
+                &folded,
+                &mut warnings
+            ),
+            Some("Style".to_string())
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // Color stated a title: it owns the surface and wins, and the folded
+        // statement that cannot be shown is named.
+        assert_eq!(
+            resolve_shared_legend_title(
+                ColorTitle::Stated("Species".into()),
+                Some("Species".into()),
+                &folded,
+                &mut warnings
+            ),
+            Some("Species".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![crate::render::RenderWarning::LegendTitleConflict {
+                kept: Some("Species".into()),
+                discarded: vec!["Style".into()],
+            }]
+        );
+
+        // Color asked for NO title. "No title" is a statement too, so the
+        // folded one does not resurrect one — and is reported, not dropped.
+        warnings.clear();
+        assert_eq!(
+            resolve_shared_legend_title(ColorTitle::Suppressed, None, &folded, &mut warnings),
+            None
+        );
+        assert_eq!(
+            warnings,
+            vec![crate::render::RenderWarning::LegendTitleConflict {
+                kept: None,
+                discarded: vec!["Style".into()],
+            }]
+        );
+
+        // Nothing folded: the color default stands untouched, whatever it is.
+        warnings.clear();
+        assert_eq!(
+            resolve_shared_legend_title(ColorTitle::Unstated, Some("g".into()), &[], &mut warnings),
+            Some("g".to_string())
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A folded channel's identity lands on the entry with the MATCHING label,
+    /// never on the entry at the matching position (#111).
+    ///
+    /// The two domains here are deliberately in opposite orders, which is what
+    /// `sort="descending"` on the folded channel produces. An index-paired
+    /// implementation gives `a` the pattern `c` draws.
+    #[test]
+    fn folded_identity_matches_by_label_not_by_position() {
+        let mut entries = vec![
+            LegendEntry::new("a", SymbolKind::Circle),
+            LegendEntry::new("b", SymbolKind::Circle),
+            LegendEntry::new("c", SymbolKind::Circle),
+        ];
+        let mut folded = FoldedChannels::default();
+        // Descending dash domain: c takes the palette's solid slot.
+        folded.dashes.insert("c".into(), vec![]);
+        folded.dashes.insert("b".into(), vec![6.0, 3.0]);
+        folded.dashes.insert("a".into(), vec![2.0, 3.0]);
+        let mut warnings = Vec::new();
+        fold_identity_into_color_entries(&mut entries, &folded, &mut warnings);
+
+        assert_eq!(entries[0].dash_pattern, Some(vec![2.0, 3.0]));
+        assert_eq!(entries[1].dash_pattern, Some(vec![6.0, 3.0]));
+        // The solid slot carries no pattern but still becomes a line swatch,
+        // so the block reads as one family rather than two circles and a line.
+        assert_eq!(entries[2].dash_pattern, None);
+        assert!(entries.iter().all(|e| e.symbol == SymbolKind::Line));
+        // One channel folded, nothing lost, nothing to report.
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `color` + `shape` + `stroke_dash` all on one field: the glyph is drawn,
+    /// the dash is NOT written onto the entry, and the loss is reported.
+    ///
+    /// Measured before this pin (`mark_line` with all three on one field): the
+    /// marks drew `solid` / `6,3` / `2,3` while the legend's three swatches
+    /// carried the glyphs and ZERO dasharrays, with no warning — the renderer's
+    /// `shape_name` branch precedes its `symbol_kind` match and its `ShapeStyle`
+    /// hardcodes `stroke_dash: None`, so the folded pattern reached the scene
+    /// and was discarded there.
+    ///
+    /// Three things are pinned, and each is a separate decision:
+    ///
+    /// 1. **The glyph wins.** Not arbitrary: it is what a standalone `shape`
+    ///    aux block already draws, so a folded legend agrees with an unfolded
+    ///    one instead of drifting from it.
+    /// 2. **The loser is not written.** An entry carrying a dash it cannot draw
+    ///    would serialize `dash_pattern` into the scene for a swatch nothing
+    ///    paints, which is how the SVG and WASM walkers get room to disagree.
+    ///    The entry carries exactly what it draws, so the precedence is a
+    ///    property of the data model rather than of the renderer's branch order
+    ///    — and the `symbol` stays untouched too, rather than being flipped to
+    ///    `Line` for a swatch that draws a glyph.
+    /// 3. **It is reported.** `#111`'s whole subject is an identity that
+    ///    vanishes silently. Fixing that for the swatch while opening it for
+    ///    the title's sibling case would leave the two halves of one merge
+    ///    disagreeing about whether losing information is worth mentioning.
+    #[test]
+    fn a_glyph_and_a_dash_folded_onto_one_entry_keep_the_glyph_and_report_the_dash() {
+        let mut entries = vec![
+            LegendEntry::new("a", SymbolKind::Circle),
+            LegendEntry::new("b", SymbolKind::Circle),
+        ];
+        let mut folded = FoldedChannels::default();
+        folded.shapes.insert("a".into(), "circle".into());
+        folded.shapes.insert("b".into(), "square".into());
+        folded.dashes.insert("a".into(), vec![2.0, 3.0]);
+        folded.dashes.insert("b".into(), vec![6.0, 3.0]);
+        let mut warnings = Vec::new();
+        fold_identity_into_color_entries(&mut entries, &folded, &mut warnings);
+
+        assert_eq!(entries[0].shape_name.as_deref(), Some("circle"));
+        assert_eq!(entries[1].shape_name.as_deref(), Some("square"));
+        assert_eq!(
+            (&entries[0].dash_pattern, &entries[1].dash_pattern),
+            (&None, &None),
+            "a pattern the swatch cannot draw must not reach the scene"
+        );
+        assert!(
+            entries.iter().all(|e| e.symbol == SymbolKind::Circle),
+            "the swatch draws a glyph, so nothing flips it to a line: {entries:?}"
+        );
+        assert_eq!(
+            warnings,
+            vec![crate::render::RenderWarning::LegendFoldNotShown {
+                kept: "shape".into(),
+                dropped: "stroke_dash".into(),
+            }],
+            "rolled up per chart, not one per category"
+        );
+        let text = warnings[0].to_string();
+        assert!(text.contains("stroke_dash") && text.contains("could not be shown"), "{text}");
+        assert!(!text.contains("LegendFoldNotShown"), "Display leaked Debug: {text}");
     }
 }

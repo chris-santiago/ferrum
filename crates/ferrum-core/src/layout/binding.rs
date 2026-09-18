@@ -138,7 +138,7 @@ pub fn compute_layout(
                 "line" => SymbolKind::Line,
                 _ => SymbolKind::Circle,
             };
-            LegendEntry { label, symbol }
+            LegendEntry::new(label, symbol)
         })
         .collect();
 

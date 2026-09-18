@@ -6164,14 +6164,8 @@ mod tests {
     fn band_bundle(theme: ThemeInputs, title: Option<&str>) -> LeafLegendBundle {
         LeafLegendBundle {
             entries: vec![
-                LegendEntry {
-                    label: "a".into(),
-                    symbol: SymbolKind::Circle,
-                },
-                LegendEntry {
-                    label: "b".into(),
-                    symbol: SymbolKind::Circle,
-                },
+                LegendEntry::new("a", SymbolKind::Circle),
+                LegendEntry::new("b", SymbolKind::Circle),
             ],
             colorbar: None,
             title: title.map(str::to_owned),

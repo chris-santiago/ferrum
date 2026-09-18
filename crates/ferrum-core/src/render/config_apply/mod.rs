@@ -1355,9 +1355,10 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
 /// `prepare_render_inputs` builds the entries from the domain as resolved, but
 /// `configure_color(domain=[…])` reorders/subsets that domain afterwards
 /// ([`apply_color_config_to_color_scale`]), so without this the swatch colors
-/// would follow the new order while the labels kept the old one. Entry symbols
-/// are preserved (a category that survives keeps its symbol; a newly listed one
-/// takes the first entry's).
+/// would follow the new order while the labels kept the old one. Entry identity
+/// is preserved (a category that survives keeps its symbol and any folded
+/// same-field shape/dash slots; a newly listed one takes the first entry's
+/// symbol and no folded identity).
 ///
 /// A no-op — and therefore byte-identical — whenever the domain still matches
 /// the entries, which is every chart that does not set `configure_color(domain=)`
@@ -1376,12 +1377,17 @@ fn resync_categorical_legend_entries(
     let default_symbol = first.symbol;
     *entries = domain
         .iter()
-        .map(|label| crate::layout::LegendEntry {
-            label: label.clone(),
-            symbol: entries
+        .map(|label| {
+            // A surviving category keeps its WHOLE entry — symbol plus any
+            // same-field shape/dash identity folded into it (#111) — because
+            // reordering the domain does not change what that category draws.
+            // A newly listed one has no marks behind it, so it takes the first
+            // entry's symbol and no folded identity.
+            entries
                 .iter()
                 .find(|e| &e.label == label)
-                .map_or(default_symbol, |e| e.symbol),
+                .cloned()
+                .unwrap_or_else(|| crate::layout::LegendEntry::new(label.clone(), default_symbol))
         })
         .collect();
 }

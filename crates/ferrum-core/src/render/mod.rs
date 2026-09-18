@@ -843,6 +843,35 @@ pub enum RenderWarning {
     /// entries in the order the caller wrote them; the matched ones still
     /// filter and order the legend normally.
     LegendValuesUnknown { values: Vec<String> },
+    /// Two channels sharing one legend surface each stated an explicit title,
+    /// and they disagree (#111, spec §4.6). A `shape`/`stroke_dash` channel
+    /// encoding the same field as `color` is folded INTO the color legend
+    /// rather than given its own block, which leaves one title slot for two
+    /// statements. The color channel owns the surface so its title stands
+    /// (`kept`); `None` there means it explicitly asked for no title at all.
+    /// The folded channel's title cannot be shown, so it is named here rather
+    /// than silently discarded — which is precisely what shipped before, and
+    /// is indistinguishable from the title having been ignored.
+    LegendTitleConflict {
+        kept: Option<String>,
+        discarded: Vec<String>,
+    },
+    /// A `shape` AND a `stroke_dash` channel both encode the same field as
+    /// `color`, so both folded into the one color legend (#111, spec §4.6) and
+    /// landed on the same entries. A swatch cannot be a point glyph and a dash
+    /// pattern at once, so one of the two identities is not drawn.
+    ///
+    /// `kept` is the channel the swatches depict (`"shape"` — what a
+    /// standalone `shape` aux block already draws, so a folded legend agrees
+    /// with an unfolded one); `dropped` is the channel that could not be shown
+    /// (`"stroke_dash"`). Sibling to
+    /// [`LegendTitleConflict`](Self::LegendTitleConflict), which reports the
+    /// same loss for the merge's title: one legend surface, two channels
+    /// addressing it, and the one that cannot be shown is named rather than
+    /// silently discarded. Rolled up per chart, not per category — both
+    /// domains come from the same field, so a collision on one entry is a
+    /// collision on all of them.
+    LegendFoldNotShown { kept: String, dropped: String },
     /// A chart-level scale-domain config field (`domain_min`/`domain_max`/
     /// `nice`/`zero`, from `configure_axis(...)` or from a per-axis
     /// `configure(axis_x=/axis_y=/axis_y2=...)` section — note the shared
@@ -1147,6 +1176,23 @@ impl std::fmt::Display for RenderWarning {
                 "legend values [{}] match no legend entry and were skipped",
                 values.join(", ")
             ),
+            RenderWarning::LegendTitleConflict { kept, discarded } => {
+                let held = match kept {
+                    Some(k) => format!("the color channel's title '{k}' stands"),
+                    None => "the color channel suppressed the legend title".to_string(),
+                };
+                write!(
+                    f,
+                    "{held}; a same-field channel titles the same merged legend [{}], \
+                     which could not be shown",
+                    discarded.join(", ")
+                )
+            }
+            RenderWarning::LegendFoldNotShown { kept, dropped } => write!(
+                f,
+                "{kept} and {dropped} encode the same field, so both merged into one legend; \
+                 its swatches show {kept} and the {dropped} patterns could not be shown"
+            ),
             RenderWarning::ScaleDomainConfigOnOrdinalAxis { channel, fields } => write!(
                 f,
                 "{} appl{} to continuous scales; the {channel} axis is ordinal, so {} not applied",
@@ -1280,6 +1326,18 @@ mod tests {
             },
             RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() },
             RenderWarning::LegendValuesUnknown { values: vec!["zzz".into()] },
+            RenderWarning::LegendTitleConflict {
+                kept: Some("species".into()),
+                discarded: vec!["Style".into()],
+            },
+            RenderWarning::LegendTitleConflict {
+                kept: None,
+                discarded: vec!["Style".into()],
+            },
+            RenderWarning::LegendFoldNotShown {
+                kept: "shape".into(),
+                dropped: "stroke_dash".into(),
+            },
             RenderWarning::ScaleDomainConfigOnOrdinalAxis {
                 channel: "x".into(),
                 fields: vec!["domain_min".into(), "nice".into()],
