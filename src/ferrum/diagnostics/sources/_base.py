@@ -30,8 +30,8 @@ class _Uncacheable:
     that stays unhashable after ``_normalize`` (a dict, a cv splitter with
     no usable ``__hash__``), so the returned key can never equal any other
     key, past or future — the lookup always misses and the compute always
-    runs fresh. ``_SourceCache.__setitem__`` recognizes this marker so the
-    *storage* half of the contract holds too: per spec §6, an
+    runs fresh. ``_SourceCache`` recognizes this marker on *every* mutation
+    path so the *storage* half of the contract holds too: per spec §6, an
     unnormalizable value is not cached, full stop, not cached-under-a-
     unique-key. Without this, the ~25 call sites' unconditional
     ``self._cache[key] = df`` would still leak one throwaway, never-reused
@@ -43,8 +43,38 @@ class _Uncacheable:
     __slots__ = ()
 
 
-class _SourceCache(dict):
-    """``self._cache``: a plain dict that refuses to store an uncacheable key.
+def _key_holds_uncacheable(key: Any) -> bool:
+    """Whether ``key`` carries an :class:`_Uncacheable` marker; refuses a malformed key.
+
+    The one reading of a cache key's shape, shared by every
+    :class:`_SourceCache` mutation path so they cannot disagree about which
+    keys are storable. ``BaseSource._cache_key`` builds exactly one shape —
+    ``(method_name, ((kwarg_name, value), ...))`` — and anything else is a
+    caller mistake, not a cache miss: it is refused by name here rather than
+    leaking a bare ``ValueError: too many values to unpack`` from inside the
+    container, which named neither the container nor the key.
+    """
+    if not (isinstance(key, tuple) and len(key) == 2):
+        raise TypeError(
+            f"_SourceCache: a cache key must be the 2-tuple "
+            f"(method_name, kwarg_pairs) that BaseSource._cache_key builds; "
+            f"got {key!r} ({type(key).__name__}). Build the key with "
+            f"self._cache_key(method, **kwargs) rather than by hand."
+        )
+    _method, pairs = key
+    try:
+        return any(isinstance(value, _Uncacheable) for _name, value in pairs)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"_SourceCache: a cache key's second element must be a tuple of "
+            f"(kwarg_name, value) pairs, as BaseSource._cache_key builds; got "
+            f"{pairs!r}. Build the key with self._cache_key(method, **kwargs) "
+            f"rather than by hand."
+        ) from exc
+
+
+class _SourceCache(dict[tuple, "pl.DataFrame"]):
+    """``self._cache``: a dict that refuses to store an uncacheable key.
 
     Every ``ModelSource`` derived-data method follows the same shape —
     ``if key in self._cache: return self._cache[key]`` on entry,
@@ -55,13 +85,56 @@ class _SourceCache(dict):
     ``_Uncacheable`` marker (see above) never gets persisted, so those
     call sites' unconditional assignment becomes a correct no-op for
     exactly the values the contract says must not be cached.
+
+    The refusal covers **every** way a dict can gain an entry, not just
+    ``[] =``: ``update``, ``setdefault``, ``|=`` and the **constructor**
+    each reach the store through their own C-level path (measured
+    2026-09-17: overriding ``__setitem__`` alone left all four storing the
+    entry this contract says must never be stored), so each is overridden
+    to route through ``__setitem__``. ``fromkeys`` inherits the refusal
+    through ``__setitem__`` already. A container whose guarantee held on
+    one of five paths is weaker than its docstring, and the ~25 call sites
+    read it as a plain dict.
     """
 
-    def __setitem__(self, key: tuple, value: Any) -> None:
-        _, pairs = key
-        if any(isinstance(v, _Uncacheable) for _, v in pairs):
+    def __init__(self, other: Any = (), /, **kwargs: Any) -> None:
+        """``dict.__init__``, routed through :meth:`update` per entry.
+
+        The one construction site today is ``_SourceCache()`` with no
+        arguments, so this guards the next one rather than a live defect --
+        which is the point: ``dict.__init__``'s C path does not call
+        ``__setitem__``, so a populated construction would have stored what
+        every other path refuses (measured 2026-09-17).
+        """
+        super().__init__()
+        self.update(other, **kwargs)
+
+    def __setitem__(self, key: tuple, value: "pl.DataFrame") -> None:
+        if _key_holds_uncacheable(key):
             return
         super().__setitem__(key, value)
+
+    def setdefault(self, key: tuple, default: Any = None) -> Any:
+        """``dict.setdefault``, minus the store for an uncacheable key.
+
+        Still returns what ``dict.setdefault`` would (the existing value, or
+        ``default``), so a caller's control flow is unchanged — only the
+        persistence is refused.
+        """
+        if key in self:
+            return self[key]
+        self[key] = default
+        return default
+
+    def update(self, other: Any = (), /, **kwargs: Any) -> None:
+        """``dict.update``, routed through :meth:`__setitem__` per entry."""
+        for key, value in dict(other, **kwargs).items():
+            self[key] = value
+
+    def __ior__(self, other: Any) -> "_SourceCache":
+        """``|=``, routed through :meth:`update` (the C-level path is not)."""
+        self.update(other)
+        return self
 
 
 _PROTOCOL_ATTRS: tuple[str, ...] = (
@@ -193,7 +266,10 @@ class BaseSource:
         self._capabilities = frozenset(
             attr for attr in _PROTOCOL_ATTRS if hasattr(self._model, attr)
         )
-        self._cache: dict[tuple, pl.DataFrame] = _SourceCache()
+        # Annotated as the subclass, not as ``dict``: this container refuses
+        # stores that a plain dict would accept, and a reader at any of the
+        # ~25 ``self._cache[key] = df`` sites has to see that from the type.
+        self._cache: _SourceCache = _SourceCache()
 
     @property
     def X(self) -> "pl.DataFrame | None":

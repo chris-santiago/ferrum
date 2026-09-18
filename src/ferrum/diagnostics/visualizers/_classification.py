@@ -184,7 +184,11 @@ class ROCVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         avg = "macro" if self.macro else ("micro" if self.micro else None)
-        roc = _base_model_rows(self._source.roc_curve(average=avg))
+        # `diagnostic=`: a caller who built this visualizer never called
+        # `roc_chart` or `ModelSource.roc_curve`, so a refusal naming either
+        # would send them to a function they did not invoke. Matches
+        # `ClassificationReportVisualizer`, which named itself from the start.
+        roc = _base_model_rows(self._source.roc_curve(average=avg, diagnostic="ROCVisualizer"))
         aucs = roc["auc"].drop_nulls().unique().to_list()
         self._metrics["auc_mean"] = float(np.nanmean(aucs)) if aucs else float("nan")
 
@@ -310,7 +314,7 @@ class PRVisualizer(FerrumVisualizer):
         return _build_compare_source(self.model, X, y, self.compare, random_state=self.random_state)
 
     def _materialize(self) -> None:
-        pr = _base_model_rows(self._source.pr_curve())
+        pr = _base_model_rows(self._source.pr_curve(diagnostic="PRVisualizer"))
         aps = pr["ap"].drop_nulls().unique().to_list()
         self._metrics["ap_mean"] = float(np.nanmean(aps)) if aps else float("nan")
 
@@ -536,6 +540,7 @@ class CalibrationVisualizer(FerrumVisualizer):
         cal = self._source.calibration_curve(
             n_bins=self.n_bins,
             strategy=self.strategy,
+            diagnostic="CalibrationVisualizer",
         )
         # A symmetric overlay carries one row per (model, bin) with no
         # distinguished model, so a single pooled mean over every row would
@@ -641,7 +646,7 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         # only the rendered heatmap's cell values). The docstring
         # documents this; the comment lives here so a future reader of
         # the code doesn't "fix" it by passing self.normalize through.
-        cm = self._source.confusion_matrix(normalize=None)
+        cm = self._source.confusion_matrix(normalize=None, diagnostic="ConfusionMatrixVisualizer")
         n_correct = float(cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum())
         n_total = float(cm["value"].sum())
         self._metrics["accuracy"] = n_correct / max(n_total, 1.0)
@@ -716,7 +721,7 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 
-        from .._internal import _curve_frames
+        from .._internal import _target_hygiene
         from ..sources._classification import report_predictions_in_y_domain
 
         if self._source.X is None:
@@ -757,19 +762,14 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         # ``require_no_null_target``'s own contract that ``diagnostic`` names
         # the entry the caller actually invoked, since a caller building this
         # visualizer directly never calls ``classification_report_chart``.
-        _curve_frames.require_no_null_target(
+        _target_hygiene.require_no_null_target(
             np.asarray(self._source.y), diagnostic="ClassificationReportVisualizer"
         )
         y_true = self._source.y
-        # `.tolist()`: see `_classification_report_chart`'s matching
-        # comment -- sklearn's `type_of_target` misreads the translated
-        # array's `dtype=object` as "unknown" rather than
-        # "multiclass"/"binary" for plain numeric values.
-        #
-        # `report_predictions_in_y_domain` also refuses here (#206 cycle 5,
+        # `report_predictions_in_y_domain` refuses here (#206 cycle 5,
         # 2026-09-13) when the model's classes_, translated into y's domain,
         # match none of y's observed values -- the same total-mismatch shape
-        # `_curve_frames.check_resolved_target`/`binary_indicator` already
+        # `_target_hygiene.check_resolved_target`/`binary_indicator` already
         # refuse on the curve paths, applied to this visualizer's own
         # translation. The class vocabulary is the subject, not the realized
         # predictions, so a slice the model gets entirely wrong still
@@ -779,7 +779,7 @@ class ClassificationReportVisualizer(FerrumVisualizer):
             self._source.y,
             self._source.model.predict(self._source.X),
             diagnostic="ClassificationReportVisualizer",
-        ).tolist()
+        )
         self._metrics["f1_macro"] = float(
             f1_score(y_true, y_pred, average="macro", zero_division=0)
         )
@@ -913,6 +913,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
             self._source.discrimination_threshold(
                 n_thresholds=self.n_thresholds,
                 cv=self.cv,
+                diagnostic="DiscriminationThresholdVisualizer",
             )
         )
         f1 = dt["f1"]
@@ -1002,7 +1003,9 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
         self.layers = layers
 
     def _materialize(self) -> None:
-        cm = self._source.confusion_matrix(normalize=None)
+        cm = self._source.confusion_matrix(
+            normalize=None, diagnostic="ClassPredictionErrorVisualizer"
+        )
         n_correct = float(cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum())
         n_total = float(cm["value"].sum())
         self._metrics["accuracy"] = n_correct / max(n_total, 1.0)

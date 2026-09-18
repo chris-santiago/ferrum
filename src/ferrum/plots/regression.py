@@ -397,7 +397,7 @@ def _prediction_error_chart_from_source(
     # classification.py for the same "adapter method, two public callers"
     # shape.
     if isinstance(source, _PrecomputedSource):
-        df = source.predictions(chart_name="prediction_error_chart").sort("y_true")
+        df = source.predictions(diagnostic="prediction_error_chart").sort("y_true")
     else:
         df = source.predictions().sort("y_true")
     # Internal invariant: the residual band (``ci`` / ``reference_band``) is a

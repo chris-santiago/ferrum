@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ferrum._desugar import _UNSET, BoolOrUnset
+from ferrum._desugar import _UNSET, BoolOrUnset, resolve_disc_flag
+from ferrum._metric_labels import _render_metric
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
     _inject_curve_annotation,
@@ -460,14 +461,16 @@ class ClassificationMarksMixin:
         # the pre-#189 silent downgrade) from "caller explicitly asked for
         # it" (refuse instead of vanishing) -- but the closure below decides
         # whether to inject the *data* the layer would need, which has to
-        # happen now, against a concrete bool, using this mark's own
-        # defaults (`optimum_label` True, `threshold_line` False). The
-        # explicit-vs-default disposition itself is decided later, in
+        # happen now, against a concrete bool. The explicit-vs-default
+        # disposition itself is decided later, in
         # `_prep_discrimination_threshold_sentinels` (`ferrum._desugar`),
         # against the raw (possibly still-`_UNSET`) values passed through
-        # unchanged below -- keep both defaults in sync if they ever change.
-        threshold_line_effective = False if threshold_line is _UNSET else bool(threshold_line)
-        optimum_label_effective = True if optimum_label is _UNSET else bool(optimum_label)
+        # unchanged below. Both decisions resolve the default through
+        # `resolve_disc_flag`, so they read one owner
+        # (`marks._desugar_helpers.DISC_FLAG_DEFAULTS`) rather than two copies of a
+        # literal that had to be hand-kept in sync.
+        threshold_line_effective = resolve_disc_flag("threshold_line", threshold_line)
+        optimum_label_effective = resolve_disc_flag("optimum_label", optimum_label)
 
         if n_thresholds != _N_THRESHOLDS_DEFAULT:
             # `n_thresholds` is registered in ferrum.marks._informational_kwargs
@@ -566,7 +569,13 @@ class ClassificationMarksMixin:
             if optimum_label_effective:
                 opt_x = [best_t] + [None] * (n - 1)
                 opt_y = [best_f1] + [None] * (n - 1)
-                opt_text = [f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"] + [None] * (n - 1)
+                # `_render_metric` owns the metric's spelling and rounding
+                # (#219); this surface owns only its own framing -- "max "
+                # because the row is the sweep's optimum, and the threshold
+                # suffix. Byte-identical to the literal it replaces.
+                opt_text = [f"max {_render_metric('f1', best_f1)} @ t={best_t:.2f}"] + [None] * (
+                    n - 1
+                )
                 new_cols.extend(
                     [
                         pl.Series("_optimum_x", opt_x, dtype=pl.Float64),

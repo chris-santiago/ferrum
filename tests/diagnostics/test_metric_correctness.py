@@ -429,6 +429,7 @@ def test_gain_frame_orders_tied_scores_by_input_order():
         np.array(_TIED_SCORES, dtype=float).reshape(-1, 1),
         [1],
         ["1"],
+        diagnostic="gain_chart",
     )
     got = frame.filter(pl.col("class") == "1")["gain"].to_list()
     assert got == pytest.approx(expected)
@@ -445,6 +446,7 @@ def test_lift_frame_orders_tied_scores_by_input_order():
         np.array(_TIED_SCORES, dtype=float).reshape(-1, 1),
         [1],
         ["1"],
+        diagnostic="lift_chart",
     )
     got = frame.filter(pl.col("class") == "1")["lift"].to_list()
     assert got == pytest.approx(expected)
@@ -490,7 +492,14 @@ def test_pr_average_interpolates_over_a_stable_recall_sort():
     precision each tied recall hands to ``np.interp``.
     """
     class_values = list(range(len(_PR_AVG_CLASSES)))
-    per_class = pr_frame(_PR_AVG_Y, _PR_AVG_SCORES, class_values, _PR_AVG_CLASSES, average=None)
+    per_class = pr_frame(
+        _PR_AVG_Y,
+        _PR_AVG_SCORES,
+        class_values,
+        _PR_AVG_CLASSES,
+        average=None,
+        diagnostic="pr_chart",
+    )
     grid = np.linspace(0.0, 1.0, _AVG_GRID_POINTS)
 
     curves: list[np.ndarray] = []
@@ -504,7 +513,14 @@ def test_pr_average_interpolates_over_a_stable_recall_sort():
     # macro weights are uniform, so the summary is the plain mean per grid point.
     expected = [sum(curve[j] for curve in curves) / len(curves) for j in range(len(grid))]
 
-    macro = pr_frame(_PR_AVG_Y, _PR_AVG_SCORES, class_values, _PR_AVG_CLASSES, average="macro")
+    macro = pr_frame(
+        _PR_AVG_Y,
+        _PR_AVG_SCORES,
+        class_values,
+        _PR_AVG_CLASSES,
+        average="macro",
+        diagnostic="pr_chart",
+    )
     assert macro["class"].unique().to_list() == ["macro"]
     assert macro["recall"].to_list() == pytest.approx(list(grid))
     assert macro["precision"].to_list() == pytest.approx(expected)

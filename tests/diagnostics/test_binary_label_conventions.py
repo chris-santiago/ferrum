@@ -690,7 +690,7 @@ def test_the_refusal_message_lists_ys_values_sorted_and_capped():
     by definition suspect and may hold mixed or unorderable types -- which
     is why `11` and `13` sort before `2` below.
     """
-    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+    from ferrum.diagnostics._internal._target_hygiene import binary_indicator
 
     eleven_values = np.array([9, 3, 11, 5, 7, 1, 13, 2, 4, 6, 8])
 
@@ -707,7 +707,7 @@ def test_the_refusal_message_lists_ys_values_sorted_and_capped():
 def test_the_refusal_message_lists_every_value_when_under_the_cap():
     """Below the cap nothing is dropped, so a caller with a small suspect
     target sees all of it."""
-    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+    from ferrum.diagnostics._internal._target_hygiene import binary_indicator
 
     with pytest.raises(ValueError) as excinfo:
         binary_indicator(np.array([5, 7, 5, 7]), 1, diagnostic="pr_curve")
@@ -724,7 +724,7 @@ def test_an_empty_target_is_not_a_mismatch():
     there is nothing to mismatch". Nothing exercised it, so making an empty
     target refuse survived the whole pin set.
     """
-    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+    from ferrum.diagnostics._internal._target_hygiene import binary_indicator
 
     indicator = binary_indicator(np.array([]), 1, diagnostic="roc_curve")
     assert list(indicator) == []
@@ -735,7 +735,7 @@ def test_binary_class_values_falls_back_to_zero_one_on_an_empty_target():
     read, the pair is `0`/`1` in that order. Order matters -- slot 1 is the
     positive class every binary builder binarizes against.
     """
-    from ferrum.diagnostics._internal._curve_frames import binary_class_values
+    from ferrum.diagnostics._internal._target_hygiene import binary_class_values
 
     values, labels = binary_class_values(np.array([]))
     assert values == [0, 1]
@@ -748,7 +748,7 @@ def test_binary_class_values_degenerate_slots_agree():
     docstring promises cannot happen, and only the `class` discriminator
     makes it visible to a user.
     """
-    from ferrum.diagnostics._internal._curve_frames import binary_class_values
+    from ferrum.diagnostics._internal._target_hygiene import binary_class_values
 
     for target, expected in ((np.array([0, 0, 0, 0]), 0), (np.array([7, 7]), 7)):
         values, labels = binary_class_values(target)
@@ -1363,10 +1363,18 @@ def test_class_prediction_error_inherits_the_confusion_drop_warning(binary_data)
     ``(method, kwargs)``, so a chart built from a source whose
     ``confusion_matrix()`` was already computed returns the cached frame
     and does not re-warn.
+
+    The warning names ``class_prediction_error_chart``, not
+    ``confusion_matrix``: ``diagnostic=`` names the public entry the caller
+    actually invoked, and this caller invoked the figure function (whole-wave
+    design review finding 4, 2026-09-17). Two figure functions render this
+    one frame, which is why the name cannot be baked into the source method.
     """
     source = _corrupted_binary_source(binary_data, 7)
 
-    with pytest.warns(UserWarning, match=r"confusion_matrix: 10 row\(s\) of y out of 200"):
+    with pytest.warns(
+        UserWarning, match=r"class_prediction_error_chart: 10 row\(s\) of y out of 200"
+    ):
         ferrum.class_prediction_error_chart(source)
 
 
@@ -1384,3 +1392,321 @@ def test_a_clean_target_leaves_the_confusion_matrix_silent(binary_data):
         warnings.simplefilter("always")
         source.confusion_matrix()
     assert [str(w.message) for w in record if str(w.message).startswith("confusion_matrix:")] == []
+
+
+# --- cell: the confusion family answers what the report family answers -----
+# The wave shipped the target-hygiene contract claiming "one contract ...
+# applied by every binary and multiclass diagnostic on both source paths",
+# with the confusion family excluded from two of its cells and the exclusion
+# disclosed in prose (whole-wave design review finding 2, 2026-09-17). On the
+# identical arrays, `classification_report_chart` refused and
+# `confusion_matrix_chart` fabricated -- the dtype/tier-dependent divergence
+# #203 set out to end, inside one figure family. These cells pin the closed
+# contract: one answer, both figures, both source paths.
+
+
+class _PredictsNull:
+    """A model whose ``predict`` returns a null for one row.
+
+    Not exotic: any wrapper that maps an abstain/low-confidence decision to
+    ``None`` produces exactly this, and the pipeline downstream has no way
+    to know a class was never predicted for that row.
+    """
+
+    def __init__(self, fitted, classes):
+        self._fitted = fitted
+        self.classes_ = np.asarray(classes)
+
+    def predict(self, X):
+        out = np.asarray(self._fitted.predict(np.asarray(X)), dtype=object)
+        out[0] = None
+        return out
+
+    def predict_proba(self, X):
+        return self._fitted.predict_proba(np.asarray(X))
+
+
+class _DisjointClasses(_DuckProba):
+    """A model whose ``classes_`` describe different labels from ``y``.
+
+    ``classes_ = [0, 1]`` against ``y = ["c0", "c1"]``: translated into
+    ``y``'s domain the vocabulary becomes ``"0"``/``"1"``, values ``y``
+    never holds. The report family refuses this (#206 cycle 5); the
+    confusion family used to render every cell as zero behind a warning
+    saying 100% of the rows had been dropped.
+    """
+
+    def __init__(self, fitted, classes):
+        super().__init__(fitted)
+        self.classes_ = np.asarray(classes)
+
+
+@pytest.mark.parametrize(
+    ("y_pred", "spelling"),
+    [
+        pytest.param(np.array(["a", None, "a", "b"], dtype=object), "object None", id="none"),
+        pytest.param(np.array([0.0, np.nan, 0.0, 1.0]), "float NaN", id="nan"),
+    ],
+)
+def test_a_null_prediction_refuses_on_the_precomputed_confusion_matrix(y_pred, spelling):
+    """The cell the confusion family sat outside of.
+
+    Measured 2026-09-13 with ``y_true=["a","b","a","b"]``,
+    ``y_pred=["a",None,"a","b"]``: ``classification_report_chart`` refused
+    naming ``y_pred`` and the null count, while ``confusion_matrix_chart``
+    on the identical arrays rendered ``predicted`` uniques
+    ``['None', 'a', 'b']`` -- a class nothing ever predicted, scored
+    against by the row that held the null. Both spellings of a null count,
+    since the float twin rendered ``'nan'`` the same way.
+    """
+    y_true = (
+        np.array(["a", "b", "a", "b"], dtype=object)
+        if y_pred.dtype == object
+        else np.array([0.0, 1.0, 0.0, 1.0])
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)
+    message = str(excinfo.value)
+    assert message.startswith("confusion_matrix_chart: y_pred has 1 null row(s) out of 4"), message
+    assert "a null is not a predicted class" in message
+
+    # The report twin on the identical arrays: same array named, same count.
+    with pytest.raises(ValueError) as report_excinfo:
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+    assert "y_pred has 1 null row(s) out of 4" in str(report_excinfo.value)
+
+
+def test_a_null_prediction_refuses_on_the_model_confusion_matrix(binary_data):
+    """The model path's twin of the cell above.
+
+    ``model.predict`` is as able to hand back a null as an array argument
+    is, and the `classes_` branch answered it by silently dropping every
+    row that held one -- a matrix describing fewer rows than the caller
+    passed, with nothing said.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(_PredictsNull(fitted, [0, 1]), X, y01)
+
+    with pytest.raises(ValueError) as excinfo:
+        source.confusion_matrix()
+    message = str(excinfo.value)
+    assert message.startswith("confusion_matrix: y_pred has 1 null row(s) out of 200"), message
+
+
+def test_a_null_prediction_refuses_on_the_report_model_path_too(binary_data):
+    """The third label-domain figure's own null-prediction cell.
+
+    ``confusion_matrix_chart`` and ``class_prediction_error_chart`` refuse a
+    null-bearing ``model.predict`` output by name; the report's model path
+    handed it to scikit-learn, which answered
+    ``ValueError: Classification metrics can't handle a mix of binary and
+    unknown targets`` -- an unowned error naming neither the array nor the
+    entry (measured 2026-09-17, cycle-2 intent-review observation). The
+    guard lives in ``report_predictions_in_y_domain``, the owner both report
+    consumers share, so the figure function and the visualizer both get it.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+
+    with pytest.raises(ValueError) as chart_exc:
+        ferrum.classification_report_chart(_PredictsNull(fitted, [0, 1]), X, y01)
+    chart_message = str(chart_exc.value)
+    assert chart_message.startswith(
+        "classification_report_chart: y_pred has 1 null row(s) out of 200"
+    ), chart_message
+    assert "a null is not a predicted class" in chart_message
+
+    with pytest.raises(ValueError) as viz_exc:
+        ferrum.ClassificationReportVisualizer(_PredictsNull(fitted, [0, 1])).fit(X, y01)
+    assert str(viz_exc.value).startswith(
+        "ClassificationReportVisualizer: y_pred has 1 null row(s) out of 200"
+    )
+
+
+def test_a_disjoint_class_vocabulary_refuses_on_both_confusion_figures():
+    """The all-zero-cells render, retired.
+
+    ``classes_ = [0, 1, 2]`` against ``y = ["c0", "c1", "c2"]`` translates
+    every prediction to ``"0"``/``"1"``/``"2"``, which ``y`` never holds:
+    every row encodes out of vocabulary, the kernel drops all of them, and
+    the matrix rendered every cell as zero behind a warning that 100% of
+    the rows were dropped. ``classification_report_chart`` refuses this
+    exact shape (#206 cycle 5), so the confusion family does too --
+    including ``class_prediction_error_chart``, which renders the same
+    frame.
+    """
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), df["y"].to_numpy())
+    y_disjoint = pl.Series("y", [f"c{int(v)}" for v in df["y"].to_list()])
+
+    for chart_fn, name in (
+        (ferrum.confusion_matrix_chart, "confusion_matrix_chart"),
+        (ferrum.class_prediction_error_chart, "class_prediction_error_chart"),
+    ):
+        source = ferrum.ModelSource(_DisjointClasses(fitted, [0, 1, 2]), X, y_disjoint)
+        with pytest.raises(ValueError) as excinfo:
+            chart_fn(source)
+        message = str(excinfo.value)
+        assert message.startswith(
+            f"{name}: the model's classes_ [0, 1, 2], translated into y's domain, "
+            "match none of y's observed values"
+        ), message
+
+
+def test_a_partly_overlapping_class_vocabulary_still_warns_and_drops(binary_data):
+    """The refusal above must not swallow the partial case.
+
+    ``classes_ = [0, 2]`` against a ``{0, 1}`` target overlaps on ``0``, so
+    it is the ordinary stray shape: the rows holding ``1`` drop, the matrix
+    renders, and the drop warning says so. Refusing here would move a
+    documented, tested warn-and-degrade cell into a refusal.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(_WrongClasses(fitted, [0, 2]), X, y01)
+
+    with pytest.warns(UserWarning, match=r"confusion_matrix: \d+ row\(s\) of y out of 200"):
+        cm = source.confusion_matrix()
+    assert cm["value"].sum() < 200.0
+
+
+def test_the_no_classes_branch_refuses_a_mixed_label_target_by_name(binary_data):
+    """The unowned ``TypeError`` the no-``classes_`` branch leaked.
+
+    Its ``sorted(set(y_true) | set(y_pred))`` had no partition at all: a
+    ``classes_``-less model predicting numbers against a string ``y``
+    raised ``TypeError: '<' not supported between instances of 'str' and
+    'int'`` from inside ferrum, naming neither the arrays nor the figure.
+    The class axis now derives through ``report_labels`` -- the wave's own
+    partition-total rule -- so the same input gets the report family's
+    named refusal.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    y_strings = pl.Series("y", [f"c{int(v)}" for v in y01.to_list()])
+    # No `classes_`, so the encode vocabulary is the y/prediction union --
+    # and `predict` returns the ints the model was fitted on.
+    source = ferrum.ModelSource(_DuckProba(fitted), X, y_strings)
+
+    with pytest.raises(ValueError) as excinfo:
+        source.confusion_matrix()
+    message = str(excinfo.value)
+    assert message.startswith("confusion_matrix: y_true and y_pred hold a mix of label types")
+    assert "unique_labels refuses" in message
+
+
+def test_the_no_classes_branch_keeps_its_order_for_a_clean_target(binary_data):
+    """The label derivation moved; the answer for a well-formed input did not.
+
+    ``report_labels`` sorts raw values and deduplicates by hash, which is
+    what ``sorted(set(...))`` did for every input that rule accepted. Only
+    the malformed cases move.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(_DuckProba(fitted), X, y01)
+
+    cm = source.confusion_matrix()
+    assert sorted(set(cm["actual"].to_list())) == ["0", "1"]
+    assert cm["value"].sum() == pytest.approx(200.0)
+
+
+# --- cell: the precomputed confusion matrix joins the same partition -------
+# The label-rule half of cycle-1 finding 2, closed 2026-09-17 after the
+# cycle-2 design review measured what `sorted(..., key=str)` actually
+# rendered. It was characterized as an ordering preference through two
+# cycles; it was not one. These pin both sides of the move.
+
+
+def test_a_mixed_label_union_refuses_on_the_precomputed_confusion_matrix():
+    """The overplotted render, retired.
+
+    ``sorted(set(...), key=str)`` stringified before comparing, so it
+    answered every input -- including ones it could not draw. Measured on
+    ``y_true=[0,1,0,1]`` / ``y_pred=["0","1","0","1"]``: four labels
+    (``[0, '0', 1, '1']``) that stringify to two, a 16-row frame with
+    duplicate ``(actual, predicted)`` keys, the true diagonal mass split
+    across visually identical cells, and four superimposed ``<text>`` nodes
+    at one pixel position in the SVG. ``classification_report_chart`` on the
+    identical arrays refused by name throughout.
+    """
+    y_true = np.array([0, 1, 0, 1], dtype=object)
+    y_pred = np.array(["0", "1", "0", "1"], dtype=object)
+
+    for chart_fn, name in (
+        (ferrum.confusion_matrix_chart, "confusion_matrix_chart"),
+        (ferrum.class_prediction_error_chart, "class_prediction_error_chart"),
+        (ferrum.classification_report_chart, "classification_report_chart"),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            chart_fn(y_true=y_true, y_pred=y_pred)
+        message = str(excinfo.value)
+        assert message.startswith(f"{name}: y_true and y_pred hold a mix of label types"), message
+        assert "unique_labels refuses" in message
+
+
+def test_the_precomputed_confusion_axis_orders_numeric_labels_by_value():
+    """The disclosed number mover: ``['1','2','10']``, not ``['1','10','2']``.
+
+    The retired rule sorted the labels' decimal strings, so it ordered by
+    digit count before value. Two classes of unequal digit count are enough
+    to see it. The report path and the model path both ordered by value
+    already; this is the third path joining them.
+    """
+    y_true = np.array([1, 2, 10, 1, 2, 10])
+    y_pred = np.array([1, 2, 10, 2, 10, 1])
+
+    confusion = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)._data
+    assert list(dict.fromkeys(confusion["actual"].to_list())) == ["1", "2", "10"]
+    assert list(dict.fromkeys(confusion["predicted"].to_list())) == ["1", "2", "10"]
+    # Three classes, nine cells, each key once -- the duplicate-key shape
+    # the retired rule produced cannot occur here.
+    keys = list(zip(confusion["actual"].to_list(), confusion["predicted"].to_list()))
+    assert len(keys) == len(set(keys)) == 9
+
+
+def test_the_precomputed_confusion_axis_is_unchanged_for_string_labels():
+    """The move's own blast-radius bound.
+
+    ``str`` labels sort identically under both rules, so every string-label
+    confusion matrix -- which is most of them, and every golden in the
+    repo -- renders exactly as before. Pinned so the axis-order change
+    cannot quietly widen.
+    """
+    y_true = np.array(["b", "a", "c", "a"], dtype=object)
+    y_pred = np.array(["a", "a", "c", "b"], dtype=object)
+
+    confusion = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)._data
+    assert list(dict.fromkeys(confusion["actual"].to_list())) == ["a", "b", "c"]
+    assert list(dict.fromkeys(confusion["predicted"].to_list())) == ["a", "b", "c"]
+    keys = list(zip(confusion["actual"].to_list(), confusion["predicted"].to_list()))
+    assert len(keys) == len(set(keys)) == 9
+
+
+def test_the_model_path_refusals_name_the_model_not_the_array(binary_data):
+    """A refusal has to name a lever the caller holds.
+
+    On the model path ``y_pred`` is ``model.predict``'s output, so "drop or
+    impute the null rows" and "use one consistent value type for y_true and
+    y_pred" both point at an array the caller never passed (cycle-2 design
+    review finding H). The diagnosis is unchanged; only the corrective
+    clause differs, and the precomputed path's own wording is untouched.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+
+    with pytest.raises(ValueError) as null_exc:
+        ferrum.ModelSource(_PredictsNull(fitted, [0, 1]), X, y01).confusion_matrix()
+    null_message = str(null_exc.value)
+    assert "the model's own predict() output" in null_message
+    assert "Drop or impute the null rows before calling" not in null_message
+
+    y_strings = pl.Series("y", [f"c{int(v)}" for v in y01.to_list()])
+    with pytest.raises(ValueError) as mix_exc:
+        ferrum.ModelSource(_DuckProba(fitted), X, y_strings).confusion_matrix()
+    mix_message = str(mix_exc.value)
+    assert "y_pred is the model's own predict() output" in mix_message
+    assert "Use one consistent value type" not in mix_message

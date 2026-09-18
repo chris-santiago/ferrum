@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 
 from ferrum._validate import validate_choice
-from .._internal import _curve_frames
+from .._internal import _curve_frames, _target_hygiene
 from .._internal.deps import require_sklearn
 
 if TYPE_CHECKING:
@@ -52,12 +52,14 @@ def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame, real_classes: An
         raise ValueError(f"ModelSource.{method_name}() requires y to be provided.")
     proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
     y_true = np.asarray(y)
-    _curve_frames.require_no_null_target(y_true, diagnostic=method_name)
+    _target_hygiene.require_no_null_target(y_true, diagnostic=method_name)
     labels = [c[len("proba_") :] for c in proba_cols]
     class_values = _resolve_class_values(real_classes, y, labels)
     # stacklevel 4: warn() -> check_resolved_target -> here -> the source
     # method -> the caller that asked for the diagnostic.
-    _curve_frames.check_resolved_target(y_true, class_values, diagnostic=method_name, stacklevel=4)
+    _target_hygiene.check_resolved_target(
+        y_true, class_values, diagnostic=method_name, stacklevel=4
+    )
     score_matrix = proba_df[proba_cols].to_numpy()
     return y_true, score_matrix, labels, class_values
 
@@ -99,9 +101,9 @@ def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
     a ``classes_``-less model whose ``y`` cardinality disagrees with that
     count. Tier 3's two routes both surface their unsound values now, by
     different owners: a **binary** curve refuses by name, because
-    :func:`_curve_frames.binary_indicator`'s total-mismatch guard catches
+    :func:`_target_hygiene.binary_indicator`'s total-mismatch guard catches
     comparison values that match no row; a **multiclass** curve refuses via
-    :func:`_curve_frames.check_resolved_target` when *zero* of the resolved
+    :func:`_target_hygiene.check_resolved_target` when *zero* of the resolved
     values match any row (#203), which is the same total mismatch wearing a
     wider hat. Until then it returned all-NaN curves silently. One-vs-rest
     still tolerates *some* classes being absent -- "no row is class k" is a
@@ -118,7 +120,7 @@ def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
 
     y_true = np.asarray(y)
     if len(labels) == 2:
-        values, _ = _curve_frames.binary_class_values(y_true)
+        values, _ = _target_hygiene.binary_class_values(y_true)
         if len(np.unique(y_true)) == 2:
             return values
     else:
@@ -148,11 +150,11 @@ def _positive_class_value(model: Any, y, proba_cols: list[str], *, diagnostic: s
     """
     labels = [c[len("proba_") :] for c in proba_cols]
     y_true = np.asarray(y)
-    _curve_frames.require_no_null_target(y_true, diagnostic=diagnostic)
+    _target_hygiene.require_no_null_target(y_true, diagnostic=diagnostic)
     class_values = _resolve_class_values(getattr(model, "classes_", None), y, labels)
     # stacklevel 4: warn() -> check_resolved_target -> here -> the source
     # method -> the caller that asked for the diagnostic.
-    _curve_frames.check_resolved_target(y_true, class_values, diagnostic=diagnostic, stacklevel=4)
+    _target_hygiene.check_resolved_target(y_true, class_values, diagnostic=diagnostic, stacklevel=4)
     return class_values[1]
 
 
@@ -183,7 +185,7 @@ def _predictions_in_y_domain(
 
 def report_predictions_in_y_domain(
     model: Any, y_true: pl.Series, y_pred: np.ndarray, *, diagnostic: str
-) -> np.ndarray:
+) -> list:
     """Translate a report model path's ``model.predict`` output into ``y``'s domain.
 
     ``classification_report``'s two model-path consumers --
@@ -202,17 +204,39 @@ def report_predictions_in_y_domain(
     -- rather than deriving a second translation that could disagree with
     it.
 
-    Returns ``y_pred`` unchanged, as a plain array, when the model exposes
-    no ``classes_`` -- there is no correspondence to translate through, the
-    same fallback ``confusion_matrix``'s no-``classes_`` branch takes. A
-    model exposing no ``classes_`` also runs no overlap check below, for
-    the same reason: disclosed, not closed, in ``ferrum-spec.md``'s #206
-    note.
+    A **null prediction refuses** here, before any translation (2026-09-17):
+    it is the same cell `confusion_matrix`'s two implementations refuse, and
+    leaving it open meant `classification_report_chart`'s model path answered
+    a null-bearing `model.predict` output with a raw sklearn
+    ``ValueError: Classification metrics can't handle a mix of binary and
+    unknown targets`` while its two siblings refused by name on the identical
+    input. The corrective clause names the model rather than the array, since
+    these predictions are not the caller's to drop rows from.
+
+    Returns a **plain Python list**, not an array, on every branch --
+    which is the whole obligation this function owns rather than leaving
+    to its callers. Both consumers hand the result straight to
+    scikit-learn, and sklearn's ``type_of_target`` misreads an
+    object-dtype ndarray of plain numeric values as ``"unknown"`` rather
+    than ``"binary"``/``"multiclass"`` (the translated array is
+    ``dtype=object`` by construction, so it can hold values from any dtype
+    ``y`` can carry). A list of native Python values is read correctly --
+    the same reason :func:`_curve_frames.confusion_frame` calls
+    ``.tolist()`` on the translated array internally. Both call sites used
+    to carry their own ``.tolist()`` plus a copy of this paragraph; a
+    third consumer would have had to copy it again or forget the call.
+
+    When the model exposes no ``classes_`` the predictions are returned
+    untranslated (as a list all the same) -- there is no correspondence to
+    translate through, the same fallback ``confusion_matrix``'s
+    no-``classes_`` branch takes. A model exposing no ``classes_`` also
+    runs no overlap check below, for the same reason: disclosed, not
+    closed, in ``ferrum-spec.md``'s #206 note.
 
     When ``classes_`` *is* present, the coerced class vocabulary is checked
     against ``y`` before anything is translated (#206 cycle 5, 2026-09-13;
     predicate corrected cycle 6):
-    :func:`_curve_frames.check_translated_classes_match_y` refuses when
+    :func:`_target_hygiene.check_translated_classes` refuses when
     ``classes_``, translated into ``y``'s domain, matches none of ``y``'s
     observed values -- ``classes_ = [0, 1, 2]`` against
     ``y = ["c0", "c1", "c2"]`` is the shape, translating every prediction to
@@ -223,8 +247,8 @@ def report_predictions_in_y_domain(
     18-row, every-metric-0.0 report with no warning at all. #203's standing
     policy is that a total mismatch refuses typed rather than rendering
     silently, so this is that policy applied here, matching
-    :func:`_curve_frames.check_resolved_target`'s zero-match case and
-    :func:`_curve_frames.binary_indicator`'s total-mismatch case. The
+    :func:`_target_hygiene.check_resolved_target`'s zero-match case and
+    :func:`_target_hygiene.binary_indicator`'s total-mismatch case. The
     vocabulary is the subject, not the realized predictions: predictions
     sample the vocabulary, so a model evaluated on a slice it gets entirely
     wrong shares no predicted value with ``y`` while still describing the
@@ -233,18 +257,44 @@ def report_predictions_in_y_domain(
     sklearn's own report already tolerates.
     """
     y_pred = np.asarray(y_pred)
+    # The null cell of the target-hygiene contract, on the array this
+    # function owns. Both consumers hand the result straight to sklearn,
+    # which answered a null-bearing prediction vector with
+    # `ValueError: Classification metrics can't handle a mix of binary and
+    # unknown targets` (measured 2026-09-17) -- an unowned error naming
+    # neither the array nor the entry, where `confusion_matrix_chart` and
+    # `class_prediction_error_chart` refuse typed on the identical input.
+    # One answer for the family, in this contract's own voice.
+    _target_hygiene.require_no_null_predictions(
+        y_pred, diagnostic=diagnostic, predictions_from="model"
+    )
     real_classes = getattr(model, "classes_", None)
     if real_classes is None:
-        return y_pred
+        return y_pred.tolist()
     encode_values = _coerce_real_classes(real_classes, y_true.dtype)
-    _curve_frames.check_translated_classes_match_y(
+    _target_hygiene.check_translated_classes(
         np.asarray(y_true), encode_values, real_classes, diagnostic=diagnostic
     )
-    return _predictions_in_y_domain(real_classes, encode_values, y_pred)
+    return _predictions_in_y_domain(real_classes, encode_values, y_pred).tolist()
 
 
 class ClassificationCurvesMixin(_MixinBase):
-    """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix)."""
+    """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix).
+
+    **Whose name a refusal carries.** Every method here takes a
+    ``diagnostic`` keyword naming *the public entry the caller actually
+    invoked*, defaulting to the method's own name. One body serves three
+    entries -- ``source.roc_curve()``, ``ferrum.roc_chart(model, X, y)``
+    and ``ROCVisualizer`` -- and the target-hygiene contract
+    (``_curve_frames``, #203) states that ``diagnostic`` "names the public
+    entry the caller actually invoked". Before this the model path always
+    said ``roc_curve``, so a ``roc_chart`` caller with a null-bearing ``y``
+    was told to drop the nulls "before calling roc_curve", a function they
+    never called, while the precomputed path on the identical arrays said
+    ``roc_chart`` (whole-wave design review finding 4, 2026-09-17). The
+    name is deliberately **not** part of the cache key: it labels messages,
+    it does not change the frame.
+    """
 
     # --- 10b: classification curves --------------------------------------
 
@@ -253,6 +303,7 @@ class ClassificationCurvesMixin(_MixinBase):
         *,
         average: str | None = None,
         drop_intermediate: bool = True,
+        diagnostic: str | None = None,
     ) -> pl.DataFrame:
         """ROC curve(s). One row per (class, threshold). ``auc`` repeats per class.
 
@@ -269,6 +320,11 @@ class ClassificationCurvesMixin(_MixinBase):
         drop_intermediate : bool, default True
             Drop collinear ROC points that do not change the curve's shape
             (sklearn's ``drop_intermediate``), yielding a lighter frame.
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.roc_curve()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         key = self._cache_key(
             "roc_curve",
@@ -279,9 +335,10 @@ class ClassificationCurvesMixin(_MixinBase):
             return self._cache[key]
         require_sklearn("roc_curve")
 
+        entry = diagnostic or "roc_curve"
         proba_df = self.probabilities()
         y_true, score_matrix, labels, class_values = _resolve_proba(
-            "roc_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+            entry, self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
         )
         df = _curve_frames.roc_frame(
             y_true,
@@ -290,11 +347,14 @@ class ClassificationCurvesMixin(_MixinBase):
             labels,
             average=average,
             drop_intermediate=drop_intermediate,
+            diagnostic=entry,
         )
         self._cache[key] = df
         return df
 
-    def pr_curve(self, *, average: str | None = None) -> pl.DataFrame:
+    def pr_curve(
+        self, *, average: str | None = None, diagnostic: str | None = None
+    ) -> pl.DataFrame:
         """Precision-recall curve(s). One row per (class, threshold).
 
         For binary classifiers, returns a single curve on the positive
@@ -315,6 +375,11 @@ class ClassificationCurvesMixin(_MixinBase):
         average : {None, "micro", "macro", "weighted"}, default None
             Multiclass averaging strategy. Accepted but inert for binary
             classifiers, which have only one curve to draw.
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.pr_curve()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         if average is not None:
             validate_choice(
@@ -325,9 +390,10 @@ class ClassificationCurvesMixin(_MixinBase):
             return self._cache[key]
         require_sklearn("pr_curve")
 
+        entry = diagnostic or "pr_curve"
         proba_df = self.probabilities()
         y_true, score_matrix, labels, class_values = _resolve_proba(
-            "pr_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+            entry, self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
         )
         df = _curve_frames.pr_frame(
             y_true,
@@ -335,6 +401,7 @@ class ClassificationCurvesMixin(_MixinBase):
             class_values,
             labels,
             average=average,
+            diagnostic=entry,
         )
         self._cache[key] = df
         return df
@@ -344,6 +411,7 @@ class ClassificationCurvesMixin(_MixinBase):
         *,
         n_bins: int = 10,
         strategy: str = "uniform",
+        diagnostic: str | None = None,
     ) -> pl.DataFrame:
         """Calibration (reliability) curve for binary classifiers.
 
@@ -367,6 +435,11 @@ class ClassificationCurvesMixin(_MixinBase):
             Bin-edge strategy (matches ``sklearn.calibration``).
             ``"uniform"`` uses equal-width bins; ``"quantile"`` uses bins
             holding an equal number of samples.
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.calibration_curve()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         key = self._cache_key(
             "calibration_curve",
@@ -387,46 +460,65 @@ class ClassificationCurvesMixin(_MixinBase):
             )
         y_true = np.asarray(self._y)
         y_score = proba_df[proba_cols[1]].to_numpy().astype(np.float64)
-        positive_class = _positive_class_value(
-            self._model, self._y, proba_cols, diagnostic="calibration_curve"
-        )
+        entry = diagnostic or "calibration_curve"
+        positive_class = _positive_class_value(self._model, self._y, proba_cols, diagnostic=entry)
 
-        df = _curve_frames.calibration_frame(y_true, y_score, positive_class, n_bins, strategy)
+        df = _curve_frames.calibration_frame(
+            y_true, y_score, positive_class, n_bins, strategy, diagnostic=entry
+        )
         self._cache[key] = df
         return df
 
-    def cumulative_gain(self) -> pl.DataFrame:
+    def cumulative_gain(self, *, diagnostic: str | None = None) -> pl.DataFrame:
         """Cumulative-gain curve per class. Appends a 2-row ``class='baseline'``
         diagonal for plotting reference.
+
+        Parameters
+        ----------
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.cumulative_gain()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         key = self._cache_key("cumulative_gain")
         if key in self._cache:
             return self._cache[key]
 
+        entry = diagnostic or "cumulative_gain"
         proba_df = self.probabilities()
         y_true, score_matrix, labels, class_values = _resolve_proba(
-            "cumulative_gain",
+            entry,
             self._y,
             proba_df,
             real_classes=getattr(self._model, "classes_", None),
         )
-        df = _curve_frames.gain_frame(y_true, score_matrix, class_values, labels)
+        df = _curve_frames.gain_frame(y_true, score_matrix, class_values, labels, diagnostic=entry)
         self._cache[key] = df
         return df
 
-    def lift_curve(self) -> pl.DataFrame:
+    def lift_curve(self, *, diagnostic: str | None = None) -> pl.DataFrame:
         """Lift curve per class. Appends a 2-row ``class='baseline'`` line at
         lift=1.0.
+
+        Parameters
+        ----------
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.lift_curve()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         key = self._cache_key("lift_curve")
         if key in self._cache:
             return self._cache[key]
 
+        entry = diagnostic or "lift_curve"
         proba_df = self.probabilities()
         y_true, score_matrix, labels, class_values = _resolve_proba(
-            "lift_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+            entry, self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
         )
-        df = _curve_frames.lift_frame(y_true, score_matrix, class_values, labels)
+        df = _curve_frames.lift_frame(y_true, score_matrix, class_values, labels, diagnostic=entry)
         self._cache[key] = df
         return df
 
@@ -435,6 +527,7 @@ class ClassificationCurvesMixin(_MixinBase):
         *,
         n_thresholds: int = 50,
         cv: Any = None,
+        diagnostic: str | None = None,
     ) -> pl.DataFrame:
         """Discrimination threshold sweep — binary classifiers only.
 
@@ -456,6 +549,11 @@ class ClassificationCurvesMixin(_MixinBase):
             with a ``.split(X, y)`` method to override the fold generator --
             it receives ``y`` too, so a stratified splitter works. ``None``
             (default) sweeps the in-sample scores directly.
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.discrimination_threshold()`` call. See the class docstring's
+            "Whose name a refusal carries" note.
         """
         key = self._cache_key(
             "discrimination_threshold",
@@ -479,20 +577,22 @@ class ClassificationCurvesMixin(_MixinBase):
         # Positionally aligned with proba_cols[1] by the same
         # probabilities()/predict_proba guarantee _resolve_proba's
         # real_classes parameter relies on.
-        positive_class = _positive_class_value(
-            self._model, self._y, proba_cols, diagnostic="discrimination_threshold"
-        )
+        entry = diagnostic or "discrimination_threshold"
+        positive_class = _positive_class_value(self._model, self._y, proba_cols, diagnostic=entry)
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
             y_score = np.asarray(proba_df[proba_cols[1]])
-            df = _curve_frames.threshold_sweep_frame(y_true, y_score, positive_class, thresholds)
+            df = _curve_frames.threshold_sweep_frame(
+                y_true, y_score, positive_class, thresholds, diagnostic=entry
+            )
         else:
             df = self._discrimination_threshold_cv(
                 cv,
                 y_true,
                 thresholds,
                 positive_class,
+                diagnostic=entry,
             )
 
         self._cache[key] = df
@@ -504,6 +604,8 @@ class ClassificationCurvesMixin(_MixinBase):
         y_true: np.ndarray,
         thresholds: np.ndarray,
         positive_class: object,
+        *,
+        diagnostic: str,
     ) -> pl.DataFrame:
         """Cross-validated threshold sweep — average per-fold metrics.
 
@@ -553,9 +655,7 @@ class ClassificationCurvesMixin(_MixinBase):
 
         # Request-level: refuses a target that genuinely never matches the
         # positive class, before any fold exists to be blamed for it.
-        y_true_bin = _curve_frames.binary_indicator(
-            y_true, positive_class, diagnostic="discrimination_threshold"
-        )
+        y_true_bin = _target_hygiene.binary_indicator(y_true, positive_class, diagnostic=diagnostic)
 
         # numpy required: CV split uses integer-array row indexing (X_np[tr], X_np[te])
         # which polars does not support.
@@ -563,7 +663,13 @@ class ClassificationCurvesMixin(_MixinBase):
         splitter = cv if hasattr(cv, "split") else check_cv(cv, y_true, classifier=True)
         fold_dfs: list[pl.DataFrame] = []
         for fold_index, (tr, te) in enumerate(splitter.split(X_np, y_true)):
-            _warn_if_train_fold_missing_a_class(fold_index, y_true_bin[tr], positive_class)
+            # stacklevel 3: warn() -> _warn_if_train_fold_missing_a_class ->
+            # here (_cv_sweep) -> discrimination_threshold, the method the
+            # caller asked for -- unchanged from the count this helper used
+            # to hardcode.
+            _warn_if_train_fold_missing_a_class(
+                fold_index, y_true_bin[tr], positive_class, stacklevel=3
+            )
             m = clone(self._model).fit(X_np[tr], y_true[tr])
             s = _score_fold(m, X_np[te])
             fold_dfs.append(
@@ -583,18 +689,27 @@ class ClassificationCurvesMixin(_MixinBase):
             .sort("threshold")
         )
 
-    def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
+    def confusion_matrix(
+        self, *, normalize: str | None = None, diagnostic: str | None = None
+    ) -> pl.DataFrame:
         """Confusion matrix in long form: one row per (actual, predicted) cell.
 
         ``value`` is the (possibly normalized) count; ``value_fmt`` is a
         stringified label suitable for ``mark_text`` overlay (integer counts
         when unnormalized, two-decimal fractions when normalized).
 
-        A null row of ``y`` refuses and a row holding a value outside the
-        model's ``classes_`` warns and is dropped from the matrix -- the
-        target-hygiene contract (#203); the drop is the kernel's
-        out-of-vocabulary rule, not an absorb, so the two say different
-        things on purpose.
+        Target hygiene (#203, completed 2026-09-17): a null row of ``y`` or
+        of the model's predictions refuses; a model whose ``classes_``,
+        translated into ``y``'s domain, share **nothing** with ``y``
+        refuses; and a row holding a value outside an otherwise-overlapping
+        ``classes_`` warns and is dropped from the matrix. The drop is the
+        kernel's out-of-vocabulary rule, not an absorb, so it and the
+        curve family's absorb warning say different things on purpose. The
+        two refusals are the ones this family used to answer differently
+        from ``classification_report_chart`` on the identical arrays -- a
+        fabricated ``'None'`` class and an all-zero-cell matrix
+        respectively -- closed so the contract's "every binary and
+        multiclass diagnostic on both source paths" claim is true.
 
         Parameters
         ----------
@@ -602,20 +717,34 @@ class ClassificationCurvesMixin(_MixinBase):
             Normalization mode. ``None`` reports raw counts; ``"true"`` /
             ``"pred"`` / ``"all"`` apply sklearn-style normalization over
             rows / columns / the whole matrix.
+        diagnostic : str, optional
+            The public entry name this call's target-hygiene refusals and
+            warnings carry. Defaults to this method's own name -- correct
+            for a direct ``source.confusion_matrix()`` call. See the class
+            docstring's "Whose name a refusal carries" note.
         """
         key = self._cache_key("confusion_matrix", normalize=normalize)
         if key in self._cache:
             return self._cache[key]
+        entry = diagnostic or "confusion_matrix"
         require_sklearn("confusion_matrix")
 
         if self._y is None:
             raise ValueError("ModelSource.confusion_matrix() requires y to be provided.")
         X = self._require_X("confusion_matrix")
         y_true = np.asarray(self._y)
-        # Owns the no-`classes_` branch's `sorted(set(...))` below, which a
+        # Owns the no-`classes_` branch's label derivation below, which a
         # null among string labels used to break with an unowned TypeError (#203).
-        _curve_frames.require_no_null_target(y_true, diagnostic="confusion_matrix")
+        _target_hygiene.require_no_null_target(y_true, diagnostic=entry)
         y_pred = np.asarray(self._model.predict(X))
+        # A null prediction is not a predicted class: the no-`classes_`
+        # branch's label union would make it a class of its own (the
+        # fabricated ``'None'`` column the report path already refused),
+        # and the `classes_` branch would silently drop every row holding
+        # one. Refused on both, as `classification_report_chart` does.
+        _target_hygiene.require_no_null_predictions(
+            y_pred, diagnostic=entry, predictions_from="model"
+        )
 
         # `encode_values` is the comparison-value list confusion_frame uses
         # to build its row/col encoding (must live in y's domain); display
@@ -627,17 +756,39 @@ class ClassificationCurvesMixin(_MixinBase):
         real_classes = getattr(self._model, "classes_", None)
         if real_classes is not None:
             encode_values = _coerce_real_classes(real_classes, self._y.dtype)
+            # A vocabulary sharing nothing with y encodes every row to -1,
+            # and the kernel drops every one: the matrix rendered was all
+            # zero cells behind a warning saying 100% of the rows were
+            # dropped. `classification_report_chart` refuses that exact
+            # shape (#206 cycle 5); one answer family-wide, so this does
+            # too, and the warning below is left to the partial overlap it
+            # was written for.
+            _target_hygiene.check_translated_classes(
+                y_true, encode_values, real_classes, diagnostic=entry
+            )
             y_pred = _predictions_in_y_domain(real_classes, encode_values, y_pred)
             # The one branch whose encoding comes from the model rather than
             # from y, so the one where a row of y can fall outside it and be
             # dropped by the kernel (#203). stacklevel 3: warn() ->
             # check_encodable_target -> here -> the caller that asked for the
             # matrix (confusion_matrix_chart, class_prediction_error_chart).
-            _curve_frames.check_encodable_target(
-                y_true, encode_values, diagnostic="confusion_matrix", stacklevel=3
+            _target_hygiene.check_encodable_target(
+                y_true, encode_values, diagnostic=entry, stacklevel=3
             )
         else:
-            encode_values = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
+            # The same partition-total rule the report's class axis uses
+            # (#224a): sorted raw values, deduplicated by hash, with a
+            # named refusal for a mix of ordering families and for values
+            # that cannot key a class. The raw `sorted(set(...))` this
+            # replaces leaked `TypeError: '<' not supported` on a mixed
+            # target and `TypeError: unhashable type` one statement later
+            # on a dict-valued prediction -- unowned errors from inside
+            # ferrum, for a request the report family already answers by
+            # name. The order is unchanged for every input either rule
+            # accepts.
+            encode_values = _target_hygiene.report_labels(
+                y_true, y_pred, diagnostic=entry, predictions_from="model"
+            )
 
         df = _curve_frames.confusion_frame(y_true, y_pred, encode_values, normalize=normalize)
 
@@ -747,7 +898,11 @@ def _score_fold(model, X_te: np.ndarray) -> np.ndarray:
 
 
 def _warn_if_train_fold_missing_a_class(
-    fold_index: int, train_indicator: np.ndarray, positive_class: object
+    fold_index: int,
+    train_indicator: np.ndarray,
+    positive_class: object,
+    *,
+    stacklevel: int,
 ) -> None:
     """Warn when a ``discrimination_threshold(cv=...)`` train fold holds one class.
 
@@ -767,6 +922,12 @@ def _warn_if_train_fold_missing_a_class(
     unwarned sibling: it is a routine property of the split (see
     :func:`ferrum.diagnostics._internal._curve_frames.threshold_sweep_from_indicator`)
     and contributes the kernel's honest all-zero metrics, not a warning.
+
+    ``stacklevel`` is the caller's to supply, as it is for every sibling
+    guard in this family (:func:`_target_hygiene.check_resolved_target`,
+    :func:`_target_hygiene.check_encodable_target`, and the pre-existing
+    ``_warn_null_y_dropped``): only the caller can count the frames
+    between itself and the user, and this helper cannot see them.
     """
     n_positive = int(train_indicator.sum())
     if n_positive == 0:
@@ -775,7 +936,7 @@ def _warn_if_train_fold_missing_a_class(
             f"split has no rows of the positive class ({positive_class!r}); "
             "the model may fail to fit or score this fold.",
             UserWarning,
-            stacklevel=3,
+            stacklevel=stacklevel,
         )
     elif n_positive == len(train_indicator):
         warnings.warn(
@@ -784,5 +945,5 @@ def _warn_if_train_fold_missing_a_class(
             f"positive class {positive_class!r}); the model may fail to fit "
             "or score this fold.",
             UserWarning,
-            stacklevel=3,
+            stacklevel=stacklevel,
         )

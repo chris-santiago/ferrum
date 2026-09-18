@@ -60,8 +60,20 @@ def _tsne_perplexity_bound(n_samples: int) -> int:
     or defaulting a user-visible ``perplexity``) and
     :meth:`ClusteringMixin.intercluster_distance` (silently clamping a
     ``k`` centers count, which has no user-visible perplexity of its own)
-    so the two call sites express one physical constraint, not two that
-    can drift (#222, N4).
+    so the two call sites spell one number once instead of twice (#222,
+    N4).
+
+    They are *two* constraints that agree at every integer, not one
+    constraint used twice, and the distinction is worth keeping visible:
+    ``embeddings`` composes the bound from the ``clamp(3 * perplexity, 5,
+    n - 1)`` kNN rule above, which admits a fractional ``perplexity``
+    anywhere below ``n - 1``, so ``n - 2`` is one sample stricter than
+    that rule strictly requires; ``intercluster_distance`` derives it from
+    "the kNN size for ``k`` co-embedded centers is ``k - 1``, and
+    perplexity must be strictly under it", which lands on ``k - 2``
+    exactly. Should either derivation ever move off the integers -- a
+    float perplexity admitted on the centers path, say -- they stop
+    agreeing and this function has to become two.
     """
     return n_samples - 2
 

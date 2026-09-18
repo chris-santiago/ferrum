@@ -7,7 +7,7 @@ from typing import Any
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.encoding import Color
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS, nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -312,8 +312,8 @@ def desugar_discrimination_threshold(
     *,
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     n_thresholds: int = 50,
-    threshold_line: bool = False,
-    optimum_label: bool = True,
+    threshold_line: bool = DISC_FLAG_DEFAULTS["threshold_line"],
+    optimum_label: bool = DISC_FLAG_DEFAULTS["optimum_label"],
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Discrimination-threshold sweep mark.

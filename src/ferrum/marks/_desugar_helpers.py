@@ -39,6 +39,26 @@ if TYPE_CHECKING:
 #: no reordering.
 SHAP_ORDER_VALUES: tuple[str, ...] = ("abs_mean", "mean", "max", "none")
 
+#: The one owner of ``mark_discrimination_threshold``'s two sentinel-backed
+#: flag defaults, read by all three sites that used to spell them: the mark
+#: method's ``*_effective`` resolution (``marks/_chart_mixins/_classification
+#: .py``, which decides whether to inject the *sentinel columns* a layer
+#: would read), ``ferrum._desugar._resolve_or_refuse_disc_flag`` (which
+#: decides the explicit-vs-default *disposition* when those columns are
+#: missing), and ``desugar_discrimination_threshold``'s own signature. Those
+#: first two answer questions one step apart and must agree: a default
+#: changed at one site alone yields data backing a layer the desugar
+#: suppressed, or a suppressed layer whose data is present. Homed here
+#: rather than in ``ferrum._desugar`` because ``marks/diagnostic/
+#: _classification.py`` cannot import ``_desugar`` (``_desugar`` imports
+#: ``marks.statistical``, whose ``_overrides`` catalog import loads the
+#: diagnostic desugars -- a cycle, measured 2026-09-17), and this module is
+#: already the shared home for a vocabulary a mark desugar and its wrapper
+#: must agree on (see ``SHAP_ORDER_VALUES`` above). Resolve a caller's value
+#: against it through ``ferrum._desugar.resolve_disc_flag``, which owns the
+#: ``_UNSET`` half of the rule.
+DISC_FLAG_DEFAULTS: dict[str, bool] = {"optimum_label": True, "threshold_line": False}
+
 #: Presentable name for the SHAP beeswarm's per-point feature-value color
 #: field. ``Chart.mark_shap_beeswarm``'s ``data_transform`` renames the raw
 #: ``ModelSource.shap_values()`` column (``feature_value_normalized``) to

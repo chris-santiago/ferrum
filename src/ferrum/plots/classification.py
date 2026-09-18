@@ -169,7 +169,7 @@ def _roc_chart_from_source(
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit
 
-    df = source.roc_curve(average=None if per_class else average)
+    df = source.roc_curve(average=None if per_class else average, diagnostic="roc_chart")
     color_field = _color_field_for(df, "class")
 
     # Single annotation surface: the figure builder owns the AUC overlay
@@ -233,7 +233,7 @@ def _pr_chart_from_source(
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit
 
-    df = source.pr_curve(average=None if per_class else average)
+    df = source.pr_curve(average=None if per_class else average, diagnostic="pr_chart")
     if iso_lines:
         df = _inject_pr_iso_lines(df)
 
@@ -349,7 +349,7 @@ def _calibration_chart_from_source(
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit
 
-    df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
+    df = source.calibration_curve(n_bins=n_bins, strategy=strategy, diagnostic="calibration_chart")
     color = "model" if "model" in df.columns else None
     # n_bins/strategy already binned the data above; mark_calibration has no
     # binning parameters of its own (P9: they were dead weight at the mark
@@ -423,7 +423,7 @@ def _gain_chart_from_source(
     """
     import ferrum
 
-    df = source.cumulative_gain()
+    df = source.cumulative_gain(diagnostic="gain_chart")
     color_field = _color_field_for(df, "class")
     if color_field is not None:
         # Only the synthetic baseline row gets a display rename here --
@@ -477,7 +477,7 @@ def _lift_chart_from_source(
     """
     import ferrum
 
-    df = source.lift_curve()
+    df = source.lift_curve(diagnostic="lift_chart")
     color_field = _color_field_for(df, "class")
     if color_field is not None:
         # See `_gain_chart_from_source`'s matching comment: only the
@@ -521,7 +521,7 @@ def _confusion_chart_from_source(
     """Build a confusion-matrix heatmap chart from a ModelSource."""
     import ferrum
 
-    df = source.confusion_matrix(normalize=normalize)
+    df = source.confusion_matrix(normalize=normalize, diagnostic="confusion_matrix_chart")
     # `normalize` is not forwarded to mark_confusion: its effect (whether
     # cell values are normalized) already happened above, in
     # `source.confusion_matrix(normalize=...)`; the mark itself treats
@@ -566,7 +566,7 @@ def _class_prediction_error_chart_from_source(
     """
     import ferrum
 
-    df = source.confusion_matrix(normalize=None)
+    df = source.confusion_matrix(normalize=None, diagnostic="class_prediction_error_chart")
     chart = ferrum.Chart(df).mark_class_prediction_error(
         normalize=normalize,
         show_counts=show_counts,
@@ -703,7 +703,9 @@ def _discrimination_threshold_chart_from_source(
             resolve={"x": "shared", "y": "shared"},
         )
 
-    df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
+    df = source.discrimination_threshold(
+        n_thresholds=n_thresholds, cv=cv, diagnostic="discrimination_threshold_chart"
+    )
     metric_columns = _resolve_metric_columns([c for c in df.columns if c != "threshold"], metrics)
     long_df = df.unpivot(
         index="threshold",
@@ -772,7 +774,7 @@ def _classification_report_chart(
 
     Target hygiene and prediction translation (#206, 2026-09-13): the
     model path now runs the shared null-target guard
-    (``_curve_frames.require_no_null_target``) before predicting, joining
+    (``_target_hygiene.require_no_null_target``) before predicting, joining
     the precomputed path inside the target-hygiene contract instead of
     leaking scikit-learn's own null error, and translates
     ``model.predict``'s output into ``y``'s domain through
@@ -796,7 +798,7 @@ def _classification_report_chart(
     tested, not the realized predictions: a model evaluated on a slice it
     gets entirely wrong predicts nothing ``y`` holds while still describing
     ``y``'s labels, and that report renders. See
-    ``_curve_frames.check_translated_classes_match_y``.
+    ``_target_hygiene.check_translated_classes``.
     """
     import ferrum
     from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
@@ -811,29 +813,22 @@ def _classification_report_chart(
 
         import numpy as np
 
-        from ferrum.diagnostics._internal import _curve_frames
+        from ferrum.diagnostics._internal import _curve_frames, _target_hygiene
         from ferrum.diagnostics.sources._classification import report_predictions_in_y_domain
 
         if source.y is None:
             raise ValueError("ModelSource.classification_report() requires y to be provided.")
-        _curve_frames.require_no_null_target(
+        _target_hygiene.require_no_null_target(
             np.asarray(source.y), diagnostic="classification_report_chart"
         )
         X = source._require_X("classification_report")
         y_true = source.y
-        # `.tolist()`: sklearn's `type_of_target` misreads an
-        # object-dtype ndarray of plain numeric values as "unknown"
-        # rather than "multiclass"/"binary" (observed with the
-        # translated array's `dtype=object`, needed to hold values from
-        # any of y's dtypes uniformly); a plain list of native Python
-        # values is read correctly, the same reason `confusion_frame`
-        # calls `.tolist()` on the translated array internally.
         y_pred = report_predictions_in_y_domain(
             source.model,
             source.y,
             source.model.predict(X),
             diagnostic="classification_report_chart",
-        ).tolist()
+        )
         report = classification_report(
             y_true,
             y_pred,

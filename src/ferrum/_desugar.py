@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Callable, Union
 from ferrum._layer import _PRIMITIVE_MARKS, _Layer
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
+from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
 
@@ -63,16 +64,54 @@ class _UnsetType:
     that distinction is exactly what decides whether a ``metrics=`` subset
     missing the f1-optimum row should refuse (explicit request, self-
     contradicting) or silently downgrade (default request, batch-F T3's
-    crash-shape fix). This is a fresh sentinel local to ``ferrum._desugar``
-    rather than a reuse of ``ferrum.plots._helpers._UNSET`` or
-    ``ferrum._title_sentinel._UNSET``: ``plots`` sits above ``marks``/
-    ``_desugar`` in the import graph (``plots/_helpers.py`` already imports
-    from ``ferrum.marks``), so importing either of those higher-layer
-    sentinels here would invert that dependency.
+    crash-shape fix).
+
+    Why a third sentinel rather than one of the two that already exist
+    (corrected 2026-09-17; the earlier rationale named a dependency
+    inversion that is real for only one of them):
+
+    - ``ferrum.plots._helpers._UNSET`` genuinely cannot be reused here.
+      ``plots`` sits *above* ``marks``/``_desugar`` in the import graph
+      (``plots/_helpers.py`` imports from ``ferrum.marks``), so importing it
+      from this module would invert that dependency.
+    - ``ferrum._title_sentinel._UNSET`` imports nothing from ``ferrum`` at
+      all, so reusing it would invert nothing. It is not reused because its
+      instance is the subject of two *named, enforced contracts* scoped to
+      the ``Axis``/``Legend`` value objects -- the three-way ``title``
+      contract (``serialize_title``) and the two-way omit-vs-explicit
+      contract (``is_unspecified``) -- and every ``is`` test on it in that
+      module would silently start answering for this module's mark kwargs
+      too. Sharing an identity means sharing those contracts; the flags here
+      obey neither.
+
+    The instance is a **singleton**, matching ``_title_sentinel``'s own
+    ``__new__``, and preserves its identity through ``copy.deepcopy`` and
+    pickling. That is load-bearing, not tidiness: every consumer tests
+    ``value is _UNSET``, so a copy that produced a second instance would
+    read as an *explicit* ``True``-ish value, and #189's disposition would
+    flip from "silently downgrade" to "refuse" on a chart that had merely
+    been round-tripped. ``Chart._clone()``'s shallow ``copy.copy`` never
+    could break it, but ``deepcopy`` and ``pickle`` both did before
+    (measured 2026-09-17: ``copy.deepcopy(_UNSET) is _UNSET`` was ``False``).
     """
+
+    _instance: "_UnsetType | None" = None
+
+    def __new__(cls) -> "_UnsetType":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __repr__(self) -> str:
         return "_UNSET"
+
+    def __deepcopy__(self, memo: dict) -> "_UnsetType":
+        """The singleton is its own deep copy -- identity is the value."""
+        return self
+
+    def __reduce__(self) -> tuple:
+        """Unpickle through ``__new__``, which hands back the one instance."""
+        return (_UnsetType, ())
 
 
 #: Sentinel default for ``mark_discrimination_threshold(threshold_line=, optimum_label=)``.
@@ -81,6 +120,34 @@ _UNSET = _UnsetType()
 #: Type alias for a bool kwarg that distinguishes "omitted" (``_UNSET``) from
 #: an explicit ``True``/``False``.
 BoolOrUnset = Union[bool, _UnsetType]
+
+
+def resolve_disc_flag(flag: str, value: BoolOrUnset) -> bool:
+    """Resolve one ``mark_discrimination_threshold`` flag to a concrete bool.
+
+    ``_UNSET`` (the caller never passed the kwarg) resolves to ``flag``'s
+    entry in :data:`ferrum.marks._desugar_helpers.DISC_FLAG_DEFAULTS` -- the
+    one owner of those two values, homed there because the desugar's own
+    signature reads them too and cannot import this module (see that
+    constant's note). Anything else is the caller's own value. The two
+    consumers that must agree -- this module's
+    :func:`_resolve_or_refuse_disc_flag` and the mark method's
+    ``*_effective`` resolution -- both call this, so neither can spell a
+    default the other does not.
+
+    An unknown ``flag`` is an internal programming error (both call sites
+    pass string literals), and it is refused by name rather than as a bare
+    ``KeyError`` on a dict the caller cannot see -- the same voice
+    ``_SourceCache``'s malformed-key ``TypeError`` and
+    ``_curve_metric``'s unreachable branch speak in.
+    """
+    if flag not in DISC_FLAG_DEFAULTS:
+        raise KeyError(
+            f"resolve_disc_flag: {flag!r} is not a discrimination-threshold flag; "
+            f"DISC_FLAG_DEFAULTS (ferrum.marks._desugar_helpers) owns "
+            f"{sorted(DISC_FLAG_DEFAULTS)}. Add the flag there before resolving it."
+        )
+    return DISC_FLAG_DEFAULTS[flag] if value is _UNSET else bool(value)
 
 
 def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | None) -> Any:
@@ -672,7 +739,6 @@ def _resolve_or_refuse_disc_flag(
     ctx: _ResolveContext,
     *,
     flag: str,
-    default: bool,
     sentinel_column: str,
     has_columns: bool,
     columns: Any,
@@ -689,10 +755,17 @@ def _resolve_or_refuse_disc_flag(
     and refuses typed; the parameter's own default silently downgrades to
     ``False``, preserving batch-F T3's crash-shape fix for callers who never
     touched the flag.
+
+    The default itself comes from
+    :data:`ferrum.marks._desugar_helpers.DISC_FLAG_DEFAULTS` via
+    :func:`resolve_disc_flag`, the same call the mark method makes when it
+    decides whether to inject ``flag``'s sentinel columns -- so the
+    "is there data for this layer?" and "was this layer asked for?"
+    questions cannot be answered from two different defaults.
     """
     raw = ctx.transform_kwargs.get(flag, _UNSET)
     explicit = raw is not _UNSET
-    resolved = bool(raw) if explicit else default
+    resolved = resolve_disc_flag(flag, raw)
     if resolved and (not has_columns or sentinel_column not in columns):
         if explicit:
             from ferrum.marks._desugar_helpers import _normalize_names
@@ -762,7 +835,6 @@ def _prep_discrimination_threshold_sentinels(ctx: _ResolveContext) -> None:
     _resolve_or_refuse_disc_flag(
         ctx,
         flag="optimum_label",
-        default=True,
         sentinel_column="_optimum_x",
         has_columns=has_columns,
         columns=columns,
@@ -770,7 +842,6 @@ def _prep_discrimination_threshold_sentinels(ctx: _ResolveContext) -> None:
     _resolve_or_refuse_disc_flag(
         ctx,
         flag="threshold_line",
-        default=False,
         sentinel_column="_threshold_best",
         has_columns=has_columns,
         columns=columns,

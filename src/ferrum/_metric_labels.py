@@ -54,7 +54,15 @@ With the duplicates gone, the surviving surfaces all derive their text
 from :func:`_render_metric` -- the single producer of a user-visible
 metric string. The display name, the ``.3f`` format and the ``"AUC = "``
 prefix are all properties of the kind in :data:`_METRIC_LABEL_SPECS`, so
-a surface can no longer spell or round a metric its own way.
+a surface can no longer spell or round a metric its own way. That claim
+covers the discrimination-threshold optimum label too, since 2026-09-17:
+it composed ``f"max F1 = {v:.3f} @ t={t:.2f}"`` inline with its own
+spelling and rounding -- the sixth-site shape #219 set out to end, inside
+#219's own subsystem -- and now renders ``f"max {_render_metric('f1', v)}
+@ t={t:.2f}"``, with ``"max "`` and the threshold suffix as that surface's
+own framing around the one metric string. Registering ``"f1"`` is also why
+a *kind* and a composable ``+ Label()`` *class* are no longer the same
+set: ``"f1"`` has no class, because nothing composes it onto a chart.
 
 A kind whose ``value_fn`` is a :class:`_NoCurveDefinition` (Brier) has no
 fallback at all: a frame without the column cannot answer the question,
@@ -149,7 +157,15 @@ def _broadcast_metric(df: pl.DataFrame, kind: str) -> Optional[float]:
     return float(values[0])
 
 
-def _metric_absence_reason(df: pl.DataFrame, kind: str) -> str:
+#: The complete set of reasons :func:`_broadcast_metric` can return ``None``.
+#: Spelled as a type rather than as three loose strings so a fourth cause
+#: added to :func:`_broadcast_metric` cannot reach :func:`_curve_metric` as an
+#: unhandled tag: the producer's return annotation and the consumer's
+#: exhaustive branch both name this alias.
+_MetricAbsence = Literal["missing_column", "no_value", "multiple_values"]
+
+
+def _metric_absence_reason(df: pl.DataFrame, kind: str) -> _MetricAbsence:
     """Which of :func:`_broadcast_metric`'s three ``None``-causes applies.
 
     Mirrors that function's own column lookup exactly (same field, same
@@ -203,12 +219,23 @@ def _curve_metric(df: pl.DataFrame, *, kind: str, x_col: str, y_col: str, where:
     spec = _METRIC_LABEL_SPECS[kind]
     if isinstance(spec.value_fn, _NoCurveDefinition):
         reason = _metric_absence_reason(df, kind)
+        # One branch per :data:`_MetricAbsence` member, none of them a
+        # catch-all: a fourth absence cause must add its own sentence here
+        # rather than inheriting "more than one distinct value", which would
+        # be a measurably false diagnosis in a message whose whole job is to
+        # say which of the three facts applies.
         if reason == "missing_column":
             cause = f"the data has no {spec.column!r} column"
         elif reason == "no_value":
             cause = f"the {spec.column!r} column holds no non-null value for these rows"
-        else:
+        elif reason == "multiple_values":
             cause = f"the {spec.column!r} column holds more than one distinct value for these rows"
+        else:
+            raise ValueError(
+                f"_curve_metric: unreachable: unhandled metric-absence reason "
+                f"{reason!r} for kind {kind!r}. Add a branch here when "
+                f"_broadcast_metric gains a None-cause."
+            )
         raise ValueError(
             f"{where}: {cause}, so no "
             f"{spec.display_name} value can be shown. {spec.value_fn.reason} "
@@ -309,9 +336,11 @@ class _MetricKind(NamedTuple):
 # ``kind -> (value function, display name, broadcast column, format)``
 # association shared by every surface that shows a metric: the direct-mark
 # ``__radd__`` path, the figure-function explicit-field path and the mark
-# annotations. Keys match the ``label_kind`` strings accepted by
-# ``_apply_metric_label_explicit``; the derived prefixes and the format
-# match the per-class dataclass defaults, which read them from here.
+# annotations. Keys are the display vocabulary — a superset of the
+# ``label_kind`` strings ``_apply_metric_label_explicit`` accepts, since a
+# kind can be displayable without being composable (``"f1"`` has no label
+# class; see its entry). The derived prefixes and the format match the
+# per-class dataclass defaults, which read them from here.
 _METRIC_LABEL_SPECS: dict[str, _MetricKind] = {
     "auc": _MetricKind(_trapezoid_auc, "AUC", "auc", ".3f"),
     "ap": _MetricKind(_ap_step, "AP", "ap", ".3f"),
@@ -325,6 +354,27 @@ _METRIC_LABEL_SPECS: dict[str, _MetricKind] = {
         ),
         "Brier",
         "brier",
+        ".3f",
+    ),
+    # The discrimination-threshold optimum label's metric (#219 residue,
+    # cycle-2 review finding B). It has no composable `+ F1Label()` class --
+    # the only surface that shows it is `mark_discrimination_threshold`'s
+    # own optimum annotation, which reads the F1-best row of the sweep it
+    # was handed -- so it is a kind without a class; see
+    # `_apply_metric_label_explicit`, whose vocabulary is the classes.
+    # Registering it is what makes `_render_metric`'s "single producer"
+    # claim true: that annotation used to carry its own "max F1 = " literal
+    # and its own `.3f`, the sixth-site shape #219 set out to end.
+    "f1": _MetricKind(
+        _NoCurveDefinition(
+            "F1 is read from the threshold sweep's own 'f1' column at the optimum row. "
+            "The curves a discrimination-threshold chart draws are precision/recall/F1/"
+            "queue-rate against threshold, and the area under one of them is not an F1 "
+            "score. Supply a frame from ModelSource.discrimination_threshold(), which "
+            "carries the column."
+        ),
+        "F1",
+        "f1",
         ".3f",
     ),
 }
@@ -718,9 +768,10 @@ class BrierLabel:
 # Registry of metric-label classes keyed by each class's own ``_kind``, so the
 # figure-function explicit-field path (:func:`_apply_metric_label_explicit`)
 # constructs the right class per kind without an if/elif ladder that could
-# desync from the classes. Derived from the classes themselves; the keys match
-# ``_METRIC_LABEL_SPECS`` (both keyed by the same ``"auc"``/``"ap"``/``"brier"``
-# strings; enforced by the single-source test).
+# desync from the classes. Derived from the classes themselves; the keys are a
+# strict subset of ``_METRIC_LABEL_SPECS``'s (``specs - classes == {"f1"}`` — a
+# display kind with no composable class; the one-directional invariant is
+# enforced by the single-source test).
 _METRIC_LABEL_CLASSES: dict[str, type] = {cls._kind: cls for cls in (AUCLabel, APLabel, BrierLabel)}
 
 
@@ -833,7 +884,13 @@ def _apply_metric_label_explicit(
     table's for the same reason (#219, 2026-09-13) -- a builder that wrote
     its own ``".3f"`` was a sixth place the rounding had to be changed.
     """
-    validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_SPECS)
+    # Validated against the *class* registry, not the kind table: this
+    # function's whole job is to construct one of the composable label
+    # classes, and a kind can exist without one (``"f1"``, whose only
+    # surface is the discrimination-threshold optimum annotation). Checking
+    # the kinds here would have let such a kind through to a ``KeyError``
+    # one line later.
+    validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_CLASSES)
     spec = _METRIC_LABEL_SPECS[label_kind]
     pos_lit: Any = position
     label_obj: Any = _METRIC_LABEL_CLASSES[label_kind](

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 from ferrum import (
     APLabel,
@@ -58,7 +59,15 @@ def test_metric_label_specs_single_source():
     assert (brier.display_name, brier.column, brier.format) == ("Brier", "brier", ".3f")
     assert isinstance(brier.value_fn, _NoCurveDefinition)
     assert brier.value_fn.reason  # the refusal quotes it; it must not be blank
-    assert set(_METRIC_LABEL_SPECS) == {"auc", "ap", "brier"}
+    # ``"f1"`` joined the table 2026-09-17 (cycle-2 design review finding B):
+    # the discrimination-threshold optimum annotation used to spell its own
+    # "max F1 = " and its own ``.3f``, which is exactly what this table
+    # exists to prevent. It has no curve to integrate either.
+    assert set(_METRIC_LABEL_SPECS) == {"auc", "ap", "brier", "f1"}
+    f1 = _METRIC_LABEL_SPECS["f1"]
+    assert (f1.display_name, f1.column, f1.format) == ("F1", "f1", ".3f")
+    assert isinstance(f1.value_fn, _NoCurveDefinition)
+    assert f1.value_fn.reason
 
     expected_fns = {"auc": _trapezoid_auc, "ap": _ap_step, "brier": brier.value_fn}
     # The dataclass prefix/format defaults are the table's (no second copy).
@@ -90,10 +99,24 @@ def test_metric_label_classes_registry_derived_consistent():
 
     # Registry is keyed by each class's own ``_kind`` (cannot desync).
     assert _METRIC_LABEL_CLASSES == {"auc": AUCLabel, "ap": APLabel, "brier": BrierLabel}
-    # Bidirectional key agreement with the spec table.
-    assert set(_METRIC_LABEL_CLASSES) == set(_METRIC_LABEL_SPECS)
+    # Every class's kind is a spec key. The converse stopped holding on
+    # 2026-09-17: ``"f1"`` is a registered kind with no composable class,
+    # because nothing composes it onto a chart -- its only surface is
+    # ``mark_discrimination_threshold``'s optimum annotation, which reads
+    # the sweep's own F1-best row. A kind without a class must refuse at
+    # the explicit-field path rather than KeyError, which is pinned below.
+    assert set(_METRIC_LABEL_CLASSES) <= set(_METRIC_LABEL_SPECS)
+    assert set(_METRIC_LABEL_SPECS) - set(_METRIC_LABEL_CLASSES) == {"f1"}
     for kind, cls in _METRIC_LABEL_CLASSES.items():
         assert cls._kind == kind
+
+    with pytest.raises(ValueError, match="label_kind"):
+        _apply_metric_label_explicit(
+            Chart(_roc_data()).encode(x="fpr", y="tpr").mark_line(),
+            "f1",
+            x_col="fpr",
+            y_col="tpr",
+        )
 
     # The explicit-field path constructs the registry's class for each kind.
     # The frame carries every kind's broadcast column so the brier kind, which
@@ -484,6 +507,38 @@ def test_render_metric_is_the_only_producer_of_a_metric_string():
     # The public per-label overrides still reach the rendered string — they
     # are the one reason the parameters exist.
     assert _render_metric("auc", 0.6666666, prefix="auc:", fmt=".2f") == "auc:0.67"
+
+
+def test_the_discrimination_threshold_optimum_label_uses_the_one_producer():
+    """The sixth site, closed (cycle-2 design review finding B).
+
+    ``mark_discrimination_threshold``'s optimum annotation composed
+    ``f"max F1 = {v:.3f} @ t={t:.2f}"`` inline -- its own spelling of the
+    metric, its own rounding -- inside the subsystem #219 created to end
+    exactly that, which left ``_metric_labels``' "single producer of a
+    user-visible metric string" claim false in its own module header. The
+    rendered text is unchanged; what changed is where the ``"F1"`` and the
+    ``.3f`` come from, so a future change to either moves this surface with
+    all the others.
+    """
+    from ferrum._metric_labels import _METRIC_LABEL_SPECS, _render_metric
+
+    df = pl.DataFrame(
+        {
+            "threshold": [0.1, 0.2, 0.3, 0.1, 0.2, 0.3],
+            "metric": ["precision"] * 3 + ["f1"] * 3,
+            "value": [0.5, 0.6, 0.7, 0.4, 0.9183, 0.3],
+        }
+    )
+    svg = Chart(df).mark_discrimination_threshold().to_svg()
+
+    expected = f"max {_render_metric('f1', 0.9183)} @ t={0.2:.2f}"
+    assert expected == "max F1 = 0.918 @ t=0.20"  # byte-identical to the old literal
+    assert expected in _svg_texts(svg)
+
+    # The spelling and the rounding are the kind's, not this surface's.
+    spec = _METRIC_LABEL_SPECS["f1"]
+    assert spec.display_name == "F1" and spec.format == ".3f"
 
 
 def test_every_metric_surface_renders_byte_identical_text():

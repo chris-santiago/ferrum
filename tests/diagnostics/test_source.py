@@ -247,6 +247,114 @@ def test_cache_key_uncacheable_value_never_grows_the_cache():
     assert len(source._cache) == size_after_one_call
 
 
+@pytest.mark.parametrize(
+    ("store", "name"),
+    [
+        (lambda cache, key, value: cache.__setitem__(key, value), "[]="),
+        (lambda cache, key, value: cache.update({key: value}), "update(mapping)"),
+        (lambda cache, key, value: cache.update([(key, value)]), "update(pairs)"),
+        (lambda cache, key, value: cache.setdefault(key, value), "setdefault"),
+        (lambda cache, key, value: cache.__ior__({key: value}), "|="),
+    ],
+)
+def test_the_uncacheable_refusal_covers_every_mutation_path(store, name):
+    """The store refusal is a property of the container, not of one operator.
+
+    ``_SourceCache`` overrode only ``__setitem__`` when it shipped, so
+    ``update``, ``setdefault`` and ``|=`` each reached the C-level store
+    directly and persisted exactly the entry the contract says must never
+    be persisted (measured 2026-09-17, whole-wave design review finding 1).
+    No call site uses those three today -- which is the point: nothing
+    would have caught the first one that did, and the ~25 sites read
+    ``self._cache`` as a plain dict.
+    """
+    from ferrum.diagnostics.sources._base import _SourceCache, _Uncacheable
+
+    cache = _SourceCache()
+    cacheable = ("method", (("cv", 5),))
+    uncacheable = ("method", (("cv", _Uncacheable()),))
+
+    store(cache, cacheable, "kept")
+    store(cache, uncacheable, "refused")
+
+    assert list(cache) == [cacheable], f"{name} stored an uncacheable key"
+
+
+def test_the_uncacheable_refusal_covers_the_constructor_too():
+    """``dict.__init__``'s C path does not call ``__setitem__`` either.
+
+    The one construction site today is ``_SourceCache()`` with no
+    arguments, so this guards the next one -- which is the same shape the
+    original finding was about, one level down: a container whose
+    invariant holds on four of five paths (cycle-2 design review finding
+    F, probe-confirmed storing before the ``__init__`` override).
+    """
+    from ferrum.diagnostics.sources._base import _SourceCache, _Uncacheable
+
+    cacheable = ("method", (("cv", 5),))
+    uncacheable = ("method", (("cv", _Uncacheable()),))
+
+    assert list(_SourceCache({cacheable: "kept", uncacheable: "refused"})) == [cacheable]
+    assert list(_SourceCache([(uncacheable, "refused")])) == []
+    assert dict(_SourceCache()) == {}
+    # `fromkeys` builds through `__setitem__` and so inherits the refusal.
+    assert list(_SourceCache.fromkeys([cacheable, uncacheable], "v")) == [cacheable]
+
+
+def test_setdefault_still_answers_what_dict_setdefault_answers():
+    """Refusing the *store* must not change what the call returns.
+
+    ``setdefault`` is a read-and-maybe-write in one call; silently
+    returning ``None`` for a refused key would break a caller's control
+    flow rather than just its caching.
+    """
+    from ferrum.diagnostics.sources._base import _SourceCache, _Uncacheable
+
+    cache = _SourceCache()
+    cacheable = ("method", (("cv", 5),))
+    uncacheable = ("method", (("cv", _Uncacheable()),))
+
+    assert cache.setdefault(cacheable, "first") == "first"
+    assert cache.setdefault(cacheable, "second") == "first"  # existing value wins
+    assert cache.setdefault(uncacheable, "fresh") == "fresh"  # returned, not stored
+    assert uncacheable not in cache
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    ["roc_curve", ("roc_curve",), ("roc_curve", (), "extra"), ("roc_curve", 5)],
+)
+def test_a_malformed_cache_key_refuses_by_name(malformed):
+    """A key that is not ``_cache_key``'s shape names the container.
+
+    It used to leak ``ValueError: too many values to unpack (expected 2)``
+    from inside ``__setitem__``'s bare unpack, which named neither the
+    container, the key, nor the fix.
+    """
+    from ferrum.diagnostics.sources._base import _SourceCache
+
+    cache = _SourceCache()
+    with pytest.raises(TypeError, match=r"_SourceCache: a cache key"):
+        cache[malformed] = "df"
+
+
+def test_a_real_cache_key_is_never_malformed():
+    """The refusal above must not be reachable from ``_cache_key`` itself.
+
+    Pins the producer against the consumer: whatever shape ``_cache_key``
+    builds, the container has to accept it, uncacheable marker or not.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+
+    source._cache[source._cache_key("dummy")] = "df"
+    source._cache[source._cache_key("dummy", cv=5, train_sizes=[0.1, 0.5])] = "df"
+    source._cache[source._cache_key("dummy", opts={"a": 1})] = "df"
+    assert len(source._cache) == 2  # the opts= key is the refused one
+
+
 # --- 10b: classification curves --------------------------------------
 
 

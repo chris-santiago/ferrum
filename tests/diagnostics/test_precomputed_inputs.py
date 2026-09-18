@@ -621,7 +621,7 @@ def test_classification_report_chart_precomputed_y_true_2d_refuses():
     """The mirror image of the ``y_pred`` 2-D refusal above: a non-1-D
     ``y_true`` gets the same typed shape refusal ``y_pred`` already had
     (#208), naming ``y_true`` specifically. Previously unchecked -- a 2-D
-    ``y_true`` reached ``_curve_frames.report_labels`` and was misdiagnosed
+    ``y_true`` reached ``_target_hygiene.report_labels`` and was misdiagnosed
     as "a mix of label types" (each row read as its own ``list``-family
     value, one ordering family, against ``y_pred``'s ``number`` family),
     which sent the caller after a defect they did not have.
@@ -646,7 +646,7 @@ def test_prediction_error_chart_precomputed_2d_refuses(regression_precomputed):
     figure functions -- residuals_chart (above) and prediction_error_chart
     (here). A malformed y_pred reaching prediction_error_chart must name
     prediction_error_chart, not residuals_chart (spec review finding:
-    predictions() previously hardcoded chart_name="residuals_chart"
+    predictions() previously hardcoded its entry name as "residuals_chart"
     unconditionally)."""
     y_true, y_pred = regression_precomputed
     y_pred_2d = np.column_stack([y_pred, y_pred])

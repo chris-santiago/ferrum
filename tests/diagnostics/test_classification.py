@@ -1778,7 +1778,7 @@ def test_classification_report_chart_model_path_predictions_disjoint_from_y_rend
     assert viz._metrics["f1_macro"] == 0.0
 
 
-# --- #224a: the report's class-axis partition (_curve_frames.report_labels) ---
+# --- #224a: the report's class-axis partition (_target_hygiene.report_labels) ---
 #
 # One cell of the partition per test below, plus a totality property test.
 # Every cell is a named contract, so a new input shape lands in exactly one
@@ -1978,10 +1978,16 @@ def test_precomputed_classification_report_order_moves_below_ten_classes():
     Measured 2026-09-13: ``{2, 10}`` rendered ``['10', '2']`` on the
     released code and renders ``['2', '10']`` now. The disclosure that
     "fewer than 10 classes are unaffected" was false, and this pins the
-    corrected claim. ``confusion_matrix_chart`` on the identical input
-    still renders ``['10', '2']`` -- the ``key=str`` rule retires for the
-    report only -- which is both the documented asymmetry and the proof
-    that the difference is real rather than an artifact of the fixture.
+    corrected claim.
+
+    ``confusion_matrix_chart`` moved with it on 2026-09-17 (cycle-2 design
+    review finding A). It rendered ``['10', '2']`` through two cycles while
+    the report rendered ``['2', '10']`` -- the documented asymmetry, and
+    real rather than a fixture artifact -- until the precomputed path's
+    ``sorted(..., key=str)`` rule was retired for the same partition the
+    report uses. Both figures now put one class axis in one order, which is
+    what the family-totality ruling asked for; this asserts the pair, so a
+    future change that moves one without the other fails here.
     """
     y_true = np.array([2, 10, 2, 10])
     y_pred = np.array([2, 10, 10, 2])
@@ -1990,7 +1996,7 @@ def test_precomputed_classification_report_order_moves_below_ten_classes():
     assert list(dict.fromkeys(report["class"].to_list())) == ["2", "10"]
 
     confusion = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)._data
-    assert list(dict.fromkeys(confusion["actual"].to_list())) == ["10", "2"]
+    assert list(dict.fromkeys(confusion["actual"].to_list())) == ["2", "10"]
 
 
 def test_report_labels_numeric_unions_are_not_a_type_mix():
@@ -2000,7 +2006,7 @@ def test_report_labels_numeric_unions_are_not_a_type_mix():
     released code accepted -- the mixed cell has to mean "cannot be
     ordered together", not "not spelled the same way".
     """
-    from ferrum.diagnostics._internal._curve_frames import report_labels
+    from ferrum.diagnostics._internal._target_hygiene import report_labels
 
     def labels(true_values, pred_values):
         return report_labels(
@@ -2119,7 +2125,7 @@ def test_report_labels_answers_or_refuses_by_name(shape):
     (measured: the ``frozensets`` row returned a duplicate label before
     the dedup fix, and ``isinstance``/``len`` alone could not see it).
     """
-    from ferrum.diagnostics._internal._curve_frames import _value_family, report_labels
+    from ferrum.diagnostics._internal._target_hygiene import _value_family, report_labels
 
     true_values, pred_values = _REPORT_LABEL_SHAPES[shape]
     try:
@@ -2240,3 +2246,49 @@ def test_calibration_error_is_the_mean_squared_deviation_not_the_mean():
     loose_viz = ferrum.CalibrationVisualizer(loose, n_bins=5).fit(X, y)
     assert loose_viz._metrics["calibration_error"] == pytest.approx(0.00498048724996414)
     assert loose_viz._metrics["calibration_error"] < viz._metrics["calibration_error"]
+
+
+# --- the dtype fast path answers exactly what the per-value scan answers ----
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param(np.array([True, False]), id="bool"),
+        pytest.param(np.array([1, 2], dtype=np.int64), id="int64"),
+        pytest.param(np.array([1, 2], dtype=np.uint8), id="uint8"),
+        pytest.param(np.array([1.0, 2.0], dtype=np.float64), id="float64"),
+        pytest.param(np.array([1.0, 2.0], dtype=np.float16), id="float16"),
+        pytest.param(np.array([1.0, 2.0], dtype=np.longdouble), id="longdouble"),
+        pytest.param(np.array(["a", "b"]), id="unicode"),
+        pytest.param(np.array([b"a", b"b"]), id="bytes"),
+        pytest.param(np.array([1 + 1j, 2 + 0j]), id="complex"),
+        pytest.param(np.array(["2020-01-01", "2020-01-02"], dtype="datetime64[D]"), id="date64"),
+        pytest.param(
+            np.array(["2020-01-01", "2020-01-02"], dtype="datetime64[ns]"), id="datetime64"
+        ),
+        pytest.param(np.array([1, 2], dtype="timedelta64[Y]"), id="timedelta64-year"),
+        pytest.param(np.array([1, 2], dtype="timedelta64[ns]"), id="timedelta64-ns"),
+        pytest.param(np.array(["a", 1], dtype=object), id="object-mixed"),
+        pytest.param(np.array([], dtype="U1"), id="empty-unicode"),
+        pytest.param(np.array([], dtype=np.int64), id="empty-int"),
+    ],
+)
+def test_the_dtype_family_fast_path_agrees_with_the_per_value_scan(values):
+    """The optimization's own pin (cycle-2 design review, missing-test 3).
+
+    ``_families_of`` reads the family set off the numpy dtype when the
+    dtype determines one, instead of running ``_value_family`` over every
+    row -- 318ms of ``report_labels``' 435ms at 1e6 rows. The map's
+    exclusions are load-bearing, not conservatism: ``datetime64[D]``'s
+    ``.tolist()`` yields ``datetime.date`` (family ``"date"``, not
+    ``"datetime"``), ``timedelta64[Y]``'s yields ``int`` (family
+    ``"number"``, not ``"timedelta"``), and ``complex`` must reach
+    ``_value_family``'s own exclusion. A contributor who "completed" the
+    map with ``"M"``, ``"m"`` or ``"c"`` would break all three, and only a
+    partition test at exactly the right dtype would have noticed.
+    """
+    from ferrum.diagnostics._internal._target_hygiene import _families_of, _value_family
+
+    listed = values.tolist()
+    assert _families_of(values, listed) == {_value_family(v) for v in listed}
