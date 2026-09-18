@@ -44,15 +44,45 @@ def ordered_text_entries(svg: str) -> list[tuple[float, float, str]]:
     care about non-numeric labels) should use ``numeric_text_entries``.
     """
     entries: list[tuple[float, float, str]] = []
-    for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
-        text = text.strip()
-        if not text:
-            continue
+    for attrs, text in _text_elements(svg):
         x_m = re.search(r'x="([^"]+)"', attrs)
         y_m = re.search(r'y="([^"]+)"', attrs)
         if x_m and y_m:
             entries.append((float(x_m.group(1)), float(y_m.group(1)), text))
     return entries
+
+
+def _text_elements(svg: str) -> list[tuple[str, str]]:
+    """``(attributes, text)`` for every non-empty attributed ``<text>`` element.
+
+    The module docstring's "the regex lives here once" promise, made literal:
+    ``ordered_text_entries`` reads the positions off these attributes and
+    ``y_axis_title`` reads the rotation, so a second helper needing another
+    attribute does not bring a second copy of the pattern with it.
+    """
+    return [
+        (attrs, text.strip())
+        for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg)
+        if text.strip()
+    ]
+
+
+def y_axis_title(svg: str) -> str | None:
+    """The rendered y-axis title of a single-panel SVG, or ``None`` when it has none.
+
+    The y-axis title is the one ``<text>`` the renderer rotates by -90 about
+    its own anchor; tick labels and the x-axis title are unrotated. ``None`` is
+    a real answer, not a parse failure: a chart whose y axis resolves from a
+    layer's own encoding rather than the chart's binds no title to write, and
+    telling those two cases apart is what the ``displot(kind="rug", kde=True)``
+    composition is pinned on (#201).
+    """
+    titles = [text for attrs, text in _text_elements(svg) if "rotate(-90" in attrs]
+    if not titles:
+        return None
+    if len(titles) > 1:
+        raise AssertionError(f"expected a single-panel SVG with one y-axis title, got {titles}")
+    return titles[0]
 
 
 def text_runs(svg: str) -> list[str]:

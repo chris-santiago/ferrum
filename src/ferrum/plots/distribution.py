@@ -394,6 +394,12 @@ def displot(
         (the bars are normalised to a ``[0, 1]`` proportion, which a
         count-scaled curve would not match).  Under any other ``stat``/
         ``kind``/``multiple`` combination the curve is an unscaled density.
+        Under ``kind="rug"`` given an ``x=`` variable -- the one primary
+        mark that binds no value axis of its own -- the curve's own density
+        axis becomes the chart's ``y`` axis, titled with the density column,
+        and the rug ticks sit at its base.  ``kind="kde", rug=True,
+        fill=False`` reaches the same two marks from the other side and
+        places them identically.
     rug : bool, default False
         When ``True`` and ``kind != "rug"``, layer a ``mark_tick`` rug
         on top of the primary mark.
@@ -687,6 +693,36 @@ def _displot_build(
             # the original (pre-Bin) data batch.
             chart._transforms = [kde_transform] + list(chart._transforms or [])
             chart._layers.append(kde_layer)
+            # The chart's own value axis, for the one kind whose primary mark
+            # has none (GH #201). `kind="rug"` binds x only: `hist` remaps
+            # y -> the Bin count column, `ecdf` binds the cumulative count
+            # above, and `kind="kde"` never reaches this block. So the rug is
+            # the only primary mark that leaves the root encoding without a y,
+            # and a density curve drawn over it has no chart-level axis to
+            # name -- pre-fix the render resolved y from the overlay layer
+            # itself and came out untitled.
+            #
+            # Taken from the overlay layer's own `y` rather than re-derived
+            # from `registry_output_columns("kde", ...)`: the axis and the
+            # curve then name one column by construction, so a Rust-side
+            # rename of the Kde output cannot retitle the axis off the data it
+            # describes. The title that follows is the density column's own
+            # name, which is what `kind="kde"` (and `kind="kde", rug=True`,
+            # the same two marks by the documented other route) already
+            # titles this axis -- the two spellings of one chart read
+            # identically. The promoted primary layer keeps its own x-only
+            # encoding, so the ticks still sit at the value axis's base.
+            #
+            # Wrapped in `Y` because this runs after `_resolve_pending()`:
+            # `chart._encoding` holds channel objects by now, and the bare
+            # string spelling the `enc` dict accepts is no longer resolved.
+            if "y" not in chart._encoding:
+                from ferrum.encoding import Y as _Y_overlay
+
+                chart._encoding = {
+                    **chart._encoding,
+                    "y": _Y_overlay(kde_layer.encoding["y"]),
+                }
 
         if rug and kind != "rug" and x_field is not None:
             from ferrum.marks._desugar_helpers import identity_transform
