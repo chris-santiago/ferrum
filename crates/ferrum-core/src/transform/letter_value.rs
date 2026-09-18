@@ -7,10 +7,15 @@
 //! four strategies.
 //!
 //! Primary output schema:
-//! `[group: Utf8|Null, depth: Int32, lower: Float64, upper: Float64, level: Utf8]`
+//! `[group: <original group-column dtype>|Null, depth: Int32, lower: Float64, upper: Float64, level: Utf8]`
+//! The `group` column's dtype matches `spec.group`'s ORIGINAL input dtype
+//! (any dtype [`crate::transform::group_key::validate_groupby_columns`]
+//! accepts — the same set every groupby-taking sibling accepts), not a
+//! forced Utf8 stringification; an ungrouped call (`spec.group = None`)
+//! still emits an all-null Utf8 `group` column, matching prior behavior.
 //!
 //! Secondary named outputs:
-//! - `outliers` (or `<name>_outliers`): `[group: Utf8|Null, value: Float64, is_outlier: Bool]`,
+//! - `outliers` (or `<name>_outliers`): `[group: <original dtype>|Null, value: Float64, is_outlier: Bool]`,
 //!   filtered to rows where the input value falls outside the outermost letter-value
 //!   fence (the flag is therefore always `true` on emitted rows — it survives in the
 //!   schema for wire-compatibility with the pre-filter contract).
@@ -28,7 +33,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::transform::context::{TransformContext, TransformWarning};
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
+use crate::transform::group_key::{
+    group_partition_multi, groupby_key_at, materialize_groupby_col, validate_groupby_columns,
+    KeyValue, NullKeyPolicy,
+};
 
 /// Maximum depth for per-depth named outputs.
 pub(crate) const K_MAX_NAMED: usize = 12;
@@ -151,49 +160,56 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
 
 struct DepthRow {
-    group: Option<String>,
+    group: KeyValue,
     depth: i32,
     lower: f64,
     upper: f64,
     level: String,
 }
 
-fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(Option<String>, f64)>> {
+/// Extract `(group key, value)` pairs (dropping null/NaN values) plus the
+/// group column's dtype for output materialization.
+///
+/// `spec.group = None` (ungrouped) reports [`DataType::Utf8`] — matching the
+/// prior all-null Utf8 `group` output column — and every row's key is
+/// [`KeyValue::Null`]. A `spec.group = Some(col)` is resolved and dtype-checked
+/// through the shared [`validate_groupby_columns`] (the same request-level
+/// validator `group_partition_multi` itself calls, and every groupby-taking
+/// sibling transform uses), rather than a hand-duplicated existence lookup
+/// and dtype gate — one rule, one wording, enforced once. Every supported
+/// dtype (the same set every groupby-taking sibling transform accepts) is
+/// then read through the shared [`groupby_key_at`] extractor, so a null group
+/// VALUE (as opposed to no group column at all) also maps to
+/// `KeyValue::Null` and the two null-group and no-group cases pool together,
+/// exactly as the prior `Option<String>` representation did.
+fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<(Vec<(KeyValue, f64)>, DataType)> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
         .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
     let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
 
-    let g_arr_opt = if let Some(g) = &spec.group {
-        let gi = schema.index_of(g.as_str())
-            .map_err(|_| PyValueError::new_err(format!("stat_letter_value: group column '{g}' not found")))?;
-        let dt = schema.field(gi).data_type();
-        if dt != &DataType::Utf8 {
-            return Err(PyValueError::new_err(format!(
-                "stat_letter_value: group column '{g}' must be Utf8; got {dt:?}"
-            )));
-        }
-        Some(batch.column(gi).as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_letter_value: expected StringArray for group column '{g}'")))?)
-    } else {
-        None
-    };
+    let group_cols: Vec<String> = spec.group.iter().cloned().collect();
+    let resolved = validate_groupby_columns(batch, &group_cols, "stat_letter_value")?;
+    let group_info: Option<(ArrayRef, DataType)> =
+        resolved.first().map(|(gi, dt)| (batch.column(*gi).clone(), dt.clone()));
+    let group_dtype = group_info.as_ref().map(|(_, dt)| dt.clone()).unwrap_or(DataType::Utf8);
 
     let mut out = Vec::with_capacity(varr.len());
     for i in 0..varr.len() {
         if varr.is_null(i) { continue; }
         let v = varr.value(i);
         if v.is_nan() { continue; }
-        let g = match g_arr_opt {
-            None => None,
-            Some(ga) => {
-                if ga.is_null(i) { None } else { Some(ga.value(i).to_string()) }
-            }
+        let key = match &group_info {
+            None => KeyValue::Null,
+            Some((arr, dt)) => groupby_key_at(arr.as_ref(), dt, i).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "stat_letter_value: internal error extracting group key at row {i}"
+                ))
+            })?,
         };
-        out.push((g, v));
+        out.push((key, v));
     }
-    Ok(out)
+    Ok((out, group_dtype))
 }
 
 pub(crate) fn apply(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -213,26 +229,34 @@ pub(crate) fn apply_with_context(
             "stat_letter_value: outlier_threshold must be finite and >= 0",
         ));
     }
-    let pairs = extract_values(spec, batch)?;
-    let depths = compute_depths(spec, &pairs, ctx);
-    build_primary_batch(&depths)
+    let (depths, group_dtype) = compute_depths(spec, batch, ctx)?;
+    build_primary_batch(&depths, &group_dtype)
 }
 
 /// Determine the order in which groups are emitted.
 ///
 /// With `sort = None` the order is lexicographic over the (optional) group key
 /// — identical to the historical `BTreeMap` iteration order. With `sort =
-/// Some`, groups are ranked by the requested per-group aggregate over the SAME
-/// `(group, value)` pairs the transform extracts (so `count` counts only the
-/// non-null value rows that boxen actually plots). Ties are broken
+/// Some`, groups are ranked by the requested per-group aggregate over the
+/// non-null, non-NaN value rows [`compute_depths`] assigns to each group (so
+/// `count` counts only the rows that boxen actually plots). Ties are broken
 /// lexicographically for byte-deterministic output.
+///
+/// This ranking has no equivalent in [`group_partition_multi`] —
+/// no other groupby-taking transform in the crate ranks its groups by an
+/// aggregate of the value column — so it stays letter_value's own
+/// post-partition step rather than something to route through the shared
+/// toolkit; [`compute_depths`] applies it AFTER the shared partitioner has
+/// already resolved which rows belong to which group.
 fn group_order(
     sort: &Option<LetterValueSort>,
-    grouped: &BTreeMap<Option<String>, Vec<f64>>,
-) -> Vec<Option<String>> {
-    // BTreeMap keys are already lexicographically ordered; this is the
-    // `sort = None` answer and the lexicographic tie-break baseline.
-    let lexicographic: Vec<Option<String>> = grouped.keys().cloned().collect();
+    grouped: &BTreeMap<KeyValue, Vec<f64>>,
+) -> Vec<KeyValue> {
+    // BTreeMap keys are already ordered by KeyValue's Ord impl (Null first,
+    // then the typed variants in their natural order — lexicographic for a
+    // Utf8 group column, numeric for an Int/UInt/Float/Bool one); this is
+    // the `sort = None` answer and the tie-break baseline.
+    let lexicographic: Vec<KeyValue> = grouped.keys().cloned().collect();
     let Some(sort) = sort else {
         return lexicographic;
     };
@@ -276,18 +300,101 @@ fn group_order(
     ordered
 }
 
+/// Resolve the value column, partition `batch` by `spec.group` through the
+/// shared [`group_partition_multi`] (the same partitioner
+/// `box_stats`/`violin`/`outliers`/`smooth`/... use — existence check, dtype
+/// validation, and row-to-group assignment all live there once, not
+/// re-hand-rolled here), then compute each group's letter-value depths.
+///
+/// **`NullKeyPolicy::Pool`, not the more common `Skip`.** MOST
+/// `group_partition_multi` callers in the crate use `Skip` (a null-keyed row
+/// belongs to no group and is dropped), because those transforms append the
+/// group key as an output column and a row with no key has no row to write
+/// it to (GH #197). But `Pool` is not exceptional in the crate — three
+/// siblings already use it: `data_stack.rs` and `join_aggregate.rs` (named
+/// directly in [`NullKeyPolicy::Pool`]'s own doc, `group_key/mod.rs`) are
+/// row-preserving transforms whose contract is one output value per INPUT
+/// row and which therefore append NO group column at all — for them,
+/// skipping a null-keyed row would leave it silently holding a default
+/// value instead of a computed one. `data_window.rs` takes the same
+/// exemption for the same row-preserving reason. letter_value's reason for
+/// `Pool` is different from all three: unlike them, it DOES append a group
+/// column, and its pre-existing, tested contract is different from `Skip`
+/// on two points `Skip` would break silently:
+///   - **Null-group pooling.** A null-valued group row has always joined a
+///     single null-keyed group (materialized as an Arrow null in the `group`
+///     output column) rather than being dropped — this is what lets a boxen
+///     chart draw a "no category" box instead of silently losing those rows.
+///     `Pool` reproduces this exactly: `group_partition_multi`'s partitioning
+///     loop only `continue`s past a null-keyed row when
+///     `null_keys.skips_null_rows()` is true, which is `!matches!(self,
+///     Pool)` — so under `Pool` every null-valued-group row still gets
+///     pushed into the `[KeyValue::Null]` group instead of being excluded.
+///   - **Emission order.** `group_partition_multi` returns groups in
+///     FIRST-APPEARANCE order (GH #179's disclosed policy for its Skip
+///     callers). letter_value's `sort = None` contract is
+///     LEXICOGRAPHIC/numeric order
+///     (`test_letter_value_sort_none_is_lexicographic`, unchanged since
+///     before this migration), and `sort = Some(...)` ranks groups by a
+///     per-group value aggregate `group_partition_multi` has no equivalent
+///     for. Neither depends on partition-return order: [`group_order`] is
+///     applied AFTER partitioning, as a deliberate post-partition reorder
+///     over the same `BTreeMap<KeyValue, Vec<f64>>` shape used pre-migration
+///     — the partitioner supplies WHICH rows belong to which group and its
+///     null policy; `group_order` decides emission order. `Skip` +
+///     first-appearance order was ruled out, not left untried: swapping to
+///     it would have to also drop the null-pooling contract (no test pins
+///     it, but nothing asked to change it) and would have made
+///     first-appearance order the ordering [`group_order`] has to override
+///     unconditionally for both its branches — replacing a real policy this
+///     module already owns with a policy borrowed from a different transform
+///     shape, not a simplification.
 fn compute_depths(
     spec: &LetterValueSpec,
-    pairs: &[(Option<String>, f64)],
+    batch: &RecordBatch,
     ctx: &TransformContext,
-) -> Vec<DepthRow> {
-    // Group values; BTreeMap keys give a deterministic lexicographic baseline.
-    let mut groups: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
-    for (g, v) in pairs {
-        groups.entry(g.clone()).or_insert_with(Vec::new).push(*v);
-    }
-    for vs in groups.values_mut() {
+) -> PyResult<(Vec<DepthRow>, DataType)> {
+    let schema = batch.schema();
+    let vi = schema.index_of(&spec.value)
+        .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
+    let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
+
+    let group_cols: Vec<String> = spec.group.iter().cloned().collect();
+    let partition = group_partition_multi(batch, &group_cols, "stat_letter_value", NullKeyPolicy::Pool, ctx)?;
+    let group_dtype = partition.dtypes.first().cloned().unwrap_or(DataType::Utf8);
+
+    // Per-group (non-null, non-NaN) sorted values. The partitioner decides
+    // WHICH rows belong to which group; filtering by the VALUE column's own
+    // null/NaN rows is this transform's job, same shape as
+    // `box_stats::apply_with_context`'s per-group `filter_map` over its
+    // partition's row indices.
+    //
+    // A group whose rows are ALL null/NaN filters down to an empty `vs`
+    // here — a group the pre-migration code could never see, since it built
+    // this map from already-filtered `(key, value)` pairs rather than raw
+    // partitioned rows. Such a group must NOT be inserted:
+    // `group_order`'s `sort=Some(mean|median)` aggregate over an empty slice
+    // is `NaN`, and `NaN.partial_cmp(_)` is `None`, which the comparator
+    // degrades to `Ordering::Equal` against every other group — measured
+    // (not just predicted) to silently INVERT the real groups' requested
+    // order (`letter_value_all_nan_group_does_not_corrupt_sort_order`).
+    // Skipping the insert here restores the exact invariant the
+    // pre-migration `pairs`-based map always had: every key in `groups` has
+    // at least one real value.
+    let mut groups: BTreeMap<KeyValue, Vec<f64>> = BTreeMap::new();
+    for (key, rows) in &partition.groups {
+        let g = key.first().cloned().unwrap_or(KeyValue::Null);
+        let mut vs: Vec<f64> = rows.iter().filter_map(|&r| {
+            if varr.is_null(r) { return None; }
+            let v = varr.value(r);
+            if v.is_nan() { return None; }
+            Some(v)
+        }).collect();
+        if vs.is_empty() {
+            continue;
+        }
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        groups.insert(g, vs);
     }
     let order = group_order(&spec.sort, &groups);
 
@@ -303,19 +410,23 @@ fn compute_depths(
             // #162's named case: the strategy computed a depth deeper than
             // this transform can emit (12 Tukey letters / named per-depth
             // outputs) and it was silently capped.
-            // `g` is the bare group VALUE (e.g. `"big"`); `TransformWarning::group`'s
-            // documented contract is a `"col=value"` label (`context.rs`'s doc,
-            // matching every sibling adopter's `describe_group_row`/
-            // `describe_group_keys`), so pair it with `spec.group` (the column
-            // name) rather than passing the bare value through. `g.is_some()`
-            // here implies `spec.group.is_some()` too — `pairs`' `Option<String>`
-            // component only becomes `Some` when `extract_values` read a real
-            // `spec.group` column — but the `None` arm stays as a defensive
-            // fallback rather than an `unwrap`.
-            let group = g.as_ref().map(|v| match &spec.group {
-                Some(col) => format!("{col}={v}"),
-                None => v.clone(),
-            });
+            // `g` is the group KEY (e.g. `KeyValue::Str("big")` or
+            // `KeyValue::Int(6)`); `TransformWarning::group`'s documented
+            // contract is a `"col=value"` label (`context.rs`'s doc), built
+            // here with the same `describe_group_keys` formatter every
+            // sibling adopter (`smooth.rs`, `robust.rs`) uses, so the label
+            // text cannot drift from theirs. `g` is `KeyValue::Null` in
+            // exactly the two cases with no real "col=value" to report: no
+            // group column at all, or this group's own key being null —
+            // `spec.group.is_some()` disambiguates the latter from the
+            // former, but both fall back to `group: None`.
+            let group = if matches!(g, KeyValue::Null) {
+                None
+            } else {
+                spec.group.as_ref().map(|col| {
+                    describe_group_keys(std::slice::from_ref(col), std::slice::from_ref(g))
+                })
+            };
             ctx.warn(TransformWarning::ParameterClamped {
                 transform: "LetterValue".into(),
                 group,
@@ -347,24 +458,26 @@ fn compute_depths(
             });
         }
     }
-    rows
+    Ok((rows, group_dtype))
 }
 
-fn build_primary_batch(rows: &[DepthRow]) -> PyResult<RecordBatch> {
+fn build_primary_batch(rows: &[DepthRow], group_dtype: &DataType) -> PyResult<RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("group", DataType::Utf8, true),
+        Field::new("group", group_dtype.clone(), true),
         Field::new("depth", DataType::Int32, false),
         Field::new("lower", DataType::Float64, false),
         Field::new("upper", DataType::Float64, false),
         Field::new("level", DataType::Utf8, false),
     ]));
-    let groups: Vec<Option<String>> = rows.iter().map(|r| r.group.clone()).collect();
+    let group_keys: Vec<Vec<KeyValue>> = rows.iter().map(|r| vec![r.group.clone()]).collect();
+    let group_col =
+        materialize_groupby_col(&group_keys, 0, group_dtype).map_err(PyValueError::new_err)?;
     let depths: Vec<i32> = rows.iter().map(|r| r.depth).collect();
     let lowers: Vec<f64> = rows.iter().map(|r| r.lower).collect();
     let uppers: Vec<f64> = rows.iter().map(|r| r.upper).collect();
     let levels: Vec<String> = rows.iter().map(|r| r.level.clone()).collect();
     let cols: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(groups.iter().map(|x| x.as_deref()).collect::<Vec<_>>())),
+        group_col,
         Arc::new(Int32Array::from(depths)),
         Arc::new(Float64Array::from(lowers)),
         Arc::new(Float64Array::from(uppers)),
@@ -409,8 +522,8 @@ pub(crate) fn secondary_outputs(
     input_batch: &RecordBatch,
     primary_batch: &RecordBatch,
 ) -> PyResult<Vec<(String, RecordBatch)>> {
-    let groups_col = primary_batch.column(0).as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'group' column"))?;
+    let group_dtype = primary_batch.schema().field(0).data_type().clone();
+    let groups_col = primary_batch.column(0);
     let depths_col = primary_batch.column(1).as_any().downcast_ref::<Int32Array>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Int32Array for 'depth' column"))?;
     let lowers_col = primary_batch.column(2).as_any().downcast_ref::<Float64Array>()
@@ -418,10 +531,21 @@ pub(crate) fn secondary_outputs(
     let uppers_col = primary_batch.column(3).as_any().downcast_ref::<Float64Array>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Float64Array for 'upper' column"))?;
 
+    // Reads row `i`'s group key from the primary batch's "group" column at
+    // its own (possibly non-Utf8) dtype, via the shared extractor rather than
+    // a hardcoded `StringArray` downcast.
+    let group_at = |i: usize| -> PyResult<KeyValue> {
+        groupby_key_at(groups_col.as_ref(), &group_dtype, i).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "stat_letter_value: internal error extracting group key at row {i}"
+            ))
+        })
+    };
+
     // Per-group max-depth (lower, upper) extents — the outermost letter value.
-    let mut tail: BTreeMap<Option<String>, (i32, f64, f64)> = BTreeMap::new();
+    let mut tail: BTreeMap<KeyValue, (i32, f64, f64)> = BTreeMap::new();
     for i in 0..primary_batch.num_rows() {
-        let g = if groups_col.is_null(i) { None } else { Some(groups_col.value(i).to_string()) };
+        let g = group_at(i)?;
         let d = depths_col.value(i);
         let lo = lowers_col.value(i);
         let hi = uppers_col.value(i);
@@ -438,8 +562,8 @@ pub(crate) fn secondary_outputs(
     // survives as a column but is always `true` on the rows that reach it) —
     // the batch is a filtered outlier list, not a flagged copy of every input
     // row, so a boxen chart's outlier layer draws only the points it names.
-    let input_pairs = extract_values(spec, input_batch)?;
-    let mut o_groups: Vec<Option<String>> = Vec::new();
+    let (input_pairs, _) = extract_values(spec, input_batch)?;
+    let mut o_groups: Vec<KeyValue> = Vec::new();
     let mut o_vals: Vec<f64> = Vec::new();
     let mut o_flags: Vec<bool> = Vec::new();
     for (g, v) in &input_pairs {
@@ -458,16 +582,27 @@ pub(crate) fn secondary_outputs(
         o_vals.push(*v);
         o_flags.push(is_outlier);
     }
+    // Column names/nullability still come from the shared consts (no drift
+    // risk); only the "group" entry's declared dtype is overridden to this
+    // call's actual group dtype, since the consts describe the schema under
+    // DEFAULT (ungrouped, Utf8) construction — see their doc comments and
+    // `registry::letter_value_secondary_outputs`.
     let outliers_schema = Arc::new(Schema::new(
         OUTLIERS_COLUMNS
             .iter()
-            .map(|(name, dt)| Field::new(*name, dt.clone(), *name == "group"))
+            .map(|(name, dt)| {
+                let dt = if *name == "group" { group_dtype.clone() } else { dt.clone() };
+                Field::new(*name, dt, *name == "group")
+            })
             .collect::<Vec<_>>(),
     ));
+    let o_group_keys: Vec<Vec<KeyValue>> = o_groups.iter().map(|k| vec![k.clone()]).collect();
+    let o_group_col =
+        materialize_groupby_col(&o_group_keys, 0, &group_dtype).map_err(PyValueError::new_err)?;
     let outliers_batch = RecordBatch::try_new(
         outliers_schema,
         vec![
-            Arc::new(StringArray::from(o_groups.iter().map(|x| x.as_deref()).collect::<Vec<_>>())) as ArrayRef,
+            o_group_col,
             Arc::new(Float64Array::from(o_vals)) as ArrayRef,
             Arc::new(BooleanArray::from(o_flags)) as ArrayRef,
         ],
@@ -479,15 +614,18 @@ pub(crate) fn secondary_outputs(
     let depth_schema = Arc::new(Schema::new(
         DEPTH_COLUMNS
             .iter()
-            .map(|(name, dt)| Field::new(*name, dt.clone(), *name == "group"))
+            .map(|(name, dt)| {
+                let dt = if *name == "group" { group_dtype.clone() } else { dt.clone() };
+                Field::new(*name, dt, *name == "group")
+            })
             .collect::<Vec<_>>(),
     ));
     let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'level' column"))?;
-    let mut by_depth: BTreeMap<i32, (Vec<Option<String>>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
+    let mut by_depth: BTreeMap<i32, (Vec<KeyValue>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
     for i in 0..primary_batch.num_rows() {
         let d = depths_col.value(i);
-        let g = if groups_col.is_null(i) { None } else { Some(groups_col.value(i).to_string()) };
+        let g = group_at(i)?;
         let entry = by_depth.entry(d).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
         entry.0.push(g);
         entry.1.push(lowers_col.value(i));
@@ -514,8 +652,11 @@ pub(crate) fn secondary_outputs(
             .get(&(k as i32))
             .map(|t| t.clone())
             .unwrap_or_else(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        let group_keys_v: Vec<Vec<KeyValue>> = groups_v.iter().map(|k| vec![k.clone()]).collect();
+        let group_col_v = materialize_groupby_col(&group_keys_v, 0, &group_dtype)
+            .map_err(PyValueError::new_err)?;
         let cols: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(groups_v.iter().map(|x| x.as_deref()).collect::<Vec<_>>())) as ArrayRef,
+            group_col_v,
             Arc::new(Float64Array::from(lowers_v)) as ArrayRef,
             Arc::new(Float64Array::from(uppers_v)) as ArrayRef,
             Arc::new(StringArray::from(levels_v.iter().map(|s| s.as_str()).collect::<Vec<_>>())) as ArrayRef,
@@ -1180,5 +1321,297 @@ mod tests {
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(group_first_appearance(&out), vec!["a", "c", "b"]);
+    }
+
+    // ── #185: letter_value accepts every dtype its siblings accept ────────
+
+    fn batch_value_int64_group(values: Vec<f64>, groups: Vec<i64>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("cyl", DataType::Int64, true),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(values)),
+            Arc::new(Int64Array::from(groups)),
+        ]).unwrap()
+    }
+
+    /// RED (pre-#185): a group column of any dtype other than Utf8 refused
+    /// with `"stat_letter_value: group column 'cyl' must be Utf8; got Int64"`
+    /// — the inverted contract every sibling groupby-taking transform (box_stats,
+    /// outliers, swarm, kde_2d, smooth, ...) does NOT share. GREEN: the call
+    /// renders, and the output `group` column carries the ORIGINAL Int64 dtype
+    /// (not a `.to_string()` shortcut, which would silently re-widen it to Utf8
+    /// one layer down — the exact drift #185 exists to close).
+    #[test]
+    fn letter_value_int64_group_succeeds_and_preserves_dtype() {
+        use arrow::array::Int64Array;
+        // Group 6: [10,20,30,40,50]; group 8: [1,2,3,4,5].
+        let batch = batch_value_int64_group(
+            vec![10.0, 20.0, 30.0, 40.0, 50.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![6, 6, 6, 6, 6, 8, 8, 8, 8, 8],
+        );
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("cyl".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(
+            out.schema().field(0).data_type(),
+            &DataType::Int64,
+            "the 'group' output column must keep the input's Int64 dtype, not widen to Utf8"
+        );
+        let groups = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..out.num_rows() {
+            seen.insert(groups.value(i));
+        }
+        assert_eq!(seen, std::collections::BTreeSet::from([6, 8]));
+    }
+
+    /// A group column of an unsupported dtype (e.g. Date32, which no groupby
+    /// consumer in the crate accepts) still refuses, naming the column and
+    /// dtype. Pins the WORDING word-for-word, not just a substring match:
+    /// `extract_values`/`compute_depths` no longer hand-roll their own dtype
+    /// gate — they delegate to `group_key::validate_groupby_columns` (via
+    /// `extract_values`) and `group_key::group_partition_multi` (via
+    /// `compute_depths`, which calls `validate_groupby_columns` internally
+    /// too), so the refusal is that SAME shared function's exact text
+    /// (`"groupby column '<col>' has unsupported dtype <dt>; supported:
+    /// ..."`), not a hand-duplicated near-copy that happened to say "group
+    /// column" instead of "groupby column". `apply` reaches this through
+    /// `compute_depths`, so this also proves the migration to
+    /// `group_partition_multi` (#185 close-review finding 2) still refuses
+    /// by name.
+    #[test]
+    fn letter_value_unsupported_group_dtype_refuses_by_name() {
+        pyo3::Python::initialize();
+        use arrow::array::Date32Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("d", DataType::Date32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Date32Array::from(vec![Some(1), Some(2)])),
+            ],
+        ).unwrap();
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("d".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let err = apply(&spec, &batch).expect_err("a Date32 group column must refuse");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
+             supported: Utf8/LargeUtf8, Float64/Float32, Int8/Int16/Int32/Int64, \
+             UInt8/UInt16/UInt32/UInt64, Boolean"
+        );
+    }
+
+    /// Companion to the primary-batch refusal above: `extract_values` (the
+    /// path `secondary_outputs` uses for its outlier classification) refuses
+    /// with the SAME `validate_groupby_columns` wording, byte-for-byte —
+    /// proof the two call sites did not drift onto their own copies of the
+    /// message after the shared-toolkit migration.
+    #[test]
+    fn letter_value_extract_values_unsupported_dtype_matches_compute_depths_wording() {
+        pyo3::Python::initialize();
+        use arrow::array::Date32Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("d", DataType::Date32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Date32Array::from(vec![Some(1), Some(2)])),
+            ],
+        ).unwrap();
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("d".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let err = extract_values(&spec, &batch).expect_err("a Date32 group column must refuse");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
+             supported: Utf8/LargeUtf8, Float64/Float32, Int8/Int16/Int32/Int64, \
+             UInt8/UInt16/UInt32/UInt64, Boolean"
+        );
+    }
+
+    /// The Int64 group dtype survives into the SECONDARY outputs too (outliers
+    /// + depth_K bands), not just the primary batch — `secondary_outputs` reads
+    /// the group column back off the primary batch via the shared
+    /// `groupby_key_at` extractor rather than assuming it is a `StringArray`.
+    #[test]
+    fn letter_value_secondary_outputs_preserve_int64_group_dtype() {
+        use arrow::array::Int64Array;
+        let mut vs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        vs.push(-1000.0);
+        vs.push(1000.0);
+        let n = vs.len();
+        let groups = vec![7i64; n];
+        let batch = batch_value_int64_group(vs, groups);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("cyl".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        assert_eq!(outliers.1.schema().field(0).data_type(), &DataType::Int64);
+        assert_eq!(outliers.1.num_rows(), 2, "the two extreme values are still classified as outliers");
+        let o_groups = outliers.1.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        for i in 0..outliers.1.num_rows() {
+            assert_eq!(o_groups.value(i), 7);
+        }
+
+        let depth_1 = secs.iter().find(|(k, _)| k == "depth_1").unwrap();
+        assert_eq!(depth_1.1.schema().field(0).data_type(), &DataType::Int64);
+        assert_eq!(depth_1.1.num_rows(), 1);
+        let d_groups = depth_1.1.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(d_groups.value(0), 7);
+    }
+
+    /// Evidence for the `NullKeyPolicy::Pool` design choice in
+    /// `compute_depths`'s doc comment: a null-valued group row still forms
+    /// its OWN group (materialized as a null `group` entry), rather than
+    /// being dropped the way `NullKeyPolicy::Skip` would drop it. 5 rows key
+    /// to `"a"`, 5 key to a null group column value; both must survive as
+    /// distinct groups.
+    #[test]
+    fn letter_value_null_group_value_pools_into_one_null_keyed_group() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let groups: Vec<Option<&str>> = vec![
+            Some("a"), Some("a"), Some("a"), Some("a"), Some("a"),
+            None, None, None, None, None,
+        ];
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0];
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(groups)),
+                Arc::new(Float64Array::from(values)),
+            ],
+        ).unwrap();
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let g_arr = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let mut seen: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
+        for i in 0..out.num_rows() {
+            seen.insert(if g_arr.is_null(i) { None } else { Some(g_arr.value(i).to_string()) });
+        }
+        assert_eq!(
+            seen,
+            std::collections::HashSet::from([Some("a".to_string()), None]),
+            "the null-valued-group rows must survive as their own group (a null 'group' \
+             entry), not be silently dropped (NullKeyPolicy::Skip's behavior) or scattered"
+        );
+    }
+
+    /// FA-7-style byte-stability guard for #185: a Utf8 group column produces
+    /// the identical output it did before the KeyValue migration — the same
+    /// group set, the same per-group median, and the field stays Utf8.
+    #[test]
+    fn letter_value_utf8_group_byte_stable_after_keyvalue_migration() {
+        let groups: Vec<&str> = (0..30).map(|i| ["a", "b", "c"][i % 3]).collect();
+        let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Utf8);
+        assert_eq!(out.num_rows(), 3);
+        assert_eq!(group_first_appearance(&out), vec!["a", "b", "c"]);
+    }
+
+    /// Regression for stage1-rust-quality-reviewer Bug Risk 3 (cycle 3):
+    /// `compute_depths` used to insert EVERY partition group into `groups`,
+    /// including one whose value rows are all null/NaN (`vs` empty) — a
+    /// group the pre-migration code could never see, since it built the map
+    /// from already-filtered `(key, value)` pairs. `group_order`'s
+    /// sort-by-aggregate comparator has no filter for empty groups: an empty
+    /// group's `median`/`mean` aggregate is `NaN`, `NaN.partial_cmp(_)` is
+    /// `None`, and the comparator degrades to `Ordering::Equal` against
+    /// every other group.
+    ///
+    /// MEASURED, not predicted: with three real groups (a/c/e, medians
+    /// 10/50/90) and three all-NaN groups (b/d/f) interleaved
+    /// lexicographically between them, `sort=Some(median, Desc)` on the
+    /// pre-fix (cycle-2) code deterministically produced `["a", "c", "e"]`
+    /// — ascending order, the exact OPPOSITE of the requested descending
+    /// order — reproduced identically across three separate runs, with no
+    /// panic on this toolchain. That is the real symptom this test pins:
+    /// not a panic, a silently INVERTED sort.
+    #[test]
+    fn letter_value_all_nan_group_does_not_corrupt_sort_order() {
+        let groups: Vec<&str> = vec![
+            "a", "a", "a",
+            "b", "b", "b",
+            "c", "c", "c",
+            "d", "d", "d",
+            "e", "e", "e",
+            "f", "f", "f",
+        ];
+        let values: Vec<f64> = vec![
+            9.0, 10.0, 11.0,
+            f64::NAN, f64::NAN, f64::NAN,
+            49.0, 50.0, 51.0,
+            f64::NAN, f64::NAN, f64::NAN,
+            89.0, 90.0, 91.0,
+            f64::NAN, f64::NAN, f64::NAN,
+        ];
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: Some(LetterValueSort { op: SortOp::Median, order: SortOrder::Desc }),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // The all-NaN groups (b/d/f) never had any value rows and must not
+        // be emitted at all -- only the three real groups.
+        assert_eq!(out.num_rows(), 3, "only a/c/e's single Tukey depth row each should be emitted");
+        assert_eq!(
+            group_first_appearance(&out),
+            vec!["e", "c", "a"],
+            "descending-by-median order must be e(90), c(50), a(10) -- \
+             an all-NaN group's NaN aggregate must not collapse the comparator \
+             to Equal and invert the real groups' relative order"
+        );
     }
 }

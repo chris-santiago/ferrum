@@ -27,7 +27,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from _svg_rects import svg_elements
+from _svg_rects import data_bar_rects, svg_elements
 
 _ALL_CATPLOT_KINDS = ("strip", "swarm", "box", "violin", "boxen", "point", "bar", "count")
 
@@ -626,13 +626,37 @@ def test_native_scale_true_numeric_kinds_accept_the_flag(kind):
     assert "<svg" in svg
 
 
-def test_native_scale_true_boxen_hits_the_pre_existing_utf8_groupby_limit():
-    """Documents (does not fix) a pre-existing, orthogonal Rust gap:
-    ``stat_letter_value`` requires its groupby column to be Utf8 regardless
-    of ``native_scale`` -- bare ``mark_boxen()`` on a numeric ``x=`` already
-    raises the identical message on unpatched `main`. Not part of
-    F-L09-03's scope (crates/** is out of bounds for this task); tracked
-    here so the boundary is tested, not silently swallowed.
+def test_boxen_accepts_a_numeric_groupby_column_under_either_native_scale():
+    """``stat_letter_value`` accepts a numeric groupby column, both ways.
+
+    This test previously pinned the opposite, and its rationale is rewritten
+    rather than re-baselined because what it pins changed in kind, not in
+    value. It used to document a Rust gap that ``F-L09-03`` deliberately left
+    standing: ``stat_letter_value`` hard-required a Utf8 groupby column, so a
+    numeric ``x=`` raised ``"must be Utf8"`` for BOTH ``native_scale`` values
+    -- ``native_scale=False`` changes the axis type, not the raw data handed
+    to the transform, so force-nominal typing could not rescue it.
+
+    Wave 5's ``#185`` closed that gap by routing the transform's group column
+    through the shared ``transform/group_key/`` toolkit, which is what every
+    sibling transform already used. So the boundary this test guards is no
+    longer a refusal but its absence: both spellings must now RENDER. Note the
+    ``#185`` issue text is inverted -- it reported Utf8 as rejected, when
+    Utf8/Categorical were in fact the only dtypes accepted.
+
+    The two ``native_scale`` values are asserted SEPARATELY, because after
+    ``#185`` they no longer behave alike -- and asserting them alike is how
+    this test would silently stop discriminating. ``native_scale=False``
+    resolves the category channel ordinal (``#171``), so the boxes get a band
+    to size against and must draw. ``native_scale=True`` is deliberately
+    quantitative, so the transform runs but the boxes have no band and draw
+    nothing; that residual is ``#328``, filed and out of this wave's scope.
+    Neither may raise.
+
+    Drawing is asserted through band geometry rather than ``"<svg" in svg``:
+    a chart with an empty plot area satisfies the latter, and an empty boxen
+    is exactly what a half-fixed dispatch yields -- ``#185`` makes the
+    transform run, which is necessary but not sufficient for boxes to appear.
     """
     df = pl.DataFrame(
         {
@@ -640,10 +664,19 @@ def test_native_scale_true_boxen_hits_the_pre_existing_utf8_groupby_limit():
             "val": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
         }
     )
-    with pytest.raises(ValueError, match=r"must be Utf8"):
-        fm.catplot(df, x="cat", y="val", kind="boxen", native_scale=True).to_svg()
-    # native_scale=False hits the identical pre-existing limit: force-nominal
-    # typing changes the AXIS type, not the raw data fed to the letter-value
-    # transform's groupby, so this is untouched by this task's fix either way.
-    with pytest.raises(ValueError, match=r"must be Utf8"):
-        fm.catplot(df, x="cat", y="val", kind="boxen", native_scale=False).to_svg()
+
+    ordinal = fm.catplot(df, x="cat", y="val", kind="boxen", native_scale=False).to_svg()
+    assert [r["width"] for r in data_bar_rects(ordinal)], (
+        "boxen(native_scale=False) on a numeric groupby column drew no boxes; "
+        "#185 makes the transform run and #171 makes the category channel "
+        "resolve ordinal so the boxes have a band -- an empty plot area means "
+        "one of the two regressed"
+    )
+
+    # #328: still quantitative by design, so no band and no boxes -- but the
+    # call must COMPLETE. Before #185 it raised "must be Utf8" instead.
+    quantitative = fm.catplot(df, x="cat", y="val", kind="boxen", native_scale=True).to_svg()
+    assert not data_bar_rects(quantitative), (
+        "boxen(native_scale=True) drew band geometry; native_scale=True is "
+        "deliberately quantitative (#328) and #185 must not have changed that"
+    )
