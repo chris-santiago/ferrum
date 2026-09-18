@@ -76,10 +76,18 @@ def rug_tick_x1_by_stroke(svg: str) -> dict[str, set[float]]:
 
     Excludes `THEME_CHROME_STROKES` so only the per-group tick lines remain --
     this lets a test compare "this group's rug ticks" between two renders
-    without depending on emission order or on the theme's own frame lines.
+    without depending on emission order or on the theme's own frame lines. A
+    `<line>` with no `stroke` attribute at all is also excluded (mirroring
+    `polylines`' explicit stance on the same question): the return type is
+    keyed by stroke color, so a strokeless line has no key to live under, and
+    a `None` key would collapse every unstyled line into one bucket instead.
     """
     out: dict[str, set[float]] = {}
-    for attrs in svg_elements(svg, "line", lambda a: a.get("stroke") not in THEME_CHROME_STROKES):
+    for attrs in svg_elements(
+        svg,
+        "line",
+        lambda a: a.get("stroke") is not None and a["stroke"] not in THEME_CHROME_STROKES,
+    ):
         out.setdefault(attrs["stroke"], set()).add(round(float(attrs["x1"]), 3))
     return out
 

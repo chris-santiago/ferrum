@@ -317,6 +317,45 @@ def test_typed_color_object_hue_still_passes_through_untouched() -> None:
     assert warnings_ == []
 
 
+@pytest.mark.parametrize("spelling", ["type_", "type"], ids=["type_-kwarg", "type-kwarg"])
+def test_an_explicitly_quantitative_hue_still_renders_its_colorbar(spelling: str) -> None:
+    """ "Does not overrule an explicit type" is a claim about the RENDER.
+
+    The test above states the same half of the branch with
+    ``type="nominal"``, which is the type ``nominal_color_channel`` would
+    have imposed anyway -- so it holds even for an implementation that
+    ignores the caller's declaration entirely, and a mutation that retyped
+    every channel object Nominal survived the whole suite: the only
+    assertion that noticed was an object-identity check in
+    ``tests/test_catplot_hue_order.py``. Identity is not the contract; the
+    chart is.
+
+    So: state the type the helper would NOT have chosen, and require the
+    rendered consequence of the caller's choice -- a continuous colorbar for
+    the numeric column, and no categorical swatch legend standing in for it.
+    ``catplot(kind="bar")`` is the vehicle because a bar mark renders a
+    continuous color scale silently (no ``UnsupportedColorScaleOnMark``), so
+    the two readings differ in the picture rather than in a warning.
+
+    Both spellings, because ``ChannelBase.__init__`` normalizes ``type_=``
+    and ``type=`` into the one ``"type"`` key the helper's untypedness
+    predicate reads.
+    """
+    df = _twin(pl.Int64)
+    hue = fm.Color("grp", **{spelling: "quantitative"})
+    svg, warnings_ = render(fm.catplot(df, x="cat", y="y", hue=hue, kind="bar"))
+
+    assert has_colorbar(svg), (
+        "an explicitly quantitative hue must still render its colorbar; "
+        "nominal_color_channel overruled the caller's stated type"
+    )
+    assert legend_labels(svg) == [], (
+        "a quantitative color scale has no categorical swatch legend; "
+        f"got {legend_labels(svg)}, i.e. the channel was retyped Nominal"
+    )
+    assert warnings_ == []
+
+
 def test_relplot_scatter_hue_with_untyped_color_object_keeps_dtype_inference() -> None:
     """The scatter carve-out is unaffected: it never calls
     ``nominal_color_channel`` at all, so an untyped ``Color(...)`` object on

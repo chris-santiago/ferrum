@@ -8,7 +8,7 @@ canonicalises on ``mark_kwargs``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 # Primitive (renderer-native) mark names — those that do not desugar into a
@@ -27,20 +27,20 @@ class _Layer:
     encoding: dict = field(default_factory=dict)
     transforms: list = field(default_factory=list)
     mark_kwargs: Optional[dict] = None
-    #: Keys of ``mark_kwargs`` that came from a caller parameter aimed at THIS
-    #: layer specifically -- ``mark_smooth(line_kwargs=...)`` / ``lmplot(
-    #: line_kws=...)`` on the fit line today (#199). The chart-level catch-all
+    #: Keys of ``mark_kwargs`` that came from a caller instruction aimed at
+    #: THIS layer specifically -- ``mark_smooth(layer_kwargs={"line": ...})``
+    #: and ``lmplot(line_kws=...)`` on the fit line today (#199). The chart-level catch-all
     #: ``**mark_kwargs``, which the pending dispatcher spreads across every
     #: emitted layer, does not override them: a value the caller aimed at one
     #: layer is more specific than one they aimed at the mark as a whole.
-    #: Read by ``_desugar._apply_style_to_layer`` and by nothing else, and
-    #: never serialized (``_spec_build._build_layers_list`` reads named
-    #: fields). A layer that never passes through that function -- one
-    #: assembled outside the pending dispatcher, e.g.
-    #: ``plots/regression._fit_chart_from_named_transform`` -- is therefore
-    #: unaffected by this field either way; it is NOT a claim that no other
-    #: merger exists (``marks/_mark_kwargs.apply_user_mark_kwargs`` is one,
-    #: and ignores this field -- see ``_desugar._catch_all_over``). Carries
+    #: Read by :func:`apply_catch_all_style` below -- the ONE merger of a
+    #: catch-all style over a layer, which both the pending dispatcher
+    #: (``_desugar._resolve_pending_impl``) and the desugar-side spreader
+    #: (``marks/_mark_kwargs.apply_user_mark_kwargs``) call -- and never
+    #: serialized (``_spec_build._build_layers_list`` reads named fields). A
+    #: layer that never passes through either -- one assembled outside both,
+    #: e.g. ``plots/regression._fit_chart_from_named_transform`` -- is
+    #: unaffected by this field either way. Carries
     #: KEYS, not values: the values live in ``mark_kwargs`` with every other
     #: style, so nothing has to be folded in later and no layer can lose its
     #: styling by skipping a fold step.
@@ -58,6 +58,55 @@ class _Layer:
     # when True, so absent/false round-trips byte-identically with
     # pre-#52 specs.
     independent_y: bool = False
+
+
+def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:
+    """Merge a chart-level catch-all *style_dict* over an already-*resolved* style.
+
+    The one precedence rule for that question, homed here beside the
+    ``caller_style_keys`` field it reads:
+
+    - a resolved key the caller did NOT name is the desugar's own default, so
+      the catch-all overrides it (``mark_boxplot(opacity=0.8)`` beats a
+      ribbon's built-in ``opacity=0.3``);
+    - a resolved key the caller DID name, through one of the mark's own
+      per-layer parameters, is the more specific instruction, so the catch-all
+      leaves it alone (``mark_smooth(layer_kwargs={"line": {"stroke": ...}})``
+      beats a bare ``stroke=`` on the fit line, while the band still takes the
+      bare one).
+
+    Both callers -- :func:`apply_catch_all_style` for a ``_Layer`` and
+    ``_desugar._merge_desugar_mark_kwargs`` for a single-mark result -- read
+    the rule from here rather than restating it, so the two shapes of a
+    desugar result cannot answer it differently.
+    """
+    return {
+        **(resolved or {}),
+        **{k: v for k, v in style_dict.items() if k not in caller_style_keys},
+    }
+
+
+def apply_catch_all_style(layer: _Layer, style_dict: dict) -> _Layer:
+    """Merge a catch-all *style_dict* into *layer*'s ``mark_kwargs``.
+
+    Precedence is :func:`catch_all_over`'s, keyed on the layer's own
+    ``caller_style_keys``.  When *style_dict* is empty the layer is returned
+    unchanged, so output stays byte-identical to a render that passed no
+    style at all.
+
+    This is the package's ONE catch-all-over-a-layer merger. Both spreaders
+    call it: ``_desugar._resolve_pending_impl``, which spreads the chart-level
+    ``**mark_kwargs`` over a layered desugar's emitted layers, and
+    ``marks/_mark_kwargs.apply_user_mark_kwargs``, which spreads a desugar's
+    own validated ``**mark_kwargs`` over the layers it just built. They used
+    to be two bodies agreeing by coincidence -- the second was unconditionally
+    user-wins and ignored ``caller_style_keys`` entirely, which was invisible
+    only because no layer reaching it recorded any.
+    """
+    if not style_dict:
+        return layer
+    merged = catch_all_over(layer.mark_kwargs, style_dict, layer.caller_style_keys)
+    return replace(layer, mark_kwargs=merged)
 
 
 @dataclass(frozen=True)
@@ -84,9 +133,9 @@ class MarkDesugarResult:
     ``mark_kwargs`` carries the style this desugar resolved for the mark it
     emits, whatever its source: a constant the desugar computes for itself
     (``desugar_function``'s ``clip=False``) or a value the caller aimed at
-    that mark through one of the desugar's own named parameters
-    (``desugar_smooth``'s ``line_kwargs=``, i.e. ``lmplot``'s ``line_kws``,
-    #199). What it is NOT is the caller's chart-level catch-all
+    the catalogued layer this mark IS, through the per-layer door
+    (``mark_smooth(layer_kwargs={"line": ...})``, i.e. ``lmplot``'s
+    ``line_kws``, #199 -- see ``layer_name`` below). What it is NOT is the caller's chart-level catch-all
     ``**mark_kwargs`` -- those are partitioned out by ``_split_style_kwargs``
     and applied by the pending dispatcher, which is a different slot with a
     different reach (every emitted layer, not this one mark).
@@ -120,13 +169,13 @@ class MarkDesugarResult:
       this is what lets ``mark_boxplot(opacity=0.8)`` beat a ribbon's
       built-in ``opacity=0.3``;
     - a key IN ``caller_style_keys`` is something the caller aimed at this
-      one mark through a named parameter, so the catch-all does NOT override
-      it -- ``mark_smooth(stroke="#0000ff", line_kwargs={"stroke":
-      "#ff0000"})`` draws the fit line ``#ff0000`` and the CI band
-      ``#0000ff``, since only the line was named.
+      one layer through the per-layer door, so the catch-all does NOT
+      override it -- ``mark_smooth(stroke="#0000ff", layer_kwargs={"line":
+      {"stroke": "#ff0000"}})`` draws the fit line ``#ff0000`` and the CI
+      band ``#0000ff``, since only the line was named.
 
     Both merge sites read the same field, so the two shapes cannot drift:
-    ``_apply_style_to_layer`` for a layered result (per ``_Layer``) and
+    ``apply_catch_all_style`` for a layered result (per ``_Layer``) and
     ``_merge_desugar_mark_kwargs`` for a single-mark one. The ordering is
     therefore a property of where a value came from, which the code records,
     rather than of which desugar happened to set it.
@@ -160,6 +209,16 @@ class MarkDesugarResult:
         above); empty means every key is a desugar default. Single-mark mode
         only -- a layered result records the same thing per layer, on
         ``_Layer.caller_style_keys``.
+    layer_name : str or None
+        Which catalogued sub-layer of the composite mark this single mark IS
+        (``_overrides.LAYER_NAME_CATALOG[kind]``) -- e.g. ``desugar_smooth``'s
+        no-CI shortcut emits one ``line``, the same layer the CI shape emits
+        beside its ``ribbon``. It is what lets the per-layer door
+        ``mark_smooth(layer_kwargs={"line": ...})`` reach a shape that has no
+        ``_Layer`` to carry the name, without the dispatcher having to guess
+        from the primitive mark name (``"line"`` the mark and ``"line"`` the
+        layer coincide here and would not in general). Single-mark mode only;
+        ``None`` when the mark is not a catalogued layer of anything.
 
     Examples
     --------
@@ -215,6 +274,7 @@ class MarkDesugarResult:
     data: Any = None  # synthetic data (e.g. desugar_function)
     mark_kwargs: Optional[dict] = None  # style resolved for the emitted mark
     caller_style_keys: frozenset = frozenset()  # which of those keys the caller named
+    layer_name: Optional[str] = None  # the catalogued sub-layer this mark is
 
     def __post_init__(self) -> None:
         """Enforce the layered-XOR-single-mark invariant, plus the
@@ -231,7 +291,9 @@ class MarkDesugarResult:
         nothing, since layered mode ignores the top-level field entirely.
         ``caller_style_keys`` rides the same rule for the same reason -- it
         annotates ``mark_kwargs``, so it is meaningless without one, and a
-        layered result records it per layer instead.
+        layered result records it per layer instead.  So does ``layer_name``:
+        it names the single mark's own catalogued layer, and a layered result
+        already carries a name per ``_Layer``.
         """
         if (self.layers is not None) == (self.mark is not None):
             raise ValueError(
@@ -254,6 +316,13 @@ class MarkDesugarResult:
                 "(layers set) must record it per layer on "
                 "_Layer.caller_style_keys instead, got "
                 f"caller_style_keys={set(self.caller_style_keys)!r}."
+            )
+        if self.layers is not None and self.layer_name is not None:
+            raise ValueError(
+                "MarkDesugarResult.layer_name is single-mark-only; it names "
+                "the catalogued sub-layer the single mark is, so a layered "
+                "result (layers set) must name each layer on _Layer.name "
+                f"instead, got layer_name={self.layer_name!r}."
             )
 
 

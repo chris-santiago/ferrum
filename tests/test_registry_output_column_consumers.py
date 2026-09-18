@@ -888,6 +888,10 @@ _KNOWN_NON_CHANNEL_KEYWORDS = frozenset(
         "how",  # e.g. a join/merge how="left"
         "label_align",  # a text-mark label alignment kwarg, same class as align
         "name",  # e.g. a named transform or layer name="median"
+        # _required_field_name(x, param="x") -- names the lmplot PARAMETER the
+        # refusal message quotes, not a column: the column name is the value
+        # being narrowed, passed positionally beside it.
+        "param",
         "title",  # e.g. an axis/legend title="sample"
         "value_name",  # Unpivot(value_name="value") -- declares, does not read
     }

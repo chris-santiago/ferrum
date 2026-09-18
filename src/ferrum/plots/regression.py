@@ -448,6 +448,74 @@ def _prediction_error_chart_from_source(
     )
 
 
+def _required_field_name(value: Any, *, entry: str, param: str) -> str:
+    """``_field_name`` for a figure parameter that has no meaning without a column.
+
+    ``_field_name`` returns ``str | None`` because the ``hue=``-shaped
+    parameters it was written for are optional. ``lmplot``'s ``x``/``y`` are
+    not, and the difference is load-bearing rather than cosmetic: their names
+    are what the fit layers title the axes with, and those layers are bound to
+    the TRANSFORM's output columns, so a ``None`` reaching
+    :func:`_fit_chart_from_named_transform`'s ``x_title``/``y_title`` -- both
+    declared ``str``, neither enforced -- silently retitles the value axis
+    ``ci_lower``, the confidence band's lower bound. That is #199 exactly,
+    restored by a type hole rather than by a code path.
+
+    Narrowing here, once, at the entry that owns the refusal, is what makes
+    the ``str`` annotations downstream true by construction instead of by
+    argument. It is also what lets an ENCODING OBJECT be accepted rather than
+    leaking a binding-layer error: ``lmplot``'s seven ``mark_smooth``-routed
+    methods already rendered ``x=fm.X("bill")`` correctly (``.encode()``
+    takes a channel object), while the three that construct their transform
+    directly raised the raw PyO3 ``argument 'x': 'X' object is not an
+    instance of 'str'``, and ``residplot`` raised polars' ``cannot turn
+    'X' into selector`` from its ``drop_nulls``. The column NAME is what
+    every one of those consumers wants; the channel itself still goes to
+    ``.encode()``, so a caller's ``title=``/``scale=`` survives.
+
+    *entry* is the public function the caller invoked and *param* the
+    parameter being narrowed, so the refusal names what they wrote.
+    ``regplot`` passes neither: it delegates to ``lmplot`` and therefore
+    reads as ``lmplot``, which is how its other refusals already read
+    (``truncate=False``, ``x_bins=`` on a dedicated method).
+    """
+    name = _field_name(value)
+    if name is None:
+        raise ValueError(
+            f"{entry}({param}=None): {param} names the column to fit and has no "
+            f"default. Pass a column name, or an encoding object wrapping one."
+        )
+    return name
+
+
+def _log_scaled_x(value: Any, field: str) -> Any:
+    """``lmplot(logx=True)``'s x channel, for either spelling of ``x``.
+
+    A bare column name becomes ``X(name, scale=log)``. A channel object the
+    caller built themselves is REBUILT with the log scale added -- same
+    class, same field, its own kwargs preserved (the idiom
+    ``nominal_color_channel`` uses for the same situation) -- rather than
+    replaced by ``X(field, ...)``, which would silently drop their
+    ``title=``/``axis=``, or passed to ``X(...)`` as a field, which is what
+    used to raise ``X: field must be str ... got X``.
+
+    A channel that already carries its own ``scale=`` is two instructions for
+    one scale slot, so it is refused rather than silently overruled in either
+    direction.
+    """
+    if not hasattr(value, "field"):
+        return X(field, scale={"type": "log"})
+    if value.option("scale") is not None:
+        raise ValueError(
+            "lmplot(logx=True, x=<channel with its own scale=>): two instructions "
+            "for one x scale. Keep your scale= and drop logx=True, or pass x as a "
+            "column name and let logx set the log scale."
+        )
+    kwargs = dict(value._kwargs)
+    kwargs["scale"] = {"type": "log"}
+    return type(value)(value.field, **kwargs)
+
+
 def _fit_chart_from_named_transform(
     data: Any,
     transform: Any,
@@ -512,9 +580,12 @@ def _fit_chart_from_named_transform(
     ``x_title``/``y_title`` are the caller's own column names, which the
     layers need because they are bound to the transform's output columns and
     the renderer titles each axis from layer 0 (see ``build_fit_layers``).
-    Required, not defaulted: ``lmplot``'s ``x``/``y`` are required ``str``
-    parameters, so every call site has them, and when ``scatter=False``
-    leaves the fit alone there is no sibling layer to fall back on (#199).
+    Required, not defaulted, and genuinely ``str``: ``lmplot`` resolves both
+    once through :func:`_required_field_name`, which refuses a ``None``
+    in ``lmplot``'s own voice, so no call site can hand this parameter the
+    ``str | None`` that would retitle the value axis ``ci_lower`` again
+    (#199). When ``scatter=False`` leaves the fit alone there is no sibling
+    layer to fall back on.
     """
     chart = Chart(data)._clone()
     chart._transforms = [transform]
@@ -793,6 +864,14 @@ def lmplot(
 
     data = to_polars(data)
 
+    # The fit's column names, resolved ONCE and non-optionally. Every consumer
+    # below -- the fit layers' axis titles, `desugar_smooth`'s field
+    # arguments, the x_range/jitter column lookups -- needs a real column
+    # name, and each used to re-derive it through `_field_name`, whose
+    # `str | None` return no call site checked (#199's type hole).
+    x_field = _required_field_name(x, entry="lmplot", param="x")
+    y_field = _required_field_name(y, entry="lmplot", param="y")
+
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
 
@@ -844,7 +923,7 @@ def lmplot(
         # range padded by 5% on each side (matching the typical auto-scale margin).
         try:
             _df = data.collect() if hasattr(data, "collect") else data
-            x_col_name = _field_name(x)
+            x_col_name = x_field
             if hasattr(_df, "to_arrow"):
                 _x_series = _df[x_col_name]
                 _x_min = float(_x_series.min())
@@ -874,7 +953,7 @@ def lmplot(
     # True)` carries the same workaround for the same renderer behavior.
     if scatter and x_jitter is not None:
         jitter_frame = to_polars(data)
-        jitter_column = _field_name(x)
+        jitter_column = x_field
         dtype = jitter_frame.schema.get(jitter_column)
         if dtype is not None and dtype.is_numeric() and dtype != pl.Float64:
             data = jitter_frame.with_columns(pl.col(jitter_column).cast(pl.Float64))
@@ -898,7 +977,7 @@ def lmplot(
     # fit all take the same channel object. (It used to be two
     # implementations at the bottom of this function, chosen on whether the
     # fit chart happened to have `_layers` yet.)
-    x_enc = X(x, scale={"type": "log"}) if logx else x
+    x_enc = _log_scaled_x(x, x_field) if logx else x
 
     enc: dict = {"x": x_enc, "y": y}
     if hue is not None:
@@ -974,16 +1053,18 @@ def lmplot(
             # takes for `ci=None, show_metrics=False`, whose chain-advancing
             # (unnamed) `Smooth` correctly becomes the chart's data.
             #
-            # `line_kws` is handed to `mark_smooth` as `line_kwargs=`, its own
-            # fit-line slot, rather than spread as mark kwargs (which would
-            # repaint the CI band too) or rewritten onto `out._layers` after
-            # the fact. The post-hoc rewrite is what dropped it here: on this
-            # branch the chart still carries a pending stat mark, so
-            # `out._layers` is empty until the desugar runs at render time
-            # (#199). Forwarding at construction reaches both shapes
-            # `desugar_smooth` can return without forcing that desugar early,
-            # which would cost the single-line shortcut.
-            fit = Chart(data).mark_smooth(**smooth_kwargs, line_kwargs=lkw)
+            # `line_kws` is handed to `mark_smooth` through its per-layer
+            # door, aimed at the `line` layer, rather than spread as mark
+            # kwargs (which would repaint the CI band too) or rewritten onto
+            # `out._layers` after the fact. The post-hoc rewrite is what
+            # dropped it here: on this branch the chart still carries a
+            # pending stat mark, so `out._layers` is empty until the desugar
+            # runs at render time (#199). Forwarding at construction reaches
+            # both shapes `desugar_smooth` can return without forcing that
+            # desugar early, which would cost the single-line shortcut.
+            fit = Chart(data).mark_smooth(
+                **smooth_kwargs, layer_kwargs={"line": lkw} if lkw else None
+            )
             fit = (
                 fit.encode(x=x_enc, y=y, color=hue_ch)
                 if hue is not None
@@ -1013,7 +1094,7 @@ def lmplot(
             # One transform, unpacked rather than indexed so a desugar that
             # ever emits a second one fails here instead of silently losing it.
             (smooth_transform,) = desugar_smooth(
-                _field_name(x), _field_name(y), name="smooth", **smooth_kwargs
+                x_field, y_field, name="smooth", **smooth_kwargs
             ).transforms
             fit = _fit_chart_from_named_transform(
                 data,
@@ -1024,40 +1105,40 @@ def lmplot(
                 ci=ci_frac,
                 line_kwargs=lkw,
                 chart_x=x_enc,
-                x_title=_field_name(x),
-                y_title=_field_name(y),
+                x_title=x_field,
+                y_title=y_field,
                 metrics=metrics_applied,
             )
     elif method == "logistic":
         fit = _fit_chart_from_named_transform(
             data,
-            Logistic(x=x, y=y, n_grid=200, ci=ci_frac, name="logistic"),
+            Logistic(x=x_field, y=y_field, n_grid=200, ci=ci_frac, name="logistic"),
             kind="logistic",
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
-            x_title=_field_name(x),
-            y_title=_field_name(y),
+            x_title=x_field,
+            y_title=y_field,
             neutral_stroke=color_active,
         )
     elif method == "glm":
         fit = _fit_chart_from_named_transform(
             data,
-            Glm(x=x, y=y, family="gaussian", n_grid=200, ci=ci_frac, name="glm"),
+            Glm(x=x_field, y=y_field, family="gaussian", n_grid=200, ci=ci_frac, name="glm"),
             kind="glm",
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
-            x_title=_field_name(x),
-            y_title=_field_name(y),
+            x_title=x_field,
+            y_title=y_field,
             neutral_stroke=color_active,
         )
     elif method == "robust":
         fit = _fit_chart_from_named_transform(
             data,
             Robust(
-                x=x,
-                y=y,
+                x=x_field,
+                y=y_field,
                 n_grid=200,
                 ci=ci_frac,
                 name="robust",
@@ -1068,8 +1149,8 @@ def lmplot(
             ci=ci_frac,
             line_kwargs=lkw,
             chart_x=x_enc,
-            x_title=_field_name(x),
-            y_title=_field_name(y),
+            x_title=x_field,
+            y_title=y_field,
             neutral_stroke=color_active,
             metrics=metrics_applied,
         )
@@ -1235,8 +1316,17 @@ def residplot(
     >>> fm.residplot(df, x="total_bill", y="tip", color="steelblue")
     """
     data = to_polars(data)
+    # Narrowed once, before the first consumer: `drop_nulls` takes column
+    # NAMES, and so do the residual transform and the two axis titles below.
+    # Without this, `residplot(x=fm.X("bill"))` -- the spelling `lmplot`
+    # accepts -- leaked polars' own `cannot turn 'X' into selector` from the
+    # line below, and `x=None` leaked the same message for `NoneType`; behind
+    # that, the titles would have announced the repr of a channel object
+    # (`title=x`, below), which is #199's defect wearing a different value.
+    x_field = _required_field_name(x, entry="residplot", param="x")
+    y_field = _required_field_name(y, entry="residplot", param="y")
     if dropna:
-        data = data.drop_nulls(subset=[x, y])
+        data = data.drop_nulls(subset=[x_field, y_field])
 
     # `color=` is documented two ways -- a grouping column or a constant
     # color -- and the dispatch runs against the INPUT frame, before the
@@ -1341,8 +1431,8 @@ def residplot(
     # Both residual transforms take the same residual-mode arguments; only
     # the fit family differs (and `degree`, which Robust has no analogue for).
     resid_kwargs: dict = dict(
-        x=x,
-        y=y,
+        x=x_field,
+        y=y_field,
         output="residuals",
         inject_zero_ref=zero_line,
         inject_metrics=metrics_applied,
@@ -1369,8 +1459,8 @@ def residplot(
     # axis names the response it residualizes, since "residual" alone leaves
     # the reader no way back to the fitted column.
     enc: dict = {
-        "x": X(_resid_x, title=x),
-        "y": Y("residual", title=f"{y} residual"),
+        "x": X(_resid_x, title=x_field),
+        "y": Y("residual", title=f"{y_field} residual"),
     }
     if color is not None:
         enc["color"] = color

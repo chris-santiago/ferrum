@@ -39,7 +39,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import ChartSpec
-from tests._svg_rects import data_bar_rects
+from tests._svg_rects import data_bar_rects, polylines
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -122,11 +122,17 @@ def _value_axis_map(svg: str):
 
 
 def _overlay_peak_count(svg: str) -> float:
-    """Return the kde overlay curve's peak, in the value axis's own units."""
-    polylines = re.findall(r'<polyline points="([^"]+)"', svg)
-    assert len(polylines) == 1, f"expected one overlay curve, got {len(polylines)}"
-    ys = [float(p.split(",")[1]) for p in polylines[0].split()]
-    return _value_axis_map(svg)(min(ys))
+    """Return the kde overlay curve's peak, in the value axis's own units.
+
+    Vertices come from ``tests/_svg_rects``' shared ``<polyline>`` parser,
+    which this module's other probe (``data_bar_rects``) already binds to --
+    rolling a second regex here was how the duplication that module exists to
+    stop got one more copy in the same change that created it.
+    """
+    curves = polylines(svg)
+    assert len(curves) == 1, f"expected one overlay curve, got {len(curves)}"
+    _stroke, points = curves[0]
+    return _value_axis_map(svg)(min(y for _x, y in points))
 
 
 # ---------------------------------------------------------------------------

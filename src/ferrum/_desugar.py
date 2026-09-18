@@ -42,7 +42,13 @@ import inspect
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Union
 
-from ferrum._layer import _PRIMITIVE_MARKS, _Layer
+from ferrum._layer import (
+    _PRIMITIVE_MARKS,
+    _Layer,
+    MarkDesugarResult,
+    apply_catch_all_style,
+    catch_all_over,
+)
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
@@ -252,51 +258,114 @@ def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
     return transform_kwargs, style_kwargs
 
 
-def _catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:
-    """Merge the chart-level catch-all *style_dict* over a mark's *resolved* style.
+def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = None) -> dict:
+    """Check a ``layer_kwargs=`` door against *kind*'s own layer vocabulary.
 
-    The precedence rule for the two merges ``_resolve_pending_impl``
-    performs -- :func:`_apply_style_to_layer` and
-    :func:`_merge_desugar_mark_kwargs`, which are its only callers -- read
-    off ``caller_style_keys`` rather than restated at each (see
-    ``MarkDesugarResult``'s precedence section):
+    ``layer_kwargs={"line": {"stroke": "red"}}`` aims mark kwargs at ONE
+    emitted sub-layer of a composite mark, where the mark's bare
+    ``**mark_kwargs`` reach every layer it emits (a bare ``stroke=`` on a
+    ``ci``-bearing ``mark_smooth`` repaints the confidence band too). It is
+    the fluent-path twin of the figure-level ``mark={"line": {...}}``
+    override, and it is validated against the same vocabulary:
+    ``_overrides.LAYER_NAME_CATALOG[kind]``, the registry every composite
+    mark already populates with the sub-layers it can draw. Keyed on that
+    rather than on the layers this particular call happens to emit, so a
+    conditionally-absent layer (a ``ribbon`` under ``ci=None``, a
+    ``boxplot`` ``outlier`` under ``outliers=False``) is accepted as a no-op
+    exactly as ``_apply_mark_overrides`` accepts it -- one vocabulary, two
+    doors, not two vocabularies.
 
-    - a resolved key the caller did NOT name is the desugar's own default, so
-      the catch-all overrides it (``mark_boxplot(opacity=0.8)`` beats a
-      ribbon's built-in ``opacity=0.3``);
-    - a resolved key the caller DID name, through one of the desugar's own
-      parameters, is the more specific instruction, so the catch-all leaves
-      it alone (``mark_smooth(line_kwargs={"stroke": ...})`` beats a bare
-      ``stroke=`` on the fit line, while the band still takes the bare one).
+    An unknown name is REFUSED rather than silently ignored, in the voice of
+    the entry the caller invoked (*where*, defaulting to ``mark_<kind>``):
+    a typo'd layer name otherwise renders a plausible chart with the styling
+    nowhere in it.
 
-    Not the package's only catch-all merger:
-    ``marks/_mark_kwargs.apply_user_mark_kwargs`` spreads a desugar's own
-    validated ``**mark_kwargs`` over its layers with an unconditional
-    user-wins rule that does not consult ``caller_style_keys``. The two
-    agree wherever ``caller_style_keys`` is empty; the only two sites that
-    set it are ``marks/_fit_layers.build_fit_layers`` and
-    ``marks/statistical.desugar_smooth``, and neither module imports that
-    function. A desugar that both calls it and records ``caller_style_keys``
-    would get that older rule instead of this one -- see its docstring for
-    the same note from the other side.
+    Returns the per-layer mapping with empty per-layer dicts dropped, so a
+    caller forwarding an absent option (``lmplot``'s ``line_kws=None`` ->
+    ``{}``) leaves every layer untouched and its render byte-identical.
+
+    Raises
+    ------
+    ValueError
+        If a key is not a sub-layer *kind* can draw.
+    TypeError
+        If *layer_kwargs*, or any of its values, is not a dict -- mirroring
+        ``_apply_mark_overrides``' refusal of a non-dict override value.
     """
-    return {
-        **(resolved or {}),
-        **{k: v for k, v in style_dict.items() if k not in caller_style_keys},
-    }
+    if layer_kwargs is None:
+        return {}
+    entry = where or f"mark_{kind}"
+    if not isinstance(layer_kwargs, dict):
+        raise TypeError(
+            f"{entry}(layer_kwargs=) must be a dict mapping a sub-layer name to that "
+            f"layer's mark kwargs, e.g. layer_kwargs={{'line': {{'stroke': 'red'}}}}; "
+            f"got {type(layer_kwargs).__name__}."
+        )
+    from ferrum._overrides import LAYER_NAME_CATALOG
+
+    valid = LAYER_NAME_CATALOG.get(kind, frozenset())
+    aimed: dict = {}
+    for name, style in layer_kwargs.items():
+        if name not in valid:
+            drawn = (
+                f"{entry} draws {sorted(valid)}"
+                if valid
+                else f"{entry} draws no named sub-layers, so it has nothing to aim at"
+            )
+            raise ValueError(
+                f"{entry}(layer_kwargs=): unknown sub-layer {name!r}; {drawn}. "
+                "Pass style that should reach every layer as a plain mark kwarg "
+                f"instead, e.g. {entry}(opacity=0.5)."
+            )
+        if not isinstance(style, dict):
+            raise TypeError(
+                f"{entry}(layer_kwargs={{{name!r}: ...}}) must be a dict of mark "
+                f"kwargs for that layer; got {type(style).__name__}."
+            )
+        if style:
+            aimed[name] = dict(style)
+    return aimed
 
 
-def _apply_style_to_layer(layer: _Layer, style_dict: dict) -> _Layer:
-    """Merge constant *style_dict* into *layer*'s ``mark_kwargs``.
+def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict) -> _Layer:
+    """Apply the caller's per-layer style to *layer*, recording the keys as theirs.
 
-    Precedence is :func:`_catch_all_over`'s, keyed on the layer's own
-    ``caller_style_keys``.  When *style_dict* is empty the layer is returned
-    unchanged so output stays byte-identical to pre-feature renders.
+    Recorded on ``caller_style_keys`` (not just merged into ``mark_kwargs``)
+    because the chart-level catch-all is spread over the same layers moments
+    later: an instruction aimed at one layer is more specific than one aimed
+    at the mark as a whole, and ``apply_catch_all_style`` reads that
+    distinction off this field.  Layers this call did not name are returned
+    unchanged.
     """
-    if not style_dict:
+    aimed = layer_kwargs.get(layer.name) if layer.name is not None else None
+    if not aimed:
         return layer
-    merged = _catch_all_over(layer.mark_kwargs, style_dict, layer.caller_style_keys)
-    return replace(layer, mark_kwargs=merged)
+    return replace(
+        layer,
+        mark_kwargs={**(layer.mark_kwargs or {}), **aimed},
+        caller_style_keys=layer.caller_style_keys | frozenset(aimed),
+    )
+
+
+def _aim_single_mark_kwargs(
+    result: MarkDesugarResult, layer_kwargs: dict
+) -> tuple[dict | None, frozenset]:
+    """The single-mark half of :func:`_aim_layer_kwargs`.
+
+    A single-mark result has no ``_Layer`` to carry a name, so the layer it
+    corresponds to is the one it declares in ``layer_name`` (``None`` when
+    the mark is not a catalogued sub-layer of anything -- then no per-layer
+    instruction can reach it, and the caller's ``**mark_kwargs`` are its only
+    door).  Returns the pair the single-mark merge consumes, unchanged when
+    nothing was aimed here.
+    """
+    aimed = layer_kwargs.get(result.layer_name) if result.layer_name is not None else None
+    if not aimed:
+        return result.mark_kwargs, result.caller_style_keys
+    return (
+        {**(result.mark_kwargs or {}), **aimed},
+        result.caller_style_keys | frozenset(aimed),
+    )
 
 
 def _merge_desugar_mark_kwargs(
@@ -306,20 +375,20 @@ def _merge_desugar_mark_kwargs(
 ) -> dict | None:
     """Merge a single-mark result's ``mark_kwargs`` with the caller's catch-all.
 
-    Precedence is :func:`_catch_all_over`'s, the same rule
-    :func:`_apply_style_to_layer` applies in layered mode, so the two shapes
-    of a desugar result cannot answer the question differently.  Returns
-    ``None`` when neither side has anything to set, so output stays
+    Precedence is ``_layer.catch_all_over``'s, the same rule
+    ``_layer.apply_catch_all_style`` applies in layered mode, so the two
+    shapes of a desugar result cannot answer the question differently.
+    Returns ``None`` when neither side has anything to set, so output stays
     byte-identical to before either source existed.
 
     *caller_style_keys* is required, with no default:
-    :func:`_apply_style_to_layer` reads its layer's copy unconditionally, and
-    a default here would let a future call site omit the record and silently
+    ``apply_catch_all_style`` reads its layer's copy unconditionally, and a
+    default here would let a future call site omit the record and silently
     get the pre-#199 catch-all-always-wins ordering instead of an error.
     """
     if not desugar_kwargs and not style_dict:
         return None
-    return _catch_all_over(desugar_kwargs, style_dict, caller_style_keys)
+    return catch_all_over(desugar_kwargs, style_dict, caller_style_keys)
 
 
 def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
@@ -952,8 +1021,16 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     if chart._pending_stat_mark is None:
         return chart
     kind = chart._pending_stat_mark.kind
-    kwargs = chart._pending_stat_mark.kwargs
+    # Copied because `layer_kwargs` is popped out below and the pending mark
+    # belongs to `chart`, which a caller may resolve more than once.
+    kwargs = dict(chart._pending_stat_mark.kwargs)
     desugar_fn = chart._pending_stat_mark.desugar_fn
+    # The per-layer style door, taken out before the transform/style split:
+    # it addresses LAYERS, not the mark, so it is neither a transform kwarg
+    # nor a `MarkBase` style key (which would reject it as unknown). Every
+    # composite mark routed through this dispatcher gets the same door and
+    # the same refusal, keyed on the same `LAYER_NAME_CATALOG` vocabulary.
+    layer_kwargs = validate_layer_kwargs(kind, kwargs.pop("layer_kwargs", None))
     x_enc = chart._encoding.get("x")
     y_enc = chart._encoding.get("y")
     x_field = (
@@ -1038,11 +1115,16 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # Layered mode: result.layers is set.
     if result.layers is not None:
         new._transforms = list(chart._transforms) + list(result.transforms)
-        # Apply the chart-level catch-all style to every emitted layer, on
-        # `_catch_all_over`'s terms: it overrides a desugar-set default, but
-        # not a key the layer records in `caller_style_keys`.  The prior
-        # primitive layer is left untouched.
-        emitted = [_apply_style_to_layer(lyr, style_dict) for lyr in result.layers]
+        # Aim the caller's per-layer `layer_kwargs=` at the layers they named,
+        # THEN apply the chart-level catch-all to every emitted layer, on
+        # `catch_all_over`'s terms: it overrides a desugar-set default, but
+        # not a key the layer records in `caller_style_keys` -- which is what
+        # `_aim_layer_kwargs` just recorded for the keys aimed here.  The
+        # prior primitive layer is left untouched.
+        emitted = [
+            apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs), style_dict)
+            for lyr in result.layers
+        ]
         # Scale-through-desugar propagation (design spec §6, GH #45
         # prerequisite): reattach any chart-level explicit x/y scale the
         # desugar's fresh per-layer encodings would otherwise drop.
@@ -1058,6 +1140,11 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     mark = result.mark
     transforms = result.transforms
     remap = result.remap
+    # The single-mark twin of the per-layer aiming above: a result that
+    # declares WHICH catalogued layer its one mark is can be styled through
+    # the same `layer_kwargs=` door, and the keys aimed there are recorded as
+    # the caller's so the chart-level catch-all below cannot override them.
+    single_mark_kwargs, single_caller_keys = _aim_single_mark_kwargs(result, layer_kwargs)
     if _prior_layer is not None:
         if result.data is not None:
             # No shipped desugar produces this combination today (the only
@@ -1081,12 +1168,12 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
         # Style applies to the composite's emitted smooth layer only; the prior
         # scatter layer keeps its own mark_kwargs. Which side wins on a shared
-        # key is `_catch_all_over`'s call, from `result.caller_style_keys`.
+        # key is `catch_all_over`'s call, from the caller-named keys.
         smooth_layer = _Layer(
             mark=mark,
             encoding=smooth_enc,
             mark_kwargs=_merge_desugar_mark_kwargs(
-                result.mark_kwargs, style_dict, result.caller_style_keys
+                single_mark_kwargs, style_dict, single_caller_keys
             ),
             data_source="smooth",
         )
@@ -1097,8 +1184,8 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     new._mark = mark
     new._transforms = list(chart._transforms) + list(transforms)
     # Merge the result's resolved mark_kwargs with the caller's catch-all
-    # style kwargs -- on `_catch_all_over`'s terms, from
-    # `result.caller_style_keys`, not a fixed winner -- then
+    # style kwargs -- on `catch_all_over`'s terms, from the caller-named
+    # keys, not a fixed winner -- then
     # merge THAT onto `new._mark_kwargs` -- which `_clone()` already
     # inherited from `chart._mark_kwargs` -- rather than replacing it
     # outright. Mirrors `Chart.mark_function`'s own direct-path merge
@@ -1110,7 +1197,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # Only touches `new._mark_kwargs` when there is something new to fold
     # in, so output stays byte-identical when neither source has anything.
     merged_mark_kwargs = _merge_desugar_mark_kwargs(
-        result.mark_kwargs, style_dict, result.caller_style_keys
+        single_mark_kwargs, style_dict, single_caller_keys
     )
     if merged_mark_kwargs:
         new._mark_kwargs = {**new._mark_kwargs, **merged_mark_kwargs}

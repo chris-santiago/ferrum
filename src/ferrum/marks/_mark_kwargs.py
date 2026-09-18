@@ -19,7 +19,9 @@ Two helpers enforce the Phase 9+ no-defer principle on this surface:
   into every layer's ``mark_kwargs`` dict for layered-mode desugars
   (``MarkDesugarResult.layers`` set), with **user-wins** semantics on
   conflict so explicit user intent overrides a desugar's hard-coded
-  defaults (e.g. ribbon's ``opacity=0.3``).
+  defaults (e.g. ribbon's ``opacity=0.3``) -- via
+  ``_layer.apply_catch_all_style``, the package's one merger of a
+  catch-all style over a layer.
 
 Single-mark desugars (``desugar_density``, ``desugar_histogram``,
 ``desugar_smooth`` with ``ci=None``) have no per-layer mark_kwargs slot
@@ -98,18 +100,15 @@ def apply_user_mark_kwargs(layers: list, user_kwargs: dict) -> list:
     kwargs that don't apply to a given mark type, so spreading across all
     layers is safe even when only one layer can use the kwarg.
 
-    That user-wins rule is unconditional here, which is NOT the rule
-    ``_desugar._catch_all_over`` applies to the same question for the two
-    merges ``_resolve_pending_impl`` performs: there, a key the caller aimed
-    at one layer through a named desugar parameter (recorded on
-    ``_Layer.caller_style_keys``) is not overridden by the chart-level
-    catch-all. The two agree wherever ``caller_style_keys`` is empty. The
-    only two sites that set it are ``marks/_fit_layers.build_fit_layers``
-    and ``marks/statistical.desugar_smooth`` (``grep -rn
-    'caller_style_keys=' src/ferrum``), and neither module imports this
-    function. A desugar that starts recording it and still routes through
-    here would get this older rule; point it at ``_catch_all_over``
-    instead, or unify the two.
+    The merge itself is ``_layer.apply_catch_all_style``, the same function
+    ``_desugar._resolve_pending_impl`` uses to spread the chart-level
+    catch-all over a layered desugar's output -- so the one exception to
+    user-wins holds here too: a key the caller aimed at ONE layer (recorded
+    on ``_Layer.caller_style_keys``, e.g. through
+    ``mark_smooth(layer_kwargs=...)``) is not overridden by a broader
+    instruction. This used to be a second, unconditional merge body whose
+    divergence was invisible only because no layer reaching it recorded any
+    caller-named key.
 
     Parameters
     ----------
@@ -133,14 +132,9 @@ def apply_user_mark_kwargs(layers: list, user_kwargs: dict) -> list:
     """
     if not user_kwargs:
         return layers
-    from dataclasses import replace
+    from ferrum._layer import apply_catch_all_style
 
-    merged: list = []
-    for layer in layers:
-        existing = dict(layer.mark_kwargs or {})
-        existing.update(user_kwargs)  # user wins
-        merged.append(replace(layer, mark_kwargs=existing))
-    return merged
+    return [apply_catch_all_style(layer, user_kwargs) for layer in layers]
 
 
 # Public re-exports — desugars should import from this module, not poke

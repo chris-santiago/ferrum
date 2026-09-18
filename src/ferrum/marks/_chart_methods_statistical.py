@@ -256,7 +256,7 @@ class StatisticalMarksMixin:
             position=position,
         )
 
-    def mark_smooth(self, *, position=None, **kwargs) -> "Chart":
+    def mark_smooth(self, *, position=None, layer_kwargs: dict | None = None, **kwargs) -> "Chart":
         """Render a smoothed regression line with optional confidence interval band.
 
         Fits a smooth curve through ``(x, y)`` data using the method specified by
@@ -331,26 +331,41 @@ class StatisticalMarksMixin:
             computed independently per group and the group column is
             preserved at its original dtype in the output
             so downstream ``color=`` encoding maps to it.
-        line_kwargs : dict, optional
-            Mark-style overrides for the FIT LINE alone -- what ``lmplot``'s
-            ``line_kws`` forwards here. Distinct from ``**mark_kwargs``
-            below, which reach every emitted layer: a bare ``stroke=`` on a
-            ``ci``-bearing call repaints the confidence band too, so styling
-            just the line needs its own slot.
+        layer_kwargs : dict of str to dict, optional
+            Mark-style overrides aimed at ONE emitted sub-layer, keyed by
+            layer name: ``{"ribbon": ..., "line": ..., "metrics": ...}`` for
+            this mark. ``mark_smooth(layer_kwargs={"line": {"stroke":
+            "red"}})`` is what ``lmplot``'s ``line_kws`` forwards here, and
+            is distinct from ``**mark_kwargs`` below, which reach every
+            emitted layer: a bare ``stroke=`` on a ``ci``-bearing call
+            repaints the confidence band too, so styling just the line needs
+            its own door.
 
-            **Precedence:** this WINS over a broad ``**mark_kwargs`` naming
-            the same key, because it is the more specific instruction --
-            ``mark_smooth(stroke="#0000ff", line_kwargs={"stroke":
-            "#ff0000"})`` draws the fit line red and the CI band blue, on the
-            layered shape and the no-CI single-line shape alike. The broad
-            value still applies everywhere nothing narrower was said.
+            The door is not this mark's alone -- every composite ``mark_*``
+            accepts ``layer_kwargs=`` through its ``**mark_kwargs``, keyed on
+            the same per-mark layer vocabulary the figure-level
+            ``mark={"line": {...}}`` override uses
+            (``_overrides.LAYER_NAME_CATALOG``); e.g.
+            ``mark_boxplot(layer_kwargs={"median": {"stroke": "black"}})``.
+            A name that mark cannot draw raises ``ValueError`` naming the
+            accepted set rather than silently styling nothing; a name it can
+            draw but this call does not emit (``"ribbon"`` under ``ci=None``)
+            is a no-op, exactly as it is for the figure-level override.
+
+            **Precedence:** a per-layer value WINS over a broad
+            ``**mark_kwargs`` naming the same key, because it is the more
+            specific instruction -- ``mark_smooth(stroke="#0000ff",
+            layer_kwargs={"line": {"stroke": "#ff0000"}})`` draws the fit
+            line red and the CI band blue, on the layered shape and the no-CI
+            single-line shape alike. The broad value still applies everywhere
+            nothing narrower was said.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
             Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
             ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
             ``alpha``→``opacity``) forwarded to all emitted layers (the regression
-            line, plus the CI ribbon when ``ci`` is set). See ``line_kwargs``
+            line, plus the CI ribbon when ``ci`` is set). See ``layer_kwargs``
             above to style the line without the band.
 
         Returns
@@ -366,6 +381,17 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_smooth(method="linear", ci=0.95).encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
         """
+        from ferrum._desugar import validate_layer_kwargs
+
+        # Declared in this signature rather than left to `**kwargs` because
+        # it is the mark whose layered shape most needs it, and a named
+        # parameter is what makes it discoverable. Checked HERE as well as in
+        # the dispatcher -- the same function, so one rule -- so a typo'd
+        # layer name refuses at the `mark_smooth(...)` call that wrote it
+        # rather than at the eventual `.to_svg()`.
+        validate_layer_kwargs("smooth", layer_kwargs, where="mark_smooth")
+        if layer_kwargs is not None:
+            kwargs["layer_kwargs"] = layer_kwargs
         _pm = self._mark if self._mark in _PRIMITIVE_MARKS else None
         return self._set_composite_mark(
             "smooth",
