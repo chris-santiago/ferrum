@@ -766,7 +766,28 @@ fn resolve_panel_scales(
     } = ctx;
 
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
+    //
+    // #113: `prep.layers[0].encoding` is POST-flip (`LayerPrepared::flip_coords`
+    // already ran), but `spec.encoding` is still the authored PRE-flip
+    // encoding. Flip the base into the same (post-flip) coordinate space
+    // BEFORE overlaying — matching the convention `numeric_domain_union`
+    // (`scale_resolve/domain.rs`) and `positional_binding`'s layer fallback
+    // (`scale_resolve/mod.rs`) already use for reading `spec.layers` in a
+    // channel's own space. Without this, a chart-level encoding binding
+    // exactly one of `{x2, y2}` left a pre-flip residual in the merge:
+    // `Encoding::overlay_from` only overwrites a channel the overlay has
+    // `Some` for, and under the flip the authored channel's post-flip twin
+    // is `None` on the overlay (its content moved to the other paired
+    // channel), so the stale pre-flip value survived in the wrong slot and
+    // widened the wrong axis's domain. Flipping the base first means both
+    // operands already agree on which slot is empty, so the overlay either
+    // legitimately fills it (a layer with its own `data_source`) or leaves
+    // it correctly empty — no residual either way. A no-op when the chart
+    // isn't flipped.
     let mut merged_encoding = spec.encoding.clone();
+    if prep.coord_flipped {
+        merged_encoding.flip_positional();
+    }
     merged_encoding.overlay_from(&prep.layers[0].encoding);
     let mut rendering_spec_for_panel = ChartSpec {
         encoding: merged_encoding,
@@ -11205,4 +11226,339 @@ mod tests {
     // spans a gap is dropped; N spanning rects roll up as suppressed; an
     // in-gap ENDPOINT suppresses the whole extent) the new contract retires.
     // See `annotation.rs`'s "Break routing" test section.
+}
+
+/// RED-proof + regression pin for `#113` — the pre-flip/post-flip encoding
+/// merge in `resolve_panel_scales`, above.
+///
+/// The bug (frozen issue text, `#113`): `resolve_panel_scales` merged
+/// `prep.layers[0].encoding` (POST-flip — `LayerPrepared::flip_coords` has
+/// already run) onto a clone of `spec.encoding` (still PRE-flip, authored).
+/// `Encoding::overlay_from` only overwrites a channel the overlay has `Some`
+/// for, so when the chart binds exactly one of `{x2, y2}` at chart level, the
+/// post-flip overlay's same-named slot is `None` (its content moved to the
+/// other paired channel under the flip) and the PRE-flip value survives
+/// unmoved in the merged encoding — landing in the wrong coordinate slot for
+/// this panel's scale resolution. The axis ticks don't see this: `prepare`
+/// builds `prep.provisional_scales` (which axis-tick generation consumes,
+/// `prepare/mod.rs`'s `build_axes` call) from `layers[0].encoding` **wholesale**,
+/// never merged with the authored chart-level encoding, so ticks are already
+/// correct. These tests compare the two: marks' resolved scale
+/// (`resolve_panel_scales`'s return) against the axis's resolved scale
+/// (`prep.provisional_scales`) for the SAME panel, SAME spec.
+#[cfg(test)]
+mod coord_flip_y2_merge_tests {
+    use super::*;
+
+    use crate::spec::coord::CoordKind as SpecCoordKind;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// A flipped `mark_bar` binding exactly one of `{x2, y2}` at chart level —
+    /// the narrow trigger the issue text calls out (cross-task note in the
+    /// wave-5 task-6 brief: binding BOTH `x2` and `y2` lets the overlay replace
+    /// both, which does not reproduce; and binding a NOMINAL primary channel
+    /// alongside the quantitative `y2` doesn't reproduce either, because ordinal
+    /// domain resolution never consults a `y2` residual — only a pairing where
+    /// BOTH sides are quantitative reaches the ranged-domain union code the bug
+    /// lives in). All three positional fields here are quantitative: `idx`
+    /// (chart-level `x`, unranged), `lo`/`hi` (chart-level `y`/`y2`, the ranged
+    /// pair). Pre-flip this is a vertical floating-bar chart; under `CoordFlip`
+    /// it becomes horizontal, so post-flip `x` carries `lo..hi` and `y` carries
+    /// `idx` alone.
+    fn flipped_ranged_bar_spec_and_batch() -> (ChartSpec, RecordBatch) {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "idx".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "lo".into(),
+                    ..Default::default()
+                }),
+                y2: Some(EncodingSpec {
+                    field: "hi".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoordKind::Flip),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Float64, false),
+            Field::new("lo", DataType::Float64, false),
+            Field::new("hi", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                // `idx` is the narrow 0..3 domain the axis reads (matches the
+                // issue text's "0..3" measurement).
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0])),
+                // `hi` carries the wide magnitude (up to 72.9, matching the
+                // issue text's measurement) that leaks into the y domain as the
+                // pre-flip residual when the merge is buggy.
+                Arc::new(Float64Array::from(vec![5.0, 15.0, 25.0, 72.9])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// #113: a flipped `mark_bar` with a chart-level `y2` places its marks on
+    /// the SAME scale its axis ticks describe.
+    ///
+    /// `prep.provisional_scales` is what `build_axes` resolved the axis ticks
+    /// from (`prepare/mod.rs`'s `rendering_spec`, built from `layers[0].encoding`
+    /// **wholesale** — never merged with the authored chart-level encoding, so
+    /// it's unaffected by the bug); `resolve_panel_scales`'s return is what THIS
+    /// panel resolved for placing marks. Before the fix these diverge on `y`:
+    /// the leftover pre-flip `y2` (`hi`, quantitative, up to 72.9) survives in
+    /// the merged encoding's `y2` slot even though the merged `y` is now `idx`
+    /// (post-flip, unranged), so mark-scale resolution for `y` unions `idx`
+    /// (0..3) with the `hi` residual (up to 72.9) — a domain the axis never
+    /// computed. `x` (the genuinely ranged `lo..hi` pair post-flip) is
+    /// unaffected by the bug either way and is asserted here as a control: it
+    /// must already agree before and after the fix.
+    #[test]
+    fn coord_flip_chart_level_y2_marks_share_axis_scale() {
+        let (spec, batch) = flipped_ranged_bar_spec_and_batch();
+
+        let theme = ThemeInputs::default();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
+            &super::super::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let panel = crate::layout::PanelLayout {
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 300.0,
+            },
+            ..Default::default()
+        };
+        let mut warnings = Vec::new();
+        let layer_batches = vec![batch.clone()];
+        let ctx = PanelResolveCtx {
+            spec: &spec,
+            prep: &prep,
+            theme: &theme,
+            chart_config: &chart_config,
+            leaf_scales: None,
+        };
+        let (_rendering_spec, scales) =
+            resolve_panel_scales(&ctx, &panel, &batch, &layer_batches, &mut warnings, (0.0, 0.0))
+                .expect("resolve_panel_scales must succeed for a flipped ranged bar");
+
+        // Post-flip: y carries `idx` alone (unranged), x carries the `lo..hi`
+        // range. Compare the axis's own resolution (`provisional_scales`,
+        // ticks' source) against this panel's marks resolution (`scales`) for
+        // BOTH channels — `y` is the channel #113 actually breaks; `x` is the
+        // negative control that must already agree.
+        let (axis_y, marks_y) = match (&prep.provisional_scales.y, &scales.y) {
+            (scale_resolve::ScaleKind::Linear(a), scale_resolve::ScaleKind::Linear(m)) => (a, m),
+            (axis_y, marks_y) => panic!(
+                "#113: axis y scale and marks y scale must be the SAME kind post-flip \
+                 (both should be Linear over `idx`); axis={axis_y:?} marks={marks_y:?}"
+            ),
+        };
+        assert_eq!(
+            axis_y.domain_pair(),
+            marks_y.domain_pair(),
+            "#113: axis y domain and marks y domain must agree post-flip"
+        );
+        assert_eq!(
+            marks_y.domain_pair(),
+            [0.0, 3.0],
+            "#113: marks y domain must be the authored `idx` range (0.0..3.0), \
+             not widened by the pre-flip `y2` (`hi`) residual"
+        );
+
+        let (axis_x, marks_x) = match (&prep.provisional_scales.x, &scales.x) {
+            (scale_resolve::ScaleKind::Linear(a), scale_resolve::ScaleKind::Linear(m)) => (a, m),
+            (axis_x, marks_x) => panic!(
+                "#113: axis x scale and marks x scale must be the SAME kind post-flip \
+                 (both should be Linear over `lo..hi`); axis={axis_x:?} marks={marks_x:?}"
+            ),
+        };
+        assert_eq!(
+            axis_x.domain_pair(),
+            marks_x.domain_pair(),
+            "#113: axis x domain and marks x domain must agree post-flip (negative \
+             control: x is the genuinely ranged `lo..hi` pair and is unaffected \
+             by the bug, so this must hold both before and after the fix)"
+        );
+        assert_eq!(
+            marks_x.domain_pair(),
+            [0.0, 72.9],
+            "#113: marks x domain must be the authored lo..hi range (0.0..72.9)"
+        );
+    }
+
+    /// #113's mirror shape, bound on `x2` instead of `y2` — the encoding a
+    /// `mark_ribbon`/`mark_area` band typically carries (`x`, `x2`, `y`, no
+    /// `y2`). The wave-5 task-6 brief's cross-task note flags `#172`(3) (a later
+    /// task fixing `mark_ribbon` under `CoordFlip`) as certain to land inside
+    /// this fix's blast radius and asks to verify explicitly rather than assume
+    /// symmetry. `Encoding::flip_positional` swaps `x`<->`y` AND `x2`<->`y2` in
+    /// one call, so the fix has no separate code path for which pair is bound —
+    /// this test is that verification, not a second mechanism.
+    #[test]
+    fn coord_flip_chart_level_x2_marks_share_axis_scale() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "lo".into(),
+                    ..Default::default()
+                }),
+                x2: Some(EncodingSpec {
+                    field: "hi".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "idx".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoordKind::Flip),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("lo", DataType::Float64, false),
+            Field::new("hi", DataType::Float64, false),
+            Field::new("idx", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0])),
+                Arc::new(Float64Array::from(vec![5.0, 15.0, 25.0, 72.9])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = ThemeInputs::default();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
+            &super::super::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let panel = crate::layout::PanelLayout {
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 300.0,
+            },
+            ..Default::default()
+        };
+        let mut warnings = Vec::new();
+        let layer_batches = vec![batch.clone()];
+        let ctx = PanelResolveCtx {
+            spec: &spec,
+            prep: &prep,
+            theme: &theme,
+            chart_config: &chart_config,
+            leaf_scales: None,
+        };
+        let (_rendering_spec, scales) =
+            resolve_panel_scales(&ctx, &panel, &batch, &layer_batches, &mut warnings, (0.0, 0.0))
+                .expect("resolve_panel_scales must succeed for a flipped ranged bar");
+
+        // Pre-flip `x`/`x2` is the ranged pair, so post-flip it lands on `y`;
+        // pre-flip `y` (`idx`, unranged) lands on `x`. Same defect, opposite axis.
+        let (axis_x, marks_x) = match (&prep.provisional_scales.x, &scales.x) {
+            (scale_resolve::ScaleKind::Linear(a), scale_resolve::ScaleKind::Linear(m)) => (a, m),
+            (axis_x, marks_x) => panic!(
+                "#113/#172(3): axis x scale and marks x scale must be the SAME kind \
+                 post-flip (both should be Linear over `idx`); axis={axis_x:?} marks={marks_x:?}"
+            ),
+        };
+        assert_eq!(
+            axis_x.domain_pair(),
+            marks_x.domain_pair(),
+            "#113/#172(3): axis x domain and marks x domain must agree post-flip"
+        );
+        assert_eq!(
+            marks_x.domain_pair(),
+            [0.0, 3.0],
+            "#113/#172(3): marks x domain must be the authored `idx` range \
+             (0.0..3.0), not widened by the pre-flip `x2` (`hi`) residual"
+        );
+
+        let (axis_y, marks_y) = match (&prep.provisional_scales.y, &scales.y) {
+            (scale_resolve::ScaleKind::Linear(a), scale_resolve::ScaleKind::Linear(m)) => (a, m),
+            (axis_y, marks_y) => panic!(
+                "#113/#172(3): axis y scale and marks y scale must be the SAME kind \
+                 post-flip (both should be Linear over `lo..hi`); axis={axis_y:?} marks={marks_y:?}"
+            ),
+        };
+        assert_eq!(
+            axis_y.domain_pair(),
+            marks_y.domain_pair(),
+            "#113/#172(3): axis y domain and marks y domain must agree post-flip \
+             (negative control: y is the genuinely ranged `lo..hi` pair and is \
+             unaffected by the bug either way)"
+        );
+        assert_eq!(
+            marks_y.domain_pair(),
+            [0.0, 72.9],
+            "#113/#172(3): marks y domain must be the authored lo..hi range (0.0..72.9)"
+        );
+    }
 }
