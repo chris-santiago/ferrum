@@ -361,27 +361,67 @@ class TestLegendRenderTitleSuppression:
         assert "Region" in texts, f"Legend(title='Region') must show that title; texts: {texts}"
         assert "origin" not in texts, "Field name must not appear when Legend title is customized"
 
-    def test_channel_title_kwarg_distinct_from_legend_title(self, simple_df: pl.DataFrame) -> None:
-        """Channel-level ``title=None`` on a color encoding is NOT the legend title.
+    def test_channel_title_kwarg_controls_legend_title(self, simple_df: pl.DataFrame) -> None:
+        """Channel-level ``title=`` on a color encoding DOES control the legend title.
 
-        The ``title`` kwarg on a channel encoding is an axis title override;
-        it does not control the legend title.  The legend title is a separate
-        concept, controlled by passing a ``Legend(title=...)`` instance to the
-        ``legend`` kwarg.  This test confirms that ``Color('origin', title=None)``
-        does NOT suppress the legend title (the field name still appears in the
-        legend because the legend title is unaffected by the channel title kwarg).
+        (#90, wave 4.) Reversed from the original v0.15.1 pin: that test
+        asserted "the ``title`` kwarg on a channel encoding is an axis title
+        override; it does not control the legend title" — but ``Color``'s own
+        docstring (``encoding/appearance.py``) has always documented ``title``
+        as "Legend title override", and the docs site demonstrates it working.
+        The Rust consumer was simply never wired to read
+        ``encoding.color.title``; every legend surface (swatch legend,
+        colorbar, aux blocks, facet figure-legend, composite band) fell back
+        to the field name regardless of what the caller passed. #90 wires it
+        through the same three-state resolver axis titles already use:
+        absent -> field name, present+non-blank -> that text verbatim,
+        present+blank (``title=None``) -> suppressed with no fallback.  A
+        ``Legend(title=...)`` override still outranks the channel ``title=``.
         """
+        # present + non-blank -> verbatim, replacing the field-name default.
         svg = (
+            fm.Chart(simple_df)
+            .mark_point()
+            .encode(x="horsepower", y="mpg", color=fm.Color("origin", title="Region"))
+            .to_svg()
+        )
+        texts = _svg_texts(svg)
+        assert "Region" in texts, (
+            f"Color('origin', title='Region') must show that title on the legend; texts: {texts}"
+        )
+        assert "origin" not in texts, (
+            f"Field name must not appear once the channel title overrides it; texts: {texts}"
+        )
+
+        # present + blank (``title=None``) -> explicit suppress, no fallback
+        # to the field name.
+        svg_suppressed = (
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y="mpg", color=fm.Color("origin", title=None))
             .to_svg()
         )
-        texts = _svg_texts(svg)
-        # The field name appears as the legend title (channel title kwarg does not
-        # affect legend title — separate control surface).
-        assert "origin" in texts, (
-            "Color('origin', title=None): field name must still appear as legend title "
-            "because channel-title and legend-title are separate kwargs; "
-            f"texts: {texts}"
+        texts_suppressed = _svg_texts(svg_suppressed)
+        assert "origin" not in texts_suppressed, (
+            "Color('origin', title=None) must suppress the legend title entirely "
+            f"(no fallback to the field name); texts: {texts_suppressed}"
         )
+
+        # ``Legend(title=...)`` still outranks the channel ``title=``.
+        svg_legend_wins = (
+            fm.Chart(simple_df)
+            .mark_point()
+            .encode(
+                x="horsepower",
+                y="mpg",
+                color=fm.Color(
+                    "origin", title="Channel Title", legend=Legend(title="Legend Title")
+                ),
+            )
+            .to_svg()
+        )
+        texts_legend_wins = _svg_texts(svg_legend_wins)
+        assert "Legend Title" in texts_legend_wins, (
+            f"Legend(title=...) must outrank the channel title=; texts: {texts_legend_wins}"
+        )
+        assert "Channel Title" not in texts_legend_wins

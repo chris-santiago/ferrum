@@ -11,6 +11,7 @@ use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendOrient, ShapeLegendEntry,
     SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
 };
+use crate::layout::axis::resolve_axis_title;
 use crate::render::chart_config::LegendStyleSpec;
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
@@ -324,26 +325,34 @@ pub(crate) fn build_color_legend(
         }
     };
 
-    // Legend title (Themes-T2.5b): default to the color encoding's field name.
-    // When entries were built from a conditional color field (no base encoding),
-    // derive the title from the first conditional Color Field branch instead.
+    // Legend title (Themes-T2.5b, #90): three-state per spec §6 "Legend title
+    // resolution" — `encoding.color.title` resolves through the same
+    // `resolve_axis_title` helper the axis path uses (present+blank →
+    // suppress with no fallback, present+non-blank → verbatim, absent →
+    // field name). When entries were built from a conditional color field
+    // (no base encoding), derive the title from the first conditional Color
+    // Field branch instead — the conditional branch carries no `title` of
+    // its own, so that leg is unaffected by #90.
     let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
-        spec.encoding.color.as_ref().map(|c| c.field.clone()).or_else(|| {
-            // Conditional-color case: find the first Color conditional with a
-            // Field branch and use its field name as the title.
-            use ferrum_scene::EncodingValue;
-            spec.conditionals.iter().find_map(|cond| {
-                if cond.channel != ChannelName::Color {
-                    return None;
-                }
-                for ev in [&cond.if_selected, &cond.if_not] {
-                    if let EncodingValue::Field { name } = ev {
-                        return Some(name.clone());
+        match spec.encoding.color.as_ref() {
+            Some(c) => resolve_axis_title(c.title.as_deref(), Some(c.field.clone())),
+            None => {
+                // Conditional-color case: find the first Color conditional with a
+                // Field branch and use its field name as the title.
+                use ferrum_scene::EncodingValue;
+                spec.conditionals.iter().find_map(|cond| {
+                    if cond.channel != ChannelName::Color {
+                        return None;
                     }
-                }
-                None
-            })
-        })
+                    for ev in [&cond.if_selected, &cond.if_not] {
+                        if let EncodingValue::Field { name } = ev {
+                            return Some(name.clone());
+                        }
+                    }
+                    None
+                })
+            }
+        }
     } else {
         None
     };
@@ -544,11 +553,16 @@ fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) ->
         .is_some_and(|l| LegendStyleSpec::suppressed_by(&[l]))
 }
 
-/// Optional explicit legend title from a channel's typed `legend.title`,
-/// falling back to the channel's field name.
+/// Aux (size/shape/dash) legend title, three-state per spec §6 (#90):
+/// `legend.title` > channel `title` > field name, each rung resolved through
+/// [`resolve_axis_title`] (present+blank → suppress with no further
+/// fallback, present+non-blank → verbatim, absent → fall through). Mirrors
+/// the color legend's own precedence above and `build_axis_input`'s
+/// spec-title/field-title cascade in `prepare/mod.rs`.
 fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
-    let explicit = enc.legend.as_ref().and_then(|l| l.title.clone());
-    explicit.or_else(|| Some(enc.field.clone()))
+    let channel_fallback = resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone()));
+    let legend_title = enc.legend.as_ref().and_then(|l| l.title.as_deref());
+    resolve_axis_title(legend_title, channel_fallback)
 }
 
 /// Whether the size channel shares its field with a Numeric-keyed
@@ -1700,5 +1714,149 @@ mod tests {
             resolve_conditional_field_names(&spec, ChannelName::Size),
             vec!["sz".to_string()]
         );
+    }
+
+    // ── #90: channel-title three-state resolution + precedence ────────────
+    //
+    // The Python end-to-end sweep (`tests/test_legend_channel_title.py`)
+    // already exercises this through the real render pipeline; these are
+    // the in-crate unit-level counterpart the quality review asked for, so
+    // the contract fails where it lives rather than only two layers up.
+
+    /// The color legend's title, direct: absent -> field name,
+    /// present+non-blank -> verbatim, present+blank -> suppressed with no
+    /// fallback. Exercised through `build_color_legend` (the real producer),
+    /// with a `Categorical` color scale so `legend_entries` is non-empty and
+    /// the title branch is reachable.
+    #[test]
+    fn legend_title_three_state_resolution() {
+        let layers = |spec: &ChartSpec| vec![LayerPrepared::from_chart_only(spec)];
+        let scale = || ColorScale::Categorical {
+            domain: vec!["a".into(), "b".into()],
+            palette: std::borrow::Cow::Owned(vec![]),
+        };
+
+        // absent -> field name.
+        let spec = spec_with_color_field("g");
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(
+            &spec,
+            &empty_batch(),
+            &scales_with_color(scale()),
+            &layers(&spec),
+            false,
+            &mut warnings,
+        );
+        assert_eq!(bundle.legend_title.as_deref(), Some("g"));
+
+        // present + non-blank -> verbatim.
+        let mut spec = spec_with_color_field("g");
+        spec.encoding.color.as_mut().unwrap().title = Some("Group".into());
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(
+            &spec,
+            &empty_batch(),
+            &scales_with_color(scale()),
+            &layers(&spec),
+            false,
+            &mut warnings,
+        );
+        assert_eq!(bundle.legend_title.as_deref(), Some("Group"));
+
+        // present + blank (the `title=None` sentinel) -> suppressed, no
+        // fallback to the field name.
+        let mut spec = spec_with_color_field("g");
+        spec.encoding.color.as_mut().unwrap().title = Some(String::new());
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(
+            &spec,
+            &empty_batch(),
+            &scales_with_color(scale()),
+            &layers(&spec),
+            false,
+            &mut warnings,
+        );
+        assert_eq!(bundle.legend_title, None);
+    }
+
+    /// `Legend(title=...)` still outranks the channel `title=` on the color
+    /// path — `legend_title` (this module's local field-vs-title resolve)
+    /// only decides channel-title-vs-field; the outer override is applied
+    /// downstream in `config_apply::effective_legend_title`, which this test
+    /// does not re-test — it pins that `legend_title` itself does NOT
+    /// already fold in `legend.title`, so the two stay layered rather than
+    /// one silently absorbing the other.
+    #[test]
+    fn legend_title_does_not_fold_in_the_legend_style_override() {
+        let mut spec = spec_with_color_field("g");
+        let color_enc = spec.encoding.color.as_mut().unwrap();
+        color_enc.title = Some("ChannelTitle".into());
+        color_enc.legend = Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+            title: Some("LegendTitle".into()),
+            ..Default::default()
+        }));
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(
+            &spec,
+            &empty_batch(),
+            &scales_with_color(ColorScale::Categorical {
+                domain: vec!["a".into(), "b".into()],
+                palette: std::borrow::Cow::Owned(vec![]),
+            }),
+            &layers,
+            false,
+            &mut warnings,
+        );
+        // `legend_title` resolves the channel title, not the `Legend(title=)`
+        // override — the override is layered on later by
+        // `config_apply::effective_legend_title`.
+        assert_eq!(bundle.legend_title.as_deref(), Some("ChannelTitle"));
+    }
+
+    /// `aux_legend_title`'s three-state + `legend.title > channel title >
+    /// field` precedence, unit-level and direct (no scale/render plumbing
+    /// needed — the function takes only an `EncodingSpec`).
+    #[test]
+    fn aux_legend_title_three_state_and_precedence() {
+        // absent -> field name.
+        let enc = crate::spec::encoding::EncodingSpec { field: "sz".into(), ..Default::default() };
+        assert_eq!(aux_legend_title(&enc), Some("sz".to_string()));
+
+        // present + non-blank -> verbatim.
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: "sz".into(),
+            title: Some("SizeTitle".into()),
+            ..Default::default()
+        };
+        assert_eq!(aux_legend_title(&enc), Some("SizeTitle".to_string()));
+
+        // present + blank -> suppressed, no fallback to the field name.
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: "sz".into(),
+            title: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(aux_legend_title(&enc), None);
+
+        // `legend.title` outranks the channel `title`.
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: "sz".into(),
+            title: Some("ChannelTitle".into()),
+            legend: Some(Box::new(LegendStyleSpec { title: Some("LegendTitle".into()), ..Default::default() })),
+            ..Default::default()
+        };
+        assert_eq!(aux_legend_title(&enc), Some("LegendTitle".to_string()));
+
+        // `legend.title` blank still suppresses, even though the channel
+        // title beneath it is non-blank — no fallback past an explicit
+        // suppress at the higher rung.
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: "sz".into(),
+            title: Some("ChannelTitle".into()),
+            legend: Some(Box::new(LegendStyleSpec { title: Some(String::new()), ..Default::default() })),
+            ..Default::default()
+        };
+        assert_eq!(aux_legend_title(&enc), None);
     }
 }
