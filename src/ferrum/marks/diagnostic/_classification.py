@@ -122,10 +122,20 @@ def desugar_pr(
 
     When ``iso_lines=True`` the chart builder appends F-score iso-curve rows
     for F in {0.2, 0.4, 0.6, 0.8} with synthetic columns ``_iso_recall``,
-    ``_iso_precision``, ``_iso_f`` (Utf8 F-score label used as the line color
+    ``_iso_precision``, ``_iso_f`` (Utf8 F-score label used as the line
     grouping key), ``_iso_label_x``, ``_iso_label_y``, and ``_iso_label``; the
     desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
+
+    The iso-line layer groups by ``mark_kwargs.detail`` rather than the
+    ``color`` encoding channel (mirrors ``desugar_parallel_coordinates`` in
+    ``ferrum.marks.diagnostic._ranking``). The chart's color scale is built
+    from the chart-level encoding, which for ``pr_chart`` is keyed on
+    ``class`` -- binding ``_iso_f`` to the ``color`` channel would put it in
+    a scale whose domain never contains the iso-F labels, so every lookup
+    misses and the mark falls back away from the declared ``stroke``.
+    ``detail`` groups the polylines into four separate curves without
+    claiming a paint channel, so the layer's own literal ``stroke`` survives.
 
     ``average`` is wired via ``data_transform`` in ``Chart.mark_pr`` (filters
     to the row(s) matching the requested average); informational at the
@@ -139,8 +149,11 @@ def desugar_pr(
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     if iso_lines:
         # Iso-F lines are rendered as a separate line layer grouped by
-        # `_iso_f` (Utf8 string of the F-score). The chart builder appends
-        # one row per (F, recall_step) point along each iso curve.
+        # `_iso_f` (Utf8 string of the F-score) via `detail`, not `color` --
+        # the chart-level color scale is keyed on `class`, so binding
+        # `_iso_f` to `color` would miss that scale's domain and lose the
+        # literal `stroke` below (#121). The chart builder appends one row
+        # per (F, recall_step) point along each iso curve.
         layers.append(
             _Layer(
                 name="iso_line",
@@ -148,9 +161,13 @@ def desugar_pr(
                 encoding={
                     "x": "_iso_recall",
                     "y": "_iso_precision",
-                    "color": "_iso_f",
                 },
-                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4], "opacity": 0.6},
+                mark_kwargs={
+                    "detail": "_iso_f",
+                    "stroke": "#AAAAAA",
+                    "stroke_dash": [4, 4],
+                    "opacity": 0.6,
+                },
             )
         )
         layers.append(

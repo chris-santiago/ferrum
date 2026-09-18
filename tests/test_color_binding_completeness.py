@@ -343,14 +343,6 @@ ALLOWED: dict[tuple[str, str], str] = {
         "'_label'",
     ): "Computed two-level annotation label column, written by the builder "
     "immediately above as Utf8 literals.",
-    (
-        "src/ferrum/marks/diagnostic/_classification.py",
-        "'_iso_f'",
-    ): "Iso-F level column on mark_pr's iso_line layer. Not a caller-named "
-    "discriminator, and the layer sets an explicit literal `stroke` in its own "
-    "mark_kwargs, so this channel does not drive the curves' paint. The "
-    "separate observation that all iso-F curves render one identical colour is "
-    "that hardcoded stroke, not this binding — tracked as its own follow-up.",
 }
 
 
