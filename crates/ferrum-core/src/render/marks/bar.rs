@@ -24,6 +24,32 @@ fn row_num(col: &Option<Vec<Option<f64>>>, i: usize) -> Option<f64> {
     col.as_ref().and_then(|v| v.get(i).copied().flatten())
 }
 
+/// A filled rect of zero width or height draws nothing in SVG, but costs a
+/// scale lookup, a layout slot and bytes on the wire — exactly the
+/// silent-drop-adjacent smell `tests/_svg_corpus.py::query_zero_size_filled`
+/// exists to catch. Every `build_*` fn below checks this immediately after
+/// computing a row's rect geometry and skips the push (the row is simply
+/// absent from `nodes`/`data_indices`, the same lockstep skip already used
+/// for null categories and non-finite values above each of these checks) —
+/// there is no other gate, so a mark this drops here never reaches the SVG.
+///
+/// A shared-extent stacked histogram routinely produces this: `apply_stack`
+/// (`render/position.rs`) emits one row per (bin, group) pair even when a
+/// group has zero rows in a bin, so that group's segment has `base == top`
+/// and a real, computed zero-height rect.
+///
+/// Exact `0.0` equality, not an epsilon: `w`/`h` here are always the result
+/// of `(a - b).abs()` or `.max(0.0)` over two scale lookups, so a
+/// zero-row group-bin is exactly `0.0` to the bit, never merely small. An
+/// epsilon would additionally swallow a genuinely tiny-but-nonzero bar (a
+/// real, if visually thin, value) — a different thing from an empty group,
+/// and not this fix's job to hide. The oracle above makes the same choice
+/// (`w == 0 or h == 0`), so this matches the guard it satisfies.
+#[inline]
+fn is_zero_extent(w: f64, h: f64) -> bool {
+    w == 0.0 || h == 0.0
+}
+
 struct BarBaseStyle<'a> {
     stroke_width: f64,
     opacity: f64,
@@ -398,6 +424,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let rect_top_y = top_y.min(bottom_y);
         let cx = cx + x_offsets[i];
         let top_y = rect_top_y + y_offsets[i];
+        if is_zero_extent(bar_width, height) { continue; }
 
         let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -565,6 +592,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // mirrored rect on the wrong side of the base.
             (row_base_x, (px - row_base_x).max(0.0))
         };
+        if is_zero_extent(width, bar_height) { continue; }
 
         let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -750,6 +778,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let bw = auto_bar_width.unwrap_or(20.0);
             (cx - bw / 2.0, bw)
         };
+        if is_zero_extent(width, height) { continue; }
 
         let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -877,6 +906,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         // mirrored rect on the wrong side of the base.
         let rect_x = row_base_x;
         let width = (px_right - row_base_x).max(0.0);
+        if is_zero_extent(width, height) { continue; }
 
         let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -978,6 +1008,103 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 3, "expected 3 histogram bars");
+    }
+
+    /// #194 follow-up: a shared-extent stacked histogram bins every group
+    /// over one grid, so `apply_stack` (`render/position.rs`) routinely
+    /// emits a row for a (bin, group) pair even when that group has zero
+    /// rows in the bin -- the row's `y` (segment top) and
+    /// `__stack_y_base__` (segment bottom) are then equal, and the pre-fix
+    /// drawer serialized that as a filled, zero-height `<rect>` (caught by
+    /// `tests/_svg_corpus.py::query_zero_size_filled`). The batch below is
+    /// `apply_stack`'s own output SHAPE for two bins / two groups -- `y`
+    /// already cumulated to each row's segment top, `__stack_y_base__` to
+    /// its bottom -- not a hand-built shape the production path never
+    /// emits: bin0 [0,1) has versicolor=0 (base=0, top=0, the empty
+    /// group-bin) stacked under setosa=1 (base=0, top=1); bin1 [1,2) has
+    /// versicolor=2 (base=0, top=2) stacked under setosa=1 (base=2, top=3).
+    #[test]
+    fn bar_quantitative_stacked_histogram_drops_zero_height_bin_keeps_siblings() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "bin_start".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "bin_end".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "count".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end",   DataType::Float64, false),
+            Field::new("count",     DataType::Float64, false),
+            Field::new("grp",       DataType::Utf8,    false),
+            Field::new("__stack_y_base__", DataType::Float64, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["versicolor", "setosa", "versicolor", "setosa"])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        // x domain [0,2] -> px [0,200]; y domain [0,3] -> px [100,0] (SVG
+        // y-down: value 0 is the panel bottom, value 3 the panel top),
+        // matching the manually-constructed `ResolvedScales` other stacked
+        // bar tests in this module use (see
+        // `horizontal_stacked_bar_segments_span_base_to_value_no_overlap`)
+        // so the expected pixel geometry below is exact, not inferred.
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 200.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64, f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
+        }).collect();
+
+        assert_eq!(rects.len(), 3, "the zero-count versicolor row in bin0 must not emit a rect; got {rects:?}");
+        assert!(
+            rects.iter().all(|(_, _, w, h)| *w > 0.0 && *h > 0.0),
+            "every surviving rect must have strictly positive extent; got {rects:?}"
+        );
+
+        // bin0 setosa: x in [0,100], top=1 -> y=66.667px, height=33.333px.
+        let setosa_bin0 = rects.iter().find(|(x, ..)| (*x - 0.0).abs() < 1e-6).expect("setosa bin0 rect (x=0)");
+        assert!((setosa_bin0.1 - 200.0 / 3.0).abs() < 1e-6, "setosa bin0 top pixel: {setosa_bin0:?}");
+        assert!((setosa_bin0.2 - 100.0).abs() < 1e-6, "setosa bin0 width: {setosa_bin0:?}");
+        assert!((setosa_bin0.3 - 100.0 / 3.0).abs() < 1e-6, "setosa bin0 height: {setosa_bin0:?}");
+
+        // bin1 versicolor: x in [100,200], base=0 top=2 -> y=33.333px, height=66.667px.
+        let versicolor_bin1 = rects.iter().find(|(x, y, ..)| (*x - 100.0).abs() < 1e-6 && (*y - 100.0 / 3.0).abs() < 1e-6).expect("versicolor bin1 rect (x=100, y=33.33)");
+        assert!((versicolor_bin1.2 - 100.0).abs() < 1e-6, "versicolor bin1 width: {versicolor_bin1:?}");
+        assert!((versicolor_bin1.3 - 200.0 / 3.0).abs() < 1e-6, "versicolor bin1 height: {versicolor_bin1:?}");
+
+        // bin1 setosa: x in [100,200], base=2 top=3 -> y=0px, height=33.333px,
+        // stacked directly atop versicolor's segment (no gap, no overlap).
+        let setosa_bin1 = rects.iter().find(|(x, y, ..)| (*x - 100.0).abs() < 1e-6 && (*y - 0.0).abs() < 1e-6).expect("setosa bin1 rect (x=100, y=0)");
+        assert!((setosa_bin1.2 - 100.0).abs() < 1e-6, "setosa bin1 width: {setosa_bin1:?}");
+        assert!((setosa_bin1.3 - 100.0 / 3.0).abs() < 1e-6, "setosa bin1 height: {setosa_bin1:?}");
+        assert!(
+            (versicolor_bin1.1 - (setosa_bin1.1 + setosa_bin1.3)).abs() < 1e-6,
+            "versicolor bin1's top must equal setosa bin1's bottom -- adjacent, not overlapping: {versicolor_bin1:?} vs {setosa_bin1:?}"
+        );
     }
 
     #[test]
@@ -1663,12 +1790,33 @@ mod tests {
     /// so the rect still renders with a positive height regardless of which
     /// of y/y2 is larger; `build_quantitative` uses `.max(0.0)` (no abs) so
     /// the same inversion — a row whose value pixel lands below its stack
-    /// base — clamps to a zero-height rect instead of mirroring it. Neither
-    /// branch was pinned by any existing test: `bar_ordinal_x_y2_spans_y_to_y2_not_baseline`
-    /// exercises the same abs-triggering data shape but only asserts the bar
-    /// doesn't sit at the baseline, never the exact height or the "abs, not
-    /// clamp" contract; no test drives `build_quantitative`'s stack-base path
-    /// with an inverted base at all.
+    /// base — clamps to a zero-extent raw height instead of mirroring it.
+    /// Neither branch was pinned by any existing test:
+    /// `bar_ordinal_x_y2_spans_y_to_y2_not_baseline` exercises the same
+    /// abs-triggering data shape but only asserts the bar doesn't sit at the
+    /// baseline, never the exact height or the "abs, not clamp" contract; no
+    /// test drives `build_quantitative`'s stack-base path with an inverted
+    /// base at all.
+    ///
+    /// Zero-extent-drop update (#194 follow-up, bar.rs's `is_zero_extent`):
+    /// the clamp site's own comment (`:680-683`) always said the intent was
+    /// "renders nothing", not "renders an invisible rect" — the original
+    /// assertion here (`rects.len() == 1` with `h == 0.0`) pinned the OLD
+    /// implementation detail of *how* that nothing-ness was achieved
+    /// (a real, zero-area `SceneNode::Rect`, invisible in SVG but still
+    /// serialized), not the contract itself. `is_zero_extent` now drops any
+    /// zero-height/-width rect at the push site regardless of whether the
+    /// zero came from equal endpoints (an empty group-bin) or a clamped
+    /// negative raw extent (this scenario) — the two are indistinguishable
+    /// in the final geometry the corpus guard inspects
+    /// (`tests/_svg_corpus.py::query_zero_size_filled` flags a filled
+    /// zero-extent rect regardless of provenance), so carving out an
+    /// exception for one cause and not the other would leave this exact
+    /// scenario able to trip that guard the day a real chart hits it. The
+    /// "abs, not clamp" contract this test exists to pin is unchanged — the
+    /// computed raw height is still `-50` clamped to `0.0`, never mirrored
+    /// to `50.0` — only "and then a rect with that zero height is still
+    /// written" is gone.
     #[test]
     fn bar_ordinal_abs_vs_quantitative_clamp_on_inverted_y_pixel_ordering() {
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
@@ -1732,11 +1880,16 @@ mod tests {
                 "build_ordinal must abs() an inverted y/y2 pixel pair into a positive height; got {}", rects[0]);
         }
 
-        // ── build_quantitative (bar.rs:684): clamp -> zero height ──────────
+        // ── build_quantitative (bar.rs:684): clamp -> dropped ───────────────
         // y="val"=3 (top_y=70px), __stack_y_base__=8 (bottom_y=20px): the
         // identical inverted-pixel shape, but via the stack-base path. No
         // `.abs()` here — the comment at :680-683 says this must clamp to
-        // zero (render nothing), not mirror a positive-height rect.
+        // zero (render nothing), not mirror a positive-height rect. Since
+        // `is_zero_extent`, "renders nothing" is achieved by not emitting
+        // the rect at all rather than emitting an invisible zero-height one
+        // — see the doc comment above this test for why that is the
+        // correct reading of the original "renders nothing" intent, not a
+        // relaxation of it.
         {
             let spec = ChartSpec {
                 data: DataRef::default(), mark: Mark::Bar,
@@ -1773,9 +1926,15 @@ mod tests {
             let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
                 if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
             }).collect();
-            assert_eq!(rects.len(), 1, "an inverted stack base must still emit a (degenerate) rect, not be skipped");
-            assert_eq!(rects[0], 0.0,
-                "build_quantitative must clamp an inverted stack-base pixel pair to zero height, not mirror it positive");
+            // The "abs, not clamp" contract this test pins is that the raw
+            // height is clamped to `0.0`, never mirrored to a positive
+            // `50.0` -- `is_zero_extent` then drops that zero-height rect
+            // entirely (see the doc comment above this test), so "clamped,
+            // not mirrored" now reads as "no rect", not "a zero-height one".
+            // A stray positive-height rect here would mean the clamp
+            // regressed into a mirror; that failure mode is still caught.
+            assert!(rects.is_empty(),
+                "build_quantitative must clamp an inverted stack-base pixel pair to zero extent and drop the rect, not mirror it positive; got {rects:?}");
         }
     }
 
