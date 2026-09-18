@@ -552,8 +552,25 @@ def _displot_build(
 
         # Extract the original field name for the axis title.
         _ecdf_x_name = x.field if isinstance(x, _CB_ecdf) else str(x)
+        # Thread the unwrapped hue field as the Bin transform's groupby,
+        # mirroring the kde branch above -- `hue` may be a channel object
+        # (e.g. fm.Color("g")), and `_field_name` is the shared extraction
+        # point for exactly this trap (see its docstring). Without a
+        # groupby, Bin's output schema drops the hue column entirely, so
+        # the color channel set below unconditionally names a column the
+        # transform no longer emits. `shared_extent=True` is unconditional
+        # (not gated on `multiple=`): an ECDF is a per-group comparison, so
+        # a common x-grid is the only reading under which the curves are
+        # comparable.
+        _ecdf_groupby = _field_name(hue)
         chart = chart.transform(
-            Bin(field=_ecdf_x_name, bin_count=_histogram_bin_count(bins), cumulative=True)
+            Bin(
+                field=_ecdf_x_name,
+                bin_count=_histogram_bin_count(bins),
+                cumulative=True,
+                groupby=_ecdf_groupby,
+                shared_extent=_ecdf_groupby is not None,
+            )
         )
         chart = chart.mark_line()
         # Re-route encoding to bin output columns, preserving the original
