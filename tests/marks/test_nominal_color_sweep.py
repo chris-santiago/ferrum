@@ -281,3 +281,72 @@ def test_mark_shap_bar_integer_color_field_override_no_colorbar():
     assert not str_caught
     assert not _has_colorbar(int_svg)
     assert _legend_labels(int_svg) == _legend_labels(str_svg) == ["0", "1"]
+
+
+# --- mark_tick (chart.py raw mark) — the mark×dtype parity table's hole ---
+#
+# Unlike the composite desugars above, ``mark_tick`` is a raw mark bound via
+# ``.encode(color=...)`` rather than a ``color_field=`` kwarg routed through
+# ``nominal_color_channel``. Its per-row color read (GH #131) closed as an
+# undisclosed rider on batch-E T13 (``2204db2a``), four days after #131 was
+# filed -- this module's docstring already named ``tick`` among the affected
+# marks, but no case pinned it. The Rust-side cross-mark parity table
+# (``crates/ferrum-core/src/render/marks/color_dtype_parity.rs``) gained a
+# ``tick`` row in the same task; this is the Python-visible half of that pin.
+
+
+def _tick_df(color_dtype) -> pl.DataFrame:
+    """Two groups of four rows, Int64 labels cast to *color_dtype* -- see
+    :func:`_violin_df` for why (label-for-label comparability).
+    """
+    rows = [
+        {"grp": label, "x": float(i) + (10.0 if label == 1 else 0.0)}
+        for label in (0, 1)
+        for i in range(4)
+    ]
+    return pl.DataFrame(rows).with_columns(pl.col("grp").cast(color_dtype))
+
+
+def test_mark_tick_nominal_color_channel_matches_utf8():
+    """An explicitly nominal-typed Int64 ``color=`` on ``mark_tick`` must
+    paint the same two-color, four-ticks-each partition as its Utf8 twin --
+    not the single flat color every tick painted before ``2204db2a`` gave
+    tick a per-row color read (the pre-fix shape: ``row_colors_from_scale``
+    was never called, so every tick fell back to the mark's constant paint
+    regardless of the color encoding).
+    """
+    int_svg, int_caught = render(
+        ferrum.Chart(_tick_df(pl.Int64))
+        .encode(x="x", color=ferrum.Color("grp", type="nominal"))
+        .mark_tick()
+    )
+    str_svg, str_caught = render(
+        ferrum.Chart(_tick_df(pl.Utf8))
+        .encode(x="x", color=ferrum.Color("grp", type="nominal"))
+        .mark_tick()
+    )
+    assert not int_caught
+    assert not str_caught
+    assert not _has_colorbar(int_svg)
+    assert _legend_labels(int_svg) == _legend_labels(str_svg) == ["0", "1"]
+
+    def _stroke_counts(svg: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for hexcolor in re.findall(r'stroke="(#[0-9a-fA-F]{6})"', svg):
+            counts[hexcolor] = counts.get(hexcolor, 0) + 1
+        return counts
+
+    int_counts = _stroke_counts(int_svg)
+    str_counts = _stroke_counts(str_svg)
+    # The two legend swatch colors, each ridden by exactly one group's four
+    # ticks. `int_counts == str_counts` alone would pass a mark that painted
+    # every row grey (both dtypes would then agree on the same wrong
+    # partition), so the palette-color counts are asserted directly.
+    assert int_counts.get("#2563eb") == int_counts.get("#dc2626") == 4, (
+        f"Int64 color must split 4 ticks per swatch color, not collapse to one "
+        f"constant paint; got {int_counts}"
+    )
+    assert int_counts == str_counts, (
+        f"Int64 and Utf8 must paint the identical stroke-color partition; "
+        f"int={int_counts} str={str_counts}"
+    )

@@ -148,6 +148,10 @@ fn encoding_for(mark: &Mark, color_col: &str) -> Encoding {
         },
         // `x` alone → RuleShape::VerticalSpan, one full-height rule per row.
         Mark::Rule => Encoding { x: field("x", q), color, ..Default::default() },
+        // `x` alone, no `y` → tick's true-rug fallthrough (quantitative x,
+        // no ordinal x/y, no encoded y): one `SceneNode::Line` per row at the
+        // panel baseline, x-only like `Rule` above (GH #131).
+        Mark::Tick => Encoding { x: field("x", q), color, ..Default::default() },
         // Everything else: plain quantitative x/y.
         _ => Encoding { x: field("x", q), y: field("y", q), color, ..Default::default() },
     }
@@ -258,6 +262,14 @@ fn color_histogram(mark: Mark, color_col: &str) -> BTreeMap<String, usize> {
 /// `polygon`, covered by their own tests since their encodings don't fit this
 /// table). GREEN for `line` and `area`, which the batch had already swept —
 /// they are the controls that prove the table is measuring the right thing.
+///
+/// `tick` was added later (GH #131, wave 4): it was never part of the NF-A3
+/// sweep this table's own history describes above — its per-row color read
+/// (`row_colors_from_scale`) landed as an undisclosed-at-filing-time rider on
+/// batch-E T13 (`2204db2a`), four days after #131 was filed, and this row is
+/// the pin that would have caught the original defect had it shipped without
+/// that rider. `tick` mirrors `rule`'s x-only shape in `encoding_for` above —
+/// both dispatch to a one-line-per-row builder off a bare quantitative `x`.
 #[test]
 fn every_mark_paints_non_utf8_categories_like_their_utf8_twin() {
     let marks = [
@@ -269,6 +281,7 @@ fn every_mark_paints_non_utf8_categories_like_their_utf8_twin() {
         Mark::Text,
         Mark::Rule,
         Mark::Segment,
+        Mark::Tick,
     ];
     for mark in marks {
         let reference = color_histogram(mark, "c_utf8");
