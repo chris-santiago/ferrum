@@ -316,12 +316,36 @@ def test_an_eligible_layer_beside_the_fallbacks_channel_still_renders() -> None:
 # Mechanism defense: the whole two-layer shape space, not a list of examples
 # ---------------------------------------------------------------------------
 
-#: `point`/`line` are the "needs both axes" representatives: their rendered SVG
-#: shapes are unambiguous and carry no chrome (a `bar`'s `<rect>` cannot be told
-#: from a panel background). `tick`/`rule` are the single-axis-eligible ones.
+#: `point`/`line` are the "needs both axes" representatives; `tick`/`rule` are
+#: the single-axis-eligible ones. All four are observed, as (element pattern,
+#: elements one layer contributes).
+#:
+#: Observing `tick`/`rule` takes more than adding their element to a presence
+#: test, because neither element is theirs alone. A tick and a rule both render
+#: as `<line>`, which is also what every axis tick and gridline renders as (a
+#: bare `mark_tick` chart carries 5 mark lines among 46 total), and every chart
+#: carries a panel `<rect>` whether or not anything drew. A presence test on
+#: either element therefore matches chrome and passes for a DROPPED layer --
+#: the same artifact-for-property substitution this sweep exists to rule out.
+#:
+#: Two changes close it together. Look only inside the marks group, which
+#: carries no chrome (measured: zero non-mark elements inside it). And compare
+#: COUNTS rather than presence, so a pair whose marks share an element type --
+#: `tick` + `rule`, or two ticks -- still observes a drop: 10 lines when both
+#: draw, 5 when one is dropped. (Both figures are `len(_PAIR_FRAME)` per layer,
+#: so they track the fixture rather than restating a literal that can drift
+#: from it.)
 _SWEEP_MARKS = ("point", "line", "tick", "rule")
 _SWEEP_CHANNELS = (("x",), ("y",), ("x", "y"))
-_SWEEP_SHAPE = {"point": r"<circle", "line": r"<polyline"}
+_SWEEP_SHAPE = {
+    "point": (r"<circle\b", len(_PAIR_FRAME)),
+    "line": (r"<polyline\b", 1),
+    "tick": (r"<line\b", len(_PAIR_FRAME)),
+    "rule": (r"<line\b", len(_PAIR_FRAME)),
+}
+
+#: The marks group. Axes, gridlines and the panel background sit outside it.
+_MARKS_GROUP = re.compile(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', re.DOTALL)
 
 
 def _sweep_chart(mark: str, channels: tuple[str, ...]) -> fm.Chart:
@@ -329,6 +353,12 @@ def _sweep_chart(mark: str, channels: tuple[str, ...]) -> fm.Chart:
     return getattr(fm.Chart(_PAIR_FRAME), f"mark_{mark}")().encode(
         **{channel: field[channel] for channel in channels}
     )
+
+
+def _marks_body(svg: str) -> str:
+    """The marks group's contents, or `""` when the render drew no marks at all."""
+    match = _MARKS_GROUP.search(svg)
+    return match.group(1) if match else ""
 
 
 def test_no_two_layer_composition_renders_a_drawing_layer_empty() -> None:
@@ -344,6 +374,9 @@ def test_no_two_layer_composition_renders_a_drawing_layer_empty() -> None:
     Measured across the three builds: pre-task 12 silent drops, the intermediate
     fix 24, this one 0. The class is not merely absent from the shapes anyone
     happened to write down; it is absent from the space.
+
+    All four marks are observed, by element COUNT inside the marks group -- see
+    `_SWEEP_SHAPE` for why presence alone cannot see a dropped tick or rule.
     """
     drops = []
     for (mark_a, channels_a), (mark_b, channels_b) in itertools.product(
@@ -354,11 +387,20 @@ def test_no_two_layer_composition_renders_a_drawing_layer_empty() -> None:
             svg = composed.to_svg()
         except ValueError:
             continue  # a refusal is the other acceptable outcome
-        for mark in sorted({mark_a, mark_b} & set(_SWEEP_SHAPE)):
-            if not re.findall(_SWEEP_SHAPE[mark], svg):
+
+        # Both layers draw, so each element type carries both layers' share.
+        expected: dict[str, int] = {}
+        for mark in (mark_a, mark_b):
+            pattern, per_layer = _SWEEP_SHAPE[mark]
+            expected[pattern] = expected.get(pattern, 0) + per_layer
+
+        body = _marks_body(svg)
+        for pattern, want in sorted(expected.items()):
+            got = len(re.findall(pattern, body))
+            if got != want:
                 drops.append(
                     f"{mark_a}{list(channels_a)} + {mark_b}{list(channels_b)}: "
-                    f"rendered with zero {mark} marks"
+                    f"expected {want} {pattern!r} marks, drew {got}"
                 )
 
     assert drops == [], "compositions that rendered while silently dropping a layer:\n" + "\n".join(

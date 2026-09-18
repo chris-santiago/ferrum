@@ -221,6 +221,188 @@ Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` dir
 > A flat (no-layers) chart is unaffected, and a layer's own paint — when it
 > sets one — always wins.
 
+> **2026-09-18 (wave 4, #201-D):** a layered chart is judged by the marks it
+> actually draws, and a positional axis may bind from the layer that binds
+> it. Two rules, each now stated once in `render/scale_resolve/`:
+>
+> 1. **Eligibility for the single-axis exemption** (the carve-out that lets
+>    `mark_tick`/`mark_rule` render against one axis) is decided by *every
+>    layer that paints*, not by the composed spec's root `mark` field.
+>    Lowering a `(tick + line)` composition leaves `mark="tick"` at the root
+>    as a placeholder, so the old root-mark test granted the exemption to a
+>    chart whose line layer genuinely needs both axes, and the resolver
+>    synthesized a `0…1` dummy y scale. Measured on `(tick_chart +
+>    line_chart)` — a rug under a density curve — the curve was squashed into
+>    the foot of the panel: polyline y extent `(368.316, 416.911)` of a 480px
+>    canvas under y tick labels `1, 0.9, … 0`. It now renders at
+>    `(24.0, 412.961)` under the density column's own units
+>    (`0.13, 0.12, … 0.01`).
+> 2. **Binding**: an axis takes the chart encoding's binding when there is
+>    one, otherwise the first layer eligible to supply it (`independent_y`
+>    layers excluded for `y`, every layer encoding normalized out of authored
+>    space first). A chart-level or layer-0 binding always wins, so the
+>    change is bounded to specs whose merged chart+layer-0 encoding leaves a
+>    positional channel unbound. Specs that resolve through the generic
+>    two-axis path are untouched; **specs that resolved through the
+>    single-axis exemption with an axis unbound DO move, by design** — that
+>    is the defect being fixed, and the `(tick + line)` geometry above is an
+>    instance of it. This fallback yields a **scale**, not a plottable
+>    field — see the refusal below, and the axis-title consequence in the
+>    next paragraph.
+>
+> **The value axis of a bare layering is deliberately untitled.** A
+> `Chart(df).mark_tick(...) + Chart(df).mark_line(...)` composition now
+> renders on the line layer's own scale, but with **no y-axis title**, and
+> that is the intended contract rather than an omission. An axis title is a
+> claim about what the chart is *about*, and the only thing that makes such
+> a claim is a binding the caller wrote — chart-level or on layer 0. The
+> fallback above is not that: it resolves a scale so a sibling layer can be
+> placed, which is precisely why a drawing layer reaching a channel *only*
+> through it is refused rather than drawn. Titling from the same fallback
+> would have the renderer assert, on the strength of whichever layer bound
+> the channel first, something no caller said — and would move rendered text
+> on compositions that already render correctly. **The caller's spelling for
+> a title is to make the binding real, and it must go where a binding is
+> read**: `.encode(y=fm.Y("density", title="Density"))` on the composition's
+> own chart encoding, or on the **first** chart of the pair (layer 0). A
+> `title=` on any later layer is ignored, because that is exactly the
+> fallback binding rule 2 above describes as not title-bearing. Measured on
+> `tick + line`, titling the density column six ways:
+>
+> | Composition | Rendered y-axis title |
+> |---|---|
+> | `tick_plain + line_plain` | *(none)* |
+> | `tick_titled + line_plain` | `Density` |
+> | `line_titled + tick_plain` | `Density` |
+> | `tick_plain + line_titled` | *(none)* |
+> | `line_plain + tick_titled` | `d` — layer 0's own field name; the later layer's `title=` is dropped |
+> | `(tick_plain + line_plain).encode(y=fm.Y("d", title="Density"))` | `Density` |
+>
+> Note the natural-reading trap in row 4: the density column is the *line's*
+> column, so titling the line chart is the obvious move, and in `tick + line`
+> the line is the second layer, so it does nothing. Put the title on the
+> first chart or on the composition. `displot` reaches the chart encoding
+> itself, which is why `displot(kind="rug", kde=True)` *is* titled (see
+> #201-B in §3.14) while the hand-composed equivalent is not.
+>
+> **New typed refusal** — `RenderError::LayerMissingPositionalChannel`,
+> surfacing as a `ValueError`. A layer that paints and whose mark needs both
+> positional channels must reach each one from its own encoding or from the
+> chart encoding it inherits; reaching it only through the fallback above is
+> now refused instead of silently drawing nothing:
+>
+> ```
+> layer 0: mark_point needs both positional channels, but no 'y' encoding
+> reaches it — a sibling layer binds 'y', which resolves the axis but leaves
+> mark_point with nothing to plot. Encode 'y' on this layer, or on the
+> chart, to draw it.
+> ```
+>
+> The guard runs *after* generic x/y resolution, so a channel bound nowhere
+> at all keeps raising the existing channel-level `EncodingTypeMismatch`.
+> This **closes 12 silent drops that predate the wave entirely**. Measured by
+> an exhaustive sweep of all 144 ordered two-layer pairs over
+> `{point, line, tick, rule} × {x}, {y}, {x,y}`, composed through the public
+> `+` API and rendered: the pre-wave tree rendered 84, refused 48 and
+> **silently dropped 12** (`tick{x} + point{x}` and `rule{y} + point{y}`
+> among them); the shipped tree renders 88, refuses 56 and drops **0**. The
+> transition census over the same 144 is `rendered→rendered 84`,
+> `refused→refused 48`, `dropped→refused 8`, `dropped→rendered 4`, and
+> **zero compositions that the pre-wave tree rendered correctly are now
+> refused**. The sweep ships as a test
+> (`tests/test_single_axis_eligibility.py`), so the class stays closed by
+> construction — but note what that test does and does not check: it asserts
+> the **zero-drop property alone** — every one of the 144 pairs either
+> refuses or draws its full complement of marks, counted for all four mark
+> kinds inside the marks group — not the 88/56 split and not the transition
+> census. Counting, rather than testing for presence, is what makes the
+> assertion cover `tick` and `rule`: both render as `<line>`, which is also
+> what every axis tick and gridline renders as, and every chart carries a
+> panel `<rect>` whether or not anything drew — so a presence test on either
+> element matches chrome and passes for a dropped layer. Scoping the search
+> to the marks group (which carries no chrome) and comparing counts closes
+> that, including for a pair whose two marks share an element type.
+> The shipped `0` is therefore re-runnable on any
+> checkout; the pre-wave `84/48/12` row and the census come from runs
+> against reverted builds and cannot be reproduced from this tree. (Scope
+> bound: the closure claim covers this 4-mark × 3-channel × 2-layer space;
+> 3+ layer stacks, other marks and polar compositions are outside it.)
+
+> **2026-09-18 (wave 4, T10b):** a bar with no extent no longer reaches the
+> SVG. All four `SceneNode::Rect` push sites in the bar renderer
+> (`build_ordinal`, `build_ordinal_y`, `build_quantitative`,
+> `build_quantitative_horizontal`) now skip a row whose computed width or
+> height is exactly `0.0`, through one shared `is_zero_extent` check. The
+> visible output is unchanged — a zero-extent rect painted nothing — but the
+> **element is gone from the document**, so code that counts rects sees one
+> fewer per empty group-bin. Concretely, a grouped/stacked histogram with an
+> empty cell used to emit e.g.
+> `<rect x="65.31" y="392.489" width="76.534" height="0" fill="#dc2626"/>`
+> for the bin where one group has no rows; it now emits nothing there. The
+> `displot_stacked_hist` golden drops from 14 rects to 13. The check is
+> exact-zero rather than epsilon on purpose: these extents are always
+> `(a - b).abs()` or `.max(0.0)` over two scale-lookup pixel values, so an
+> empty-group zero is exactly `0.0` to the bit, and an epsilon would also
+> swallow a genuinely tiny-but-nonzero bar.
+
+> **2026-09-18 (wave 4 close, R1 — an all-zero-extent bar batch says why it
+> drew nothing):** the guard above skips the push site, and nothing
+> downstream could tell that silence from a chart that legitimately had
+> nothing to draw. The four rect builders now count their zero-extent drops
+> and set the batch's `empty_reason` through one shared helper, which fires
+> **only** when the guard emptied a batch that had rows to draw (every row
+> dropped, none emitted). A batch already empty for a documented reason —
+> zero input rows, null categories, non-finite values, unresolvable
+> pixels — never reaches the guard and keeps the `None` reserved for a
+> legitimate empty, so the channel stays quiet. Measured on
+> `importance_chart` over an all-zero importance column:
+>
+> ```
+> bar layer 0 drew nothing: mark_bar() computed a zero width or height for
+> all 4 of its rects (every value equal to its own baseline, or an empty
+> group in every bin); a zero-extent fill paints nothing, so none were
+> emitted
+> ```
+>
+> The non-zero control emits no warning (measured: the same chart with
+> importances `0.4/0.3/0.2/0.1` renders 4 data rects and zero warnings,
+> against 0 data rects and this one warning for the all-zero case).
+> **SVG bytes are unchanged everywhere** — this adds a diagnosis, not a
+> rendering — but it is a new `UserWarning`, so a consumer running under
+> `-W error` will now see an exception where it previously saw a silent
+> blank panel.
+
+> **2026-09-18 (wave 4 close, R6 — a dodged span mark subdivides its band):**
+> `apply_dodge`'s continuous branch offset only the band column (`x` /
+> `bin_start`) and left the span's other end (`x2` / `bin_end`) untouched, so
+> each group's rect became `[bin_start + offset, bin_end]` — a width of
+> `bin_width ∓ offset` instead of a share of the bin. Both endpoints now move
+> together into the group's own sub-slot, using `apply_dodge_ordinal`'s
+> existing convention (padding off each end of the band, `n_groups` slots laid
+> end to end from the leading edge), and the row's **own** span is subdivided
+> rather than a median-spacing bandwidth proxy, so a non-uniform final bin
+> keeps its slots inside itself. The point-row path (no paired channel) is
+> untouched and byte-identical.
+>
+> This also closes a **silent drop**, not just a mis-sized bar: a negative
+> slot offset could push the leftmost `bin_start` below the resolved
+> x-domain minimum, where the unclamped linear scale returns `NaN`, the
+> pixel resolves to `None`, and the bar builder skips the row entirely — a
+> missing bar. Two further notes: the `uniques.len() < 2` bail (which exists
+> because median spacing is undefined for a single band value, a proxy the
+> span path does not need) no longer applies to span rows, so a **one-bin
+> dodged histogram now dodges instead of overlapping**; and the span branch
+> preserves nulls rather than coercing a null band value to `0.0` as the
+> point branch still does, because a row with a null endpoint is skipped by
+> the drawer today and would otherwise have started drawing a rect back to
+> the axis origin.
+>
+> **Radius: every dodged span mark, not only `displot`.** Any chart whose
+> band axis carries a paired channel under `Dodge` now draws sub-slots
+> instead of offset full-width spans. No golden moved, but a downstream
+> chart built on the old overlapping geometry will look different —
+> correctly so.
+
 > **Dated note (2026-09-11, wave-1 hardening, #198 — `Chart.__add__` preserves each layer's own `data_source`):** `a + b`'s two rewrite sites (the column-collision branch, and the named-transform-routing branch that promotes an unnamed RHS transform) used to unconditionally overwrite every RHS layer's `data_source` with the merge's own auto-generated name — harmless for a plain single-mark chart (whose one layer starts with `data_source=None`), but every multi-output composite mark (`mark_qq`, `mark_violin`, `mark_boxplot`, …) names its own top-level transform and points each layer's `data_source` at it, so the clobber stranded a layer pointing at a name nothing publishes. Measured: `point + qq` raised `unknown column 'qq_line_x_start'`; `qq + point` happened to work only because `__add__` takes a different branch when the LHS already carries `_transforms`. Both sites now preserve a layer's own `data_source` when it is already set, substituting the merge's name only when a layer's `data_source` is `None` — so a multi-output composite composes via `+` in **either order**. A second, previously-silent defect surfaced by the same code path is now a typed refusal instead of silent data corruption: two DIFFERENT composite-mark charts that happen to name their top-level transform identically (every `mark_qq()` names its transform `"qq_main"` regardless of field) used to compose without error and silently let one side's data overwrite the other's at render time (measured: 100 rendered circles collapsing to only 50 distinct positions). `Chart.__add__` now raises `ValueError` naming the specific layer and the named transform output both sides would collide on, before the merge happens — a self-add (`chart + chart`) and two structurally-identical transforms (`qq(field="y") + qq(field="y")`) are exempted, since a transform that would produce identical output on both sides isn't a real collision.
 
 ---
@@ -477,6 +659,31 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 ---
 
 ### 3.2 Encoding Channels
+
+> **2026-09-18 (wave 4, #90 — a channel's `title=` is the title its legend
+> prints):** `title=` on `Color`/`Size`/`Shape`/`StrokeDash` and the other
+> legend-bearing channels was honored on axes but discarded by every legend
+> builder, which read the field name directly. A caller who wrote
+> `fm.Color("species", type="N", title="Species")` got a legend headed
+> `species`. One resolver now serves all of them — the swatch legend, both
+> colorbars (continuous and binned), the conditional legend, the facet band
+> and every auxiliary block — and legend-title suppression is spelled the
+> way axes already spell it. The field name remains the default when no
+> `title=` is given, so a chart that never set one is byte-identical. (The
+> guide's "Legend title" section, `docs/site/guide/marks-encodings.md`, has
+> illustrated this parameter since before it worked; its rendered image was
+> regenerated with this note.)
+
+> **2026-09-18 (wave 4, #130 — an untyped `Color` on `hue=` is a
+> discriminator, not a gradient):** the figure-level helpers decided whether
+> a `hue=` argument was categorical by asking whether the caller passed a
+> bare string or a channel *object*, so `hue="species"` and
+> `hue=fm.Color("species")` read the same column two different ways — the
+> typed object fell through to a continuous color scale. The helper now asks
+> the question that actually matters: whether the caller *stated* a type.
+> `fm.Color("species")` with no `type=` is treated exactly like the bare
+> string; `fm.Color("v", type="Q")` still gets its gradient. Bare-string
+> `hue=` and an explicitly typed `Color` are both unaffected.
 
 > **2026-05-10 (Phase 9):** Adds **position adjustments** as a sibling concept
 > to encoding channels. Four immutable value classes — `Identity`, `Dodge`,
@@ -1099,9 +1306,9 @@ Marks are constructors that accept visual property overrides as keyword argument
 
 | Mark | Stat Computed | Key Parameters |
 |---|---|---|
-| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`, + aliases), `ci`, `bandwidth` (loess-only — explicit values on other methods raise, 2026-09-06), `degree`, `k` (gam-only basis dimension, 2026-09-06), `n`, `line_kwargs` (mark kwargs for the fit line alone, 2026-09-17 — a bare style kwarg reaches the CI band too, and `line_kwargs` outranks it on the line) |
+| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`, + aliases), `ci`, `bandwidth` (loess-only — explicit values on other methods raise, 2026-09-06), `degree`, `k` (gam-only basis dimension, 2026-09-06), `n`, `layer_kwargs` (per-layer mark kwargs, keyed by sub-layer name — `{"ribbon": ..., "line": ..., "metrics": ...}` here, 2026-09-18: a bare style kwarg reaches every emitted layer including the CI band, and a per-layer value outranks it on the layer it names; an unknown name raises. Shared by every composite mark, keyed on the same sub-layer vocabulary the figure-level `mark={...}` override uses; replaces the unreleased `line_kwargs`) |
 | `mark_density(...)` | KDE | `bandwidth` (`"scott"`\|`"silverman"`\|float), `kernel`, `extent`, `cumulative`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
-| `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
+| `mark_histogram(...)` | Frequency / density bins | `bins` (`"sturges"`\|`"fd"`\|`"freedman_diaconis"`\|`int` bin count\|`float` bin width, 2026-09-18 — mutually exclusive with `bin_count`/`bin_width`), `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`), `position_by` (column name the `multiple=` position adjustment groups by, 2026-09-18) |
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
 | `mark_violin(...)` | KDE + optional boxplot overlay | `bandwidth`, `inner` (`"box"`, `"quartile"`, `"point"`, `None`) |
 | `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, `"lognormal"` — the latter newly computed 2026-09-05, batch D F-L03-07: normal theoretical quantiles exponentiated; it was documented but refused before — or `scipy.stats` dist), `dequantize` |
@@ -2325,7 +2532,7 @@ Stat transforms are applied before rendering, in the Rust engine. They receive a
 
 | Class | Description | Key Parameters |
 |---|---|---|
-| `stat_bin(field, *, bin_count=None, bin_width=None, extent=None, nice=True)` | Bin a field; add `bin_start`, `bin_end`, `count`, `density` | |
+| `stat_bin(field, *, bins=None, bin_count=None, bin_width=None, extent=None, nice=True)` | Bin a field; add `bin_start`, `bin_end`, `count`, `density` | `bins` (2026-09-18): `"sturges"` \| `"fd"` \| `"freedman_diaconis"` \| a positive `int` (bin count) \| a positive finite `float` (bin width) \| `None`. Mutually exclusive with `bin_count`/`bin_width` — naming both refuses. |
 | `stat_bin_2d(x, y, *, bin_count_x=None, bin_count_y=None)` | 2D binning | |
 | `stat_kde(field, *, bandwidth="scott", kernel="gaussian", n=512, extent=None, cumulative=False)` | Kernel density estimate | |
 | `stat_kde_2d(x, y, *, bandwidth="scott", n=128)` | 2D KDE | |
@@ -3592,6 +3799,169 @@ ferrum.displot(data, *, x=None, y=None, hue=None, col=None, row=None,
 > raised `"Stack: value (y) encoding required"` (the rug tick layer gets
 > the same `Identity()` fix, so rug ticks are never dodged/stacked either).
 
+> **2026-09-18 (wave 4, #193 — `bins=` accepts a vocabulary instead of
+> swallowing one):** `displot`'s `bins=` was passed to a door that read only
+> an integer count, so every other spelling was silently discarded and the
+> chart fell back to Sturges. Measured pre-fix: `bins="fd"`,
+> `"freedman_diaconis"`, `"auto"`, `"scott"`, `"stone"`, `bins=0.5` and
+> `bins=np.int64(9)` all rendered the identical 11-rect Sturges histogram
+> with an empty transform payload; `bins=True` rendered a 1-bin histogram
+> (because `bool` subclasses `int`); `bins=0` raised a `ValueError` naming
+> `Bin` rather than `displot`; and `bins=-3` leaked a raw `OverflowError`
+> out of the renderer. The accepted set is now explicit and closed:
+>
+> | Value | Meaning |
+> |---|---|
+> | `"sturges"` | Sturges' rule (the default) |
+> | `"fd"` / `"freedman_diaconis"` | Freedman–Diaconis rule |
+> | `int` ≥ 1 | an exact bin count |
+> | positive finite `float` | a bin **width** |
+> | `None` | unset; falls through to `bin_count`/`bin_width` |
+>
+> Everything else refuses with a typed `ValueError` in the voice of the entry
+> the caller invoked. Measured live: `"auto"`, `"scott"`, `"sqrt"`, `"rice"`,
+> `"doane"`, `"stone"`, and the near-misses `"FD"` and `"fd "` all give
+> `displot: unknown bins value 'auto'; expected 'sturges'|'fd'|int|float`
+> (no case or whitespace coercion — the vocabulary is closed); `True`/`False`
+> give `displot: bins must not be a bool (True); expected
+> 'sturges'|'fd'|int|float`, checked *before* the integer arm; `0`, `-3` and
+> `10**30` give `displot: bins as an int must be a bin count >= 1 within
+> machine range; got 0` — no `OverflowError`, and no fall-through into the
+> width arm; `0.0`, `-0.5`, `nan` and `inf` give `displot: bins as a float
+> must be a positive finite bin width; got 0`; and a `list`/`tuple`/`dict`/
+> arbitrary object gives `displot: bins must be 'sturges'|'fd'|int|float`.
+>
+> `bins=` is validated for **every** `kind`, matching the `stat=` precedent —
+> so `displot(kind="kde", bins="auto")` and `displot(kind="rug",
+> bins="auto")` now raise where `bins=` was previously inert on those kinds.
+> A valid `bins=` on those kinds is still accepted and still inert.
+>
+> Two doors that already spoke this vocabulary inherit the hardened parser
+> and therefore gain refusals they did not have: `Bin2D(bins_x=)`/`bins_y=`
+> and `Kde(count_scale=)` now refuse `bool`, non-positive and out-of-range
+> integers, and non-positive/non-finite floats at construction, each naming
+> itself (`Bin2D: …`, `stat_kde: …`). Valid values are unaffected.
+>
+> Serialization is fixed with it: `BinMode::FreedmanDiaconis` previously
+> mapped to the same empty wire payload as Sturges, so `to_dict()`/
+> `to_json()` reported Sturges for a chart that had drawn Freedman–Diaconis.
+> FD now carries an explicitly-named additive `bin_rule` key; Sturges stays
+> the wire default (the absence of all three mode keys), so **every
+> pre-existing payload keeps its exact bytes**. A payload naming `bin_rule`
+> *and* a numeric key refuses rather than dropping one answer.
+> `repr(Bin("x", bins="fd"))` gains a trailing `, bins='freedman_diaconis'`;
+> every other mode's repr is byte-identical.
+
+> **2026-09-18 (wave 4, #194 — `multiple="stack"` means stacked):**
+> `displot` built its own position adjustment from `multiple=` and never
+> forwarded the mode into `mark_histogram`, so the underlying `Bin` ran at
+> its default and binned **each group over its own data range**. The two
+> groups' bars therefore shared no x position and were not even the same
+> width — measured on two 300-point normals at means 0 and 3: bar widths
+> `31.34 px` vs `34.19 px`, and **16 distinct x starts where a stack needs
+> 8**. The stack adjustment had no pairs to pair, and the render was a
+> side-by-side chart wearing a stack's name. What a `multiple=` mode means is
+> now answered in one place (`marks/_multiple.py`), which decides the
+> position adjustment *and* the binning extent together — because bars can
+> only stack if every group binned against the same edges. `displot` forwards
+> the mode; `"layer"`, `"dodge"`, the no-hue `"stack"` path and the
+> `kind="kde"` branch are byte-identical.
+>
+> **`mark_histogram(position_by=)` is new public API** (additive,
+> keyword-only): the column the `multiple=` position adjustment groups by, so
+> forwarding the mode does not cost the caller its grouping. It accepts a
+> column name (`str`) or `None` and refuses anything else in its own voice —
+> `mark_histogram: position_by must be a column name (str) or None, not
+> Color; received Color('g').` — appending `Pass the column name itself:
+> position_by='g'.` when a channel object was passed. It is documented as a
+> column name, not as the figure layer's "str or encoding" spelling, on
+> purpose: `position_by` feeds `Stack(by=)`/`Dodge(by=)`, whose contract is
+> `Optional[str]`, and unwrapping would silently widen a contract this change
+> is only now creating.
+>
+> Known limit, unchanged: `displot(kind="kde", multiple="stack")` still does
+> not forward the mode to `mark_density`.
+
+> **2026-09-18 (wave 4, #200 — `kind="ecdf"` keeps the column it colors
+> by):** the ecdf branch is the one `displot` path that builds its own `Bin`,
+> and it built one without the group key, so the transform discarded the
+> `hue=` column before the encoding referred to it. Per-class curves could
+> not render. The branch now hands the `Bin` the group key, on a support the
+> groups share, so `displot(kind="ecdf", hue=...)` draws one curve per class.
+> The no-hue ecdf path is byte-identical.
+
+> **2026-09-18 (wave 4, #201-B — the rug gets the axis its curve was drawn
+> against):** `displot(x=..., kind="rug", kde=True)` is a composition the
+> docstring advertised twice and named rug for explicitly, and it **raised**
+> (`encoding 'y' expected EncodingSpec, got None`) because the x-only root
+> encoding fell through the generic x/y check. #201-D (above) made it render
+> with the correct extent and tick labels, but through the binding *fallback*
+> — which resolves a scale, not a chart-level binding — so the density axis
+> came out **untitled**. `displot` now binds the density column the overlay
+> already names at chart level, and the axis is titled `density`: the KDE
+> transform's own output column name, which is exactly what
+> `displot(kind="kde")` and `displot(kind="kde", rug=True)` already title the
+> same axis, and what `kind="ecdf"` does with `count`. The curve's extent and
+> tick labels are unchanged from #201-D; the rug's 200 ticks still sit at the
+> axis base; `hue=` still yields two curves and split ticks, now titled.
+>
+> `displot(y="v", kind="rug", kde=True)` used to silently drop the KDE
+> overlay (the overlay block is gated on the x variable) and render a bare
+> vertical rug. It now refuses — see the close note below.
+
+> **2026-09-18 (wave 4 close, A2/A3/A5 — `displot` answers in its own voice,
+> and stops dropping a mark it was asked for):** three related changes to
+> what `displot` accepts.
+>
+> 1. **One refusal for the x-requiring kinds.** `mark_histogram() requires
+>    .encode(x=...)` and its `mark_density()` twin no longer escape from this
+>    path: one helper answers for `hist`, `kde` and `ecdf` alike, naming the
+>    entry the caller invoked, the binding observed, and the fix in the
+>    caller's own column name. Measured:
+>    `displot(kind='hist', y='v') is not supported -- kind='hist' draws the
+>    distribution of the variable x= names and computes the other axis itself
+>    (a count, a density, a cumulative frequency), so a y= variable has
+>    nowhere to go. Pass x='v', or kind='rug', which draws its ticks against
+>    either axis.` `kind="rug"` is deliberately excluded: a tick mark draws
+>    against either axis.
+> 2. **`kind="rug", y=..., kde=True` refuses rather than dropping the
+>    overlay.** Measured: `displot(kind='rug', y='v', kde=True) is not
+>    supported -- the kde= overlay is drawn against the variable x= names,
+>    and this call binds y= instead, so the overlay has no variable to read.
+>    Pass x='v' (kind='rug' draws the same ticks from x= or y=), or drop
+>    kde=.` Refusal rather than a warning because the overlay is not a knob
+>    that got ignored, it is a whole requested mark with nowhere to stand —
+>    there is no partially-honored reading of it, unlike `bins=` below. A
+>    previously-accepted call now raises. The end state this defers is a
+>    y-oriented density curve, which is an orientation feature, not a guard.
+> 3. **`bins=` warns where it is inert.** `kind="kde"` and `kind="rug"`
+>    evaluate no binned statistic, so a stated rule cannot act. Measured:
+>    `displot(kind='kde', bins=7): bins= is inert for kind='kde' -- it
+>    evaluates no binned statistic, so the rule you named cannot act on
+>    anything and the render is identical for every value. Drop bins=, or use
+>    kind='hist'/'ecdf', which bin.` Only a rule the caller actually *stated*
+>    warns: `bins=None` and `bins="sturges"` both mean the default a
+>    non-binning kind would have used anyway, so nothing is discarded and
+>    there is nothing to report. This is the warn-degraded half of the #193
+>    refusal contract above, which validates the vocabulary for every kind.
+
+> **2026-09-18 (wave 4 close, A1 — `multiple="dodge"` bins on shared
+> edges):** `"dodge"` now maps to a shared binning extent, joining `"stack"`
+> and `"fill"`; `"layer"` is the only mode that may still bin per group,
+> because it is the only one that asks nothing of its neighbours. The band a
+> dodged bar takes its slot in *is* the bin, so the bins have to be the same
+> bins for every group before a slot means anything. Previously each hue
+> group binned over its own range: measured on a two-group frame, 9 bars of
+> one width against 10 of another, sharing **zero** x positions — two
+> histograms wearing a dodge's name. Measured after, on 200 rows in two
+> groups at `bins=10`: both groups draw 10 bars of equal width `22.57 px` on
+> one grid of step `50.16 px`, offset from each other by exactly one slot
+> (`22.57 px`), with no overlapping pairs and the two slots plus padding
+> spanning the band. **This is a user-visible rendering change** — a chart
+> built on the old geometry will look different, correctly so. (The
+> equal-width half of this depends on the R6 span fix noted under
+> `ferrum.Layer`; shared edges alone fixed the grid but not the widths.)
+
 #### Categorical
 
 ```
@@ -3604,6 +3974,21 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                height=None, aspect=None,   # > **2026-05-31:** added; same semantics as displot
                theme=None)
 ```
+
+> **2026-09-18 (wave 4, #192 — `kind="count"` accepts a channel object like
+> its seven siblings):** `count` was the only one of catplot's eight kinds
+> that read the **raw** `x=`/`y=` argument again after the shared splitter
+> had already resolved it, so `catplot(..., kind="count", x=fm.X("g"))` died
+> with a bare PyO3 `TypeError: argument 'field': 'X' object is not an
+> instance of 'str'`, naming neither `catplot`, nor `kind="count"`, nor a
+> working route — while `x : str or encoding` was already the documented
+> contract for the parameter. It now derives the aggregated field from the
+> resolved channel, the same idiom the estimating kinds already use. This
+> closes a second, latent defect on the same line: an
+> `encode={"x": fm.X("other_col")}` override on `kind="count"` now aggregates
+> **the column its axis actually binds**, not the column named by the
+> original `x=`/`y=` keyword. The bare-string path is byte-identical
+> (SHA-256-pinned).
 
 > **2026-09-10 (batch F, F-L09-04):** `hue_order=` is honored for
 > `kind="box"` and `kind="violin"` -- previously silently ignored (byte-
@@ -3879,16 +4264,57 @@ parameter is forwarded to `lmplot` unchanged.
 > applied by rewriting the finished chart's layers, which on that branch are
 > still unmaterialized (the chart carries a pending stat mark until render).
 > Every branch now forwards it at construction, to the fit line alone, and
-> `mark_smooth` gained a `line_kwargs=` parameter for the same purpose --
-> its own `**mark_kwargs` reach every emitted layer, so a `stroke=` passed
-> that way repaints the CI band too. **Precedence between the two is by
-> specificity:** when both name the same style key, the one aimed at the fit
-> line wins, and the catch-all still applies wherever nothing narrower was
-> said — measured, `mark_smooth(ci=0.95, stroke="#0000ff",
-> line_kwargs={"stroke": "#ff0000"})` draws the line `#ff0000` and the band
-> `#0000ff`, on the layered shape and the single-line shortcut alike. Charts
-> with a scatter present and the single-line shortcut render
-> byte-identically.
+> the same capability is exposed on the grammar as
+> `layer_kwargs={"<layer>": {...}}` — a composite mark's own `**mark_kwargs`
+> reach every emitted layer, so a `stroke=` passed that way repaints the CI
+> band too. **Precedence between the two is by specificity:** when both name
+> the same style key, the one aimed at the named layer wins, and the
+> catch-all still applies wherever nothing narrower was said — measured,
+> `mark_smooth(ci=0.95, stroke="#0000ff", layer_kwargs={"line": {"stroke":
+> "#ff0000"}})` draws the fit line `#ff0000` while the CI band keeps its
+> `#0000ff`-derived fill, on the layered shape and the single-line shortcut
+> alike. Charts with a scatter present and the single-line shortcut render
+> byte-identically. (This parameter was first written as a
+> `mark_smooth`-only `line_kwargs=` earlier in the same unreleased wave and
+> reshaped before release into the general door; see the 2026-09-18 note
+> under `ferrum.Layer` for the shipped contract. `line_kwargs=` is not
+> accepted.)
+
+> **2026-09-18 (wave 4 close, B3/B6 — the fit paths accept a channel object
+> on every method, and refuse a missing fit column by name):** `lmplot`'s
+> `x=`/`y=` are documented as "str or encoding", and seven of the ten methods
+> already honored the encoding spelling — the `mark_smooth`-routed ones,
+> because `.encode()` takes a channel object. The three that construct a
+> transform directly did not, and neither did `residplot`, and all four
+> leaked a **binding-layer** error out of a figure-level call: measured
+> pre-fix, `lmplot(x=fm.X("bill"), method="robust")` raised the raw PyO3
+> `TypeError: argument 'x': 'X' object is not an instance of 'str'`,
+> `residplot(x=fm.X("bill"))` raised polars' `TypeError: cannot turn
+> 'ferrum.encoding.positional.X' into selector`, and any method with
+> `logx=True` raised `X: field must be str, ...`.
+>
+> **Resolved by accepting, not refusing** — refusing would have regressed
+> seven working paths and contradicted the family's own documented contract.
+> Each consumer wants the column *name*, which is now narrowed once at the
+> figure's own entry; the channel itself still reaches `.encode()`, so the
+> caller's `title=`/`scale=` survive. Measured:
+> `lmplot(x=fm.X("bill", title="Total bill (USD)"), method="robust")` renders
+> that title, not the bare column name, and `residplot(x=fm.X("bill"))`
+> renders. **`residplot` now accepts an encoding object where it previously
+> died** — a widened public surface at a second entry, deliberately, to match
+> the family.
+>
+> Two new typed refusals come with the narrowing, replacing untyped errors:
+> `lmplot(x=None): x names the column to fit and has no default. Pass a
+> column name, or an encoding object wrapping one.` (and its
+> `residplot(y=None)` twin, which names `residplot`), and the contradiction
+> `lmplot(logx=True, x=<channel with its own scale=>): two instructions for
+> one x scale. Keep your scale= and drop logx=True, or pass x as a column
+> name and let logx set the log scale.` The `None` case also closed a latent
+> instance of this same note's title defect: `residplot` built its titles
+> from the **raw** parameter, so `y=None` would have rendered the axis title
+> `"None residual"` and a channel object would have rendered an object repr —
+> unreachable only because polars raised first.
 
 #### Matrix / Pairwise
 
@@ -3989,6 +4415,17 @@ ferrum.pr_chart(model_or_source=None, X=None, y=None, *,
 # now filter out a null class label before sorting, mirroring the same
 # file's already-correct `_curve_metrics_by_group` idiom, instead of
 # comparing `None` against every class value during the sort.
+#
+# **2026-09-18 (wave 4, #121):** the `iso_lines=True` reference curves now
+# render in the grey they always declared. The iso-line layer bound its
+# grouping key `_iso_f` to the `color` channel, but the chart's color scale
+# is keyed on `class`, so every `"F=0.2".."F=0.8"` lookup missed and the
+# line mark's stroke fallback painted `paint.fill` — theme blue at the
+# layer's `opacity=0.6` — instead of the literal `stroke="#AAAAAA"` the
+# layer had set all along. The key now travels on `detail` (the channel
+# that groups without painting), mirroring `desugar_parallel_coordinates`.
+# The stale `_iso_f` entry in the color-binding allowlist, whose rationale
+# asserted the curves were already grey, is deleted with it.
 
 ferrum.confusion_matrix_chart(model_or_source=None, X=None, y=None, *,
                                y_true=None, y_pred=None,   # precomputed path (1-D hard labels)

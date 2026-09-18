@@ -622,7 +622,7 @@ This section is the canonical reference for that vocabulary. Docstrings across t
 | `leader_line` | `mark_label`: draw a thin connecting line from the data point to the placed label. Default `False`. |
 | `zero` | `mark_bar`: set `zero=False` to suppress the y-scale zero-anchor. Default `True`. |
 
-Statistical marks' own tunables (`mark_smooth(method=, ci=, bandwidth=, degree=, k=, n=, ...)`, `mark_density(bandwidth=, kernel=, extent=, cumulative=, multiple=, ...)`, `mark_histogram(bin_count=, bin_width=, density=, cumulative=, multiple=, ...)`, `mark_errorbar(method=, ...)`) are named parameters of those specific `mark_*()` methods, not entries in this `**kwargs` vocabulary — see each method's own docstring on [`Chart`][ferrum.Chart] for its full parameter list. Every composite, statistical, and diagnostic mark (`mark_boxplot`, `mark_density`, `mark_roc`, …) still accepts the two tables above through its own `**kwargs`, on top of its named parameters.
+Statistical marks' own tunables (`mark_smooth(method=, ci=, bandwidth=, degree=, k=, n=, ...)`, `mark_density(bandwidth=, kernel=, extent=, cumulative=, multiple=, ...)`, `mark_histogram(bins=, bin_count=, bin_width=, density=, cumulative=, multiple=, position_by=, ...)`, `mark_errorbar(method=, ...)`) are named parameters of those specific `mark_*()` methods, not entries in this `**kwargs` vocabulary — see each method's own docstring on [`Chart`][ferrum.Chart] for its full parameter list. Every composite, statistical, and diagnostic mark (`mark_boxplot`, `mark_density`, `mark_roc`, …) still accepts the two tables above through its own `**kwargs`, on top of its named parameters.
 
 ## Friendly kwarg aliases
 
