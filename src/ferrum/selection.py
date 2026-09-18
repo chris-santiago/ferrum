@@ -25,6 +25,7 @@ from functools import partial
 from typing import Any, Literal
 
 from ferrum._validate import is_none_color_sentinel
+from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
 
 
@@ -50,8 +51,13 @@ class SelectionMark:
         Opacity of the border.
     stroke_width : float, default 1.0
         Border line width in pixels.
-    stroke_dash : list of float, optional
+    stroke_dash : list of float, comma-separated str, or named linetype, optional
         Dash pattern for the border (e.g. ``[4, 2]``).  Solid when omitted.
+        Also accepts a comma-separated numeric string (``"4,2"``) or a named
+        linetype (``"solid"``, ``"dashed"``, ``"dotted"``, ``"dashdot"``,
+        ``"longdash"``) -- normalized and validated at construction time
+        (#124); an unrecognized string raises ``ValueError`` rather than
+        constructing silently.
 
     Examples
     --------
@@ -66,6 +72,17 @@ class SelectionMark:
     stroke_opacity: float = 1.0
     stroke_width: float = 1.0
     stroke_dash: list[float] | None = None
+
+    def __post_init__(self) -> None:
+        # Normalize stroke_dash through the shared helper (#124) so a named
+        # linetype or comma-split string resolves identically to MarkBase's
+        # and the annotate_* constructors' stroke_dash=, and so junk (e.g.
+        # "wiggly") refuses at construction rather than constructing
+        # silently and reaching the wire unvalidated. Frozen dataclass, so
+        # the normalized value is written back via object.__setattr__
+        # (matches axis.py's / _facet.py's existing pattern).
+        normalized = _normalize_stroke_dash(self.stroke_dash, context="SelectionMark: stroke_dash")
+        object.__setattr__(self, "stroke_dash", normalized)
 
     def to_spec_dict(self) -> dict:
         """Serialize to a dict matching the Rust ``SelectionMarkStyle`` shape."""

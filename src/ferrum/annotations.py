@@ -18,6 +18,7 @@ from ferrum.annotation.coords import (
     _coerce_coord_to_numeric,
 )
 from ferrum.chart import Chart
+from ferrum.marks.base import _normalize_stroke_dash
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
 from ferrum._validate import validate_choice
 
@@ -43,19 +44,30 @@ class _LineStyle:
     dash: Optional[list]
 
 
-def _capture_line_style(*, stroke: Optional[str], stroke_dash) -> _LineStyle:
+def _capture_line_style(*, stroke: Optional[str], stroke_dash, context: str) -> _LineStyle:
     """Capture the user-supplied reference-line style once.
 
+    ``stroke_dash`` is normalized through the shared
+    :func:`ferrum.marks.base._normalize_stroke_dash` helper (#124) before it
+    is split into the two representations below, so a named linetype (e.g.
+    ``"dashed"``) resolves identically for both — normalizing only one would
+    leave the mark and the ``+``-overlay primitive disagreeing on what the
+    same ``stroke_dash=`` call produced. *context* names the public
+    ``annotate_*`` entry the caller invoked, so a refusal (an unrecognized
+    string) is traceable to that call rather than to the internal
+    ``mark_rule`` construction it used to surface from.
+
     The mark receives ``stroke``/``stroke_dash`` only when supplied; the
-    primitive receives the defaulted ``stroke`` (``"#333"``) and the raw
-    ``stroke_dash`` as its ``dash``.
+    primitive receives the defaulted ``stroke`` (``"#333"``) and the
+    normalized ``stroke_dash`` as its ``dash``.
     """
+    dash = _normalize_stroke_dash(stroke_dash, context=f"{context}: stroke_dash")
     mark_kwargs: dict = {}
     if stroke is not None:
         mark_kwargs["stroke"] = stroke
-    if stroke_dash is not None:
-        mark_kwargs["stroke_dash"] = stroke_dash
-    return _LineStyle(mark_kwargs=mark_kwargs, stroke=stroke or "#333", dash=stroke_dash)
+    if dash is not None:
+        mark_kwargs["stroke_dash"] = dash
+    return _LineStyle(mark_kwargs=mark_kwargs, stroke=stroke or "#333", dash=dash)
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
@@ -144,8 +156,11 @@ def annotate_hline(
     stroke : str, optional
         Line color as a CSS color string. Defaults to the mark default when
         omitted.
-    stroke_dash : list of float, optional
-        SVG dash array, e.g. ``[4, 4]`` for evenly dashed.
+    stroke_dash : list of float, comma-separated str, or named linetype, optional
+        SVG dash array, e.g. ``[4, 4]`` for evenly dashed. Also accepts a
+        comma-separated numeric string (``"4,4"``) or a named linetype
+        (``"solid"``, ``"dashed"``, ``"dotted"``, ``"dashdot"``,
+        ``"longdash"``).
 
     Returns
     -------
@@ -171,7 +186,7 @@ def annotate_hline(
     # Single style capture: collect only the explicitly-supplied style once,
     # then derive the mark kwargs (only-if-supplied) and the primitive fields
     # (defaulted) from it so the two representations cannot drift.
-    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash)
+    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash, context="annotate_hline")
     chart = Chart(df).mark_rule(**style.mark_kwargs).encode(y="_y")
     # Attach annotation primitive: horizontal line spanning the full x-axis
     prim = AnnotationLine(
@@ -223,8 +238,10 @@ def annotate_vline(
         onto another chart.  When omitted, no text is rendered.
     stroke : str, optional
         Line color as a CSS color string.
-    stroke_dash : list of float, optional
-        SVG dash array, e.g. ``[4, 4]``.
+    stroke_dash : list of float, comma-separated str, or named linetype, optional
+        SVG dash array, e.g. ``[4, 4]``. Also accepts a comma-separated
+        numeric string (``"4,4"``) or a named linetype (``"solid"``,
+        ``"dashed"``, ``"dotted"``, ``"dashdot"``, ``"longdash"``).
 
     Returns
     -------
@@ -247,7 +264,7 @@ def annotate_vline(
     x_coord = _coerce_coord(x)
     x_num = _coerce_coord_to_numeric(x_coord)
     df = pl.DataFrame({"_x": [x_num]})
-    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash)
+    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash, context="annotate_vline")
     chart = Chart(df).mark_rule(**style.mark_kwargs).encode(x="_x")
     # Attach annotation primitive: vertical line spanning the full y-axis
     prim = AnnotationLine(
@@ -525,8 +542,11 @@ def annotate_abline(
         Line color as a CSS color string.
     stroke_width : float, default 1.0
         Line width in pixels.
-    stroke_dash : list of float, optional
-        SVG dash array, e.g. ``[4, 4]`` for evenly dashed.
+    stroke_dash : list of float, comma-separated str, or named linetype, optional
+        SVG dash array, e.g. ``[4, 4]`` for evenly dashed. Also accepts a
+        comma-separated numeric string (``"4,4"``) or a named linetype
+        (``"solid"``, ``"dashed"``, ``"dotted"``, ``"dashdot"``,
+        ``"longdash"``).
     opacity : float, default 1.0
         Line opacity in ``[0, 1]``.
 
@@ -553,9 +573,18 @@ def annotate_abline(
             "__abline_y": [slope * x_lo + intercept, slope * x_hi + intercept],
         }
     )
-    mark_kwargs: dict = {"stroke": stroke, "stroke_width": stroke_width, "opacity": opacity}
-    if stroke_dash is not None:
-        mark_kwargs["stroke_dash"] = stroke_dash
+    # stroke_dash routes through the same _capture_line_style normalization
+    # as annotate_hline/annotate_vline (#124) -- unlike those two, abline
+    # always sets stroke/stroke_width/opacity on the mark unconditionally
+    # (it has no "let the mark use its own default" behavior), so it reads
+    # style.stroke/style.dash directly rather than style.mark_kwargs' own
+    # only-if-supplied dict shape (style.stroke never falls back to that
+    # dict's "#333" default here either: *stroke* is always a non-empty str,
+    # never None, since its parameter default is "black").
+    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash, context="annotate_abline")
+    mark_kwargs: dict = {"stroke": style.stroke, "stroke_width": stroke_width, "opacity": opacity}
+    if style.dash is not None:
+        mark_kwargs["stroke_dash"] = style.dash
     chart = Chart(df).mark_line(**mark_kwargs).encode(x="__abline_x:Q", y="__abline_y:Q")
     # Attach annotation primitive: line from extreme data coords (clipped by renderer)
     prim = AnnotationLine(
@@ -563,9 +592,9 @@ def annotate_abline(
         y1=slope * x_lo + intercept,
         x2=x_hi,
         y2=slope * x_hi + intercept,
-        stroke=stroke,
+        stroke=style.stroke,
         stroke_width=stroke_width,
-        dash=stroke_dash,
+        dash=style.dash,
     )
     return _attach_annotation_primitive(chart, prim)
 

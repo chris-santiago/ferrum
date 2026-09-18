@@ -16,10 +16,16 @@ refusal is sentinel-aware, not a claim that ``transparent`` lacks a hex
 form) — this short-circuit
 is what keeps ``fill=`` construction from ever reaching that raise.
 
-This module also pins the ``stroke_dash="4,2"`` comma-split: the same
-comma-split ``linetype=``/``line_type=`` already used for named dash forms
-now applies directly to the canonical ``stroke_dash=`` kwarg's string form,
-while list/tuple and named-linetype forms stay unchanged.
+This module also pins the ``stroke_dash="4,2"`` comma-split, and canonical
+``stroke_dash=``'s named-linetype acceptance (``"dashed"``, ``"dotted"``,
+...): ``#124`` (batch-A T9 reversal, ``f8148bdc``) made the canonical kwarg
+the *superset* of ``linetype=``/``line_type=``'s accepted forms rather than
+a strict subset restricted to the comma-split. Both spellings now route
+through the one shared ``_normalize_stroke_dash`` helper
+(``marks/base.py``), so a named form resolves identically no matter which
+of the three spellings (``stroke_dash=``, ``linetype=``, ``line_type=``)
+the caller used; list/tuple forms stay unchanged (untouched by the helper,
+as they always were).
 
 Sentinel matching mirrors ``resolve_paint_color`` in
 ``crates/ferrum-core/src/render/draw.rs`` exactly (spec-reviewer finding,
@@ -213,7 +219,13 @@ class TestStrokeDashCommaSplit:
         assert mb.kwargs["stroke_dash"] == (4.0, 2.0)
 
     def test_linetype_named_form_still_resolves_via_alias(self) -> None:
-        # Named forms stay attached to linetype=/line_type= only.
+        # REVERSED (#124, batch-A T9 reversal of f8148bdc): named forms are
+        # no longer attached to linetype=/line_type= exclusively -- the
+        # canonical stroke_dash= kwarg resolves them too (see
+        # test_stroke_dash_canonical_key_resolves_named_forms below). This
+        # test still pins that the linetype= alias path itself is unchanged
+        # by the reversal: it resolves through the same shared
+        # _normalize_stroke_dash helper as every other spelling.
         mb = MarkBase("line", linetype="dashed")
         assert mb.kwargs["stroke_dash"] == [4.0, 2.0]
 
@@ -221,23 +233,38 @@ class TestStrokeDashCommaSplit:
         mb = MarkBase("line", linetype="6,3")
         assert mb.kwargs["stroke_dash"] == [6.0, 3.0]
 
-    def test_stroke_dash_canonical_key_does_not_resolve_named_forms(self) -> None:
-        # "dashed" is a linetype= name, not a comma-separated dash array;
-        # the canonical stroke_dash= kwarg only understands the comma-split
-        # form, so a named string is refused. The refusal must name the
-        # mark, the kwarg, the offending value, and the accepted forms
-        # (spec-reviewer finding: a bare "could not convert string to
-        # float" ValueError names none of those and falls below the
-        # batch's "fail loudly" bar).
+    def test_stroke_dash_canonical_key_resolves_named_forms(self) -> None:
+        # REVERSED (#124, batch-A T9 reversal of f8148bdc): this test used to
+        # be test_stroke_dash_canonical_key_does_not_resolve_named_forms and
+        # asserted that "dashed" was REFUSED on the canonical stroke_dash=
+        # kwarg because named forms were reachable only via linetype=/
+        # line_type=. #124, filed the same day by that batch's own final
+        # design review, ruled that restriction backwards: the canonical
+        # spelling should be the superset, not a subset, of its aliases'
+        # accepted forms. "dashed" now resolves identically whether spelled
+        # stroke_dash="dashed" or linetype="dashed" -- both route through
+        # the shared _normalize_stroke_dash helper (marks/base.py).
+        mb = MarkBase("line", stroke_dash="dashed")
+        assert mb.kwargs["stroke_dash"] == [4.0, 2.0]
+
+    def test_stroke_dash_canonical_key_still_refuses_junk(self) -> None:
+        # #124 widens the accepted vocabulary on the canonical kwarg; it
+        # does not remove the refusal for genuine junk (neither a named
+        # linetype nor a valid comma-split numeric string). The refusal
+        # must name the mark, the kwarg, the offending value, and the
+        # accepted forms (spec-reviewer finding, carried over from the
+        # pre-reversal version of this test: a bare "could not convert
+        # string to float" ValueError names none of those and falls below
+        # the batch's "fail loudly" bar).
         with pytest.raises(ValueError) as exc_info:
-            MarkBase("line", stroke_dash="dashed")
+            MarkBase("line", stroke_dash="squiggly")
         message = str(exc_info.value)
         assert "mark_line" in message
         assert "stroke_dash" in message
-        assert "'dashed'" in message
+        assert "'squiggly'" in message
         assert "[4.0, 2.0]" in message  # numeric-list example
         assert '"4,2"' in message  # comma-separated-string example
-        assert "linetype" in message  # named-linetype escape hatch
+        assert "named linetype" in message  # named-linetype form, no longer an "escape hatch"
 
     def test_linetype_alias_bad_value_message_names_accepted_forms(self) -> None:
         # Same refusal, reached via the linetype= alias with a value that is

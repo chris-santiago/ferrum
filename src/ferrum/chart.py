@@ -1078,8 +1078,9 @@ class Chart(
         stroke_width : float, optional
             Stroke width in pixels.
         stroke_dash : str or list, optional
-            Dash pattern, e.g. ``"4,2"``.  Applies to the point outline
-            stroke.
+            Dash pattern, e.g. ``"4,2"`` or a named linetype (``"solid"``,
+            ``"dashed"``, ``"dotted"``, ``"dashdot"``, ``"longdash"``).
+            Applies to the point outline stroke.
         position : Position, optional
             Position adjustment — ``fm.Jitter()``, ``fm.Dodge()``, etc.
 
@@ -1285,7 +1286,8 @@ class Chart(
         stroke_width : float, optional
             Rule width in pixels.  Default is ``1``.
         stroke_dash : str or list, optional
-            Dash pattern, e.g. ``"4,2"``.
+            Dash pattern, e.g. ``"4,2"`` or a named linetype (``"solid"``,
+            ``"dashed"``, ``"dotted"``, ``"dashdot"``, ``"longdash"``).
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         position : Position, optional
@@ -1469,8 +1471,10 @@ class Chart(
             Segment stroke colour override.
         stroke_width : float, optional
             Segment stroke width in pixels.
-        stroke_dash : list of float, optional
-            Dash pattern (alternating on/off pixel lengths).
+        stroke_dash : list of float, comma-separated str, or named linetype, optional
+            Dash pattern (alternating on/off pixel lengths), e.g. ``"4,2"``
+            or a named linetype (``"solid"``, ``"dashed"``, ``"dotted"``,
+            ``"dashdot"``, ``"longdash"``).
         opacity : float, optional
             Stroke opacity in ``[0, 1]``.
         position : Position, optional

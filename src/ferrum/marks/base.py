@@ -35,6 +35,83 @@ _LINETYPE_MAP: dict[str, list[float]] = {
 }
 
 
+def _stroke_dash_error(context: str, value: Any) -> str:
+    """Build the refusal message for a *value* :func:`_normalize_stroke_dash` rejects."""
+    return (
+        f"{context}={value!r} is not a valid stroke_dash value. Expected a "
+        "numeric list (e.g. [4.0, 2.0]), a comma-separated numeric string "
+        f'(e.g. "4,2"), or a named linetype (one of {sorted(_LINETYPE_MAP)}).'
+    )
+
+
+def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
+    """Normalize a user-supplied ``stroke_dash=`` value to its wire form (#124).
+
+    Shared by :class:`MarkBase` (the mark-kwarg path, including the
+    ``linetype=``/``line_type=`` aliases), ``annotate_hline``/
+    ``annotate_vline`` (``ferrum/annotations.py``, which route
+    ``stroke_dash=`` straight into the mark and the ``AnnotationLine``
+    primitive with no ``linetype=`` alias of their own), and
+    ``fm.SelectionMark`` (``ferrum/selection.py``, whose ``stroke_dash=``
+    used to pass through completely unvalidated). One normalization means
+    the three surfaces cannot each accept a different form set — before
+    this helper, named linetypes ("dashed", ...) worked only via the
+    ``linetype=``/``line_type=`` aliases on ``MarkBase``, were unreachable
+    by any spelling on the annotation constructors, and "wiggly" silently
+    constructed a ``SelectionMark``. This reverses `f8148bdc` (batch A T9,
+    2026-09-02), which deliberately restricted the canonical ``stroke_dash=``
+    kwarg to the comma-split form; `#124`, filed the same day by that
+    batch's final design review, ruled the restriction should not have
+    shipped — canonical ``stroke_dash=`` is the superset, not a subset of
+    ``linetype=``.
+
+    Accepts, in order:
+
+    - ``None`` — passes through unchanged (solid / mark default).
+    - a named linetype string: one of ``sorted(_LINETYPE_MAP)`` (``"solid"``,
+      ``"dashed"``, ``"dotted"``, ``"dashdot"``, ``"longdash"``).
+    - a comma-separated numeric string, spaces around each number tolerated
+      (e.g. ``"4,2"``, ``"4, 2"``); ``""`` is the empty-dash spelling and
+      normalizes to ``[]`` (solid), matching an already-empty list/tuple.
+    - anything that is not a ``str`` (a list/tuple of numbers, or any other
+      type) — passed through completely unchanged. Named-linetype and
+      comma-split resolution are string-only features; list/tuple values
+      were never touched by any of the three surfaces before this helper
+      (mark kwargs stored them as-is, the annotation constructors forwarded
+      them as-is, and ``SelectionMark`` did not validate them at all), so
+      they stay symmetric across all three by construction rather than by
+      a repeated no-op check.
+
+    Anything that is a ``str`` but neither a recognized linetype name nor a
+    valid comma-split numeric string raises ``ValueError`` naming *context*
+    (the public entry + kwarg the caller invoked) and the offending value —
+    junk refuses on every surface, unchanged from before this helper.
+
+    Parameters
+    ----------
+    value:
+        The raw ``stroke_dash=`` value as the caller received it.
+    context:
+        Pre-composed ``"<entry>: <kwarg>"`` label, without the value — this
+        function appends ``={value!r}`` itself, matching
+        :func:`ferrum._validate.validate_color_value`'s ``label`` convention.
+
+    Raises
+    ------
+    ValueError
+        If *value* is a ``str`` that is neither a recognized linetype name
+        nor a valid comma-separated numeric string.
+    """
+    if not isinstance(value, str):
+        return value
+    if value in _LINETYPE_MAP:
+        return list(_LINETYPE_MAP[value])
+    try:
+        return [float(x) for x in value.split(",") if x.strip()]
+    except ValueError as exc:
+        raise ValueError(_stroke_dash_error(context, value)) from exc
+
+
 def _is_paint_sentinel(value: str) -> bool:
     """Return ``True`` if *value* is a non-color paint sentinel, not a color.
 
@@ -307,24 +384,13 @@ class MarkBase:
                 canonical = color_target
             else:
                 canonical = _MARK_KWARG_ALIASES.get(k, k)
-            if canonical == "stroke_dash" and isinstance(v, str):
-                # Named forms ("dashed", "dotted", ...) are only recognized
-                # via the linetype/line_type aliases; the canonical
-                # ``stroke_dash=`` kwarg takes the documented "a,b" comma
-                # -split form directly (no named-form lookup for it).
-                if k in ("linetype", "line_type") and v in _LINETYPE_MAP:
-                    v = _LINETYPE_MAP[v]
-                else:
-                    try:
-                        v = [float(x) for x in v.split(",") if x.strip()]
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"mark_{mark_name}: {k}={v!r} is not a valid stroke_dash "
-                            "value. Expected a numeric list (e.g. [4.0, 2.0]), a "
-                            'comma-separated numeric string (e.g. "4,2"), or — via '
-                            f"linetype=/line_type= — a named linetype "
-                            f"(one of {sorted(_LINETYPE_MAP)})."
-                        ) from exc
+            if canonical == "stroke_dash":
+                # Named forms ("dashed", "dotted", ...), the comma-split
+                # form, and list/tuple passthrough are all resolved by the
+                # one shared helper (#124) -- reached identically whether
+                # the user wrote the canonical ``stroke_dash=`` kwarg or
+                # either alias, so a named string works either way.
+                v = _normalize_stroke_dash(v, context=f"mark_{mark_name}: {k}")
             resolved[canonical] = v
         for k in resolved:
             if not mark_honors(mark_name, k):
