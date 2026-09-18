@@ -287,7 +287,7 @@ fn size_scale_defaults_to_theme_point_size_range() {
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.shapes.len(), 3);
@@ -355,7 +355,7 @@ fn shape_absent_sort_preserves_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(None);
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     // First-appearance order: cat=0, bird=1, dog=2
@@ -388,7 +388,7 @@ fn shape_sort_ascending_reorders_domain_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("ascending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["bird", "cat", "dog"]);
@@ -420,7 +420,7 @@ fn shape_sort_descending_reorders_domain_reverse_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("descending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "cat", "bird"]);
@@ -459,7 +459,7 @@ fn shape_sort_data_aware_minus_y_orders_by_y_aggregate_descending() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("-y")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected for valid -y sort: {warns:?}");
     // bird has the lowest y-sum (20) → must be last in the descending domain
@@ -491,7 +491,7 @@ fn shape_sort_explicit_array_overrides_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!(["dog", "bird", "cat"])));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "bird", "cat"]);
@@ -527,7 +527,7 @@ fn shape_sort_missing_field_emits_warning_not_panic() {
     let sort_obj = serde_json::json!({"field": "nonexistent_column", "op": "mean", "order": "descending"});
     let spec = make_spec_with_shape_sort(Some(sort_obj));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
     let scale = scale.unwrap();
     // Must emit a SortSpecIgnored warning
     assert!(!warns.is_empty(), "expected SortSpecIgnored warning for missing field");

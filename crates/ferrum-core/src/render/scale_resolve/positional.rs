@@ -144,6 +144,16 @@ pub(in crate::render) fn build_axis_scale(
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
     let dtype = infer_spec_type(enc, located.col.data_type());
     let pr = axis_pixel_range(channel, &dtype, pixel_range);
+    // #95: `positional_fields` names the RENDERED channels (the caller derives
+    // them from the post-`CoordFlip` encoding), while a `sort="-y"` shorthand
+    // names the channel the user AUTHORED. `SortContext` carries the flag that
+    // reconciles the two — see its `coord_flipped` doc. `spec.coord` is
+    // untouched by the swap `prepare::build_layers` applies to the ENCODINGS,
+    // which is why it is readable here and at every other site that asks the
+    // same question off the same field (`domain::numeric_domain_union`'s
+    // layer-union loop, `build_auxiliary_scales`, `resolve_scales`'s
+    // `EncodingTypeMismatch`).
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
 
     if let Some(scale_spec) = &enc.scale {
         let sort_ctx = SortContext {
@@ -151,6 +161,7 @@ pub(in crate::render) fn build_axis_scale(
             batch: located.batch,
             x_field: positional_fields.x,
             y_field: positional_fields.y,
+            coord_flipped,
         };
         return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, warnings);
     }
@@ -211,6 +222,7 @@ pub(in crate::render) fn build_axis_scale(
                 batch: sort_batch,
                 x_field: positional_fields.x,
                 y_field: positional_fields.y,
+                coord_flipped,
             };
             apply_sort_to_domain(&mut domain, enc.sort.as_ref(), &sort_ctx, warnings);
             // An auto-inferred categorical axis has no user padding to honor:
@@ -1207,6 +1219,7 @@ mod tests {
             batch: &batch,
             x_field: None,
             y_field: None,
+            coord_flipped: false,
         };
         let mut warnings = Vec::new();
         super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
@@ -1545,6 +1558,7 @@ mod tests {
             batch,
             x_field: None,
             y_field: None,
+            coord_flipped: false,
         };
         let mut warnings = Vec::new();
         super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &mut warnings)

@@ -1524,14 +1524,19 @@ fn build_auxiliary_scales(
     // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
     // marks normalize through the same domain as the global legend/colorbar.
     let aux_shared = facet_aux_shared(spec);
+    // #95: the categorical shape/stroke-dash domains honor `sort=`, and a
+    // channel-shorthand sort names the channel the user AUTHORED while
+    // `spec.encoding` here is the RENDERED encoding. Same question, same
+    // single answer as the positional axes ask in `build_axis_scale`.
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     // 10-pre-b: composite shared color/size domains (None → standalone path).
     let color_domain = leaf_scales.and_then(|c| c.color.as_ref());
     let size_domain = leaf_scales.and_then(|c| c.size.as_ref());
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain)?;
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain, coord_flipped)?;
     warnings.extend(color_warns);
     let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain)?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped)?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
     // closure is only here so each call site reads as the channel it resolves
@@ -1544,7 +1549,7 @@ fn build_auxiliary_scales(
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped)?;
     warnings.extend(dash_warns);
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }

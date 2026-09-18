@@ -100,6 +100,11 @@ pub fn build_color_scale(
     force_categorical: bool,
     facet_shared: bool,
     composite_domain: Option<&SharedDomain>,
+    // `spec.coord` is `CoordFlip`: `encoding` above is the RENDERED encoding,
+    // so an authored `sort="-y"` shorthand on the color channel needs this to
+    // find the channel the user wrote (#95). `false` for every unflipped
+    // chart → byte-identical.
+    coord_flipped: bool,
 ) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
@@ -214,8 +219,12 @@ pub fn build_color_scale(
         let sort_ctx = SortContext {
             category_field: &c_enc.field,
             batch: domain_batch,
+            // Rendered channels (`encoding` is post-`CoordFlip`); the flag is
+            // what lets an authored `sort="-y"` still name the user's own y
+            // channel (#95, same rule the positional axes resolve under).
             x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
             y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
+            coord_flipped,
         };
         // D1: if the color encoding carries an explicit ordinal string range, build
         // the palette from those colors (parsed via `parse_color`).

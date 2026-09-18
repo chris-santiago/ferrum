@@ -155,10 +155,21 @@ enum SortOrder {
 pub(in crate::render) struct SortContext<'a> {
     pub(in crate::render) category_field: &'a str,
     pub(in crate::render) batch: &'a RecordBatch,
-    /// Field bound to the x channel (if any), for resolving `"x"`/`"-x"`.
+    /// Field bound to the RENDERED x channel (if any), for resolving `"x"`/`"-x"`.
     pub(in crate::render) x_field: Option<&'a str>,
-    /// Field bound to the y channel (if any), for resolving `"y"`/`"-y"`.
+    /// Field bound to the RENDERED y channel (if any), for resolving `"y"`/`"-y"`.
     pub(in crate::render) y_field: Option<&'a str>,
+    /// Whether the chart carries `CoordFlip` (`spec.coord`), i.e. whether the
+    /// two spaces this struct straddles differ at all (#95).
+    ///
+    /// `x_field`/`y_field` are built from the RESOLVED (post-flip) rendering
+    /// encoding — `positional.rs`'s `PositionalFields`, `auxiliary.rs`'s
+    /// rendering `Encoding`. The channel token inside a `sort="-y"` shorthand,
+    /// by contrast, is the text the user AUTHORED. This flag is what lets
+    /// [`apply_channel_shorthand_sort`] move that authored token into the
+    /// fields' own space before the lookup, so both sides of it live in one
+    /// space. `false` for every unflipped chart → byte-identical.
+    pub(in crate::render) coord_flipped: bool,
 }
 
 /// Apply `encoding.sort` to an ordinal domain in place.
@@ -168,7 +179,10 @@ pub(in crate::render) struct SortContext<'a> {
 /// - `"descending"` — sort alphabetically descending.
 /// - Channel shorthand `"x"`/`"-x"`/`"y"`/`"-y"` — sort the categorical domain by
 ///   the per-category aggregate of the *other* positional channel's field. The
-///   leading `-` selects descending; the default aggregate is `sum`.
+///   leading `-` selects descending; the default aggregate is `sum`. The token
+///   names the channel the user AUTHORED, so under `CoordFlip` a chart sorts
+///   identically to its unflipped twin (#95) — see
+///   [`apply_channel_shorthand_sort`].
 /// - Sort-field object `{"field": "...", "op": "sum"|"mean"|"max"|"min"|
 ///   "count"|"median", "order": "ascending"|"descending"}` — sort the domain by
 ///   the per-category aggregate of `field`. `op` defaults to `sum`, `order` to
@@ -243,6 +257,17 @@ pub(in crate::render) fn apply_sort_to_domain(
 /// Resolve the channel-shorthand form (`"x"`/`"-x"`/`"y"`/`"-y"`). The domain is
 /// reordered by the per-category aggregate (default op = sum) of the field bound
 /// to the named channel.
+///
+/// **The shorthand names an AUTHORED channel** (#95, user-adjudicated; spec
+/// §5/§8). `sort="-y"` means "descending by whatever the user's own
+/// `.encode(y=...)` bound", which under `CoordFlip` is the field that RENDERS
+/// on x. Before this was pinned, the flipped spelling aggregated the category
+/// column itself, fell back to insertion order, and warned — so the only
+/// spelling that worked under flip was `"-x"`, which names a channel the user
+/// never wrote. The sort-FIELD object form (`{"field": …, "op": …}`) names a
+/// field rather than a channel and was always flip-invariant; the two forms
+/// agreeing is the observable contract, pinned by
+/// `prepare`'s `sort_field_object_is_flip_invariant_and_agrees_with_the_shorthand`.
 fn apply_channel_shorthand_sort(
     domain: &mut Vec<String>,
     shorthand: &str,
@@ -254,26 +279,29 @@ fn apply_channel_shorthand_sort(
     } else {
         (SortOrder::Ascending, shorthand)
     };
-    let value_field = match channel {
+    // #95 (AUTHORED semantics, spec §5/§8): `channel` is the literal substring
+    // of the `shorthand` STRING the user wrote (`sort="-y"` → `"y"`), so it
+    // names the channel their own `.encode(y=...)` bound — the PRE-flip space.
+    // `ctx.x_field`/`ctx.y_field` name the RENDERED channels. Move the
+    // authored token into the fields' space ONCE, here at the boundary where
+    // it enters resolution, rather than re-mapping the fields at the read site
+    // (the rule `#113` reinforced): `user_facing_channel` is an involution on
+    // `x`/`y`, so the crate's single flip expression serves both directions and
+    // there is no second mapping to drift from it. Unflipped, this is identity
+    // and the lookup is byte-identical to what it always was.
+    let rendered_channel = crate::render::prepare::user_facing_channel(channel, ctx.coord_flipped);
+    let value_field = match rendered_channel {
         "x" => ctx.x_field,
         "y" => ctx.y_field,
         _ => None,
     };
-    // R3 (SortSpecIgnored family): `channel` here is NOT a resolved/post-flip
-    // token the way every other R3-covered `channel` field is — it is the
-    // literal substring of the `shorthand` STRING the user wrote in their own
-    // `sort=` spec (e.g. `sort="-x"` → `channel == "x"`), echoed back verbatim.
-    // `prepare::user_facing_channel` must NOT be applied to it: doing so would
-    // translate the user's own written text AWAY from what they wrote (and
-    // directly contradict the `sort={shorthand:?}` clause right next to it in
-    // the same sentence). This message already satisfies "names the channel as
-    // the user wrote it" by construction, flipped or not — see
+    // R3 (SortSpecIgnored family): the message keeps naming `channel`, NOT
+    // `rendered_channel` — it is the user's own written text, echoed back
+    // verbatim, and translating it would contradict the `sort={shorthand:?}`
+    // clause right next to it in the same sentence. This is why the two tokens
+    // stay separate bindings rather than one shadowed variable; see
     // `sort_shorthand_missing_channel_names_users_own_text_{unflipped,under_flip}`
-    // below. (Separately: whether `ctx.x_field`/`ctx.y_field` — which DO come
-    // from the post-flip rendering encoding, `positional.rs`'s
-    // `PositionalFields` — resolve against the axis the user actually intended
-    // by `"-x"`/`"-y"` under `CoordFlip` is a resolution-semantics question,
-    // not a message-naming one; out of R3's scope, logged as a follow-up.)
+    // below, which pin the message under both coordinate systems.
     let Some(value_field) = value_field else {
         warnings.push(RenderWarning::SortSpecIgnored {
             reason: format!("sort={shorthand:?} but no field is bound to channel {channel:?}"),
@@ -978,6 +1006,7 @@ mod tests {
             batch: &batch,
             x_field: Some("price"),
             y_field: None,
+            coord_flipped: false,
         };
         let mut domain = vec!["a".to_string(), "b".to_string()];
         let mut warnings = Vec::new();
@@ -994,23 +1023,31 @@ mod tests {
 
     /// R3, post-`CoordFlip` shape: `SortContext.x_field`/`y_field` are
     /// populated from the RESOLVED (post-flip) rendering encoding on the
-    /// prepare path (`positional.rs`'s `PositionalFields`) — the same
-    /// "downstream of the swap" condition every other R3 family is un-flipped
-    /// under. This family is the deliberate exception: `channel` in the
-    /// message is parsed straight out of the `shorthand` STRING the user
-    /// wrote (`apply_channel_shorthand_sort`'s doc comment explains why), not
-    /// derived from which resolved slot matched — so the message must still
-    /// echo the user's own literal text, byte-identical in shape to the
-    /// unflipped case above, even though the underlying `ctx` here is
-    /// genuinely post-flip.
+    /// prepare path (`positional.rs`'s `PositionalFields`), so the SAME
+    /// "the user's own y channel is unbound" situation the unflipped case
+    /// above expresses as `y_field: None` is expressed HERE as `x_field:
+    /// None` — post-flip x is where the authored y lands. The message is then
+    /// asserted byte-identical to the unflipped one: `channel` is parsed
+    /// straight out of the `shorthand` STRING the user wrote, never derived
+    /// from which resolved slot was consulted.
+    ///
+    /// Re-reasoned for `#95` (not re-baselined): the fields were previously
+    /// `x_field: Some("weight"), y_field: None`, which under AUTHORED
+    /// semantics no longer describes an unbound authored `y` at all — it
+    /// describes an authored `y` bound to `weight`, which now RESOLVES.
+    /// Keeping the old fixture would have made this test pass on a different
+    /// message ("cannot read sort value field") and quietly stopped pinning
+    /// R3's actual claim. The asserted string is unchanged, because R3's
+    /// claim is unchanged.
     #[test]
     fn sort_shorthand_missing_channel_names_users_own_text_under_flip() {
         let batch = group_batch(vec!["a", "b"]);
         let ctx = SortContext {
             category_field: "cat",
             batch: &batch,
-            x_field: Some("weight"), // post-flip x holds what was the user's y
-            y_field: None,           // post-flip y holds what was the user's x (unset)
+            x_field: None,            // post-flip x holds the user's y — unbound
+            y_field: Some("species"), // post-flip y holds the user's x (the category)
+            coord_flipped: true,
         };
         let mut domain = vec!["a".to_string(), "b".to_string()];
         let mut warnings = Vec::new();
@@ -1025,6 +1062,79 @@ mod tests {
             }
             other => panic!("expected SortSpecIgnored, got {other:?}"),
         }
+        assert_eq!(
+            domain,
+            vec!["a".to_string(), "b".to_string()],
+            "insertion order preserved on failure"
+        );
+    }
+
+    /// `#95`, at the unit seam: the authored channel token is resolved against
+    /// the field the user's OWN channel bound, which under `CoordFlip` is the
+    /// field sitting in the opposite `SortContext` slot.
+    ///
+    /// Both rows aggregate the same column (`val`) and must therefore produce
+    /// the same order; the only difference between them is which slot that
+    /// column occupies and whether `coord_flipped` is set. A broken
+    /// implementation reads the like-named slot instead: unflipped that is
+    /// still `val` (so the control passes either way — it is the control), but
+    /// flipped it is the category column, which yields no usable aggregate and
+    /// leaves insertion order plus a warning.
+    #[test]
+    fn sort_shorthand_resolves_the_authored_channel_not_the_rendered_one() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::Fields;
+        let schema = Arc::new(Schema::new(Fields::from(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ])));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("b"), Some("c")])),
+                Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+
+        // Unflipped: the user authored the value on y, and y is where it renders.
+        let unflipped = SortContext {
+            category_field: "cat",
+            batch: &batch,
+            x_field: Some("cat"),
+            y_field: Some("val"),
+            coord_flipped: false,
+        };
+        let mut domain = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &unflipped, &mut warnings);
+        assert!(warnings.is_empty(), "control must resolve: {warnings:?}");
+        assert_eq!(domain, ["a", "c", "b"], "descending by val");
+
+        // Flipped: the same authored encoding, so the value now renders on x.
+        let flipped = SortContext {
+            category_field: "cat",
+            batch: &batch,
+            x_field: Some("val"),
+            y_field: Some("cat"),
+            coord_flipped: true,
+        };
+        let mut flipped_domain = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut flipped_warnings = Vec::new();
+        apply_sort_to_domain(
+            &mut flipped_domain,
+            Some(&serde_json::json!("-y")),
+            &flipped,
+            &mut flipped_warnings,
+        );
+        assert!(
+            flipped_warnings.is_empty(),
+            "the authored spelling must resolve under flip too: {flipped_warnings:?}"
+        );
+        assert_eq!(
+            flipped_domain, domain,
+            "one authored spelling, one order, whatever the coordinate system"
+        );
     }
 
     // ── Task 13 (spec §4.4, "Extended 2026-09-02, T13 quality review",

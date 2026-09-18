@@ -792,33 +792,51 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 /// per-panel facts and must keep fanning out one warning per panel
 /// (adjudicated boundary, wave-1 close remediation).
 ///
-/// Members share one shape: produced by continuous-color-scheme resolution
-/// (`scale_resolve::color::resolve_continuous_scheme`), pixel-range-independent,
-/// and chart-level rather than panel-level.
-/// - `UnknownColorScheme` — a named-but-unrecognized `scheme`/`cmap`.
+/// Members share one shape: the warning answers a question about the SPEC (a
+/// scheme name, a stops list, a sort spec), never about this panel's data or
+/// pixels, so every panel that resolves re-derives the identical answer.
+/// - `UnknownColorScheme` — a named-but-unrecognized `scheme`/`cmap`, from
+///   continuous-color-scheme resolution
+///   (`scale_resolve::color::resolve_continuous_scheme`).
 /// - `GradientTooFewStops` — a `Sequential` scale's `stops` resolved to
 ///   fewer than 2 usable entries (cycle-2 close-remediation finding N1: this
 ///   variant reproduced the exact S3-1 shape in the very change that fixed
 ///   it for `UnknownColorScheme`, because it is built by the same resolver
 ///   but was not added to this predicate when it was introduced).
+/// - `SortSpecIgnored` — a `sort=` the resolver could not honor (#95, wave-5).
+///   Every reason it carries is a property of the spec plus the schema
+///   (unrecognized form, unsupported `op`, a `field`/channel naming nothing
+///   bound), so the panel-real pass restates it verbatim; a user who wrote one
+///   bad `sort=` was getting two identical `UserWarning`s for it. Note this
+///   member is NOT produced by the color resolver like the two above — the
+///   shared property is "restated per panel, not re-measured per panel", which
+///   is what this predicate has always actually meant.
 ///
 /// A future member must be added here explicitly — there is no compile-time
 /// forcing function for this list (unlike `apply_with_context`'s exhaustive
-/// match), so a new continuous-color-scheme warning needs a human to notice
-/// it shares this shape. See "What still feels wrong" in the close-rust
-/// design review for the durable fix (an exhaustive `RenderWarning::multiplicity()`
-/// classifier), not executed here as out of scope for this remediation.
+/// match), so a new pixel-range-independent, spec-keyed warning needs a human
+/// to notice it shares this shape. See "What still feels wrong" in the
+/// close-rust design review for the durable fix (an exhaustive
+/// `RenderWarning::multiplicity()` classifier), not executed here as out of
+/// scope for this remediation.
 ///
 /// `scene_build::build_scene` calls this to strip the provisional prefix of
 /// its warnings vec once it has confirmed at least one panel actually
 /// reached `resolve_panel_scales` — see that function's own doc for why the
 /// empty-after-transform case (T11, #118) must keep the provisional copy
 /// when NO panel ever resolves (the provisional pass is then the only chance
-/// this fact is ever reported).
+/// this fact is ever reported). That is also why `SortSpecIgnored` belongs
+/// HERE and not in [`drop_placeholder_only_warnings`]: dropping it at the
+/// source would silence it outright for an all-filtered chart, which is the
+/// regression that filter's own doc was written to prevent
+/// (`unresolvable_sort_still_warns_when_no_panel_resolves` pins the
+/// difference).
 pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarning) -> bool {
     matches!(
         w,
-        RenderWarning::UnknownColorScheme { .. } | RenderWarning::GradientTooFewStops { .. }
+        RenderWarning::UnknownColorScheme { .. }
+            | RenderWarning::GradientTooFewStops { .. }
+            | RenderWarning::SortSpecIgnored { .. }
     )
 }
 
@@ -6663,6 +6681,219 @@ mod tests {
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert!(prep.axes.secondary_y.is_empty());
+    }
+
+    // ── #95: a sort shorthand binds to the channel the user WROTE ───────────
+    //
+    // End-to-end through `prepare_render_inputs`, which is the production
+    // entry that applies the `CoordFlip` swap (`build_layers`) and then
+    // resolves the category axis against the post-flip rendering encoding.
+    // A unit call into `resolve_scales` would hand it an un-swapped encoding
+    // and prove nothing about the two-spaces defect.
+
+    /// `cat` in insertion order a, b, c; `val` per category a=3, b=1, c=2. So
+    /// the descending-by-`val` order is [a, c, b] — distinct from insertion
+    /// order (a, b, c) AND from alphabetical descending (c, b, a), so the
+    /// asserted vector can only come from a data-aware sort that actually
+    /// aggregated `val`.
+    fn sort_shorthand_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A bar chart with the category AUTHORED on `x` and the value on `y`,
+    /// carrying `sort` on the category encoding. `flipped` adds
+    /// `.coord(CoordFlip())`, which is the ONLY difference between the twins —
+    /// the authored encoding (and therefore the authored `sort` text) is
+    /// byte-identical either way.
+    fn sorted_bar_spec(sort: serde_json::Value, flipped: bool) -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "cat".into(),
+                    sort: Some(sort),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: flipped.then_some(crate::spec::coord::CoordKind::Flip),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    /// The category axis's resolved domain, read off the axis the categories
+    /// actually render on: `x` unflipped, `y` under `CoordFlip`. Returns the
+    /// tick labels alongside every `SortSpecIgnored` reason the prepare pass
+    /// produced, so a test can assert order and silence together.
+    fn category_axis_order(
+        sort: serde_json::Value,
+        flipped: bool,
+    ) -> (Vec<String>, Vec<String>) {
+        let spec = sorted_bar_spec(sort, flipped);
+        let prep = prepare_render_inputs(
+            &spec,
+            &sort_shorthand_batch(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .expect("the fixture renders");
+        let axis = if flipped { &prep.axes.y } else { &prep.axes.x };
+        let ignored = prep
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::SortSpecIgnored { reason } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect();
+        (axis.tick_labels.clone(), ignored)
+    }
+
+    /// #95, the defect: `sort="-y"` names the channel the user's own
+    /// `.encode(y=...)` bound, so a flipped chart must order its categories
+    /// exactly like its unflipped twin. Before the fix the flipped twin looked
+    /// up the RENDERED `y` field (the category column `cat`, post-swap),
+    /// found no numeric aggregate worth the name, and fell back to insertion
+    /// order with a `SortSpecIgnored` — measured [a, b, c] against the
+    /// unflipped [a, c, b].
+    #[test]
+    fn sort_shorthand_binds_to_the_authored_channel_under_flip() {
+        let (unflipped, unflipped_ignored) = category_axis_order(serde_json::json!("-y"), false);
+        assert_eq!(
+            unflipped, ["a", "c", "b"],
+            "control: unflipped, sort=\"-y\" orders categories by descending val"
+        );
+        assert!(unflipped_ignored.is_empty(), "control must not warn: {unflipped_ignored:?}");
+
+        let (flipped, flipped_ignored) = category_axis_order(serde_json::json!("-y"), true);
+        assert_eq!(
+            flipped, unflipped,
+            "under CoordFlip the authored \"-y\" still names the user's own y \
+             channel (the value column), so the category order must match the \
+             unflipped twin"
+        );
+        assert!(
+            flipped_ignored.is_empty(),
+            "the authored spelling must resolve, not degrade: {flipped_ignored:?}"
+        );
+    }
+
+    /// Negative control for the test above. The sort-FIELD object names a
+    /// FIELD, never a channel, so it was already flip-invariant before the
+    /// fix — which is what makes the two forms' pre-fix DISAGREEMENT the
+    /// argument for authored semantics. After the fix they must agree, and
+    /// both must equal the object form's flip-invariant answer.
+    #[test]
+    fn sort_field_object_is_flip_invariant_and_agrees_with_the_shorthand() {
+        let object_form =
+            serde_json::json!({"field": "val", "op": "sum", "order": "descending"});
+        let (unflipped, unflipped_ignored) = category_axis_order(object_form.clone(), false);
+        let (flipped, flipped_ignored) = category_axis_order(object_form, true);
+        assert_eq!(unflipped, ["a", "c", "b"], "the object form names a field, not a channel");
+        assert_eq!(flipped, unflipped, "the object form was always flip-invariant");
+        assert!(unflipped_ignored.is_empty() && flipped_ignored.is_empty());
+
+        let (shorthand_flipped, _) = category_axis_order(serde_json::json!("-y"), true);
+        assert_eq!(
+            shorthand_flipped, flipped,
+            "the two spellings of one intent must produce one order under flip"
+        );
+    }
+
+    /// A genuinely unresolvable sort must be reported ONCE per chart. The
+    /// provisional placeholder pass here and `scene_build`'s panel-real pass
+    /// both resolve the same chart-level fact, so without
+    /// `provisional_scale_warning_superseded_by_panel_pass` naming it the user
+    /// gets two identical `UserWarning`s for one mistake.
+    #[test]
+    fn unresolvable_sort_warns_once_per_chart() {
+        let spec = sorted_bar_spec(serde_json::json!({"field": "does_not_exist"}), false);
+        let out = crate::render::render_svg(
+            &spec,
+            &sort_shorthand_batch(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("the fixture renders");
+        let sort_warnings: Vec<&RenderWarning> = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::SortSpecIgnored { .. }))
+            .collect();
+        assert_eq!(
+            sort_warnings.len(),
+            1,
+            "one ignored sort spec is one fact: {sort_warnings:?}"
+        );
+    }
+
+    /// The companion to the test above, and the reason the fix belongs in
+    /// `provisional_scale_warning_superseded_by_panel_pass` rather than in
+    /// `drop_placeholder_only_warnings`: when the data is empty after
+    /// transforms, `build_scene`'s panel loop skips every zero-row panel, so
+    /// no panel-real pass ever re-reports the fact. The provisional copy is
+    /// then the only report this render will ever make and must survive.
+    #[test]
+    fn unresolvable_sort_still_warns_when_no_panel_resolves() {
+        let mut spec = sorted_bar_spec(serde_json::json!({"field": "does_not_exist"}), false);
+        // A `top_k` keeping zero groups: the batch is non-empty on entry (so
+        // `prepare_render_inputs` runs its provisional pass) but every panel
+        // is zero-row by the time `build_scene` loops. Chosen over a `filter`
+        // that matches nothing because `filter`'s predicate is evaluated
+        // through the Python interpreter, which a `cargo test` binary has not
+        // initialized.
+        spec.transforms = vec![serde_json::from_value(serde_json::json!({
+            "type": "top_k",
+            "n": 0,
+            "field": "val"
+        }))
+        .expect("top_k transform spec")];
+        let out = crate::render::render_svg(
+            &spec,
+            &sort_shorthand_batch(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("an all-filtered chart still renders its axes");
+        assert_eq!(
+            out.warnings
+                .iter()
+                .filter(|w| matches!(w, RenderWarning::SortSpecIgnored { .. }))
+                .count(),
+            1,
+            "the provisional copy is the only report this render can make: {:?}",
+            out.warnings
+        );
     }
 }
 

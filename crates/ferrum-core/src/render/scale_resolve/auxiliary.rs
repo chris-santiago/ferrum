@@ -84,6 +84,7 @@ fn sorted_categorical_domain(
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
+    coord_flipped: bool,
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
     let domain_batch = shared_categorical_batch(batch, field, transform_outputs, facet_shared);
     let mut distinct = distinct_values_in_order(domain_batch, field)?;
@@ -92,8 +93,14 @@ fn sorted_categorical_domain(
     let sort_ctx = SortContext {
         category_field: field,
         batch: domain_batch,
+        // `encoding` is the RENDERED (post-`CoordFlip`) encoding, so these two
+        // fields name the rendered channels; `coord_flipped` is what lets an
+        // authored `sort="-y"` still find the channel the user wrote (#95).
+        // A shape/stroke-dash domain sorts by the same rule the positional
+        // axes do, because it runs through the same `apply_sort_to_domain`.
         x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
         y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
+        coord_flipped,
     };
     apply_sort_to_domain(&mut distinct, sort, &sort_ctx, &mut warnings);
     Ok((distinct, warnings))
@@ -185,6 +192,10 @@ pub fn build_shape_scale(
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
+    // `spec.coord` is `CoordFlip`: `encoding` above is the RENDERED encoding,
+    // so an authored `sort="-y"` shorthand needs this to find the channel the
+    // user wrote (#95). `false` for every unflipped chart → byte-identical.
+    coord_flipped: bool,
 ) -> Result<(Option<ShapeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(shape_enc) = &encoding.shape else {
         return Ok((None, Vec::new()));
@@ -204,6 +215,7 @@ pub fn build_shape_scale(
         batch,
         transform_outputs,
         facet_shared,
+        coord_flipped,
     )?;
 
     if distinct.len() > SHAPE_PALETTE.len() {
@@ -376,6 +388,9 @@ pub fn build_stroke_dash_scale(
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
+    // See [`build_shape_scale`]'s `coord_flipped` — the same authored-vs-
+    // rendered channel question, same answer (#95).
+    coord_flipped: bool,
 ) -> Result<(Option<StrokeDashScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(dash_enc) = &encoding.stroke_dash else {
         return Ok((None, Vec::new()));
@@ -395,6 +410,7 @@ pub fn build_stroke_dash_scale(
         batch,
         transform_outputs,
         facet_shared,
+        coord_flipped,
     )?;
 
     // The dash index space is the solid entry (0) plus every DASH_PALETTE
