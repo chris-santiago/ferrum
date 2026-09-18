@@ -368,12 +368,12 @@ class TestOrdering:
 #: point/bar honored only the kwargs -- because nothing compared the kinds.
 _ALL_KINDS = ["strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"]
 
-#: The kinds a caller can hand an already-built category CHANNEL to.
-#: ``kind="count"`` builds its ``Aggregate`` from the raw ``x=`` argument, so a
-#: channel object there raises inside the transform constructor -- pre-existing,
-#: unrelated to the layer/chart split this section covers, and tracked
-#: separately. It stays in the color-channel tables below, which it passes.
-_CHANNEL_OBJECT_KINDS = [k for k in _ALL_KINDS if k != "count"]
+#: The kinds a caller can hand an already-built category CHANNEL to. All eight
+#: -- ``kind="count"`` used to build its ``Aggregate`` from the raw ``x=``
+#: argument, so a channel object there raised inside the transform constructor
+#: (#192); it now derives the aggregated field from the same resolved
+#: `cat_channel` every other kind binds, so it takes a channel object too.
+_CHANNEL_OBJECT_KINDS = _ALL_KINDS
 
 
 def _catplot_kwargs(kind: str, **kwargs) -> dict:
@@ -499,12 +499,6 @@ class TestCallerChannelOptions:
         so this is the shipped rule, stated once here instead of implied by
         two implementations.
         """
-        if kind == "count":
-            # `kind="count"` builds its Aggregate from the raw x= argument, so
-            # a channel OBJECT there raises inside the transform constructor
-            # (pre-existing, all-kinds-independent, tracked separately). The
-            # precedence question is therefore only askable on the other seven.
-            pytest.skip("count takes a bare category column name, not a channel object")
         svg = fm.catplot(
             cat_df,
             **_catplot_kwargs(
@@ -938,3 +932,92 @@ def test_non_estimating_kinds_are_byte_identical(cat_df, kind):
         f"catplot(kind={kind!r}) output moved -- expected byte-identity with the "
         "pre-aggregation baseline"
     )
+
+
+# ---------------------------------------------------------------------------
+# kind="count" accepts a channel object for the category slot (#192)
+# ---------------------------------------------------------------------------
+
+
+class TestCountChannelObjectParity:
+    """``kind="count"`` reaches parity with the other seven kinds (#192).
+
+    It used to be the only kind that read the RAW ``x=``/``y=`` argument a
+    second time, straight into ``AggregateOp`` -- so a channel object there
+    (``x=fm.X("cat")``) raised a bare PyO3 ``TypeError`` naming neither
+    ``catplot`` nor ``kind="count"``. It now derives the aggregated field
+    from ``cat_channel``, the SAME resolved channel every other kind binds
+    on ``enc["x"]``/``enc["y"]`` -- so a channel object works, its
+    ``sort=``/``title=``/``type_=`` ride through to the rendered axis, and
+    an ``encode={"x": ...}`` override aggregates the column the axis
+    actually binds, not the column named by the original ``x=``/``y=``
+    keyword.
+    """
+
+    def test_channel_object_renders_and_counts_by_category(self, cat_df):
+        svg = fm.catplot(cat_df, x=fm.X("cat"), kind="count").to_svg()
+        assert sorted(set(cat_axis_labels(svg))) == ["a", "b", "c", "d"]
+        assert len(estimator_bars(svg)) == 4
+
+    def test_channel_object_under_orient_h(self, cat_df):
+        """`y=` carries the category channel under `orient="h"`."""
+        svg = fm.catplot(cat_df, y=fm.Y("cat"), kind="count", orient="h").to_svg()
+        assert sorted(set(cat_axis_labels(svg))) == ["a", "b", "c", "d"]
+        assert len(estimator_bars(svg)) == 4
+
+    def test_channel_object_with_hue(self, cat_df):
+        """Grouped by (category, hue): 4 categories x 2 hue levels = 8 bars."""
+        svg = fm.catplot(cat_df, x=fm.X("cat"), hue="grp", kind="count").to_svg()
+        assert len(estimator_bars(svg)) == 8
+        assert hue_legend_labels(svg) == ["X", "Y"]
+
+    def test_channel_object_without_hue_is_ungrouped(self, cat_df):
+        """No `hue=` -> one bar per category, not per (category, hue) cell."""
+        svg = fm.catplot(cat_df, x=fm.X("cat"), kind="count").to_svg()
+        assert hue_legend_labels(svg) == []
+        assert len(estimator_bars(svg)) == 4
+
+    def test_channel_options_survive_to_the_rendered_axis(self, cat_df):
+        """`sort=`/`title=`/`type_=` on the caller's channel all ride through."""
+        svg = fm.catplot(
+            cat_df,
+            x=fm.X("cat", sort=["d", "c", "b", "a"], title="Category", type_="N"),
+            kind="count",
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["d", "c", "b", "a"]
+        assert "Category" in text_labels(svg)
+
+    def test_channel_options_survive_under_orient_h(self, cat_df):
+        """The same survival, through the `y=` door under `orient="h"`."""
+        svg = fm.catplot(
+            cat_df,
+            y=fm.Y("cat", sort=["d", "c", "b", "a"], title="Category", type_="N"),
+            kind="count",
+            orient="h",
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["d", "c", "b", "a"]
+        assert "Category" in text_labels(svg)
+
+    def test_encode_override_aggregates_the_bound_column(self, cat_df):
+        """`encode={"x": ...}` replaces the AGGREGATED field, not just the axis.
+
+        Before the fix, the branch built its `Aggregate` from the raw `x=`
+        argument (`"cat"`) while `enc["x"]`/the chart-level encoding was
+        overridden to bind `"grp"` -- a transform output with no `grp`
+        column, so the encoding referenced an unknown column (or, with a
+        channel-object `x=`, the #192 TypeError fired before the override
+        was even reached). Now the Aggregate's groupby is
+        `_field_name(cat_channel)` -- the POST-override channel -- so the
+        aggregated column and the bound axis always agree.
+        """
+        svg = fm.catplot(cat_df, x="cat", kind="count", encode={"x": fm.X("grp")}).to_svg()
+        labels = text_labels(svg)
+        assert set(t for t in labels if t in {"X", "Y"}) == {"X", "Y"}
+        assert not any(t in {"a", "b", "c", "d"} for t in labels)
+        assert len(estimator_bars(svg)) == 2
+
+    def test_bare_string_count_is_unaffected(self, cat_df):
+        """The clean-input path (no channel object, no `encode=`) is untouched."""
+        svg = fm.catplot(cat_df, x="cat", kind="count").to_svg()
+        digest = hashlib.sha256(svg.encode()).hexdigest()
+        assert digest == _UNTOUCHED_KIND_DIGESTS["count"]

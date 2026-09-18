@@ -1884,10 +1884,22 @@ def _catplot_build(
         chart._mark = None
         chart._layers = summary_layers
     elif kind == "count":
-        # Aggregate(count of cat_field) → bar.
-        if cat_field is None:
+        # Aggregate(count of the resolved category channel) → bar. Derived
+        # from `cat_channel` -- not the raw `cat_field` argument -- for two
+        # reasons: `cat_channel` is already unwrapped to a plain column name
+        # (a bare-string `cat_field` passes through `_field_name` a no-op;
+        # a channel object like `fm.X("g")` does not, and the raw object
+        # reaching `AggregateOp` raised a PyO3 TypeError naming neither
+        # `catplot` nor `kind="count"`), and `cat_channel` is also the
+        # POST-`encode=`-override channel (`:1777`-`:1778`), the same value
+        # bound on `enc["x"]` a few lines up -- so `encode={"x": fm.X("other")}`
+        # aggregates the column the axis actually binds, not the one named by
+        # the original `x=`/`y=` keyword. Mirrors `_catplot_summary_layers`'s
+        # own `cat_field = _field_name(cat_channel)` (`:1052`).
+        if cat_name is None:
             raise ValueError("catplot(kind='count') requires x= (or y= when orient='h')")
-        op = AggregateOp(cat_field, "count", "n")
+        count_field = _field_name(cat_channel)
+        op = AggregateOp(count_field, "count", "n")
         # Group by the hue column too when one is bound. Aggregate emits only
         # its groupby columns, so grouping by the category alone dropped the
         # hue column from the transform's output and the color encoding then
@@ -1902,7 +1914,9 @@ def _catplot_build(
         # category column" is one rule with one owner, and this branch and
         # `_catplot_summary_layers` were spelling it separately, forty lines
         # apart, inside one function.
-        count_groupby, _split_hue = resolve_color_groupby(cat_field, _field_name(hue), [cat_field])
+        count_groupby, _split_hue = resolve_color_groupby(
+            count_field, _field_name(hue), [count_field]
+        )
         chart = chart.transform(Aggregate([op], groupby=count_groupby))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
         # Remap value axis to the count column.
