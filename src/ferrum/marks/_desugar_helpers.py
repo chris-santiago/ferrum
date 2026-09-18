@@ -109,11 +109,18 @@ def nominal_color_channel(
     a single unpaired ``point`` mark, which keeps dtype inference so a
     numeric ``hue=`` still renders a gradient (seaborn parity).
 
-    An already-constructed channel object passes through untouched: that is
-    the caller stating the type explicitly (``fm.Color("grp",
-    type_="quantitative")``), and this helper does not overrule it. Only a
-    bare field-name string -- the shape that silently infers -- is typed.
-    ``None`` passes through as ``None``.
+    An already-constructed channel object passes through untouched only when
+    it already declares a type: that is the caller stating the type
+    explicitly (``fm.Color("grp", type_="quantitative")``), and this helper
+    does not overrule it. An already-constructed channel object that
+    declares *no* type (``fm.Color("grp")``) is exactly as untyped as a bare
+    field-name string -- object-ness alone was never the caller stating a
+    type, and infers a Continuous scale from runtime dtype the same way a
+    bare string would -- so it is rebuilt with ``type_="nominal"`` too
+    (``field._kwargs.get("type") is None`` is the complete untyped predicate:
+    ``ChannelBase.__init__`` normalizes both the ``type_=`` kwarg and the
+    ``"col:N"`` shorthand into that one key, so this test covers every
+    untyped spelling). ``None`` passes through as ``None``.
 
     Left untyped, a plain string field name infers its scale type from the
     column's runtime dtype: a numeric dtype (e.g. an integer class/model-id
@@ -158,20 +165,30 @@ def nominal_color_channel(
     An already-constructed channel object combined with an explicit ``sort``
     is rebuilt (same class, same field, same other kwargs) with ``sort``
     overriding whatever the channel already carried -- the sibling defect
-    closed alongside #190: the early pass-through above returns a non-string
-    ``field`` untouched, which used to silently discard a caller-supplied
-    ``sort`` the moment ``field`` was already a channel object instead of a
-    bare name. ``sort=None`` (no override requested) still passes the
+    closed alongside #190: the early pass-through above used to return a
+    non-string ``field`` untouched, which silently discarded a
+    caller-supplied ``sort`` the moment ``field`` was already a channel
+    object instead of a bare name. The untyped-object rebuild above uses the
+    same idiom (same class, same field, kwargs merged): a channel object can
+    need either correction, both, or neither, so both are folded into one
+    rebuild rather than two separate early-return branches. ``sort=None``
+    (no override requested) on an already-typed object still passes the
     channel through byte-identical, preserving its own ``sort=`` (or its
     absence) verbatim.
     """
     if field is None:
         return None
     if not isinstance(field, str):
-        if sort is None:
-            return field
         kwargs = dict(field._kwargs)
-        kwargs["sort"] = list(sort)
+        needs_rebuild = False
+        if kwargs.get("type") is None:
+            kwargs["type"] = "nominal"
+            needs_rebuild = True
+        if sort is not None:
+            kwargs["sort"] = list(sort)
+            needs_rebuild = True
+        if not needs_rebuild:
+            return field
         return type(field)(field.field, **kwargs)
     from ferrum.encoding import Color
 

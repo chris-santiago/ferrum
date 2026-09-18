@@ -267,10 +267,18 @@ def test_nominal_color_channel_sort_kwarg_overrides_channel_object_sort():
     pass-through for an already-built channel object used to silently
     discard an explicit `sort=` kwarg passed to the helper itself (as
     opposed to a `sort=` already on the channel). `sort=` now overrides;
-    `sort=None` still passes the channel through untouched."""
+    `sort=None` still passes an already-typed channel through untouched.
+
+    The channel here is explicitly typed (`type_="nominal"`) so this test
+    isolates the sort-override behavior from #130's separate rule that an
+    *untyped* channel object is itself rebuilt with `type_="nominal"` (see
+    `tests/test_figure_hue_typing.py`) -- an untyped channel would rebuild
+    here too, even with `sort=None`, which is a different assertion than
+    the one this test exists to make.
+    """
     from ferrum.marks._desugar_helpers import nominal_color_channel
 
-    channel = fm.Color("sex", sort=["Male", "Female"])
+    channel = fm.Color("sex", sort=["Male", "Female"], type_="nominal")
 
     overridden = nominal_color_channel(channel, sort=["Female", "Male"])
     assert overridden.option("sort") == ["Female", "Male"]
@@ -282,16 +290,18 @@ def test_nominal_color_channel_sort_kwarg_overrides_channel_object_sort():
 
 
 # ---------------------------------------------------------------------------
-# #190 spec-review cycle 2 correction: `hue_order=` is what makes a
+# #190 spec-review cycle 2 correction -- SUPERSEDED by #130 (wave-4 figures,
+# 2026-09-17). This section originally pinned "`hue_order=` is what makes a
 # channel-object hue categorical, not the mere fact of being a channel
-# object. A numeric `hue=fm.Color(...)` with no explicit `type_=` and no
-# `hue_order=` must keep inferring Continuous (a colorbar), exactly the
-# pre-#190 pass-through behavior -- the cycle-1 patch unconditionally forced
-# nominal typing whenever the channel carried no explicit type, which
-# silently retyped this exact case on 5 of catplot's 8 kinds with no
-# `hue_order=` in play at all (caught by spec review via file-copy A/B
-# byte-diff against HEAD, not by this module's own then-string-only
-# coverage).
+# object": a numeric `hue=fm.Color(...)` with no explicit `type_=` and no
+# `hue_order=` kept inferring Continuous (a colorbar), matching the
+# pre-#190 pass-through. #130 ruled that reading wrong -- an
+# under-specified discriminator has exactly one sensible reading, the same
+# Nominal typing the bare-string door has always given, `hue_order=` or not
+# (wave-4 design spec §4.3) -- so `nominal_color_channel` now retypes ANY
+# untyped channel object, independent of `hue_order=`. The test immediately
+# below is flipped to pin the corrected behavior, not deleted, per this
+# repo's standing convention for a superseded finding.
 # ---------------------------------------------------------------------------
 
 
@@ -305,48 +315,53 @@ def _numeric_hue_df() -> pl.DataFrame:
     )
 
 
-#: The five kinds spec review's byte-diff (file-copy revert vs. HEAD) found
-#: actually changed under the cycle-1 patch's unconditional forced-nominal.
-#: `box`/`violin` are deliberately excluded from the "keeps the colorbar"
-#: test below: they route their color channel through `_prep_color_field` /
-#: `_ResolveContext._color_field()` (see this module's own header docstring),
-#: which ALWAYS flattens to a bare field name and forces nominal typing via
-#: `nominal_color_channel`, independent of whether `hue=` originally arrived
-#: as a channel object -- pre-existing, unrelated to this task, and why
-#: spec review found those two kinds byte-identical before and after the
-#: cycle-1 patch (the forced-nominal was invisible there, not absent).
-_COLORBAR_PRESERVING_KINDS = ["strip", "swarm", "point", "bar", "boxen"]
-
-#: All kinds a channel-object hue reaches, box/violin included, for the
-#: hue_order-forces-nominal test below: hue_order= must still make every
-#: kind categorical, even the two that were already forcing it downstream
-#: for an unrelated reason.
-_NUMERIC_HUE_KINDS = [*_COLORBAR_PRESERVING_KINDS, "box", "violin"]
+#: All kinds a channel-object hue reaches. Pre-#130 this was split into a
+#: "colorbar-preserving" subset (strip/swarm/point/bar/boxen) versus box/violin,
+#: which route their color channel through `_prep_color_field` /
+#: `_ResolveContext._color_field()` (see this module's header docstring) and so
+#: always forced nominal typing regardless of the caller's channel. #130
+#: collapsed that split: `nominal_color_channel` now retypes any untyped
+#: channel object the same way for every kind, so one list covers both tests
+#: below.
+_NUMERIC_HUE_KINDS = ["strip", "swarm", "point", "bar", "boxen", "box", "violin"]
 
 
-@pytest.mark.parametrize("kind", _COLORBAR_PRESERVING_KINDS)
-def test_catplot_numeric_channel_hue_keeps_continuous_colorbar_without_hue_order(kind):
+@pytest.mark.parametrize("kind", _NUMERIC_HUE_KINDS)
+def test_catplot_numeric_channel_hue_forces_nominal_without_hue_order(kind):
+    """An untyped numeric channel-object hue is Nominal even with no
+    `hue_order=` -- the behavior #130 generalized.
+
+    Before #130 this test pinned the opposite: `nominal_color_channel`'s
+    pass-through branch tested object-ness, not typedness, so an untyped
+    `fm.Color("grp_num")` kept inferring Continuous (a colorbar) unless
+    `hue_order=` was also supplied (see the superseded-#190 comment above).
+    """
     df = _numeric_hue_df()
     svg = fm.catplot(df, x="day", y="tip", hue=fm.Color("grp_num"), kind=kind).to_svg()
-    assert has_colorbar(svg), (
-        f"kind={kind}: a numeric channel-object hue with no hue_order= must keep "
-        "inferring Continuous (a colorbar), matching pre-#190 pass-through behavior"
+    assert not has_colorbar(svg), (
+        f"kind={kind}: an untyped channel-object hue must render the categorical "
+        "swatch legend, matching the bare-string door and #130's fix, even with "
+        "no hue_order= supplied"
     )
 
 
 @pytest.mark.parametrize("kind", _NUMERIC_HUE_KINDS)
 def test_catplot_numeric_channel_hue_with_hue_order_forces_nominal(kind):
-    """The SAME numeric channel-object hue, but WITH `hue_order=`, switches to
-    a categorical swatch legend: ordering a fixed list of named levels is a
-    statement `sort=` cannot honor against a Continuous scale, so supplying
-    `hue_order=` is itself a declaration that the channel is categorical."""
+    """`hue_order=` on a numeric channel-object hue still renders nominal.
+
+    Post-#130 this is no longer the *reason* the legend is categorical --
+    every untyped channel-object hue is nominal now, `hue_order=` or not
+    (see `test_catplot_numeric_channel_hue_forces_nominal_without_hue_order`
+    directly above). This test stays to confirm `hue_order=` composes with
+    #130's retyping rather than conflicting with it.
+    """
     df = _numeric_hue_df()
     svg = fm.catplot(
         df, x="day", y="tip", hue=fm.Color("grp_num"), kind=kind, hue_order=["2", "1", "0"]
     ).to_svg()
     assert not has_colorbar(svg), (
-        f"kind={kind}: hue_order= on a channel-object hue must force nominal typing "
-        "so the requested level order has a scale to apply to"
+        f"kind={kind}: hue_order= on a channel-object hue must render the categorical "
+        "swatch legend, composing with #130's retyping"
     )
 
 

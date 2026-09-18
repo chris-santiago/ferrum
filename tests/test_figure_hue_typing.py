@@ -248,6 +248,91 @@ def test_categorical_hue_gets_a_swatch_legend_not_a_colorbar(figure: str, kwargs
 
 
 # ---------------------------------------------------------------------------
+# The untyped channel-object door (#130)
+# ---------------------------------------------------------------------------
+
+
+def test_untyped_color_object_hue_reads_identically_to_bare_string_catplot() -> None:
+    """``hue=fm.Color("grp")`` (untyped) on the silent catplot kind renders
+    the same swatch legend and per-group paint as ``hue="grp"`` (bare
+    string) -- not a fabricated gradient colorbar.
+
+    Two doors into the same helper (``nominal_color_channel``) used to
+    disagree: the bare-string door typed the column Nominal; an
+    already-constructed but untyped ``Color(...)`` object passed straight
+    through on object-ness alone and inferred a Continuous scale from the
+    column's runtime dtype instead. On ``catplot(kind="bar")`` that produced
+    a fabricated 1/1.5/2/2.5/3-tick colorbar over a 3-level discriminator
+    with no warning at all -- the silent class the completeness guard
+    cannot see, since its AST scan reads any call to ``Color`` as "typed"
+    regardless of what the caller passes it at runtime.
+    """
+    df = _twin(pl.Int64)
+    string_svg, string_warnings = render(fm.catplot(df, x="cat", y="y", hue="grp", kind="bar"))
+    object_svg, object_warnings = render(
+        fm.catplot(df, x="cat", y="y", hue=fm.Color("grp"), kind="bar")
+    )
+    assert has_colorbar(object_svg) is False, (
+        "an untyped Color(...) object on hue= rendered a continuous "
+        "colorbar over a categorical discriminator"
+    )
+    assert legend_labels(object_svg) == legend_labels(string_svg)
+    assert paint_colors(object_svg) == paint_colors(string_svg)
+    assert object_warnings == string_warnings == []
+
+
+def test_untyped_color_object_hue_reads_identically_to_bare_string_relplot_line() -> None:
+    """Same equivalence, on the one door that at least warned.
+
+    ``relplot(kind="line")`` collapsed an untyped numeric hue into one
+    polyline with a ``continuous color scale is not supported on line``
+    warning; an untyped ``Color(...)`` object hit the identical bug because
+    ``nominal_color_channel`` tested object-ness, not typedness.
+    """
+    df = _twin(pl.Int64)
+    string_svg, string_warnings = render(fm.relplot(df, x="x", y="y", hue="grp", kind="line"))
+    object_svg, object_warnings = render(
+        fm.relplot(df, x="x", y="y", hue=fm.Color("grp"), kind="line")
+    )
+    assert has_colorbar(object_svg) is False
+    assert legend_labels(object_svg) == legend_labels(string_svg)
+    assert paint_colors(object_svg) == paint_colors(string_svg)
+    assert object_warnings == string_warnings
+
+
+def test_typed_color_object_hue_still_passes_through_untouched() -> None:
+    """An already-typed ``Color(...)`` object is unaffected by the fix.
+
+    Pins the other half of the branch: ``nominal_color_channel`` must not
+    overrule a caller who stated the type explicitly -- the documented
+    ``Color(field, scheme=...)`` spelling from ``Color``'s own docstring
+    must keep working exactly as before.
+    """
+    df = _twin(pl.Int64)
+    svg, warnings_ = render(
+        fm.catplot(df, x="cat", y="y", hue=fm.Color("grp", type="nominal"), kind="bar")
+    )
+    assert has_colorbar(svg) is False
+    assert len(legend_labels(svg)) == 2
+    assert warnings_ == []
+
+
+def test_relplot_scatter_hue_with_untyped_color_object_keeps_dtype_inference() -> None:
+    """The scatter carve-out is unaffected: it never calls
+    ``nominal_color_channel`` at all, so an untyped ``Color(...)`` object on
+    ``hue=`` keeps inferring a continuous gradient, identically to the
+    bare-string spelling pinned by
+    ``test_relplot_scatter_hue_keeps_dtype_inference`` above.
+    """
+    svg, _ = render(fm.relplot(_twin(pl.Int64), x="x", y="y", hue=fm.Color("grp"), kind="scatter"))
+    assert has_colorbar(svg), (
+        "relplot(kind='scatter') should still read an untyped Color(...) "
+        "hue as a continuous gradient; #130's fix lives in "
+        "nominal_color_channel, which the scatter carve-out never calls"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The deliberate carve-out
 # ---------------------------------------------------------------------------
 

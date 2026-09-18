@@ -32,6 +32,21 @@ color" rather than "a field name" is delegated entirely to ferrum's single
 parser (``ferrum.color.to_hex``) and its single sentinel predicate
 (``ferrum.marks.base._is_paint_sentinel``). This module defines no color
 names, no hex patterns, and no sentinel spellings of its own.
+
+**Structural ceiling (#130).** This guard is an AST scan over ferrum's own
+source text: a call to a name in :data:`TYPED_CONSTRUCTORS` reads as
+"typed" regardless of what the caller passes that constructor at runtime.
+That makes it blind to a *caller-supplied* channel object that declares no
+type -- ``fm.Color("grp")`` on a figure's ``hue=`` is, syntactically, a call
+to ``Color``, so a call site that forwards it (e.g.
+``nominal_color_channel(hue)``) scans as fully typed even though the value
+flowing through at runtime is untyped. An AST scan can never observe the
+type of a user's runtime argument value, so this class of enforcement
+cannot be taught to this guard; it has to live in the helper itself, at
+runtime -- which is where ``nominal_color_channel`` closes it: it rebuilds
+an already-constructed but untyped channel object with ``type_="nominal"``
+the same way it types a bare string, rather than passing object-ness alone
+through as if it were a type declaration.
 """
 
 from __future__ import annotations
