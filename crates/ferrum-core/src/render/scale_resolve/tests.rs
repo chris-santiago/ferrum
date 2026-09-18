@@ -6589,3 +6589,630 @@ fn to_pixel_f64_extrapolated_ordinal_returns_none() {
     ));
     assert_eq!(scale.to_pixel_f64_extrapolated(1.0), None);
 }
+
+// --- Wave 4 T6: single-axis eligibility reads the marks a spec DRAWS ------
+
+use crate::spec::layer::Layer;
+
+/// Shared builder for the layered single-axis tests below — only the root mark
+/// and the layer list vary between them, so a full `ChartSpec` literal per test
+/// would be near-verbatim duplication of this file's fixture (operating
+/// principle 11, the `arc_spec_with_coord` precedent above). The chart encoding
+/// binds `x` alone: the shape the single-axis exemption exists for, and the one
+/// layer promotion leaves behind.
+fn layered_x_only_spec(mark: crate::spec::mark::Mark, layers: Vec<Layer>) -> ChartSpec {
+    let mut spec = make_spec_with_color();
+    spec.mark = mark;
+    spec.encoding = single_channel_encoding("x");
+    spec.layers = Some(layers);
+    spec
+}
+
+/// An `Encoding` binding exactly `field` on the channel of the same name —
+/// `"x"` or `"y"`, the two `make_batch_q_q_n` positional columns.
+fn single_channel_encoding(field: &str) -> crate::spec::encoding::Encoding {
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    let bound = Some(EncodingSpec {
+        field: field.into(),
+        type_: Some(DataType::Quantitative),
+        ..Default::default()
+    });
+    match field {
+        "x" => Encoding { x: bound, ..Default::default() },
+        "y" => Encoding { y: bound, ..Default::default() },
+        other => panic!("single_channel_encoding: unexpected channel {other}"),
+    }
+}
+
+fn layer_with(mark: crate::spec::mark::Mark, encoding: crate::spec::encoding::Encoding) -> Layer {
+    Layer {
+        mark,
+        encoding,
+        transforms: Vec::new(),
+        mark_style: None,
+        data_source: None,
+        position: None,
+        blend: None,
+        name: None,
+        independent_y: false,
+    }
+}
+
+/// The Rust-side mirror of Python's `_CarrierLayer` (`chart.py`): a layer built
+/// `opacity`/`size` 0 so it paints nothing. Kept as its own fixture so a test
+/// about the carrier cannot accidentally assert about a VISIBLE layer — the
+/// distinction the eligibility predicate turns on.
+fn invisible_carrier_layer(
+    mark: crate::spec::mark::Mark,
+    encoding: crate::spec::encoding::Encoding,
+) -> Layer {
+    Layer {
+        mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+            size: Some(0.0),
+            opacity: Some(0.0),
+            ..Default::default()
+        }),
+        ..layer_with(mark, encoding)
+    }
+}
+
+fn resolved_domain(scale: &ScaleKind, what: &str) -> [f64; 2] {
+    match scale {
+        ScaleKind::Linear(l) => l.domain_pair(),
+        other => panic!("expected a Linear {what} scale, got {other:?}"),
+    }
+}
+
+/// A layered spec whose layers draw only rug ticks is single-axis eligible even
+/// though its root mark slot holds a placeholder.
+///
+/// Python's layer promotion empties the mark slot and the wire encoder
+/// substitutes `"point"`, so the root mark is not evidence of what is drawn.
+/// Pre-fix (RED) the predicate read that placeholder, found `Point`, and the
+/// unconditional `spec.encoding.y.ok_or(EncodingTypeMismatch)` fired.
+#[test]
+fn placeholder_root_mark_with_tick_layers_resolves_via_the_single_axis_exemption() {
+    use crate::spec::mark::Mark;
+
+    let spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a spec whose layers draw only ticks must resolve, not error on a missing y");
+
+    assert_eq!(
+        resolved_domain(&scales.x, "x"),
+        [1.0, 6.0],
+        "the bound x axis must be the real data-driven scale"
+    );
+    assert_eq!(
+        resolved_domain(&scales.y, "y"),
+        [0.0, 1.0],
+        "the unbound y axis must be the synthesized dummy unit scale"
+    );
+}
+
+/// A later layer's own `y` binding reaches scale resolution rather than being
+/// papered over by the dummy unit scale.
+///
+/// `(tick_chart + line_chart)` keeps `tick` in the root slot while drawing a
+/// line that needs a real y-domain. Pre-fix (RED) the root mark alone granted
+/// the exemption and `y` resolved to `[0.0, 1.0]`, squashing the line into the
+/// bottom sliver of the panel under a fabricated `0…1` axis.
+#[test]
+fn layer_bound_y_resolves_a_real_domain_instead_of_the_dummy_scale() {
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: Some(EncodingSpec {
+            field: "y".into(),
+            type_: Some(DataType::Quantitative),
+            ..Default::default()
+        }),
+        ..single_channel_encoding("x")
+    };
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+            layer_with(Mark::Line, line_encoding),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a layer-bound y must resolve, not error");
+
+    // `make_batch_q_q_n`'s "y" column is `[10.0 … 60.0]`; `[0.0, 1.0]` here
+    // would be `dummy_unit_scale`, which is also `ScaleKind::Linear`.
+    assert_eq!(
+        resolved_domain(&scales.y, "y"),
+        [10.0, 60.0],
+        "the line layer's y column must drive the y axis, not a fabricated unit scale"
+    );
+}
+
+/// When NO layer binds `y` either, the dummy unit scale is still the answer —
+/// the eligible mark set is unchanged and a genuinely one-axis spec resolves
+/// exactly as before.
+#[test]
+fn tick_layers_binding_no_y_anywhere_keep_the_dummy_scale() {
+    use crate::spec::mark::Mark;
+
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![layer_with(Mark::Tick, single_channel_encoding("x"))],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a tick-only layered spec must keep resolving");
+
+    assert_eq!(resolved_domain(&scales.x, "x"), [1.0, 6.0]);
+    assert_eq!(resolved_domain(&scales.y, "y"), [0.0, 1.0]);
+}
+
+/// An invisible CARRIER layer does not vote on eligibility, so it cannot
+/// disqualify a spec whose real content draws from one axis.
+///
+/// `annotate_hline() + annotate_vline()` carries its visual content in
+/// annotation primitives and puts a deliberately invisible `point` carrier layer
+/// in the layer list (`chart.py`'s `_CarrierLayer`, `opacity`/`size` 0) purely so
+/// the spec has a layer at all. A plain all-layers rule would read that `Point`
+/// and refuse the chart; [`layer_paints`] excludes it, no drawing mark is left to
+/// object, and the y-only exemption stands.
+#[test]
+fn invisible_carrier_layer_does_not_disqualify_the_single_axis_exemption() {
+    use crate::spec::mark::Mark;
+
+    let mut spec = layered_x_only_spec(
+        Mark::Rule,
+        vec![invisible_carrier_layer(
+            Mark::Point,
+            single_channel_encoding("y"),
+        )],
+    );
+    spec.encoding = single_channel_encoding("y");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("an invisible carrier layer must not disqualify the y-only exemption");
+
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+    assert_eq!(
+        resolved_domain(&scales.x, "x"),
+        [0.0, 1.0],
+        "nothing binds x, so it must stay the synthesized dummy unit scale"
+    );
+}
+
+/// The same carrier layer made VISIBLE disqualifies the spec — the discriminator
+/// is that it paints, not that it is a `Point` in a layer list.
+///
+/// This is the mutation guard for [`layer_paints`]: without the invisibility
+/// test, `invisible_carrier_layer_does_not_disqualify_the_single_axis_exemption`
+/// above and this test cannot both pass.
+#[test]
+fn a_visible_point_layer_in_the_same_shape_does_disqualify() {
+    use crate::spec::mark::Mark;
+
+    let mut spec = layered_x_only_spec(
+        Mark::Rule,
+        vec![layer_with(Mark::Point, single_channel_encoding("y"))],
+    );
+    spec.encoding = single_channel_encoding("y");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a point layer that actually paints needs a real x axis, so this must error");
+    match err {
+        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "x"),
+        other => panic!("expected EncodingTypeMismatch{{channel: \"x\", ..}}, got {other:?}"),
+    }
+}
+
+/// **The case the predicate turns on.** One eligible mark must not exempt the
+/// ineligible mark beside it. A rug tick and a point, both x-only, with nothing
+/// binding `y` anywhere: the tick could render from x alone, the point cannot,
+/// and there is no `y` for the point to fall back to. This must REFUSE.
+///
+/// Under an `any`-over-marks rule it rendered instead, placing every point on a
+/// fabricated `0…1` axis — measured through the Python API as a chart with the
+/// `['1','0.9', … ,'0']` ladder and ZERO `<circle>` elements, i.e. the point
+/// layer's whole dataset silently dropped. This is the mixed eligible/ineligible
+/// set; an all-`Point` layer list would answer the same under `any`, `all`, or
+/// root-only and so proves nothing about the choice.
+#[test]
+fn a_mixed_eligible_and_ineligible_layer_set_refuses() {
+    use crate::spec::mark::Mark;
+
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+            layer_with(Mark::Point, single_channel_encoding("x")),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).expect_err(
+        "a point layer beside a tick, with no y bound anywhere, must refuse rather than \
+         drop the points onto a fabricated axis",
+    );
+    match err {
+        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
+        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
+    }
+}
+
+/// The same refusal with no eligible mark anywhere in the set — the baseline the
+/// mixed case above must match.
+#[test]
+fn layered_points_without_any_y_binding_still_error() {
+    use crate::spec::mark::Mark;
+
+    let spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            layer_with(Mark::Point, single_channel_encoding("x")),
+            layer_with(Mark::Point, single_channel_encoding("x")),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("no eligible mark and no y binding anywhere must still error");
+    match err {
+        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
+        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
+    }
+}
+
+/// The fallback's X arm, symmetric with
+/// [`layer_bound_y_resolves_a_real_domain_instead_of_the_dummy_scale`]. A rule
+/// spanning `y` layered with a tick binding `x` resolves the tick's real x
+/// domain; pre-fix the root `Rule` took the y-only arm and x was the fabricated
+/// unit scale. Pinned even though no golden or pre-existing test exercises this
+/// direction — absence from the corpus is exactly why the symmetric arm of a
+/// symmetric mechanism needs its own test.
+#[test]
+fn layer_bound_x_resolves_a_real_domain_instead_of_the_dummy_scale() {
+    use crate::spec::mark::Mark;
+
+    let mut spec = layered_x_only_spec(
+        Mark::Rule,
+        vec![
+            layer_with(Mark::Rule, single_channel_encoding("y")),
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+        ],
+    );
+    spec.encoding = single_channel_encoding("y");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a layer-bound x must resolve, not error");
+
+    assert_eq!(
+        resolved_domain(&scales.x, "x"),
+        [1.0, 6.0],
+        "the tick layer's x column must drive the x axis, not a fabricated unit scale"
+    );
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+/// An `independent_y` layer's `y` belongs to its OWN slot and must not become the
+/// primary binding.
+///
+/// `numeric_domain_union` already refuses to let such a layer widen the
+/// primary/shared y domain ("that would couple the left axis to a scale it does
+/// not own"); supplying the primary binding outright is a stronger coupling than
+/// the one that carve-out forbids. Measured without the skip, `LayerChart(rug,
+/// curve, resolve={"y": "independent"})` rendered a left y axis duplicating its
+/// own secondary axis. With the skip, nothing else binds `y`, so the primary y
+/// keeps the synthesized unit scale — the layer's real domain lives in its slot.
+#[test]
+fn an_independent_y_layer_does_not_supply_the_primary_y_binding() {
+    use crate::spec::mark::Mark;
+
+    let secondary = Layer {
+        independent_y: true,
+        ..layer_with(
+            Mark::Line,
+            crate::spec::encoding::Encoding {
+                y: single_channel_encoding("y").y,
+                ..single_channel_encoding("x")
+            },
+        )
+    };
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![layer_with(Mark::Tick, single_channel_encoding("x")), secondary],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a rug base with an independent-y layer must keep resolving");
+
+    assert_eq!(resolved_domain(&scales.x, "x"), [1.0, 6.0]);
+    assert_eq!(
+        resolved_domain(&scales.y, "y"),
+        [0.0, 1.0],
+        "the independent layer's y must stay in its own slot, not wear the primary axis"
+    );
+}
+
+/// The same layer with `independent_y` cleared DOES supply the binding — the
+/// mutation guard proving the skip above is the flag and not the shape.
+#[test]
+fn a_shared_y_layer_in_the_same_shape_does_supply_the_primary_y_binding() {
+    use crate::spec::mark::Mark;
+
+    let shared = layer_with(
+        Mark::Line,
+        crate::spec::encoding::Encoding {
+            y: single_channel_encoding("y").y,
+            ..single_channel_encoding("x")
+        },
+    );
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![layer_with(Mark::Tick, single_channel_encoding("x")), shared],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a shared-y line layer must supply the primary y binding");
+
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+/// Under `CoordFlip` the fallback reads the layer's encoding in the channel's own
+/// space, not by channel NAME.
+///
+/// `spec.layers` is the spec as AUTHORED while the resolved channels are
+/// post-flip, so a layer's authored `y` is what occupies the x axis. The layer
+/// here authors `y` (the `[10 … 60]` column) and nothing else; under `CoordFlip`
+/// that binding must land on **x**. Reading the like-named channel would put it
+/// on y and leave x unbound — the wrong-coordinate-space class
+/// `numeric_domain_union`'s "ruling 1" comment was written about, one step worse
+/// here because a whole axis BINDING is chosen rather than a domain contributor.
+#[test]
+fn coord_flip_moves_a_layer_binding_into_the_resolved_channels_space() {
+    use crate::spec::mark::Mark;
+
+    // Post-flip the chart encoding binds y (to the `[10 … 60]` column). The sole
+    // layer binds AUTHORED y, which post-flip occupies x — so x must resolve to
+    // that column's real extent. Read by channel NAME instead, the layer's `y`
+    // would collide with the already-bound y and leave x unbound, which is the
+    // y-only single-axis arm and a fabricated `[0, 1]` x scale. The two outcomes
+    // are `[10, 60]` vs `[0, 1]`, so this discriminates the normalization.
+    let mut spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![layer_with(Mark::Tick, single_channel_encoding("y"))],
+    );
+    spec.encoding = single_channel_encoding("y");
+    spec.coord = Some(CoordKind::Flip);
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("the flipped layer binding must resolve on the axis it actually occupies");
+
+    assert_eq!(
+        resolved_domain(&scales.x, "x"),
+        [10.0, 60.0],
+        "the authored-y layer binding occupies the x axis under CoordFlip, so x must \
+         resolve that column, not the fabricated unit scale"
+    );
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+// --- Wave 4 T6 cycle 3: a drawing layer must be able to reach both channels ---
+
+/// A layer whose mark DRAWS and needs both axes, with `y` reachable only through
+/// [`positional_binding`]'s fallback, is refused rather than silently drawn empty.
+///
+/// `mark_point(x=) + mark_line(x=,y=)`: the point is layer 0, so the merged chart
+/// encoding carries `x` alone; the fallback resolves the y AXIS from the line
+/// layer, but no `y` FIELD ever reaches the point, whose builder then reads a
+/// column that is not there and returns an empty batch. Measured pre-guard
+/// through the public API: renders with `<circle>` count 0 and no warning.
+#[test]
+fn drawing_layer_that_cannot_reach_a_fallback_sourced_channel_is_refused() {
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: single_channel_encoding("y").y,
+        ..single_channel_encoding("x")
+    };
+    let spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            layer_with(Mark::Point, single_channel_encoding("x")),
+            layer_with(Mark::Line, line_encoding),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).expect_err(
+        "a point layer with no reachable y must refuse, not render zero marks on the \
+         line layer's axis",
+    );
+    match err {
+        RenderError::LayerMissingPositionalChannel { layer, mark, channel, .. } => {
+            assert_eq!((layer, mark, channel), (0, "point", "y"));
+        }
+        other => panic!("expected LayerMissingPositionalChannel, got {other:?}"),
+    }
+}
+
+/// The SAME pair in the other order still renders: the working case this rule
+/// must not break.
+///
+/// With the line as layer 0 its `y` is merged INTO the chart encoding, so the
+/// point inherits a real column and has something to plot. That inheritance —
+/// from the chart encoding, never from the fallback — is the whole discriminator
+/// between the two orderings, so this test and the one above cannot both pass
+/// under a rule that counts the fallback as "available".
+#[test]
+fn the_same_pair_in_the_inheriting_order_still_resolves() {
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: single_channel_encoding("y").y,
+        ..single_channel_encoding("x")
+    };
+    let mut spec = layered_x_only_spec(
+        Mark::Line,
+        vec![
+            layer_with(Mark::Line, line_encoding.clone()),
+            layer_with(Mark::Point, single_channel_encoding("x")),
+        ],
+    );
+    // Layer 0's merge: the chart encoding the resolver sees carries the line's y.
+    spec.encoding = line_encoding;
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("the point inherits the chart encoding's y, so this must keep resolving");
+
+    assert_eq!(resolved_domain(&scales.x, "x"), [1.0, 6.0]);
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+/// The x-direction twin of the refusal — the mechanism is symmetric, so its
+/// guard must be too.
+#[test]
+fn drawing_layer_that_cannot_reach_a_fallback_sourced_x_is_refused() {
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: single_channel_encoding("y").y,
+        ..single_channel_encoding("x")
+    };
+    let mut spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            layer_with(Mark::Point, single_channel_encoding("y")),
+            layer_with(Mark::Line, line_encoding),
+        ],
+    );
+    spec.encoding = single_channel_encoding("y");
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("a point layer with no reachable x must refuse");
+    match err {
+        RenderError::LayerMissingPositionalChannel { layer, mark, channel, .. } => {
+            assert_eq!((layer, mark, channel), (0, "point", "x"));
+        }
+        other => panic!("expected LayerMissingPositionalChannel, got {other:?}"),
+    }
+}
+
+/// A single-axis-eligible layer in the same position is NOT refused: one channel
+/// is enough for a rug tick, so the axis it cannot reach is one its own builder
+/// is written to do without. The mutation guard for the eligibility arm of the
+/// per-layer rule — swap `Tick` for `Point` here and it becomes the refusal above.
+#[test]
+fn an_eligible_layer_beside_a_fallback_sourced_channel_still_resolves() {
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: single_channel_encoding("y").y,
+        ..single_channel_encoding("x")
+    };
+    let spec = layered_x_only_spec(
+        Mark::Tick,
+        vec![
+            layer_with(Mark::Tick, single_channel_encoding("x")),
+            layer_with(Mark::Line, line_encoding),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("a tick needs only one channel, so the fallback-sourced y must not refuse it");
+
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+/// An INVISIBLE layer never triggers the refusal, however incomplete its
+/// encoding: it paints nothing, so it has nothing to fail to plot. The same
+/// `layer_paints` discriminator the eligibility vote uses, consumed by the
+/// per-layer rule.
+#[test]
+fn an_invisible_layer_is_never_refused_for_a_missing_channel() {
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    let line_encoding = Encoding {
+        y: single_channel_encoding("y").y,
+        ..single_channel_encoding("x")
+    };
+    let spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            invisible_carrier_layer(Mark::Point, single_channel_encoding("x")),
+            layer_with(Mark::Line, line_encoding),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect("an invisible layer paints nothing, so it cannot be refused for a missing y");
+
+    assert_eq!(resolved_domain(&scales.y, "y"), [10.0, 60.0]);
+}
+
+/// "Nothing binds this channel" keeps its own channel-level error. The per-layer
+/// rule runs after the generic resolution, so it can only ever fire on the
+/// narrower case the fallback created — it never takes over a refusal that
+/// already had a correct diagnosis.
+#[test]
+fn a_channel_bound_nowhere_still_raises_the_channel_level_error() {
+    use crate::spec::mark::Mark;
+
+    let spec = layered_x_only_spec(
+        Mark::Point,
+        vec![
+            layer_with(Mark::Point, single_channel_encoding("x")),
+            layer_with(Mark::Line, single_channel_encoding("x")),
+        ],
+    );
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("no y anywhere must stay the channel-level refusal");
+    match err {
+        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
+        other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
+    }
+}

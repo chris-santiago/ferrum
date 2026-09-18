@@ -261,11 +261,13 @@ pub enum RenderError {
     /// the base data, or the named `data_source` output the layer reads from
     /// (F-L10-01 rider, spec §4).
     ///
-    /// Only layer 0's encoding reaches scale resolution
-    /// (`scene_build::resolve_panel_scales` merges layer 0 onto the chart
-    /// encoding; `resolve_layer_y_scale` covers only an `independent_y`
-    /// layer's `y`), so a layer ≥ 1 naming a missing positional column used to
-    /// reach the mark builders, where the `.ok()`-swallowing column readers
+    /// A layer ≥ 1's encoding reaches scale resolution only where layer 0
+    /// leaves the channel unbound (`scene_build::resolve_panel_scales` merges
+    /// layer 0 onto the chart encoding, and `scale_resolve::positional_binding`
+    /// falls back to the first layer that binds an otherwise-unbound `x`/`y`;
+    /// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`), so
+    /// a layer ≥ 1 naming a missing positional column that layer 0 also binds
+    /// used to reach the mark builders, where the `.ok()`-swallowing readers
     /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into
     /// an empty mark batch: the layer simply vanished from the render, with no
     /// error and no warning. That is how a broken regression-fit layer shipped
@@ -291,6 +293,45 @@ pub enum RenderError {
         layer: usize,
         channel: &'static str,
         name: String,
+        coord_flipped: bool,
+    },
+    /// A layer whose mark DRAWS and needs both positional channels has no
+    /// binding for one of them — neither on its own encoding nor on the chart
+    /// encoding it inherits (wave 4 T6).
+    ///
+    /// The sibling of [`Self::EncodingTypeMismatch`], one level down. That one
+    /// says "nothing in this spec binds this channel"; this one says "the
+    /// channel IS bound, but not anywhere this layer can reach". The
+    /// distinction became reachable when `scale_resolve::positional_binding`
+    /// started sourcing an unbound axis from a later layer: the axis resolves,
+    /// so the generic path stops erroring, but a sibling layer that needed a
+    /// FIELD (not just a scale) has nothing to plot and its mark builder
+    /// returns an empty batch — the same `.ok()`-swallowing silent drop
+    /// [`Self::LayerUnknownColumn`] was written to stop, arriving by a
+    /// different road.
+    ///
+    /// Inheritance is deliberately judged against the chart encoding only, NOT
+    /// against `positional_binding`'s fallback. That is exactly what separates
+    /// the two orderings of the same pair: in `mark_line(x=,y=) +
+    /// mark_point(x=)` the line is layer 0, so the merge puts its `y` FIELD
+    /// into the chart encoding and the point inherits a real column to plot
+    /// (measured: 3 circles, unchanged). In `mark_point(x=) +
+    /// mark_line(x=,y=)` the fallback resolves a y SCALE from the line layer
+    /// but no `y` field ever reaches the chart encoding, so the point has
+    /// nothing — measured pre-guard as a render with 0 circles and no warning.
+    ///
+    /// Whether the fallback SHOULD also make the field inheritable (which
+    /// would render both orderings as 3 circles) is an open rendering-semantics
+    /// question, deliberately not decided here; refusing is the conservative
+    /// answer and leaves that door open behind a message that names the layer.
+    ///
+    /// `channel` is the RESOLVED (post-`CoordFlip`) token; `coord_flipped` (R3)
+    /// is the `Display`-time un-flip back to what the user wrote, set at the one
+    /// construction site (`scale_resolve::validate_drawing_layers_can_plot`).
+    LayerMissingPositionalChannel {
+        layer: usize,
+        mark: &'static str,
+        channel: &'static str,
         coord_flipped: bool,
     },
     /// An explicit color-range entry (an encoding's `scale.range=[...]`, a
@@ -461,6 +502,12 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // as `EncodingTypeMismatch` and friends above, so this boundary must
         // leave it alone rather than overwrite it.
         | RenderError::LayerUnknownColumn { .. }
+        // Wave 4 T6: same discipline as `LayerUnknownColumn` directly above —
+        // carries `coord_flipped`, set at its own single construction site
+        // (`scale_resolve::validate_drawing_layers_can_plot`, which derives it
+        // from `spec.coord` exactly as the `EncodingTypeMismatch` beside it
+        // does), so this boundary must leave it alone rather than overwrite it.
+        | RenderError::LayerMissingPositionalChannel { .. }
         // #126: carries no channel token at all — a color string, not a
         // positional channel.
         | RenderError::ColorRangeParseFailure { .. }
@@ -613,6 +660,16 @@ impl std::fmt::Display for RenderError {
                     f,
                     "layer {layer}: encoding '{channel}' references unknown column '{name}' \
                      (not present in that layer's data)"
+                )
+            }
+            Self::LayerMissingPositionalChannel { layer, mark, channel, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(
+                    f,
+                    "layer {layer}: mark_{mark} needs both positional channels, but no \
+                     '{channel}' encoding reaches it — a sibling layer binds '{channel}', \
+                     which resolves the axis but leaves mark_{mark} with nothing to plot. \
+                     Encode '{channel}' on this layer, or on the chart, to draw it."
                 )
             }
             Self::ColorRangeParseFailure { entry } => write!(

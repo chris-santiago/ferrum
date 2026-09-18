@@ -3354,11 +3354,14 @@ fn validate_mark_encoding(
 /// Refuse a layer beyond the first whose positional encoding names a column
 /// absent from that layer's own resolved batch (F-L10-01 rider, spec §4/§6).
 ///
-/// **Why this gate exists.** Only layer 0's encoding reaches scale resolution
-/// — `resolve_panel_scales` merges layer 0 onto the chart encoding, and
+/// **Why this gate exists.** A layer ≥ 1's encoding reaches scale resolution
+/// only where layer 0 leaves that channel unbound — `resolve_panel_scales`
+/// merges layer 0 onto the chart encoding, `scale_resolve::positional_binding`
+/// falls back to the first layer that binds an otherwise-unbound `x`/`y`, and
 /// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`. A layer
-/// ≥ 1 naming a missing positional column therefore sailed past every check
-/// and reached the mark builders, whose `.ok()`-swallowing column reads
+/// ≥ 1 naming a missing positional column that layer 0 also binds therefore
+/// sailed past every check and reached the mark builders, whose
+/// `.ok()`-swallowing column reads
 /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into an
 /// empty mark batch: the layer vanished from the render with no error and no
 /// warning. Those readers are deliberately unchanged — they are correct for
