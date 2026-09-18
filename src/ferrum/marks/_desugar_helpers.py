@@ -198,6 +198,75 @@ def nominal_color_channel(
     return Color(field, **kwargs)
 
 
+def typed_positional_channel(
+    field: str,
+    *,
+    channel: "type[ChannelBase]",
+    declared_type: str | None,
+    default_type: str | None = "N",
+    sort: Any = None,
+    title: str | None = None,
+) -> "ChannelBase | str":
+    """Bind *field* to a positional channel carrying an explicit scale type.
+
+    The positional twin of :func:`nominal_color_channel` (#171). Both close
+    the same class of defect on different channels: a composite-mark desugar
+    rebuilds one of its layers' channels from a bare field-name string, the
+    string infers its scale type from the column's runtime Arrow dtype, and a
+    field the caller meant categorically but stored as ``Int64``/``Float64``
+    infers Quantitative. On the color channel that yields a colorbar where a
+    swatch legend belongs; on a *positional* channel it is worse, because
+    every band-geometry consumer downstream needs an ordinal scale to size a
+    band against. ``mark_boxplot(size=0.6).encode(x=<Int64>, y=)`` measured at
+    zero box rects and 8px stubs where the identical ``Utf8`` column renders
+    three band-width rects, and ``mark_violin``/``mark_errorbar`` degrade the
+    same way.
+
+    Two rules, and the caller states which it wants through ``default_type``:
+
+    - **The caller's declared type always wins.** ``declared_type`` is the
+      normalized single-letter code from the chart-level channel the user
+      authored (``fm.X("cyl", type_="N")``, or the ``"cyl:N"`` shorthand --
+      ``ChannelBase`` normalizes both into one ``"type"`` kwarg, so one read
+      covers every spelling), threaded down by
+      ``ferrum._desugar._prep_cat_axis_types``. Before #171 it was discarded
+      before the desugar ran, so the user's own ``:N`` was inert on exactly
+      the marks that needed it most. Never overrule it here: this is the same
+      pass-through precedent ``nominal_color_channel`` sets for an explicitly
+      typed ``Color`` channel, and it is what keeps
+      ``catplot(native_scale=True)`` -- which states ``type_="Q"`` on a
+      numeric category column deliberately -- quantitative.
+    - **The fallback is the calling site's, not this helper's.** A desugar
+      whose channel *is* the category axis (boxplot, boxen, errorbar,
+      violin, swarm) takes the ``"N"`` default: nothing else is a legitimate
+      reading of "which group does this row belong to", and the band geometry
+      those marks draw has no meaning on a continuous axis.
+      ``desugar_errorband`` passes ``default_type=None`` instead, because its
+      ``x_field`` is a documented *continuous* axis that the transform merely
+      aggregates by -- it needs declared-type survival, not a categorical
+      default -- and ``None`` there returns the bare field name unchanged, so
+      that site stays byte-identical for every caller who declared nothing.
+
+    ``sort`` and ``title`` are the only other kwargs the six call sites set;
+    each is omitted from the constructed channel when ``None`` so a channel
+    built here is identical to the one the call site used to build by hand.
+    When there is no type to state and neither is set, the bare ``field``
+    string is returned rather than an empty channel wrapper, preserving the
+    exact binding those sites emitted before.
+    """
+    resolved = declared_type if declared_type is not None else default_type
+    if resolved is None and sort is None and title is None:
+        return field
+    kwargs: dict[str, Any] = {}
+    if resolved is not None:
+        kwargs["type_"] = resolved
+    if sort is not None:
+        kwargs["sort"] = sort
+    if title is not None:
+        kwargs["title"] = title
+    return channel(field, **kwargs)
+
+
 def shap_beeswarm_color_channel(*, color_bar: bool):
     """Return the ``Color(...)`` channel shared by both places that need it.
 

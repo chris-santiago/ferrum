@@ -45,6 +45,7 @@ import pytest
 
 import ferrum as fm
 from tests._svg_extents import axis_tick_labels
+from tests._svg_rects import mark_layer
 
 # The rug values and the curve's density column. The densities are all well
 # below 1 so a fabricated unit scale is unmistakable in the rendered ticks: a
@@ -344,21 +345,12 @@ _SWEEP_SHAPE = {
     "rule": (r"<line\b", len(_PAIR_FRAME)),
 }
 
-#: The marks group. Axes, gridlines and the panel background sit outside it.
-_MARKS_GROUP = re.compile(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', re.DOTALL)
-
 
 def _sweep_chart(mark: str, channels: tuple[str, ...]) -> fm.Chart:
     field = {"x": "v", "y": "d"}
     return getattr(fm.Chart(_PAIR_FRAME), f"mark_{mark}")().encode(
         **{channel: field[channel] for channel in channels}
     )
-
-
-def _marks_body(svg: str) -> str:
-    """The marks group's contents, or `""` when the render drew no marks at all."""
-    match = _MARKS_GROUP.search(svg)
-    return match.group(1) if match else ""
 
 
 def test_no_two_layer_composition_renders_a_drawing_layer_empty() -> None:
@@ -394,7 +386,7 @@ def test_no_two_layer_composition_renders_a_drawing_layer_empty() -> None:
             pattern, per_layer = _SWEEP_SHAPE[mark]
             expected[pattern] = expected.get(pattern, 0) + per_layer
 
-        body = _marks_body(svg)
+        body = mark_layer(svg)
         for pattern, want in sorted(expected.items()):
             got = len(re.findall(pattern, body))
             if got != want:

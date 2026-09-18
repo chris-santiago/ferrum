@@ -128,16 +128,28 @@ def test_catplot_boxplot_continuous_groupby_column_warns_named_instead_of_silent
     """#183's OWN frozen repro: "Grouping a transform by a continuous column
     produced a 549KB SVG with one rect and 0 visible marks, silently."
 
-    A `:N`-typed high-cardinality Float64 column resolves a CONTINUOUS x
-    scale (Rust's `infer_spec_type`/shorthand-type handling does not make
-    every composite-mark layer restate the chart-level type, so the
-    per-layer merge loses it -- a separate, escalated Python-side finding),
-    so `GroupCardinalityDegenerate` (which only fires on an Ordinal/Band/
-    Point scale) cannot fire for this shape. The symptom this issue actually
-    reports -- silent, chrome-only output -- is closed at its real site
-    instead: `mark_rect()`'s IQR-box layer needs an ordinal axis for its
-    band-relative width and doesn't get one, and now says so by name
-    (`RenderWarning::MarkBuildEmpty`) rather than silently drawing nothing.
+    What this pins is unchanged -- a boxplot whose x resolves CONTINUOUS says
+    so by name (`RenderWarning::MarkBuildEmpty`: `mark_rect()`'s IQR-box layer
+    needs an ordinal axis for its band-relative width and did not get one)
+    instead of emitting silent, chrome-only output. **How that shape is
+    reached changed with #171**, and this test was rewritten onto the new
+    contract rather than re-baselined.
+
+    It used to reach it by spelling `x="cont:N"` on a Float64 column, on the
+    strength of a defect: the composite-mark desugar discarded the caller's
+    declared type before rebuilding its layers' channels, so the `:N` was
+    inert and the layer inferred Continuous from the dtype. That defect was
+    the "separate, escalated Python-side finding" the previous version of this
+    docstring named, and #171 closed it -- `x="cont:N"` now resolves ordinal
+    and draws 50 real boxes, which is a *stronger* closure of #183's reported
+    symptom than a warning is (see
+    `tests/test_declared_type_through_desugar.py` for that half).
+
+    So the trigger moves to the one spelling that still legitimately resolves
+    a continuous category axis: `native_scale=True`, where the caller states
+    Quantitative deliberately and #171 honors the statement. The warning has
+    to keep firing there, because that is now the only route by which a
+    catplot box layer can find itself without a band to size against.
     """
     n = 200
     df = pl.DataFrame(
@@ -146,7 +158,7 @@ def test_catplot_boxplot_continuous_groupby_column_warns_named_instead_of_silent
             "v": [float(i % 7) for i in range(n)],
         }
     )
-    chart = fm.catplot(df, x="cont:N", y="v", kind="box")
+    chart = fm.catplot(df, x="cont", y="v", kind="box", native_scale=True)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

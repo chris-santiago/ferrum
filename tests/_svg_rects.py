@@ -21,6 +21,22 @@ recorded as pending when it was written, and the copy it carried read
 attributes positionally (`<line x1="..." ... stroke="...">`), so it would
 have started failing on any attribute-order change the renderer made. Both
 now go through `svg_elements`, which reads attributes by name.
+
+`plot_rect` is the fifth: `test_bug_hunt_stack_value_axis.py` reaches the plot
+area as `_svg_rects(svg)[1]["x"]` -- by POSITION in the document, which is
+silently wrong the moment a chart emits a rect before the clip rect -- and
+`test_area_ribbon_baseline_axis.py` needed the same rectangle to assert which
+panel edge an area fill closes on. It lives here rather than in either caller
+because "the plot area is the one unfilled rect" is a fact about ferrum's SVG
+output, not about any one test's subject.
+
+`mark_layer` is the sixth: `tests/_category_dtype_matrix.py` and
+`tests/test_single_axis_eligibility.py` each carried an identical private
+copy of the plot-area clip-group regex to scope a query to drawn marks and
+exclude chrome. It lives here for the same reason `svg_elements` does --
+scoping to "the marks, and nothing else" is a fact about ferrum's SVG
+structure, not about either module's subject -- and both import it rather
+than keep their own copy.
 """
 
 from __future__ import annotations
@@ -55,6 +71,25 @@ def data_bar_rects(svg: str) -> list[dict[str, str]]:
             and not a["fill"].startswith("url(")
         ),
     )
+
+
+#: The plot-area clip group: every mark a chart draws is emitted inside one;
+#: no chrome (axes, gridlines, legend swatches) is. Non-greedy, and every
+#: caller below uses it only on single-panel charts, where the group does
+#: not nest.
+_MARK_GROUP_RE = re.compile(r'<g clip-path="url\(#ferrum-clip-\d+\)">(.*?)</g>', re.DOTALL)
+
+
+def mark_layer(svg: str) -> str:
+    """Return the concatenation of every plot-area clip group's contents.
+
+    The marks, and nothing else. This regex was carried as an identical
+    private copy in both `tests/_category_dtype_matrix.py` and
+    `tests/test_single_axis_eligibility.py`; this is the one copy both
+    import. Returns `""` for a chart that drew no marks at all, which is
+    itself a meaningful (and asserted-on) outcome for some callers.
+    """
+    return "".join(_MARK_GROUP_RE.findall(svg))
 
 
 def polylines(svg: str) -> list[tuple[str | None, list[tuple[float, float]]]]:
@@ -107,3 +142,27 @@ def fill_rects(svg: str, fill: str = "#2563eb") -> list[tuple[float, float, floa
         (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
         for a in svg_elements(svg, "rect", lambda a: a.get("fill") == fill)
     ]
+
+
+def plot_rect(svg: str) -> tuple[float, float, float, float]:
+    """Return `(x, y, w, h)` of a single-panel chart's plot area.
+
+    Identified by the one structural property that holds whatever the chart
+    draws: the plot area is the only `<rect>` a chart emits with NO `fill`
+    attribute (it exists to define the clip path; the page background carries
+    the theme fill, and every data rect carries a mark fill). Callers asserting
+    "this mark sits on the panel's left/bottom edge" need this rectangle, and
+    reaching it by document position -- as `test_bug_hunt_stack_value_axis.py`
+    still does -- breaks silently the moment a chart emits an unfilled rect
+    earlier.
+
+    Raises `AssertionError` for a chart with zero or several panels: the return
+    type is one rectangle, so a faceted or composed SVG has no single answer
+    and must not be handed the first one found.
+    """
+    rects = svg_elements(svg, "rect", lambda a: "fill" not in a)
+    assert len(rects) == 1, (
+        f"expected exactly one unfilled plot rect (a single-panel chart); got {len(rects)}"
+    )
+    a = rects[0]
+    return (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))

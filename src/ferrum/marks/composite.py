@@ -33,6 +33,7 @@ from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
+    typed_positional_channel,
 )
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
@@ -148,6 +149,8 @@ def desugar_boxplot(
     horizontal: bool = False,
     x_sort: Any = None,
     y_sort: Any = None,
+    x_type: str | None = None,
+    y_type: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Box-plot composite mark desugar.
@@ -216,6 +219,12 @@ def desugar_boxplot(
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    x_type, y_type : str or None, default None
+        The scale type the caller DECLARED on the corresponding chart-level
+        channel (``fm.X("cyl", type_="N")`` / ``"cyl:N"``), injected by the
+        composite-mark expansion. ``None`` means they declared none, in which
+        case the categorical channel defaults to Nominal so an ``Int64``
+        category column bands exactly as its ``Utf8`` equivalent does (#171).
 
     Returns
     -------
@@ -288,6 +297,19 @@ def desugar_boxplot(
     # categorical channel and y_sort applies; otherwise x is categorical and
     # x_sort applies.
     cat_sort = y_sort if horizontal else x_sort
+    # Every layer below binds the SAME categorical channel object, built once:
+    # the four band-geometry layers (two whisker caps, the IQR rect, the median
+    # tick) all size their band against it, so they cannot be allowed to
+    # disagree about its scale type. Typed Nominal unless the caller declared
+    # otherwise (#171) -- an Int64 category column otherwise infers
+    # Quantitative and every one of those layers falls through to the
+    # continuous path, dropping the box rects and drawing 8px stubs.
+    cat_enc = typed_positional_channel(
+        cat,
+        channel=Y if horizontal else X,
+        declared_type=y_type if horizontal else x_type,
+        sort=cat_sort,
+    )
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of any of these columns raises here instead of
     # silently reading a stale name.
@@ -298,11 +320,11 @@ def desugar_boxplot(
     def enc(y_col, y2_col=None, *, title=None):
         if horizontal:
             d: dict = {"x": X(y_col, title=title) if title else y_col}
-            d["y"] = Y(cat, sort=cat_sort) if cat_sort is not None else cat
+            d["y"] = cat_enc
             if y2_col:
                 d["x2"] = y2_col
         else:
-            d = {"x": X(cat, sort=cat_sort) if cat_sort is not None else cat}
+            d = {"x": cat_enc}
             d["y"] = Y(y_col, title=title) if title else y_col
             if y2_col:
                 d["y2"] = y2_col
@@ -391,6 +413,7 @@ def desugar_errorbar(
     color_field: Optional[str] = None,
     color_sort: Any = None,
     x_sort: Any = None,
+    x_type: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-bar composite mark desugar.
@@ -445,6 +468,14 @@ def desugar_errorbar(
     x_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    x_type : str or None, default None
+        The scale type the caller DECLARED on the chart-level x channel
+        (``fm.X("day", type_="N")`` / ``"day:N"``), injected by the
+        composite-mark expansion. ``None`` means they declared none, in which
+        case the categorical x channel defaults to Nominal so a numeric
+        category column bands exactly as its ``Utf8`` equivalent does (#171).
+        There is no ``y_type``, for the same reason there is no ``y_sort``:
+        this mark's categorical axis is always x.
 
     Returns
     -------
@@ -473,7 +504,11 @@ def desugar_errorbar(
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
     groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
-    x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
+    # Typed Nominal unless the caller declared otherwise (#171): the two
+    # endpoint `tick` layers below size their cap against the category band,
+    # which a numeric category column's inferred Quantitative scale gives them
+    # no way to do -- they render as 8px stubs instead.
+    x_enc_val = typed_positional_channel(x_field, channel=X, declared_type=x_type, sort=x_sort)
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
@@ -543,6 +578,7 @@ def desugar_errorband(
     borders: bool = False,
     color_field: Optional[str] = None,
     color_sort: Any = None,
+    x_type: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
@@ -592,6 +628,15 @@ def desugar_errorband(
         Explicit hue-level order for the color channel, injected by the
         composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
         channel (F-L09-04). Ignored when there is no color split.
+    x_type : str or None, default None
+        The scale type the caller DECLARED on the chart-level x channel,
+        injected by the composite-mark expansion, and passed straight through
+        to every layer's x binding (#171). Unlike its boxplot/errorbar/violin
+        siblings this mark applies **no** categorical default when it is
+        ``None``: ``x_field`` here is a continuous axis the transform merely
+        aggregates by, and the ribbon it draws needs no band geometry. So a
+        caller who declares ``"x:N"`` gets an ordinal axis, and a caller who
+        declares nothing gets exactly the binding this mark emitted before.
 
     Returns
     -------
@@ -623,10 +668,16 @@ def desugar_errorband(
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
     _err_cols = registry_output_columns("error_extent", ["lower", "upper"])
+    # Declared-type survival only -- see the `x_type` parameter doc for why
+    # this mark takes no categorical default. With nothing declared this is
+    # the bare `x_field` string the layers used to bind directly.
+    x_enc_val = typed_positional_channel(
+        x_field, channel=X, declared_type=x_type, default_type=None
+    )
 
     def _enc_ribbon() -> dict:
         d: dict = {
-            "x": x_field,
+            "x": x_enc_val,
             "y": Y(_err_cols["lower"], title=y_field),
             "y2": _err_cols["upper"],
         }
@@ -635,7 +686,7 @@ def desugar_errorband(
         return d
 
     def _enc_border(y_col: str) -> dict:
-        d: dict = {"x": x_field, "y": y_col}
+        d: dict = {"x": x_enc_val, "y": y_col}
         if split_hue:
             d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
@@ -1039,6 +1090,8 @@ def desugar_boxen(
     color_field: str | None = None,
     x_sort: Any = None,
     y_sort: Any = None,
+    x_type: str | None = None,
+    y_type: str | None = None,
     boxen_agg_sort: dict | None = None,
     materialized_depth: int | None = None,
     **mark_kwargs: Any,
@@ -1056,6 +1109,13 @@ def desugar_boxen(
     function runs, the same idiom ``boxen_agg_sort`` already uses. ``None``
     (no data available, or the ``palette=`` path, which never reads it) falls
     back to the full configured depth cap.
+
+    ``x_type``/``y_type`` are injected the same way (by
+    ``_desugar._prep_cat_axis_types``, alongside ``x_sort``/``y_sort``): they
+    carry the scale type the caller DECLARED on the chart-level channel, and
+    ``None`` -- they declared none -- defaults the categorical channel to
+    Nominal so a numeric category column bands exactly as its ``Utf8``
+    equivalent does (#171).
 
     LetterValue secondary-output schemas:
         ``lv_depth_K``:  ``[group, lower, upper, level]``
@@ -1158,16 +1218,18 @@ def desugar_boxen(
     # ~L280), whose categorical field is never renamed, boxen renames BOTH
     # channels identically across every layer, so both are titled once here
     # rather than per call site.
+    #
+    # Typed Nominal unless the caller declared otherwise (#171). ``group`` is
+    # LetterValue's rename of the user's category column and carries its
+    # dtype, so a numeric category column reaches these channels numeric and
+    # would otherwise infer Quantitative -- which every one of this mark's
+    # depth-band rects needs an ordinal scale to size against.
     group_col = depth_cols["group"]
-    group_enc_x = (
-        X(group_col, title=group, sort=cat_sort)
-        if cat_sort is not None
-        else X(group_col, title=group)
+    group_enc_x = typed_positional_channel(
+        group_col, channel=X, declared_type=x_type, sort=cat_sort, title=group
     )
-    group_enc_y = (
-        Y(group_col, title=group, sort=cat_sort)
-        if cat_sort is not None
-        else Y(group_col, title=group)
+    group_enc_y = typed_positional_channel(
+        group_col, channel=Y, declared_type=y_type, sort=cat_sort, title=group
     )
 
     def enc(value_col: str, value2_col: str | None = None) -> dict:

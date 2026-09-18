@@ -559,6 +559,11 @@ class _ResolveContext:
     x_sort: Any
     y_sort: Any
     color_sort: Any
+    #: The scale type the caller DECLARED on the chart-level x/y channel
+    #: (normalized single-letter code), or ``None`` when they declared none.
+    #: Never an inferred type -- see :func:`_prep_cat_axis_types`.
+    x_type: str | None
+    y_type: str | None
 
     def _color_field(self) -> str | None:
         color_enc = self.chart._encoding.get("color")
@@ -769,6 +774,14 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "materialized_depth": depth}
 
 
+#: Kinds whose categorical positional axis is ALWAYS x: their desugars take no
+#: ``y_sort``/``y_type`` parameter at all (``desugar_errorbar`` groups by
+#: ``x_field`` unconditionally; ``desugar_errorband`` aggregates by it), so
+#: injecting one would be a ``TypeError`` rather than a silently dead kwarg.
+#: Spelled once here because two prep steps below key the same carve-out on it.
+_CAT_AXIS_ALWAYS_X = frozenset({"errorbar", "errorband"})
+
+
 def _prep_cat_axis_sorts(ctx: _ResolveContext) -> None:
     """Inject x_sort and y_sort for composites with a categorical positional axis.
 
@@ -777,12 +790,41 @@ def _prep_cat_axis_sorts(ctx: _ResolveContext) -> None:
 
     errorbar always treats x as the categorical grouping axis (see
     desugar_errorbar), so it only consumes x_sort; y_sort is never read there
-    and is deliberately not injected (R4: dead-param removal).
+    and is deliberately not injected (R4: dead-param removal) -- that carve-out
+    is :data:`_CAT_AXIS_ALWAYS_X`, shared with :func:`_prep_cat_axis_types`.
     """
     if ctx.x_sort is not None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "x_sort": ctx.x_sort}
-    if ctx.y_sort is not None and ctx.kind != "errorbar":
+    if ctx.y_sort is not None and ctx.kind not in _CAT_AXIS_ALWAYS_X:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "y_sort": ctx.y_sort}
+
+
+def _prep_cat_axis_types(ctx: _ResolveContext) -> None:
+    """Inject x_type and y_type -- the scale type the CALLER declared (#171).
+
+    ``_resolve_pending_impl`` reduces the chart-level positional channels to
+    bare field-name strings before running a composite desugar, which used to
+    discard everything else the caller stated on them. ``sort=`` was already
+    rescued (:func:`_prep_cat_axis_sorts`); the declared *type* was not, so
+    ``.encode(x=fm.X("cyl", type_="N"))`` -- and its ``"cyl:N"`` shorthand --
+    was inert on precisely the marks whose band geometry depends on resolving
+    ordinal. The desugars re-bind the type through
+    :func:`~ferrum.marks._desugar_helpers.typed_positional_channel`, which also
+    owns the "default the category channel to Nominal" half of the rule.
+
+    Only the declared type is threaded here, never an inferred one: a kind that
+    receives ``None`` is the caller having stated nothing, which is what lets
+    the desugar apply its own default (and what keeps
+    ``catplot(native_scale=True)``'s deliberate ``type_="Q"`` authoritative
+    rather than overruled).
+
+    :data:`_CAT_AXIS_ALWAYS_X` kinds take ``x_type`` only, for the same reason
+    they take ``x_sort`` only.
+    """
+    if ctx.x_type is not None:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "x_type": ctx.x_type}
+    if ctx.y_type is not None and ctx.kind not in _CAT_AXIS_ALWAYS_X:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "y_type": ctx.y_type}
 
 
 def _prep_color_field(ctx: _ResolveContext) -> None:
@@ -984,15 +1026,16 @@ _PENDING_PREP: dict[str, _KindPrep] = {
         pre=(
             _prep_boxen_agg_sort,
             _prep_cat_axis_sorts,
+            _prep_cat_axis_types,
             _prep_boxen_palette_color_conflict,
             _prep_boxen_ramp_depth,
         ),
     ),
-    "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
-    "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
-    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
-    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts,)),
-    "errorband": _KindPrep(pre=(_prep_color_field,)),
+    "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
+    "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
+    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
+    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types)),
+    "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field)),
     "density": _KindPrep(pre=(_prep_groupby_from_color,)),
     "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
     "hex": _KindPrep(pre=(_prep_hex_field_from_color,)),
@@ -1072,6 +1115,15 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # verbatim, never through `_resolve_sort_for_composite` (F-L09-04).
     color_enc = chart._encoding.get("color")
     color_sort = color_enc.option("sort") if isinstance(color_enc, ChannelBase) else None
+    # The declared scale type, captured for the same reason and from the same
+    # objects as the sorts above: the bare field names below carry neither, and
+    # a composite mark's band geometry needs the categorical channel to resolve
+    # ordinal regardless of the column's Arrow dtype (#171). `option("type")`
+    # returns the normalized single-letter code for every spelling the caller
+    # could have used (`type_="nominal"`, `type_="N"`, `"cyl:N"`), or None when
+    # they declared nothing at all.
+    x_type = x_enc.option("type") if isinstance(x_enc, ChannelBase) else None
+    y_type = y_enc.option("type") if isinstance(y_enc, ChannelBase) else None
     # Partition the user kwargs by the desugar signature: declared params are
     # transform kwargs; everything else is a constant mark-style override.
     # ``style_dict`` is validated/normalised through MarkBase so aliases
@@ -1090,6 +1142,8 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         x_sort=x_sort,
         y_sort=y_sort,
         color_sort=color_sort,
+        x_type=x_type,
+        y_type=y_type,
     )
     prep = _PENDING_PREP.get(kind)
     if prep is not None:

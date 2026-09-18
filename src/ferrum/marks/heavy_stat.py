@@ -25,6 +25,7 @@ from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
+    typed_positional_channel,
 )
 
 
@@ -269,6 +270,8 @@ def desugar_violin(
     inner: Optional[str] = "box",
     x_sort: Any = None,
     y_sort: Any = None,
+    x_type: str | None = None,
+    y_type: str | None = None,
     color_field: str | None = None,
     color_sort: Any = None,
     shared_extent: bool = False,
@@ -324,6 +327,14 @@ def desugar_violin(
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    x_type, y_type : str or None, default None
+        The scale type the caller DECLARED on the corresponding chart-level
+        channel (``fm.X("cyl", type_="N")`` / ``"cyl:N"``), injected by the
+        composite-mark expansion. ``None`` means they declared none, in which
+        case the categorical channel defaults to Nominal so a numeric category
+        column bands exactly as its ``Utf8`` equivalent does (#171). Both are
+        forwarded verbatim to ``desugar_boxplot`` under ``inner="box"`` so the
+        inner box resolves the same scale the violin body does.
     color_field : str or None, default None
         Hue field, injected by the composite-mark expansion from a ``color=``
         encoding.  When set, the ``Violin`` (and inner ``BoxStats``) groupby
@@ -389,16 +400,24 @@ def desugar_violin(
         cat_field = y_field  # categorical grouping on y
         val_field = x_field  # numeric values on x
         cat_sort = y_sort
+        cat_type = y_type
     else:
         cat_field = x_field  # categorical grouping on x (default)
         val_field = y_field  # numeric values on y
         cat_sort = x_sort
+        cat_type = x_type
 
-    # Wrap the categorical encoding in X/Y with sort when a sort is present.
-    if horizontal:
-        cat_enc = Y(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
-    else:
-        cat_enc = X(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
+    # The categorical encoding, built once and shared by the body polygon and
+    # every inner overlay below: typed Nominal unless the caller declared
+    # otherwise (#171), so a numeric category column resolves ordinal and the
+    # body polygon's per-band placement (and the quartile ticks' band_size)
+    # have a band to size against instead of a continuous axis.
+    cat_enc = typed_positional_channel(
+        cat_field,
+        channel=Y if horizontal else X,
+        declared_type=cat_type,
+        sort=cat_sort,
+    )
 
     # When a hue (color) field is present, the KDE — and every inner summary —
     # must split per (cat, hue) group rather than pooling across hues.  The
@@ -523,6 +542,8 @@ def desugar_violin(
         horizontal=horizontal,
         x_sort=x_sort,
         y_sort=y_sort,
+        x_type=x_type,
+        y_type=y_type,
         color_field=color_field if split_hue else None,
         color_sort=color_sort if split_hue else None,
     )
@@ -960,6 +981,8 @@ def desugar_swarm(
     dodge: Optional[str] = None,
     x_sort: Any = None,
     y_sort: Any = None,
+    x_type: str | None = None,
+    y_type: str | None = None,
 ) -> MarkDesugarResult:
     """Beeswarm plot mark desugar.
 
@@ -1017,6 +1040,13 @@ def desugar_swarm(
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    x_type, y_type : str or None, default None
+        The scale type the caller DECLARED on the corresponding chart-level
+        channel (``fm.X("cyl", type_="N")`` / ``"cyl:N"``), injected by the
+        composite-mark expansion. ``None`` means they declared none, in which
+        case the categorical channel defaults to Nominal so a numeric category
+        column spreads within a band exactly as its ``Utf8`` equivalent does
+        (#171).
 
     Returns
     -------
@@ -1038,9 +1068,10 @@ def desugar_swarm(
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
-    # Resolve the categorical axis sort.  When vertical, x is categorical
-    # (x_sort applies); when horizontal, y is categorical (y_sort applies).
+    # Resolve the categorical axis sort and declared type.  When vertical, x is
+    # categorical (x_sort/x_type apply); when horizontal, y is (y_sort/y_type).
     cat_sort = x_sort if orient == "vertical" else y_sort
+    cat_type = x_type if orient == "vertical" else y_type
     swarm_kwargs: dict = dict(
         category=cat,
         value=val,
@@ -1060,8 +1091,10 @@ def desugar_swarm(
         # axis renders properly with the category labels. The Swarm transform
         # emits `__pos_x_offset__` (pixel offset on the cross axis) which the
         # renderer's standard position-offset path applies on top of the category
-        # band center — same mechanism Dodge uses (Phase 9c).
-        x_enc_val = X(cat, sort=cat_sort) if cat_sort is not None else cat
+        # band center — same mechanism Dodge uses (Phase 9c). That band centre
+        # only exists on an ordinal scale, so the channel is typed Nominal
+        # unless the caller declared otherwise (#171).
+        x_enc_val = typed_positional_channel(cat, channel=X, declared_type=cat_type, sort=cat_sort)
         layers = [
             _Layer(
                 name="point",
@@ -1077,7 +1110,7 @@ def desugar_swarm(
         # the original field names lets the ordinal y axis render category labels
         # correctly, and the renderer picks up `__pos_y_offset__` automatically via
         # `render/position.rs::read_position_offsets`.
-        y_enc_val = Y(cat, sort=cat_sort) if cat_sort is not None else cat
+        y_enc_val = typed_positional_channel(cat, channel=Y, declared_type=cat_type, sort=cat_sort)
         layers = [
             _Layer(
                 name="point",

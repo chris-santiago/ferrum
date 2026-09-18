@@ -87,21 +87,15 @@ import polars as pl
 import ferrum as fm
 from ferrum.encoding import X, Y
 from ferrum.position import Stack
+from _svg_rects import data_bar_rects, plot_rect
 
 _THEME_BACKGROUND = "#faf7f2"
 
 
 # ---------------------------------------------------------------------------
-# Helpers (SVG rect/path parsing conventions mirror
-# tests/test_bug_hunt_band_point_range.py's _svg_elements/_data_bar_rects)
+# Helpers (rect parsing/filtering delegates to tests/_svg_rects.py's
+# data_bar_rects/plot_rect rather than re-spelling either)
 # ---------------------------------------------------------------------------
-
-
-def _svg_rects(svg: str) -> list[dict[str, str]]:
-    out = []
-    for m in re.finditer(r"<rect([^/]+)/>", svg):
-        out.append(dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1))))
-    return out
 
 
 def _data_rects(svg: str) -> list[dict[str, float | str]]:
@@ -109,10 +103,7 @@ def _data_rects(svg: str) -> list[dict[str, float | str]]:
     background and the unfilled plot-area rect), with numeric attrs parsed.
     """
     out = []
-    for attrs in _svg_rects(svg):
-        fill = attrs.get("fill")
-        if not fill or fill == _THEME_BACKGROUND or fill.startswith("url("):
-            continue
+    for attrs in data_bar_rects(svg):
         out.append(
             {
                 **attrs,
@@ -228,9 +219,9 @@ def test_horizontal_stacked_histogram_renders_and_stacks_along_x():
 
     # Every bin's first segment must start at the plot-area left edge (base
     # of the stack is 0), not some arbitrary offset.
-    plot_area_x = _svg_rects(svg)[1]["x"]
+    plot_area_x, _, _, _ = plot_rect(svg)
     starts = sorted({r["x"] for r in rects})
-    assert abs(min(starts) - float(plot_area_x)) < 0.5, (
+    assert abs(min(starts) - plot_area_x) < 0.5, (
         f"first stacked segment must start at the plot-area left edge "
         f"({plot_area_x}); got {min(starts)}"
     )
@@ -348,7 +339,7 @@ def test_horizontal_stacked_density_stacks_not_overlays():
         f"{len(paths_stack[0])} vs {len(paths_stack[1])}"
     )
 
-    plot_area_x = float(_svg_rects(svg_stack)[1]["x"])
+    plot_area_x, _, _, _ = plot_rect(svg_stack)
 
     def _bottom_half_xs(points: list[tuple[float, float]]) -> list[float]:
         half = len(points) // 2
