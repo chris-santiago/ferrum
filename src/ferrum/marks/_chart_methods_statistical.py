@@ -211,7 +211,14 @@ class StatisticalMarksMixin:
             Render a cumulative histogram.  Default is ``False``.
         multiple : str, optional
             How to handle grouped histograms when a ``color`` encoding is
-            present: ``"layer"`` (default), ``"stack"``, ``"dodge"``.
+            present: ``"layer"`` (default), ``"stack"``, ``"fill"``,
+            ``"dodge"``.  ``"stack"`` and ``"fill"`` also bin every group
+            against one global extent, so the groups share bin edges and
+            the bars are genuinely stackable.
+        position_by : str, optional
+            Column the ``multiple=`` position adjustment groups by.  Default
+            (``None``) resolves the ``color`` channel at render time.  A
+            column name only; an encoding object is refused, not unwrapped.
         orient : {"vertical", "horizontal"}, optional
             Canonical orientation alias for ``orientation``.  ``"horizontal"``
             swaps the bin-edge and count axes.  Takes precedence over

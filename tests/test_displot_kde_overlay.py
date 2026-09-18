@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 import numpy as np
 import polars as pl
@@ -40,7 +39,8 @@ import pytest
 
 import ferrum as fm
 from tests._svg_rects import data_bar_rects as _data_bar_rects
-from tests._svg_rects import svg_elements as _svg_elements
+from tests._svg_rects import polylines as _polylines
+from tests._svg_rects import rug_tick_x1_by_stroke as _rug_tick_x1_by_stroke
 
 
 # ---------------------------------------------------------------------------
@@ -82,22 +82,20 @@ def two_facet_df():
 
 
 # ---------------------------------------------------------------------------
-# SVG geometry helpers. `_data_bar_rects` comes from the shared
-# `tests/_svg_rects.py` module (same convention as `tests/_svg_extents.py`);
-# the polyline helpers below are specific to this file's line-mark overlay.
+# SVG geometry helpers. `_data_bar_rects`, `_polylines` and
+# `_rug_tick_x1_by_stroke` come from the shared `tests/_svg_rects.py` module
+# (same convention as `tests/_svg_extents.py`); the three wrappers below are
+# this file's own readings of a parsed polyline list.
 # ---------------------------------------------------------------------------
 
 
 def _polyline_points(svg: str) -> list[list[tuple[float, float]]]:
     """Return the ``(x, y)`` point lists for every ``<polyline>`` in *svg*."""
-    out = []
-    for pts in re.findall(r'<polyline[^>]*points="([^"]+)"', svg):
-        out.append([tuple(map(float, p.split(","))) for p in pts.split()])
-    return out
+    return [points for _stroke, points in _polylines(svg)]
 
 
 def _polyline_strokes(svg: str) -> list[str]:
-    return re.findall(r'<polyline[^>]*stroke="([^"]+)"', svg)
+    return [stroke for stroke, _points in _polylines(svg) if stroke is not None]
 
 
 def _polyline_peak_by_stroke(svg: str) -> dict[str, float]:
@@ -108,11 +106,11 @@ def _polyline_peak_by_stroke(svg: str) -> dict[str, float]:
     compare "this group's curve" between two renders without depending on
     ``<polyline>`` emission order.
     """
-    out = {}
-    for pts, stroke in re.findall(r'<polyline points="([^"]+)"[^>]*stroke="([^"]+)"', svg):
-        ys = [float(p.split(",")[1]) for p in pts.split()]
-        out[stroke] = min(ys)
-    return out
+    return {
+        stroke: min(y for _x, y in points)
+        for stroke, points in _polylines(svg)
+        if stroke is not None
+    }
 
 
 def _curve_to_bar_ratio(bars: list[dict[str, str]], points: list[tuple[float, float]]) -> float:
@@ -126,22 +124,6 @@ def _curve_to_bar_ratio(bars: list[dict[str, str]], points: list[tuple[float, fl
     max_bar_height = max(heights)
     curve_top = min(y for _, y in points)
     return (baseline - curve_top) / max_bar_height
-
-
-def _rug_tick_x1_by_stroke(svg: str) -> dict[str, set[float]]:
-    """Map each rug tick `<line>`'s `stroke` color to its set of x1 positions.
-
-    Excludes the theme axis-line/gridline strokes (`#6b7280`, `#d6d3d1`) so
-    only the per-hue rug-tick lines remain -- lets a test compare "this
-    group's rug ticks" between two renders without depending on emission
-    order or on the theme's own chrome lines.
-    """
-    out: dict[str, set[float]] = {}
-    for attrs in _svg_elements(
-        svg, "line", lambda a: a.get("stroke") not in {"#6b7280", "#d6d3d1"}
-    ):
-        out.setdefault(attrs["stroke"], set()).add(round(float(attrs["x1"]), 3))
-    return out
 
 
 def _kde_overlay_transform(spec: dict) -> dict:
@@ -386,10 +368,15 @@ class TestOverlayPerHueColor:
 
 class TestOverlayBinWidthParity:
     """The overlay's `shared_extent` must equal what the histogram's `Bin`
-    transform actually receives on the displot path -- which is always
-    `False` today, since `_displot_build` never forwards `multiple=` into
-    `mark_histogram` -- not a re-derivation of the `multiple in ("stack",
-    "fill")` rule that never reaches that call.
+    transform actually receives on the displot path -- not a second,
+    independent reading of the `multiple=` mode.
+
+    RATIONALE CORRECTED (#194): that value used to be `False` for every mode,
+    because `_displot_build` never forwarded `multiple=` into
+    `mark_histogram`. It forwards it now, and both sides read the same owner
+    (`marks/_multiple.py`), so the mirrored value is `True` under
+    `"stack"`/`"fill"` and `False` under `"layer"`/`"dodge"`. The mirroring
+    itself is unchanged, and is still what this class exists to guard.
     """
 
     def test_wire_shared_extent_matches_the_real_bin_transform(self, two_group_df):
@@ -415,48 +402,81 @@ class TestOverlayBinWidthParity:
                 f"{bin_xform['shared_extent']!r}"
             )
 
-    def test_stack_mode_curve_scale_matches_layer_mode(self, two_group_df):
-        """Per-hue overlay curve geometry must be identical between
-        multiple="stack" and multiple="layer" for the same data -- asserts
-        the parity directly rather than pinning either render's absolute
-        pixel constants.
-        """
-        layer_svg = fm.displot(
-            two_group_df,
-            x="x",
-            hue="g",
-            kind="hist",
-            kde=True,
-            stat="count",
-            multiple="layer",
-            fill=False,
-        ).to_svg()
-        stack_svg = fm.displot(
-            two_group_df,
-            x="x",
-            hue="g",
-            kind="hist",
-            kde=True,
-            stat="count",
-            multiple="stack",
-            fill=False,
-        ).to_svg()
-        _assert_finite_svg(layer_svg)
-        _assert_finite_svg(stack_svg)
+    @pytest.mark.parametrize("multiple", ["layer", "stack", "dodge"])
+    def test_overlay_curve_tracks_its_own_bars_in_every_count_mode(self, two_group_df, multiple):
+        """Each hue's overlay curve peak must track that hue's own tallest bar,
+        in whatever binning its `multiple=` mode chose.
 
-        layer_peaks = _polyline_peak_by_stroke(layer_svg)
-        stack_peaks = _polyline_peak_by_stroke(stack_svg)
-        assert len(layer_peaks) == 2, f"expected 2 hue curves, got {len(layer_peaks)}"
-        assert set(layer_peaks) == set(stack_peaks), (
-            "stack/layer overlay curves are colored differently -- cannot compare"
+        RE-REASONED FROM THE NEW CONTRACT (#194). This test used to assert
+        that a group's overlay peak landed at the same *pixel* under
+        `multiple="stack"` as under `"layer"` (`abs=0.5`). That equality held
+        only because of the defect: with `shared_extent=False` the two groups
+        binned on disjoint edges, `apply_stack` found no pairs to stack, and
+        the "stacked" chart rendered as a layered one -- same bin width, same
+        y-domain, same pixels. Now that `"stack"` genuinely bins on a global
+        extent and genuinely stacks, both the bin width and the y-domain
+        differ by construction, so a cross-render pixel equality is no longer
+        a statement about anything. Re-baselining it to the new pixel numbers
+        would pin two arbitrary constants.
+
+        What the contract actually says is that the overlay is count-scaled
+        by the bin width THE BARS USED. Restated scale-free, and within a
+        single render: a count-scaled KDE peak approximates the expected row
+        count of the modal bin, which is what the tallest bar of that group
+        also is -- so `curve_peak / tallest_segment_height` sits near 1 in
+        every mode whose bars are on a count axis. The rect `height`
+        attribute is the group's own count segment even when stacked, so the
+        same reading works under all three modes.
+
+        SCOPE OF THE BAND. `abs=0.12` is calibrated to THIS fixture, not a
+        universal identity: how close that ratio runs to 1 depends on the
+        kernel bandwidth relative to the bin width, and a wider-separated
+        fixture (means 0/6 instead of this module's 0/3) measures 1.203 under
+        `"stack"`. So this is a proxy for the scale relation on one fixture,
+        strong enough to catch a mismatched bin width and no stronger. The
+        EXACT form of the invariant -- the overlay's extent mode is the bars'
+        own, never re-derived -- is pinned on the wire by
+        `test_wire_shared_extent_matches_the_real_bin_transform` above, which
+        holds for every fixture.
+
+        Discrimination (measured on this fixture): de-mirroring the overlay
+        -- pinning `shared_extent=False` in `_kde_overlay` while the bars bin
+        on the shared extent -- drops the stack ratios to 0.84 / 0.74,
+        outside the band, while correct output sits at 0.93-1.04.
+        `multiple="fill"` is excluded because it deliberately carries no
+        `count_scale` at all (`TestOverlayCountScaleAxisScope`).
+        """
+        svg = fm.displot(
+            two_group_df,
+            x="x",
+            hue="g",
+            kind="hist",
+            kde=True,
+            stat="count",
+            multiple=multiple,
+            fill=False,
+        ).to_svg()
+        _assert_finite_svg(svg)
+
+        bars = _data_bar_rects(svg)
+        baseline = max(float(b["y"]) + float(b["height"]) for b in bars)
+        tallest_by_fill: dict[str, float] = {}
+        for bar in bars:
+            fill = bar["fill"]
+            tallest_by_fill[fill] = max(tallest_by_fill.get(fill, 0.0), float(bar["height"]))
+
+        peaks = _polyline_peak_by_stroke(svg)
+        assert len(peaks) == 2, f"expected 2 hue curves, got {len(peaks)}"
+        assert set(peaks) == set(tallest_by_fill), (
+            f"overlay curve colors {set(peaks)} do not match the bar fills "
+            f"{set(tallest_by_fill)} -- cannot pair a curve with its own bars"
         )
-        for stroke, layer_peak in layer_peaks.items():
-            stack_peak = stack_peaks[stroke]
-            assert stack_peak == pytest.approx(layer_peak, abs=0.5), (
-                f"stroke {stroke}: multiple='stack' overlay peak {stack_peak:.2f} "
-                f"diverges from multiple='layer' peak {layer_peak:.2f} -- the "
-                "count-scaled bin width used by the overlay no longer matches "
-                "the one the bars actually use"
+        for stroke, peak_y in peaks.items():
+            ratio = (baseline - peak_y) / tallest_by_fill[stroke]
+            assert ratio == pytest.approx(1.0, abs=0.12), (
+                f"multiple={multiple!r}, stroke {stroke}: overlay peak is "
+                f"{ratio:.3f}x this group's tallest bar -- the count-scaled bin "
+                "width the overlay used no longer matches the one the bars did"
             )
 
 

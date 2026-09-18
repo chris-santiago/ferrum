@@ -36,6 +36,7 @@ from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
+from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
 from ferrum.plots._helpers import _field_name, _finalize_chart
 
 
@@ -44,7 +45,10 @@ from ferrum.plots._helpers import _field_name, _finalize_chart
 # ---------------------------------------------------------------------------
 
 _DISPLOT_VALID_KINDS = {"hist", "kde", "ecdf", "rug"}
-_DISPLOT_VALID_MULTIPLE = {"layer", "stack", "fill", "dodge"}
+# The accepted `multiple=` words come from the module that owns what each
+# word MEANS (`marks/_multiple.py`), so displot cannot accept a mode the
+# owner has no mapping for, or refuse one it has.
+_DISPLOT_VALID_MULTIPLE = MULTIPLE_MODES
 _DISPLOT_VALID_STAT = {"count", "density"}
 
 _CATPLOT_VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
@@ -123,16 +127,26 @@ def _count_facet_levels(data: Any, field: str) -> int:
         return 1
 
 
-def _multiple_to_position(multiple: str, hue: Any):
-    if multiple == "layer":
-        return Identity()
-    if multiple == "dodge":
-        return Dodge(by=hue)
-    if multiple == "stack":
-        return Stack(by=hue, offset="zero")
-    if multiple == "fill":
-        return Stack(by=hue, offset="normalize")
-    raise ValueError(f"unknown multiple {multiple!r}")
+def _multiple_to_position(multiple: str, hue: Any) -> MultipleSemantics:
+    """Return displot's ``(position, shared_extent)`` pair for *multiple*.
+
+    A thin binding of the package-wide owner (``marks/_multiple.py``) to
+    displot's two local conventions:
+
+    - the position groups by ``hue`` explicitly, so the rendered ``Stack`` /
+      ``Dodge`` names the column the caller asked to split on rather than
+      resolving the color channel implicitly at render time;
+    - ``multiple="layer"`` becomes an explicit ``Identity()`` rather than
+      the owner's ``None``.  displot's overlay path copies the chart-level
+      position onto the primary layer, and "no adjustment declared" and
+      "explicitly no adjustment" are different values there.
+
+    Both halves come from the owner, so the binning extent the histogram's
+    ``Bin`` receives and the adjustment that positions its bars can never
+    disagree about the mode again (GH #194).
+    """
+    position, shared_extent = multiple_semantics(multiple, by=hue)
+    return MultipleSemantics(position if position is not None else Identity(), shared_extent)
 
 
 def _overlay_count_scale(bins: Any) -> Any:
@@ -156,6 +170,7 @@ def _kde_overlay(
     kind: str,
     stat: str,
     multiple: str,
+    shared_extent: bool,
     bins: Any,
     bandwidth: Any,
     bw_adjust: float,
@@ -167,13 +182,18 @@ def _kde_overlay(
     reads the original, pre-`Bin` data batch) and appends the layer.
 
     `groupby=hue` gives one curve per hue level instead of one curve pooled
-    across all rows; `shared_extent=False` mirrors what the real histogram's
-    `Bin` transform actually receives on this call path (`_displot_build`
-    never forwards `multiple=` into `mark_histogram`, so `Bin` always runs
-    ungrouped-extent regardless of displot's `multiple=`) -- this must track
-    that value, not re-derive `multiple in ("stack", "fill")`, or a grouped
-    count-scaled bin width diverges from the bars' own
+    across all rows; `shared_extent` is passed in -- it is the value the real
+    histogram's `Bin` transform receives on this same call, taken from the
+    one owner of what `multiple=` means (`_multiple_to_position` ->
+    `marks/_multiple.py`). It is never re-derived here: a second reading of
+    `multiple in ("stack", "fill")` would be a second answer that can drift
+    from the bars', and a grouped count-scaled bin width computed off the
+    wrong extent no longer matches the bars it is drawn against
     (`test_wire_shared_extent_matches_the_real_bin_transform` guards this).
+    RATIONALE CORRECTED (#194): this used to read `shared_extent=False`
+    unconditionally, mirroring a `Bin` that was itself wrong, because
+    `_displot_build` did not forward the mode at all. It forwards it now, so
+    stack/fill bin on a global extent and the overlay follows them there.
     `count_scale` is requested only when the histogram's own value axis is
     actually a count axis: `kind == "hist"` (not ecdf's cumulative-count
     line, not rug, which has no bar axis at all), `stat == "count"` (density
@@ -194,7 +214,7 @@ def _kde_overlay(
         bandwidth=bandwidth,
         bw_adjust=bw_adjust,
         cumulative=cumulative,
-        shared_extent=False,
+        shared_extent=shared_extent,
         name="kde_overlay",
     )
     if hue is not None:
@@ -507,8 +527,11 @@ def _displot_build(
     # and none can be left holding the raw object.
     hue_field = _field_name(hue)
 
-    # Position adjustment from `multiple`.
-    position = _multiple_to_position(multiple, hue_field)
+    # What `multiple=` means, decided once: the position adjustment AND the
+    # binning extent mode. Every consumer below reads this pair; none
+    # re-derives either half (GH #194).
+    semantics = _multiple_to_position(multiple, hue_field)
+    position = semantics.position
 
     # Build the base chart.
     chart = Chart(data)
@@ -536,10 +559,23 @@ def _displot_build(
         # hue is bound, thread `groupby=hue` so the Bin transform emits per-
         # (bin, group) rows preserving the hue column for color encoding +
         # position adjustment.
+        #
+        # `multiple=` IS forwarded (GH #194): it is what tells the `Bin`
+        # transform to bin every group against one global extent under
+        # "stack"/"fill", without which the groups land on different edges at
+        # different widths and `apply_stack` has no pairs to stack. `position=`
+        # stays explicit alongside it and is not redundant: for "layer" the
+        # desugar declares no adjustment and displot wants an explicit
+        # `Identity()` (see `_multiple_to_position`), and for the other three
+        # modes the desugar's own adjustment -- which overwrites this one --
+        # is built by the same owner from the same `position_by`, so the two
+        # are equal by construction rather than by coincidence.
         hist_kwargs: dict = dict(
             bins=bins,
             cumulative=cumulative,
             density=(stat == "density"),
+            multiple=multiple,
+            position_by=hue_field,
             position=position,
         )
         if hue is not None and multiple in ("stack", "fill", "dodge"):
@@ -641,6 +677,7 @@ def _displot_build(
                 kind=kind,
                 stat=stat,
                 multiple=multiple,
+                shared_extent=semantics.shared_extent,
                 bins=bins,
                 bandwidth=bandwidth,
                 bw_adjust=bw_adjust,
@@ -1645,9 +1682,18 @@ def _catplot_build(
         stats = _native_scale_stats(data, cat_name)
 
     # Position adjustment.
+    #
+    # `_field_name(hue)`, not the raw `hue`: `Dodge(by=)` takes a column name,
+    # and `hue=fm.Color("g")` is a documented catplot spelling, so the raw
+    # channel object reached serialization and raised an untyped `TypeError:
+    # Object of type Color is not JSON serializable` -- naming neither
+    # `catplot` nor `dodge=`. Same resolution the three sibling sites in this
+    # file already use (`_catplot_summary_layers`'s `hue_field`, the
+    # `kind="count"` groupby, `_displot_build`'s `hue_field`); this was the
+    # fourth of the class.
     position = None
     if dodge and hue is not None:
-        position = Dodge(by=hue)
+        position = Dodge(by=_field_name(hue))
 
     # Domain padding against the silent Jitter/Dodge mark-drop (cycle-2 fix,
     # quality finding 1): `jitter_active` mirrors the exact condition the

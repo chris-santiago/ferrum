@@ -247,6 +247,16 @@ def test_horizontal_stacked_histogram_auto_domain_tiles_along_x():
     from Part A above — pre-widening-fix this rendered only the first
     group's bars (the cumulative "b" segments fell outside the narrow
     auto-inferred domain and were silently dropped, one per bin).
+
+    RE-EXPRESSED (wave 4 T10b follow-on), same claim, measured over DRAWN
+    segments. This counted every ``<rect>`` the render emitted and required
+    6 (3 bins x 2 groups) — a claim about the complete (bin x group) grid
+    reaching the SVG, which this test never existed to make and which T10b
+    deliberately ended: a cell whose group has no rows in that bin no longer
+    serializes an invisible zero-width rect. The widening property is about
+    segments that have something to draw, so the count is now over those
+    (``width > 0``), which makes it indifferent to the empty cell in either
+    direction — it reads 5 whether or not the invisible rect is emitted.
     """
     df = pl.DataFrame(
         {
@@ -260,17 +270,25 @@ def test_horizontal_stacked_histogram_auto_domain_tiles_along_x():
         .encode(y="v", color="g")
         .to_svg()
     )
-    rects = _data_rects(svg)
-    fills = {r["fill"] for r in rects}
+    drawn = [r for r in _data_rects(svg) if r["width"] > 0]
+    fills = {r["fill"] for r in drawn}
     assert len(fills) == 2, f"expected both groups' fills present; got {fills}"
-    assert len(rects) == 6, f"expected 6 bar segments (3 bins x 2 groups); got {len(rects)}"
-    _assert_tiles_without_overlap(rects, axis="x")
+    # 6 cells (3 bins x 2 groups), of which exactly one has no rows to draw:
+    # "a" tops out at 4.0, so the topmost bin — the upper third of the
+    # shared [1, 6] extent — holds "b" rows only. Every one of the other 5
+    # must be drawn. Pre-widening-fix this read 2: the cumulative "b"
+    # segments mapped outside the narrow auto-inferred domain and were
+    # dropped, one per bin, taking the "b" fill with them.
+    assert len(drawn) == 5, (
+        f"expected 5 drawn bar segments (6 bin x group cells, 1 of them empty); got {len(drawn)}"
+    )
+    _assert_tiles_without_overlap(drawn, axis="x")
 
     # Every bin's first segment must start at the SAME x (base of the stack
     # is 0 in every bin) — a consistent base-alignment check that doesn't
     # pin the exact plot-area edge, since the auto-inferred domain applies
     # its own (unrelated to stacking) expand/nice padding.
-    bins = _group_rects_by_bin(rects, axis="x")
+    bins = _group_rects_by_bin(drawn, axis="x")
     first_starts = {round(min(r["x"] for r in segs), 1) for segs in bins.values()}
     assert len(first_starts) == 1, (
         f"every bin's first segment must start at the same x; got {first_starts}"

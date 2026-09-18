@@ -12,9 +12,10 @@ from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
 from ferrum.marks._fit_layers import build_fit_layers
+from ferrum.marks._multiple import MULTIPLE_MODES as _MULTIPLE_MODES
+from ferrum.marks._multiple import multiple_semantics
 
 _ORIENTATIONS = ("horizontal", "vertical")
-_MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
 
 
 def desugar_density(
@@ -87,7 +88,11 @@ def desugar_density(
         Whether to emit the cumulative density rather than the PDF.
     multiple : {"layer", "stack", "fill", "dodge"}, default "layer"
         How to render multiple density curves.  ``"stack"`` and ``"fill"``
-        stack areas; ``"dodge"`` is not yet implemented.
+        stack areas and evaluate every group on one shared x-grid so the
+        curves can be stacked.  ``"dodge"`` is accepted and overlays the
+        curves exactly as ``"layer"`` does: a continuous curve has no band
+        to be offset within, so Rust's KDE ``normalize_mode`` handles
+        per-group normalization instead of a position adjustment.
     fill : bool, default True
         If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
     groupby : str, optional
@@ -121,7 +126,7 @@ def desugar_density(
     ------
     ValueError
         If ``multiple`` is not one of ``"layer"``, ``"stack"``, ``"fill"``,
-        ``"dodge"`` (dodge raises because it is not yet implemented).
+        ``"dodge"``.
 
     Examples
     --------
@@ -157,6 +162,18 @@ def desugar_density(
         validate_choice("mark_density", "kernel", kernel, transform_registry("kde")["methods"])
     validate_choice("mark_density", "multiple", multiple, _MULTIPLE_MODES)
     validate_choice("mark_density", "orientation", orientation, _ORIENTATIONS)
+    # GH #77: orientation="horizontal" remaps the density column onto
+    # encoding.x directly (`encoding_remap` below) without setting CoordFlip,
+    # so the Stack must say so explicitly — otherwise Rust's `apply_stack`
+    # falls back to `coord_flipped` (False here) and cumulates the wrong
+    # column.
+    #
+    # Both halves of what `multiple=` means come from the one owner
+    # (`marks/_multiple.py`), so the grid this curve is evaluated on and the
+    # adjustment that positions it cannot disagree about the mode.
+    semantics = multiple_semantics(
+        multiple, value_axis="x" if orientation == "horizontal" else None
+    )
     kde_kwargs: dict = dict(
         bandwidth=bandwidth,
         bw_adjust=float(bw_adjust),
@@ -164,7 +181,7 @@ def desugar_density(
         extent=extent,
         cumulative=cumulative,
         # shared_extent=True forces a global x-grid across groups (required for stack/fill).
-        shared_extent=(multiple in ("stack", "fill")),
+        shared_extent=semantics.shared_extent,
         kernel=kernel or "gaussian",
     )
     if groupby is not None:
@@ -182,29 +199,13 @@ def desugar_density(
         encoding_remap = {"x": _kde_cols["value"], "y": _kde_cols["density"]}
     mark = "area" if fill else "line"
 
-    # multiple="stack" and "fill" use the Stack position adjuster.
-    # multiple="dodge": Rust KDE normalize_mode handles per-group normalization.
-    #
-    # GH #77: orientation="horizontal" remaps the value column onto
-    # encoding.x directly (`encoding_remap` above) without setting
-    # CoordFlip, so the Stack must say so explicitly — otherwise Rust's
-    # `apply_stack` falls back to `coord_flipped` (False here) and
-    # cumulates the wrong column.
-    stack_value_axis = "x" if orientation == "horizontal" else None
-    if multiple == "stack":
-        from ferrum.position import Stack
-
-        position = Stack(offset="zero", value_axis=stack_value_axis)
-    elif multiple == "fill":
-        from ferrum.position import Stack
-
-        position = Stack(offset="normalize", value_axis=stack_value_axis)
-    elif multiple == "dodge":
-        # For density plots, "dodge" produces overlapping curves (same as "layer").
-        # Histogram dodge (side-by-side bars) is handled separately in mark_histogram.
-        position = None
-    else:
-        position = None
+    # multiple="stack" and "fill" use the Stack position adjuster the owner
+    # built above.  Density's one documented departure from it:
+    # multiple="dodge" produces overlapping curves (same as "layer") because a
+    # continuous curve has no band to be offset within -- Rust's KDE
+    # normalize_mode handles per-group normalization instead.  Side-by-side
+    # dodging is a bar behavior, and mark_histogram keeps the owner's `Dodge`.
+    position = None if multiple == "dodge" else semantics.position
 
     return MarkDesugarResult(
         mark=mark, transforms=transforms, remap=encoding_remap, position=position
@@ -223,6 +224,7 @@ def desugar_histogram(
     cumulative: bool = False,
     right: bool = False,
     multiple: str = "layer",
+    position_by: str | None = None,
     groupby: Any = None,
     orientation: str = "vertical",
 ) -> MarkDesugarResult:
@@ -270,9 +272,22 @@ def desugar_histogram(
     right : str, default False
         Reserved for future use (no-op today — bin intervals are always
         left-closed, right-open ``[lo, hi)``).
-    multiple : str, default "layer"
-        Reserved for future use (no-op today — only ``"layer"`` overlap
-        is supported; stacking deferred).
+    multiple : {"layer", "stack", "fill", "dodge"}, default "layer"
+        How grouped bars are drawn relative to each other.  Decides two
+        things at once, through one owner (``marks/_multiple.py``): the
+        position adjustment on the count/density axis, and whether the
+        ``Bin`` transform bins every group against one global extent.
+        ``"stack"`` and ``"fill"`` need that shared extent — bars can only
+        be stacked onto bars that share their edges.
+    position_by : str or None, default None
+        Column the ``multiple=`` position adjustment groups by.  ``None``
+        (the default) lets the adjustment resolve the color channel at
+        render time.  Pass it when the caller already knows the grouping
+        column and wants it stated in the spec — ``displot`` does, so its
+        ``hue=`` survives into the rendered ``Stack``/``Dodge``.  A column
+        name only: an encoding object (``fm.Color("g")``) is refused with
+        its own message rather than unwrapped, since ``Stack(by=)`` /
+        ``Dodge(by=)`` take a name.
     groupby : list or None, default None
         Optional grouping columns forwarded to the ``Bin`` transform.
     orientation : {"vertical", "horizontal"}, default "vertical"
@@ -307,6 +322,46 @@ def desugar_histogram(
         )
     validate_choice("mark_histogram", "multiple", multiple, _MULTIPLE_MODES)
     validate_choice("mark_histogram", "orientation", orientation, _ORIENTATIONS)
+    # `position_by` ends up as `Stack(by=)`/`Dodge(by=)`, whose contract is
+    # `Optional[str]`, so anything else reaches serialization untyped: a
+    # channel object raised the bare `TypeError: Object of type Color is not
+    # JSON serializable` (naming neither this function nor the parameter --
+    # the exact failure shape the catplot dodge rider in this same change
+    # exists to eliminate), and an int or list raised a raw serde message
+    # naming an internal wire key. Refused here in `mark_histogram`'s own
+    # voice instead. It REFUSES rather than unwrapping: this parameter is
+    # documented as a column name, not as the figure layer's "str or
+    # encoding" spelling, and unwrapping would silently widen a contract
+    # this change is only now creating -- and would leave
+    # `mark_histogram(position=Dodge(by=<channel>))`, the sibling door one
+    # level down, still failing the old way (filed follow-up).
+    if position_by is not None and not isinstance(position_by, str):
+        field = getattr(position_by, "field", None)
+        hint = (
+            f" Pass the column name itself: position_by={field!r}."
+            if isinstance(field, str)
+            else ""
+        )
+        raise ValueError(
+            f"mark_histogram: position_by must be a column name (str) or None, not "
+            f"{type(position_by).__name__}; received {position_by!r}.{hint}"
+        )
+    # Both halves of what `multiple=` means come from the one owner
+    # (`marks/_multiple.py`): the bin-extent mode below and the position
+    # adjustment returned at the end.  They are the same decision -- bars can
+    # only be stacked onto bars that share their edges -- and deriving them
+    # separately is exactly how GH #194 happened.
+    #
+    # GH #77: orientation="horizontal" remaps the count/density column onto
+    # encoding.x directly (`encoding_remap` below) without setting CoordFlip,
+    # so the Stack must say so explicitly — otherwise Rust's `apply_stack`
+    # falls back to `coord_flipped` (False here) and cumulates the wrong
+    # column.
+    semantics = multiple_semantics(
+        multiple,
+        by=position_by,
+        value_axis="x" if orientation == "horizontal" else None,
+    )
     bin_kwargs: dict = dict(
         bins=bins,
         bin_count=bin_count,
@@ -317,7 +372,7 @@ def desugar_histogram(
         # shared_extent=True forces a global bin-edge range across all groups so
         # that multiple="stack" / "fill" always produces aligned bars that
         # apply_stack can match on x-key pairs.
-        shared_extent=(multiple in ("stack", "fill")),
+        shared_extent=semantics.shared_extent,
     )
     if groupby is not None:
         bin_kwargs["groupby"] = groupby
@@ -342,30 +397,8 @@ def desugar_histogram(
             "y": count_column,
         }
 
-    # multiple= → position adjustment on the count/density axis.
-    #
-    # GH #77: orientation="horizontal" remaps the count/density column onto
-    # encoding.x directly (`encoding_remap` above) without setting
-    # CoordFlip, so the Stack must say so explicitly — otherwise Rust's
-    # `apply_stack` falls back to `coord_flipped` (False here) and
-    # cumulates the wrong column.
-    stack_value_axis = "x" if orientation == "horizontal" else None
-    position = None
-    if multiple == "stack":
-        from ferrum.position import Stack
-
-        position = Stack(offset="zero", value_axis=stack_value_axis)
-    elif multiple == "fill":
-        from ferrum.position import Stack
-
-        position = Stack(offset="normalize", value_axis=stack_value_axis)
-    elif multiple == "dodge":
-        from ferrum.position import Dodge
-
-        position = Dodge()
-
     return MarkDesugarResult(
-        mark="bar", transforms=transforms, remap=encoding_remap, position=position
+        mark="bar", transforms=transforms, remap=encoding_remap, position=semantics.position
     )
 
 

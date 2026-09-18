@@ -20,13 +20,13 @@ histogram binning).
 from __future__ import annotations
 
 import hashlib
-import re
 
 import numpy as np
 import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_rects import polylines, rug_tick_x1_by_stroke
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -67,39 +67,13 @@ def two_facet_df():
 
 
 # ---------------------------------------------------------------------------
-# SVG parsing helpers, specific to this file's line-mark assertions.
-#
-# DUPLICATION-PENDING: near-verbatim with `_polyline_points`/`_polyline_strokes`
-# in tests/test_displot_kde_overlay.py. Not hoisted here: neither
-# distribution.py's ecdf branch (this task's sole file) nor
-# tests/_svg_rects.py (rect-only scope today) is a natural home this task
-# should reach into on its own -- flagged for a future consolidation pass
-# once a third site needs it (see tests/_svg_rects.py's own module docstring
-# for the precedent: it waited for a fourth copy before it was hoisted).
+# SVG parsing helpers. `_polylines` and `_rug_tick_x1_by_stroke` were written
+# here as local copies with a DUPLICATION-PENDING note; they now come from
+# `tests/_svg_rects.py`, the module that already owned the element regex for
+# the sibling site (`test_displot_kde_overlay.py`). The copies deleted here
+# read attributes positionally, so they also depended on the renderer's
+# attribute order; the owner's parser reads them by name.
 # ---------------------------------------------------------------------------
-
-
-def _polylines(svg: str) -> list[tuple[str, list[tuple[float, float]]]]:
-    """Return `(stroke, points)` for every `<polyline>` in *svg*."""
-    out = []
-    for pts, stroke in re.findall(r'<polyline points="([^"]+)"[^>]*stroke="([^"]+)"', svg):
-        points = [tuple(map(float, p.split(","))) for p in pts.split()]
-        out.append((stroke, points))
-    return out
-
-
-def _rug_tick_x1_by_stroke(svg: str) -> dict[str, set[float]]:
-    """Map each rug tick `<line>`'s `stroke` to its set of x1 positions.
-
-    Excludes the theme axis-line/gridline strokes so only per-hue rug ticks
-    remain.
-    """
-    out: dict[str, set[float]] = {}
-    for x1, stroke in re.findall(r'<line x1="([^"]+)"[^>]*stroke="([^"]+)"', svg):
-        if stroke in {"#6b7280", "#d6d3d1"}:
-            continue
-        out.setdefault(stroke, set()).add(round(float(x1), 3))
-    return out
 
 
 def _assert_finite_svg(svg: str) -> None:
@@ -118,7 +92,7 @@ class TestEcdfHueCarriesGroupKey:
         svg = chart.to_svg()
         _assert_finite_svg(svg)
 
-        lines = _polylines(svg)
+        lines = polylines(svg)
         assert len(lines) == 2, f"expected one step line per hue level, got {len(lines)}"
         strokes = {stroke for stroke, _ in lines}
         assert len(strokes) == 2, f"step lines are not distinctly colored: {strokes}"
@@ -150,7 +124,7 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_facet_df, x="x", hue="g", col="c", kind="ecdf")
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = _polylines(svg)
+        lines = polylines(svg)
         # Two hue levels x two facet panels.
         assert len(lines) == 4, f"expected 4 step lines (2 hue x 2 facets), got {len(lines)}"
         strokes = {stroke for stroke, _ in lines}
@@ -160,7 +134,7 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_group_df, x="x", hue="g", kind="ecdf", kde=True)
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = _polylines(svg)
+        lines = polylines(svg)
         # One ECDF step line + one KDE overlay curve per hue level.
         assert len(lines) == 4, f"expected 4 lines (2 ecdf + 2 kde overlay), got {len(lines)}"
         strokes = {stroke for stroke, _ in lines}
@@ -172,11 +146,11 @@ class TestEcdfHueCarriesGroupKey:
         chart = fm.displot(two_group_df, x="x", hue="g", kind="ecdf", rug=True)
         svg = chart.to_svg()
         _assert_finite_svg(svg)
-        lines = _polylines(svg)
+        lines = polylines(svg)
         assert len(lines) == 2, f"expected 2 ecdf step lines, got {len(lines)}"
         line_strokes = {stroke for stroke, _ in lines}
 
-        rug_ticks = _rug_tick_x1_by_stroke(svg)
+        rug_ticks = rug_tick_x1_by_stroke(svg)
         assert set(rug_ticks) == line_strokes, (
             f"rug tick colors {set(rug_ticks)} do not match the ecdf lines' "
             f"hue colors {line_strokes}"

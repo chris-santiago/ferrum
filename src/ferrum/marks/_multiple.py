@@ -1,0 +1,102 @@
+"""One owner for what a ``multiple=`` mode means.
+
+A grouped distribution mark answers two questions from one word.  Where are
+the groups drawn relative to each other (the position adjustment), and are
+they binned/gridded against one global extent or each against its own
+(``shared_extent``)?  The answers are not independent: bars can only be
+stacked when every group's bars land on the same edges, so stacking without
+a shared extent is not a weaker stack, it is a side-by-side render wearing a
+stack's name.
+
+``multiple_semantics`` decides both together and is the only place either is
+decided.  GH #194 is what happens otherwise: ``desugar_histogram`` derived
+both halves from ``multiple=``, ``displot`` re-derived only the position and
+never forwarded the mode, so its ``Bin`` kept ``shared_extent=False`` and
+``multiple="stack"`` drew two groups' bars side by side, at different widths,
+sharing no bin edge.
+
+The mode vocabulary itself (:data:`MULTIPLE_MODES`) lives here too, so the
+set of accepted words and the meaning of each word cannot drift apart.
+Public entries (``mark_histogram``, ``mark_density``, ``displot``) validate
+``multiple=`` in their own voice before reaching this function; the
+``ValueError`` below is the unreachable-today guard that keeps a newly added
+mode from silently mapping to "layer".
+"""
+
+from __future__ import annotations
+
+from typing import Any, NamedTuple, Optional
+
+MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
+
+
+class MultipleSemantics(NamedTuple):
+    """The pair of decisions a ``multiple=`` mode makes.
+
+    Attributes
+    ----------
+    position : Position or None
+        The position adjustment the mode requires, or ``None`` for "no
+        adjustment declared" (``multiple="layer"``).  A caller that wants an
+        explicit no-op in the spec substitutes its own ``Identity()``.
+    shared_extent : bool
+        Whether the mark's binning/gridding transform must compute one
+        global extent across all groups before splitting them.
+    """
+
+    position: Any
+    shared_extent: bool
+
+
+def multiple_semantics(
+    multiple: str,
+    *,
+    by: Optional[str] = None,
+    value_axis: Optional[str] = None,
+) -> MultipleSemantics:
+    """Return the position adjustment and extent mode ``multiple`` implies.
+
+    Parameters
+    ----------
+    multiple : {"layer", "stack", "fill", "dodge"}
+        The mode.
+    by : str or None, default None
+        Column the position adjustment groups by.  ``None`` leaves the
+        adjustment to resolve its own default (the color channel) at render
+        time.
+    value_axis : {"x", "y"} or None, default None
+        Explicit value axis for the ``Stack`` adjustments, needed when a
+        mark remaps its count/density column onto ``x`` without setting
+        ``CoordFlip`` (GH #77, ``orientation="horizontal"``).
+
+    Returns
+    -------
+    MultipleSemantics
+        ``(position, shared_extent)``.
+
+    Raises
+    ------
+    ValueError
+        If ``multiple`` is not one of :data:`MULTIPLE_MODES`.
+
+    Examples
+    --------
+    >>> multiple_semantics("layer")
+    MultipleSemantics(position=None, shared_extent=False)
+    >>> multiple_semantics("stack", by="g").shared_extent
+    True
+    """
+    from ferrum.position import Dodge, Stack
+
+    if multiple == "layer":
+        return MultipleSemantics(None, False)
+    if multiple == "dodge":
+        # Dodged bars occupy their own slot within a shared band, so they do
+        # not need a common bin grid to be comparable -- each group keeps
+        # its own extent, exactly as "layer" does.
+        return MultipleSemantics(Dodge(by=by), False)
+    if multiple == "stack":
+        return MultipleSemantics(Stack(by=by, offset="zero", value_axis=value_axis), True)
+    if multiple == "fill":
+        return MultipleSemantics(Stack(by=by, offset="normalize", value_axis=value_axis), True)
+    raise ValueError(f"unknown multiple {multiple!r}; expected one of {MULTIPLE_MODES}")

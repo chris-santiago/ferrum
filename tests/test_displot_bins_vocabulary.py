@@ -269,6 +269,16 @@ class TestBinsVocabularyRefuses:
 #: THE PRE-FIX BUILD -- the sources reverted by file copy and the extension
 #: rebuilt -- so these are a record of the old behavior, not a re-baseline of
 #: the new one.
+#:
+#: `hue_str_stack` (`x="v", hue="g", multiple="stack"`) was in this table and
+#: is not anymore. It is not re-baselined: a SIBLING task in the same wave
+#: (#194) deliberately changed that render -- `multiple="stack"` now bins every
+#: group against one global extent, so the bars finally share edges and stack.
+#: This table's claim is "the bins-vocabulary change moved nothing", and that
+#: claim is no longer observable on a path another change moves on purpose.
+#: The stacked path's new geometry is pinned by
+#: `tests/test_displot_multiple_shared_edges.py`, which asserts what the bars
+#: must do rather than a digest of what they happened to do.
 _PRE_FIX_SVG_DIGESTS = {
     "default": "747bef4e8cbf4042ca00c7dd8a9b85a2e1888101d382890f866bdebb2cdcba97",
     "sturges": "747bef4e8cbf4042ca00c7dd8a9b85a2e1888101d382890f866bdebb2cdcba97",
@@ -278,7 +288,6 @@ _PRE_FIX_SVG_DIGESTS = {
     "ecdf_int7": "08095cf826f2bba9be7122a96772d41728d737af726f8da99c47ebd2965a7677",
     "kde_overlay_int7": "380fc7f2b4f54e6b52280afa5b7d3c8ea9f14e0e11cfb96cad505b2d8b4ece07",
     "hue_str_hist": "026d89fb991e49b1a5d67468f85ea170cec38087bdd8ee360f800844fff7ca3d",
-    "hue_str_stack": "a39483dee3a391a0c6cfd556b98776dbf673e1422ae77f29d45b4cc2e051b873",
     "hue_str_kde": "4b5bf25e46b4335ad48c2e3f5668f59cbd0a039835e730217c02acfe93461c63",
 }
 
@@ -291,7 +300,6 @@ _CLEAN_PATHS = {
     "ecdf_int7": dict(x="v", kind="ecdf", bins=7),
     "kde_overlay_int7": dict(x="v", kind="hist", kde=True, stat="count", bins=7),
     "hue_str_hist": dict(x="v", hue="g"),
-    "hue_str_stack": dict(x="v", hue="g", multiple="stack"),
     "hue_str_kde": dict(x="v", hue="g", kind="kde"),
 }
 
