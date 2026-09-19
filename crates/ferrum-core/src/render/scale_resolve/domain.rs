@@ -571,6 +571,18 @@ fn layer_wants_bar_zero_anchor(
 ///     Scoped to `spec.layers` only (never `spec.mark`), so a genuinely
 ///     unlayered spec's auto path is untouched — byte-identical, because a
 ///     single-chart bar never reaches the auto path in the first place.
+///
+///     One entry path is newer than the paragraph above and not implied by it
+///     (#247A): a FLAT layered spec whose chart-level encoding carries the
+///     injected bar scale used to return at `build_axis_scale`'s explicit-scale
+///     bypass and never arrive here at all. That bypass now yields when the
+///     scale is `system_injected`, so `bar + point` reaches this union where it
+///     previously could not. The gate that decides it, and the reason
+///     provenance rather than deleting the injection was the route, are
+///     documented at that bypass in
+///     [`super::positional::build_axis_scale`] — read the two together; this
+///     doc owns the arithmetic and its eligibility terms, not the question of
+///     which specs get here.
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
     field: &str,
