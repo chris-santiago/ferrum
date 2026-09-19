@@ -18,8 +18,8 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning};
 
 use super::domain::{
-    apply_sort_to_domain, distinct_positional_categories_shared, locate_field,
-    numeric_domain_union, SortContext,
+    apply_sort_to_domain, locate_field, numeric_domain_union, positional_category_union,
+    SortContext,
 };
 use super::{
     column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind, SharedDomain,
@@ -271,11 +271,21 @@ pub(in crate::render) fn build_axis_scale(
                     warn_if_ordinal_cardinality_degenerate(&scale, cats.len(), warnings);
                     return Ok(ScaleKind::Ordinal(scale));
                 }
-                _ => distinct_positional_categories_shared(
-                    located.batch,
+                // The chart-level column AND every layer's own column for this
+                // channel (task 12c) — the ordinal sibling of the Quantitative
+                // arm's `numeric_domain_union` just above, so both axes answer
+                // "does the shared domain cover every layer" the same way. A
+                // layered chart whose layers name the same positional field
+                // resolves byte-identically; a cross-DataFrame `a + b` merge,
+                // whose RHS column is renamed, stops losing the RHS categories
+                // (and with them every RHS mark, for want of a band).
+                _ => positional_category_union(
+                    channel,
                     &enc.field,
                     positional_fields.paired_positional(channel),
+                    primary_batch,
                     transform_outputs,
+                    spec,
                     include_final,
                 )?,
             };
@@ -284,7 +294,7 @@ pub(in crate::render) fn build_axis_scale(
             // `sort_ctx.batch`.  When the channel resolves Shared (`include_final`),
             // using the per-panel batch causes each panel to re-sort the shared
             // category vector by its OWN aggregate, placing marks under the wrong
-            // tick.  Mirror `distinct_positional_categories_shared`: use the global
+            // tick.  Mirror `positional_category_union`: use the global
             // batch (`FINAL_OUTPUT_KEY`) so every panel's data-aware sort agrees
             // with the global/provisional axis order.  Fall back to the per-panel
             // batch when the global batch is absent (defensive, same as the

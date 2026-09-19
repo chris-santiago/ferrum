@@ -3,7 +3,7 @@
 //! This is pass 1 of the three-pass composite renderer (design spec §5). It
 //! walks a [`CompositeNode`] tree and computes, per shared positional channel,
 //! one resolved domain across the tree's leaves — through the *same* mechanism
-//! facets use ([`numeric_domain_union`] / [`distinct_positional_categories_shared`]),
+//! facets use ([`numeric_domain_union`] / [`positional_category_union`]),
 //! with tree-path pairing for congruent grid children and skip for non-congruent
 //! groups (spec §6, decision D2). The output is a per-leaf
 //! [`LeafScaleContext`]; the layout/scene passes (Task 5) thread it into each
@@ -44,9 +44,9 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    distinct_positional_categories_shared, distinct_values_in_order, extend_extent_to_zero,
-    infer_spec_type, locate_field, numeric_domain_union, numeric_extent, Channel,
-    LeafScaleContext, SharedDomain,
+    distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field,
+    numeric_domain_union, numeric_extent, positional_category_union, Channel, LeafScaleContext,
+    SharedDomain,
 };
 use crate::render::RenderError;
 use crate::spec::chart::ChartSpec;
@@ -708,11 +708,20 @@ fn leaf_positional_domain(
                 _ => None,
             }
             .map(|e| e.field.as_str());
-            let cats = distinct_positional_categories_shared(
-                leaf.final_batch,
+            // `leaf.spec` for the same reason the numeric arm above passes it: a
+            // leaf can itself be a flat-merged layered chart (`hconcat(a + b, c)`),
+            // and its own layers' categories belong in the domain it contributes
+            // (task 12c). Routing through the same union as the flat path also
+            // means a leaf whose ordinal field lives only in a named output now
+            // locates it, where passing `final_batch` straight through used to
+            // fail the leaf's whole domain resolve.
+            let cats = positional_category_union(
+                channel.as_str(),
                 &enc.field,
                 paired_positional,
+                leaf.final_batch,
                 leaf.transform_outputs,
+                leaf.spec,
                 false,
             )
             .map_err(|source| CompositeResolveError::DomainResolve {

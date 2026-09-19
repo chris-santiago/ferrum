@@ -53,7 +53,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    distinct_positional_categories_shared, locate_field, numeric_domain_union,
+    locate_field, numeric_domain_union, positional_category_union,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -1465,7 +1465,7 @@ fn distinct_positional_categories(
 /// when `resolve` is omitted). Non-faceted charts and `Independent` channels
 /// yield `false`, so [`build_axis_scale`] keeps per-panel-only domain resolution
 /// byte-identically. Passed to `build_axis_scale` → `numeric_domain_union` /
-/// `distinct_positional_categories_shared` as `include_final`.
+/// `positional_category_union` as `include_final`.
 fn facet_shared_flags(spec: &ChartSpec) -> (bool, bool) {
     use crate::layout::facet::ResolveMode;
     match &spec.facet {

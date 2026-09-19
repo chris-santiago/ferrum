@@ -826,7 +826,11 @@ pub(in crate::render) fn numeric_domain_union(
 /// `arrow_cast::null_category_band_is_occupied`. It is resolved against each
 /// batch separately (panel and global), because absence in one says nothing about
 /// the other and a batch that cannot answer keeps the band.
-pub(in crate::render) fn distinct_positional_categories_shared(
+///
+/// Private to this module: [`positional_category_union`] is the one entry the
+/// scale paths call, so "the ordinal domain of this axis" has a single answer
+/// that always includes the layer union (task 12c).
+fn distinct_positional_categories_shared(
     panel_batch: &RecordBatch,
     field: &str,
     paired_positional: Option<&str>,
@@ -859,6 +863,160 @@ pub(in crate::render) fn distinct_positional_categories_shared(
     for cat in panel_domain {
         if !domain.contains(&cat) {
             domain.push(cat);
+        }
+    }
+    Ok(domain)
+}
+
+/// The ordinal/nominal counterpart of [`numeric_domain_union`]: the category
+/// ladder for an axis, covering the chart-level column **and every layer's own
+/// column for this channel**.
+///
+/// The shared-axis invariant is "the resolved domain covers every layer's
+/// extent". The numeric side has enforced it since long before this function
+/// existed — [`numeric_domain_union`]'s `spec.layers` loop, whose own doc
+/// explains why (a cross-DataFrame `a + b` merge renames the RHS columns, so the
+/// chart-level field covers the LHS data ALONE). The ordinal side had no
+/// equivalent, so the same shape lost the RHS layer's categories entirely: no
+/// band existed for them, and every mark of that layer was silently dropped for
+/// want of one. Measured before this function: `Chart({cat:[a,b,c]}) +
+/// Chart({cat:[x,y,z]})`, both `mark_point().encode(x="cat:N", y="v:Q")`, drew
+/// **3 circles for 6 rows** under x labels `['a','b','c']`.
+///
+/// **Order: first appearance, in layer order.** Walk the chart-level column,
+/// then the layers in spec order, appending each previously-unseen category.
+/// This is not a new semantic: [`crate::render::arrow_cast::distinct_values_in_order`]
+/// already orders categories by first appearance *within* a column, and this
+/// extends that same rule across the layer boundary rather than introducing a
+/// sort. Nothing here sorts, and a user `sort=` still applies afterwards at the
+/// caller ([`apply_sort_to_domain`]), to the unioned ladder.
+///
+/// A layer contributes only when its OWN encoding binds this channel to a
+/// **different** field from the chart-level one. Reading the layer's own
+/// encoding rather than the inherited one (the reading `numeric_domain_union`'s
+/// loop also takes) loses nothing: a layer that binds nothing here inherits the
+/// chart-level field, which is the seed already. It is why a layered chart whose
+/// layers share their positional columns — every composite-mark chart, every
+/// same-frame `+` — resolves byte-identically to before.
+///
+/// **One batch per field, via [`locate_field`], not a union across every named
+/// output** — the one deliberate narrowing relative to
+/// [`numeric_domain_union`]. A numeric extent is order-free, so unioning
+/// `min`/`max` over several batches is safe in any order; a category *vector* is
+/// ordered, and `HashMap` iteration order is unspecified (the bug
+/// `locate_field_named_output_fallback_is_deterministic` pins). Each field is
+/// therefore read from the one batch `locate_field` deterministically chooses —
+/// exactly how the chart-level seed has always been resolved.
+///
+/// `include_final` and `paired_positional` mean what they mean for
+/// [`distinct_positional_categories_shared`], and each layer's contribution goes
+/// through that same helper — so a faceted+Shared axis takes its layer
+/// categories from the global all-panels batch too, keeping the ladder identical
+/// in every panel rather than panel-local.
+///
+/// # A layer never opens the null band on an inherited coordinate
+///
+/// `#247`B decides the null band by occupancy: it exists iff some null-category
+/// row carries a non-null value on the opposite positional channel, and where no
+/// opposite channel is bound at all the band is kept (nothing can be missing, so
+/// every null row draws). That reading is sound for the axis's OWN column and
+/// unsound for a layer's, because a layer's opposite channel is frequently
+/// *inherited* — its values are the chart-level frame's, and say nothing about
+/// whether this layer places a mark. So a layer's contribution is judged against
+/// the field the layer itself binds on the opposite channel, and when it binds
+/// none, [`crate::render::arrow_cast::NULL_CATEGORY`] is dropped from what that
+/// layer contributes: with no coordinate pair of its own, the layer has no
+/// evidence to open a band with, and the axis's own column still decides the
+/// band exactly as `#247`B left it.
+///
+/// This is not a hypothetical. `_inject_constant`'s reference-line column is one
+/// authored value in a sea of structural nulls (`z = ["b", null, null, null]`),
+/// bound on one positional channel with the other inherited. Judging it against
+/// the inherited channel opens the null band and the reference-line layer draws
+/// a line per null row instead of the one line the user asked for — pinned by
+/// `scene_build`'s `coord_flipped_layered_rule_draws_its_own_channel_not_the_inherited_one`.
+/// A cross-frame `a + b` merge, by contrast, binds BOTH channels on every layer,
+/// so its genuine null-category-with-a-value row still opens the band and its
+/// padding rows still do not — `#247`B applies to a layer's own column with full
+/// force wherever the layer has the pair to answer with.
+pub(in crate::render) fn positional_category_union(
+    channel: &str,
+    field: &str,
+    paired_positional: Option<&str>,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    spec: &ChartSpec,
+    include_final: bool,
+) -> Result<Vec<String>, RenderError> {
+    let seed_batch = locate_field(field, primary_batch, transform_outputs)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?
+        .batch;
+    let mut domain = distinct_positional_categories_shared(
+        seed_batch,
+        field,
+        paired_positional,
+        transform_outputs,
+        include_final,
+    )?;
+    let Some(layers) = &spec.layers else { return Ok(domain) };
+    // Membership set rather than `Vec::contains`: the ladder can run to hundreds
+    // of categories and every layer would re-scan it.
+    let mut seen: std::collections::HashSet<String> = domain.iter().cloned().collect();
+    // COORDINATE SPACE — the same reconciliation `numeric_domain_union`'s layer
+    // loop documents at length: `channel`/`field` are POST-flip (derived from the
+    // rendering encoding), while `spec.layers` is the spec as AUTHORED, so the
+    // layer encoding is moved into the channel's own space before any read. One
+    // flipped clone answers both reads below, which is what keeps "this layer's
+    // category column" and "this layer's own opposite coordinate" in one space.
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    for layer in layers {
+        // An `independent_y` layer owns its own y axis (GH #52) and must not
+        // widen the primary y ladder, exactly as it does not widen the primary
+        // numeric y extent. Its x stays shared, so only `"y"` skips.
+        if channel == "y" && layer.independent_y {
+            continue;
+        }
+        let flipped = coord_flipped.then(|| {
+            let mut e = layer.encoding.clone();
+            e.flip_positional();
+            e
+        });
+        let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
+        let (layer_enc, own_paired_enc) = match channel {
+            "x" => (encoding.x.as_ref(), encoding.y.as_ref()),
+            "y" => (encoding.y.as_ref(), encoding.x.as_ref()),
+            _ => (None, None),
+        };
+        let Some(layer_field) = layer_enc.map(|e| e.field.as_str()) else { continue };
+        if layer_field == field {
+            continue;
+        }
+        // Absent from every batch is the normal "wrong `data_source` / not loaded
+        // yet" outcome, not an error — the same reading `numeric_domain_union`
+        // gives a layer field it cannot find.
+        let Some(located) = locate_field(layer_field, primary_batch, transform_outputs) else {
+            continue;
+        };
+        let own_paired = own_paired_enc.map(|e| e.field.as_str());
+        let mut cats = distinct_positional_categories_shared(
+            located.batch,
+            layer_field,
+            own_paired,
+            transform_outputs,
+            include_final,
+        )?;
+        if own_paired.is_none() {
+            // The layer binds no opposite coordinate of its own, so it has no
+            // evidence to open the null band with — see this function's doc. The
+            // helper's own "unanswerable → keep the band" arm is right for the
+            // axis's column and wrong for a layer's, and this is where the two
+            // readings part.
+            cats.retain(|c| c != crate::render::arrow_cast::NULL_CATEGORY);
+        }
+        for cat in cats {
+            if seen.insert(cat.clone()) {
+                domain.push(cat);
+            }
         }
     }
     Ok(domain)
@@ -1813,6 +1971,196 @@ mod tests {
             (10.0, 20.0),
             "a bar layer whose declared value field never resolves to data \
              must not force a zero-anchor from its name alone"
+        );
+    }
+
+    // ── positional_category_union: the ordinal cross-layer ladder ────────────
+    //
+    // Same fixture discipline as the numeric layer-union tests above: lowered
+    // spec JSON through the serde path Python actually writes, over one batch
+    // whose columns make the answer readable straight off the returned vector.
+    // The merged-flat lowering's renamed RHS column (`cat__rhs_0001`) is
+    // reproduced literally, because the rename is precisely why the chart-level
+    // column cannot answer for the other layer.
+
+    /// The merged batch `Chart({cat:[c,a], grp:[p,q]}) + Chart({cat:[b], grp:[r]})`
+    /// lowers to: six columns, diagonal-concat padded, the RHS's renamed.
+    ///
+    /// TWO categorical columns per side, on the two different positional
+    /// channels, so "which channel did this category come from" is readable
+    /// straight off the returned vector — an x/y mix-up in the channel match
+    /// would otherwise be silent.
+    fn merged_category_batch() -> RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("grp", DataType::Utf8, true),
+            Field::new("cat__rhs_0001", DataType::Utf8, true),
+            Field::new("val__rhs_0001", DataType::Float64, true),
+            Field::new("grp__rhs_0001", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c"), Some("a"), None])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+                Arc::new(StringArray::from(vec![Some("p"), Some("q"), None])),
+                Arc::new(StringArray::from(vec![None, None, Some("b")])),
+                Arc::new(Float64Array::from(vec![None, None, Some(40.0)])),
+                Arc::new(StringArray::from(vec![None, None, Some("r")])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn category_ladder(spec_json: &str, channel: &str, field: &str, paired: Option<&str>) -> Vec<String> {
+        let spec: ChartSpec =
+            serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
+        let batch = merged_category_batch();
+        positional_category_union(channel, field, paired, &batch, &HashMap::new(), &spec, false)
+            .expect("every category column in the fixture is Utf8")
+    }
+
+    /// The merged-flat lowering of `a + b` across two frames: chart-level
+    /// encoding is the LHS's, the RHS layer's columns are renamed.
+    const MERGED_LAYERS_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"val__rhs_0001"}},"data_source":"_ident_0"}]}"#;
+
+    /// The ruled order, at the unit seam: first appearance, in layer order.
+    ///
+    /// `c, a` from the chart-level column then `b` from the RHS layer's. A
+    /// sorting union answers `["a","b","c"]`; a union that walked the layers
+    /// before the seed answers `["b","c","a"]`; the pre-fix code answers
+    /// `["c","a"]`.
+    #[test]
+    fn layer_categories_join_the_ladder_in_first_appearance_order() {
+        assert_eq!(
+            category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+        );
+    }
+
+    /// The `null`s the merge's padding leaves in BOTH category columns open no
+    /// band: each layer binds its own paired value column, and every
+    /// null-category row of each is null there too (`#247`B).
+    #[test]
+    fn merge_padding_opens_no_null_band_on_either_column() {
+        let ladder = category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat", Some("val"));
+        assert!(
+            !ladder.iter().any(|c| c == crate::render::arrow_cast::NULL_CATEGORY),
+            "padding nulls carry no paired value and must claim no band; got {ladder:?}"
+        );
+    }
+
+    /// Both positional channels categorical: each one widens from its OWN
+    /// channel's layer field and never the other's. An x/y mix-up in the channel
+    /// match would swap these two answers wholesale and nothing else would
+    /// notice.
+    #[test]
+    fn a_layer_widens_only_the_channel_it_binds() {
+        const BOTH_CATEGORICAL: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}},"data_source":"_ident_0"}]}"#;
+        assert_eq!(
+            category_ladder(BOTH_CATEGORICAL, "x", "cat", Some("grp")),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            "the x ladder takes the layers' x fields"
+        );
+        assert_eq!(
+            category_ladder(BOTH_CATEGORICAL, "y", "grp", Some("cat")),
+            vec!["p".to_string(), "q".to_string(), "r".to_string()],
+            "the y ladder takes the layers' y fields, never the x ones"
+        );
+    }
+
+    /// Layers naming the SAME positional field as chart level (every
+    /// composite-mark chart, every same-frame `+`) contribute nothing — the
+    /// byte-identity control for the common case.
+    #[test]
+    fn same_field_layers_leave_the_ladder_exactly_as_seeded() {
+        const SAME_FIELD: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"rule","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}}]}"#;
+        assert_eq!(
+            category_ladder(SAME_FIELD, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string()],
+        );
+    }
+
+    /// An unlayered spec returns the seed untouched — the `spec.layers == None`
+    /// arm, which every flat chart takes.
+    #[test]
+    fn an_unlayered_spec_is_the_seed_alone() {
+        const FLAT: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}}"#;
+        assert_eq!(
+            category_ladder(FLAT, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string()],
+        );
+    }
+
+    /// A layer binding ONE positional channel opens no null band, even though
+    /// its category column carries nulls and the helper's unanswerable arm would
+    /// keep them. This is `_inject_constant`'s reference-line shape: the layer's
+    /// only other coordinate would be an inherited one, whose values say nothing
+    /// about this layer's rows.
+    ///
+    /// RED (verified in place): drop the `own_paired.is_none()` retain and this
+    /// returns `["c", "a", "b", "null"]`, and the rule layer draws a line per
+    /// structural null row.
+    #[test]
+    fn a_single_channel_layer_opens_no_null_band() {
+        const RULE_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"rule","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"}}}]}"#;
+        assert_eq!(
+            category_ladder(RULE_LAYER, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+        );
+    }
+
+    /// Under `CoordFlip` the authored `y` occupies the rendered x axis, so the
+    /// layer's authored `y` field is the one that widens x — and its authored
+    /// `x` is the opposite coordinate the null band is judged against. Reading
+    /// `layer.encoding` unflipped would union the wrong column onto the wrong
+    /// axis, silently: the two answers below would simply trade places.
+    #[test]
+    fn coord_flipped_layer_widens_the_axis_its_authored_channel_occupies() {
+        const FLIPPED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}}}],"coord":{"kind":"flip"}}"#;
+        // `channel`/`field` arrive POST-flip: rendered x holds the authored `grp`.
+        assert_eq!(
+            category_ladder(FLIPPED, "x", "grp", Some("cat")),
+            vec!["p".to_string(), "q".to_string(), "r".to_string()],
+            "the authored y field must widen the axis it occupies post-flip"
+        );
+        assert_eq!(
+            category_ladder(FLIPPED, "y", "cat", Some("grp")),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            "the authored x field must widen the post-flip y axis"
+        );
+    }
+
+    /// An `independent_y` layer resolves its own y slot (GH #52) and must not
+    /// widen the primary y ladder, exactly as it does not widen the primary
+    /// numeric y extent. Its x still does.
+    #[test]
+    fn an_independent_y_layer_widens_x_but_never_the_primary_y() {
+        const INDEPENDENT: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"val__rhs_0001"}},"independent_y":true}]}"#;
+        assert_eq!(
+            category_ladder(INDEPENDENT, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+        );
+        // A categorical y with an independent-y layer: the layer's own y field
+        // must stay out of the primary ladder.
+        const INDEPENDENT_CAT_Y: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"val"},"y":{"field":"cat","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"val"},"y":{"field":"cat","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"val__rhs_0001"},"y":{"field":"cat__rhs_0001","type":"nominal"}},"independent_y":true}]}"#;
+        assert_eq!(
+            category_ladder(INDEPENDENT_CAT_Y, "y", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string()],
+        );
+    }
+
+    /// A layer field absent from every batch is the normal "wrong `data_source`
+    /// / not loaded yet" outcome, not an error — the same reading
+    /// `numeric_domain_union` gives one.
+    #[test]
+    fn a_layer_field_in_no_batch_is_skipped_not_raised() {
+        const PHANTOM: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"val"}}}]}"#;
+        assert_eq!(
+            category_ladder(PHANTOM, "x", "cat", Some("val")),
+            vec!["c".to_string(), "a".to_string()],
         );
     }
 }
