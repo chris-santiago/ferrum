@@ -1255,6 +1255,18 @@ pub(crate) fn apply_stack(
     // construction, and bin by exact instant where one does not (#184, category
     // half).
     //
+    // One asymmetry, deliberate (`#247`B): the ladder can omit the
+    // `NULL_CATEGORY` band when nothing is drawn in it, while the bins below are
+    // a partition of ROWS and always keep their null bin. It is the safe
+    // direction. A stack only rewrites the VALUE column, never the category, so
+    // an extra bin cannot move a real category's cumulative tops off its tick —
+    // the null bin's rows are precisely the rows no other bin contains, and each
+    // of them is one whose value was null (that is why the ladder dropped the
+    // band), so the segment it stacks is the zero-height one below and the
+    // scale lookup then places no mark for it at all. Giving the bins the
+    // ladder's occupancy rule would buy nothing and would make the stack's
+    // binning depend on the axis it does not read.
+    //
     // The temporal arm is what makes a stacked time series render — an ordinary
     // `mark_area(position=Stack())` over a date x, which raised for every input
     // before. It is not a second keying model bolted on: a stack over a
@@ -3196,7 +3208,9 @@ mod tests {
     // Float64 or Utf8" while the identical column dodged, jittered and banded.
     // It now keys through `arrow_cast::col_as_positional_category_str`, which is
     // the reader the ordinal band ladder (`distinct_positional_categories`) is
-    // enumerated with, so the bins and the bands are the same partition.
+    // enumerated with, so the bins and the bands agree on which value is which.
+    // (Not on WHICH bands exist — see the `#247`B note in `apply_stack` for why
+    // an unoccupied null band the ladder omits still gets a row bin here.)
     // -----------------------------------------------------------------------
 
     /// One 4-row category column per dtype the band ladder can enumerate, each
@@ -3431,6 +3445,13 @@ mod tests {
     /// enumerates `["0", "null"]`, two bands, and the cumulation must be two
     /// bins: 10 → 30 in the first, 30 → 70 in the second.
     ///
+    /// The premise below names `y` as the paired positional channel, which is
+    /// what the axis resolver passes for an `x` ladder, so `#247`B's occupancy
+    /// rule is exercised rather than sidestepped: both null-`x` rows carry a real
+    /// `y` (30, 40), so the null band is occupied and stays. Drop the `y` values
+    /// and the band goes — and those two rows would then draw nothing, which is
+    /// why binning them separately here costs the other bin nothing.
+    ///
     /// RED against the retired `to_bits` key, which answered a third thing
     /// again: `-0.0` keyed apart from `0.0` (one band, two bins — two segments
     /// stacked at one pixel), while both nulls keyed INTO the `0.0` bin, since
@@ -3454,7 +3475,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::render::arrow_cast::distinct_positional_categories(&batch, "x").unwrap(),
+            crate::render::arrow_cast::distinct_positional_categories(&batch, "x", Some("y"))
+                .unwrap(),
             vec!["0".to_string(), "null".to_string()],
             "premise: the ladder this stack must agree with has two bands here"
         );

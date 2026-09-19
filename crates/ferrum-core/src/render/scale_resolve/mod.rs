@@ -1446,13 +1446,16 @@ pub(in crate::render) fn distinct_values_in_order(
 }
 
 /// Positional (x:N / y:N) ordinal domain: like [`distinct_values_in_order`] but
-/// surfaces a null row as its own category (FA-9). Used only by the positional
-/// scale path so color/shape/legend domains keep dropping nulls.
+/// surfaces a null row as its own category (FA-9) when the opposite positional
+/// channel `paired_positional` shows that band to be occupied (`#247`B). Used
+/// only by the positional scale path so color/shape/legend domains keep dropping
+/// nulls.
 fn distinct_positional_categories(
     batch: &RecordBatch,
     field: &str,
+    paired_positional: Option<&str>,
 ) -> Result<Vec<String>, RenderError> {
-    super::arrow_cast::distinct_positional_categories(batch, field)
+    super::arrow_cast::distinct_positional_categories(batch, field, paired_positional)
 }
 
 /// T4: per-channel "shared faceted positional scale" flags `(x_shared, y_shared)`.

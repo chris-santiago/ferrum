@@ -819,14 +819,25 @@ pub(in crate::render) fn numeric_domain_union(
 ///
 /// Order semantics for the non-shared path are unchanged: it returns the
 /// per-panel first-appearance order untouched.
+///
+/// `paired_positional` is the opposite positional channel's field, threaded
+/// straight through to [`crate::render::arrow_cast::distinct_positional_categories`]'s
+/// null-band occupancy rule (`#247`B) — see
+/// `arrow_cast::null_category_band_is_occupied`. It is resolved against each
+/// batch separately (panel and global), because absence in one says nothing about
+/// the other and a batch that cannot answer keeps the band.
 pub(in crate::render) fn distinct_positional_categories_shared(
     panel_batch: &RecordBatch,
     field: &str,
+    paired_positional: Option<&str>,
     transform_outputs: &HashMap<String, RecordBatch>,
     include_final: bool,
 ) -> Result<Vec<String>, RenderError> {
-    let panel_domain =
-        crate::render::arrow_cast::distinct_positional_categories(panel_batch, field)?;
+    let panel_domain = crate::render::arrow_cast::distinct_positional_categories(
+        panel_batch,
+        field,
+        paired_positional,
+    )?;
     if !include_final {
         return Ok(panel_domain);
     }
@@ -838,8 +849,11 @@ pub(in crate::render) fn distinct_positional_categories_shared(
     }
     // Global first-appearance order is the shared domain: a superset of every
     // panel, so it is identical across panels and preserves the global order.
-    let mut domain =
-        crate::render::arrow_cast::distinct_positional_categories(global_batch, field)?;
+    let mut domain = crate::render::arrow_cast::distinct_positional_categories(
+        global_batch,
+        field,
+        paired_positional,
+    )?;
     // Defensive union: append any panel category absent from the global set so a
     // category can never disappear from a panel's scale (no-op in practice).
     for cat in panel_domain {

@@ -36,6 +36,32 @@ pub(in crate::render) struct PositionalFields<'a> {
     pub(in crate::render) y: Option<&'a str>,
 }
 
+impl<'a> PositionalFields<'a> {
+    /// The field bound on the **opposite** positional channel from `channel`:
+    /// `y` for `"x"`, `x` for `"y"`.
+    ///
+    /// This is the "paired positional channel" of `#247`B's null-band occupancy
+    /// rule (`arrow_cast::null_category_band_is_occupied`) — the second
+    /// coordinate a mark needs before it can be placed at all — and NOT
+    /// `build_axis_scale`'s `paired_enc`, which is the `x2`/`y2` span partner.
+    /// Both sides are the RENDERED (post-`CoordFlip`) channels, like the struct's
+    /// own fields, so the pairing is the one the marks actually draw with.
+    ///
+    /// `None` for any other channel token: only x and y have an opposite, and an
+    /// auxiliary channel asking would be a caller bug rather than a domain whose
+    /// null band should quietly vanish.
+    fn paired_positional(self, channel: &str) -> Option<&'a str> {
+        match channel {
+            "x" => self.y,
+            "y" => self.x,
+            _ => {
+                debug_assert!(false, "paired_positional called with non-positional channel {channel:?}");
+                None
+            }
+        }
+    }
+}
+
 // The padding-inset constants and `inset_pixel_range` now live in
 // `crate::layout::geometry` (the geometry layer) so that the layout engine can
 // reproduce the *exact same* inset when projecting axis ticks. Re-export the
@@ -246,7 +272,11 @@ pub(in crate::render) fn build_axis_scale(
                     return Ok(ScaleKind::Ordinal(scale));
                 }
                 _ => distinct_positional_categories_shared(
-                    located.batch, &enc.field, transform_outputs, include_final,
+                    located.batch,
+                    &enc.field,
+                    positional_fields.paired_positional(channel),
+                    transform_outputs,
+                    include_final,
                 )?,
             };
             // For data-aware sort forms (`"-y"`, `"y"`, `{field, op, order}`),
@@ -406,10 +436,10 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 
 /// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.
 ///
-/// `channel` (`"x"`/`"y"`) is threaded through purely for the #152 explicit-
-/// domain/range shape refusal below — it names the axis in
-/// [`RenderError::InvalidScaleDomainConfig`], the same field
-/// `apply_axis_domain_config`'s sibling refusal on this type already carries.
+/// `channel` (`"x"`/`"y"`) names the axis in the #152 explicit-domain/range shape
+/// refusal below — the same field `apply_axis_domain_config`'s sibling refusal on
+/// this type already carries — and picks the opposite positional channel for the
+/// discrete arms' null-band occupancy rule (`#247`B).
 pub(in crate::render) fn build_from_scale_spec(
     channel: &str,
     scale_spec: &crate::spec::encoding::ScaleSpec,
@@ -424,6 +454,15 @@ pub(in crate::render) fn build_from_scale_spec(
     let col = batch
         .column_by_name(&enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
+
+    // `#247`B: an explicit Ordinal/Band/Point scale that names no `domain` resolves
+    // one from the data, so it bands nulls by the same rule the auto path does.
+    // `SortContext` already carries the rendered x/y field pair (it needs them for
+    // data-aware sort forms), so the pairing is re-read off it rather than passed a
+    // second time — one helper answers "which channel is opposite this one" for
+    // both entry points, so the two cannot disagree about the null band.
+    let paired_positional =
+        PositionalFields { x: sort_ctx.x_field, y: sort_ctx.y_field }.paired_positional(channel);
 
     Ok(match scale_spec {
         // `system_injected` is read by `build_axis_scale`'s bypass gate above,
@@ -452,7 +491,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Ordinal { domain, range, padding } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             // Extract numeric pixel range from the typed polymorphic `range`.
@@ -491,7 +530,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Band { domain, padding, padding_inner, padding_outer, align, range } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             // d3's `padding` is a shorthand that sets BOTH inner and outer;
@@ -511,7 +550,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Point { domain, padding, align, range, reverse } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_positional_categories(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             // PointScale(reverse=True) reverses the resolved domain order (GH #65).
