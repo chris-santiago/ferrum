@@ -54,14 +54,32 @@ pub(crate) enum PositionAdjustReason {
     /// "<role> (<channel>) encoding required" — Stack's missing
     /// category/value encoding pair. `role` is `"category"` or `"value"`.
     MissingEncoding { role: &'static str, channel: &'static str },
-    /// "<channel> must be Float64, UInt64, or a signed integer type
-    /// (Int8/Int16/Int32/Int64); got <dtype>" — Stack's value-dtype check.
-    /// `dtype` is pre-formatted (`{:?}` of the Arrow `DataType`) since it
-    /// carries no channel token to un-flip.
+    /// "<channel> must be a numeric dtype (Float64/Float32,
+    /// Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, or Timestamp); got
+    /// <dtype>" — Stack's value-dtype check. `dtype` is pre-formatted (`{:?}` of
+    /// the Arrow `DataType`) since it carries no channel token to un-flip.
+    ///
+    /// The named set is `arrow_cast::supported_numeric_dtype`'s, because since
+    /// #184 `apply_stack` reads its value column through `col_as_f64` like its
+    /// two sibling adjustments rather than through a hand-rolled downcast chain.
+    /// It previously named only the chain's six dtypes ("Float64, UInt64, or a
+    /// signed integer type"), which understated what stack accepts today.
     ValueDtype { channel: &'static str, dtype: String },
-    /// "<channel> column must be Float64 or Utf8" — Stack's category-dtype
-    /// check.
-    CategoryDtype { channel: &'static str },
+    /// "<channel> must be a dtype that can identify a row (Utf8/LargeUtf8,
+    /// Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Float32/Float64,
+    /// Boolean, or Timestamp); got <dtype>" — Stack's category-dtype check.
+    /// `dtype` is pre-formatted (`{:?}` of the Arrow `DataType`), like
+    /// [`ValueDtype`](Self::ValueDtype)'s.
+    ///
+    /// The named set is `arrow_cast::col_as_identity_key_str`'s, because since
+    /// #184 `apply_stack` keys its category column through that reader — the
+    /// ordinal band ladder's own enumerator, plus the temporal epoch reader for
+    /// `Timestamp` — rather than through a two-arm dtype gate. It previously
+    /// named only that gate's two dtypes ("column must be Float64 or Utf8"),
+    /// which refused every integer, `Float32` and `Boolean` category column that
+    /// the same chart's dodge, jitter and bands all accepted, and refused every
+    /// stacked time series outright.
+    CategoryDtype { channel: &'static str, dtype: String },
     /// A free-form reason with no positional channel token — every
     /// Dodge/Jitter message, plus Stack's column-not-found and
     /// `RecordBatch`-construction failures.
@@ -584,13 +602,19 @@ impl std::fmt::Display for RenderError {
                     let channel = prepare::user_facing_channel(channel, *coord_flipped);
                     write!(
                         f,
-                        "{adjustment}: {channel} must be Float64, UInt64, or a signed integer \
-                         type (Int8/Int16/Int32/Int64); got {dtype}"
+                        "{adjustment}: {channel} must be a numeric dtype (Float64/Float32, \
+                         Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, or Timestamp); \
+                         got {dtype}"
                     )
                 }
-                PositionAdjustReason::CategoryDtype { channel } => {
+                PositionAdjustReason::CategoryDtype { channel, dtype } => {
                     let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                    write!(f, "{adjustment}: {channel} column must be Float64 or Utf8")
+                    write!(
+                        f,
+                        "{adjustment}: {channel} must be a dtype that can identify a row \
+                         (Utf8/LargeUtf8, Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, \
+                         Float32/Float64, Boolean, or Timestamp); got {dtype}"
+                    )
                 }
             },
             Self::UnsupportedDtype { field, dtype, context } => match context {

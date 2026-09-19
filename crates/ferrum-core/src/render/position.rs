@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
@@ -253,7 +253,7 @@ pub(crate) fn apply_position(
             apply_dodge(batch, by.as_deref(), *padding, scales, encoding, coord_flipped, warnings)
         }
         PositionAdjust::Jitter { axis, width, seed } => {
-            apply_jitter(batch, axis, *width, *seed, scales, encoding)
+            apply_jitter(batch, axis, *width, *seed, scales, encoding, warnings)
         }
         PositionAdjust::Stack { by, offset, anchor, value_axis } => {
             apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, coord_flipped, warnings)
@@ -408,6 +408,54 @@ fn dodge_slot_domain<'a>(
     scales.color.as_ref()?.categorical_domain()
 }
 
+/// Write `values` into `cols[idx]` and retype `fields[idx]` to `Float64`.
+///
+/// Both `Dodge`'s continuous branch and `Jitter`'s data-space branch rewrite a
+/// positional column with fractional coordinates, which an integer column
+/// cannot hold. Before GH #184 both wrote a `Float64Array` into the *input*
+/// schema's slot, so an `Int64`/`Int32` positional column made
+/// `RecordBatch::try_new` fail with a raw Arrow schema message ("column types
+/// must match schema types, expected Int64 but found Float64") escaping as the
+/// adjustment's error. Retyping the field alongside the column is the fix, and
+/// it lives here rather than twice because forgetting it on one of the two
+/// sites is exactly how the defect looked.
+///
+/// Name, nullability, and field metadata are preserved. Nullability is safe to
+/// keep as-is because both callers only ever emit a null where the value they
+/// read was null, so the output's null set is a subset of the input's.
+fn set_float64_column(
+    fields: &mut [Field],
+    cols: &mut [ArrayRef],
+    idx: usize,
+    values: Float64Array,
+) {
+    let old = &fields[idx];
+    fields[idx] = Field::new(old.name(), DataType::Float64, old.is_nullable())
+        .with_metadata(old.metadata().clone());
+    cols[idx] = Arc::new(values);
+}
+
+/// Dense index per row: the position at which that row's category string first
+/// appeared in `cats`.
+///
+/// `apply_stack` asks this question of both its axes, for two different reasons
+/// that need the same answer. On the `by` axis the index is the within-bin
+/// stacking order, so the group laid down first is the group encountered first.
+/// On the category axis it is the bin identity, so two rows cumulate together
+/// exactly when their category strings are equal. Written once because the two
+/// loops were the same seven lines, and because the category axis's previous key
+/// — a 64-bit hash of the value — made a collision a silent mis-stack where
+/// string equality cannot collide at all.
+fn first_appearance_indices(cats: &[String]) -> Vec<usize> {
+    let mut index_of: HashMap<&str, usize> = HashMap::with_capacity(cats.len());
+    let mut out: Vec<usize> = Vec::with_capacity(cats.len());
+    for c in cats {
+        let next = index_of.len();
+        out.push(*index_of.entry(c.as_str()).or_insert(next));
+    }
+    out
+}
+
 fn apply_dodge(
     batch: &RecordBatch,
     by_field: Option<&str>,
@@ -483,19 +531,62 @@ fn apply_dodge(
             coord_flipped,
         }
     })?;
-    let is_ordinal_band = batch.schema().field(band_col_idx).data_type() != &DataType::Float64;
-    if is_ordinal_band {
-        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, band_on_y, slot_domain);
+    // GH #184: the branch is decided by the RESOLVED scale kind, never by the
+    // band column's Arrow dtype. A category axis is "ordinal" because its
+    // scale says so — the dtype of the column feeding it is irrelevant, and
+    // the two disagree in both directions:
+    //
+    // - A `Float64` column the user declared `:N` resolves Ordinal but IS
+    //   `Float64`, so the old dtype gate sent it down the continuous branch.
+    //   That branch rewrites band values in data space (0.0 → 0.75), and the
+    //   ordinal scale then looks "0.75" up in a domain of "0"/"1"/"2" and
+    //   finds nothing: every bar dropped, silently.
+    // - A non-`Float64` numeric column on a genuinely continuous scale
+    //   (`native_scale=True` over `Int64`) IS not `Float64`, so the old gate
+    //   sent it into `apply_dodge_ordinal`, which had no ordinal scale to
+    //   read a bandwidth from and returned the batch unchanged — an
+    //   unconditional silent no-op, with every dodge group overlapping.
+    //
+    // Routing on the scale kind makes both impossible, and passing the
+    // `OrdinalScale` itself (rather than the `ScaleKind`) into
+    // `apply_dodge_ordinal` deletes that no-op arm outright: the branch is
+    // now compiler-enforced instead of re-checked and silently abandoned.
+    if let ScaleKind::Ordinal(band_ordinal) = band_scale {
+        return apply_dodge_ordinal(batch, &by_cats, padding, band_ordinal, band_on_y, slot_domain);
     }
-    let band_arr = batch
-        .column(band_col_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
-            adjustment: "Dodge",
-            reason: crate::render::PositionAdjustReason::Message("band axis must be Float64".into()),
-            coord_flipped,
-        })?;
+    // Continuous band: read the positional values through the shared numeric
+    // coercion (`arrow_cast::col_as_f64`) rather than a bare `Float64Array`
+    // downcast, so every dtype the rest of the render layer treats as
+    // quantitative (Int8..64, UInt8..64, Float32, Timestamp) dodges with the
+    // same arithmetic `Float64` gets.
+    //
+    // A band column that is not numeric AT ALL on a continuous scale warns and
+    // no-ops, the same answer `resolve_group_channel` gives for a grouping
+    // column it cannot categorize. It is reachable — `x="cat:N"` with a numeric
+    // `CoordCartesian(xlim=…)` resolves the categorical axis continuous — and
+    // it is not the dodge's to refuse: that chart already draws nothing before
+    // the dodge is reached, so the axis configuration is the defect and raising
+    // here would replace one silent blank with a crash. What this must fix is
+    // the SILENCE: pre-#184 the dtype gate sent this shape into
+    // `apply_dodge_ordinal`'s unconditional `Ok(batch.clone())` with no
+    // diagnostic whatsoever.
+    let band_vals = match crate::render::arrow_cast::col_as_f64(batch, &band_field.field) {
+        Ok(vals) => vals,
+        Err(_) => {
+            warnings.push(RenderWarning::PositionAdjustSkipped {
+                adjustment: "dodge".into(),
+                // Column name only, no channel token: `PositionAdjustSkipped`
+                // carries no `coord_flipped` for `Display` to un-flip one with,
+                // and the column name is already authored-space.
+                reason: format!(
+                    "band column '{}' has dtype {:?} on a continuous axis, which cannot carry a data-space offset",
+                    band_field.field,
+                    batch.schema().field(band_col_idx).data_type(),
+                ),
+            });
+            return Ok(batch.clone());
+        }
+    };
 
     // 1. Determine group→slot order: legend order when the dodge field is the
     //    categorical color field, else first-appearance order (see
@@ -544,31 +635,35 @@ fn apply_dodge(
     //    one-bin dodged histogram (`bins=1`) with its groups fully overlapped —
     //    the same failure this fix exists to remove, surviving in the one shape
     //    where the band interval is known from the row itself.
+    //
+    //    The span end is read through the same `col_as_f64` coercion as the
+    //    band itself (GH #184): before, a bare `Float64Array` downcast on the
+    //    `x2`/`y2` column meant an `Int64` bin-edge pair silently fell through
+    //    to the point branch below and dodged as if it had no interval at all.
+    //    A present-but-non-numeric span end still falls through to the point
+    //    branch — that is not a dodge failure, it is a row with no interval.
     let span_end = if band_on_y { encoding.y2.as_ref() } else { encoding.x2.as_ref() }
-        .and_then(|e| batch.schema().index_of(&e.field).ok())
-        .filter(|idx| *idx != band_col_idx)
-        .and_then(|idx| {
-            batch
-                .column(idx)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .map(|arr| (idx, arr))
+        .map(|e| e.field.as_str())
+        .and_then(|name| batch.schema().index_of(name).ok().map(|idx| (idx, name)))
+        .filter(|(idx, _)| *idx != band_col_idx)
+        .and_then(|(idx, name)| {
+            crate::render::arrow_cast::col_as_f64(batch, name).ok().map(|vals| (idx, vals))
         });
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
+    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
 
-    if let Some((end_idx, end_arr)) = span_end {
-        let mut new_start: Vec<Option<f64>> = Vec::with_capacity(band_arr.len());
-        let mut new_end: Vec<Option<f64>> = Vec::with_capacity(band_arr.len());
-        let value_at = |arr: &Float64Array, i: usize| (!arr.is_null(i)).then(|| arr.value(i));
+    if let Some((end_idx, end_vals)) = span_end {
+        let mut new_start: Vec<Option<f64>> = Vec::with_capacity(band_vals.len());
+        let mut new_end: Vec<Option<f64>> = Vec::with_capacity(band_vals.len());
         for (i, g) in by_cats.iter().enumerate() {
             let group_idx = *seen.get(g).unwrap();
-            let (Some(lo), Some(hi)) = (value_at(band_arr, i), value_at(end_arr, i)) else {
+            let (Some(lo), Some(hi)) = (band_vals[i], end_vals[i]) else {
                 // Null on either endpoint: both columns keep their exact
                 // values (nulls included), so a row this batch could never
                 // draw is not turned into one it draws at the wrong place.
-                new_start.push(value_at(band_arr, i));
-                new_end.push(value_at(end_arr, i));
+                new_start.push(band_vals[i]);
+                new_end.push(end_vals[i]);
                 continue;
             };
             let span = hi - lo;
@@ -582,18 +677,15 @@ fn apply_dodge(
             new_start.push(Some(slot_lo));
             new_end.push(Some(slot_lo + slot));
         }
-        cols[band_col_idx] = Arc::new(Float64Array::from(new_start));
-        cols[end_idx] = Arc::new(Float64Array::from(new_end));
+        set_float64_column(&mut fields, &mut cols, band_col_idx, Float64Array::from(new_start));
+        set_float64_column(&mut fields, &mut cols, end_idx, Float64Array::from(new_end));
     } else {
         // 3. A POINT row's band is centered on its single value, and its width
         //    is the median spacing of the unique band values (the bandwidth
         //    proxy a continuous axis has no ordinal `bandwidth()` for). Each
         //    group's mark moves to the CENTER of its sub-slot, since there is no
         //    second endpoint to carry the slot's extent. Unchanged behavior.
-        let mut uniques: Vec<f64> = (0..band_arr.len())
-            .filter(|i| !band_arr.is_null(*i))
-            .map(|i| band_arr.value(i))
-            .collect();
+        let mut uniques: Vec<f64> = band_vals.iter().flatten().copied().collect();
         uniques.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         uniques.dedup();
         if uniques.len() < 2 {
@@ -605,17 +697,27 @@ fn apply_dodge(
         let pad_total = bandwidth * padding * 2.0;
         let sub_band = (bandwidth - pad_total) / n_groups as f64;
 
-        let mut new_band = Vec::with_capacity(band_arr.len());
+        let mut new_band: Vec<Option<f64>> = Vec::with_capacity(band_vals.len());
         for (i, g) in by_cats.iter().enumerate() {
             let group_idx = *seen.get(g).unwrap();
             let offset =
                 -bandwidth / 2.0 + bandwidth * padding + sub_band * (group_idx as f64 + 0.5);
-            new_band.push(band_arr.value(i) + offset);
+            // A null band value stays null — the same rule the span branch
+            // above states for a null endpoint, and for the same reason: a row
+            // this batch could never draw must not become one it draws at the
+            // wrong place. The pre-#184 `Float64Array::value(i)` read the raw
+            // buffer slot under a null (0.0 in practice, undefined by
+            // contract) and emitted a NON-null mark at `0.0 + offset`.
+            new_band.push(band_vals[i].map(|v| v + offset));
         }
-        cols[band_col_idx] = Arc::new(Float64Array::from(new_band));
+        set_float64_column(&mut fields, &mut cols, band_col_idx, Float64Array::from(new_band));
     }
 
-    let schema = batch.schema();
+    // Schema metadata is carried over verbatim (`BatchPositionMeta` keys and
+    // anything else upstream stamped); only the rewritten positional fields'
+    // dtypes can differ from the input schema, and only when the input was a
+    // non-`Float64` numeric column.
+    let schema = Arc::new(Schema::new(fields).with_metadata(batch.schema().metadata().clone()));
     RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Dodge",
         reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
@@ -637,7 +739,13 @@ fn apply_dodge(
 /// `band_scale` is the ordinal scale of the band axis (scales.x when
 /// `band_on_y` is false, scales.y when true — resolved by [`apply_dodge`]
 /// from which axis actually carries the Ordinal scale, not from
-/// `coord_flipped` alone) and supplies the pixel bandwidth. `slot_domain` is
+/// `coord_flipped` alone) and supplies the pixel bandwidth. It is an
+/// [`OrdinalScale`] rather than a `ScaleKind` (GH #184): this function used to
+/// re-`match` the kind and `return Ok(batch.clone())` on any other variant, an
+/// unconditional silent no-op that the old dtype-based gate in
+/// [`apply_dodge`] could reach with a `Linear` scale — every dodge group
+/// overlapping, no warning. Taking the scale the branch already proved makes
+/// that arm impossible to write. `slot_domain` is
 /// the color-scale domain order threaded from [`apply_dodge`]: `Some` orders
 /// sub-band slots by legend order, `None` keeps first-appearance order.
 ///
@@ -681,15 +789,12 @@ fn apply_dodge_ordinal(
     batch: &RecordBatch,
     by_cats: &[String],
     padding: f64,
-    band_scale: &ScaleKind,
+    band_scale: &crate::scale::ordinal::OrdinalScale,
     band_on_y: bool,
     slot_domain: Option<&[String]>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     let schema = batch.schema();
-    let bandwidth_px = match band_scale {
-        ScaleKind::Ordinal(s) => s.bandwidth(),
-        _ => return Ok(batch.clone()),
-    };
+    let bandwidth_px = band_scale.bandwidth();
 
     let group_order = ordered_dodge_groups(by_cats, slot_domain);
     let mut group_idx: HashMap<String, usize> = HashMap::new();
@@ -778,20 +883,17 @@ fn apply_jitter(
     seed: Option<u64>,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::JitterAxis;
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
     use twox_hash::xxh3;
 
-    let x_idx = encoding
-        .x
-        .as_ref()
-        .and_then(|e| batch.schema().index_of(&e.field).ok());
-    let y_idx = encoding
-        .y
-        .as_ref()
-        .and_then(|e| batch.schema().index_of(&e.field).ok());
+    let x_field = encoding.x.as_ref().map(|e| e.field.as_str());
+    let y_field = encoding.y.as_ref().map(|e| e.field.as_str());
+    let x_idx = x_field.and_then(|f| batch.schema().index_of(f).ok());
+    let y_idx = y_field.and_then(|f| batch.schema().index_of(f).ok());
 
     let do_x = matches!(axis, JitterAxis::X | JitterAxis::Both);
     let do_y = matches!(axis, JitterAxis::Y | JitterAxis::Both);
@@ -814,8 +916,37 @@ fn apply_jitter(
     let x_bandwidth = if let ScaleKind::Ordinal(s) = &scales.x { s.bandwidth() } else { 1.0 };
     let y_bandwidth = if let ScaleKind::Ordinal(s) = &scales.y { s.bandwidth() } else { 1.0 };
 
-    let x_arr = x_idx.and_then(|j| batch.column(j).as_any().downcast_ref::<Float64Array>());
-    let y_arr = y_idx.and_then(|j| batch.column(j).as_any().downcast_ref::<Float64Array>());
+    // Positional values are read through the shared numeric coercion, not a
+    // bare `Float64Array` downcast (GH #184). The downcast failed on every
+    // non-`Float64` numeric column, and the consequences split by branch:
+    //
+    // - On a CONTINUOUS axis it yielded `None`, so every `xv` was `NaN`, the
+    //   whole column was rewritten as `NaN`, and writing a `Float64Array` into
+    //   an `Int64` schema slot raised — a raw Arrow schema error surfacing from
+    //   `Jitter` on a plain integer x axis.
+    // - On an ORDINAL axis the column is not rewritten, so the failure only
+    //   reached the `seed: None` hash key below: `format!("{xv}|{yv}")` read
+    //   `NaN` and the same chart jittered *differently* depending on whether
+    //   its column happened to be `Float64` or `Int64`. The seed is derived
+    //   from data, so it must not vary with the dtype that data arrived in.
+    //
+    // Reading through `col_as_f64` closes both: an `Int64` `3` and a `Float64`
+    // `3.0` both read `3.0_f64` and format as `"3"`, so the hash key — and
+    // every jittered position — is dtype-invariant across the numeric family.
+    // A non-numeric column (a `Utf8` category band) still reads as `None` and
+    // still seeds from `NaN`, which is what keeps existing strip-plot goldens
+    // byte-identical.
+    let x_vals = jitter_axis_values(batch, x_idx.and(x_field), do_x && !x_is_ordinal, warnings);
+    let y_vals = jitter_axis_values(batch, y_idx.and(y_field), do_y && !y_is_ordinal, warnings);
+
+    // An axis is rewritten in data space only when it is being jittered, is
+    // continuous, AND yielded readable values. The third conjunct is the
+    // warn-degraded path: a non-numeric column on a continuous axis (the same
+    // `x="cat:N"` + numeric `xlim` shape `apply_dodge` warns about) leaves the
+    // column alone rather than replacing it with `NaN`s — which is what made
+    // `RecordBatch::try_new` surface a raw Arrow schema message before #184.
+    let rewrite_x = do_x && !x_is_ordinal && x_vals.is_some();
+    let rewrite_y = do_y && !y_is_ordinal && y_vals.is_some();
 
     let n = batch.num_rows();
     let mut new_x: Vec<f64> = Vec::with_capacity(n);
@@ -824,8 +955,10 @@ fn apply_jitter(
     let mut y_pixel_offsets: Vec<f64> = Vec::with_capacity(n);
 
     for i in 0..n {
-        let xv = x_arr.map(|a| if a.is_null(i) { f64::NAN } else { a.value(i) }).unwrap_or(f64::NAN);
-        let yv = y_arr.map(|a| if a.is_null(i) { f64::NAN } else { a.value(i) }).unwrap_or(f64::NAN);
+        // A null reads `NaN` exactly as the pre-#184 `is_null` check did, so a
+        // nulled row keeps both its un-drawable position and its hash key.
+        let xv = x_vals.as_ref().and_then(|v| v[i]).unwrap_or(f64::NAN);
+        let yv = y_vals.as_ref().and_then(|v| v[i]).unwrap_or(f64::NAN);
 
         let row_seed = match seed {
             Some(s) => s.wrapping_add(i as u64),
@@ -840,44 +973,97 @@ fn apply_jitter(
         let u2 = (rng.next_u64() as f64) / (u64::MAX as f64);
         let noise_y_data = (u2 - 0.5) * width;
 
-        new_x.push(if do_x && !x_is_ordinal { xv + noise_x_data } else { xv });
-        new_y.push(if do_y && !y_is_ordinal { yv + noise_y_data } else { yv });
+        new_x.push(if rewrite_x { xv + noise_x_data } else { xv });
+        new_y.push(if rewrite_y { yv + noise_y_data } else { yv });
         x_pixel_offsets.push(if do_x && x_is_ordinal { (u - 0.5) * width * x_bandwidth } else { 0.0 });
         y_pixel_offsets.push(if do_y && y_is_ordinal { (u2 - 0.5) * width * y_bandwidth } else { 0.0 });
     }
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    if let (Some(j), true) = (x_idx, do_x && !x_is_ordinal) {
-        cols[j] = Arc::new(Float64Array::from(new_x));
+    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    // A rewritten positional column is retyped to Float64 alongside the data
+    // (GH #184) — jittered coordinates are fractional and an `Int64` slot
+    // cannot hold them; see [`set_float64_column`].
+    if let (Some(j), true) = (x_idx, rewrite_x) {
+        set_float64_column(&mut fields, &mut cols, j, Float64Array::from(new_x));
     }
-    if let (Some(j), true) = (y_idx, do_y && !y_is_ordinal) {
-        cols[j] = Arc::new(Float64Array::from(new_y));
+    if let (Some(j), true) = (y_idx, rewrite_y) {
+        set_float64_column(&mut fields, &mut cols, j, Float64Array::from(new_y));
     }
 
     let need_offsets = (do_x && x_is_ordinal) || (do_y && y_is_ordinal);
-    if !need_offsets {
-        let schema = batch.schema();
-        // No positional channel token in this message and no `coord_flipped`
-        // in scope (`apply_jitter` doesn't take it) — structurally inert,
-        // see the field doc on `PositionAdjustFailed`.
-        return RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
-            adjustment: "Jitter",
-            reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
-            coord_flipped: false,
-        });
+    if need_offsets {
+        cols.push(Arc::new(Float64Array::from(x_pixel_offsets)));
+        cols.push(Arc::new(Float64Array::from(y_pixel_offsets)));
+        fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+        fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
     }
 
-    cols.push(Arc::new(Float64Array::from(x_pixel_offsets)));
-    cols.push(Arc::new(Float64Array::from(y_pixel_offsets)));
-    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
-    fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
-    fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
-    let new_schema = Arc::new(Schema::new(fields));
+    // Both arms carry the input schema's metadata forward. The offset-emitting
+    // arm used to build a bare `Schema::new(fields)` and drop it while the
+    // other arm reused `batch.schema()` and kept it — two schema builds in one
+    // function disagreeing about the same thing, which is what folding them
+    // into one build removes.
+    let new_schema =
+        Arc::new(Schema::new(fields).with_metadata(batch.schema().metadata().clone()));
+    let context = if need_offsets { "ordinal: " } else { "" };
     RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Jitter",
-        reason: crate::render::PositionAdjustReason::Message(format!("ordinal: {e}")),
+        reason: crate::render::PositionAdjustReason::Message(format!("{context}{e}")),
+        // No positional channel token in either message and no `coord_flipped`
+        // in scope (`apply_jitter` doesn't take it) — structurally inert, see
+        // the field doc on `PositionAdjustFailed`.
         coord_flipped: false,
     })
+}
+
+/// Read a `Jitter` axis column as per-row `Option<f64>`, or `None` when the
+/// axis has no column this function can read.
+///
+/// `field` is `Some` only when the encoding names a column that is actually
+/// present in the batch — an encoded-but-absent column stays the per-axis
+/// no-op it has always been.
+///
+/// `rewrites_in_data_space` is true when this axis's values would REPLACE the
+/// column (a continuous axis being jittered). Only then does an unreadable
+/// column warrant a diagnostic, and it gets the same warn-and-skip
+/// `apply_dodge` gives the identical shape (`x="cat:N"` with a numeric
+/// `CoordCartesian(xlim=…)`): the axis configuration is the defect, the
+/// adjustment just cannot service it. Pre-#184 this path let a raw Arrow schema
+/// message escape as the `Jitter` failure, because the unreadable column was
+/// rewritten as all-`NaN` `Float64` into an integer slot.
+///
+/// When the axis is ordinal (or not being jittered at all) the values only feed
+/// the hash seed, so a non-numeric column reads as `None` and seeds from `NaN`
+/// with no diagnostic, exactly as before — that silent fallback is what keeps
+/// every `Utf8`-band strip plot byte-identical.
+///
+/// The warning names the COLUMN, not the channel: `PositionAdjustSkipped`
+/// carries no `coord_flipped` for `Display` to un-flip a positional token with.
+fn jitter_axis_values(
+    batch: &RecordBatch,
+    field: Option<&str>,
+    rewrites_in_data_space: bool,
+    warnings: &mut Vec<RenderWarning>,
+) -> Option<Vec<Option<f64>>> {
+    let field = field?;
+    match crate::render::arrow_cast::col_as_f64(batch, field) {
+        Ok(vals) => Some(vals),
+        Err(_) => {
+            if rewrites_in_data_space {
+                let dtype = batch
+                    .column_by_name(field)
+                    .map_or_else(|| "unknown".to_string(), |c| format!("{:?}", c.data_type()));
+                warnings.push(RenderWarning::PositionAdjustSkipped {
+                    adjustment: "jitter".into(),
+                    reason: format!(
+                        "column '{field}' has dtype {dtype} on a continuous axis, which cannot carry a data-space offset"
+                    ),
+                });
+            }
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,81 +1205,119 @@ pub(crate) fn apply_stack(
             coord_flipped,
         }
     })?;
-    // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column)
-    // and all signed integer types (Int8/Int16/Int32/Int64 — common for Polars
-    // integer columns that have not been explicitly cast to Float64), we
-    // transparently widen to f64 so stacked charts work without an explicit
-    // cast at the Python boundary.
+    // The value column is read through `arrow_cast::col_as_f64`, the same
+    // single source of truth `apply_dodge` and `apply_jitter` read positional
+    // values through (#184). Until then this was a hand-rolled six-arm downcast
+    // chain (Float64, UInt64, Int64/32/16/8) that refused everything else, so
+    // one module held two answers to "which dtypes are numeric": a `Float32`,
+    // `UInt8`/`UInt16`/`UInt32` or `Timestamp` column dodged and jittered but
+    // raised here. `col_as_f64` delegates to `supported_numeric_dtype`, so the
+    // three adjustments now widen exactly the same set and cannot drift apart
+    // again — a dtype added there reaches all three at once.
+    //
+    // A null measure reads as 0.0, which is precisely what the chain's
+    // `if a.is_null(i) { 0.0 }` arms did on every one of their six dtypes. This
+    // is a stacked CUMULATION, not a position offset: the dodge point branch's
+    // "a null stays null" rule is the opposite answer to a different question
+    // (there a null row must not be drawn at all; here a null contributes
+    // nothing to the running total but the rows above it still stack).
     let y_col = batch.column(yi);
-    let ya_vals: Vec<f64> = if let Some(a) = y_col.as_any().downcast_ref::<Float64Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) }).collect()
-    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
-    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int64Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
-    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int32Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
-    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int16Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
-    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int8Array>() {
-        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
-    } else {
-        // R3: `y_col` is always the VALUE column (bound from `yi` = the resolved
-        // `value_field` index), whichever of x/y it actually reads from — see
-        // `value_token` above, computed from the same `value_on_x`/`coord_flipped`
-        // resolution this dtype check is downstream of.
-        return Err(crate::render::RenderError::PositionAdjustFailed {
-            adjustment: "Stack",
-            reason: crate::render::PositionAdjustReason::ValueDtype {
-                channel: value_token,
-                dtype: format!("{:?}", y_col.data_type()),
-            },
-            coord_flipped,
-        });
-    };
+    let ya_vals: Vec<f64> = crate::render::arrow_cast::col_as_f64(batch, &value_field.field)
+        .map_err(|_| {
+            // R3: `y_col` is always the VALUE column (bound from `yi` = the
+            // resolved `value_field` index), whichever of x/y it actually reads
+            // from — see `value_token` above, computed from the same
+            // `value_on_x`/`coord_flipped` resolution this dtype check is
+            // downstream of. The reason variant is unchanged, so the refusal
+            // still un-flips its channel token at `Display` time; only the set
+            // of dtypes that reach it has narrowed.
+            crate::render::RenderError::PositionAdjustFailed {
+                adjustment: "Stack",
+                reason: crate::render::PositionAdjustReason::ValueDtype {
+                    channel: value_token,
+                    dtype: format!("{:?}", y_col.data_type()),
+                },
+                coord_flipped,
+            }
+        })?
+        .into_iter()
+        .map(|v| v.unwrap_or(0.0))
+        .collect();
     let ya_len = ya_vals.len();
 
-    // x may be Float64 (continuous) or Utf8 (ordinal). Build a stable u64 key
-    // for the BTreeMap from either case.
+    // The category column is read through `arrow_cast::col_as_identity_key_str`,
+    // the crate's one answer to "which value is this row" — the ordinal-category
+    // reader the band ladder is enumerated with (`distinct_positional_categories`
+    // produces exactly these strings, both delegating to
+    // `col_as_ordinal_category_str`/`float_as_ordinal_str`), falling back to the
+    // temporal epoch reader for `Timestamp`. Two rows therefore share a stack bin
+    // if and only if they share a band wherever a band ladder exists, by
+    // construction, and bin by exact instant where one does not (#184, category
+    // half).
+    //
+    // The temporal arm is what makes a stacked time series render — an ordinary
+    // `mark_area(position=Stack())` over a date x, which raised for every input
+    // before. It is not a second keying model bolted on: a stack over a
+    // continuous quantitative axis already bins by exact value through the first
+    // reader (an `Int32` x:Q stacks to its group sum), so exact-value keying over
+    // a continuous axis is the established behavior and `Timestamp` was simply
+    // the one dtype the reader could not spell.
+    //
+    // Until then this was a two-arm dtype gate — `Float64` keyed on
+    // `f64::to_bits`, `Utf8` on a hash of the bytes, everything else a typed
+    // `CategoryDtype` refusal — so `mark_bar(position=Stack()).encode(x=<Int64
+    // as :N>, y, color=)` raised "x column must be Float64 or Utf8" while the
+    // identical column dodged, jittered and banded fine. That is a pre-existing
+    // hole, not a regression introduced by this wave's `#171`: the refusal is
+    // byte-identical with and without it.
+    //
+    // Two `Float64` partitions differ from the old `to_bits` key, both toward
+    // the ladder rather than away from it: `-0.0`/`0.0` (two bit patterns, one
+    // band) now share a bin instead of stacking twice at one pixel, and a null
+    // category row keys to its own `NULL_CATEGORY` band instead of merging into
+    // the real `0.0` bin that `Float64Array::value` on a null used to return.
+    // Existing `Utf8` stacks are byte-identical: their nulls used to key on the
+    // `""` that `StringArray::value` returns, which partitioned them together
+    // exactly as `NULL_CATEGORY` now does.
     let x_col = batch.column(xi);
-    let x_keys: Vec<u64> = if x_col.data_type() == &DataType::Float64 {
-        let xa = x_col.as_any().downcast_ref::<Float64Array>().unwrap();
-        (0..xa.len()).map(|i| xa.value(i).to_bits()).collect()
-    } else if let Some(xs) = x_col.as_any().downcast_ref::<StringArray>() {
-        // Stable hash of the string for grouping; we never decode back, only bin.
-        use twox_hash::xxh3;
-        (0..xs.len())
-            .map(|i| xxh3::hash64(xs.value(i).as_bytes()))
-            .collect()
-    } else {
-        // R3: `x_col` is always the CATEGORY column (bound from `xi` = the
-        // resolved `cat_field` index) — see `cat_token` above.
-        return Err(crate::render::RenderError::PositionAdjustFailed {
-            adjustment: "Stack",
-            reason: crate::render::PositionAdjustReason::CategoryDtype { channel: cat_token },
-            coord_flipped,
-        });
-    };
+    let x_cats: Vec<String> = crate::render::arrow_cast::col_as_identity_key_str(batch, &cat_field.field)
+        .map_err(|_| {
+            // R3: `x_col` is always the CATEGORY column (bound from `xi` = the
+            // resolved `cat_field` index) — see `cat_token` above. The reason
+            // variant is unchanged, so the refusal still un-flips its channel
+            // token at `Display` time; it now carries the offending dtype, and
+            // the set it names is the identity reader's.
+            crate::render::RenderError::PositionAdjustFailed {
+                adjustment: "Stack",
+                reason: crate::render::PositionAdjustReason::CategoryDtype {
+                    channel: cat_token,
+                    dtype: format!("{:?}", x_col.data_type()),
+                },
+                coord_flipped,
+            }
+        })?
+        .into_iter()
+        // A null category row bins under the `NULL_CATEGORY` label, which is the
+        // band `distinct_positional_categories` gives it (FA-9) — so a null
+        // group stacks in its own band rather than merging into the real `0.0`
+        // bin `Float64Array::value` returns for a null, and a null instant on a
+        // temporal axis lands in one bin rather than several.
+        .map(|c| c.unwrap_or_else(|| crate::render::arrow_cast::NULL_CATEGORY.to_string()))
+        .collect();
 
-    // Group order from `by` channel (first-appearance). `by_cats` indexes 1:1
-    // with rows, exactly as the old `by_arr` StringArray did.
-    let mut group_idx_map: HashMap<String, usize> = HashMap::new();
-    let mut group_order: Vec<String> = Vec::new();
-    for g in &by_cats {
-        if !group_idx_map.contains_key(g) {
-            group_idx_map.insert(g.clone(), group_order.len());
-            group_order.push(g.clone());
-        }
-    }
+    // Bin identity for the category axis, and stacking order for the `by`
+    // groups: both are "which distinct value did this row's string first
+    // appear as", so both read it off the same helper.
+    let x_bins = first_appearance_indices(&x_cats);
+    let group_idx = first_appearance_indices(&by_cats);
 
-    // bins: x_key → Vec<(group_idx, row_idx, y)>
-    let mut bins: BTreeMap<u64, Vec<(usize, usize, f64)>> = BTreeMap::new();
+    // bins: x_bin → Vec<(group_idx, row_idx, y)>
+    let mut bins: BTreeMap<usize, Vec<(usize, usize, f64)>> = BTreeMap::new();
     for i in 0..ya_len {
-        let gi = *group_idx_map.get(&by_cats[i]).unwrap();
-        bins.entry(x_keys[i]).or_default().push((gi, i, ya_vals[i]));
+        bins.entry(x_bins[i]).or_default().push((group_idx[i], i, ya_vals[i]));
     }
 
-    let totals: HashMap<u64, f64> = bins
+    let totals: HashMap<usize, f64> = bins
         .iter()
         .map(|(k, rows)| (*k, rows.iter().map(|(_, _, y)| y).sum::<f64>()))
         .collect();
@@ -1146,16 +1370,21 @@ pub(crate) fn apply_stack(
     };
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    cols[yi] = Arc::new(Float64Array::from(y_output));
-    // Rebuild schema with the y column promoted to Float64 (in case the
-    // input was UInt64, e.g. Bin's `count` column).
     let mut new_fields: Vec<Field> = batch
         .schema()
         .fields()
         .iter()
         .map(|f| f.as_ref().clone())
         .collect();
-    new_fields[yi] = Field::new(new_fields[yi].name(), DataType::Float64, true);
+    // Promote the value column to Float64 (the input may have been UInt64, e.g.
+    // Bin's `count`) through the SAME helper dodge and jitter retype with. This
+    // was the third retype site in this file and the one `set_float64_column`
+    // did not reach: it hand-built `Field::new(name, Float64, true)`, forcing
+    // nullability and dropping field metadata where the helper preserves both.
+    // Inert as written — `y_output` is null-free, so the forced `true` never
+    // mattered — but a third hand-rolled copy of the thing the helper exists to
+    // single-source is exactly the drift the helper's own doc warns about.
+    set_float64_column(&mut new_fields, &mut cols, yi, Float64Array::from(y_output));
 
     // Append a synthetic __stack_y_base__ column so mark drawers can emit
     // per-segment rects (base → top) instead of drawing every segment from
@@ -2371,9 +2600,13 @@ mod tests {
         );
     }
 
-    /// R3: the Stack dtype-check messages ("{channel} must be Float64...",
-    /// "{channel} column must be Float64 or Utf8") swap consistently with the
-    /// value/category role under flip too — not just the missing-encoding pair.
+    /// R3: the Stack dtype-check messages ("{channel} must be a numeric
+    /// dtype...", "{channel} must be a dtype that can key categories...") swap
+    /// consistently with the value/category role under flip too — not just the
+    /// missing-encoding pair. Both wordings moved with #184 (the value half onto
+    /// `col_as_f64`'s set, the category half onto the band ladder's); the
+    /// property this test pins — which channel token the message names — did
+    /// not.
     #[test]
     fn stack_dtype_error_messages_name_users_channel_under_flip() {
         use arrow::array::BooleanArray;
@@ -2404,45 +2637,75 @@ mod tests {
         };
         let err = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
         let text = format!("{err}");
+        // The load-bearing part of this assertion is the channel token `y` —
+        // the post-flip x column's bad dtype must be reported as the user's own
+        // y. The accepted-set clause after it moved with #184 (stack now reads
+        // through `col_as_f64`, so the message names that helper's set instead
+        // of the retired downcast chain's six dtypes); it is matched here only
+        // so the prefix pins the whole opening of the message rather than the
+        // token alone.
         assert!(
-            text.starts_with("Stack: y must be Float64, UInt64, or a signed integer type"),
+            text.starts_with("Stack: y must be a numeric dtype"),
             "post-flip x's bad dtype must be reported as the user's own y; got: {text}"
         );
     }
 
-    /// R3 (#89 part C restructure): the Stack CATEGORY-dtype check
-    /// ("{channel} column must be Float64 or Utf8") also swaps with the
-    /// value/category role under flip — sibling coverage to
+    /// R3 (#89 part C restructure): the Stack CATEGORY-dtype check also swaps
+    /// with the value/category role under flip — sibling coverage to
     /// `stack_dtype_error_messages_name_users_channel_under_flip` above, which
     /// only pins the VALUE-dtype message. `PositionAdjustReason::CategoryDtype`
     /// was not previously exercised by any test.
     ///
+    /// #184's category half RE-REASONED both category blocks rather than
+    /// re-baselining them. The property under test is unchanged — a category
+    /// column the stack cannot key refuses, naming the channel the USER wrote —
+    /// but two things about it moved. The bad column is now `Duration`, not
+    /// `Boolean`: `Boolean` was only ever refused because the retired two-arm
+    /// gate admitted `Float64` and `Utf8` and nothing else, and a `Boolean`
+    /// category column dodges, jitters and bands, so refusing it here was the
+    /// defect. `Duration` is what is left once the stack keys through
+    /// `col_as_identity_key_str` — every category-keyable dtype plus `Timestamp`
+    /// by its epoch — and it is the honest boundary rather than a live user
+    /// shape (`_coerce.normalize_for_rust` pre-casts `Duration`/`Date*` before
+    /// they could arrive). And the text now names the accepted set and the
+    /// offending dtype, the shape its VALUE-dtype sibling already had.
+    ///
     /// Also pins the VALUE-dtype message's FULL rendered string (quality-review
-    /// cycle 2 required fix): `ValueDtype`'s literal was reshaped into a
-    /// `\`-continuation join in `render/mod.rs`'s `Display` impl, and
+    /// cycle 2 required fix): `ValueDtype`'s literal is a `\`-continuation join
+    /// in `render/mod.rs`'s `Display` impl, and
     /// `stack_dtype_error_messages_name_users_channel_under_flip`'s
-    /// `starts_with("Stack: y must be Float64, UInt64, or a signed integer type")`
-    /// stops one character before that join, leaving
-    /// `(Int8/Int16/Int32/Int64); got Boolean` — the exact part a lost or
-    /// doubled space in the reformatted join would corrupt — entirely
+    /// `starts_with` stops before that join, leaving the tail — the exact part a
+    /// lost or doubled space in the continuation would corrupt — otherwise
     /// unpinned. The two `assert_eq!` blocks at the end of this fn (unflipped,
-    /// then flipped) close that gap, matching HEAD's `format!` output verified
-    /// byte-identical under `rustc`.
+    /// then flipped) close that gap.
+    ///
+    /// #184 re-reasoned the expected text, it did not re-baseline it: stack's
+    /// value column moved from a hand-rolled six-arm downcast chain onto
+    /// `arrow_cast::col_as_f64`, so the accepted set the message enumerates is
+    /// now that helper's (`supported_numeric_dtype`) and the old wording
+    /// understated it. The join is now two continuations rather than one, which
+    /// is more surface for exactly the defect these two blocks exist to catch,
+    /// not less.
     #[test]
     fn stack_category_dtype_error_message_names_users_channel_under_flip() {
-        use arrow::array::BooleanArray;
+        use arrow::array::{BooleanArray, DurationMillisecondArray};
+        let dur = || DataType::Duration(arrow::datatypes::TimeUnit::Millisecond);
+        let dur_col = || Arc::new(DurationMillisecondArray::from(vec![1_i64, 2])) as ArrayRef;
+        const CATEGORY_REFUSAL: &str = "must be a dtype that can identify a row \
+             (Utf8/LargeUtf8, Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, \
+             Float32/Float64, Boolean, or Timestamp); got Duration(Millisecond)";
 
-        // Unflipped: the resolved category slot IS the user's own x — Boolean
+        // Unflipped: the resolved category slot IS the user's own x — Duration
         // "x" is directly the bad column.
         let schema_unflipped = Arc::new(Schema::new(vec![
-            Field::new("x", DataType::Boolean, false),
+            Field::new("x", dur(), false),
             Field::new("y", DataType::Float64, false),
             Field::new("g", DataType::Utf8, false),
         ]));
         let batch_unflipped = RecordBatch::try_new(
             schema_unflipped,
             vec![
-                Arc::new(BooleanArray::from(vec![true, false])),
+                dur_col(),
                 Arc::new(Float64Array::from(vec![1.0, 2.0])),
                 Arc::new(StringArray::from(vec!["a", "b"])),
             ],
@@ -2457,21 +2720,21 @@ mod tests {
             value_axis: None,
         };
         let err = apply_position(&batch_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
-        assert_eq!(format!("{err}"), "Stack: x column must be Float64 or Utf8");
+        assert_eq!(format!("{err}"), format!("Stack: x {CATEGORY_REFUSAL}"));
 
-        // Flipped: the resolved category slot is post-flip y — Boolean "y" is
+        // Flipped: the resolved category slot is post-flip y — Duration "y" is
         // the bad column, but it must still be reported as the user's own x
         // (the same message text as the unflipped case above).
         let schema_flipped = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
-            Field::new("y", DataType::Boolean, false),
+            Field::new("y", dur(), false),
             Field::new("g", DataType::Utf8, false),
         ]));
         let batch_flipped = RecordBatch::try_new(
             schema_flipped,
             vec![
                 Arc::new(Float64Array::from(vec![1.0, 2.0])),
-                Arc::new(BooleanArray::from(vec![true, false])),
+                dur_col(),
                 Arc::new(StringArray::from(vec!["a", "b"])),
             ],
         )
@@ -2479,7 +2742,7 @@ mod tests {
         let err = apply_position(&batch_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
-            "Stack: x column must be Float64 or Utf8",
+            format!("Stack: x {CATEGORY_REFUSAL}"),
             "post-flip y (category) dtype failure must be reported as the user's own x"
         );
 
@@ -2508,9 +2771,9 @@ mod tests {
         let err = apply_position(&batch_value_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
-            "Stack: y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); \
-             got Boolean",
-            "unflipped: exact VALUE-dtype message, verified byte-identical to HEAD's format! output"
+            "Stack: y must be a numeric dtype (Float64/Float32, Int8/Int16/Int32/Int64, \
+             UInt8/UInt16/UInt32/UInt64, or Timestamp); got Boolean",
+            "unflipped: exact VALUE-dtype message, naming the set `col_as_f64` accepts"
         );
 
         // Flipped: the same scenario `stack_dtype_error_messages_name_users_channel_under_flip`
@@ -2533,8 +2796,8 @@ mod tests {
         let err = apply_position(&batch_value_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
-            "Stack: y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); \
-             got Boolean",
+            "Stack: y must be a numeric dtype (Float64/Float32, Int8/Int16/Int32/Int64, \
+             UInt8/UInt16/UInt32/UInt64, or Timestamp); got Boolean",
             "post-flip x's bad dtype must be reported as the user's own y — exact match"
         );
     }
@@ -2679,6 +2942,557 @@ mod tests {
         assert_eq!(ya.value(1), 30.0);
         assert_eq!(ya.value(2), 30.0);
         assert_eq!(ya.value(3), 70.0);
+    }
+
+    // ---- One numeric-read policy for all three adjustments (#184 cycle 2) ---
+    //
+    // `apply_stack` kept a bespoke six-arm downcast chain (Float64, UInt64,
+    // Int64/32/16/8) while `apply_dodge` and `apply_jitter` moved onto
+    // `arrow_cast::col_as_f64`, so after the first pass at #184 a `Float32` /
+    // `UInt8..32` / `Timestamp` value column DODGED and JITTERED but RAISED on
+    // stack: three adjustments in one module disagreeing about which dtypes are
+    // numeric. `col_as_f64` is the render layer's single source of truth for
+    // that question (its doc delegates to `supported_numeric_dtype`), so stack
+    // reads through it too and the disagreement is gone.
+
+    /// The value-column dtypes `arrow_cast::col_as_f64` accepts, each carrying
+    /// the same 10/20/30/40 measures. `Timestamp` is deliberately included: it
+    /// is in `supported_numeric_dtype`, so it is part of the set the three
+    /// adjustments must agree on, however unusual stacking one is.
+    fn numeric_value_matrix() -> Vec<(&'static str, Field, ArrayRef)> {
+        use arrow::array::{
+            Float32Array, Int16Array, Int32Array, Int64Array, Int8Array, TimestampMillisecondArray,
+            UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        };
+        let ts = DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None);
+        vec![
+            ("Float64", DataType::Float64, Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])) as ArrayRef),
+            ("Float32", DataType::Float32, Arc::new(Float32Array::from(vec![10.0_f32, 20.0, 30.0, 40.0]))),
+            ("Int64", DataType::Int64, Arc::new(Int64Array::from(vec![10_i64, 20, 30, 40]))),
+            ("Int32", DataType::Int32, Arc::new(Int32Array::from(vec![10_i32, 20, 30, 40]))),
+            ("Int16", DataType::Int16, Arc::new(Int16Array::from(vec![10_i16, 20, 30, 40]))),
+            ("Int8", DataType::Int8, Arc::new(Int8Array::from(vec![10_i8, 20, 30, 40]))),
+            ("UInt64", DataType::UInt64, Arc::new(UInt64Array::from(vec![10_u64, 20, 30, 40]))),
+            ("UInt32", DataType::UInt32, Arc::new(UInt32Array::from(vec![10_u32, 20, 30, 40]))),
+            ("UInt16", DataType::UInt16, Arc::new(UInt16Array::from(vec![10_u16, 20, 30, 40]))),
+            ("UInt8", DataType::UInt8, Arc::new(UInt8Array::from(vec![10_u8, 20, 30, 40]))),
+            ("Timestamp(ms)", ts, Arc::new(TimestampMillisecondArray::from(vec![10_i64, 20, 30, 40]))),
+        ]
+        .into_iter()
+        .map(|(name, dt, col)| (name, Field::new("y", dt, false), col))
+        .collect()
+    }
+
+    /// Every dtype `col_as_f64` reads stacks to the same cumulative tops the
+    /// `Float64` column produces, and comes back retyped to `Float64`.
+    ///
+    /// RED against the bespoke chain: `Float32`, `UInt32`, `UInt16`, `UInt8` and
+    /// `Timestamp(ms)` fell through all six arms and raised
+    /// `PositionAdjustReason::ValueDtype`, so `expect` panics on the first of
+    /// them — while the identical columns dodged and jittered fine.
+    #[test]
+    fn stack_accepts_every_numeric_dtype_its_siblings_accept() {
+        for (name, field, col) in numeric_value_matrix() {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                field,
+                Field::new("g", DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                    col,
+                    Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+                ],
+            )
+            .unwrap();
+            let pos = PositionAdjust::Stack {
+                by: Some("g".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            };
+            let out = apply_position(
+                &batch,
+                Some(&pos),
+                &dummy_scales(),
+                &enc_xy("x", "y", Some("g")),
+                false,
+                &mut Vec::new(),
+            )
+            .unwrap_or_else(|e| panic!("{name} must stack, as it already dodges and jitters: {e}"));
+            assert_eq!(
+                out.schema().field(1).data_type(),
+                &DataType::Float64,
+                "{name}: the stacked value column must be retyped to Float64"
+            );
+            let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(
+                (0..4).map(|i| ya.value(i)).collect::<Vec<_>>(),
+                vec![10.0, 30.0, 30.0, 70.0],
+                "{name}: cumulative tops must match the Float64 oracle"
+            );
+        }
+    }
+
+    /// The same matrix, through all THREE adjustments, which is the property
+    /// that actually has to hold: one module cannot have two answers to "is this
+    /// dtype numeric". Asserts acceptance, not per-adjustment geometry — the
+    /// geometry oracles live in the focused tests above and beside them.
+    #[test]
+    fn stack_dodge_and_jitter_accept_the_same_value_dtypes() {
+        for (name, field, col) in numeric_value_matrix() {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                field,
+                Field::new("g", DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                    col,
+                    Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+                ],
+            )
+            .unwrap();
+            let enc = enc_xy("x", "y", Some("g"));
+            for (adjustment, pos) in [
+                (
+                    "Stack",
+                    PositionAdjust::Stack {
+                        by: Some("g".into()),
+                        offset: StackOffset::Zero,
+                        anchor: StackAnchor::Top,
+                        value_axis: None,
+                    },
+                ),
+                ("Dodge", PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 }),
+                (
+                    "Jitter",
+                    PositionAdjust::Jitter { axis: JitterAxis::Y, width: 0.4, seed: Some(3) },
+                ),
+            ] {
+                let mut warnings = Vec::new();
+                let out =
+                    apply_position(&batch, Some(&pos), &dummy_scales(), &enc, false, &mut warnings);
+                assert!(
+                    out.is_ok(),
+                    "{adjustment} must accept a {name} value column, like its two siblings: {:?}",
+                    out.err()
+                );
+                assert!(
+                    warnings.is_empty(),
+                    "{adjustment} on a {name} value column must not warn: {warnings:?}"
+                );
+            }
+        }
+    }
+
+    /// A non-numeric value column still refuses, and the refusal still names the
+    /// accepted set — which after the migration is the set `col_as_f64` really
+    /// reads, not the six dtypes the hand-rolled chain happened to list.
+    #[test]
+    fn stack_still_refuses_a_non_numeric_value_column_naming_the_accepted_set() {
+        use arrow::array::BooleanArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Boolean, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let err = apply_position(
+            &batch,
+            Some(&pos),
+            &dummy_scales(),
+            &enc_xy("x", "y", Some("g")),
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("Boolean is not a numeric dtype and must still refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("Boolean"), "must name the offending dtype: {msg}");
+        for named in ["Float32", "UInt8", "Timestamp"] {
+            assert!(
+                msg.contains(named),
+                "the refusal must name {named} among the accepted dtypes, since stack now \
+                 accepts it: {msg}"
+            );
+        }
+    }
+
+    /// Fix 2(a): stack's value field is retyped through `set_float64_column`
+    /// like dodge's and jitter's, so it keeps the input field's nullability and
+    /// metadata instead of hand-building `Field::new(name, Float64, true)`.
+    ///
+    /// RED against the hand-built field: `is_nullable()` came back `true` for a
+    /// non-nullable input and the metadata map came back empty.
+    #[test]
+    fn stack_value_field_keeps_its_nullability_and_metadata() {
+        use arrow::array::Int64Array;
+        let y_field = Field::new("y", DataType::Int64, false)
+            .with_metadata([("unit".to_string(), "count".to_string())].into());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            y_field,
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+                Arc::new(Int64Array::from(vec![10_i64, 20])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let out = apply_position(
+            &batch,
+            Some(&pos),
+            &dummy_scales(),
+            &enc_xy("x", "y", Some("g")),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let f = out.schema().field(1).clone();
+        assert_eq!(f.data_type(), &DataType::Float64, "still promoted to Float64");
+        assert!(!f.is_nullable(), "a non-nullable input field must not be forced nullable");
+        assert_eq!(
+            f.metadata().get("unit").map(String::as_str),
+            Some("count"),
+            "field metadata must survive the retype, as it does for dodge and jitter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #184, category half: the stack bins on the band ladder, not on a dtype.
+    //
+    // `apply_stack`'s x_keys chain was a second dtype gate, independent of the
+    // value-column one above: `Float64` keyed on `f64::to_bits`, `Utf8` on a
+    // hash of the bytes, and every other dtype was a typed `CategoryDtype`
+    // refusal — so an `Int64` column declared `:N` raised "x column must be
+    // Float64 or Utf8" while the identical column dodged, jittered and banded.
+    // It now keys through `arrow_cast::col_as_positional_category_str`, which is
+    // the reader the ordinal band ladder (`distinct_positional_categories`) is
+    // enumerated with, so the bins and the bands are the same partition.
+    // -----------------------------------------------------------------------
+
+    /// One 4-row category column per dtype the band ladder can enumerate, each
+    /// spelling the SAME two categories as the `Utf8` row spells (`"1"`/`"2"`,
+    /// and `"false"`/`"true"` for `Boolean` — whatever
+    /// `col_as_ordinal_category_str` formats them as).
+    ///
+    /// Row layout is fixed across the matrix at `[c1, c1, c2, c2]` so every cell
+    /// is judged against one oracle. `Boolean` is in it because it is the dtype
+    /// the retired gate's refusal was *pinned* on; `LargeUtf8` because polars
+    /// produces it for every string column, so it is the shape a real
+    /// string-category stack arrives as.
+    fn category_column_matrix() -> Vec<(&'static str, Field, ArrayRef)> {
+        use arrow::array::{
+            BooleanArray, Float32Array, Int16Array, Int32Array, Int64Array, Int8Array,
+            LargeStringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        };
+        vec![
+            ("Utf8", DataType::Utf8, Arc::new(StringArray::from(vec!["1", "1", "2", "2"])) as ArrayRef),
+            ("LargeUtf8", DataType::LargeUtf8, Arc::new(LargeStringArray::from(vec!["1", "1", "2", "2"]))),
+            ("Int64", DataType::Int64, Arc::new(Int64Array::from(vec![1_i64, 1, 2, 2]))),
+            ("Int32", DataType::Int32, Arc::new(Int32Array::from(vec![1_i32, 1, 2, 2]))),
+            ("Int16", DataType::Int16, Arc::new(Int16Array::from(vec![1_i16, 1, 2, 2]))),
+            ("Int8", DataType::Int8, Arc::new(Int8Array::from(vec![1_i8, 1, 2, 2]))),
+            ("UInt64", DataType::UInt64, Arc::new(UInt64Array::from(vec![1_u64, 1, 2, 2]))),
+            ("UInt32", DataType::UInt32, Arc::new(UInt32Array::from(vec![1_u32, 1, 2, 2]))),
+            ("UInt16", DataType::UInt16, Arc::new(UInt16Array::from(vec![1_u16, 1, 2, 2]))),
+            ("UInt8", DataType::UInt8, Arc::new(UInt8Array::from(vec![1_u8, 1, 2, 2]))),
+            ("Float64", DataType::Float64, Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0]))),
+            ("Float32", DataType::Float32, Arc::new(Float32Array::from(vec![1.0_f32, 1.0, 2.0, 2.0]))),
+            ("Boolean", DataType::Boolean, Arc::new(BooleanArray::from(vec![false, false, true, true]))),
+        ]
+        .into_iter()
+        .map(|(name, dt, col)| (name, Field::new("x", dt, true), col))
+        .collect()
+    }
+
+    /// Stack a 2-category × 2-group batch whose category column is `(field,
+    /// col)`, returning the cumulative tops and any warnings pushed.
+    fn stack_by_category_column(
+        field: Field,
+        col: ArrayRef,
+    ) -> Result<(Vec<f64>, Vec<RenderWarning>), crate::render::RenderError> {
+        let schema = Arc::new(Schema::new(vec![
+            field,
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                col,
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(
+            &batch,
+            Some(&pos),
+            &dummy_scales(),
+            &enc_xy("x", "y", Some("g")),
+            false,
+            &mut warnings,
+        )?;
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        Ok(((0..4).map(|i| ya.value(i)).collect(), warnings))
+    }
+
+    /// Every category dtype the band ladder can enumerate cumulates to the same
+    /// tops the `Utf8` column does — the stack's groups are the bands, not the
+    /// storage.
+    ///
+    /// RED against the retired chain: only `Utf8` and `Float64` reached the
+    /// cumulation at all; the other eleven cells raised
+    /// `PositionAdjustReason::CategoryDtype`, so `expect` panics on `LargeUtf8`,
+    /// the second cell — the dtype polars hands every string column over as.
+    #[test]
+    fn stack_keys_every_category_dtype_the_band_ladder_enumerates() {
+        // Two categories, two groups, 10/20/30/40 measures: within category 1
+        // group "a" takes 10 and group "b" tops out at 30; within category 2
+        // group "a" takes 30 and group "b" tops out at 70.
+        let oracle = vec![10.0, 30.0, 30.0, 70.0];
+        for (name, field, col) in category_column_matrix() {
+            let dtype = field.data_type().clone();
+            let (tops, warnings) = stack_by_category_column(field, col)
+                .unwrap_or_else(|e| panic!("{name} must stack, as it already dodges and bands: {e}"));
+            assert_eq!(tops, oracle, "{name}: cumulative tops must match the Utf8 oracle");
+            assert!(warnings.is_empty(), "{name} must stack without a warning: {warnings:?}");
+            assert!(
+                stack_accepts_dtype(&dtype),
+                "{name}: the acceptance rule must predict the acceptance that just happened"
+            );
+        }
+    }
+
+    /// The relationship that holds between what `apply_stack` keys and what the
+    /// band ladder enumerates: every dtype the ladder can enumerate stacks, AND
+    /// `Timestamp` — which the ladder deliberately cannot enumerate — stacks
+    /// too, by exact instant.
+    ///
+    /// This is deliberately NOT a call to `col_as_identity_key_str`, which is
+    /// the function under test; it restates the contract in the terms the
+    /// crate's own gate (`ensure_category_keyable`) and the documented temporal
+    /// exception are written in, so a change to the reader's coverage has to
+    /// disagree with the rule rather than move it along.
+    ///
+    /// An earlier version of this guard asserted `acceptance ==
+    /// ensure_category_keyable`, which was too narrow rather than wrong in kind:
+    /// it encoded the premise that a stack can only bin by a *band*. A stack
+    /// over a continuous axis bins by exact value (an `Int32` x:Q stacks to its
+    /// group sum through the same reader), and `Timestamp` is exactly the dtype
+    /// whose exact value the category reader cannot spell — so equality with the
+    /// band-keyable set would have kept every stacked time series refused.
+    /// Widening it to "keyable or temporal" keeps both directions live: a
+    /// narrowing back to `Float64`/`Utf8` fails on the matrix, and a widening to
+    /// a dtype neither identity reader covers (`Duration`, `Date32`) fails on
+    /// `stack_refuses_a_column_that_cannot_identify_a_row`.
+    fn stack_accepts_dtype(dtype: &DataType) -> bool {
+        crate::render::arrow_cast::ensure_category_keyable("x", dtype).is_ok()
+            || matches!(dtype, DataType::Timestamp(_, _))
+    }
+
+    /// A stacked time series renders, and it stacks by the INSTANT: two rows
+    /// share a bin exactly when they carry the same epoch value.
+    ///
+    /// RED before this landed: every `Timestamp` category column raised, because
+    /// the category reader excludes temporal dtypes by documented contract (an
+    /// epoch read through the `f64` widening is not injective past `2^53`) and
+    /// nothing picked up the column after it declined. `mark_area(position=
+    /// Stack())` over a date x — a mainstream chart — was unrenderable.
+    ///
+    /// The oracle is the same one the category matrix uses, which is the point:
+    /// two instants behave exactly like two categories, so the cumulation is
+    /// 10 → 30 in the first bin and 30 → 70 in the second.
+    #[test]
+    fn stack_keys_a_temporal_category_column_by_its_instant() {
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::TimeUnit;
+        // Two instants, each carried by two rows (one per group). The second
+        // pair is 2^53 + 1 ms apart from the first — a magnitude at which an
+        // `f64` round-trip would collapse the two into one bin, which is why
+        // this reads the raw `i64` rather than going through `col_as_f64`.
+        let far_apart = 9_007_199_254_740_993_i64;
+        let field = Field::new("x", DataType::Timestamp(TimeUnit::Millisecond, None), true);
+        let col: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+            1_i64, 1, far_apart, far_apart,
+        ]));
+        let (tops, warnings) = stack_by_category_column(field, col)
+            .expect("a temporal category column must stack, not raise");
+        assert_eq!(
+            tops,
+            vec![10.0, 30.0, 30.0, 70.0],
+            "each instant must be its own bin, cumulating its two groups"
+        );
+        assert!(warnings.is_empty(), "a temporal stack must not warn: {warnings:?}");
+        assert!(
+            stack_accepts_dtype(&DataType::Timestamp(TimeUnit::Millisecond, None))
+                && crate::render::arrow_cast::ensure_category_keyable(
+                    "x",
+                    &DataType::Timestamp(TimeUnit::Millisecond, None)
+                )
+                .is_err(),
+            "Timestamp is the documented case where stack accepts what the band \
+             ladder cannot enumerate — if that stops being true, the acceptance \
+             rule above is no longer describing anything"
+        );
+    }
+
+    /// The refusal is exactly "neither identity reader can key this", not a
+    /// dtype list of the stack's own — and a column that genuinely cannot
+    /// identify a row still refuses, rather than binning every row together or
+    /// panicking inside the render pass.
+    ///
+    /// `Duration`/`Date32` are the honest boundary rather than a live user
+    /// shape: `_coerce.normalize_for_rust` pre-casts both to `Timestamp(ms)`
+    /// before any batch crosses the CDI boundary, so from Python this arm is
+    /// unreachable — which is the point of testing it here, where the arm can
+    /// be reached at all. `Timestamp` moved OUT of this test when the temporal
+    /// reader picked it up; it is now covered by
+    /// `stack_keys_a_temporal_category_column_by_its_instant`.
+    #[test]
+    fn stack_refuses_a_column_that_cannot_identify_a_row() {
+        use arrow::array::{Date32Array, DurationMillisecondArray};
+        use arrow::datatypes::TimeUnit;
+        let cases: Vec<(&str, Field, ArrayRef)> = vec![
+            (
+                "Duration(ms)",
+                Field::new("x", DataType::Duration(TimeUnit::Millisecond), true),
+                Arc::new(DurationMillisecondArray::from(vec![1_i64, 1, 2, 2])),
+            ),
+            (
+                "Date32",
+                Field::new("x", DataType::Date32, true),
+                Arc::new(Date32Array::from(vec![1_i32, 1, 2, 2])),
+            ),
+        ];
+        for (name, field, col) in cases {
+            let dtype = field.data_type().clone();
+            let err = stack_by_category_column(field, col)
+                .expect_err(&format!("{name} cannot identify a row, so it must refuse"));
+            let text = format!("{err}");
+            assert!(
+                text.starts_with("Stack: x must be a dtype that can identify a row"),
+                "{name}: the refusal must name the user's channel and the accepted set; got: {text}"
+            );
+            assert!(
+                text.ends_with(&format!("got {dtype:?}")),
+                "{name}: the refusal must name the offending dtype; got: {text}"
+            );
+            assert!(
+                !stack_accepts_dtype(&dtype),
+                "{name}: the acceptance rule must predict the refusal that just happened"
+            );
+        }
+    }
+
+    /// Two rows share a bin exactly when they share a BAND, which for a
+    /// `Float64` category column is not the same question as sharing a bit
+    /// pattern.
+    ///
+    /// `x = [0.0, -0.0, null, null]` is one band `"0"` (`float_as_ordinal_str`
+    /// formats both signed zeros as `"0"`) plus the `NULL_CATEGORY` band the
+    /// positional reader places a null row in — so `distinct_positional_categories`
+    /// enumerates `["0", "null"]`, two bands, and the cumulation must be two
+    /// bins: 10 → 30 in the first, 30 → 70 in the second.
+    ///
+    /// RED against the retired `to_bits` key, which answered a third thing
+    /// again: `-0.0` keyed apart from `0.0` (one band, two bins — two segments
+    /// stacked at one pixel), while both nulls keyed INTO the `0.0` bin, since
+    /// `Float64Array::value` on a null returns `0.0`. Tops came out
+    /// `[10, 20, 40, 80]`.
+    #[test]
+    fn stack_bins_by_band_not_by_float_bit_pattern() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let x: ArrayRef = Arc::new(Float64Array::from(vec![Some(0.0), Some(-0.0), None, None]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::clone(&x),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::render::arrow_cast::distinct_positional_categories(&batch, "x").unwrap(),
+            vec!["0".to_string(), "null".to_string()],
+            "premise: the ladder this stack must agree with has two bands here"
+        );
+
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let out = apply_position(
+            &batch,
+            Some(&pos),
+            &dummy_scales(),
+            &enc_xy("x", "y", Some("g")),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            (0..4).map(|i| ya.value(i)).collect::<Vec<_>>(),
+            vec![10.0, 30.0, 30.0, 70.0],
+            "the two signed zeros must cumulate together and the nulls must cumulate \
+             in their own band, matching the two bands the ladder drew"
+        );
+        let base = out
+            .column_by_name("__stack_y_base__")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(
+            (0..4).map(|i| base.value(i)).collect::<Vec<_>>(),
+            vec![0.0, 10.0, 0.0, 30.0],
+            "each band's first segment must start at 0 — a segment whose base is the \
+             other band's top is the mis-binning this pins"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2863,6 +3677,610 @@ mod tests {
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
         assert!(warnings.is_empty());
         assert_dodge_oracle(&out);
+    }
+
+    // -----------------------------------------------------------------------
+    // GH #184: Dodge and Jitter branch on the RESOLVED ScaleKind, never the
+    // band column's Arrow dtype, and read positional values through
+    // `arrow_cast::col_as_f64` instead of a bare `Float64Array` downcast.
+    //
+    // The three failure shapes the dtype gate produced, each pinned below:
+    //   (a) `Float64` column + `:N` (Ordinal scale) took the CONTINUOUS branch,
+    //       rewrote band values in data space, and the ordinal scale then found
+    //       none of them in its domain — zero bars, no warning.
+    //   (b) a non-`Float64` numeric column on a genuinely CONTINUOUS scale took
+    //       `apply_dodge_ordinal`, which had no `OrdinalScale` and returned the
+    //       batch unchanged — every dodge group overlapping, no warning.
+    //   (c) `Jitter` on an `Int64`/`Int32` continuous axis wrote a `Float64`
+    //       column into an integer schema slot and surfaced a raw Arrow schema
+    //       error.
+    // -----------------------------------------------------------------------
+
+    /// `ResolvedScales` whose x is an Ordinal scale over the numeric-formatted
+    /// domain a `Float64`/`Int64` category column produces (`"1"`/`"2"`, via
+    /// `arrow_cast`'s `float_as_ordinal_str`), y Linear. Two bands over pixel
+    /// range [0, 100] → `bandwidth() == 50`.
+    fn scales_ordinal_x_numeric_domain() -> ResolvedScales {
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["1".into(), "2".into()],
+                vec![0.0, 100.0],
+                DiscreteLayout::UNPADDED,
+            )),
+            y: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![0.0, 100.0],
+                false,
+                false,
+            )),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            x2: None,
+            y2: None,
+            y_slots: Default::default(),
+        }
+    }
+
+    /// `batch_xyg`'s shape with the x column in an arbitrary dtype: two band
+    /// values (1, 2), y 10/20/30/40, and an alternating two-level Utf8 group.
+    fn batch_xyg_with_x(x_field: Field, x_col: ArrayRef) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            x_field,
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                x_col,
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The four x columns that must all dodge and jitter identically: the same
+    /// band values 1, 1, 2, 2 in `Float64`, `Int64`, `Int32`, and `Float32`.
+    fn x_column_dtype_matrix() -> Vec<(&'static str, Field, ArrayRef)> {
+        use arrow::array::{Float32Array, Int32Array, Int64Array};
+        vec![
+            (
+                "Float64",
+                Field::new("x", DataType::Float64, false),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])) as ArrayRef,
+            ),
+            (
+                "Int64",
+                Field::new("x", DataType::Int64, false),
+                Arc::new(Int64Array::from(vec![1_i64, 1, 2, 2])) as ArrayRef,
+            ),
+            (
+                "Int32",
+                Field::new("x", DataType::Int32, false),
+                Arc::new(Int32Array::from(vec![1_i32, 1, 2, 2])) as ArrayRef,
+            ),
+            (
+                "Float32",
+                Field::new("x", DataType::Float32, false),
+                Arc::new(Float32Array::from(vec![1.0_f32, 1.0, 2.0, 2.0])) as ArrayRef,
+            ),
+        ]
+    }
+
+    /// Shape (a). A `Float64` band column on an ORDINAL scale (`x="cat:N"` over
+    /// integer-valued floats) must take the ordinal, pixel-space branch: the
+    /// band column keeps its exact values — so the ordinal scale can still find
+    /// `1`/`2` in its domain — and the sub-band offset arrives in
+    /// `__pos_x_offset__`.
+    ///
+    /// RED against the dtype gate: `Float64` passed `!= DataType::Float64`, so
+    /// this batch went down the continuous branch, which rewrote x to
+    /// 0.75/1.25/1.75/2.25 and emitted NO offset columns. The ordinal scale then
+    /// looked `"0.75"` up in `["1", "2"]`, missed, and every bar was dropped
+    /// silently. Both assertions below fail on that: `offset_col` panics on the
+    /// absent column, and the band values are not 1/1/2/2.
+    #[test]
+    fn dodge_float64_band_on_ordinal_scale_offsets_in_pixel_space() {
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = scales_ordinal_x_numeric_domain();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "ordinal-scale dodge must not warn: {warnings:?}");
+
+        // bandwidth 50, 2 groups, padding 0 → sub_band 25 → ∓12.5.
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
+        assert_eq!(offset_col(&out, "__pos_y_offset__"), vec![0.0, 0.0, 0.0, 0.0]);
+
+        // The band column is untouched — the ordinal scale resolves categories
+        // from it by string, so any data-space rewrite loses the whole layer.
+        let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            (0..4).map(|i| xa.value(i)).collect::<Vec<_>>(),
+            vec![1.0, 1.0, 2.0, 2.0],
+            "an ordinal band must not be rewritten in data space"
+        );
+    }
+
+    /// Shape (a), mirrored: the same `Float64`-on-Ordinal batch must produce the
+    /// byte-identical result its `Utf8` twin produces. The whole point of
+    /// routing by scale kind is that the dtype stops being observable.
+    #[test]
+    fn dodge_float64_band_on_ordinal_matches_utf8_twin() {
+        let numeric = apply_position(
+            &batch_xyg(),
+            Some(&PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
+            &scales_ordinal_x_numeric_domain(),
+            &enc_xy("x", "y", Some("g")),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        // `batch_cat_val_grp` is the same shape with a Utf8 band ("a"/"a"/"b"/"b")
+        // and the group column named `grp`.
+        let utf8 = apply_position(
+            &batch_cat_val_grp(),
+            Some(&PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.05 }),
+            &scales_one_ordinal(true),
+            &enc_xy("cat", "val", Some("grp")),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            offset_col(&numeric, "__pos_x_offset__"),
+            offset_col(&utf8, "__pos_x_offset__"),
+            "a numeric ordinal band must dodge exactly like its Utf8 twin"
+        );
+        assert_eq!(
+            numeric.schema().metadata(),
+            utf8.schema().metadata(),
+            "both must stamp the same dodge group count / sub-band width"
+        );
+    }
+
+    /// Shape (b). A non-`Float64` numeric band on a genuinely CONTINUOUS scale
+    /// must dodge in data space, to the same oracle offsets the `Float64` column
+    /// produces, and the rewritten column must come back as `Float64` (an
+    /// `Int64` slot cannot hold 0.75).
+    ///
+    /// RED against the dtype gate: `Int64 != Float64` routed this into
+    /// `apply_dodge_ordinal`, whose `_ => return Ok(batch.clone())` arm no-op'd
+    /// the dodge unconditionally against the `Linear` scale — x came back
+    /// 1/1/2/2 with both groups fully overlapping, no warning. `assert_dodge_oracle`
+    /// fails on the first row.
+    #[test]
+    fn dodge_non_float64_band_on_continuous_scale_actually_dodges() {
+        for (name, field, col) in x_column_dtype_matrix() {
+            let b = batch_xyg_with_x(field, col);
+            let enc = enc_xy("x", "y", Some("g"));
+            let s = dummy_scales(); // Linear x — a genuinely continuous band.
+            let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+            let mut warnings = Vec::new();
+            let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+            assert!(warnings.is_empty(), "{name}: continuous dodge must not warn: {warnings:?}");
+            assert_eq!(
+                out.schema().field(0).data_type(),
+                &DataType::Float64,
+                "{name}: a data-space rewrite must retype the band field to Float64"
+            );
+            assert_dodge_oracle(&out);
+            assert!(
+                out.schema().index_of("__pos_x_offset__").is_err(),
+                "{name}: a continuous band dodges in data space, not pixel space"
+            );
+        }
+    }
+
+    /// Shape (b) for a SPAN row: an `Int64` bin-edge pair (`x` + `x2`) on a
+    /// continuous scale subdivides its own bin, exactly as the `Float64` pair
+    /// does in `dodge_continuous_span_subdivides_the_bin_into_equal_slots`.
+    ///
+    /// RED twice over against the dtype gate: the band's `Int64` dtype sent the
+    /// batch into `apply_dodge_ordinal`'s silent clone, and even reaching the
+    /// continuous branch, the bare `Float64Array` downcast on `x2` failed, so
+    /// the span was invisible and the row dodged as a point.
+    #[test]
+    fn dodge_int64_span_subdivides_the_bin_like_its_float64_twin() {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Int64, false),
+            Field::new("bin_end", DataType::Int64, false),
+            Field::new("count", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![0_i64, 0, 2, 2])),
+                Arc::new(Int64Array::from(vec![2_i64, 2, 4, 4])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 7.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "bin_start".into(), type_: None, ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bin_end".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+            .unwrap();
+
+        let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Bins [0,2) and [2,4), padding 0, two groups → half-bin slots laid end
+        // to end from each bin's leading edge.
+        let expected = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0)];
+        for (i, (elo, ehi)) in expected.iter().enumerate() {
+            assert!(
+                (lo.value(i) - elo).abs() < 1e-9 && (hi.value(i) - ehi).abs() < 1e-9,
+                "row {i}: expected [{elo}, {ehi}], got [{}, {}]",
+                lo.value(i),
+                hi.value(i)
+            );
+        }
+        assert_eq!(out.schema().field(1).data_type(), &DataType::Float64);
+    }
+
+    /// A band column with no numeric reading at all on a CONTINUOUS scale warns
+    /// and no-ops — the same answer `resolve_group_channel` gives an
+    /// un-categorizable grouping column, and not a refusal, because the shape is
+    /// reachable (`x="cat:N"` with a numeric `CoordCartesian(xlim=…)` resolves
+    /// the categorical axis continuous) and that chart already draws nothing
+    /// before the dodge runs. The defect being fixed is the SILENCE.
+    ///
+    /// RED against the dtype gate: `Utf8 != Float64` reached
+    /// `apply_dodge_ordinal`'s unconditional `Ok(batch.clone())` against the
+    /// `Linear` scale and emitted ZERO warnings — the assertion on the warning
+    /// list fails, while the unchanged-batch assertions pass either way (the
+    /// no-op is the part that was always right).
+    #[test]
+    fn dodge_non_numeric_band_on_continuous_scale_warns_and_noops() {
+        let b = batch_xyg_with_x(
+            Field::new("x", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["p", "p", "q", "q"])) as ArrayRef,
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut warnings)
+            .expect("a Utf8 band on a continuous scale degrades, it does not refuse");
+        assert_eq!(out.schema(), b.schema(), "the batch must come back untouched");
+        assert_eq!(warnings.len(), 1, "expected exactly one warning, got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::PositionAdjustSkipped { adjustment, reason } => {
+                assert_eq!(adjustment, "dodge");
+                assert!(reason.contains("'x'"), "must name the band column: {reason}");
+                assert!(reason.contains("Utf8"), "must name the dtype: {reason}");
+            }
+            other => panic!("wrong warning variant: {other:?}"),
+        }
+    }
+
+    /// Shape (c). `Jitter` on a non-`Float64` continuous axis renders instead of
+    /// raising, and — spec §9 — produces bit-identical output across
+    /// `Float64`/`Int64`/`Int32`/`Float32` for the same data, on BOTH the
+    /// explicit-seed path and the `seed: None` hash path.
+    ///
+    /// RED against the bare downcast: `Int64`/`Int32`/`Float32` all failed it,
+    /// so every `xv` was `NaN`, the rewritten column was all-`NaN`, and
+    /// `RecordBatch::try_new` rejected a `Float64` array in an integer slot —
+    /// `unwrap()` panics with "column types must match schema types". `Float32`
+    /// reached the same error; it never even got as far as the comparison.
+    #[test]
+    fn jitter_continuous_axis_is_dtype_invariant() {
+        for seed in [Some(42_u64), None] {
+            let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed };
+            let enc = enc_xy("x", "y", Some("g"));
+            let mut reference: Option<Vec<u64>> = None;
+            for (name, field, col) in x_column_dtype_matrix() {
+                let b = batch_xyg_with_x(field, col);
+                let out =
+                    apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+                        .unwrap_or_else(|e| panic!("{name} (seed {seed:?}) must jitter: {e}"));
+                assert_eq!(
+                    out.schema().field(0).data_type(),
+                    &DataType::Float64,
+                    "{name}: the jittered column must be retyped to Float64"
+                );
+                let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+                let bits: Vec<u64> = (0..4).map(|i| xa.value(i).to_bits()).collect();
+                // Sanity on the values themselves, not just their agreement: each
+                // lands within ±width/2 of its own band value.
+                for (i, want) in [1.0, 1.0, 2.0, 2.0].iter().enumerate() {
+                    assert!(
+                        (xa.value(i) - want).abs() <= 0.25 + 1e-12,
+                        "{name} row {i}: {} is outside ±0.25 of {want}",
+                        xa.value(i)
+                    );
+                }
+                match &reference {
+                    None => reference = Some(bits),
+                    Some(want) => assert_eq!(
+                        &bits, want,
+                        "{name} (seed {seed:?}) jittered differently from Float64 — \
+                         jitter must not vary with the dtype the data arrived in"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The silent half of shape (c): on an ORDINAL band the column is never
+    /// rewritten, so a failed downcast only corrupted the `seed: None` hash key
+    /// (`format!("{xv}|{yv}")` read `NaN`) — identical charts jittered
+    /// differently by dtype, with nothing raised and nothing warned. The pixel
+    /// offsets must now agree across the numeric family.
+    ///
+    /// RED against the bare downcast: `Int64`/`Int32`/`Float32` seeded from
+    /// `"NaN|10"` while `Float64` seeded from `"1|10"`, so the three
+    /// `__pos_x_offset__` vectors differed from the `Float64` one in every row.
+    #[test]
+    fn jitter_ordinal_band_hash_seed_is_dtype_invariant() {
+        let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.4, seed: None };
+        let enc = enc_xy("x", "y", Some("g"));
+        let mut reference: Option<Vec<f64>> = None;
+        for (name, field, col) in x_column_dtype_matrix() {
+            let b = batch_xyg_with_x(field, col);
+            let out = apply_position(
+                &b,
+                Some(&pos),
+                &scales_ordinal_x_numeric_domain(),
+                &enc,
+                false,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let offsets = offset_col(&out, "__pos_x_offset__");
+            assert!(
+                offsets.iter().all(|o| o.is_finite() && o.abs() <= 0.4 * 50.0 / 2.0 + 1e-12),
+                "{name}: offsets must stay inside ±width·bandwidth/2: {offsets:?}"
+            );
+            match &reference {
+                None => reference = Some(offsets),
+                Some(want) => assert_eq!(
+                    &offsets, want,
+                    "{name}: the hash seed must not vary with the column's dtype"
+                ),
+            }
+        }
+    }
+
+    /// `Jitter`'s twin of the case above, and deliberately the SAME answer: a
+    /// `Utf8` axis the scales call continuous warns and leaves the column alone.
+    /// The two adjustments must not disagree about one input pathology.
+    ///
+    /// RED against the bare downcast: the column was rewritten as all-`NaN`
+    /// `Float64` into the `Utf8` slot, so this raised with a raw Arrow schema
+    /// message ("column types must match schema types") instead of warning —
+    /// `expect` fails before any assertion below is reached.
+    #[test]
+    fn jitter_non_numeric_continuous_axis_warns_and_leaves_the_column_alone() {
+        let b = batch_xyg_with_x(
+            Field::new("x", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["p", "p", "q", "q"])) as ArrayRef,
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(7) };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut warnings)
+            .expect("a Utf8 axis degrades, it does not raise an Arrow schema error");
+        let xa = out.column(0).as_any().downcast_ref::<StringArray>().expect("still Utf8");
+        assert_eq!((0..4).map(|i| xa.value(i)).collect::<Vec<_>>(), vec!["p", "p", "q", "q"]);
+        assert_eq!(warnings.len(), 1, "expected exactly one warning, got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::PositionAdjustSkipped { adjustment, reason } => {
+                assert_eq!(adjustment, "jitter");
+                assert!(reason.contains("'x'"), "must name the column: {reason}");
+                assert!(reason.contains("Utf8"), "must name the dtype: {reason}");
+            }
+            other => panic!("wrong warning variant: {other:?}"),
+        }
+    }
+
+    /// A null band value on a continuous dodge stays null. The span branch has
+    /// always stated this rule; the point branch read the raw buffer slot under
+    /// the null (`Float64Array::value` on a null is 0.0 in practice, undefined
+    /// by contract) and emitted a NON-null mark at `0.0 + offset` — a row the
+    /// batch could never draw, turned into one drawn at the wrong place.
+    #[test]
+    fn dodge_continuous_point_keeps_a_null_band_null() {
+        let b = batch_xyg_with_x(
+            Field::new("x", DataType::Float64, true),
+            Arc::new(Float64Array::from(vec![Some(1.0), None, Some(2.0), Some(2.0)])) as ArrayRef,
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+            .unwrap();
+        let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(xa.is_null(1), "a null band value must stay null, got {}", xa.value(1));
+        // The non-null rows still dodge: uniques {1, 2} → bandwidth 1, two
+        // groups → ∓0.25.
+        assert!((xa.value(0) - 0.75).abs() < 1e-9, "row0 x={}", xa.value(0));
+        assert!((xa.value(2) - 1.75).abs() < 1e-9, "row2 x={}", xa.value(2));
+        assert!((xa.value(3) - 2.25).abs() < 1e-9, "row3 x={}", xa.value(3));
+    }
+
+    // ---- GH #184 end to end, through `render_svg` --------------------------
+    //
+    // The unit tests above pin the position arithmetic; these two pin the thing
+    // the issue actually reports — bars present, and bars separated — through
+    // the full pipeline, because that is the consequence a `position.rs` unit
+    // test cannot see: the ordinal scale's category lookup happens downstream,
+    // in the mark drawer, and it is what silently dropped every rect.
+
+    /// Render a two-band, two-group dodged bar chart whose category column has
+    /// the given dtype and declared encoding type. Returns the SVG and the
+    /// sorted left edges of the bar rects.
+    ///
+    /// `x_scale_json` is spliced into the x channel: the continuous cases pass
+    /// an explicit domain wide enough to hold the dodged positions, since a
+    /// data-derived `[1, 2]` domain clips the outer sub-slots and would hide
+    /// the very separation under test. The batch and the declared type are the
+    /// only things that vary between twins, so any render difference is theirs.
+    fn dodge_bar_svg(
+        declared_type: &str,
+        x_scale_json: &str,
+        cat_field: Field,
+        cat_col: ArrayRef,
+    ) -> (String, Vec<f64>) {
+        let spec: ChartSpec = serde_json::from_str(&format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"bar",
+                 "encoding":{{"x":{{"field":"cat","type":"{declared_type}"{x_scale_json}}},
+                              "y":{{"field":"val","type":"quantitative"}},
+                              "color":{{"field":"g","type":"nominal"}}}},
+                 "position":{{"type":"dodge","by":"g","padding":0.0}}}}"#
+        ))
+        .expect("spec JSON");
+        let schema = Arc::new(Schema::new(vec![
+            cat_field,
+            Field::new("val", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                cat_col,
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap();
+        let out = crate::render::render_svg(
+            &spec,
+            &batch,
+            &crate::render::ThemeInputs::default(),
+            crate::render::Viewport { width: 640.0, height: 480.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("render");
+        let bars = bar_rect_lefts(&out.bytes, out.layout.panels[0].plot_area);
+        (out.bytes, bars)
+    }
+
+    /// The left edges of the filled `<rect>`s that fall inside `plot` — the bar
+    /// marks. The plot-area rect itself carries no `fill` (this repo's
+    /// single-structural-property convention, see `tests/_svg_rects.py`'s
+    /// `plot_rect`) and legend swatches sit outside the plot area.
+    fn bar_rect_lefts(svg: &str, plot: Rect) -> Vec<f64> {
+        let mut lefts = Vec::new();
+        for frag in svg.split("<rect ").skip(1) {
+            let frag = &frag[..frag.find('>').unwrap_or(frag.len())];
+            if !frag.contains("fill=\"") {
+                continue;
+            }
+            let attr = |name: &str| -> Option<f64> {
+                let at = frag.find(&format!("{name}=\""))? + name.len() + 2;
+                frag[at..].find('"').and_then(|end| frag[at..at + end].parse().ok())
+            };
+            let (Some(x), Some(w)) = (attr("x"), attr("width")) else { continue };
+            if x >= plot.x - 1e-6 && x + w <= plot.x + plot.w + 1e-6 {
+                lefts.push(x);
+            }
+        }
+        lefts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        lefts
+    }
+
+    /// Shape (a), end to end and as the issue words it: a `Float64` category
+    /// column declared `:N` with `Dodge` renders its bars — four of them, at
+    /// four distinct positions — and renders byte-identically to the `Utf8`
+    /// column carrying the same category labels.
+    ///
+    /// RED against the dtype gate: the `Float64` render emitted ZERO bar rects
+    /// (`bars` empty, so the count assertion fails first) because the continuous
+    /// branch moved x to 0.75/1.25/1.75/2.25 and the ordinal scale found none of
+    /// those in its `["1", "2"]` domain. The `Utf8` twin was unaffected, so the
+    /// byte-equality assertion failed too.
+    #[test]
+    fn float64_nominal_dodge_renders_the_same_bars_as_its_utf8_twin() {
+        let (float_svg, float_bars) = dodge_bar_svg(
+            "nominal",
+            "",
+            Field::new("cat", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])) as ArrayRef,
+        );
+        assert_eq!(
+            float_bars.len(),
+            4,
+            "two bands x two dodge groups must draw four bars; got {float_bars:?}"
+        );
+        let mut distinct = float_bars.clone();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 4, "each bar needs its own sub-slot; got {float_bars:?}");
+
+        let (utf8_svg, utf8_bars) = dodge_bar_svg(
+            "nominal",
+            "",
+            Field::new("cat", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["1", "1", "2", "2"])) as ArrayRef,
+        );
+        assert_eq!(float_bars, utf8_bars);
+        // The category labels are identical strings, so the axis, the layout and
+        // every mark must be too: the dtype is not supposed to be observable.
+        assert_eq!(
+            float_svg, utf8_svg,
+            "a Float64 ':N' category column must render byte-identically to its Utf8 twin"
+        );
+    }
+
+    /// Shape (b), end to end: an `Int64` band on a genuinely CONTINUOUS scale
+    /// (the `native_scale=True` shape) separates its dodge groups, and renders
+    /// byte-identically to the `Float64` column carrying the same values.
+    ///
+    /// RED against the dtype gate: `Int64 != Float64` routed the batch into
+    /// `apply_dodge_ordinal`, which had no `OrdinalScale` and returned it
+    /// unchanged — two bar positions instead of four, the two groups drawn on
+    /// top of each other, and no warning. The `Float64` twin dodged correctly,
+    /// so the byte-equality assertion failed as well.
+    #[test]
+    fn int64_continuous_dodge_separates_its_groups_like_its_float64_twin() {
+        const DOMAIN: &str = r#","scale":{"type":"linear","domain":[0.0,3.0]}"#;
+        let (int_svg, int_bars) = dodge_bar_svg(
+            "quantitative",
+            DOMAIN,
+            Field::new("cat", DataType::Int64, false),
+            Arc::new(arrow::array::Int64Array::from(vec![1_i64, 1, 2, 2])) as ArrayRef,
+        );
+        assert_eq!(
+            int_bars.len(),
+            4,
+            "two bands x two dodge groups must draw four bars; got {int_bars:?}"
+        );
+        let mut distinct = int_bars.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "a continuous dodge must give each group its own position; got {int_bars:?}"
+        );
+
+        let (float_svg, float_bars) = dodge_bar_svg(
+            "quantitative",
+            DOMAIN,
+            Field::new("cat", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])) as ArrayRef,
+        );
+        assert_eq!(int_bars, float_bars);
+        assert_eq!(
+            int_svg, float_svg,
+            "an Int64 continuous band must render byte-identically to its Float64 twin"
+        );
     }
 
     // -----------------------------------------------------------------------

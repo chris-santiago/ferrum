@@ -8,7 +8,7 @@ use ferrum_scene::{
 use crate::layout::{AxisLayout, LayoutResult, Rect, ResolveMode, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
-use super::arrow_cast::{col_as_ordinal_category_str, col_as_temporal_epoch_str};
+use super::arrow_cast::col_as_identity_key_str;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
@@ -2207,9 +2207,11 @@ fn extract_keys(
     data_indices: Option<&[usize]>,
 ) -> Option<Vec<String>> {
     let key_enc = encoding.key.as_ref()?;
-    let col = col_as_ordinal_category_str(batch, &key_enc.field)
-        .ok()
-        .or_else(|| col_as_temporal_epoch_str(batch, &key_enc.field).ok())?;
+    // The category-reader-else-temporal-epoch pairing this function used to
+    // spell inline is `arrow_cast::col_as_identity_key_str`; `apply_stack`
+    // became its second caller (#184), and a second hand-copy is how the two
+    // would have ended up covering different dtype sets.
+    let col = col_as_identity_key_str(batch, &key_enc.field).ok()?;
     let indices = data_indices?;
     Some(
         indices
@@ -3658,6 +3660,7 @@ mod tests {
             },
             nice: false,
             zero: false,
+            system_injected: false,
         }
     }
 
@@ -5910,6 +5913,85 @@ mod tests {
             unique.len(), n,
             "50 distinct present-day timestamps must produce 50 distinct keys, not 1"
         );
+    }
+
+    /// GH #184 cross-module follow-through, measured rather than reasoned.
+    ///
+    /// `extract_keys` reads the POST-position batch — line 1569 above shadows
+    /// `layer_batch` with `apply_position`'s output — so a `key=` bound to the
+    /// same column a CONTINUOUS dodge rewrites in data space reads the rewritten
+    /// column. #184 widened which dtypes reach that branch (an `Int*`/`UInt*`/
+    /// `Float32`/`Timestamp` band now dodges where it used to hit a silent
+    /// no-op) and retypes the rewritten column to `Float64`, so the open question
+    /// was whether keys change shape. Two separable facts, both pinned here:
+    ///
+    /// 1. **The retype is key-neutral.** Epoch values in a `Timestamp` column
+    ///    (via `col_as_temporal_epoch_str`) and the identical epochs in a
+    ///    `Float64` column (via `col_as_ordinal_category_str`, whose
+    ///    `float_as_ordinal_str` integer-formats whole-valued floats) produce
+    ///    BYTE-IDENTICAL keys. The feared "float-formatted keys instead of
+    ///    epoch ints" does not occur for whole values.
+    /// 2. **The offset is not.** The dodge sub-band offset shifts the key
+    ///    values, because the key is read from the moved column. This is
+    ///    pre-existing behavior for `Float64` bands, which this branch has always
+    ///    rewritten in place; #184 only widens the set of dtypes that reach it.
+    ///    Keys stay injective (distinct rows keep distinct keys) and the offset is
+    ///    uniform within a dodge group, so keyed transitions remain stable across
+    ///    updates that do not change the group count.
+    #[test]
+    fn extract_keys_is_unchanged_by_a_float64_retype_but_moves_with_a_dodge_offset() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let epochs: Vec<i64> = vec![1_767_225_600_000, 1_767_225_601_000];
+        let encoding = Encoding {
+            key: Some(EncodingSpec { field: "t".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let idx = [0usize, 1];
+        let float_batch = |vals: Vec<f64>| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("t", DataType::Float64, false)])),
+                vec![Arc::new(Float64Array::from(vals))],
+            )
+            .unwrap()
+        };
+
+        let ts_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "t",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            )])),
+            vec![Arc::new(TimestampMillisecondArray::from(epochs.clone()))],
+        )
+        .unwrap();
+        let ts_keys = extract_keys(&encoding, &ts_batch, Some(&idx));
+        assert_eq!(
+            ts_keys,
+            Some(vec!["1767225600000".to_string(), "1767225601000".to_string()])
+        );
+
+        // Fact 1: retyping the same epochs to Float64 does not move the keys.
+        let retyped = float_batch(epochs.iter().map(|e| *e as f64).collect());
+        assert_eq!(
+            extract_keys(&encoding, &retyped, Some(&idx)),
+            ts_keys,
+            "a Timestamp->Float64 retype must not change the key strings for whole values"
+        );
+
+        // Fact 2: the dodge offset does move them (here a -250ms sub-band
+        // offset), and they stay distinct.
+        let dodged = float_batch(epochs.iter().map(|e| *e as f64 - 250.0).collect());
+        let dodged_keys = extract_keys(&encoding, &dodged, Some(&idx)).unwrap();
+        assert_eq!(
+            dodged_keys,
+            vec!["1767225599750".to_string(), "1767225600750".to_string()],
+            "keys are read off the offset column, so they carry the offset"
+        );
+        assert_ne!(dodged_keys[0], dodged_keys[1], "keys must stay injective");
     }
 
     /// **Boolean key column** (GH #93): a residual silent-drop gap distinct
@@ -9716,6 +9798,7 @@ mod tests {
             },
             nice: false,
             zero: true,
+            system_injected: false,
         };
         spec.encoding.y = Some(EncodingSpec {
             field: "v".into(),
@@ -10112,6 +10195,7 @@ mod tests {
                 domain_param: None, reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -10275,6 +10359,7 @@ mod tests {
                 domain_param: None, reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         let spec = ChartSpec {
             data: DataRef::default(),

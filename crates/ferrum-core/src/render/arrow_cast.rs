@@ -262,6 +262,42 @@ pub(crate) fn col_as_temporal_epoch_str(
     }
 }
 
+/// Per-row **identity key** for any column that must partition rows by value:
+/// [`col_as_ordinal_category_str`] for every dtype the ordinal band ladder
+/// enumerates, falling back to [`col_as_temporal_epoch_str`] for `Timestamp`,
+/// which the first deliberately excludes.
+///
+/// The two readers are complements, not alternatives: between them they cover
+/// every dtype that can identify a row, and each is injective over the dtypes it
+/// claims (with the documented `float_as_ordinal_str` saturation caveat above
+/// `2^53`/`2^63` for floats). "Which value is this row" is therefore one
+/// question with one answer, rather than a pairing each caller re-derives.
+///
+/// Two callers ask it. `scene_build::extract_keys` needs an injective row →
+/// string map for a `key=` column (GH #93). `position::apply_stack` needs the
+/// bin identity for its category axis (#184): a stack over a *category* axis
+/// must bin exactly as the band ladder does, which the first reader guarantees
+/// by construction, and a stack over a *continuous* axis bins by exact value —
+/// which is why a temporal x, whose exact value is an epoch and whose band
+/// ladder does not exist, must key through the second reader rather than be
+/// refused. Before this existed, `extract_keys` spelled the pairing inline and
+/// `apply_stack` did not know about it at all, so a stacked time series raised.
+///
+/// Nulls stay `None`, as in both underlying readers; a caller that needs them
+/// placed (e.g. into the [`NULL_CATEGORY`] band) maps them itself.
+pub(crate) fn col_as_identity_key_str(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<Option<String>>, RenderError> {
+    match col_as_ordinal_category_str(batch, field) {
+        Ok(keys) => Ok(keys),
+        // The category reader's refusal is the more informative of the two for
+        // every dtype neither covers, so it is the one returned when the
+        // temporal fallback also declines.
+        Err(category_err) => col_as_temporal_epoch_str(batch, field).map_err(|_| category_err),
+    }
+}
+
 /// Distinct categories for a **positional** (x:N / y:N) ordinal domain, with a
 /// null row surfaced as its own [`NULL_CATEGORY`] category (FA-9).
 ///
@@ -1330,5 +1366,134 @@ mod tests {
             "the table must exercise both sides of the predicate; got \
              {admitted} admitted / {refused} refused"
         );
+    }
+
+    /// [`col_as_identity_key_str`] is exactly the union of its two readers: it
+    /// delegates unchanged for every dtype the category reader claims, picks up
+    /// `Timestamp` from the temporal reader, and refuses what neither covers.
+    ///
+    /// The union is what both callers rely on for different halves.
+    /// `extract_keys` needs the temporal arm (a `key=` column may be a
+    /// timestamp); `apply_stack` needs the delegation to be *byte-exact*, since
+    /// its bins must coincide with the band ladder wherever a ladder exists —
+    /// a union that reformatted anything on the way through would move a stack
+    /// off its bands while still "working".
+    #[test]
+    fn identity_key_reader_is_the_union_of_the_category_and_temporal_readers() {
+        use arrow::datatypes::TimeUnit;
+        let delegating = [
+            DataType::Utf8, DataType::LargeUtf8,
+            DataType::Int64, DataType::Int32, DataType::Int16, DataType::Int8,
+            DataType::UInt64, DataType::UInt32, DataType::UInt16, DataType::UInt8,
+            DataType::Float64, DataType::Float32, DataType::Boolean,
+        ];
+        for dtype in &delegating {
+            let batch = one_elem_batch_for_dtype(dtype);
+            assert_eq!(
+                col_as_identity_key_str(&batch, "v").unwrap(),
+                col_as_ordinal_category_str(&batch, "v").unwrap(),
+                "{dtype:?}: the identity reader must delegate byte-exactly, not reformat"
+            );
+        }
+
+        // Timestamp: the category reader declines by documented contract, the
+        // temporal reader answers, and the union returns the temporal answer —
+        // the raw epoch, injective past the f64 mantissa.
+        for unit in [TimeUnit::Second, TimeUnit::Millisecond, TimeUnit::Microsecond, TimeUnit::Nanosecond] {
+            let dtype = DataType::Timestamp(unit, None);
+            let batch = one_elem_batch_for_dtype(&dtype);
+            assert!(col_as_ordinal_category_str(&batch, "v").is_err(), "{unit:?}: premise");
+            assert_eq!(
+                col_as_identity_key_str(&batch, "v").unwrap(),
+                col_as_temporal_epoch_str(&batch, "v").unwrap(),
+                "{unit:?}: the identity reader must return the temporal reader's epoch string"
+            );
+        }
+
+        // Neither reader covers these, so the union refuses — and it refuses
+        // with the CATEGORY reader's message, which is the informative one.
+        for dtype in [DataType::Duration(TimeUnit::Millisecond), DataType::Date32, DataType::Date64] {
+            let batch = one_elem_batch_for_dtype(&dtype);
+            let err = col_as_identity_key_str(&batch, "v").unwrap_err();
+            assert_eq!(
+                format!("{err}"),
+                format!("{}", col_as_ordinal_category_str(&batch, "v").unwrap_err()),
+                "{dtype:?}: the union must surface the category reader's refusal"
+            );
+        }
+    }
+
+    /// The two category readers must agree on the STRINGS, not merely on which
+    /// dtypes they accept: [`distinct_values_in_order`]'s output must be exactly
+    /// [`col_as_ordinal_category_str`]'s per-row output deduplicated in
+    /// encounter order, for every dtype in the set.
+    ///
+    /// Both functions' doc comments state this ("must agree exactly with"), and
+    /// `float64_distinct_values_and_category_str_agree` above pins it for
+    /// `Float64` — the dtype where the formatting rule is non-trivial. It was
+    /// unpinned for the other twelve, which matters because consumers now rely
+    /// on the equality as a *partition* guarantee rather than a display one:
+    /// `render::position::apply_stack` keys its stack bins through the per-row
+    /// reader precisely so that two rows share a bin exactly when they share a
+    /// band from the domain builder (#184). A dtype where the two formatted
+    /// differently would silently split one band's rows across two stacks.
+    #[test]
+    fn category_readers_produce_the_same_strings_for_every_dtype_they_accept() {
+        use arrow::array::Float32Array;
+        // Each row: duplicated values in a deliberately non-sorted encounter
+        // order, so a reader that sorted or deduplicated differently shows up.
+        let cases: Vec<(&str, DataType, Arc<dyn Array>)> = vec![
+            ("Utf8", DataType::Utf8, Arc::new(StringArray::from(vec![Some("b"), Some("a"), Some("b"), None]))),
+            ("LargeUtf8", DataType::LargeUtf8, Arc::new(LargeStringArray::from(vec![Some("b"), Some("a"), Some("b"), None]))),
+            ("Int64", DataType::Int64, Arc::new(arrow::array::Int64Array::from(vec![Some(-2i64), Some(7), Some(-2), None]))),
+            ("Int32", DataType::Int32, Arc::new(Int32Array::from(vec![Some(-2i32), Some(7), Some(-2), None]))),
+            ("Int16", DataType::Int16, Arc::new(arrow::array::Int16Array::from(vec![Some(-2i16), Some(7), Some(-2), None]))),
+            ("Int8", DataType::Int8, Arc::new(Int8Array::from(vec![Some(-2i8), Some(7), Some(-2), None]))),
+            ("UInt64", DataType::UInt64, Arc::new(arrow::array::UInt64Array::from(vec![Some(9u64), Some(3), Some(9), None]))),
+            ("UInt32", DataType::UInt32, Arc::new(UInt32Array::from(vec![Some(9u32), Some(3), Some(9), None]))),
+            ("UInt16", DataType::UInt16, Arc::new(arrow::array::UInt16Array::from(vec![Some(9u16), Some(3), Some(9), None]))),
+            ("UInt8", DataType::UInt8, Arc::new(UInt8Array::from(vec![Some(9u8), Some(3), Some(9), None]))),
+            // Whole and fractional together: the `float_as_ordinal_str` rule
+            // both readers share is the only reason these two agree at all.
+            ("Float64", DataType::Float64, Arc::new(Float64Array::from(vec![Some(2000.0), Some(1.5), Some(2000.0), None]))),
+            ("Float32", DataType::Float32, Arc::new(Float32Array::from(vec![Some(2000.0f32), Some(1.5), Some(2000.0), None]))),
+            ("Boolean", DataType::Boolean, Arc::new(BooleanArray::from(vec![Some(true), Some(false), Some(true), None]))),
+        ];
+        for (name, dtype, col) in cases {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", dtype, true)]));
+            let batch = RecordBatch::try_new(schema, vec![col]).unwrap();
+
+            let domain = distinct_values_in_order(&batch, "v").unwrap();
+            let per_row = col_as_ordinal_category_str(&batch, "v").unwrap();
+
+            let mut deduped: Vec<String> = Vec::new();
+            for s in per_row.iter().flatten() {
+                if !deduped.contains(s) {
+                    deduped.push(s.clone());
+                }
+            }
+            assert_eq!(
+                domain, deduped,
+                "{name}: the domain builder and the per-row reader disagree on the strings"
+            );
+            assert_eq!(domain.len(), 2, "{name}: the case must carry a duplicate to dedup");
+            assert_eq!(per_row[3], None, "{name}: a null row must stay None for the base reader");
+
+            // The positional pair adds exactly one band for the null row and
+            // keys that row into it — the agreement `apply_stack` binds to.
+            let pos_domain = distinct_positional_categories(&batch, "v").unwrap();
+            let pos_rows = col_as_positional_category_str(&batch, "v").unwrap();
+            assert_eq!(
+                pos_domain,
+                [domain.as_slice(), &[NULL_CATEGORY.to_string()]].concat(),
+                "{name}: the positional ladder must be the base domain plus the null band"
+            );
+            for s in pos_rows.iter().flatten() {
+                assert!(
+                    pos_domain.contains(s),
+                    "{name}: per-row band {s:?} is absent from the ladder {pos_domain:?}"
+                );
+            }
+        }
     }
 }
