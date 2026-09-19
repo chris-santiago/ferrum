@@ -415,6 +415,28 @@ class SpecBuildMixin:
                     and _scale_type_accepts_zero(_scale_type)
                 ):
                     d["scale"] = {"type": _scale_type or "linear", **scale, "zero": True}
+                    # #247A provenance: mark the scale as OURS, not the caller's,
+                    # but only when this injection authored the whole thing.
+                    # Rust's two "is there an explicit scale here" gates --
+                    # `composite::leaf_positional_domain`'s sharing exclusion and
+                    # `positional::build_axis_scale`'s bypass -- could otherwise
+                    # only ask `scale.is_some()`, so a layered bar leaf was locked
+                    # out of the cross-leaf domain union in both directions and
+                    # every sibling layer drew against a scale the rendered ticks
+                    # did not describe (`fm.layer(bar(1..3), point(40..80))` showed
+                    # a 0..3 axis). Rust honors the `zero` anchor on the shared
+                    # path, so nothing about a bar's baseline changes.
+                    #
+                    # Withheld when the caller wrote a `scale=` of their own that
+                    # this block merely ADDED `zero` to (or an
+                    # `override(y_scale_*=...)` leaf did, merged just above): their
+                    # `padding`/`nice`/`range`/`clamp` are real intent, and the
+                    # explicit-scale path is the only one that honors those. Such a
+                    # leaf keeps today's behavior -- it stays out of the union,
+                    # deliberately, because it is a user scale with our anchor on
+                    # top rather than our scale outright.
+                    if not scale:
+                        d["scale"]["systemInjected"] = True
             # D5b: strip ``stack=`` on marks that cannot honor stacking and emit
             # a one-time UserWarning.  Only ``bar`` and ``area`` consume the
             # ``__stack_y_base__`` column emitted by ``apply_stack``; every other

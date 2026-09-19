@@ -76,6 +76,11 @@ pub(in crate::render) use self::domain::encoding_explicit_extent;
 // `connect_to` resolution — see the `mod positional` doc above for why this
 // is a re-export rather than a wider module visibility.
 pub(in crate::render) use self::positional::{data_pixel_x, data_pixel_y};
+// The zero-anchor's "widen this extent to include zero" arithmetic, shared with
+// `render::composite`'s resolve pass so a system-injected bar scale's anchor
+// reaches the cross-leaf union it now participates in (#247A) through the same
+// two guarded assignments the explicit path applies, not a second copy of them.
+pub(in crate::render) use self::positional::extend_extent_to_zero;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

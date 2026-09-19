@@ -295,6 +295,20 @@ class TestScaleParity:
         )
 
 
+#: Declared, deliberate wire additions the frozen baseline predates, as
+#: ``name -> (baseline substring, what the current wire emits in its place)``.
+#:
+#: ``band``'s baseline chart is the one `mark_bar` among the 14, so its y
+#: encoding carries the bar zero-anchor's injected scale — which now also carries
+#: the ``systemInjected`` provenance key (#247A) that lets Rust tell ferrum's own
+#: injection from a caller's explicit scale, instead of excluding a zero-anchored
+#: bar leaf from every cross-leaf domain union. The key is additive and skipped
+#: when unset, so nothing else in the fixture moves.
+_BASELINE_WIRE_ADDITIONS: dict[str, tuple[str, str]] = {
+    "band": ('"zero":true', '"zero":true,"systemInjected":true'),
+}
+
+
 class TestByteIdentity:
     """to_json() is byte-identical to the pre-change baseline for all 14 scale types."""
 
@@ -318,11 +332,32 @@ class TestByteIdentity:
         ],
     )
     def test_to_json_matches_baseline(self, name: str):
-        """Chart.to_json() is byte-identical to the frozen pre-change baseline."""
+        """Chart.to_json() is byte-identical to the frozen pre-change baseline,
+        plus exactly the wire additions this suite declares in
+        :data:`_BASELINE_WIRE_ADDITIONS`.
+
+        The claim is unchanged for 13 of the 14 names. For the one whose
+        baseline chart is a ``mark_bar`` (``band``), the claim is now "identical
+        except for one named, verbatim addition" rather than "identical": the
+        fixture is captured from a frozen ref (see this module's docstring —
+        regeneration from the working tree would make this guard a tautology),
+        so a deliberate additive wire key can never appear in it, and expressing
+        the delta here is the only way to keep the byte-exactness the guard is
+        for. Writing the delta out in full is what keeps this from being a
+        rebaseline: an unrelated drift still fails, and so does the addition
+        silently disappearing (the ``old in expected`` guard below).
+        """
         baseline = _load_baseline()
         charts = _build_baseline_charts()
         actual = charts[name].to_json()
         expected = baseline[name]
+        if name in _BASELINE_WIRE_ADDITIONS:
+            old, new = _BASELINE_WIRE_ADDITIONS[name]
+            assert old in expected, (
+                f"'{name}' baseline no longer contains {old!r}; the declared wire "
+                "addition is stale and this entry must be re-examined, not adjusted"
+            )
+            expected = expected.replace(old, new)
         assert actual == expected, (
             f"to_json() for '{name}' scale differs from baseline.\n"
             f"Expected: {expected}\n"

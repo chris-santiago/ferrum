@@ -44,8 +44,9 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    distinct_positional_categories_shared, distinct_values_in_order, infer_spec_type, locate_field,
-    numeric_domain_union, numeric_extent, Channel, LeafScaleContext, SharedDomain,
+    distinct_positional_categories_shared, distinct_values_in_order, extend_extent_to_zero,
+    infer_spec_type, locate_field, numeric_domain_union, numeric_extent, Channel,
+    LeafScaleContext, SharedDomain,
 };
 use crate::render::RenderError;
 use crate::spec::chart::ChartSpec;
@@ -585,7 +586,10 @@ fn leaf_channel_domain(
 ///
 /// Non-participation (returns `None`):
 /// - the channel has no encoding on this leaf;
-/// - the channel carries an explicit user `enc.scale` (user scale wins, spec §6);
+/// - the channel carries an explicit user `enc.scale` (user scale wins, spec §6)
+///   — a scale ferrum itself injected is NOT one of these and DOES participate,
+///   carrying its zero anchor into its own contribution (#247A; see
+///   `ScaleSpec::Linear`'s `system_injected`);
 /// - the leaf is faceted with `Independent` resolution on this channel (its
 ///   internal per-panel resolution is preserved — pdp `compare=` independent-x).
 ///
@@ -614,9 +618,19 @@ fn leaf_positional_domain(
 
     // Explicit user scale bypasses sharing (must remain distinguishable so it
     // still short-circuits at the existing explicit-scale path — D4b).
-    if enc.scale.is_some() {
-        return Ok(None);
-    }
+    //
+    // #247A: "user scale" is the whole point of the rule, and until this field
+    // existed the question could only be asked as `is_some()`. A scale ferrum's
+    // own spec build injected is not the user's, so it does NOT buy the leaf out
+    // of sharing — see `ScaleSpec::Linear`'s `system_injected` doc for what
+    // produces one and why the alternative (deleting the injection) was
+    // rejected. The anchor it asked for travels into the union below instead of
+    // being lost with the bypass it no longer takes.
+    let injected_zero = match enc.scale.as_ref() {
+        Some(s) if !s.is_system_injected() => return Ok(None),
+        Some(s) => s.anchors_zero(),
+        None => false,
+    };
 
     // Faceted child keeps its internal facet resolution: an outer node shares
     // only the child's outer scales. A channel the leaf resolves `Independent`
@@ -664,6 +678,23 @@ fn leaf_positional_domain(
                 source,
                 coord_flipped,
             })?;
+            // #247A: the leaf kept its injected scale's zero anchor by taking
+            // the explicit bypass; now that it shares instead, the anchor has to
+            // travel with its CONTRIBUTION or it would be silently dropped
+            // (`fm.layer(bar(1..3), point(40..80))` would union to `1..80`, not
+            // the `0..80` a bar promises). Applied to this leaf's extent, not to
+            // the group union, so a sibling leaf never inherits an anchor its own
+            // mark never asked for.
+            //
+            // Dtype-blind, like the auto path's own layered-bar anchor
+            // (`domain::layer_wants_bar_zero_anchor`, which is reached from both
+            // the Quantitative and Temporal arms of `build_axis_scale` and asks
+            // nothing about dtype): one rule for "a bar's value axis reaches
+            // zero", not one per dtype. A temporal value axis on a bar is a
+            // latent shape either way — Python injects `type: "linear"` without
+            // consulting the `:T` annotation — and the two mechanisms agreeing
+            // matters more than special-casing it here.
+            let (lo, hi) = if injected_zero { extend_extent_to_zero(lo, hi) } else { (lo, hi) };
             Ok(Some(SharedDomain::Numeric { lo, hi }))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
@@ -1427,6 +1458,7 @@ mod tests {
             },
             nice: false,
             zero: false,
+            system_injected: false,
         });
         e1.color = Some(c1);
         let s1 = spec_with(e1);
@@ -1595,6 +1627,7 @@ mod tests {
             },
             nice: false,
             zero: false,
+            system_injected: false,
         });
         e1.x = Some(x1);
         let s1 = spec_with(e1.clone());
@@ -1616,6 +1649,111 @@ mod tests {
         assert_eq!(ctx[0].x, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
         // Leaf 1's explicit scale wins → no shared context injected.
         assert_eq!(ctx[1].x, None);
+    }
+
+    // -- system-injected scale participates (#247A) ----------------------------
+
+    /// A leaf carrying the bar zero-anchor's injected scale on `x`, with its own
+    /// extent and its own provenance flag.
+    fn injected_zero_leaf(system_injected: bool, data: &[f64]) -> LeafOwned {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+        let mut e = Encoding::default();
+        let mut x = enc("v");
+        x.scale = Some(ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+            zero: true,
+            system_injected,
+        });
+        e.x = Some(x);
+        let spec = spec_with(e);
+        LeafOwned {
+            encoding: spec.encoding.clone(),
+            outputs: outputs(&num_batch("v", data)),
+            batch: num_batch("v", data),
+            spec,
+        }
+    }
+
+    /// #247A: the injection is ferrum's, not the caller's, so it must not buy the
+    /// leaf out of sharing — and the anchor it asked for has to travel with the
+    /// leaf's contribution, since the leaf no longer resolves it through the
+    /// explicit bypass.
+    ///
+    /// Leaf 0 spans `[12, 40]` and the injected leaf spans `[5, 30]`, so the
+    /// plain union would be `[5, 40]`: a `lo` of `0` can only have come from the
+    /// anchor, and `ctx[1]` being `Some` at all is what was broken (pre-fix both
+    /// assertions failed — `ctx[0]` was leaf 0's own `[12, 40]` and `ctx[1]` was
+    /// `None`).
+    #[test]
+    fn system_injected_scale_leaf_shares_and_carries_its_zero_anchor() {
+        let l0 = owned(spec_with_x("v"), num_batch("v", &[12.0, 40.0]));
+        let l1 = injected_zero_leaf(true, &[5.0, 30.0]);
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("v"), None), leaf_node(Some("v"), None)],
+            shared_x(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let unioned = Some(SharedDomain::Numeric { lo: 0.0, hi: 40.0 });
+        assert_eq!(ctx[0].x, unioned);
+        assert_eq!(ctx[1].x, unioned);
+    }
+
+    /// The control that makes the assertion above about PROVENANCE rather than
+    /// about `zero`: the identical scale the caller wrote keeps the documented
+    /// "explicit user scale wins" exclusion, so leaf 0 shares only its own
+    /// extent and the injected-scale leaf gets no context.
+    #[test]
+    fn user_written_zero_scale_leaf_stays_excluded_from_sharing() {
+        let l0 = owned(spec_with_x("v"), num_batch("v", &[12.0, 40.0]));
+        let l1 = injected_zero_leaf(false, &[5.0, 30.0]);
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("v"), None), leaf_node(Some("v"), None)],
+            shared_x(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        assert_eq!(ctx[0].x, Some(SharedDomain::Numeric { lo: 12.0, hi: 40.0 }));
+        assert_eq!(ctx[1].x, None);
+    }
+
+    /// An injected scale with no anchor to carry (`zero: false` — a shape the
+    /// current injection never emits, but the wire admits) participates with its
+    /// raw extent: the provenance bit governs who may share, `zero` governs what
+    /// is shared. Without this, reading the two as one flag would look correct on
+    /// every test above.
+    #[test]
+    fn system_injected_scale_without_zero_shares_its_raw_extent() {
+        use crate::spec::encoding::ScaleSpec;
+        let l0 = owned(spec_with_x("v"), num_batch("v", &[12.0, 40.0]));
+        let mut l1 = injected_zero_leaf(true, &[5.0, 30.0]);
+        if let Some(ScaleSpec::Linear { zero, .. }) =
+            l1.spec.encoding.x.as_mut().and_then(|e| e.scale.as_mut())
+        {
+            *zero = false;
+        }
+        l1.encoding = l1.spec.encoding.clone();
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("v"), None), leaf_node(Some("v"), None)],
+            shared_x(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let unioned = Some(SharedDomain::Numeric { lo: 5.0, hi: 40.0 });
+        assert_eq!(ctx[0].x, unioned);
+        assert_eq!(ctx[1].x, unioned);
     }
 
     // -- faceted child outer/inner separation ---------------------------------

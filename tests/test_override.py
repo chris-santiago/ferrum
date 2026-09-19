@@ -372,12 +372,29 @@ class TestOverrideRegistryParity:
         # The registry is derived from the wire gate's own per-type
         # accepted-key table, not from the *Scale pyclasses' attributes.
         # Pin the derivation exactly: the union of every type's accepted keys,
-        # plus "type", plus one snake_case alias per camelCase wire key.
+        # MINUS the system-only keys, plus "type", plus one snake_case alias per
+        # camelCase wire key.
+        #
+        # The subtraction (#247A) is why this assertion moved: a wire key the
+        # gate must PARSE is not automatically a presentation option the caller
+        # may SET. `systemInjected` records that ferrum's own spec build
+        # authored a scale rather than the caller, so the gate has to accept it
+        # (the bar zero-anchor emits it across the same wire boundary every raw
+        # scale dict crosses) while the override escape hatch must not offer a
+        # way to assert ferrum's authorship on a hand-written scale.
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == "x_scale_")
         wire_union = set()
         for scale_type in oa._SCALE_TYPE_TAGS:
             wire_union.update(scale_accepted_keys(scale_type))
-        expected = wire_union | {"type"} | set(oa._SCALE_LEAF_WIRE_ALIASES)
+        # The exclusion must actually bite: every system-only key is a real key
+        # of the gate's table, so removing one from the wire schema without
+        # updating the registry fails here rather than silently subtracting
+        # nothing (the same guard shape as the AxisConfig `x`/`y` deprecation
+        # check above).
+        assert oa._SCALE_LEAF_SYSTEM_ONLY <= wire_union
+        expected = (
+            (wire_union - oa._SCALE_LEAF_SYSTEM_ONLY) | {"type"} | set(oa._SCALE_LEAF_WIRE_ALIASES)
+        )
         assert rule.valid_leaves == expected
         # Derived read-only getters are not leaves: `num_bins` is
         # `len(bins)` on BinOrdinalScale, `quantiles` is QuantileScale's

@@ -107,6 +107,15 @@ ACCEPTED_KEYS: dict[str, list[str]] = {
         "range",
         "reverse",
         "scheme",
+        # `systemInjected` (#247A) is a PROVENANCE key, not a presentation one:
+        # it records that ferrum's own spec build authored the scale (the bar
+        # zero-anchor), so a layered bar leaf can be told apart from a caller's
+        # explicit scale. It is listed here because the gate must accept it --
+        # the producer emits it through the same wire boundary every raw scale
+        # dict crosses -- even though `.override(x_scale_systemInjected=...)`
+        # is deliberately NOT an override path
+        # (`_override_apply._SCALE_LEAF_SYSTEM_ONLY`).
+        "systemInjected",
         "zero",
     ],
     "log": [
@@ -164,6 +173,10 @@ VALID_DICTS: dict[str, dict[str, object]] = {
         "reverse": True,
         "nice": True,
         "zero": True,
+        # See `ACCEPTED_KEYS["linear"]`'s note: populated here because the
+        # fixture-integrity assertion below requires every accepted key exactly
+        # once, and the gate does accept it from any wire producer.
+        "systemInjected": True,
         "scheme": "viridis",
         "domainParam": "unused_param_name",
     },

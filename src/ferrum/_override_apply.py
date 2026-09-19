@@ -268,6 +268,18 @@ _SCALE_LEAF_WIRE_ALIASES: dict[str, str] = {
     "domain_param": "domainParam",
 }
 
+#: Wire keys the gate accepts but that are NOT presentation options, so they get
+#: no override path.  ``systemInjected`` (#247A) records that ferrum's own spec
+#: build authored a scale rather than the caller (see
+#: ``_spec_build.py``'s bar zero-anchor and ``ScaleSpec::Linear``'s
+#: ``system_injected`` doc); the gate has to accept it because that producer
+#: emits it through the same wire boundary every raw scale dict crosses, but the
+#: whole point of the field is to distinguish ferrum's authorship from the
+#: caller's, and an override path would let a caller assert ferrum's.  Excluded
+#: here rather than removed from the gate table: the gate is the wire contract
+#: (it must keep parsing the key), this is the user-facing escape hatch.
+_SCALE_LEAF_SYSTEM_ONLY: frozenset[str] = frozenset({"systemInjected"})
+
 
 def _scale_leaves() -> frozenset[str]:
     """Return the valid ``<channel>_scale_<leaf>`` leaf names.
@@ -293,12 +305,16 @@ def _scale_leaves() -> frozenset[str]:
     ``.override(<channel>_scale_type="utc")`` is its real spelling), and they
     now refuse with this registry's own "Unknown override path" error instead
     of an opaque wire refusal.
+
+    :data:`_SCALE_LEAF_SYSTEM_ONLY` is subtracted afterwards: a wire key the
+    gate parses is not automatically a presentation option the caller may set.
     """
     from ferrum._core import scale_accepted_keys  # type: ignore[attr-defined]
 
     wire: set[str] = {"type"}
     for scale_type in _SCALE_TYPE_TAGS:
         wire.update(scale_accepted_keys(scale_type))
+    wire -= _SCALE_LEAF_SYSTEM_ONLY
     aliases = {snake for snake, key in _SCALE_LEAF_WIRE_ALIASES.items() if key in wire}
     return frozenset(wire | aliases)
 

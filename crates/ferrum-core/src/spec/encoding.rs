@@ -215,6 +215,61 @@ pub enum ScaleSpec {
         nice: bool,
         #[serde(default)]
         zero: bool,
+        /// **Provenance (#247A, spec §6): ferrum wrote this scale, the caller
+        /// did not.** Its ONE producer is the bar zero-anchor injection in
+        /// `_spec_build.py::_build_encoding_specs`, and only in the case where
+        /// that injection authored the whole scale (the channel carried no
+        /// `scale=` of its own). An injection that merely ADDS `zero` on top of
+        /// a scale the caller wrote leaves this `false` — the caller's
+        /// `padding`/`nice`/`range` are still their intent, and the
+        /// explicit-scale contract must keep honoring them.
+        ///
+        /// Its two consumers both used to read a bare `enc.scale.is_some()` and
+        /// so could not tell ferrum's own injection from a user's scale:
+        /// `render::composite::leaf_positional_domain` (which excluded any
+        /// explicit-scale leaf from cross-leaf domain sharing) and
+        /// `render::scale_resolve::positional::build_axis_scale` (whose
+        /// explicit-scale bypass returns before the shared domain is
+        /// consulted). Together those locked a zero-anchored `mark_bar` leaf out
+        /// of an `fm.layer` union in BOTH directions, so the shared axis showed
+        /// leaf 0's own domain and every other layer drew against a scale the
+        /// ticks did not describe (#247A: `fm.layer(bar(1..3), point(40..80))`
+        /// rendered a 0..3 axis). The anchor itself is unaffected — see
+        /// [`ScaleSpec::anchors_zero`], which carries `zero` into the shared
+        /// domain so the union spans `0..80` rather than dropping to `1..80`.
+        ///
+        /// Skipped when `false`, so every scale that does not set it (every
+        /// user-authored scale, every non-bar chart) serializes to the bytes it
+        /// did before this field existed.
+        ///
+        /// **User-reachable by hand, deliberately.** The name says "the system
+        /// wrote this", but nothing can stop a caller from writing
+        /// `scale={"type": "linear", "systemInjected": True}` in a raw dict: the
+        /// Python producer crosses the same wire boundary every user dict
+        /// crosses, so the key gate (`accepted_keys_for_scale_type`) has to
+        /// accept it on `linear`, and a gate that could tell the two apart would
+        /// need a notion of caller identity the wire does not carry. What that
+        /// spelling buys is exactly what the flag means and nothing more: the
+        /// scale stops short-circuiting a cross-mark domain (a composite shared
+        /// domain, or a layered spec's cross-layer union) and resolves on the
+        /// auto path instead, which for a hand-written scale means its
+        /// `padding`/`nice`/`range` stop being honored. A coherent, if pointless,
+        /// request — not a corruption, and not a way to reach any behavior a
+        /// caller could not already reach by omitting the scale. It is NOT
+        /// offered as an override path (`_override_apply._SCALE_LEAF_SYSTEM_ONLY`
+        /// excludes it from the auto-derived `<channel>_scale_<leaf>` surface),
+        /// so the hand-written raw dict is the only spelling that reaches it.
+        ///
+        /// **Not the north star.** Rust already owns an auto-path bar
+        /// zero-anchor for layered specs
+        /// (`render::scale_resolve::domain::layer_wants_bar_zero_anchor`), and
+        /// deleting Python's injection in favour of it would leave one
+        /// mechanism instead of two. That unification is a logged follow-up, not
+        /// this field: the auto-inferred path applies padding/`nice` treatment
+        /// the explicit-scale bypass skips, so it would move every bar-chart
+        /// golden (spec §8).
+        #[serde(rename = "systemInjected", default, skip_serializing_if = "std::ops::Not::not")]
+        system_injected: bool,
     },
     Log {
         #[serde(default = "default_log_base")]
@@ -462,7 +517,11 @@ const CONTINUOUS_COMMON_SCALE_KEYS: &[&str] =
 /// non-goal is unaffected.
 fn accepted_keys_for_scale_type(scale_type: &str) -> Option<Vec<&'static str>> {
     let keys: Vec<&'static str> = match scale_type {
-        "linear" => CONTINUOUS_COMMON_SCALE_KEYS.iter().chain(["nice", "zero"].iter()).copied().collect(),
+        "linear" => CONTINUOUS_COMMON_SCALE_KEYS
+            .iter()
+            .chain(["nice", "zero", "systemInjected"].iter())
+            .copied()
+            .collect(),
         "log" => CONTINUOUS_COMMON_SCALE_KEYS.iter().chain(["base", "nice"].iter()).copied().collect(),
         "time" => CONTINUOUS_COMMON_SCALE_KEYS.iter().chain(["nice"].iter()).copied().collect(),
         "symlog" => CONTINUOUS_COMMON_SCALE_KEYS.iter().chain(["constant", "nice"].iter()).copied().collect(),
@@ -657,6 +716,28 @@ impl ScaleSpec {
             // Categorical variants have no continuous extent.
             ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. } => None,
         }
+    }
+
+    /// Whether ferrum's own spec build authored this scale rather than the
+    /// caller — see [`ScaleSpec::Linear`]'s `system_injected` field for the full
+    /// contract. Only `Linear` can carry the flag (it is the only variant the
+    /// bar zero-anchor injection ever produces), so every other variant answers
+    /// `false`: a scale ferrum did not write is, by definition, the caller's.
+    pub(crate) fn is_system_injected(&self) -> bool {
+        matches!(self, ScaleSpec::Linear { system_injected: true, .. })
+    }
+
+    /// Whether this scale asks its resolved domain to include zero.
+    ///
+    /// `zero` is `Linear`'s own field — the only continuous variant that carries
+    /// one, as `resolve_continuous_domain_and_range`'s doc records — so every
+    /// other variant answers `false`. Read by
+    /// `render::composite::leaf_positional_domain` so an injected scale's anchor
+    /// reaches the cross-leaf union instead of being lost with the bypass it no
+    /// longer takes; the explicit-scale path reads the field directly from its
+    /// own `Linear` arm.
+    pub(crate) fn anchors_zero(&self) -> bool {
+        matches!(self, ScaleSpec::Linear { zero: true, .. })
     }
 }
 
@@ -1415,7 +1496,7 @@ mod tests {
     /// mislabel an entry (spec review cycle-2 ❌3 / rs-quality S3+2).
     fn maximal_instances() -> Vec<ScaleSpec> {
         vec![
-            ScaleSpec::Linear { common: maximal_common(), nice: true, zero: true },
+            ScaleSpec::Linear { common: maximal_common(), nice: true, zero: true, system_injected: true },
             ScaleSpec::Log { base: 2.0, common: maximal_common(), nice: true },
             ScaleSpec::Time { common: maximal_common(), nice: true },
             ScaleSpec::Symlog { constant: 2.0, common: maximal_common(), nice: true },
@@ -1640,12 +1721,59 @@ mod tests {
     /// rather than leaving only the derive-generated inherent method).
     #[test]
     fn scale_spec_serialize_still_works_through_the_trait() {
-        let scale = ScaleSpec::Linear { common: maximal_common(), nice: true, zero: false };
+        let scale = ScaleSpec::Linear { common: maximal_common(), nice: true, zero: false, system_injected: false };
         let json = serde_json::to_string(&scale).unwrap();
         assert!(json.contains(r#""type":"linear""#), "json: {json}");
         // Round-trips through the same gated Deserialize.
         let back: ScaleSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back, scale);
+    }
+
+    // ── #247A scale provenance (wire contract, spec §6) ──────────────────────
+
+    /// The wire payload a bar chart's injected y scale serialized to BEFORE the
+    /// provenance field existed, captured verbatim: it must still deserialize,
+    /// report no provenance, and re-serialize to those same bytes. This is the
+    /// byte-stability proof asked for as a round-trip of a pre-change payload
+    /// rather than as a reading of the serde attributes — a `skip_serializing_if`
+    /// typo'd onto the wrong predicate would pass an attribute inspection and
+    /// fail here.
+    #[test]
+    fn pre_provenance_payload_round_trips_to_identical_bytes() {
+        const CAPTURED: &str = r#"{"type":"linear","clamp":false,"nice":false,"zero":true}"#;
+        let scale: ScaleSpec = serde_json::from_str(CAPTURED).unwrap();
+        assert!(!scale.is_system_injected(), "an absent flag must not read as injected");
+        assert!(scale.anchors_zero(), "the captured payload's own zero anchor");
+        assert_eq!(serde_json::to_string(&scale).unwrap(), CAPTURED);
+    }
+
+    /// The flag travels: set on the wire, it survives into
+    /// `is_system_injected()` and back out to the same key. `anchors_zero` is
+    /// asserted alongside it because the two are read independently by
+    /// `composite::leaf_positional_domain` — one decides whether the leaf
+    /// shares, the other what it contributes.
+    #[test]
+    fn system_injected_flag_round_trips_and_is_readable() {
+        const WIRE: &str =
+            r#"{"type":"linear","clamp":false,"nice":false,"zero":true,"systemInjected":true}"#;
+        let scale: ScaleSpec = serde_json::from_str(WIRE).unwrap();
+        assert!(scale.is_system_injected());
+        assert!(scale.anchors_zero());
+        assert_eq!(serde_json::to_string(&scale).unwrap(), WIRE);
+    }
+
+    /// Provenance is `Linear`-only, which the key gate enforces rather than
+    /// leaving serde's flatten to swallow: the injection has no other variant to
+    /// target (`zero` is Linear's own field), so the same key on a `log` scale is
+    /// a typo or a misunderstanding, refused naming the accepted set.
+    #[test]
+    fn system_injected_is_refused_on_a_non_linear_scale_type() {
+        let err = serde_json::from_str::<ScaleSpec>(r#"{"type":"log","systemInjected":true}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown key 'systemInjected' for type 'log'"), "err: {err}");
+        assert!(!ScaleSpec::Log { base: 10.0, common: maximal_common(), nice: false }
+            .is_system_injected());
     }
 
     // ── Python-visible accepted-key table (batch-C task 4, round 4) ─────────
@@ -2727,7 +2855,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Temporal),
-                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false }, nice: true, zero: false }),
+                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false }, nice: true, zero: false, system_injected: false }),
                 title: Some("Parent Title".into()),
                 scheme: Some("parent_scheme".into()),
                 format: Some("parent_fmt".into()),

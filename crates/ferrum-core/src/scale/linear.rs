@@ -298,6 +298,11 @@ impl LinearScale {
             }),
             nice: self.nice,
             zero: false,
+            // A `LinearScale` instance is something the caller constructed, so
+            // it is never system-injected — the flag's one producer is the bar
+            // zero-anchor in Python's spec build (#247A). See
+            // `ScaleSpec::Linear`'s `system_injected` doc.
+            system_injected: false,
         }
     }
 }

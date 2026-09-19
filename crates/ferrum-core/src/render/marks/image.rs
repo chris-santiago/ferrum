@@ -395,6 +395,7 @@ mod tests {
                 reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
@@ -404,6 +405,7 @@ mod tests {
                 reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         ChartSpec {
             data: DataRef::default(),
@@ -444,6 +446,7 @@ mod tests {
                 reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
@@ -453,6 +456,7 @@ mod tests {
                 reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         ChartSpec {
             data: DataRef::default(),
@@ -874,6 +878,7 @@ mod tests {
                 range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
@@ -881,6 +886,7 @@ mod tests {
                 range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
             },
             nice: false, zero: false,
+            system_injected: false,
         };
         ChartSpec {
             data: crate::spec::data_ref::DataRef::default(),

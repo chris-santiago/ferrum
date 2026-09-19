@@ -1716,6 +1716,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
                         },
                         nice: false,
                         zero: false,
+                        system_injected: false,
                     }),
                     ..Default::default()
                 }),
@@ -4357,6 +4358,7 @@ fn d4b_user_scale_wins_over_shared() {
             },
             nice: false,
             zero: false,
+            system_injected: false,
         }),
         ..Default::default()
     });
@@ -5014,6 +5016,7 @@ mod positional_extent_classification {
             common: common_with_domain(Some(vec![0.0, 100.0])),
             nice: false,
             zero: false,
+            system_injected: false,
         };
         assert_eq!(spec.positional_extent(), Some(vec![0.0, 100.0]));
     }

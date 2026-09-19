@@ -136,7 +136,10 @@ pub(in crate::render) fn build_axis_scale(
     // facet-shared panels use, so composite-shared axes get the auto path's
     // padding/`nice`, never the explicit-scale bypass. `None` for every
     // standalone (flat/facet) render → byte-identical. Consulted only after the
-    // explicit `enc.scale` bypass below, so a genuine user scale still wins.
+    // explicit `enc.scale` bypass below, so a genuine user scale still wins —
+    // a SYSTEM-INJECTED scale (#247A) is the one thing that bypass now yields
+    // to, and only when an auto path has a cross-mark domain to offer (this, or
+    // a layered spec's own cross-layer union); see the gate below.
     shared: Option<&SharedDomain>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
@@ -155,7 +158,54 @@ pub(in crate::render) fn build_axis_scale(
     // `EncodingTypeMismatch`).
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
 
-    if let Some(scale_spec) = &enc.scale {
+    // #247A: the explicit-scale bypass is for a scale the CALLER wrote. A scale
+    // ferrum's own spec build injected (the bar zero-anchor — see
+    // `ScaleSpec::Linear`'s `system_injected` doc) is not one, and it yields the
+    // bypass to whichever auto path has a CROSS-MARK domain to offer. Before
+    // this, the bypass returned before either was consulted, so a zero-anchored
+    // bar could neither contribute to nor receive that domain and every other
+    // mark in the chart drew against a scale the rendered ticks did not describe.
+    //
+    // The two auto paths are the two ways "layer a bar with a point" lowers, and
+    // both reach this one gate:
+    //
+    //   * `shared.is_some()` — a composite leaf (`fm.layer(bar, point)`), whose
+    //     shared domain already carries the anchor, applied to the bar leaf's own
+    //     contribution by `composite::leaf_positional_domain`;
+    //   * `spec.layers.is_some()` — the flat layered lowering (`bar + point`,
+    //     whose chart-level encoding is the LHS bar's, so the injected scale sat
+    //     on the axis every layer resolves against). Here the anchor comes from
+    //     `domain::numeric_domain_union`'s own `layer_wants_bar_zero_anchor`,
+    //     which exists for precisely this shape and was unreachable through it
+    //     while the bypass fired first. That asymmetry was visible: `bar + point`
+    //     rendered `0..3` while `point + bar` (chart-level encoding = the point's,
+    //     so no injected scale, so the auto path) rendered the correct `0..80`.
+    //
+    // With NEITHER — a standalone single-mark chart — there is nothing to yield
+    // to and the bypass stands, so every single bar render is byte-identical by
+    // construction. That is why provenance was the route rather than deleting the
+    // injection (spec §8): the auto path's padding/`nice` treatment never reaches
+    // an unlayered bar.
+    //
+    // A layered spec whose layers contain no bar loses the anchor here, and that
+    // is correct rather than tolerated: `prepare::build_layers` builds layers from
+    // `spec.layers` ALONE when it is `Some`, and `Layer::mark` is required, so
+    // `spec.mark` draws nothing in a layered spec. No bar is drawn, so no bar
+    // baseline needs keeping in view — today's behavior anchors an axis for a mark
+    // that does not exist. Pinned by
+    // `layered_spec_with_no_bar_layer_takes_the_union_without_an_anchor`.
+    // `is_some_and(!is_empty)`, not a bare `is_some()`: the question is "are there
+    // layers whose fields the cross-layer union can read", and a `Some(vec![])`
+    // spec has none — it would strip the anchor while offering nothing to union
+    // against. No Python lowering emits an empty layers list today (the key is
+    // written only when `_layers is not None`, and every producer appends at least
+    // the LHS's own layer), so this is the predicate saying what it means rather
+    // than a fix for a live shape. Pinned by
+    // `injected_scale_with_an_empty_layers_list_keeps_the_bypass`.
+    let yields_to_auto_path = shared.is_some() || spec.layers.as_ref().is_some_and(|l| !l.is_empty());
+    let explicit_scale =
+        enc.scale.as_ref().filter(|s| !(yields_to_auto_path && s.is_system_injected()));
+    if let Some(scale_spec) = explicit_scale {
         let sort_ctx = SortContext {
             category_field: &enc.field,
             batch: located.batch,
@@ -376,7 +426,10 @@ pub(in crate::render) fn build_from_scale_spec(
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
 
     Ok(match scale_spec {
-        ScaleSpec::Linear { common, nice, zero } => {
+        // `system_injected` is read by `build_axis_scale`'s bypass gate above,
+        // which decides WHETHER this function is called at all; once a scale
+        // reaches here it resolves identically whoever wrote it (#247A).
+        ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, *zero, common.reverse)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
@@ -627,6 +680,37 @@ fn validate_explicit_continuous_shape(
     Ok(())
 }
 
+/// Widen a resolved `[lo, hi]` extent so it includes zero — the zero-anchor's
+/// arithmetic, in one place instead of per-caller.
+///
+/// Spelled as the two guarded comparisons rather than `lo.min(0.0)` /
+/// `hi.max(0.0)` deliberately: `f64::min`/`max` return the non-NaN operand, so
+/// they would turn an all-null column's `NaN` extent into `0.0`, while the
+/// comparison form leaves `NaN` untouched (`NaN > 0.0` is false). All three
+/// callers relied on that, so the extraction is behavior-preserving rather than
+/// merely equivalent-looking.
+///
+/// **Every site that widens an extent to zero binds here** — the ferrum-wide
+/// answer to "does this axis reach zero", in one function:
+///
+/// * [`resolve_continuous_domain_and_range`] below — a
+///   `ScaleSpec::Linear { zero: true }` resolving on the explicit-scale path;
+/// * `composite::leaf_positional_domain` — a zero-anchored bar leaf's
+///   contribution to a cross-leaf domain union (#247A), where an injected
+///   scale's anchor lands now that the leaf no longer takes the bypass;
+/// * `domain::numeric_domain_union`'s `bar_zero_wanted` block — a layered bar on
+///   the auto path, which is the mechanism [`build_axis_scale`]'s own
+///   system-injected gate hands the flat-layered arm's anchor to, so it is
+///   downstream of that gate rather than a neighbour of it.
+///
+/// A fourth site would be a fourth chance for the answers to disagree, which is
+/// what happened before this existed: the third site carried a comment claiming
+/// to mirror the first "exactly (same two guarded assignments)", by which time
+/// the first had become a call to this function.
+pub(in crate::render) fn extend_extent_to_zero(lo: f64, hi: f64) -> (f64, f64) {
+    (if lo > 0.0 { 0.0 } else { lo }, if hi < 0.0 { 0.0 } else { hi })
+}
+
 /// Resolve `(domain, range)` for a continuous ScaleSpec variant, then apply
 /// `zero`'s zero-extension and `reverse`'s domain-swap sugar, in that order,
 /// as the LAST two steps (rust-design review S3-1 / refactor 4).
@@ -678,8 +762,9 @@ fn resolve_continuous_domain_and_range(
         vec![inset.0, inset.1]
     };
     if zero && d.len() == 2 {
-        if d[0] > 0.0 { d[0] = 0.0; }
-        if d[1] < 0.0 { d[1] = 0.0; }
+        let (lo, hi) = extend_extent_to_zero(d[0], d[1]);
+        d[0] = lo;
+        d[1] = hi;
     }
     let d = apply_domain_reverse(d, reverse);
     Ok((d, r))
@@ -945,7 +1030,7 @@ mod tests {
     use crate::render::{RenderError, RenderWarning};
     use crate::scale::discrete::{CategoricalPlacement, DiscreteLayout};
     use arrow::record_batch::RecordBatch;
-    use crate::render::scale_resolve::ScaleKind;
+    use crate::render::scale_resolve::{ScaleKind, SharedDomain};
     use crate::scale::linear::LinearScale;
     use crate::scale::log::LogScale;
     use crate::scale::pow::PowScale;
@@ -1629,6 +1714,7 @@ mod tests {
             common: reverse_common(Some(vec![5.0]), None, false),
             nice: false,
             zero: false,
+            system_injected: false,
         };
         let err = try_resolve_scale(&spec, "v", &batch, (0.0, 500.0)).unwrap_err();
         assert!(
@@ -1652,7 +1738,7 @@ mod tests {
     )> {
         use crate::spec::encoding::ScaleSpec;
         vec![
-            ("linear", |d, r| ScaleSpec::Linear { common: reverse_common(d, r, false), nice: false, zero: false }),
+            ("linear", |d, r| ScaleSpec::Linear { common: reverse_common(d, r, false), nice: false, zero: false, system_injected: false }),
             ("log", |d, r| ScaleSpec::Log { base: 10.0, common: reverse_common(d, r, false), nice: false }),
             ("time", |d, r| ScaleSpec::Time { common: reverse_common(d, r, false), nice: false }),
             ("symlog", |d, r| ScaleSpec::Symlog { constant: 1.0, common: reverse_common(d, r, false), nice: false }),
@@ -1765,7 +1851,7 @@ mod tests {
     fn linear_reverse_true_swaps_auto_inferred_domain() {
         use crate::spec::encoding::ScaleSpec;
         let batch = numeric_batch("v", vec![0.0, 100.0]);
-        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: false };
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: false, system_injected: false };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((100.0, 0.0)));
     }
@@ -1856,7 +1942,7 @@ mod tests {
     fn linear_reverse_false_preserves_auto_inferred_domain() {
         use crate::spec::encoding::ScaleSpec;
         let batch = numeric_batch("v", vec![0.0, 100.0]);
-        let spec = ScaleSpec::Linear { common: reverse_common(None, None, false), nice: false, zero: false };
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, false), nice: false, zero: false, system_injected: false };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((0.0, 100.0)));
     }
@@ -1878,7 +1964,7 @@ mod tests {
     fn linear_zero_true_reverse_true_yields_non_degenerate_descending_domain() {
         use crate::spec::encoding::ScaleSpec;
         let batch = numeric_batch("v", vec![20.0, 80.0]);
-        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: true };
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: true, system_injected: false };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(
             scale.data_domain(),
@@ -1900,6 +1986,7 @@ mod tests {
             common: reverse_common(Some(vec![10.0, 90.0]), None, true),
             nice: false,
             zero: false,
+            system_injected: false,
         };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((90.0, 10.0)));
@@ -1917,6 +2004,7 @@ mod tests {
             common: reverse_common(None, Some(vec![500.0, 0.0]), true),
             nice: false,
             zero: false,
+            system_injected: false,
         };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((100.0, 0.0)), "reverse still swaps the domain");
@@ -1970,6 +2058,7 @@ mod tests {
                         common: reverse_common(None, None, true),
                         nice: false,
                         zero: false,
+                        system_injected: false,
                     }),
                     ..Default::default()
                 }),
@@ -2060,6 +2149,7 @@ mod tests {
                 common: reverse_common(Some(vec![0.0, 100.0]), None, reverse),
                 nice: false,
                 zero: false,
+                system_injected: false,
             }),
             ..Default::default()
         };
@@ -2080,6 +2170,227 @@ mod tests {
             &mut warnings,
         )
         .unwrap()
+    }
+
+    // ── #247A: scale provenance vs. the explicit-scale bypass ──
+
+    /// A two-column `[1, 3]` / `[40, 80]` batch: the bar's own values and a
+    /// sibling mark's wider ones, so which domain a scale resolved against is
+    /// readable off the resolved domain alone.
+    fn bar_and_sibling_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", ArrowDataType::Float64, false),
+            Field::new("p", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 3.0])),
+                Arc::new(Float64Array::from(vec![40.0, 80.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A layer binding `y` to `field` with `mark`, and nothing else set.
+    fn y_layer(mark: crate::spec::mark::Mark, field: &str) -> crate::spec::layer::Layer {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let mut encoding = Encoding::default();
+        encoding.y = Some(EncodingSpec { field: field.into(), type_: None, ..Default::default() });
+        crate::spec::layer::Layer {
+            mark,
+            encoding,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        }
+    }
+
+    /// Resolve a y axis whose encoding carries the bar zero-anchor's shape
+    /// (`{type: linear, zero: true}`, no domain) through the REAL
+    /// `build_axis_scale` entry point, with the provenance flag, the composite
+    /// shared domain, and the spec's layers as the three variables — the three
+    /// inputs the #247A gate reads.
+    ///
+    /// The bar's column is `[1, 3]`, its sibling's is `[40, 80]`, and any shared
+    /// domain passed in is `[0, 80]`, so every route is distinguishable by the
+    /// resolved domain alone: the bypass resolves the bar column's own extent
+    /// (zero-extended to `[0, 3]`), the composite arm takes the shared extent,
+    /// and the layered arm takes the cross-layer union.
+    fn build_zero_anchored_y(
+        system_injected: bool,
+        shared: Option<&SharedDomain>,
+        layers: Option<Vec<crate::spec::layer::Layer>>,
+    ) -> ScaleKind {
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use std::collections::HashMap;
+
+        let batch = bar_and_sibling_batch();
+        let enc = EncodingSpec {
+            field: "v".into(),
+            type_: None,
+            scale: Some(ScaleSpec::Linear {
+                common: reverse_common(None, None, false),
+                nice: false,
+                zero: true,
+                system_injected,
+            }),
+            ..Default::default()
+        };
+        let mut spec = minimal_point_chart_spec();
+        spec.mark = crate::spec::mark::Mark::Bar;
+        spec.layers = layers;
+        let outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let mut warnings = Vec::new();
+        super::build_axis_scale(
+            "y",
+            &enc,
+            None,
+            super::PositionalFields { x: None, y: Some("v") },
+            &batch,
+            &outputs,
+            (0.0, 400.0),
+            &spec,
+            false,
+            shared,
+            &mut warnings,
+        )
+        .unwrap()
+    }
+
+    /// The defect itself: a composite leaf whose scale ferrum injected must take
+    /// the shared domain, not its own. Pre-fix this returned `(0, 3)` — the
+    /// bypass fired before `shared` was ever read, which is what left every
+    /// sibling layer of a zero-anchored bar drawing against a scale the rendered
+    /// ticks did not describe.
+    #[test]
+    fn injected_scale_yields_to_the_composite_shared_domain() {
+        let shared = SharedDomain::Numeric { lo: 0.0, hi: 80.0 };
+        let scale = build_zero_anchored_y(true, Some(&shared), None);
+        assert_eq!(scale.data_domain(), Some((0.0, 80.0)));
+    }
+
+    /// The same defect through the OTHER lowering: a flat layered spec
+    /// (`bar + point`), where the injected scale sits on the chart-level
+    /// encoding every layer resolves against. No shared domain exists here — the
+    /// cross-layer union inside `domain::numeric_domain_union` is what the scale
+    /// yields to, and that union's own `layer_wants_bar_zero_anchor` supplies the
+    /// anchor, which is the rule's whole purpose and was unreachable through this
+    /// shape while the bypass fired first.
+    ///
+    /// `(0, 80)` is discriminating in both directions: the bypass would answer
+    /// `(0, 3)` (the bar column alone) and a union that lost the anchor would
+    /// answer `(1, 80)`.
+    #[test]
+    fn injected_scale_yields_to_a_layered_specs_cross_layer_union() {
+        use crate::spec::mark::Mark;
+        let layers = vec![y_layer(Mark::Bar, "v"), y_layer(Mark::Point, "p")];
+        let scale = build_zero_anchored_y(true, None, Some(layers));
+        assert_eq!(scale.data_domain(), Some((0.0, 80.0)));
+    }
+
+    /// The shape the widened gate's risk lives in, pinned rather than left
+    /// unknown: a layered spec carrying chart-level `mark: bar` whose layers
+    /// contain NO bar. The union runs and no anchor is applied, so the domain is
+    /// the raw `(1, 80)`.
+    ///
+    /// That is correct, not merely tolerated. `prepare::build_layers` builds its
+    /// layers from `spec.layers` ALONE when it is `Some`, and `Layer::mark` is a
+    /// required field, so a layered spec's `spec.mark` draws nothing whatsoever —
+    /// no bar exists here, so no bar baseline needs keeping in view, and the old
+    /// behavior (anchoring at zero off the chart-level bar mark) was anchoring an
+    /// axis for a mark that is never drawn.
+    ///
+    /// No public-API construction reaches this shape: every lowering that keeps a
+    /// chart-level bar mark alongside layers derives layer 0 from that same bar
+    /// chart (measured across `+`, `fm.layer` merged, `resolve={"y":
+    /// "independent"}`, `SecondaryY`, annotations, `catplot(kind="bar")` and
+    /// `displot(kind="hist")` — see `tests/test_layer_union_provenance.py::
+    /// test_no_public_lowering_produces_a_bar_marked_spec_without_a_bar_layer`,
+    /// which fails if one ever starts to). This test exists so that if one does,
+    /// the behavior it lands on is the one written down here.
+    #[test]
+    fn layered_spec_with_no_bar_layer_takes_the_union_without_an_anchor() {
+        use crate::spec::mark::Mark;
+        let layers = vec![y_layer(Mark::Point, "v"), y_layer(Mark::Line, "p")];
+        let scale = build_zero_anchored_y(true, None, Some(layers));
+        assert_eq!(scale.data_domain(), Some((1.0, 80.0)));
+    }
+
+    /// The provenance half of the gate, as a control: the identical scale with
+    /// `zero: true` but written by the CALLER keeps the bypass even when a shared
+    /// domain is offered. `zero` is not what decides — authorship is.
+    #[test]
+    fn user_written_zero_scale_keeps_the_bypass_against_a_shared_domain() {
+        let shared = SharedDomain::Numeric { lo: 0.0, hi: 80.0 };
+        let scale = build_zero_anchored_y(false, Some(&shared), None);
+        assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+    }
+
+    /// The same control on the layered arm: a caller's own scale is not overruled
+    /// by the presence of layers either, so their `padding`/`nice`/`range` keep
+    /// being honored in a layered chart.
+    #[test]
+    fn user_written_zero_scale_keeps_the_bypass_in_a_layered_spec() {
+        use crate::spec::mark::Mark;
+        let layers = vec![y_layer(Mark::Bar, "v"), y_layer(Mark::Point, "p")];
+        let scale = build_zero_anchored_y(false, None, Some(layers));
+        assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+    }
+
+    /// The other half: with NEITHER a shared domain nor layers there is nothing
+    /// to yield to, so an injected scale resolves through the explicit path
+    /// exactly as it always did. This is the byte-stability of every standalone
+    /// single-mark bar render, stated as an assertion rather than assumed —
+    /// `(0, 3)` is the bar column's extent `[1, 3]` zero-extended by the bypass's
+    /// own `zero` handling.
+    ///
+    /// This is also what keeps a FACETED single-mark bar unchanged: a facet passes
+    /// no shared domain and a faceted single-mark spec has no layers, so it stays
+    /// on the bypass. (That shape has its own separate defect — its panels resolve
+    /// per-panel extents under a shared facet axis — which this task does not
+    /// touch and which cannot be closed by another disjunct here: with no layers,
+    /// `layer_wants_bar_zero_anchor` has nothing to fire on, so the auto path
+    /// would trade the mark/axis disagreement for a lost zero baseline. Measured,
+    /// and logged with the north-star unification.)
+    #[test]
+    fn injected_scale_on_an_unlayered_standalone_chart_keeps_the_bypass() {
+        let scale = build_zero_anchored_y(true, None, None);
+        assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+    }
+
+    /// An EMPTY layers list is not a layered spec: there are no layer fields to
+    /// union and no layer mark to take an anchor from, so yielding would strip the
+    /// zero anchor in exchange for nothing. Unreachable from Python today (the
+    /// `layers` key is written only when `_layers is not None`, and every producer
+    /// appends at least the LHS's own layer), which is exactly why it is pinned —
+    /// the gate reads `is_some_and(!is_empty)` rather than `is_some()` on purpose,
+    /// and a later refactor back to the shorter spelling fails here.
+    #[test]
+    fn injected_scale_with_an_empty_layers_list_keeps_the_bypass() {
+        let scale = build_zero_anchored_y(true, None, Some(Vec::new()));
+        assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+    }
+
+    /// `extend_extent_to_zero` keeps the guarded-comparison semantics its two
+    /// call sites had before the extraction: a `NaN` extent (an all-null column)
+    /// stays `NaN` rather than being silently turned into `0.0`, which
+    /// `f64::min`/`max` would have done.
+    #[test]
+    fn extend_extent_to_zero_widens_without_laundering_nan() {
+        assert_eq!(super::extend_extent_to_zero(5.0, 30.0), (0.0, 30.0));
+        assert_eq!(super::extend_extent_to_zero(-30.0, -5.0), (-30.0, 0.0));
+        assert_eq!(super::extend_extent_to_zero(-4.0, 9.0), (-4.0, 9.0));
+        let (lo, hi) = super::extend_extent_to_zero(f64::NAN, f64::NAN);
+        assert!(lo.is_nan() && hi.is_nan(), "got ({lo}, {hi})");
     }
 
     // ── #183: degenerate/high-cardinality ordinal grouping ──

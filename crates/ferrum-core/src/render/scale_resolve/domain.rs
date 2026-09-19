@@ -744,19 +744,21 @@ pub(in crate::render) fn numeric_domain_union(
         return Ok((0.0, 1.0));
     }
     if bar_zero_wanted {
-        // Mirrors `resolve_continuous_domain_and_range`'s `zero: true` block
-        // exactly (same two guarded assignments), applied here instead of
-        // there because a layered bar spec never reaches that function (see
-        // this function's doc comment). Runs BEFORE the degenerate-domain
-        // widening below so a single-row/all-equal bar value (e.g. one
-        // category) resolves to a real `[0, v]` span instead of the
-        // synthetic `±0.5` band that widening produces for non-bar data.
-        if mn > 0.0 {
-            mn = 0.0;
-        }
-        if mx < 0.0 {
-            mx = 0.0;
-        }
+        // The SAME widening `resolve_continuous_domain_and_range` applies for a
+        // `ScaleSpec::Linear { zero: true }`, through the one helper both call
+        // (`positional::extend_extent_to_zero`) rather than a second copy of its
+        // two comparisons — this block used to restate them, and the restatement
+        // was already drifting: it claimed to mirror a block that had itself
+        // become a call to the helper. Applied here as well as there because an
+        // auto-path spec reaches this function instead of that one (see this
+        // function's doc comment).
+        //
+        // Runs BEFORE the degenerate-domain widening below so a single-row or
+        // all-equal bar value (e.g. one category) resolves to a real `[0, v]`
+        // span instead of the synthetic `±0.5` band that widening produces for
+        // non-bar data — `single_row_bar_value_zero_extends_before_degenerate_widening`
+        // pins that order, which the extraction does not change.
+        (mn, mx) = crate::render::scale_resolve::extend_extent_to_zero(mn, mx);
     }
     // Degenerate domain: a single row or all-equal values produce mn == mx.
     // As of GH #104, `scale::core::degenerate_ratio` already makes every
