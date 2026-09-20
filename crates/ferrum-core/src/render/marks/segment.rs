@@ -1,11 +1,9 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{
-    arrowhead_path_with_opacity, arrowhead_triangle, col_as_f64, resolve_stroke_color, x_field, y_field,
-    DrawCtx,
-};
+use crate::render::draw::{col_as_f64, resolve_stroke_color, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::arrowhead::{arrowhead_path_with_opacity, arrowhead_triangle};
 use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::RenderError;
@@ -946,8 +944,8 @@ mod tests {
 
     /// Geometry-equality proof (task requirement): `segment.rs`'s emitted
     /// arrowhead triangle for a row must equal EXACTLY what
-    /// `draw::arrowhead_triangle` computes from that row's own resolved
-    /// pixel endpoints — the same shared function `annotation::emit_arrow`
+    /// `marks::arrowhead::arrowhead_triangle` computes from that row's own
+    /// resolved pixel endpoints — the same shared function `annotation::emit_arrow`
     /// calls (pinned by `emit_arrow_triangle_matches_shared_arrowhead_triangle_helper`
     /// in `annotation.rs`), so `mark_segment(arrow=True)` and
     /// `annotate_arrow`'s unlabelled overlay draw byte-identical arrowheads

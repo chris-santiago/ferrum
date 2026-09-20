@@ -12,7 +12,8 @@ use serde::Deserialize;
 
 use super::break_axis;
 use super::color::parse_color as parse_color_str;
-use super::draw::{arrowhead_path, arrowhead_triangle, to_scene_color};
+use super::draw::to_scene_color;
+use super::marks::arrowhead::{arrowhead_path, arrowhead_triangle};
 use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
 use super::RenderWarning;
 use crate::layout::geometry::Rect;
@@ -864,8 +865,8 @@ fn emit_arrow(
     });
 
     // Arrowhead: a small filled triangle at (x2, y2) pointing in the
-    // direction of travel. Geometry lives in `draw::arrowhead_triangle` —
-    // shared with `marks::segment::build`'s `arrow=true` path (spec §4 H1) —
+    // direction of travel. Geometry lives in `marks::arrowhead::arrowhead_triangle`
+    // — shared with `marks::segment::build`'s `arrow=true` path (spec §4 H1) —
     // so this stays byte-identical to the pre-extraction inline math.
     if let Some(points) = arrowhead_triangle(x1, y1, x2, y2, head_size) {
         out.push(arrowhead_path(points, color));

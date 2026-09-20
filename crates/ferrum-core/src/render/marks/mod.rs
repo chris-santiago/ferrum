@@ -2,6 +2,7 @@
 //! from `render::draw::dispatch_mark`. Internal-only helpers (`axis`, `legend`,
 //! `strip_title`) are not surfaced as primitive marks.
 
+pub(crate) mod arrowhead;
 pub(crate) mod point;
 pub(crate) mod line;
 pub(crate) mod area;

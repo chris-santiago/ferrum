@@ -22,8 +22,8 @@ use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 use super::CutEdges;
 
 /// The three vertices of an arrowhead triangle node, tip first — the shape
-/// `draw::arrowhead_path_with_opacity` emits (`MoveTo` tip, `LineTo` left,
-/// `LineTo` right, `Close`).
+/// `marks::arrowhead::arrowhead_path_with_opacity` emits (`MoveTo` tip,
+/// `LineTo` left, `LineTo` right, `Close`).
 ///
 /// `None` for any other closed path, which routes the node to the per-vertex
 /// remap instead of the arrowhead rebuild.

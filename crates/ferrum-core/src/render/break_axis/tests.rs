@@ -2311,7 +2311,7 @@ fn segment_row(
     tip: (f64, f64),
     head_size: f64,
 ) -> Vec<SceneNode> {
-    let points = crate::render::draw::arrowhead_triangle(
+    let points = crate::render::marks::arrowhead::arrowhead_triangle(
         start.0, start.1, tip.0, tip.1, head_size,
     )
     .expect("non-degenerate segment yields a triangle");
@@ -2323,7 +2323,7 @@ fn segment_row(
             y2: tip.1,
             style: stroke(),
         },
-        crate::render::draw::arrowhead_path(points, ferrum_scene::Color::rgb(0, 0, 0)),
+        crate::render::marks::arrowhead::arrowhead_path(points, ferrum_scene::Color::rgb(0, 0, 0)),
     ]
 }
 

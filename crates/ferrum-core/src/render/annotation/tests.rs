@@ -14,9 +14,9 @@ use super::*;
 use crate::render::scale_resolve::ScaleKind;
 use crate::scale::linear::LinearScale;
 // Batch H Task 1 fix: `PathCmd` is only referenced by test assertions
-// (production code now goes through `draw::arrowhead_path`, which builds
-// its own `PathCmd` variants internally) — scoped here rather than at
-// module scope so a module-wide `use` doesn't go stale/unused again.
+// (production code now goes through `marks::arrowhead::arrowhead_path`,
+// which builds its own `PathCmd` variants internally) — scoped here rather
+// than at module scope so a module-wide `use` doesn't go stale/unused again.
 use ferrum_scene::PathCmd;
 
 // ── Per-variant wire key drift tests (#92/#148) ──────────────────────────
@@ -598,12 +598,13 @@ fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
 }
 
 /// Batch H Task 1: `emit_arrow`'s arrowhead Path must carry EXACTLY the
-/// vertices `draw::arrowhead_triangle` computes for the same
+/// vertices `marks::arrowhead::arrowhead_triangle` computes for the same
 /// endpoints/head_size — proving the annotation path and
 /// `marks::segment::build`'s new `arrow=true` path (segment.rs) share one
 /// geometry function rather than two independently-typed copies that
 /// could silently drift. Fails to compile against the pre-extraction
-/// surface: `draw::arrowhead_triangle` did not exist before this task.
+/// surface: `marks::arrowhead::arrowhead_triangle` did not exist before
+/// this task.
 #[test]
 fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
     let (x1, y1, x2, y2, head_size) = (10.0, 20.0, 130.0, 65.0, 8.0);
@@ -1714,7 +1715,7 @@ fn an_arrow_head_rides_the_tip_piece_with_its_size_kept() {
     );
 }
 
-/// `(tip, head_size)` of an arrowhead path — `draw::arrowhead_triangle`
+/// `(tip, head_size)` of an arrowhead path — `marks::arrowhead::arrowhead_triangle`
 /// writes `[tip, left, right]`, with the tip `head_size` from the base
 /// midpoint.
 fn head_tip_and_size(node: &SceneNode) -> ((f64, f64), f64) {

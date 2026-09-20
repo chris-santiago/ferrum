@@ -143,7 +143,7 @@ pub struct MarkKwargsSpec {
     /// resolves to `false` at `render::draw::resolve_mark_style` — byte-stable,
     /// matching every segment rendered before this field existed. The
     /// triangle geometry is shared with `annotate_arrow`'s unlabelled overlay
-    /// path (`render::draw::arrowhead_triangle`), extracted from
+    /// path (`render::marks::arrowhead::arrowhead_triangle`), extracted from
     /// `render::annotation::emit_arrow`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrow: Option<bool>,

@@ -1209,10 +1209,10 @@ impl<'a> BreakRemap<'a> {
     /// endpoints when they describe a direction.
     ///
     /// The tip is the triangle's first vertex by construction
-    /// (`draw::arrowhead_path_with_opacity` writes it as the leading
-    /// `MoveTo`) and is the shaft's own `(x2, y2)`; `head_size` is the
+    /// (`marks::arrowhead::arrowhead_path_with_opacity` writes it as the
+    /// leading `MoveTo`) and is the shaft's own `(x2, y2)`; `head_size` is the
     /// distance from that tip to the midpoint of the other two vertices,
-    /// which is how `draw::arrowhead_triangle` built them.
+    /// which is how `marks::arrowhead::arrowhead_triangle` built them.
     ///
     /// `shaft` is the placed sub-shaft the head terminates, when
     /// [`BreakRemap::split_segment_nodes`] found one; `None` is the malformed
@@ -1260,7 +1260,7 @@ impl<'a> BreakRemap<'a> {
                 })
             })
             .and_then(|(sx, sy)| {
-                crate::render::draw::arrowhead_triangle(
+                crate::render::marks::arrowhead::arrowhead_triangle(
                     sx,
                     sy,
                     placed_tip.0,
