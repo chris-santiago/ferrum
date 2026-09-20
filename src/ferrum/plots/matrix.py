@@ -1188,13 +1188,16 @@ def _clustermap_build(
         name="col_dendrogram",
         mark="segment",
         encoding={
-            # Blank the axis titles (mirrors the center heatmap's _X/_Y
-            # title="" above): axis(show=False) below guarantees these axes
-            # never draw, but an unblanked title still reserved a phantom
-            # title gutter in layout, silently eating into the dendrogram's
-            # share of dendrogram_ratio (F-L09-08).
-            "x": _X(_segment_cols["x"], title=""),
-            "y": _Y(_segment_cols["y"], title=""),
+            # Plain column names, like x2/y2: the `axis(show=False)` below is
+            # the whole statement. These channels carried `title=""` until
+            # #182 -- not to suppress a title anyone would see, but to reach
+            # `compute_*_title_width`'s `title.is_some()` route, because a
+            # hidden axis still reserved a phantom title gutter that ate into
+            # the dendrogram's share of dendrogram_ratio (F-L09-08). Layout now
+            # reserves a gutter only for chrome it draws, so the workaround is
+            # removed rather than left as a second mechanism for one rule.
+            "x": _segment_cols["x"],
+            "y": _segment_cols["y"],
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },
@@ -1212,10 +1215,11 @@ def _clustermap_build(
         name="row_dendrogram",
         mark="segment",
         encoding={
-            # See col_dendro_layer above: blank titles so the axis(show=False)
-            # below doesn't leave a phantom title gutter reserved in layout.
-            "x": _X(_segment_cols["x"], title=""),
-            "y": _Y(_segment_cols["y"], title=""),
+            # See col_dendro_layer above: the `title=""` phantom-gutter
+            # workaround is gone with #182; `axis(show=False)` below is the
+            # whole statement.
+            "x": _segment_cols["x"],
+            "y": _segment_cols["y"],
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },

@@ -102,11 +102,18 @@ pub fn compute_layout(
     let mut theme = ThemeInputs::default();
     theme.legend.legend_orient = parse_legend_orient(legend_orient)?;
 
+    let cartesian_axes_suppressed =
+        crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
     let mut axes = AxesInput {
         x: AxisInput::new(AxisOrient::Bottom, x_title, x_tick_labels, label_angle),
         y: AxisInput::new(AxisOrient::Left, y_title, y_tick_labels, None),
-        show_x: true,
-        show_y: true,
+        // Same fold as `render::prepare::build_axes` (`AxesInput::show_x` means
+        // "this Cartesian axis is drawn"): a `Polar`/`Geo` spec reserves no
+        // Cartesian band here either, so this binding's layout answers agree
+        // with the full render pipeline's (#182/#94). This binding has no
+        // `.axis(show=False)` argument, so the coord is the only reason.
+        show_x: !cartesian_axes_suppressed,
+        show_y: !cartesian_axes_suppressed,
         secondary_y: Vec::new(),
     };
     // Bottom of the grid/domain precedence chain (D4, spec §4.3), same as the

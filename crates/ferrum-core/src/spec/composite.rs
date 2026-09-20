@@ -31,7 +31,8 @@
 //!
 //! ```text
 //! {"kind": "leaf", "spec": <ChartSpec>, "data": 0}
-//! {"kind": "composite", "layout": "grid", "children": [...], "nrows": 2, "ncols": 2, ...}
+//! {"kind": "composite", "layout": "grid", "children": [...], "nrows": 2, "ncols": 2,
+//!  "extent_alignments": [{"follower": 0, "leader": 2, "axis": "x"}], ...}
 //! {"kind": "hole"}
 //! ```
 //!
@@ -40,6 +41,7 @@
 //! coercion ([`composite_tree_from_py`]) is consumed by the
 //! `render_composite_svg`/`render_composite_interactive` entries (Task 5c).
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -107,6 +109,68 @@ impl FromStr for CompositeLayout {
             other => Err(ParseCompositeLayoutError(other.to_string())),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ExtentAlignment
+// ---------------------------------------------------------------------------
+
+/// The axis an [`ExtentAlignment`] equalizes. `X` makes two cells in the same
+/// grid COLUMN span the same pixels horizontally; `Y` does the same for two
+/// cells in one ROW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlignAxis {
+    X,
+    Y,
+}
+
+impl AlignAxis {
+    /// The axis as it appears on the wire — and, for that reason, as it
+    /// appears in the warning a caller reads back
+    /// (`RenderWarning::ExtentAlignmentUnresolvable`): the token it is told
+    /// about is the token it wrote.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            AlignAxis::X => "x",
+            AlignAxis::Y => "y",
+        }
+    }
+}
+
+/// One grid cell whose plot extent follows another cell's on one axis —
+/// **the composition declaring, on the wire, that two of its panels are meant
+/// to read against the same ruler** (`#182` follow-up: a jointplot's marginals
+/// span the joint panel's axis; a clustermap's dendrograms span their
+/// heatmap's).
+///
+/// `follower` and `leader` are **cell positions** in the grid's own
+/// `children` (row-major, so they count holes), not leaf indices: the
+/// declaration is local to the node that makes it and stays correct when that
+/// node is nested inside another composition.
+/// [`crate::render::composite_render`] resolves them to leaf indices at render
+/// time.
+///
+/// Why a declaration and not a shape predicate: the first implementation of
+/// this alignment recognized a jointplot by its grid geometry (2x2, hole in
+/// the top-right corner, axis-free corner cells). That predicate cannot be
+/// made safe, because a clustermap is *also* a 2x2 grid with a hole and
+/// axis-free cells — it distinguishes two different figures by which corner
+/// the hole is in. This wave took the same decision for the area baseline
+/// (`mark_style.value_axis`, `9c570342`) and deleted the geometric heuristic
+/// that preceded it; carrying a second heuristic here would leave the
+/// codebase holding two answers to one question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtentAlignment {
+    /// Cell position (in the grid's `children`) of the panel that adopts the
+    /// other's extent.
+    pub follower: usize,
+    /// Cell position of the panel whose extent is adopted.
+    pub leader: usize,
+    /// The axis on which the two must agree. The follower keeps its own
+    /// extent on the other axis.
+    pub axis: AlignAxis,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +334,14 @@ pub enum CompositeNode {
         /// equal `nrows * ncols`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nrows: Option<u32>,
+        /// Grid-only: cells whose plot extent follows another cell's on one
+        /// axis (`#182` follow-up — a jointplot's marginals against its joint
+        /// panel, a clustermap's dendrograms against its heatmap). Empty for
+        /// every other composition and skipped from canonical JSON, so a
+        /// payload that declares none serializes byte-identically to one
+        /// written before this field existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extent_alignments: Vec<ExtentAlignment>,
         /// Root-only figure chrome (spec §6).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
@@ -367,6 +439,7 @@ impl CompositeNode {
             col_ratios,
             ncols,
             nrows,
+            extent_alignments,
             title,
             subtitle,
             caption,
@@ -402,13 +475,23 @@ impl CompositeNode {
             }
         }
 
+        // Extent alignment is cell-to-cell geometry, so it means nothing
+        // without the row/column addressing only `grid` has (same reason
+        // `row_ratios`/`col_ratios` are grid-only).
+        if !matches!(layout, CompositeLayout::Grid) && !extent_alignments.is_empty() {
+            return Err(CompositeSpecError::GridOnlyField {
+                kind,
+                field: "extent_alignments",
+            });
+        }
+
         match layout {
             CompositeLayout::Hconcat | CompositeLayout::Vconcat | CompositeLayout::Overlay => {
                 if row_ratios.is_some() {
-                    return Err(CompositeSpecError::RatiosNotSupported { kind, field: "row_ratios" });
+                    return Err(CompositeSpecError::GridOnlyField { kind, field: "row_ratios" });
                 }
                 if col_ratios.is_some() {
-                    return Err(CompositeSpecError::RatiosNotSupported { kind, field: "col_ratios" });
+                    return Err(CompositeSpecError::GridOnlyField { kind, field: "col_ratios" });
                 }
                 if ncols.is_some() {
                     return Err(CompositeSpecError::WrapParamsNotSupported { kind, field: "ncols" });
@@ -419,10 +502,10 @@ impl CompositeNode {
             }
             CompositeLayout::Wrap => {
                 if row_ratios.is_some() {
-                    return Err(CompositeSpecError::RatiosNotSupported { kind, field: "row_ratios" });
+                    return Err(CompositeSpecError::GridOnlyField { kind, field: "row_ratios" });
                 }
                 if col_ratios.is_some() {
-                    return Err(CompositeSpecError::RatiosNotSupported { kind, field: "col_ratios" });
+                    return Err(CompositeSpecError::GridOnlyField { kind, field: "col_ratios" });
                 }
                 if nrows.is_some() {
                     return Err(CompositeSpecError::WrapParamsNotSupported { kind, field: "nrows" });
@@ -464,6 +547,7 @@ impl CompositeNode {
                         });
                     }
                 }
+                validate_extent_alignments(kind, children, *ncols as usize, extent_alignments)?;
             }
         }
 
@@ -489,6 +573,59 @@ impl CompositeNode {
     }
 }
 
+/// Check a grid's `extent_alignments` against the grid it is declared on
+/// (see [`ExtentAlignment`]). Called from [`CompositeNode::validate`] once
+/// `nrows`/`ncols` and the child count are known, so the row/column
+/// addressing here is sound.
+///
+/// Every rejection is a malformed declaration — a statement the grid cannot
+/// honor, which no lowering emits — so it refuses rather than degrading.
+/// Whether the named cell is a *leaf* is deliberately NOT checked here: a
+/// nested composite cell (a `LayerChart` as a jointplot's centre panel) is a
+/// legitimate figure, and the render pass drops such an alignment rather
+/// than failing the render. See `render::composite_render`'s
+/// `resolve_extent_alignments`.
+fn validate_extent_alignments(
+    kind: &'static str,
+    children: &[CompositeNode],
+    ncols: usize,
+    alignments: &[ExtentAlignment],
+) -> Result<(), CompositeSpecError> {
+    let mut claimed: HashSet<(usize, AlignAxis)> = HashSet::new();
+    for (index, a) in alignments.iter().enumerate() {
+        let invalid = |reason| CompositeSpecError::ExtentAlignmentInvalid { kind, index, reason };
+        for cell in [a.follower, a.leader] {
+            match children.get(cell) {
+                None => return Err(invalid("names a cell outside this grid's children")),
+                Some(CompositeNode::Hole { .. }) => {
+                    return Err(invalid("names a 'hole' cell, which has no plot extent to share"));
+                }
+                Some(_) => {}
+            }
+        }
+        if a.follower == a.leader {
+            return Err(invalid("makes a cell follow itself"));
+        }
+        // An x alignment equalizes horizontal extents, which is only
+        // meaningful for cells stacked in one column; y is the transpose.
+        let same_column = a.follower % ncols == a.leader % ncols;
+        let same_row = a.follower / ncols == a.leader / ncols;
+        match a.axis {
+            AlignAxis::X if !same_column => {
+                return Err(invalid("aligns x across cells that are not in one column"));
+            }
+            AlignAxis::Y if !same_row => {
+                return Err(invalid("aligns y across cells that are not in one row"));
+            }
+            _ => {}
+        }
+        if !claimed.insert((a.follower, a.axis)) {
+            return Err(invalid("gives a cell a second leader on the same axis"));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CompositeSpecError
 // ---------------------------------------------------------------------------
@@ -503,8 +640,20 @@ impl CompositeNode {
 pub enum CompositeSpecError {
     /// A composite node's `children` list is empty.
     EmptyChildren { kind: &'static str },
-    /// `row_ratios`/`col_ratios` was set on a layout that isn't `grid`.
-    RatiosNotSupported { kind: &'static str, field: &'static str },
+    /// A grid-only field (`row_ratios`/`col_ratios`/`extent_alignments`) was
+    /// set on a layout that isn't `grid`.
+    GridOnlyField { kind: &'static str, field: &'static str },
+    /// An `extent_alignments` entry is not a statement this grid can honor:
+    /// a cell index outside `children`, a cell following itself, a `hole`
+    /// endpoint (a hole has no plot extent to share), two cells that are not
+    /// in the same column for an `"x"` alignment (or the same row for `"y"`),
+    /// or a second leader for a cell's axis. `index` is the entry's position
+    /// in the list so the caller can find the one it wrote.
+    ExtentAlignmentInvalid {
+        kind: &'static str,
+        index: usize,
+        reason: &'static str,
+    },
     /// `row_ratios`/`col_ratios` length didn't match `nrows`/`ncols`.
     RatioArityMismatch {
         kind: &'static str,
@@ -547,9 +696,13 @@ impl fmt::Display for CompositeSpecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyChildren { kind } => write!(f, "{kind}: children must not be empty"),
-            Self::RatiosNotSupported { kind, field } => {
+            Self::GridOnlyField { kind, field } => {
                 write!(f, "{kind}: '{field}' is only supported on 'grid' nodes")
             }
+            Self::ExtentAlignmentInvalid { kind, index, reason } => write!(
+                f,
+                "{kind}: extent_alignments[{index}] {reason}"
+            ),
             Self::RatioArityMismatch { kind, field, expected, got } => write!(
                 f,
                 "{kind}: '{field}' length mismatch: expected {expected}, got {got}"
@@ -678,6 +831,15 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 Some(v) => Some(v.extract()?),
                 None => None,
             };
+            // Routed through the serde bridge (like `resolve`) rather than a
+            // hand-written dict walk: a misspelled key or an axis outside
+            // {"x","y"} then refuses with the field named, instead of
+            // silently dropping the alignment.
+            let extent_alignments: Vec<ExtentAlignment> = match opt_item(dict, "extent_alignments")?
+            {
+                Some(v) => crate::pyo3_serde::from_py(&v, "extent_alignments")?,
+                None => Vec::new(),
+            };
             let title: Option<String> = match opt_item(dict, "title")? {
                 Some(v) => Some(v.extract()?),
                 None => None,
@@ -702,6 +864,7 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 col_ratios,
                 ncols,
                 nrows,
+                extent_alignments,
                 title,
                 subtitle,
                 caption,
@@ -800,6 +963,7 @@ mod tests {
             col_ratios: None,
             ncols: None,
             nrows: None,
+            extent_alignments: Vec::new(),
             title: None,
             subtitle: None,
             caption: None,
@@ -1125,6 +1289,222 @@ mod tests {
         }
     }
 
+    // -- extent alignment (#182 follow-up) ---------------------------------
+
+    /// A jointplot's grid, built exactly as `JointChart._composite_tree`
+    /// lowers it: `[top, HOLE, centre, right]`, each marginal declared against
+    /// the centre CELL (2, not leaf 1 — the wire counts cells).
+    fn joint_grid_with(alignments: Vec<ExtentAlignment>) -> CompositeNode {
+        let mut node = composite(
+            CompositeLayout::Grid,
+            vec![
+                leaf(0),
+                CompositeNode::Hole { width: None, height: None },
+                leaf(1),
+                leaf(2),
+            ],
+        );
+        if let CompositeNode::Composite {
+            nrows,
+            ncols,
+            extent_alignments,
+            ..
+        } = &mut node
+        {
+            *nrows = Some(2);
+            *ncols = Some(2);
+            *extent_alignments = alignments;
+        }
+        node
+    }
+
+    fn joint_alignments() -> Vec<ExtentAlignment> {
+        vec![
+            ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+            ExtentAlignment { follower: 3, leader: 2, axis: AlignAxis::Y },
+        ]
+    }
+
+    /// **Wire byte-stability.** A payload captured before this field existed
+    /// parses, reads as declaring nothing, and re-serializes to the SAME
+    /// BYTES — proved by round-tripping the captured string, not by reading
+    /// the `skip_serializing_if` attribute (the same proof
+    /// `ScaleSpec::Linear::system_injected` took in `2299d31b` and
+    /// `MarkKwargsSpec::value_axis` in `9c570342`).
+    #[test]
+    fn pre_alignment_grid_payload_round_trips_to_identical_bytes() {
+        // A jointplot-shaped grid with a hole, written with every key a
+        // pre-change producer emitted and nothing else. (The leaves carry
+        // `ChartSpec`'s explicit default `data` ref because that struct
+        // serializes it — unrelated to this field, and included so the
+        // equality below is byte-for-byte rather than approximate.)
+        const CAPTURED: &str = r#"{"kind":"composite","layout":"grid","children":[{"kind":"leaf","spec":{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}},"data":0},{"kind":"hole"},{"kind":"leaf","spec":{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}},"data":1}],"spacing":8.0,"ncols":2,"nrows":2}"#;
+        let parsed: CompositeNode = serde_json::from_str(CAPTURED).unwrap();
+        let CompositeNode::Composite { ref extent_alignments, .. } = parsed else {
+            panic!("expected Composite")
+        };
+        assert!(
+            extent_alignments.is_empty(),
+            "an absent field must read as 'declares nothing', never as a default alignment"
+        );
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), CAPTURED);
+    }
+
+    /// A declaration survives the wire in both directions, keyed the way the
+    /// Python lowering writes it (`_extent_alignment`).
+    #[test]
+    fn declared_alignments_round_trip_on_the_wire() {
+        let node = joint_grid_with(joint_alignments());
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(
+            json.contains(
+                r#""extent_alignments":[{"follower":0,"leader":2,"axis":"x"},{"follower":3,"leader":2,"axis":"y"}]"#
+            ),
+            "json: {json}"
+        );
+        let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, node);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    /// The shapes the lowering actually emits validate — the guard against a
+    /// refusal rule that is too strict to let the real figures through.
+    #[test]
+    fn the_lowerings_own_declarations_validate() {
+        joint_grid_with(joint_alignments()).validate().unwrap();
+        // ClusterMap: [HOLE, col_dendro, row_dendro, heatmap], dendrograms
+        // declared against the heatmap cell (3).
+        let mut clustermap = composite(
+            CompositeLayout::Grid,
+            vec![
+                CompositeNode::Hole { width: None, height: None },
+                leaf(0),
+                leaf(1),
+                leaf(2),
+            ],
+        );
+        if let CompositeNode::Composite {
+            nrows,
+            ncols,
+            extent_alignments,
+            ..
+        } = &mut clustermap
+        {
+            *nrows = Some(2);
+            *ncols = Some(2);
+            *extent_alignments = vec![
+                ExtentAlignment { follower: 1, leader: 3, axis: AlignAxis::X },
+                ExtentAlignment { follower: 2, leader: 3, axis: AlignAxis::Y },
+            ];
+        }
+        clustermap.validate().unwrap();
+    }
+
+    /// Every way a declaration can be unhonorable is REFUSED naming the
+    /// entry, not silently dropped: the grid would otherwise render as if the
+    /// caller had said nothing, which is indistinguishable from the feature
+    /// being broken.
+    #[test]
+    fn validate_refuses_every_unhonorable_alignment() {
+        for (alignment, reason) in [
+            (
+                ExtentAlignment { follower: 0, leader: 9, axis: AlignAxis::X },
+                "names a cell outside this grid's children",
+            ),
+            (
+                ExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::X },
+                "names a 'hole' cell, which has no plot extent to share",
+            ),
+            (
+                ExtentAlignment { follower: 2, leader: 2, axis: AlignAxis::X },
+                "makes a cell follow itself",
+            ),
+            (
+                // Cells 2 and 3 are in one ROW, so they can agree on y, never x.
+                ExtentAlignment { follower: 3, leader: 2, axis: AlignAxis::X },
+                "aligns x across cells that are not in one column",
+            ),
+            (
+                // Cells 0 and 2 are in one COLUMN, so they can agree on x, never y.
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::Y },
+                "aligns y across cells that are not in one row",
+            ),
+        ] {
+            let node = joint_grid_with(vec![alignment]);
+            assert_eq!(
+                node.validate().unwrap_err(),
+                CompositeSpecError::ExtentAlignmentInvalid { kind: "grid", index: 0, reason }
+            );
+        }
+
+        // A second leader for the same cell+axis: which one wins would be
+        // whichever the resolver happened to visit last.
+        let node = joint_grid_with(vec![
+            ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+            ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+        ]);
+        assert_eq!(
+            node.validate().unwrap_err(),
+            CompositeSpecError::ExtentAlignmentInvalid {
+                kind: "grid",
+                index: 1,
+                reason: "gives a cell a second leader on the same axis",
+            }
+        );
+
+        // One cell may still follow different leaders on DIFFERENT axes: the
+        // two declarations describe independent extents, so the duplicate rule
+        // must key on cell AND axis, not on the cell alone. Needs a dense grid
+        // (a jointplot's row-mate is the hole).
+        let mut dense = composite(
+            CompositeLayout::Grid,
+            vec![leaf(0), leaf(1), leaf(2), leaf(3)],
+        );
+        if let CompositeNode::Composite {
+            nrows,
+            ncols,
+            extent_alignments,
+            ..
+        } = &mut dense
+        {
+            *nrows = Some(2);
+            *ncols = Some(2);
+            *extent_alignments = vec![
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                ExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::Y },
+            ];
+        }
+        dense.validate().unwrap();
+    }
+
+    /// Cell-to-cell geometry needs the row/column addressing only `grid` has,
+    /// the same reason `row_ratios`/`col_ratios` are grid-only.
+    #[test]
+    fn validate_rejects_alignments_on_a_non_grid_layout() {
+        for layout in [
+            CompositeLayout::Hconcat,
+            CompositeLayout::Vconcat,
+            CompositeLayout::Overlay,
+            CompositeLayout::Wrap,
+        ] {
+            let mut node = composite(layout, vec![leaf(0), leaf(1)]);
+            if let CompositeNode::Composite { extent_alignments, ncols, .. } = &mut node {
+                *extent_alignments =
+                    vec![ExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::Y }];
+                if layout == CompositeLayout::Wrap {
+                    *ncols = Some(2); // otherwise wrap fails its own required-field check first
+                }
+            }
+            assert_eq!(
+                node.validate().unwrap_err(),
+                CompositeSpecError::GridOnlyField {
+                    kind: layout.as_str(),
+                    field: "extent_alignments",
+                }
+            );
+        }
+    }
+
     #[test]
     fn validate_rejects_ratios_on_hconcat() {
         let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0), leaf(1)]);
@@ -1134,7 +1514,7 @@ mod tests {
         let err = node.validate().unwrap_err();
         assert_eq!(
             err,
-            CompositeSpecError::RatiosNotSupported { kind: "hconcat", field: "col_ratios" }
+            CompositeSpecError::GridOnlyField { kind: "hconcat", field: "col_ratios" }
         );
     }
 
@@ -1650,6 +2030,104 @@ mod tests {
             assert_eq!(title.as_deref(), Some("T"));
             assert_eq!(subtitle.as_deref(), Some("S"));
             assert_eq!(caption.as_deref(), Some("C"));
+        });
+    }
+
+    /// The declaration must survive the PyO3 boundary in the dict shape
+    /// `composition.py`'s `_extent_alignment` writes — otherwise the Python
+    /// emit is dead and the panels silently go back to laying out
+    /// independently, which is a defect no test of either side alone catches.
+    #[test]
+    fn composite_tree_from_py_reads_extent_alignments() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+            // JointChart's lowering: [top, HOLE, centre, right].
+            let children = pyo3::types::PyList::new(
+                py,
+                [mk_leaf(0), hole.clone(), mk_leaf(1), mk_leaf(2)],
+            )
+            .unwrap();
+
+            let mk_alignment = |follower: usize, leader: usize, axis: &str| {
+                let d = PyDict::new(py);
+                d.set_item("follower", follower).unwrap();
+                d.set_item("leader", leader).unwrap();
+                d.set_item("axis", axis).unwrap();
+                d
+            };
+            let alignments =
+                pyo3::types::PyList::new(py, [mk_alignment(0, 2, "x"), mk_alignment(3, 2, "y")])
+                    .unwrap();
+
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "grid").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("nrows", 2usize).unwrap();
+            root.set_item("ncols", 2usize).unwrap();
+            root.set_item("extent_alignments", alignments).unwrap();
+
+            let node = composite_tree_from_py(root.as_any()).unwrap();
+            let CompositeNode::Composite { extent_alignments, .. } = node else {
+                panic!("expected Composite")
+            };
+            assert_eq!(extent_alignments, joint_alignments());
+
+            // Absent is "declares nothing", never an error or a default.
+            let bare = PyDict::new(py);
+            bare.set_item("kind", "composite").unwrap();
+            bare.set_item("layout", "hconcat").unwrap();
+            bare.set_item("children", pyo3::types::PyList::new(py, [mk_leaf(0)]).unwrap())
+                .unwrap();
+            let node = composite_tree_from_py(bare.as_any()).unwrap();
+            let CompositeNode::Composite { extent_alignments, .. } = node else {
+                panic!("expected Composite")
+            };
+            assert!(extent_alignments.is_empty());
+        });
+    }
+
+    /// An axis outside `{"x","y"}` (or a misspelled key) refuses naming the
+    /// field, rather than dropping the alignment and rendering as if the
+    /// caller had declared nothing.
+    #[test]
+    fn composite_tree_from_py_refuses_a_malformed_alignment() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let bad = PyDict::new(py);
+            bad.set_item("follower", 0usize).unwrap();
+            bad.set_item("leader", 1usize).unwrap();
+            bad.set_item("axis", "diagonal").unwrap();
+
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "grid").unwrap();
+            root.set_item("children", pyo3::types::PyList::new(py, [mk_leaf(0), mk_leaf(1)]).unwrap())
+                .unwrap();
+            root.set_item("nrows", 2usize).unwrap();
+            root.set_item("ncols", 1usize).unwrap();
+            root.set_item("extent_alignments", pyo3::types::PyList::new(py, [bad]).unwrap())
+                .unwrap();
+
+            let err = composite_tree_from_py(root.as_any()).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("extent_alignments"), "msg: {msg}");
         });
     }
 

@@ -572,12 +572,30 @@ impl AxisInput {
 pub struct AxesInput {
     pub x: AxisInput,
     pub y: AxisInput,
-    /// When false, the x axis line + ticks + labels + title are suppressed
-    /// at layout time. Used by `ChartSpec.axis_x = Some(false)` (i.e.
-    /// `Chart.axis(x=False)`) on clustermap dendrogram panels and JointChart
-    /// marginal panels. Default `true`.
+    /// Whether the Cartesian x axis is DRAWN — the one question every
+    /// reservation and every emission in this module asks. False suppresses the
+    /// axis line + ticks + labels + title at layout time AND reserves no band
+    /// for any of them (`#182`, closes `#94`: a gutter exists if and only if
+    /// something is drawn in it).
+    ///
+    /// Its producer (`render::prepare::build_axes`) resolves BOTH reasons an
+    /// axis may not be drawn into this one flag, so no consumer needs a second
+    /// gate — the same discipline [`AxesInput::apply_show_defaults`] applies to
+    /// `grid`/`domain`:
+    ///
+    /// 1. `ChartSpec.axis_x = Some(false)` (i.e. `Chart.axis(x=False)`), used on
+    ///    clustermap dendrogram panels and JointChart marginal panels.
+    /// 2. A projected coordinate system that replaces the Cartesian axes
+    ///    outright ([`crate::spec::coord::suppresses_cartesian_axes`]):
+    ///    `CoordPolar` draws a circular boundary with radial ticks, `CoordGeo`
+    ///    draws no axis at all, and `render::scene_build` emits no Cartesian
+    ///    axis or gridline node for either. This is `#94` — a polar chart used
+    ///    to reserve a full Cartesian left gutter and bottom band for chrome
+    ///    that never existed.
+    ///
+    /// Default `true`.
     pub show_x: bool,
-    /// Y-axis variant of `show_x`. Default `true`.
+    /// Y-axis variant of `show_x`, with the same two-reason fold. Default `true`.
     pub show_y: bool,
     /// Secondary y-axis inputs, one per `independent_y` layer, in layer order
     /// (secondary-y-axis, GH #52). Each renders on the right, stacked outward
@@ -1039,19 +1057,17 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
 /// only floor a stride once collision was already detected by pure overlap.
 ///
 /// Algorithm (mirrors the cascade order in `cascade_collision_recovery`):
+/// 0. If `show_labels` is false, return `0.0` — no text draws, so no band
+///    (drawn gate, see doc below).
 /// 1. If `label_angle_override` is set, use that angle directly.
 /// 2. If all labels fit flat, return `tick_size + label_pad_eff + line_height`
-///    (#97, spec §4.1 — the always-on standoff, not a bare `line_height`) when
-///    `show_labels` is true; otherwise the pre-#97 `line_height + padding_delta`
-///    (standoff gate, see doc below).
+///    (#97, spec §4.1 — the always-on standoff, not a bare `line_height`).
 /// 3. If wrapping resolves collision (all labels wrap successfully), return
-///    `tick_size + label_pad_eff + max_lines * line_height` when `show_labels`
-///    is true; otherwise the pre-#97 `max_lines * line_height + padding_delta`.
+///    `tick_size + label_pad_eff + max_lines * line_height`.
 /// 4. Try each angle in `ANGLE_CASCADE`; first that passes returns the full
-///    geometric extent of the rotated label (see the SYNC comment below) —
-///    unaffected by `show_labels` (see the standoff-gate doc below).
+///    geometric extent of the rotated label (see the SYNC comment below).
 /// 5. Fallback: vertical labels (-90°, S4/S5 scenarios) reserve the full extent
-///    at sin=1, cos=0 — also unaffected by `show_labels`.
+///    at sin=1, cos=0.
 ///
 /// SYNC: every branch mirrors the label geometry in
 /// `crate::render::marks::axis::build_axis`. A flat label's baseline sits at
@@ -1070,23 +1086,25 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
 /// the render geometry (or the title placement in `layout_x_axis`) to match, or
 /// the x-axis title will overlap the labels.
 ///
-/// **Standoff gate (`show_labels: bool`, spec §4.1 amended 2026-08-27, x-side
-/// extension):** mirrors `compute_y_label_band_width`'s gate exactly — the new
-/// standoff applies only to an axis that actually DRAWS its labels.
-/// `axes.show_x` (`.axis(x=False)`) already short-circuits the caller in
-/// `reserve_axis_bands` to `0.0` before this function is ever invoked, so the
-/// remaining knob is `fm.Axis(labels=False)` (`AxisInput.show_labels`): a
-/// SHOWN x axis whose labels never draw (`render/marks/axis.rs`'s tick loop:
-/// `if axis.show_labels && !tick.culled`) must not gain #97's new
-/// `tick_size + label_pad_eff` standoff either. When `show_labels` is `false`,
-/// the flat (S0) and wrapped (S1) branches fall back to their pre-#97 values
-/// (`line_h + padding_delta` / `n·line_h + padding_delta`) — byte-for-byte the
-/// same #94 phantom-margin-family reservation the empty-label branch above
-/// already returns unconditionally. Rotated/override branches (S2/S3/S4) are
-/// NOT gated: pre-#97 they already reserved the full standoff at any nonzero
-/// angle regardless of label visibility, so gating only matters where the
-/// angle resolves to flat/wrapped — the same reasoning that limited the y-side
-/// gate to θ=0 only (see `compute_y_label_band_width`'s doc). See #94.
+/// **Drawn gate (`show_labels: bool`, spec §4.1 amended 2026-08-27, x-side
+/// extension; widened by `#182`, which closes `#94`):** mirrors
+/// `compute_y_label_band_width`'s gate exactly — a band exists only for an axis
+/// that actually DRAWS its labels, and an axis that draws none reserves `0.0`
+/// whatever the cascade would have chosen. `axes.show_x` (`.axis(x=False)`, and
+/// a `Polar`/`Geo` coord that replaces the Cartesian axes outright) already
+/// short-circuits the caller in `reserve_axis_bands` to `0.0` before this
+/// function is invoked, so the knob that reaches here is
+/// `fm.Axis(labels=False)` (`AxisInput.show_labels`): a SHOWN x axis whose
+/// labels never draw (`render/marks/axis.rs`'s tick loop: `if axis.show_labels
+/// && !tick.culled`). Before this gate it reserved the pre-#97 `line_h +
+/// padding_delta` (flat/wrapped) or the full rotated extent (S2–S4) for text
+/// that never renders. Its title is unaffected, so `Axis(labels=False)`
+/// collapses the label band alone.
+///
+/// The empty-label branch below deliberately keeps its own `line_h +
+/// padding_delta` rather than folding into this gate: an x axis with zero tick
+/// labels but `show_labels: true` still draws its tick marks, and that corner
+/// is out of `#182`'s scope (see this task's report).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_x_label_band(
     labels: &[String],
@@ -1101,6 +1119,16 @@ pub(crate) fn estimate_x_label_band(
 ) -> f64 {
     let line_h = metrics.line_height(label_font_size);
     let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
+
+    // #182 (closes #94): an axis whose labels never draw reserves no band, at
+    // any angle the cascade below would have chosen. `fm.Axis(labels=False)` is
+    // the knob that reaches here (`.axis(x=False)` and a projected coord
+    // short-circuit the caller); before this gate the flat/wrapped branches
+    // reserved `line_h + padding_delta` and the rotated ones the full extent,
+    // for text the renderer never emits.
+    if !show_labels {
+        return 0.0;
+    }
 
     // Empty label set: byte-identical to pre-#97 behavior — no tick_size/label_pad
     // standoff is reserved when there are no labels to draw. JointChart marginals
@@ -1145,12 +1173,10 @@ pub(crate) fn estimate_x_label_band(
     let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
 
     // S0 — flat (#97, spec §4.1): the same `tick_size + label_pad_eff` standoff
-    // the renderer draws below the axis line, plus one line of text — but only
-    // for an axis whose labels actually draw (standoff gate, see doc above).
+    // the renderer draws below the axis line, plus one line of text. Labels are
+    // known to draw here — the drawn gate above already returned for an axis
+    // whose labels don't.
     if max_label_w <= threshold {
-        if !show_labels {
-            return line_h + padding_delta;
-        }
         return tick_size + label_pad_eff + line_h;
     }
 
@@ -1172,9 +1198,6 @@ pub(crate) fn estimate_x_label_band(
                     .map(|w| w.split('\n').count())
                     .max()
                     .unwrap_or(1);
-                if !show_labels {
-                    return max_lines as f64 * line_h + padding_delta;
-                }
                 return tick_size + label_pad_eff + max_lines as f64 * line_h;
             }
         }
@@ -1283,34 +1306,33 @@ fn rotated_y_label_extent(
 /// 2026-08-27 to retire that specific corner as a reservation for labels that
 /// don't exist).
 ///
-/// **Standoff gate (`visible: bool`, spec §4.1 amended 2026-08-27):** the
-/// standoff applies only to an axis that actually DRAWS
-/// its labels — visible AND labels shown. Two independent knobs feed this:
+/// **Drawn gate (`visible: bool`, spec §4.1 amended 2026-08-27; widened by
+/// `#182`, which closes `#94`):** the band exists only for an axis that
+/// actually DRAWS its labels — visible AND labels shown. Anything else
+/// reserves `0.0`, at any angle. Two independent knobs feed this:
 ///
 /// 1. `.axis(show=False)` (`AxesInput.show_x`/`show_y`, passed in as
 ///    `visible`) does NOT empty `tick_labels` — `build_axis_input` populates
 ///    them regardless, and `layout::mod`'s panel loop only skips *emitting*
-///    the axis layout, not the upstream gutter reservation (see that loop's
-///    own comment: "the plot area is unchanged, gutters remain reserved
-///    upstream"). So a hidden y axis (JointChart marginals, ClusterMap
+///    the axis layout. So a hidden y axis (JointChart marginals, ClusterMap
 ///    dendrograms use `.axis(show=False)`) still reaches this function with
-///    real labels.
+///    real labels. `visible` also carries the projected-coord case: a
+///    `Polar`/`Geo` chart has no Cartesian axes at all
+///    ([`crate::spec::coord::suppresses_cartesian_axes`], folded into the two
+///    show flags by `render::prepare::build_axes`), which is `#94`'s half of
+///    the defect.
 /// 2. `fm.Axis(labels=False)` (`AxisInput.show_labels`, read directly off
 ///    `input` — no separate parameter needed) draws NO tick label text
 ///    either (`render/marks/axis.rs`'s tick loop: `if axis.show_labels &&
-///    !tick.culled`), on an otherwise fully visible axis.
+///    !tick.culled`), on an otherwise fully visible axis. Its title is
+///    unaffected, so this collapses the label band alone.
 ///
-/// In BOTH cases #97 must not stack a NEW standoff on top of the pre-existing
-/// phantom reservation: when `visible && input.show_labels` is `false` (no
-/// labels actually draw) and the resolved angle is exactly 0.0, this returns
-/// the bare pre-#97 `max_label_w` (no `tick_size`/`label_pad_eff`),
-/// byte-for-byte identical to before this batch. A ROTATED axis with no drawn
-/// labels is unaffected by the gate — pre-#97 already routed any nonzero
-/// angle through `rotated_y_label_extent` (which already included the
-/// standoff) regardless of visibility or `show_labels`, so gating only
-/// matters at θ=0. The underlying phantom reservation for labels that never
-/// render is a pre-existing quirk in the #94 family and is intentionally NOT
-/// fixed here — see #94.
+/// `#97`'s standoff question (should `tick_size + label_pad_eff` be added on
+/// top of the text extent?) is subsumed: an undrawn axis reserves nothing at
+/// all, so there is nothing for the standoff to stack onto. What this replaced
+/// was the pre-`#94` phantom — bare `max_label_w` at θ=0, and the full
+/// `rotated_y_label_extent` at any other angle — i.e. space set aside for
+/// label text that never renders.
 pub(crate) fn compute_y_label_band_width(
     input: &AxisInput,
     label_font_size: f64,
@@ -1328,13 +1350,18 @@ pub(crate) fn compute_y_label_band_width(
         .fold(0.0_f64, f64::max);
     let angle = input.overrides.label_angle.unwrap_or(0.0);
     let labels_drawn = visible && input.show_labels();
-    if !labels_drawn && angle == 0.0 {
-        // #94 phantom-margin family (deliberately unchanged here): the
-        // pre-#97 flat reservation for an axis whose labels never draw
-        // (hidden via `.axis(show=False)`, or shown but with
-        // `Axis(labels=False)`) was bare `max_label_w` — keep it exactly, do
-        // not add #97's new standoff on top.
-        return max_label_w;
+    if !labels_drawn {
+        // #182 (closes #94): a band exists if and only if something is drawn
+        // in it. An axis whose labels never draw — hidden via
+        // `.axis(show=False)`, replaced by a projected coord, or shown with
+        // `Axis(labels=False)` — reserves NOTHING, at any angle. This
+        // supersedes the pre-#97 flat `max_label_w` reservation kept here
+        // while #94 was open (and, for a rotated hidden axis, the full
+        // `rotated_y_label_extent` the angle arm below used to return): both
+        // were space set aside for label text that never renders, which is
+        // what made a `.axis(show=False)` chart sit off-centre in its own
+        // frame.
+        return 0.0;
     }
     let line_h = metrics.line_height(label_font_size);
     let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
@@ -1343,14 +1370,29 @@ pub(crate) fn compute_y_label_band_width(
 
 /// Returns the title-row width contribution: title text height (rotated 90°,
 /// so its "width" along the x-axis is its line height) plus axis_title_padding.
-/// Returns 0 if there is no title.
+/// Returns 0 when this axis draws no title — either because it has none, or
+/// because the axis itself is not drawn.
+///
+/// **Drawn gate (`visible: bool`, `#182`, closes `#94`):** a gutter exists if
+/// and only if something is drawn in it. `visible` is the same
+/// `AxesInput::show_x`/`show_y` answer [`compute_y_label_band_width`] already
+/// takes — "is this Cartesian axis drawn at all", folding both
+/// `.axis(show=False)` and a projected coord (`Polar`/`Geo`) that replaces the
+/// Cartesian axes outright (see
+/// [`crate::spec::coord::suppresses_cartesian_axes`]). `AxisInput::title` is
+/// populated regardless of either, so before this gate a hidden axis with a
+/// title still reserved the full gutter and the plot sat off-centre in its own
+/// frame. Unlike the label band, the title is NOT gated on
+/// `AxisInput::show_labels` — `fm.Axis(labels=False)` drops the tick labels and
+/// keeps the title, so it collapses the label band alone.
 pub fn compute_y_title_width(
     input: &AxisInput,
     title_font_size: f64,
     axis_title_padding: f64,
     metrics: &dyn TextMetrics,
+    visible: bool,
 ) -> f64 {
-    if input.title.is_some() {
+    if visible && input.title.is_some() {
         let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
         let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
@@ -1361,17 +1403,20 @@ pub fn compute_y_title_width(
 
 /// Returns the x-axis title-gutter height contribution: title text line height
 /// (the title is unrotated on the x axis, so its band along the y-axis is its line
-/// height) plus axis_title_padding. Returns 0 if there is no title. The body is
-/// byte-identical to [`compute_y_title_width`] (cohesion finding LAYOUT-855:
-/// `compute_layout` previously inlined this formula "mirroring the y-axis pattern"
-/// while y was a named helper, leaving the axis family asymmetric).
+/// height) plus axis_title_padding. Returns 0 when this axis draws no title —
+/// see [`compute_y_title_width`] for the `visible` drawn gate (`#182`/`#94`).
+/// The body is byte-identical to [`compute_y_title_width`] (cohesion finding
+/// LAYOUT-855: `compute_layout` previously inlined this formula "mirroring the
+/// y-axis pattern" while y was a named helper, leaving the axis family
+/// asymmetric).
 pub fn compute_x_title_width(
     input: &AxisInput,
     title_font_size: f64,
     axis_title_padding: f64,
     metrics: &dyn TextMetrics,
+    visible: bool,
 ) -> f64 {
-    if input.title.is_some() {
+    if visible && input.title.is_some() {
         let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
         let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
@@ -3104,16 +3149,19 @@ mod tests {
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
     }
 
-    /// #97 spec §4.1 (amended 2026-08-27, gap 1 — the real defect): a HIDDEN
-    /// y axis (`visible: false`, as JointChart marginals / ClusterMap
-    /// dendrograms set via `.axis(show=False)`) must keep the pre-#97 bare
-    /// `max_label_w` reservation byte-for-byte, with NO
-    /// `tick_size`/`label_pad_eff` standoff — #94 phantom-margin family,
-    /// deliberately unchanged by #97. RED-proven: this test fails against the
-    /// unconditional (pre-gate) code, which returned `4.0 + 2.0 + 50.0 = 56.0`
-    /// regardless of visibility.
+    /// `#182` (closes `#94`), superseding this test's own pre-fix contract: a
+    /// HIDDEN y axis (`visible: false` — `.axis(show=False)` on JointChart
+    /// marginals / ClusterMap dendrograms, or a projected coord with no
+    /// Cartesian axes at all) reserves NOTHING, at any angle. It previously
+    /// pinned the pre-`#97` bare `max_label_w` here, which `#97` left standing
+    /// as a knowingly-deferred phantom ("the #94 family"); the rule is now that
+    /// a band exists if and only if label text is drawn in it, so 50.0 of
+    /// reservation for labels the renderer never emits is exactly the defect.
+    /// The angle sweep is the part `#182` widened beyond the θ=0 case `#97`
+    /// gated: a hidden ROTATED axis used to reserve the full
+    /// `rotated_y_label_extent`.
     #[test]
-    fn y_axis_label_band_hidden_axis_keeps_bare_max_label_w() {
+    fn y_axis_label_band_hidden_axis_reserves_nothing() {
         let input = axis_input(
             AxisOrient::Left,
             None,
@@ -3122,41 +3170,43 @@ mod tests {
         );
         let m = mock(10.0);
         let hidden = compute_y_label_band_width(&input, 11.0, &m, 4.0, false);
-        assert_eq!(hidden, 50.0, "hidden axis must reserve bare max_label_w, no standoff");
+        assert_eq!(hidden, 0.0, "a hidden axis draws no labels, so it reserves no band");
 
-        // label_padding must NOT move a hidden axis's reservation — the
-        // reviewer's probe shape: a hidden axis's first-mark position must
-        // not respond to `label_padding` at all, since the standoff term
-        // that padding feeds is gated off entirely.
+        // No override moves it, because there is nothing to move: neither the
+        // standoff term `label_padding` feeds nor the rotated extent an angle
+        // override selects applies to an axis that draws no labels.
         let mut padded = input.clone();
         padded.overrides.label_padding = Some(40.0);
-        let hidden_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, false);
+        assert_eq!(compute_y_label_band_width(&padded, 11.0, &m, 4.0, false), 0.0);
+        let mut rotated = input.clone();
+        rotated.overrides.label_angle = Some(-45.0);
         assert_eq!(
-            hidden_padded, hidden,
-            "hidden axis must be insensitive to label_padding (standoff gated off)"
+            compute_y_label_band_width(&rotated, 11.0, &m, 4.0, false),
+            0.0,
+            "#182 widened the gate past θ=0: a hidden rotated axis reserves nothing either"
         );
 
-        // Contrast: the SAME input, visible, DOES grow with label_padding.
-        let visible_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, true);
-        assert!(
-            visible_padded > hidden_padded,
-            "visible axis must reserve more than a hidden one for the same input"
-        );
+        // Discriminating control: the SAME inputs, VISIBLE, all reserve a real
+        // band — so the zeros above come from the drawn gate, not from a
+        // degenerate fixture that would measure 0.0 either way.
+        assert!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true) >= 50.0);
+        assert!(compute_y_label_band_width(&padded, 11.0, &m, 4.0, true) > 50.0);
+        assert!(compute_y_label_band_width(&rotated, 11.0, &m, 4.0, true) > 0.0);
     }
 
-    /// #97 spec §4.1 (amended 2026-08-27): the standoff
-    /// gate must key off "labels actually drawn", not just "axis shown" — a
+    /// `#182` (closes `#94`), superseding this test's own pre-fix contract: the
+    /// drawn gate keys off "labels actually drawn", not just "axis shown" — a
     /// SHOWN axis (`visible: true`) with `fm.Axis(labels=False)`
     /// (`AxisInput.show_labels = false`) draws no tick label text
-    /// (`render/marks/axis.rs`'s `if axis.show_labels && !tick.culled`
-    /// guard), so it must ALSO keep the pre-#97 bare `max_label_w`
-    /// reservation, byte-for-byte, same as a hidden axis. RED-proven: an
-    /// earlier gate (`!visible && angle == 0.0`) alone left this case
-    /// unguarded — `visible` is `true` here, so the standoff still applied —
-    /// matching the reviewer's probe (`fm.Axis(labels=False)` on a shown y
-    /// axis grew `cx` under `label_padding`).
+    /// (`render/marks/axis.rs`'s `if axis.show_labels && !tick.culled` guard),
+    /// so it reserves no label band at all. It previously pinned the pre-`#97`
+    /// bare `max_label_w` here; that was a reservation for text the renderer
+    /// never emits. Its axis TITLE gutter is untouched by this — the two are
+    /// separately gated, which is what makes `fm.Axis(labels=False)` collapse
+    /// the label band alone (pinned end-to-end in
+    /// `tests/test_axis_gutter_gating.py`).
     #[test]
-    fn y_axis_label_band_labels_off_on_shown_axis_keeps_bare_max_label_w() {
+    fn y_axis_label_band_labels_off_on_shown_axis_reserves_nothing() {
         let mut input = axis_input(
             AxisOrient::Left,
             None,
@@ -3169,29 +3219,29 @@ mod tests {
         // `visible: true` — the axis itself is shown; only its labels are off.
         let labels_off = compute_y_label_band_width(&input, 11.0, &m, 4.0, true);
         assert_eq!(
-            labels_off, 50.0,
-            "a shown axis with labels off must reserve bare max_label_w, no standoff"
+            labels_off, 0.0,
+            "a shown axis whose labels are off draws no label text, so it reserves no band"
         );
 
-        // The reviewer's probe shape: label_padding must NOT move the
-        // reservation when labels never draw.
+        // Nothing to move: `label_padding` feeds only the standoff of a band
+        // that no longer exists.
         let mut padded = input.clone();
         padded.overrides.label_padding = Some(40.0);
         let labels_off_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, true);
         assert_eq!(
             labels_off_padded, labels_off,
-            "labels-off axis must be insensitive to label_padding (standoff gated off)"
+            "labels-off axis must be insensitive to label_padding (no band to pad)"
         );
 
         // Contrast: the SAME input with labels back on DOES grow with
         // label_padding — proving the gate keys on `show_labels`, not some
-        // unrelated code path that always returns the bare value.
+        // unrelated code path that always returns zero.
         let mut labels_on_padded = padded.clone();
         labels_on_padded.overrides.show_labels = Some(true);
         let labels_on_padded_band = compute_y_label_band_width(&labels_on_padded, 11.0, &m, 4.0, true);
         assert!(
             labels_on_padded_band > labels_off_padded,
-            "restoring show_labels must restore the standoff"
+            "restoring show_labels must restore the band"
         );
     }
 
@@ -5008,20 +5058,17 @@ mod tests {
         );
     }
 
-    /// #97 spec §4.1 x-side extension (issue #97 gap): the standoff
-    /// gate applied to the y band must ALSO apply to the x band's
-    /// flat/wrapped branches — a SHOWN x axis whose labels never draw
-    /// (`fm.Axis(labels=False)` → `AxisInput.show_labels = false`,
-    /// `render/marks/axis.rs`'s `if axis.show_labels && !tick.culled` guard)
-    /// must keep the pre-#97 `line_h + padding_delta` / `n·line_h +
-    /// padding_delta` reservation, byte-for-byte, NOT #97's new
-    /// `tick_size + label_pad_eff` standoff. RED-proven: with the gate
-    /// removed (`show_labels` ignored), both assertions below fail — the flat
-    /// case returns `tick_size + 2.0 + line_h` instead of `line_h`, and the
-    /// wrapped case returns `tick_size + 2.0 + 2.0*line_h` instead of
-    /// `2.0*line_h`.
+    /// `#182` (closes `#94`), superseding this test's own pre-fix contract: a
+    /// SHOWN x axis whose labels never draw (`fm.Axis(labels=False)` →
+    /// `AxisInput.show_labels = false`, `render/marks/axis.rs`'s `if
+    /// axis.show_labels && !tick.culled` guard) reserves NO band — not the
+    /// pre-`#97` `line_h + padding_delta` this test used to pin, which `#97`
+    /// kept as a knowingly-deferred phantom ("the #94 family") and which
+    /// `label_padding` could even drive NEGATIVE. The gate now sits ahead of the
+    /// whole cascade, so it covers the rotated branches the earlier flat/wrapped
+    /// gate left reserving a full rotated extent for invisible text.
     #[test]
-    fn x_axis_label_band_labels_off_on_shown_axis_keeps_pre_97_value() {
+    fn x_axis_label_band_labels_off_on_shown_axis_reserves_nothing() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
@@ -5030,35 +5077,42 @@ mod tests {
         let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let flat_off =
             estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, false);
-        assert!(
-            (flat_off - line_h).abs() < 1e-9,
-            "labels-off flat band should be pre-#97 line_h={line_h}, got {flat_off}"
-        );
-        // Contrast: labels drawn DOES gain the #97 standoff for the same input.
+        assert_eq!(flat_off, 0.0, "labels-off flat band reserves nothing");
+        // Contrast: labels drawn DOES reserve the #97 standoff for the same input.
         let flat_on =
             estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
         assert!(
             (flat_on - (tick_size + 2.0 + line_h)).abs() < 1e-9,
             "labels-on flat band should still be tick_size + label_pad_eff + line_h"
         );
-        assert!(
-            flat_on > flat_off,
-            "labels-drawn axis must reserve more than a labels-off axis for the same input"
-        );
 
-        // Pre-#97's flat branch was itself `line_h + padding_delta` (the same
-        // formula the empty-label branch still uses today), so a gated,
-        // labels-off axis stays sensitive to label_padding via that delta —
-        // unlike the y-side gate, which is fully padding-insensitive. This
-        // pins the EXACT pre-batch value, not just "insensitive to padding".
-        let padding_delta = 40.0 - 2.0;
-        let flat_off_padded = estimate_x_label_band(
-            &flat_labels, 11.0, None, &m, 100.0, 0, Some(40.0), tick_size, false,
+        // No `label_padding` can move it: the pre-fix value was `line_h +
+        // padding_delta`, i.e. a phantom band that a large negative padding
+        // could even make negative.
+        for padding in [Some(40.0), Some(-100.0)] {
+            assert_eq!(
+                estimate_x_label_band(
+                    &flat_labels, 11.0, None, &m, 100.0, 0, padding, tick_size, false,
+                ),
+                0.0,
+                "labels-off band must be zero for label_padding={padding:?}"
+            );
+        }
+
+        // Rotated: an explicit angle override used to bypass the gate entirely
+        // and reserve the full `rotated_x_label_extent`.
+        assert_eq!(
+            estimate_x_label_band(
+                &flat_labels, 11.0, Some(-45.0), &m, 100.0, 0, None, tick_size, false,
+            ),
+            0.0,
+            "#182 widened the gate past flat/wrapped: a rotated labels-off axis reserves nothing"
         );
         assert!(
-            (flat_off_padded - (line_h + padding_delta)).abs() < 1e-9,
-            "labels-off flat band must keep the pre-#97 line_h + padding_delta value, \
-             got {flat_off_padded}"
+            estimate_x_label_band(
+                &flat_labels, 11.0, Some(-45.0), &m, 100.0, 0, None, tick_size, true,
+            ) > 0.0,
+            "the same rotated axis WITH labels drawn still reserves its extent"
         );
 
         // Wrapped case (same fixture as `estimate_wrapped_labels`).
@@ -5072,20 +5126,12 @@ mod tests {
         let line_h6 = m6.line_height(11.0);
         let wrapped_off =
             estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, false);
-        assert!(
-            (wrapped_off - 2.0 * line_h6).abs() < 1e-9,
-            "labels-off wrapped band should be pre-#97 2*line_h={}, got {wrapped_off}",
-            2.0 * line_h6
-        );
+        assert_eq!(wrapped_off, 0.0, "labels-off wrapped band reserves nothing");
         let wrapped_on =
             estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, true);
         assert!(
             (wrapped_on - (tick_size + 2.0 + 2.0 * line_h6)).abs() < 1e-9,
             "labels-on wrapped band should still be tick_size + label_pad_eff + 2*line_h"
-        );
-        assert!(
-            wrapped_on > wrapped_off,
-            "labels-drawn axis must reserve more than a labels-off axis for the wrapped case"
         );
     }
 
@@ -5873,11 +5919,11 @@ mod tests {
         let theme_pad = 8.0;
 
         let default_input = titled_input(None, None);
-        let gutter_default = compute_x_title_width(&default_input, theme_fs, theme_pad, &m);
+        let gutter_default = compute_x_title_width(&default_input, theme_fs, theme_pad, &m, true);
         assert!((gutter_default - 23.6).abs() < 1e-9, "got {gutter_default}");
 
         let override_input = titled_input(Some(30.0), None);
-        let gutter_override = compute_x_title_width(&override_input, theme_fs, theme_pad, &m);
+        let gutter_override = compute_x_title_width(&override_input, theme_fs, theme_pad, &m, true);
         assert!((gutter_override - 44.0).abs() < 1e-9, "got {gutter_override}");
 
         assert!(
@@ -5891,7 +5937,7 @@ mod tests {
     fn x_title_gutter_uses_per_axis_font_size_and_padding() {
         let m = mock(0.0);
         let input = titled_input(Some(24.0), Some(16.0));
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert!((gutter - 44.8).abs() < 1e-9, "24*1.2+16 = 44.8, got {gutter}");
     }
 
@@ -5901,7 +5947,7 @@ mod tests {
         let m = mock(0.0);
         let mut input = axis_input(AxisOrient::Bottom, None, vec!["a".into()], None);
         input.overrides.title_font_size = Some(100.0);
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert_eq!(gutter, 0.0, "no title should mean zero gutter");
     }
 
@@ -5910,7 +5956,7 @@ mod tests {
     fn x_title_gutter_zero_font_size() {
         let m = mock(0.0);
         let input = titled_input(Some(0.0), None);
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert!((gutter - 8.0).abs() < 1e-9, "zero font size means gutter = padding only, got {gutter}");
     }
 
@@ -5919,7 +5965,7 @@ mod tests {
     fn x_title_gutter_very_large_font_size() {
         let m = mock(0.0);
         let input = titled_input(Some(1000.0), None);
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert!((gutter - 1208.0).abs() < 1e-9, "huge font: gutter = 1000*1.2+8 = 1208, got {gutter}");
     }
 
@@ -5930,7 +5976,7 @@ mod tests {
     fn x_title_gutter_nan_font_size_propagates() {
         let m = mock(0.0);
         let input = titled_input(Some(f64::NAN), None);
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert!(gutter.is_nan(), "NaN font size should propagate to a NaN gutter");
     }
 
@@ -5939,8 +5985,64 @@ mod tests {
     fn x_title_gutter_none_falls_back_to_theme() {
         let m = mock(0.0);
         let input = titled_input(None, None);
-        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert!((gutter - 23.6).abs() < 1e-9, "13*1.2+8 = 23.6, got {gutter}");
+    }
+
+    /// `#182` (closes `#94`): the title gutter is reserved only for an axis that
+    /// DRAWS its title. `visible: false` is both `.axis(show=False)` and a
+    /// projected coord with no Cartesian axes (see
+    /// `crate::spec::coord::suppresses_cartesian_axes`, which
+    /// `render::prepare::build_axes` folds into `AxesInput::show_x`/`show_y`).
+    /// Pinned on both axes, and with an override large enough that the pre-fix
+    /// phantom would be unmissable.
+    #[test]
+    fn title_gutter_undrawn_axis_is_zero_on_both_axes() {
+        let m = mock(0.0);
+        let input = titled_input(Some(50.0), Some(12.0));
+
+        assert_eq!(
+            compute_x_title_width(&input, 13.0, 8.0, &m, false),
+            0.0,
+            "an x axis that is not drawn reserves no title gutter"
+        );
+        assert_eq!(
+            compute_y_title_width(&input, 13.0, 8.0, &m, false),
+            0.0,
+            "a y axis that is not drawn reserves no title gutter"
+        );
+
+        // Discriminating control: the same titled input, drawn, reserves the
+        // full 50*1.2 + 12 gutter on both axes — so the zeros above come from
+        // the gate, not from a fixture that has no title to measure.
+        assert!((compute_x_title_width(&input, 13.0, 8.0, &m, true) - 72.0).abs() < 1e-9);
+        assert!((compute_y_title_width(&input, 13.0, 8.0, &m, true) - 72.0).abs() < 1e-9);
+    }
+
+    /// `#182`: the title gutter and the label band are gated SEPARATELY, which
+    /// is what makes `fm.Axis(labels=False)` collapse the label band alone. The
+    /// title is drawn by `layout_x_axis`/`layout_y_axis` whatever `show_labels`
+    /// says, so it keeps its gutter; only the labels' band goes to zero.
+    #[test]
+    fn title_gutter_survives_labels_off_while_the_label_band_collapses() {
+        let m = mock(10.0);
+        let mut input = axis_input(
+            AxisOrient::Left,
+            Some("Title".into()),
+            vec!["0".into(), "100".into(), "10000".into()],
+            None,
+        );
+        input.overrides.show_labels = Some(false);
+
+        assert!(
+            compute_y_title_width(&input, 13.0, 8.0, &m, true) > 0.0,
+            "labels=False must not take the axis title's gutter with it"
+        );
+        assert_eq!(
+            compute_y_label_band_width(&input, 11.0, &m, 4.0, true),
+            0.0,
+            "labels=False collapses the label band alone"
+        );
     }
 
     /// `compute_x_title_width` and `compute_y_title_width` are parity-equal
@@ -5951,8 +6053,8 @@ mod tests {
     fn title_gutter_x_y_parity_with_overrides() {
         let m = mock(0.0);
         let input = titled_input(Some(20.0), Some(12.0));
-        let x_gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
-        let y_gutter = compute_y_title_width(&input, 13.0, 8.0, &m);
+        let x_gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
+        let y_gutter = compute_y_title_width(&input, 13.0, 8.0, &m, true);
         assert_eq!(x_gutter, y_gutter, "x and y title gutters must match for identical overrides");
     }
 
@@ -5965,8 +6067,8 @@ mod tests {
         let inner_h = 400.0;
         let x_label_band = 20.0;
 
-        let gutter_default = compute_x_title_width(&titled_input(None, None), 13.0, 8.0, &m);
-        let gutter_large = compute_x_title_width(&titled_input(Some(50.0), None), 13.0, 8.0, &m);
+        let gutter_default = compute_x_title_width(&titled_input(None, None), 13.0, 8.0, &m, true);
+        let gutter_large = compute_x_title_width(&titled_input(Some(50.0), None), 13.0, 8.0, &m, true);
         assert!(gutter_large > gutter_default, "a larger font must produce a larger gutter");
 
         let plot_h_default = inner_h - x_label_band - gutter_default;

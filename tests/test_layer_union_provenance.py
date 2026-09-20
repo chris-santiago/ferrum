@@ -52,7 +52,7 @@ import pytest
 import ferrum as fm
 from ferrum._core import ChartSpec as _ChartSpec
 
-from _svg_extents import axis_tick_dash_label_pairs, tick_along
+from _svg_extents import pixel_for, value_axis_ladder, value_axis_ladders
 from _svg_rects import data_bar_rects, mark_layer, svg_elements
 
 #: Pixel coordinates are emitted rounded to 3 decimals, so a tolerance below
@@ -78,60 +78,6 @@ def bar_chart(*, flip: bool = False, zero: bool = True, scale: dict | None = Non
 def point_chart(*, flip: bool = False):
     chart = fm.Chart(POINT_FRAME).mark_point().encode(x="cat", y="v")
     return chart.coord(fm.CoordFlip()) if flip else chart
-
-
-def value_axis_ladders(svg: str, *, axis: str) -> list[tuple[float, dict[float, float]]]:
-    """Every value-axis tick ladder in the SVG, as ``(across-axis position, ladder)``.
-
-    A ladder is ``{tick value: tick pixel}``. Each tick's dash is paired with its
-    label via `axis_tick_dash_label_pairs`, so the pixel is the tick's ANCHOR, not
-    its label's text baseline (which sits a few pixels off and would put a
-    systematic offset into every comparison below). Non-numeric labels are
-    skipped: the value axis of every chart in this module is quantitative.
-
-    One entry per drawn axis: one for a single-panel chart (and for an Overlay
-    composite, which dedups its chrome to one axis), several for a faceted chart,
-    ordered by position so the list reads left-to-right / top-to-bottom. A y
-    ladder is keyed by its dashes' ``x``, an x ladder by their ``y``.
-    """
-    by_position: dict[int, dict[float, float]] = {}
-    for group in axis_tick_dash_label_pairs(svg, axis=axis):
-        across = group.dash[0] if axis == "y" else group.dash[1]
-        for label in group.labels:
-            try:
-                value = float(label[2])
-            except ValueError:
-                continue
-            by_position.setdefault(round(across), {})[value] = tick_along(group.dash, axis=axis)
-    return [(float(pos), lad) for pos, lad in sorted(by_position.items()) if len(lad) >= 2]
-
-
-def value_axis_ladder(svg: str, *, axis: str) -> dict[float, float]:
-    """The single value-axis tick ladder of a one-axis chart.
-
-    Asserts there is exactly one rather than silently merging several: a faceted
-    chart draws one ladder per panel, and folding them into a single dict would
-    quietly turn a per-panel disagreement into an average nobody asked about.
-    """
-    ladders = value_axis_ladders(svg, axis=axis)
-    assert len(ladders) == 1, (
-        f"expected exactly one {axis} tick ladder (a single-axis chart); got {len(ladders)}"
-    )
-    ladder = ladders[0][1]
-    assert len(ladder) >= 2, f"need at least two numeric {axis} ticks; got {ladder}"
-    return ladder
-
-
-def pixel_for(ladder: dict[float, float], value: float) -> float:
-    """The pixel a linear axis with this tick ladder places ``value`` at.
-
-    Fitted through the ladder's two extreme ticks, which is exact for a linear
-    scale and needs no knowledge of the plot rect, the padding inset, or the
-    range direction.
-    """
-    lo, hi = min(ladder), max(ladder)
-    slope = (ladder[hi] - ladder[lo]) / (hi - lo)
-    return ladder[lo] + (value - lo) * slope
 
 
 def point_marks(svg: str, *, axis: str) -> list[float]:

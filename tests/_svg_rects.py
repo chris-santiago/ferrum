@@ -166,3 +166,68 @@ def plot_rect(svg: str) -> tuple[float, float, float, float]:
     )
     a = rects[0]
     return (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
+
+
+#: The three structural tokens `panel_extents` walks, in document order: a
+#: group opening (with or without a transform), a group closing, and a
+#: `clipPath` opening. The compositor wraps a ratio-fitted cell's whole panel
+#: -- its `clipPath` INCLUDED -- in one `<g transform="translate(...) scale(...)">`,
+#: and bakes the offset straight into the rect for an identity-scaled cell
+#: (`place_panel`'s two arms), so the transform that applies to a clip rect is
+#: the product of the groups enclosing it, not one adjacent attribute.
+_PANEL_TOKEN_RE = re.compile(
+    r"<g(?P<attrs>[^>]*)>|(?P<close></g>)|"
+    r'<clipPath id="(?P<cid>ferrum-clip-\d+)"><rect x="(?P<x>[-\d.]+)" y="(?P<y>[-\d.]+)" '
+    r'width="(?P<w>[-\d.]+)" height="(?P<h>[-\d.]+)"'
+)
+_PANEL_TRANSFORM_RE = re.compile(
+    r'transform="(?:translate\((?P<tx>[-\d.]+),\s*(?P<ty>[-\d.]+)\))?\s*'
+    r'(?:scale\((?P<sx>[-\d.]+),\s*(?P<sy>[-\d.]+)\))?"'
+)
+
+
+def panel_extents(svg: str) -> dict[str, tuple[float, float, float, float]]:
+    """Map each panel clip id to its `(x0, x1, y0, y1)` extent in FIGURE space.
+
+    The clip rect is in the leaf's own coordinates; the compositor either bakes
+    the cell offset into it (identity-scaled cells) or leaves it alone and
+    wraps the panel in a `translate(...) scale(...)` group (ratio-fitted cells,
+    which is what a `JointChart` marginal and a `ClusterMapChart` dendrogram
+    both are). Composing the enclosing transforms here is what makes an
+    assertion a statement about the rendered figure rather than about one
+    leaf's private coordinates, where a misaligned pair can look identical.
+
+    It lives here rather than in either caller because "a panel's place in the
+    figure is the product of the groups enclosing its clip rect" is a fact
+    about ferrum's composite SVG output, not about any one test's subject.
+    `test_joint_marginal_alignment.py` wrote it and recorded that it belonged
+    here once a second composite-geometry module appeared;
+    `test_clustermap_dendrogram_alignment.py` is that module, and both import
+    it instead of carrying a copy.
+
+    One precision caveat callers must respect: the `scale(...)` in the emitted
+    transform is rounded to three decimals, so a composed coordinate carries up
+    to `5e-4 * coordinate` of error (~0.35px at x=700) that the renderer itself
+    does not have. Assert alignment to a tolerance that covers it.
+    """
+    stack: list[tuple[float, float, float, float]] = [(0.0, 0.0, 1.0, 1.0)]
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for m in _PANEL_TOKEN_RE.finditer(svg):
+        if m.group("close"):
+            if len(stack) > 1:
+                stack.pop()
+            continue
+        if m.group("cid") is not None:
+            tx, ty, sx, sy = stack[-1]
+            x, y, w, h = (float(m.group(k)) for k in ("x", "y", "w", "h"))
+            out[m.group("cid")] = (tx + sx * x, tx + sx * (x + w), ty + sy * y, ty + sy * (y + h))
+            continue
+        tx, ty, sx, sy = stack[-1]
+        t = _PANEL_TRANSFORM_RE.search(m.group("attrs") or "")
+        if t:
+            ntx, nty = float(t.group("tx") or 0.0), float(t.group("ty") or 0.0)
+            nsx, nsy = float(t.group("sx") or 1.0), float(t.group("sy") or 1.0)
+            stack.append((tx + sx * ntx, ty + sy * nty, sx * nsx, sy * nsy))
+        else:
+            stack.append((tx, ty, sx, sy))
+    return out

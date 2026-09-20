@@ -807,6 +807,26 @@ pub enum RenderWarning {
     /// doubled-chrome chart is otherwise hard to attribute: the cause is the
     /// layers' own gutter requests, not the overlay.
     OverlayGuttersDiverged { layers: usize },
+    /// A grid declared that one of its cells spans another's extent
+    /// (`CompositeNode::Composite::extent_alignments`, `#182`), and one of the
+    /// two named cells is a nested **composite** — a subtree of leaves laid
+    /// out in its own frame, with no single plot rect to copy from or onto.
+    /// The declaration is dropped and that cell renders as if nothing were
+    /// declared.
+    ///
+    /// Not a refusal: the caller wrote something coherent (a `LayerChart` as a
+    /// jointplot's centre panel is a legitimate figure) and the render
+    /// proceeds, which makes it degraded rather than malformed — WARN
+    /// DEGRADED. Silence is the one response excluded, because an
+    /// unaligned marginal is indistinguishable from the alignment being
+    /// broken. `follower`/`leader` are the declared CELL positions (row-major
+    /// in the grid's `children`, holes counted) and `axis` is `"x"`/`"y"`, so
+    /// a grid carrying several declarations says WHICH one was ignored.
+    ExtentAlignmentUnresolvable {
+        follower: usize,
+        leader: usize,
+        axis: String,
+    },
     /// A `Continuous`/`Discretizing` (numeric-keyed) color scale was resolved
     /// while EVERY layer consuming it draws with `Mark::Line`/`Mark::Ribbon`
     /// — the two stroke-continuous marks that cannot paint a per-value color
@@ -1168,6 +1188,11 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "overlay gutters diverged; {layers} layers render with independent chrome"
             ),
+            RenderWarning::ExtentAlignmentUnresolvable { follower, leader, axis } => write!(
+                f,
+                "grid cell {follower} cannot span cell {leader}'s {axis} extent: one of them is a \
+                 nested composite with no single plot rect; that panel lays out on its own terms"
+            ),
             RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
                 let marks = marks.join(", ");
                 if *suppressed {
@@ -1334,6 +1359,11 @@ mod tests {
                 reason: "by-column 'grp' not found in data".into(),
             },
             RenderWarning::OverlayGuttersDiverged { layers: 2 },
+            RenderWarning::ExtentAlignmentUnresolvable {
+                follower: 0,
+                leader: 2,
+                axis: "x".into(),
+            },
             RenderWarning::UnsupportedColorScaleOnMark {
                 marks: vec!["line".into(), "ribbon".into()],
                 scale_kind: "continuous".into(),
@@ -1432,6 +1462,24 @@ mod tests {
         assert!(diverged_text.contains("overlay gutters diverged"), "{diverged_text}");
         assert!(diverged_text.contains("independent chrome"), "{diverged_text}");
         assert!(!diverged_text.contains("OverlayGuttersDiverged"), "{diverged_text}");
+
+        // #182: a dropped extent-alignment names WHICH declaration was ignored
+        // (follower cell, leader cell, axis), because a grid may carry several
+        // and "something was ignored" is not actionable.
+        let unresolvable = RenderWarning::ExtentAlignmentUnresolvable {
+            follower: 3,
+            leader: 2,
+            axis: "y".into(),
+        };
+        let unresolvable_text = format!("{unresolvable}");
+        assert!(unresolvable_text.contains("cell 3"), "{unresolvable_text}");
+        assert!(unresolvable_text.contains("cell 2"), "{unresolvable_text}");
+        assert!(unresolvable_text.contains("y extent"), "{unresolvable_text}");
+        assert!(unresolvable_text.contains("nested composite"), "{unresolvable_text}");
+        assert!(
+            !unresolvable_text.contains("ExtentAlignmentUnresolvable"),
+            "{unresolvable_text}"
+        );
 
         // D2/F-L07-06 (this task): `axis_y2` names a surface the chart lacks.
         let no_surface = RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() };

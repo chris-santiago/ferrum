@@ -540,8 +540,13 @@ class SpecBuildMixin:
                     # values -- notably ``title=""`` (`_emit_title`'s explicit
                     # "suppress the title" sentinel, ``None``-passed-by-caller
                     # forwarded as an empty string), which used to vanish here
-                    # and leave the phantom axis-title gutter this key exists
-                    # to close (F-L09-08).
+                    # so a layer's title suppression silently did nothing
+                    # (F-L09-08). The sentinel's job is now only what it says:
+                    # draw no title. It is no longer also the way to drop a
+                    # hidden axis's gutter -- since #182 layout reserves a title
+                    # gutter only for an axis that draws one, which is why
+                    # `plots/matrix.py`'s dendrogram `title=""` workaround is
+                    # gone.
                     #
                     # This allowlist is still hand-curated against Rust's
                     # ``EncodingSpec`` (`crates/ferrum-core/src/spec/encoding.rs`),

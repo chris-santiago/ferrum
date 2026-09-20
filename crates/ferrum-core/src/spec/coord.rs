@@ -73,6 +73,24 @@ impl Default for CoordKind {
     }
 }
 
+/// Whether this coordinate system replaces the Cartesian x/y axes entirely.
+///
+/// `Polar` draws a circular boundary with radial ticks and `Geo` draws none at
+/// all; in both cases `render::scene_build` emits no Cartesian axis or gridline
+/// nodes for the panel. Because nothing is drawn, nothing may be reserved:
+/// `render::prepare::build_axes` folds this into `AxesInput::show_x`/`show_y`
+/// so `layout` never sets aside a label band or title gutter for an axis a
+/// projected coord suppresses (`#94`, the polar half of `#182`'s rule — a
+/// gutter exists if and only if something is drawn in it).
+///
+/// One owner for the question, asked by both subsystems: layout reserves off
+/// it, `scene_build` suppresses off it. Two hand-written `matches!` arms is how
+/// the reservation and the emission drifted apart in the first place. Takes an
+/// `Option` because `ChartSpec::coord` is optional and absent means Cartesian.
+pub fn suppresses_cartesian_axes(coord: Option<&CoordKind>) -> bool {
+    matches!(coord, Some(CoordKind::Polar { .. }) | Some(CoordKind::Geo { .. }))
+}
+
 /// Convert a spec-side `CoordKind` to the scene-side equivalent.
 ///
 /// `Flip` maps to Cartesian — Python handles the channel swap before this point.
@@ -179,6 +197,45 @@ mod tests {
         assert!(json.contains("outer_radius"));
         let parsed: CoordKind = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
+    }
+
+    /// `#182`/`#94`: exactly the projected coords suppress the Cartesian axes,
+    /// and `None` (no `coord=` at all) does not. Enumerated variant by variant
+    /// rather than sampled, because both consumers — `layout`'s band
+    /// reservation and `scene_build`'s node emission — read this one answer, so
+    /// a wrong `true` silently deletes a real chart's axes and a wrong `false`
+    /// restores `#94`'s phantom margins.
+    #[test]
+    fn only_projected_coords_suppress_the_cartesian_axes() {
+        let polar = CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        };
+        let geo = CoordKind::Geo { projection: GeoProjection::Mercator };
+        assert!(suppresses_cartesian_axes(Some(&polar)));
+        assert!(suppresses_cartesian_axes(Some(&geo)));
+
+        for drawn in [
+            CoordKind::default(),
+            CoordKind::Flip,
+            CoordKind::Fixed {
+                ratio: 1.0,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+        ] {
+            assert!(
+                !suppresses_cartesian_axes(Some(&drawn)),
+                "{drawn:?} draws Cartesian axes and must keep its gutters"
+            );
+        }
+        assert!(!suppresses_cartesian_axes(None), "no coord= means Cartesian");
     }
 
     #[test]

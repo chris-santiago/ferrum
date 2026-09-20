@@ -94,7 +94,7 @@ use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHRO
 use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
-use crate::spec::composite::{CompositeLayout, CompositeNode};
+use crate::spec::composite::{AlignAxis, CompositeLayout, CompositeNode};
 
 /// Default pixel gap between adjacent cells, matching the deleted string
 /// compositor's `spacing = 10.0` default (`render/compositor.rs`, removed in
@@ -348,6 +348,20 @@ pub(crate) fn render_composite_scene(
     let mut warnings: Vec<RenderWarning> = Vec::new();
     let mut overlay_groups = plan_overlay_groups(tree, n);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
+
+    // Declared extent alignment (#182 follow-up). A jointplot's marginals and a
+    // clustermap's dendrograms declare `axis(show=False)`, so since #182 they
+    // reserve no band and spend the freed pixels on width — correct for a
+    // standalone chart, and visibly wrong here, because a marginal is only
+    // meaningful ON the panel it annotates. The phantom gutter used to hide this
+    // by coincidence: it happened to inset them by roughly the centre panel's own
+    // axis band. The composition now says on the wire which cells read against
+    // the same ruler (`CompositeNode::Composite::extent_alignments`), and this
+    // pass carries that through the same imposition seam the overlay pre-pass
+    // uses — the follower adopts the leader's extent on the declared axis and
+    // keeps its own on the other.
+    let alignments = resolve_extent_alignments(tree, n, &mut warnings);
+    impose_extent_alignments(leaves, &alignments, &mut contexts);
 
     // Line/ribbon inert-continuous-color exemption for all-leaf Overlay
     // groups (T5b static-composite fix, spec §4.0's second bullet, spec-review
@@ -1068,13 +1082,13 @@ fn impose_shared_overlay_rects(
 
         let mut rect: Option<LayoutRect> = None;
         for &i in &group {
-            let Some(natural) = natural_plot_region(&leaves[i], &contexts[i]) else {
+            let Some(natural) = natural_layout(&leaves[i], &contexts[i]) else {
                 rect = None;
                 break;
             };
             rect = Some(match rect {
-                Some(shared) => shared.intersect(natural),
-                None => natural,
+                Some(shared) => shared.intersect(natural.plot),
+                None => natural.plot,
             });
         }
 
@@ -1113,15 +1127,270 @@ fn impose_shared_overlay_rects(
     }
 }
 
-/// One leaf's plot region as it lays itself out under `ctx` — the region left
-/// by its own chart-title, legend and axis-band reservations, minus whatever
-/// `ctx` already suppresses (a non-primary overlay leaf's title band). `None`
-/// when the leaf's layout fails (see [`impose_shared_overlay_rects`]'s error
-/// contract).
-fn natural_plot_region(
-    leaf: &CompositeLeafInput<'_>,
-    ctx: &LeafScaleContext,
-) -> Option<LayoutRect> {
+/// One leaf whose plot extent must follow another leaf's on one axis — a
+/// grid's wire-declared [`ExtentAlignment`] with its **cell** positions
+/// resolved to **leaf** indices in composite pre-order (the numbering
+/// `overlay_groups` and `contexts` use). The two index spaces are different —
+/// a hole consumes a cell but no leaf, and a nested composite cell consumes a
+/// whole run of them — so they get different types rather than one type used
+/// two ways.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LeafExtentAlignment {
+    follower: usize,
+    leader: usize,
+    axis: AlignAxis,
+}
+
+/// Resolve every grid's declared [`ExtentAlignment`]s into leaf-indexed
+/// [`LeafExtentAlignment`]s for [`impose_extent_alignments`].
+///
+/// The trigger is **declared, not inferred**: the composition states which of
+/// its cells read against the same ruler (`src/ferrum/composition.py` —
+/// `JointChart` names its marginals against the joint panel, `ClusterMapChart`
+/// its dendrograms against the heatmap). The first implementation recognized a
+/// jointplot by its grid geometry instead; that predicate could not be made
+/// safe, because a clustermap is also a 2x2 grid with a hole and axis-free
+/// cells and only the hole's corner told them apart. This wave made the same
+/// call for the area baseline (`mark_style.value_axis`, `9c570342`) and
+/// deleted the geometric heuristic that preceded it.
+///
+/// A declaration whose follower or leader cell is **not a leaf** is dropped
+/// here rather than refused, and **warned about**: a nested composite cell is
+/// a legitimate figure (a `LayerChart` as a jointplot's centre panel), but it
+/// spans a subtree of leaves laid out in its own frame, so there is no single
+/// plot rect to copy from or onto — the same shape [`plan_overlay_groups`]
+/// leaves alone for the same reason. The caller wrote something coherent and
+/// the render proceeds, so this is degraded, not malformed: it pushes a
+/// [`RenderWarning::ExtentAlignmentUnresolvable`] naming that declaration's
+/// own follower, leader and axis, because a grid carrying several of them
+/// would otherwise only tell the caller that *something* was ignored (campaign
+/// policy: REFUSE MALFORMED, WARN DEGRADED). Every *malformed* declaration
+/// (out-of-range cell, hole endpoint, axis disagreeing with the grid's
+/// geometry) is already refused by [`CompositeNode::validate`], so it cannot
+/// reach here.
+fn resolve_extent_alignments(
+    tree: &CompositeNode,
+    n_leaves: usize,
+    warnings: &mut Vec<RenderWarning>,
+) -> Vec<LeafExtentAlignment> {
+    let mut out = Vec::new();
+    let mut leaf_cursor = 0usize;
+    resolve_extent_alignment_walk(tree, &mut leaf_cursor, &mut out, warnings);
+    debug_assert!(out.iter().all(|a| a.follower < n_leaves && a.leader < n_leaves));
+    out
+}
+
+fn resolve_extent_alignment_walk(
+    node: &CompositeNode,
+    leaf_cursor: &mut usize,
+    out: &mut Vec<LeafExtentAlignment>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    match node {
+        CompositeNode::Leaf { .. } => *leaf_cursor += 1,
+        CompositeNode::Hole { .. } => {}
+        CompositeNode::Composite {
+            children,
+            extent_alignments,
+            ..
+        } => {
+            // Each child's first leaf index, captured as the walk passes it.
+            // This is the whole cell→leaf mapping: a `Leaf` cell IS its start
+            // index, and only `Leaf` cells are resolvable (see the doc above).
+            let mut starts = Vec::with_capacity(children.len());
+            for c in children {
+                starts.push(*leaf_cursor);
+                resolve_extent_alignment_walk(c, leaf_cursor, out, warnings);
+            }
+            for a in extent_alignments {
+                let resolvable = |cell: usize| {
+                    matches!(children.get(cell), Some(CompositeNode::Leaf { .. }))
+                        .then(|| starts[cell])
+                };
+                let (Some(follower), Some(leader)) = (resolvable(a.follower), resolvable(a.leader))
+                else {
+                    warnings.push(RenderWarning::ExtentAlignmentUnresolvable {
+                        follower: a.follower,
+                        leader: a.leader,
+                        axis: a.axis.wire_name().to_string(),
+                    });
+                    continue;
+                };
+                out.push(LeafExtentAlignment { follower, leader, axis: a.axis });
+            }
+        }
+    }
+}
+
+/// Give each following panel its leader's extent on their declared axis, by
+/// writing it into the follower's [`LeafScaleContext::imposed_plot_region`]
+/// — the same seam [`impose_shared_overlay_rects`] uses, so there is one
+/// mechanism for "a composite parent decides a leaf's plot rect" and one place
+/// (`layout::compute_layout`'s stage 5b) where it is applied.
+///
+/// **The scale factor is not cosmetic.** A grid cell is rendered at its leaf's
+/// OWN viewport and then fitted into its slot by `plan_grid`, which scales it
+/// by `sx = col_w[col] / native_w`. Two cells in one column share `col_w` and
+/// the column's `tx`, so their figure-space x agree exactly when
+/// `sx_follower * x_follower == sx_leader * x_leader`, i.e. when
+/// `x_follower == x_leader * (native_w_follower / native_w_leader)`. Imposing
+/// the leader's rect verbatim would align the two only when their leaves happen
+/// to share a native viewport. The y case is the transpose.
+///
+/// The follower keeps its own extent on the OTHER axis: a top marginal adopts
+/// the centre's x span and keeps its own vertical band, which is the whole
+/// point of a marginal.
+///
+/// **Refuses rather than corrupts.** If the mapped extent is not finite, not
+/// positive, or would push the follower's marks outside the region the follower
+/// itself reserved (i.e. over its own chrome), the alignment is dropped for that
+/// cell: it renders exactly as it does without this pass. That is the same
+/// discipline `impose_shared_overlay_rects` applies to a degenerate
+/// intersection, and it is why a marginal that draws chrome of its own can
+/// never be made to overlap it.
+fn impose_extent_alignments(
+    leaves: &[CompositeLeafInput<'_>],
+    alignments: &[LeafExtentAlignment],
+    contexts: &mut [LeafScaleContext],
+) {
+    // Which followers THIS pass wrote. A leaf may legitimately follow one
+    // leader on x and another on y (nothing in the wire contract forbids it),
+    // and the second axis must compose with the first rather than be skipped
+    // as "already imposed" — while a rect imposed by the OVERLAY pre-pass
+    // still wins outright, because it exists to stop marks rendering across a
+    // sibling's chrome.
+    let mut imposed_here = vec![false; contexts.len()];
+    for a in alignments {
+        if contexts[a.follower].imposed_plot_region.is_some() && !imposed_here[a.follower] {
+            continue;
+        }
+        let (Some(leader), Some(follower)) = (
+            natural_layout(&leaves[a.leader], &contexts[a.leader]),
+            natural_layout(&leaves[a.follower], &contexts[a.follower]),
+        ) else {
+            // A leaf whose layout fails here produces no diagnostic: `render_leaf`
+            // re-runs the identical call moments later and raises the identical
+            // typed error (same contract as `impose_shared_overlay_rects`).
+            continue;
+        };
+        let (native_f, native_l) = match a.axis {
+            AlignAxis::X => (follower.width, leader.width),
+            AlignAxis::Y => (follower.height, leader.height),
+        };
+        // A non-finite or non-positive native extent makes the factor
+        // meaningless; NaN fails `is_finite` rather than sneaking through a
+        // negated comparison.
+        if !native_l.is_finite() || native_l <= 0.0 || !native_f.is_finite() {
+            continue;
+        }
+        let factor = native_f / native_l;
+        let imposed = match a.axis {
+            AlignAxis::X => LayoutRect {
+                x: leader.plot.x * factor,
+                w: leader.plot.w * factor,
+                ..follower.plot
+            },
+            AlignAxis::Y => LayoutRect {
+                y: leader.plot.y * factor,
+                h: leader.plot.h * factor,
+                ..follower.plot
+            },
+        };
+        if !extent_fits_within(&imposed, &follower, a.axis) {
+            continue;
+        }
+        contexts[a.follower].imposed_plot_region = Some(imposed);
+        imposed_here[a.follower] = true;
+    }
+}
+
+/// Slack for "did this side reserve chrome?" — the plot region is derived
+/// from the padded box by shrinking, so a side that reserved nothing is
+/// exactly equal and only float noise needs absorbing.
+const CHROME_EPS: f64 = 1e-9;
+
+/// Whether the follower may adopt `imposed` on `axis` (see
+/// [`impose_extent_alignments`]).
+///
+/// The extent must be finite and positive, and it must not reach into
+/// anything the follower DRAWS. Two different insets sit between a leaf's plot
+/// region and its viewport edge, and they are not the same promise:
+///
+/// - **Chrome** — an axis band, a legend, a chart title — is drawn there. The
+///   follower's marks may never cross into it, so on a side that reserves
+///   chrome the follower's own plot edge is the hard bound. This is the case
+///   the guard exists for: a marginal that keeps a legend of its own is left
+///   unaligned rather than drawn across it.
+/// - **Padding** is blank by construction: the theme's margin around the whole
+///   chart. A follower whose leader has proportionally less padding lands
+///   inside it, and refusing *that* would leave two panels visibly unaligned
+///   in order to protect empty space. A clustermap's row dendrogram is exactly
+///   this: its own 16px padding against the heatmap's 16px scaled to 13.33.
+///
+/// The two are told apart by comparing the follower's plot region with its
+/// padded box ([`crate::layout::LayoutResult::padded_region`]): a gap means
+/// chrome is reserved on that side, no gap means nothing is drawn there.
+fn extent_fits_within(imposed: &LayoutRect, follower: &NaturalLayout, axis: AlignAxis) -> bool {
+    let (lo, len) = match axis {
+        AlignAxis::X => (imposed.x, imposed.w),
+        AlignAxis::Y => (imposed.y, imposed.h),
+    };
+    let (plot_lo, plot_len, pad_lo, pad_len, viewport_len) = match axis {
+        AlignAxis::X => (
+            follower.plot.x,
+            follower.plot.w,
+            follower.padded.x,
+            follower.padded.w,
+            follower.width,
+        ),
+        AlignAxis::Y => (
+            follower.plot.y,
+            follower.plot.h,
+            follower.padded.y,
+            follower.padded.h,
+            follower.height,
+        ),
+    };
+    let low_bound = if plot_lo > pad_lo + CHROME_EPS {
+        plot_lo
+    } else {
+        0.0
+    };
+    let high_bound = if plot_lo + plot_len < pad_lo + pad_len - CHROME_EPS {
+        plot_lo + plot_len
+    } else {
+        viewport_len
+    };
+    lo.is_finite() && len.is_finite() && len > 0.0 && lo >= low_bound && lo + len <= high_bound
+}
+
+/// How one leaf lays itself out under `ctx`, in ITS OWN coordinates.
+struct NaturalLayout {
+    /// The region left by the leaf's own chart-title, legend and axis-band
+    /// reservations, minus whatever `ctx` already suppresses (a non-primary
+    /// overlay leaf's title band).
+    plot: LayoutRect,
+    /// The viewport less the theme's padding, before any chrome band. With
+    /// `plot` it says which sides reserved chrome and which are blank margin
+    /// — see [`extent_fits_within`].
+    padded: LayoutRect,
+    /// The viewport the leaf laid out INTO, which is also the size the
+    /// compositor places it at: `scene_build` takes `SceneGraph::width`/
+    /// `height` from this same `layout.viewport`, `Placed` takes them from the
+    /// scene, and `plan_grid` divides the slot by them to get the cell's
+    /// scale. Read from this probe rather than from the REQUESTED
+    /// `leaf.viewport` because the two can disagree, and the difference lands
+    /// straight in a cell's scale: deriving the alignment factor from the
+    /// request left a clustermap's dendrogram 0.3px out from its heatmap.
+    width: f64,
+    height: f64,
+}
+
+/// Lay one leaf out exactly as it will be rendered and report its geometry.
+/// `None` when the layout fails (see [`impose_shared_overlay_rects`]'s error
+/// contract). One probe answers both questions, so the two composite pre-passes
+/// cannot end up measuring different things.
+fn natural_layout(leaf: &CompositeLeafInput<'_>, ctx: &LeafScaleContext) -> Option<NaturalLayout> {
     let ctx_opt = (!ctx.is_empty()).then_some(ctx);
     super::prepare_and_layout(
         leaf.spec,
@@ -1132,7 +1401,12 @@ fn natural_plot_region(
         ctx_opt,
     )
     .ok()
-    .map(|po| po.layout.plot_region)
+    .map(|po| NaturalLayout {
+        plot: po.layout.plot_region,
+        padded: po.layout.padded_region,
+        width: po.layout.viewport.w,
+        height: po.layout.viewport.h,
+    })
 }
 
 /// Advance one channel's [`ChannelWalk`] across a composite node, returning the
@@ -2439,7 +2713,7 @@ mod tests {
     use super::*;
     use crate::layout::SymbolKind;
     use crate::render::config::RenderConfig;
-    use crate::spec::composite::CompositeResolve;
+    use crate::spec::composite::{CompositeResolve, ExtentAlignment};
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::DataType as EncDataType;
     use crate::spec::encoding::{Encoding, EncodingSpec};
@@ -2515,6 +2789,7 @@ mod tests {
             col_ratios: None,
             ncols: None,
             nrows: None,
+            extent_alignments: Vec::new(),
             title: None,
             subtitle: None,
             caption: None,
@@ -3155,6 +3430,496 @@ mod tests {
             "row1 must carry a ratio layout_scale"
         );
         assert!((scene.panels[1].layout_scale.sy - (1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    // -- declared extent alignment (#182 follow-up) ----------------------------
+
+    /// A marginal's look: a leaf whose chart hides BOTH axes, which is what
+    /// `JointChart._composite_tree`'s `axis(show=False)` produces. Kept only to
+    /// build a grid that LOOKS like a jointplot without saying so — nothing in
+    /// the alignment path reads these flags any more.
+    fn axis_free_leaf(data: usize) -> CompositeNode {
+        let mut spec = scatter_spec();
+        spec.axis_x = Some(false);
+        spec.axis_y = Some(false);
+        leaf_node_with(spec, data)
+    }
+
+    /// `resolve_extent_alignments` with the warning channel discarded — for
+    /// the tests that are about the RESOLUTION. The tests that are about a
+    /// DROPPED declaration read the warnings themselves.
+    fn resolved(tree: &CompositeNode, n_leaves: usize) -> Vec<LeafExtentAlignment> {
+        resolve_extent_alignments(tree, n_leaves, &mut Vec::new())
+    }
+
+    fn hole_cell() -> CompositeNode {
+        CompositeNode::Hole { width: None, height: None }
+    }
+
+    /// A grid node as `_build_grid_tree` emits it: dimensions set, and the
+    /// alignments the composition declares for its own cells.
+    fn grid_with(
+        children: Vec<CompositeNode>,
+        nrows_v: u32,
+        ncols_v: u32,
+        alignments: Vec<ExtentAlignment>,
+    ) -> CompositeNode {
+        let mut tree = composite(CompositeLayout::Grid, children);
+        if let CompositeNode::Composite {
+            nrows,
+            ncols,
+            extent_alignments,
+            ..
+        } = &mut tree
+        {
+            *nrows = Some(nrows_v);
+            *ncols = Some(ncols_v);
+            *extent_alignments = alignments;
+        }
+        tree
+    }
+
+    /// `JointChart`'s both-marginals lowering verbatim: `[top, HOLE, centre,
+    /// right]` on a 2x2, each marginal declared against the centre CELL (2).
+    fn joint_grid(top: CompositeNode, centre: CompositeNode, right: CompositeNode) -> CompositeNode {
+        grid_with(
+            vec![top, hole_cell(), centre, right],
+            2,
+            2,
+            vec![
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                ExtentAlignment { follower: 3, leader: 2, axis: AlignAxis::Y },
+            ],
+        )
+    }
+
+    /// `ClusterMapChart`'s both-dendrograms lowering verbatim: `[HOLE, col,
+    /// row, heatmap]` on a 2x2, each dendrogram declared against the heatmap
+    /// CELL (3).
+    fn clustermap_grid(
+        col_dendro: CompositeNode,
+        row_dendro: CompositeNode,
+        heatmap: CompositeNode,
+    ) -> CompositeNode {
+        grid_with(
+            vec![hole_cell(), col_dendro, row_dendro, heatmap],
+            2,
+            2,
+            vec![
+                ExtentAlignment { follower: 1, leader: 3, axis: AlignAxis::X },
+                ExtentAlignment { follower: 2, leader: 3, axis: AlignAxis::Y },
+            ],
+        )
+    }
+
+    /// The declaration names CELLS; the imposition needs LEAF indices, and the
+    /// two disagree exactly where a hole sits. In a jointplot's grid the centre
+    /// is cell 2 but leaf 1, and the right marginal cell 3 but leaf 2 — an
+    /// off-by-one here would align the wrong pair silently.
+    #[test]
+    fn declared_cells_resolve_to_leaf_indices_skipping_the_hole() {
+        let tree = joint_grid(axis_free_leaf(0), leaf_node(1), axis_free_leaf(2));
+        assert_eq!(
+            resolved(&tree, 3),
+            vec![
+                LeafExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::X },
+                LeafExtentAlignment { follower: 2, leader: 1, axis: AlignAxis::Y },
+            ]
+        );
+    }
+
+    /// ClusterMap's grid is the same 2x2-with-a-hole as a jointplot's with the
+    /// hole in the OTHER corner, and its dendrograms are axis-free cells too.
+    /// This test used to assert the opposite — that a clustermap-shaped grid
+    /// planned NO alignment — because the trigger was a shape predicate that
+    /// could only tell the two figures apart by which corner the hole was in,
+    /// and only the jointplot's corner was taught. That is precisely why the
+    /// predicate was deleted: each figure now states its own meaning, so the
+    /// dendrograms are served by the same mechanism and the hole's position
+    /// stops carrying meaning it was never fit to carry. The column dendrogram
+    /// spans the heatmap's x, the row dendrogram its y.
+    #[test]
+    fn a_clustermap_declares_its_dendrograms_against_the_heatmap() {
+        let tree = clustermap_grid(axis_free_leaf(0), axis_free_leaf(1), leaf_node(2));
+        assert_eq!(
+            resolved(&tree, 3),
+            vec![
+                LeafExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                LeafExtentAlignment { follower: 1, leader: 2, axis: AlignAxis::Y },
+            ]
+        );
+    }
+
+    /// Cell positions are node-local, leaf indices are tree-global: the same
+    /// declaration nested inside another composite must resolve against the
+    /// leaves that came before it, not restart at 0.
+    #[test]
+    fn resolved_leaf_indices_are_offset_by_earlier_leaves() {
+        let joint = joint_grid(axis_free_leaf(1), leaf_node(2), axis_free_leaf(3));
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), joint]);
+        assert_eq!(
+            resolved(&tree, 4),
+            vec![
+                LeafExtentAlignment { follower: 1, leader: 2, axis: AlignAxis::X },
+                LeafExtentAlignment { follower: 3, leader: 2, axis: AlignAxis::Y },
+            ]
+        );
+    }
+
+    /// The trigger is the DECLARATION and nothing else. A grid built in a
+    /// jointplot's exact shape — 2x2, hole in the top-right corner, axis-free
+    /// corner cells — that declares no alignment keeps every cell laying out on
+    /// its own terms. (The pre-existing
+    /// `grid_with_hole_places_three_panels_and_ratio_math_is_unaffected` below
+    /// builds this shape and pins its placements.)
+    #[test]
+    fn a_grid_that_declares_nothing_is_left_alone_whatever_its_shape() {
+        let tree = grid_with(
+            vec![axis_free_leaf(0), hole_cell(), leaf_node(1), axis_free_leaf(2)],
+            2,
+            2,
+            vec![],
+        );
+        assert_eq!(resolved(&tree, 3), vec![]);
+    }
+
+    /// The single-marginal / single-dendrogram lowerings are dense 2x1 and 1x2
+    /// grids, and each declares its one alignment.
+    #[test]
+    fn single_marginal_grids_resolve_their_one_alignment() {
+        let top_only = grid_with(
+            vec![axis_free_leaf(0), leaf_node(1)],
+            2,
+            1,
+            vec![ExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::X }],
+        );
+        assert_eq!(
+            resolved(&top_only, 2),
+            vec![LeafExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::X }]
+        );
+
+        let right_only = grid_with(
+            vec![leaf_node(0), axis_free_leaf(1)],
+            1,
+            2,
+            vec![ExtentAlignment { follower: 1, leader: 0, axis: AlignAxis::Y }],
+        );
+        assert_eq!(
+            resolved(&right_only, 2),
+            vec![LeafExtentAlignment { follower: 1, leader: 0, axis: AlignAxis::Y }]
+        );
+    }
+
+    /// A cell that is a nested composite (a `LayerChart` as a jointplot's
+    /// centre panel) spans a whole subtree laid out in its own frame, so there
+    /// is no single plot rect to copy from — that alignment is DROPPED, and the
+    /// figure renders as it would with nothing declared. Dropped, not refused:
+    /// the figure is legitimate, only unalignable. The declaration that names
+    /// two leaves in the same grid still resolves, and still resolves to the
+    /// right leaves — the composite cell consumes two leaf indices, which is
+    /// the off-by-one this pins.
+    #[test]
+    fn an_alignment_naming_a_composite_cell_is_dropped_without_shifting_the_others() {
+        let layered = composite(CompositeLayout::Overlay, vec![leaf_node(1), leaf_node(2)]);
+        let tree = grid_with(
+            vec![axis_free_leaf(0), hole_cell(), layered, axis_free_leaf(3)],
+            2,
+            2,
+            vec![
+                // Names the composite centre: unalignable, dropped.
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                // Names two leaves: kept. The right marginal is leaf 3 because
+                // the centre cell consumed leaves 1 and 2.
+                ExtentAlignment { follower: 3, leader: 0, axis: AlignAxis::Y },
+            ],
+        );
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        assert_eq!(
+            resolve_extent_alignments(&tree, 4, &mut warnings),
+            vec![LeafExtentAlignment { follower: 3, leader: 0, axis: AlignAxis::Y }]
+        );
+        // And the drop is ANNOUNCED, naming its own declaration. A grid may
+        // carry several; "something was ignored" would not tell the caller
+        // which panel is laying out on its own terms (REFUSE MALFORMED, WARN
+        // DEGRADED -- this is coherent but unhonorable, so it warns).
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::ExtentAlignmentUnresolvable {
+                follower: 0,
+                leader: 2,
+                axis: "x".into(),
+            }],
+            "exactly the dropped declaration, and only it"
+        );
+    }
+
+    /// The whole path, end to end: a jointplot whose CENTRE is a `LayerChart`
+    /// renders, its marginals lay out on their own terms, and the render's
+    /// warnings say so in words a caller can act on.
+    ///
+    /// This is the test that matters for the warning. A variant that is
+    /// defined, `Display`-ed and unit-tested but never CONSTRUCTED passes
+    /// every one of those gates while changing nothing observable -- the same
+    /// shape of defect as an assertion that pins an artifact instead of the
+    /// property.
+    #[test]
+    fn a_layered_centre_panel_warns_that_its_marginals_were_not_aligned() {
+        let layered = composite(CompositeLayout::Overlay, vec![leaf_node(1), leaf_node(2)]);
+        let tree = grid_with(
+            vec![axis_free_leaf(0), hole_cell(), layered, axis_free_leaf(3)],
+            2,
+            2,
+            vec![
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                ExtentAlignment { follower: 3, leader: 2, axis: AlignAxis::Y },
+            ],
+        );
+        let h = [hold(), hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 400.0, 300.0),
+            leaf_input(&h[1], 400.0, 300.0),
+            leaf_input(&h[2], 400.0, 300.0),
+            leaf_input(&h[3], 400.0, 300.0),
+        ];
+        let (scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 4, "the figure still renders, in full");
+
+        let dropped: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::ExtentAlignmentUnresolvable { .. }))
+            .collect();
+        assert_eq!(dropped.len(), 2, "both declarations name the composite centre");
+        let texts: Vec<String> = dropped.iter().map(|w| format!("{w}")).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("cell 0") && t.contains("cell 2") && t.contains("x extent")),
+            "the top marginal's dropped x declaration must be named: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("cell 3") && t.contains("cell 2") && t.contains("y extent")),
+            "the right marginal's dropped y declaration must be named: {texts:?}"
+        );
+        assert!(
+            texts.iter().all(|t| t.contains("nested composite")),
+            "the message must say WHY it could not be honored: {texts:?}"
+        );
+    }
+
+    /// The guard's two bounds, which are NOT the same bound: a side that
+    /// reserves chrome stops the imposed extent at the follower's own plot
+    /// edge (marks must never cross a legend or an axis band it draws), while
+    /// a side that reserves only padding lets the extent run to the viewport
+    /// edge — padding is blank by construction, and refusing there leaves two
+    /// panels visibly unaligned to protect empty space (the clustermap row
+    /// dendrogram's 16px-vs-13.33px case).
+    #[test]
+    fn extent_fits_within_bounds_chrome_hard_and_padding_soft() {
+        // A leaf 200x200 with 10px padding all round and a 20px chrome band on
+        // its LEFT only: plot starts at 30 while the padded box starts at 10.
+        let chrome_left = NaturalLayout {
+            plot: LayoutRect { x: 30.0, y: 10.0, w: 160.0, h: 180.0 },
+            padded: LayoutRect { x: 10.0, y: 10.0, w: 180.0, h: 180.0 },
+            width: 200.0,
+            height: 200.0,
+        };
+        let within_plot = LayoutRect { x: 40.0, y: 10.0, w: 100.0, h: 180.0 };
+        let into_the_chrome = LayoutRect { x: 20.0, y: 10.0, w: 100.0, h: 180.0 };
+        let into_the_padding = LayoutRect { x: 5.0, y: 5.0, w: 100.0, h: 100.0 };
+        let past_the_viewport = LayoutRect { x: 40.0, y: 10.0, w: 200.0, h: 180.0 };
+        assert!(extent_fits_within(&within_plot, &chrome_left, AlignAxis::X));
+        assert!(
+            !extent_fits_within(&into_the_chrome, &chrome_left, AlignAxis::X),
+            "the left side draws a band; marks may not cross into it"
+        );
+        assert!(
+            extent_fits_within(&into_the_padding, &chrome_left, AlignAxis::Y),
+            "the top reserves only padding, so y may run into it"
+        );
+        assert!(
+            !extent_fits_within(&past_the_viewport, &chrome_left, AlignAxis::X),
+            "blank margin is not unlimited: the viewport edge still bounds it"
+        );
+
+        // Degenerate extents are refused on either kind of side.
+        let empty = LayoutRect { x: 40.0, y: 10.0, w: 0.0, h: 180.0 };
+        let nan = LayoutRect { x: f64::NAN, y: 10.0, w: 50.0, h: 180.0 };
+        assert!(!extent_fits_within(&empty, &chrome_left, AlignAxis::X));
+        assert!(!extent_fits_within(&nan, &chrome_left, AlignAxis::X));
+
+        // The transpose, to prove the Y arm reads the other pair of fields: a
+        // bottom axis band bounds y hard, while x is padding-only and soft.
+        let chrome_bottom = NaturalLayout {
+            plot: LayoutRect { x: 10.0, y: 10.0, w: 180.0, h: 160.0 },
+            padded: LayoutRect { x: 10.0, y: 10.0, w: 180.0, h: 180.0 },
+            width: 200.0,
+            height: 200.0,
+        };
+        let past_the_band = LayoutRect { x: 10.0, y: 10.0, w: 180.0, h: 180.0 };
+        assert!(!extent_fits_within(&past_the_band, &chrome_bottom, AlignAxis::Y));
+        assert!(extent_fits_within(&past_the_band, &chrome_bottom, AlignAxis::X));
+    }
+
+    /// Panel extents in FIGURE space, not leaf-local: a ratio-fitted cell keeps
+    /// its rects in its own coordinates and carries the fit in `layout_scale`,
+    /// so a leaf-local comparison passes while the rendered figure is
+    /// misaligned (the same reason the Python tests compose the SVG group
+    /// transforms).
+    fn fig_extent(p: &ferrum_scene::Panel, axis: AlignAxis) -> (f64, f64) {
+        let s = &p.layout_scale;
+        match axis {
+            AlignAxis::X => (
+                s.tx + s.sx * p.plot_area.x,
+                s.tx + s.sx * (p.plot_area.x + p.plot_area.w),
+            ),
+            AlignAxis::Y => (
+                s.ty + s.sy * p.plot_area.y,
+                s.ty + s.sy * (p.plot_area.y + p.plot_area.h),
+            ),
+        }
+    }
+
+    fn assert_flush(follower: (f64, f64), leader: (f64, f64), what: &str) {
+        assert!(
+            (follower.0 - leader.0).abs() < 1e-9 && (follower.1 - leader.1).abs() < 1e-9,
+            "{what}: follower {follower:?} must equal leader {leader:?}"
+        );
+    }
+
+    /// End to end for `JointChart`'s lowering: the top marginal spans exactly
+    /// the centre panel's x, the right marginal exactly its y, and neither
+    /// overlaps the centre — the property `tests/test_joint_marginal_alignment.py`
+    /// asserts against a real `fm.jointplot`, pinned here against the
+    /// compositor so a regression is attributable without a Python round trip.
+    #[test]
+    fn joint_marginals_render_flush_with_the_centre_panel() {
+        let mut top_spec = scatter_spec();
+        top_spec.axis_x = Some(false);
+        top_spec.axis_y = Some(false);
+        let right_spec = top_spec.clone();
+        let tree = joint_grid(
+            leaf_node_with(top_spec, 0),
+            leaf_node(1),
+            leaf_node_with(right_spec, 2),
+        );
+        let h = [hold(), hold(), hold()];
+        // Marginal cells are short/narrow; the centre is the big one — the
+        // shape `plan_grid` ratio-fits, so `layout_scale` is non-identity on
+        // the marginals and the bug this pins would be invisible without it.
+        let leaves = [
+            leaf_input(&h[0], 400.0, 300.0),
+            leaf_input(&h[1], 400.0, 300.0),
+            leaf_input(&h[2], 400.0, 300.0),
+        ];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 3);
+        let (top, centre, right) = (&scene.panels[0], &scene.panels[1], &scene.panels[2]);
+        assert_flush(
+            fig_extent(top, AlignAxis::X),
+            fig_extent(centre, AlignAxis::X),
+            "top marginal x",
+        );
+        assert_flush(
+            fig_extent(right, AlignAxis::Y),
+            fig_extent(centre, AlignAxis::Y),
+            "right marginal y",
+        );
+        // And each marginal keeps its OWN extent on the other axis: the top
+        // marginal sits entirely above the centre, the right one entirely
+        // beside it. A shared-rect imposition (the Overlay pre-pass's shape)
+        // would fail this.
+        let (cx0, cx1) = fig_extent(centre, AlignAxis::X);
+        let (cy0, _cy1) = fig_extent(centre, AlignAxis::Y);
+        assert!(
+            fig_extent(top, AlignAxis::Y).1 <= cy0 + 1e-9,
+            "the top marginal must not overlap the centre"
+        );
+        assert!(
+            fig_extent(right, AlignAxis::X).0 >= cx1 - 1e-9,
+            "the right marginal must not overlap the centre"
+        );
+    }
+
+    /// End to end for `ClusterMapChart`'s lowering — the case the shape
+    /// predicate could not serve. The column dendrogram spans exactly the
+    /// heatmap's x and the row dendrogram exactly its y, which is what makes a
+    /// dendrogram's leaves line up with the heatmap columns they describe.
+    #[test]
+    fn clustermap_dendrograms_render_flush_with_the_heatmap() {
+        let mut dendro_spec = scatter_spec();
+        dendro_spec.axis_x = Some(false);
+        dendro_spec.axis_y = Some(false);
+        let tree = clustermap_grid(
+            leaf_node_with(dendro_spec.clone(), 0),
+            leaf_node_with(dendro_spec, 1),
+            leaf_node(2),
+        );
+        let h = [hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 400.0, 300.0),
+            leaf_input(&h[1], 400.0, 300.0),
+            leaf_input(&h[2], 400.0, 300.0),
+        ];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 3);
+        let (col_dendro, row_dendro, heatmap) =
+            (&scene.panels[0], &scene.panels[1], &scene.panels[2]);
+        assert_flush(
+            fig_extent(col_dendro, AlignAxis::X),
+            fig_extent(heatmap, AlignAxis::X),
+            "column dendrogram x",
+        );
+        assert_flush(
+            fig_extent(row_dendro, AlignAxis::Y),
+            fig_extent(heatmap, AlignAxis::Y),
+            "row dendrogram y",
+        );
+    }
+
+    /// A cell may follow one leader on x and another on y — nothing in the wire
+    /// contract forbids it, and the two must COMPOSE rather than the second
+    /// being skipped as "already imposed". Pinned because the skip that
+    /// protects an overlay-imposed rect is one condition away from eating this.
+    #[test]
+    fn a_cell_can_follow_one_leader_on_x_and_another_on_y() {
+        let mut free_spec = scatter_spec();
+        free_spec.axis_x = Some(false);
+        free_spec.axis_y = Some(false);
+        let tree = grid_with(
+            vec![
+                leaf_node_with(free_spec, 0),
+                leaf_node(1),
+                leaf_node(2),
+                leaf_node(3),
+            ],
+            2,
+            2,
+            vec![
+                ExtentAlignment { follower: 0, leader: 2, axis: AlignAxis::X },
+                ExtentAlignment { follower: 0, leader: 1, axis: AlignAxis::Y },
+            ],
+        );
+        let h = [hold(), hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 400.0, 300.0),
+            leaf_input(&h[1], 400.0, 300.0),
+            leaf_input(&h[2], 400.0, 300.0),
+            leaf_input(&h[3], 400.0, 300.0),
+        ];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let follower = &scene.panels[0];
+        assert_flush(
+            fig_extent(follower, AlignAxis::X),
+            fig_extent(&scene.panels[2], AlignAxis::X),
+            "x leader",
+        );
+        assert_flush(
+            fig_extent(follower, AlignAxis::Y),
+            fig_extent(&scene.panels[1], AlignAxis::Y),
+            "y leader",
+        );
     }
 
     // -- hole cells (Task 8a) --------------------------------------------------
@@ -4743,7 +5508,7 @@ mod tests {
         let mut groups = plan_overlay_groups(&tree, 2);
         let mut contexts = vec![LeafScaleContext::default(); 2];
         let natural: Vec<_> = (0..2)
-            .map(|i| natural_plot_region(&leaves[i], &contexts[i]).expect("leaf lays out"))
+            .map(|i| natural_layout(&leaves[i], &contexts[i]).expect("leaf lays out").plot)
             .collect();
         assert_ne!(
             natural[0], natural[1],

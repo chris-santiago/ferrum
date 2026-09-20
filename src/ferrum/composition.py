@@ -1405,6 +1405,24 @@ def _lower_leaf_node(
     return leaf_node
 
 
+def _extent_alignment(follower: int, leader: int, axis: str) -> dict:
+    """Declare that grid cell *follower* spans cell *leader*'s extent on *axis*.
+
+    The wire shape of ``CompositeNode::Composite::extent_alignments`` (GH #182
+    follow-up), spelled in exactly one place so a key typo cannot reach only
+    some of the six declaration sites. ``follower``/``leader`` are row-major
+    cell positions in the same grid's ``cells`` list (holes counted); ``axis``
+    is ``"x"`` (two cells in one column spanning the same pixels horizontally)
+    or ``"y"`` (two cells in one row, vertically).
+
+    Why the composition declares this rather than Rust inferring it: a
+    jointplot and a clustermap are both 2×2 grids with a hole and axis-free
+    cells, distinguished only by which corner the hole is in. See
+    ``crates/ferrum-core/src/spec/composite.rs``'s ``ExtentAlignment``.
+    """
+    return {"follower": follower, "leader": leader, "axis": axis}
+
+
 def _build_grid_tree(
     cells: List[Optional[object]],
     *,
@@ -1415,6 +1433,7 @@ def _build_grid_tree(
     spacing: float,
     auto_tooltips: bool,
     resolve: Optional[dict] = None,
+    extent_alignments: Optional[List[dict]] = None,
     chrome: _RootChrome,
 ) -> _LoweredTree:
     """Lower a row-major grid of chart cells (with optional holes) to a tree.
@@ -1458,6 +1477,13 @@ def _build_grid_tree(
         Composite resolve field (e.g. ``{"x": "shared"}``) attached to the grid
         node so the Rust resolve pass unions the shared channel's domain across
         every cell. ``None`` or empty leaves each cell with independent scales.
+    extent_alignments : list of dict, optional
+        Cells whose plot extent must span another cell's on one axis, built
+        with :func:`_extent_alignment` (GH #182 follow-up: a jointplot's
+        marginals against the joint panel, a clustermap's dendrograms against
+        the heatmap). ``None``/empty is the ordinary case and is omitted from
+        the wire node entirely, so a grid that declares none serializes exactly
+        as it did before the field existed.
     chrome : _RootChrome
         Root-only figure chrome (title/subtitle/caption/config), whether this
         grid is the tree root, and the calling class's name for error text.
@@ -1515,6 +1541,22 @@ def _build_grid_tree(
         extra_fields["row_ratios"] = row_ratios
     if col_ratios is not None:
         extra_fields["col_ratios"] = col_ratios
+
+    # An empty-data cell lowers to a hole (see :func:`_lower_leaf`), and a hole
+    # has no plot extent to share or adopt -- a jointplot whose marginal has no
+    # rows, say. The caller declares the alignments its FIGURE means, in cell
+    # positions, without having to know which cells came back empty; dropping
+    # the ones that no longer name two panels is this builder's job, because
+    # this is where that is first knowable. The wire contract stays strict: a
+    # declaration naming a hole is malformed and Rust refuses it.
+    def _is_panel(cell: int) -> bool:
+        return children[cell]["kind"] != "hole"
+
+    live = [
+        a for a in (extent_alignments or []) if _is_panel(a["follower"]) and _is_panel(a["leader"])
+    ]
+    if live:
+        extra_fields["extent_alignments"] = live
     tree = _composite_node(
         "grid",
         children,
@@ -2573,6 +2615,12 @@ class JointChart(_CompositeBase):
           cover every marginal-count case, carrying figure chrome at the root
           uniformly instead of a separate single-chart bypass.
 
+        Each marginal also declares, via the grid node's ``extent_alignments``
+        (see :func:`_extent_alignment`), that it spans the center panel's
+        extent on the axis the two share — the top marginal the center's x,
+        the right marginal its y. Without that declaration each cell lays out
+        independently and the marginals overhang the panel they annotate.
+
         Marginals suppress their own axis decoration via ``axis(show=False)``
         before lowering (the data axis is redundant against the centre panel;
         the marginal-only axis is illegible at marginal size) — applied here so
@@ -2632,26 +2680,37 @@ class JointChart(_CompositeBase):
         center_share = self.ratio / (self.ratio + 1)
 
         cells: List[Optional[object]]
+        # Each marginal declares that it spans the CENTER panel's extent on
+        # the axis the two share (GH #182 follow-up): the top marginal reads
+        # against the center's x, the right marginal against its y. Stated on
+        # the wire rather than inferred from the grid's shape downstream --
+        # the center cell is the one this class knows is the anchor, and it
+        # knows it in every branch below.
+        alignments: List[dict]
         if top is not None and right is not None:
             cells = [top, None, center, right]
             nrows, ncols = 2, 2
             row_ratios: Optional[List[float]] = [marginal_share, center_share]
             col_ratios: Optional[List[float]] = [center_share, marginal_share]
+            alignments = [_extent_alignment(0, 2, "x"), _extent_alignment(3, 2, "y")]
         elif top is not None:
             cells = [top, center]
             nrows, ncols = 2, 1
             row_ratios = [marginal_share, center_share]
             col_ratios = None
+            alignments = [_extent_alignment(0, 1, "x")]
         elif right is not None:
             cells = [center, right]
             nrows, ncols = 1, 2
             row_ratios = None
             col_ratios = [center_share, marginal_share]
+            alignments = [_extent_alignment(1, 0, "y")]
         else:
             cells = [center]
             nrows, ncols = 1, 1
             row_ratios = None
             col_ratios = None
+            alignments = []
 
         resolve_field = _composite_resolve_field(self._resolve, kind=type(self).__name__)
 
@@ -2664,6 +2723,7 @@ class JointChart(_CompositeBase):
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
             resolve=resolve_field or None,
+            extent_alignments=alignments,
             chrome=_RootChrome(
                 kind=type(self).__name__,
                 is_root=is_root,
@@ -3381,6 +3441,11 @@ class ClusterMapChart(_CompositeBase):
         - no dendrogram: a dense 1×1 grid — see :meth:`JointChart._composite_tree`
           for why a single-cell tree needs no separate bypass.
 
+        Each dendrogram declares, via the grid node's ``extent_alignments``
+        (see :func:`_extent_alignment`), that it spans the heatmap's extent on
+        the axis it is drawn along — the same mechanism a jointplot's marginals
+        use, for the same reason.
+
         Each cell (``heatmap``/``row_dendrogram``/``col_dendrogram``) lowers via
         :func:`_build_grid_tree`'s generic cell dispatch (:func:`_lower_any`),
         so a nested composite dendrogram (e.g. a ``LayerChart`` combining the
@@ -3400,26 +3465,37 @@ class ClusterMapChart(_CompositeBase):
         h = 1.0 - d
 
         cells: List[Optional[object]]
+        # Each dendrogram declares that it spans the HEATMAP's extent on the
+        # axis it is drawn along (GH #182 follow-up): the column dendrogram
+        # sits above the heatmap and must span its x, the row dendrogram sits
+        # beside it and must span its y. Before this declaration the
+        # dendrograms laid out independently and hung past the heatmap's ends,
+        # which the marginals' phantom axis gutter used to mask.
+        alignments: List[dict]
         if col_dendro is not None and row_dendro is not None:
             cells = [None, col_dendro, row_dendro, heatmap]
             nrows, ncols = 2, 2
             row_ratios: Optional[List[float]] = [d, h]
             col_ratios: Optional[List[float]] = [d, h]
+            alignments = [_extent_alignment(1, 3, "x"), _extent_alignment(2, 3, "y")]
         elif col_dendro is not None:
             cells = [col_dendro, heatmap]
             nrows, ncols = 2, 1
             row_ratios = [d, h]
             col_ratios = None
+            alignments = [_extent_alignment(0, 1, "x")]
         elif row_dendro is not None:
             cells = [row_dendro, heatmap]
             nrows, ncols = 1, 2
             row_ratios = None
             col_ratios = [d, h]
+            alignments = [_extent_alignment(0, 1, "y")]
         else:
             cells = [heatmap]
             nrows, ncols = 1, 1
             row_ratios = None
             col_ratios = None
+            alignments = []
 
         return _build_grid_tree(
             cells,
@@ -3429,6 +3505,7 @@ class ClusterMapChart(_CompositeBase):
             col_ratios=col_ratios,
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
+            extent_alignments=alignments,
             chrome=_RootChrome(
                 kind=type(self).__name__,
                 is_root=is_root,

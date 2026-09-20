@@ -1296,12 +1296,11 @@ fn route_panel_axes_and_grid(
     // the axis title — see `marks::axis::AxisNodes`.
     breaks: &[break_axis::BreakRemap<'_>],
 ) -> PanelAxisGrid {
-    // Polar and Geo coordinates suppress Cartesian axes and gridlines.
-    let suppress_axes = matches!(
-        &spec.coord,
-        Some(crate::spec::coord::CoordKind::Polar { .. })
-            | Some(crate::spec::coord::CoordKind::Geo { .. })
-    );
+    // Polar and Geo coordinates suppress Cartesian axes and gridlines. Same
+    // predicate `render::prepare::build_axes` folds into
+    // `AxesInput::show_x`/`show_y`, so the reservation and the emission cannot
+    // disagree about whether this panel has Cartesian axes (#182/#94).
+    let suppress_axes = crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
     let grid_band_colors: &[String] = chart_config
         .grid
@@ -3968,6 +3967,7 @@ mod tests {
             warnings: Vec::new(),
             secondary_y_axes: Vec::new(),
             plot_region: Rect::ZERO,
+            padded_region: Rect::ZERO,
         }
     }
 

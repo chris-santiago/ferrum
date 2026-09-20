@@ -77,6 +77,19 @@ pub struct LayoutResult {
     /// computed. A deserialized value is therefore `Rect::ZERO`.
     #[serde(skip)]
     pub(crate) plot_region: Rect,
+    /// `viewport` less the theme's padding, BEFORE any chrome band — the box
+    /// the chart-title, legend and axis reservations were taken out of.
+    ///
+    /// Its one reader is the declared-extent-alignment pass
+    /// (`render::composite_render`), which needs to tell the two kinds of
+    /// inset apart: the gap between `padded_region` and `plot_region` on a
+    /// side is chrome that gets DRAWN there, while the gap between
+    /// `padded_region` and `viewport` is blank margin. Same in-process-only
+    /// contract as `plot_region` above — `#[serde(skip)]` keeps
+    /// `fm.compute_layout`'s returned dict byte-identical, and a deserialized
+    /// value is `Rect::ZERO`.
+    #[serde(skip)]
+    pub(crate) padded_region: Rect,
 }
 
 /// What a composite parent imposes on ONE leaf's own layout: legend
@@ -836,11 +849,17 @@ fn reserve_axis_bands(
     theme: &ThemeInputs,
     metrics: &dyn TextMetrics,
 ) -> (Rect, f64, Vec<f64>) {
+    // Drawn gate (#182, closes #94): the title gutter is reserved only for an
+    // axis that draws its title — the same `axes.show_y` answer the label band
+    // three lines below already gates on, which also carries the projected-coord
+    // case (`Polar`/`Geo` have no Cartesian axes at all; see
+    // `spec::coord::suppresses_cartesian_axes`).
     let y_title_gutter = axis::compute_y_title_width(
         &axes.y,
         theme.typography.title_font_size,
         theme.padding.axis_title_padding,
         metrics,
+        axes.show_y,
     );
     // Per-axis label_font_size override must drive the band reservation too (it
     // already drives the rendered label size in marks/axis.rs); otherwise the
@@ -850,16 +869,17 @@ fn reserve_axis_bands(
         .overrides
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
-    // Standoff gate (#97, spec §4.1 amended 2026-08-27;
-    // #94 phantom-margin family): `axes.show_y` is `.axis(y=False)`'s
-    // chart-level toggle (JointChart marginals, ClusterMap dendrograms). It
-    // does NOT empty `axes.y.tick_labels` — only `layout_y_axis`'s emission
-    // is skipped, not this reservation — so a hidden axis must keep its bare
-    // pre-#97 `max_label_w` reservation. `compute_y_label_band_width` also
-    // reads `axes.y.show_labels()` directly off the passed `AxisInput`
-    // (`fm.Axis(labels=False)` on an otherwise-shown axis draws no label
-    // text either), so only an axis that both is shown AND draws its labels
-    // gets #97's new standoff.
+    // Drawn gate (#97, spec §4.1 amended 2026-08-27; widened by #182, which
+    // closes #94): `axes.show_y` answers "is this Cartesian y axis drawn" —
+    // `.axis(y=False)`'s chart-level toggle (JointChart marginals, ClusterMap
+    // dendrograms) AND a projected coord that replaces the Cartesian axes
+    // (`render::prepare::build_axes` folds both into the flag). It does NOT
+    // empty `axes.y.tick_labels` — only `layout_y_axis`'s emission is skipped —
+    // so the reservation has to ask the flag itself. `compute_y_label_band_width`
+    // also reads `axes.y.show_labels()` directly off the passed `AxisInput`
+    // (`fm.Axis(labels=False)` on an otherwise-shown axis draws no label text
+    // either), so only an axis that both is shown AND draws its labels reserves
+    // a band at all.
     let y_label_band = axis::compute_y_label_band_width(
         &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
     );
@@ -877,12 +897,13 @@ fn reserve_axis_bands(
             .overrides
             .label_font_size
             .unwrap_or(theme.typography.label_font_size);
-        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
-        // #94 phantom-margin family): `axes.show_x` already gates this whole
-        // branch to `0.0` above (`.axis(x=False)`), so the only remaining
-        // knob is `axes.x.show_labels()` (`fm.Axis(labels=False)` on an
-        // otherwise-shown axis draws no label text either) — mirrors the
-        // primary y band's gate exactly, see `estimate_x_label_band`'s doc.
+        // Drawn gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
+        // widened by #182, which closes #94): `axes.show_x` already gates this
+        // whole branch to `0.0` above (`.axis(x=False)`, or a projected coord
+        // with no Cartesian axes at all), so the only remaining knob is
+        // `axes.x.show_labels()` (`fm.Axis(labels=False)` on an otherwise-shown
+        // axis draws no label text either) — mirrors the primary y band's gate
+        // exactly, see `estimate_x_label_band`'s doc.
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
             x_label_font_size,
@@ -908,6 +929,7 @@ fn reserve_axis_bands(
         theme.typography.title_font_size,
         theme.padding.axis_title_padding,
         metrics,
+        axes.show_x,
     );
 
     // Reserved band totals per axis (label band + title gutter). The orphan
@@ -947,16 +969,29 @@ fn reserve_axis_bands(
                 .overrides
                 .label_font_size
                 .unwrap_or(theme.typography.label_font_size);
-            // Standoff gate (#97, same discipline as the primary y band
+            // Drawn gate (#97/#182, same discipline as the primary y band
             // above): secondary y-axes have no `.axis(show=False)`-style
             // suppression toggle anywhere in `AxesInput` — the panel loop
             // always emits every `axes.secondary_y` entry ("Independent of
             // axes.show_y" — that toggle only suppresses the primary/left
-            // axis). `visible: true` is therefore always correct today, not
-            // a placeholder; if a per-secondary-axis show toggle is ever
-            // added, thread it through here. `Axis(labels=False)` on a
-            // secondary axis IS already honored — `compute_y_label_band_width`
-            // reads `a.show_labels` directly off this `AxisInput`.
+            // axis). `visible: true` is therefore correct for both the label
+            // band and the title gutter under every Cartesian coord, not a
+            // placeholder; if a per-secondary-axis show toggle is ever added,
+            // thread it through here. `Axis(labels=False)` on a secondary axis
+            // IS already honored — `compute_y_label_band_width` reads
+            // `a.show_labels` directly off this `AxisInput`.
+            //
+            // Named residual (#182): under a PROJECTED coord (`Polar`/`Geo`)
+            // `render::scene_build` suppresses secondary y-axes along with the
+            // primaries, so these bands are reserved for nothing. The primaries
+            // close via `axes.show_x`/`show_y` (which
+            // `render::prepare::build_axes` folds the coord into); the secondary
+            // slots cannot, because the coord fact is not per-axis and the
+            // honest fix is for the #52 slot plan to produce NO secondary axes
+            // under a projected coord — its three index-correlated vectors
+            // (inputs/scales/tick_counts) must be emptied together, which is
+            // that plan's call, not this reservation's. Reachable only by
+            // combining `CoordPolar`/`CoordGeo` with an independent-y layer.
             let label_band = axis::compute_y_label_band_width(
                 a, label_font_size, metrics, a.tick_size(theme), true,
             );
@@ -965,6 +1000,7 @@ fn reserve_axis_bands(
                 theme.typography.title_font_size,
                 theme.padding.axis_title_padding,
                 metrics,
+                true,
             );
             clamp_axis_band(label_band + title_gutter, a.overrides.min_band, a.overrides.max_band)
         })
@@ -1117,6 +1153,7 @@ fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMet
         &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
     ) + axis::compute_y_title_width(
         &axes.y, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+        axes.show_y,
     );
     clamp_axis_band(raw, axes.y.overrides.min_band, axes.y.overrides.max_band)
 }
@@ -1421,6 +1458,7 @@ fn auto_padding_for_axis_titles(
             };
             let x_title_gutter = axis::compute_x_title_width(
                 &axes.x, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+                axes.show_x,
             );
             let x_band = clamp_axis_band(
                 x_label_band + x_title_gutter,
@@ -1756,10 +1794,12 @@ fn layout_panel_axes(
         });
 
         if rect != Rect::ZERO {
-            // Spec-level axis suppression: when `chart.axis(y=False)` is
-            // active, skip emitting the y axis layout entirely. The plot
-            // area is unchanged (gutters remain reserved upstream); this
-            // simply omits axis line + ticks + labels + title.
+            // Axis suppression: when this y axis is not drawn — `chart.axis(y=False)`,
+            // or a projected coord that has no Cartesian axes (see `AxesInput::show_y`) —
+            // skip emitting the y axis layout entirely. Since #182 the plot area is
+            // LARGER in that case rather than unchanged: `reserve_axis_bands` reserves
+            // neither the label band nor the title gutter for chrome this branch omits,
+            // so the omission and the reservation now read the same flag.
             if axes.show_y {
                 // Suppress y-axis title on non-leftmost-column facet panels to
                 // avoid duplicating the title in every inter-column gutter —
@@ -2019,6 +2059,9 @@ pub fn compute_layout(
         left:   theme.padding.padding_left.unwrap_or(base.left + extra.left),
     };
     let inner = viewport_rect.shrink(inset);
+    // Captured before the chrome reservations below shadow `inner`: this is
+    // the blank-margin boundary `LayoutResult::padded_region` promises.
+    let padded_region = inner;
     if inner.w <= 0.0 || inner.h <= 0.0 {
         // Report the CALLER's actual value and the specific side responsible
         // (D10, spec §4.7 — repro:
@@ -2134,6 +2177,7 @@ pub fn compute_layout(
         warnings,
         secondary_y_axes,
         plot_region,
+        padded_region,
     })
 }
 
@@ -2229,6 +2273,7 @@ mod tests {
             warnings: vec![],
             secondary_y_axes: vec![],
             plot_region: Rect::ZERO,
+            padded_region: Rect::ZERO,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
@@ -3791,13 +3836,25 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
-        // `plot_region` is deliberately off the wire (GH #89A): serializing it
-        // would add a key to `fm.compute_layout`'s returned dict for a purely
-        // in-process reader. It is the ONE field a round trip may drop, and
-        // this asserts exactly that — every other field survives byte-for-byte.
+        // `plot_region` (GH #89A) and `padded_region` (#182's extent
+        // alignment) are deliberately off the wire: serializing either would
+        // add a key to `fm.compute_layout`'s returned dict for a purely
+        // in-process reader. They are the ONLY fields a round trip may drop,
+        // and this asserts exactly that — every other field survives
+        // byte-for-byte. (Previously this named `plot_region` as the one such
+        // field; `padded_region` joins it under the same contract, so the
+        // claim is now "these two and no others".)
         assert!(result.plot_region.w > 0.0, "the computed layout has a real plot region");
+        assert!(
+            result.padded_region.w > result.plot_region.w,
+            "the padded box is the plot region plus this chart's axis chrome"
+        );
         assert_eq!(parsed.plot_region, Rect::ZERO, "plot_region does not round-trip by design");
-        assert_eq!(parsed, LayoutResult { plot_region: Rect::ZERO, ..result });
+        assert_eq!(parsed.padded_region, Rect::ZERO, "padded_region does not round-trip by design");
+        assert_eq!(
+            parsed,
+            LayoutResult { plot_region: Rect::ZERO, padded_region: Rect::ZERO, ..result }
+        );
     }
 
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
@@ -4313,6 +4370,71 @@ mod tests {
             "show_x=false should reserve less bottom space (larger bottom edge); \
              no_x={no_x_bottom:.1}, with_x={with_x_bottom:.1}"
         );
+    }
+
+    /// `#182` (closes `#94`): with NEITHER Cartesian axis drawn, the plot area
+    /// is exactly the viewport minus the theme padding — no label band, no title
+    /// gutter, on either side. The fixture carries a title AND labels on both
+    /// axes precisely so every phantom the pre-fix code reserved would show up
+    /// as a shortfall here: the y band was `max_label_w + line_h(title) +
+    /// title_padding` and the x band the title gutter.
+    ///
+    /// This is the Rust-side twin of `tests/test_axis_gutter_gating.py`'s
+    /// measured `(16, 16, 608, 448)` plot rect; it pins the arithmetic at the
+    /// layout boundary, where the reservation lives.
+    #[test]
+    fn compute_layout_undrawn_axes_reserve_no_band_at_all() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let titled_axes = AxesInput {
+            x: axis_input(
+                AxisOrient::Bottom,
+                Some("X title".into()),
+                vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()],
+                None,
+            ),
+            y: axis_input(
+                AxisOrient::Left,
+                Some("Y title".into()),
+                vec!["0".into(), "10000".into()],
+                None,
+            ),
+            show_x: false,
+            show_y: false,
+            secondary_y: Vec::new(),
+        };
+        let theme = default_theme_inputs();
+        let result = compute_layout(
+            &spec, &theme, viewport,
+            &titled_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        ).unwrap();
+
+        let pad = theme.padding.padding;
+        let plot = result.panels[0].plot_area;
+        assert_eq!(
+            (plot.x, plot.y, plot.w, plot.h),
+            (pad, pad, viewport.width - 2.0 * pad, viewport.height - 2.0 * pad),
+            "undrawn axes must leave the padded inner rect untouched"
+        );
+
+        // Discriminating control: the SAME axes, drawn, reserve a real band on
+        // both sides — so the equality above is the gate's work, not a fixture
+        // whose bands happen to measure zero.
+        let drawn = compute_layout(
+            &spec, &theme, viewport,
+            &AxesInput { show_x: true, show_y: true, ..titled_axes.clone() },
+            &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        ).unwrap();
+        let drawn_plot = drawn.panels[0].plot_area;
+        assert!(drawn_plot.x > plot.x, "a drawn y axis must reserve a left band");
+        assert!(drawn_plot.h < plot.h, "a drawn x axis must reserve a bottom band");
     }
 
     #[test]

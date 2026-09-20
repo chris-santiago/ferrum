@@ -909,6 +909,7 @@ mod tests {
             col_ratios: None,
             ncols: None,
             nrows: None,
+            extent_alignments: Vec::new(),
             title: None,
             subtitle: None,
             caption: None,

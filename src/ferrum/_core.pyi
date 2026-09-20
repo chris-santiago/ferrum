@@ -1018,9 +1018,17 @@ def render_interactive(
 #               # root-only chrome: "title"/"subtitle"/"caption"/"config";
 #               # per-child (non-root) label:
 #               "label"?: str, "resolve"?: dict, "ncols"?: int, "nrows"?: int,
-#               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float}
+#               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float,
+#               "extent_alignments"?: list}
 #               # resolve maps channel -> "shared"/"independent"; supported
 #               # channels are "x", "y", "color", "size" (10-pre-b).
+#               # extent_alignments (grid only, GH #182 follow-up) is a list of
+#               # {"follower": int, "leader": int, "axis": "x"|"y"}: the
+#               # follower cell's plot extent spans the leader cell's on that
+#               # axis, keeping its own on the other. Cell positions are
+#               # row-major in `children` (holes counted). A jointplot's
+#               # marginals name its center panel; a clustermap's dendrograms
+#               # name its heatmap. Omit (or pass []) for every other grid.
 #   hole:      {"kind": "hole"}  # Task 8a: a field-less placeholder cell —
 #               # valid only as a direct child of a "grid"/"wrap" composite
 #               # (never at the tree root); reserves its row/column slot but

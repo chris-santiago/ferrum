@@ -44,12 +44,10 @@ from _svg_corpus import path_points
 from _svg_rects import data_bar_rects, mark_layer, svg_elements
 
 # `value_axis_ladder` / `pixel_for` read a quantitative axis's tick ladder and
-# invert it. They live in `test_layer_union_provenance.py` today, built on
-# `_svg_extents`' tick primitives; their natural home is `_svg_extents` itself,
-# and the hoist is recorded as pending rather than done here because that module
-# belongs to another in-flight task. Importing them is the alternative to a
-# third copy of the same ten lines.
-from test_layer_union_provenance import pixel_for, value_axis_ladder
+# invert it. The pending hoist recorded here is done: they now live in
+# `_svg_extents`, whose tick primitives they are built on, instead of in a
+# sibling test module.
+from _svg_extents import pixel_for, value_axis_ladder
 
 #: How many rows `category_frame` carries per category level, and therefore how
 #: many stacked segments each bar is built from once a segment column is added.
@@ -288,11 +286,8 @@ def test_temporal_stack_renders_a_stacked_time_series() -> None:
     unstacked control pins that the reference values are the chart's, not
     hardcoded luck: the same data overlaid reaches 6, not 9.
 
-    `value_axis_ladder` / `pixel_for` come from `test_layer_union_provenance.py`
-    because that module owns them today; their natural home is
-    `tests/_svg_extents.py`, whose tick primitives they are built on, and the
-    hoist is recorded as pending rather than done here (that module is another
-    task's and still in flight).
+    `value_axis_ladder` / `pixel_for` come from `tests/_svg_extents.py`, whose
+    tick primitives they are built on.
     """
     stacked, overlaid = _area_svg(stack=True), _area_svg(stack=False)
     stacked_ladder = value_axis_ladder(stacked, axis="y")

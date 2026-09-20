@@ -1358,6 +1358,8 @@ fn build_axes(
     // in here, the boundary that DOES know it, so a rejected orient names the
     // axis the user actually wrote instead of the resolved (post-flip) one.
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let cartesian_axes_suppressed =
+        crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
     let SecondaryYAxes {
         inputs: secondary_y,
@@ -1392,8 +1394,15 @@ fn build_axes(
             theme,
         )
         .map_err(|e| e.resolve(coord_flipped))?,
-        show_x: spec.axis_x.unwrap_or(true),
-        show_y: spec.axis_y.unwrap_or(true),
+        // `AxesInput::show_x`/`show_y` mean "this Cartesian axis is DRAWN", so
+        // this is where both reasons it may not be fold together: the user's
+        // `.axis(x=False)` toggle, and a projected coord (`Polar`/`Geo`) that
+        // replaces the Cartesian axes outright — `scene_build` emits no axis or
+        // gridline node under either, so `layout` must reserve no band for
+        // either (#182, closes #94). Resolving it here keeps every layout
+        // consumer on one gate instead of each re-asking the coord.
+        show_x: spec.axis_x.unwrap_or(true) && !cartesian_axes_suppressed,
+        show_y: spec.axis_y.unwrap_or(true) && !cartesian_axes_suppressed,
         secondary_y,
     };
     Ok(PreparedAxes { axes, x_tick_count, y_tick_count, secondary_y_scales, secondary_y_tick_counts })

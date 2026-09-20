@@ -37,18 +37,28 @@ Rust's scale-resolve for the first time, so the absent radius axis now
 resolves through ``dummy_unit_scale`` (domain ``[0, 1]``) instead of a real
 quantitative scale copied from theta's own domain. Axis-margin reservation
 (``render::prepare::build_axes``, consumed by ``layout::compute_layout``)
-sizes the panel's margin from whatever ``ScaleKind`` the absent axis
-resolves to, even under ``CoordPolar`` where that axis is never actually
+sized the panel's margin from whatever ``ScaleKind`` the absent axis
+resolved to, even under ``CoordPolar`` where that axis is never actually
 drawn (suppressed later, in ``scene_build.rs::route_panel_axes_and_grid``).
 Pre-fix, the dummy's stolen domain happened to reserve a realistic
-2-digit-label margin; post-fix, the panel now reserves the SAME margin an
-existing single-axis ``mark_tick(x=...)``/``mark_tick(y=...)`` chart already
-gets (verified directly below) — the architecturally correct outcome, since
-Arc now genuinely shares the Tick/Rule single-axis convention. This moves
-every arc's absolute pixel coordinates (center, radii, circular theta-tick
-positions) while leaving the wedges' *proportions* (sweep angles, relative
-radii) and the full tag/text content unaffected — verified structurally
-below rather than via an unblessed byte pin.
+2-digit-label margin; this batch made the panel reserve the SAME margin an
+existing single-axis ``mark_tick(x=...)``/``mark_tick(y=...)`` chart gets.
+This moves every arc's absolute pixel coordinates (center, radii, circular
+theta-tick positions) while leaving the wedges' *proportions* (sweep angles,
+relative radii) and the full tag/text content unaffected — verified
+structurally below rather than via an unblessed byte pin.
+
+**Amended 2026-09-19 by `#182`, which closes `#94`.** The sentence above
+describes the defect `#94` reports, not a convention: reserving a margin
+"even under ``CoordPolar`` where that axis is never actually drawn" is
+precisely the phantom. Layout now reserves a label band or a title gutter
+only for an axis that is drawn, and a projected coord (``Polar``/``Geo``)
+has no Cartesian axes at all — so a pie reserves the theme padding and
+nothing more. The two margin tests below are inverted accordingly, with the
+single-axis ``mark_tick`` chart kept as the control that a REAL drawn axis
+still reserves its band. Everything else in this module (the ``to_dict()``
+channel set, wedge proportions, the absence of a rendered axis line) is
+unchanged by that amendment.
 """
 
 from __future__ import annotations
@@ -135,6 +145,14 @@ def _arc_sweep_radians(path_d: str) -> float:
         return math.nan
     naive = 2.0 * math.asin(min(ratio, 1.0))
     return math.tau - naive if large_arc else naive
+
+
+#: ferrum's default chart height and the Paper Ink theme's flat padding. The
+#: two polar-margin tests below state their expected insets in terms of these
+#: rather than as bare pixels, since what they pin is "the padding and nothing
+#: else" (`#182`/`#94`), not a particular number.
+_DEFAULT_HEIGHT = 480.0
+_DEFAULT_PADDING = 16.0
 
 
 def _clip_rect(svg: str) -> tuple[float, float, float, float]:
@@ -413,13 +431,24 @@ def test_arc_sweep_radians_handles_sweeps_over_180_degrees() -> None:
     assert abs(sum(sweeps) - math.tau) < 0.05
 
 
-def test_theta_x_arc_left_margin_matches_established_single_axis_convention() -> None:
-    """Root-cause confirmation for the module docstring's finding: a
-    theta="x" arc's plot-area left edge must now match the SAME left edge an
-    existing single-axis ``mark_tick(x=...)`` chart gets (both resolve their
-    absent axis through the identical ``dummy_unit_scale`` exemption arm),
-    not the wider margin a real two-axis chart reserves for realistic tick
-    labels."""
+def test_theta_x_arc_reserves_no_left_margin_for_its_undrawn_axis() -> None:
+    """Superseded by `#182`/`#94` (this test previously asserted the equality
+    the amendment below retired).
+
+    It used to pin a theta="x" arc's plot-area left edge to the SAME left edge
+    a single-axis ``mark_tick(x=...)`` chart gets, on the grounds that both
+    resolve their absent axis through the identical ``dummy_unit_scale``
+    exemption arm. That equality was never about the two charts drawing the
+    same thing: the tick chart DRAWS its axis and the polar chart does not, so
+    it pinned the size of a margin nothing occupied. `#94` is exactly that
+    margin. The rule now is that a gutter exists if and only if something is
+    drawn in it, so the two charts must DIFFER -- and the polar chart's left
+    edge is the theme padding, nothing more.
+
+    The tick chart is kept as the discriminating control: its own margin must
+    be untouched, or this would pass for a fix that stopped reserving margins
+    for real drawn axes too.
+    """
     df = pl.DataFrame({"category": ["A", "B", "C"], "value": [10.0, 20.0, 30.0]})
     pie_svg = (
         fm.Chart(df).mark_arc().encode(theta="value:Q").coord(fm.CoordPolar(theta="x")).to_svg()
@@ -427,14 +456,23 @@ def test_theta_x_arc_left_margin_matches_established_single_axis_convention() ->
     tick_svg = (
         fm.Chart(pl.DataFrame({"x": [1, 2, 3, 20, 25, 30]})).mark_tick().encode(x="x:Q").to_svg()
     )
-    assert _clip_rect(pie_svg)[0] == _clip_rect(tick_svg)[0]
+    pie_left = _clip_rect(pie_svg)[0]
+    tick_left = _clip_rect(tick_svg)[0]
+    assert pie_left == _DEFAULT_PADDING, (
+        f"a polar chart draws no Cartesian y axis, so its left inset is the theme "
+        f"padding and nothing else; got {pie_left}"
+    )
+    assert tick_left > pie_left, (
+        f"the single-axis tick chart DRAWS its y axis and must keep its band: {tick_left}"
+    )
 
 
-def test_theta_y_arc_bottom_margin_matches_established_single_axis_convention() -> None:
-    """Mirror of the theta="x" check above: a theta="y" arc's absent axis is
-    x (the radius side), which governs the panel's BOTTOM margin, not the
-    left. The panel height must match a single-axis ``mark_tick(y=...)``
-    chart's height for the same reason."""
+def test_theta_y_arc_reserves_no_bottom_margin_for_its_undrawn_axis() -> None:
+    """Mirror of the theta="x" check above, on the other axis, and superseded
+    the same way by `#182`/`#94`: a theta="y" arc's absent axis is x (the
+    radius side), which governs the panel's BOTTOM margin. The polar panel now
+    spans the full padded height, and the single-axis ``mark_tick(y=...)``
+    chart -- which draws its x axis -- keeps its shorter one."""
     df = pl.DataFrame({"category": ["A", "B", "C"], "value": [10.0, 20.0, 30.0]})
     pie_svg = (
         fm.Chart(df).mark_arc().encode(theta="value:Q").coord(fm.CoordPolar(theta="y")).to_svg()
@@ -442,7 +480,15 @@ def test_theta_y_arc_bottom_margin_matches_established_single_axis_convention() 
     tick_svg = (
         fm.Chart(pl.DataFrame({"y": [1, 2, 3, 20, 25, 30]})).mark_tick().encode(y="y:Q").to_svg()
     )
-    assert _clip_rect(pie_svg)[3] == _clip_rect(tick_svg)[3]
+    pie_h = _clip_rect(pie_svg)[3]
+    tick_h = _clip_rect(tick_svg)[3]
+    assert pie_h == _DEFAULT_HEIGHT - 2 * _DEFAULT_PADDING, (
+        f"a polar chart draws no Cartesian x axis, so its panel spans the full "
+        f"padded height; got {pie_h}"
+    )
+    assert tick_h < pie_h, (
+        f"the single-axis tick chart DRAWS its x axis and must keep its band: {tick_h}"
+    )
 
 
 def test_pie_never_renders_a_real_y_axis_line(pie_df: pl.DataFrame) -> None:
