@@ -24,16 +24,18 @@ use crate::spec::encoding::DataType as SpecDataType;
 ///   that used to return a silent empty result — the path-independent
 ///   backstop for a caller that reaches this mark builder WITHOUT going
 ///   through the standalone/composite-leaf scale resolution above (a
-///   merged-flat layer's per-mark dispatch — e.g.
-///   `LayerChart(bar, arc).interactive()`'s single-panel path, or
-///   `resolve={"y": "independent"}` — resolves scales against the OTHER
+///   merged-flat layer's per-mark dispatch resolves scales against the OTHER
 ///   layer's mark, so `Mark::Arc`'s own guard never runs there).
+///
+/// The message names the requirement and no longer prescribes the fix
+/// (`#172`(1)): a merged-flat arc LAYER now carries its own `CoordPolar`
+/// through `Layer::coord`, so the case that used to reach here with the fix
+/// already applied — `LayerChart(bar, arc.coord(fm.CoordPolar()))` — renders
+/// instead of being told to add the coord it had. What still reaches here is a
+/// chart with no polar coord anywhere, and for that the state is the whole
+/// diagnosis. See [`RenderError::MarkRequiresCoord`]'s doc.
 pub(crate) fn requires_polar_coord() -> RenderError {
-    RenderError::MarkRequiresCoord {
-        mark: "mark_arc",
-        required: "Polar",
-        hint: "add .coord(fm.CoordPolar(...))",
-    }
+    RenderError::MarkRequiresCoord { mark: "mark_arc", required: "Polar" }
 }
 
 /// Resolved polar geometry shared by the pie/donut and annular-wedge paths.

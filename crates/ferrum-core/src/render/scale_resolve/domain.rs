@@ -685,8 +685,19 @@ pub(in crate::render) fn numeric_domain_union(
         // into the channel's own space first, via the same
         // `Encoding::flip_positional` `LayerPrepared::flip_coords` applies, and
         // both sides of every read below live in one space.
-        let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+        //
+        // WHOSE space is per layer (`#172`(1)): the layer `build_layers` swaps
+        // is the one whose OWN effective coord flips, so that is the layer whose
+        // authored `y` occupies this x axis. Reading the chart's flip for a
+        // layer that carries its own coord unions the wrong channel — the same
+        // blowout described above, one level down.
+        //
+        // Flipping the layer's encoding costs a clone, so it is skipped for the
+        // (overwhelmingly common) unflipped layer exactly as before.
         for layer in layers {
+            let coord_flipped = crate::spec::coord::flips_positional_channels(
+                layer.effective_coord(spec.coord.as_ref()),
+            );
             // An `independent_y` layer resolves its own y-slot (secondary-y-axis,
             // GH #52) and must not widen the primary/shared y domain — that would
             // couple the left axis to a scale it does not own. Its x stays shared,
@@ -1100,7 +1111,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         }
     }
 

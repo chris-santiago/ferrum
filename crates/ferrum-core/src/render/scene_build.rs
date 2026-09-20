@@ -48,6 +48,45 @@ fn break_axis_incompatible_coord(
     })
 }
 
+/// The `(layer index, coord spelling, panel-scoped property)` of the first
+/// layer whose OWN `coord` declares something that belongs to the whole panel —
+/// the combination `#172`(1) refuses. `None` when every layer's coord is a
+/// per-layer placement rule, which includes every spec that declares no
+/// per-layer coord at all.
+///
+/// A layer's coord places that layer's marks; the panel's chrome, aspect ratio
+/// and scale domains stay the chart's (see [`crate::spec::layer::Layer::coord`]).
+/// So a per-layer `xlim=`/`ylim=`/`expand=`/`clip=`/`CoordFixed(ratio=)` has
+/// nowhere honest to land: the layers share one panel, and one of them cannot
+/// have its own. The alternative to refusing is what the merged-flat path did
+/// for every per-layer coord before this fix — render a chart the caller did
+/// not write, silently.
+///
+/// The predicate itself lives in
+/// [`crate::spec::coord::panel_scoped_property`], beside the coord it is about;
+/// this function only finds the first offender and names the variant for the
+/// message.
+fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, &'static str, &'static str)> {
+    spec.layers.iter().flatten().enumerate().find_map(|(index, layer)| {
+        let coord = layer.coord.as_ref()?;
+        let property = crate::spec::coord::panel_scoped_property(coord)?;
+        Some((index, coord_spelling(coord), property))
+    })
+}
+
+/// The user-facing constructor name for a coord, for refusal messages: the
+/// caller wrote `fm.CoordFixed(...)`, not `CoordKind::Fixed { .. }`.
+fn coord_spelling(coord: &crate::spec::coord::CoordKind) -> &'static str {
+    use crate::spec::coord::CoordKind;
+    match coord {
+        CoordKind::Cartesian { .. } => "fm.CoordCartesian",
+        CoordKind::Flip => "fm.CoordFlip",
+        CoordKind::Fixed { .. } => "fm.CoordFixed",
+        CoordKind::Polar { .. } => "fm.CoordPolar",
+        CoordKind::Geo { .. } => "fm.CoordGeo",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     spec: &ChartSpec,
@@ -72,6 +111,16 @@ pub fn build_scene(
     // corruption (not suppression) was the pre-fix behavior for both coords.
     if let Some((coord, axis)) = break_axis_incompatible_coord(spec, chart_config) {
         return Err(RenderError::BreakAxisIncompatibleCoord { coord, axis });
+    }
+
+    // `#172`(1) (REFUSE MALFORMED). A per-layer coord that declares a PANEL
+    // property cannot be placed on one layer of a shared panel. Refused at the
+    // same funnel, before any geometry, for the same reason the gate above is
+    // here: every standalone render and every composite leaf passes through it,
+    // so one check covers the merged-flat path's three public routes (static
+    // `chart + chart`, `resolve={"y": "independent"}`, and `.interactive()`).
+    if let Some((layer, coord, property)) = unplaceable_layer_coord(spec) {
+        return Err(RenderError::LayerCoordUnplaceable { layer, coord, property });
     }
 
     let background = config.background.or(Some(theme.colors.background_color));
@@ -784,6 +833,16 @@ fn resolve_panel_scales(
     // legitimately fills it (a layer with its own `data_source`) or leaves
     // it correctly empty — no residual either way. A no-op when the chart
     // isn't flipped.
+    //
+    // Deliberately the CHART's flip (`prep.coord_flipped`), not layer 0's own
+    // (`#172`(1)): the result drives this panel's axes and scales, which are
+    // chart-level chrome by that field's contract. The two can only differ for a
+    // spec that declares a `coord` on layer 0, which no Python path produces —
+    // `_carry_layer_coord` stamps the SECONDARY members' coords and leaves the
+    // primary's at chart level, because the primary's IS the panel's. A
+    // hand-written wire spec that declares one on layer 0 gets the panel chrome
+    // its chart-level coord asks for, and that layer's own marks still draw in
+    // the coord it declared (the per-layer loop below).
     let mut merged_encoding = spec.encoding.clone();
     if prep.coord_flipped {
         merged_encoding.flip_positional();
@@ -1526,6 +1585,22 @@ fn build_panel_mark_batches(
         // contract independent of that fact.
         let own_batch: &RecordBatch = layer_batch;
 
+        // This layer's coordinate system (`#172`(1)), already resolved against
+        // the chart's by `prepare`, and whether it exchanges the positional
+        // channels. Both are read three times below — by the position
+        // adjustment, by the two refusal gates, and by the synthetic per-layer
+        // `ChartSpec` every mark builder sees — so they are bound once here,
+        // above the first of those uses.
+        //
+        // `prep.coord_flipped` (the CHART's flip) is what all three read before
+        // `#172`(1), which is the same answer for every layer of every spec that
+        // declares no per-layer coord — hence byte-stable — and the wrong one for
+        // a layer carrying its own `CoordFlip`: `prepare::build_layers` swapped
+        // THAT layer's channels, so the stack under it has to agree about which
+        // slot each channel now occupies.
+        let layer_coord = layer.coord.clone();
+        let layer_flipped = crate::spec::coord::flips_positional_channels(layer_coord.as_ref());
+
         // Bind this layer to its y-slot (secondary-y-axis, GH #52). Shared layers
         // (and every layer on a chart with no independent slot) draw through the
         // primary `scales` unchanged — byte-stable. An independent layer draws
@@ -1562,7 +1637,7 @@ fn build_panel_mark_batches(
             layer.position.as_ref(),
             scales,
             &layer.encoding,
-            prep.coord_flipped,
+            layer_flipped,
             warnings,
         )?;
         let layer_batch: &RecordBatch = &adjusted_owned;
@@ -1712,9 +1787,17 @@ fn build_panel_mark_batches(
                 _ => {}
             }
         }
+        // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
+        // Stamped onto the synthetic spec so every mark builder that asks
+        // `ctx.spec.coord` — `arc::polar_geom`, `bar::build_polar`,
+        // `geoshape::build`'s projection — is answered about the layer it is
+        // drawing rather than about the chart's primary layer. That read is why
+        // `LayerChart(bar, arc).interactive()` refused: the arc layer's own
+        // `CoordPolar` never reached the builder that needed it.
         let layer_spec = ChartSpec {
             mark: layer.mark,
             encoding: layer_spec_encoding,
+            coord: layer_coord,
             ..spec.clone()
         };
         let ctx = DrawCtx {
@@ -1742,13 +1825,8 @@ fn build_panel_mark_batches(
         // on the other side it refused a `mark_rule`/`mark_tick` layer over an
         // inherited channel the normalization then cleared and no builder ever
         // read — a working chart turned into a hard error.
-        validate_layer_positional_columns(
-            li,
-            &layer_spec.encoding,
-            own_batch,
-            prep.coord_flipped,
-        )?;
-        validate_mark_encoding(&layer.mark, &layer_spec.encoding, prep.coord_flipped)?;
+        validate_layer_positional_columns(li, &layer_spec.encoding, own_batch, layer_flipped)?;
+        validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
         // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
@@ -1769,9 +1847,15 @@ fn build_panel_mark_batches(
         // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
         // must likewise be excluded from the transform, or the wedge
         // coordinates are corrupted by a second polar projection.
+        //
+        // Asked of THIS layer's coord (`#172`(1)), the same one its builder just
+        // drew through: projecting a Cartesian layer because a SIBLING declared
+        // polar would place its marks in a coordinate system nothing resolved
+        // them for, and leaving a polar layer unprojected because the CHART is
+        // Cartesian is how a per-layer `CoordPolar` would half-apply.
         let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
         if matches!(
-            &spec.coord,
+            &layer_spec.coord,
             Some(crate::spec::coord::CoordKind::Polar { .. })
         ) && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
             && !is_arc_geometry
@@ -3879,6 +3963,7 @@ mod tests {
             color_is_own: false,
             x_is_own: false,
             y_is_own: true,
+            coord: None,
         }
     }
 
@@ -4239,7 +4324,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let mut layer1 = y_enc("y1");
         layer1.independent_y = layer1_independent;
@@ -4317,6 +4402,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: independent,
+            coord: None,
         };
 
         let spec = ChartSpec {
@@ -4607,7 +4693,7 @@ mod tests {
             },
             transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
@@ -4617,7 +4703,7 @@ mod tests {
             },
             transforms: Vec::new(),
             mark_style: fill_style(text_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
 
         let spec = ChartSpec {
@@ -4828,7 +4914,7 @@ mod tests {
             },
             transforms: Vec::new(), mark_style: None,
             data_source: None, position: None, blend: None, name: Some("line".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let reference_layer = Layer {
             mark: Mark::Line,
@@ -4844,7 +4930,7 @@ mod tests {
                 ..Default::default()
             }),
             data_source: None, position: None, blend: None, name: Some("reference".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5053,7 +5139,7 @@ mod tests {
             mark: Mark::Text,
             encoding: xy_encoding(), // layer 0; NO own color
             transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
         let bar_layer = Layer {
             mark: Mark::Bar,
@@ -5062,7 +5148,7 @@ mod tests {
                 ..xy_encoding()
             },
             transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5127,13 +5213,13 @@ mod tests {
                 ..xy_ordinal_encoding()
             },
             transforms: Vec::new(), mark_style: None,
-            data_source: None, position: Some(position.clone()), blend: None, name: None, independent_y: false,
+            data_source: None, position: Some(position.clone()), blend: None, name: None, independent_y: false, coord: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
             encoding: xy_ordinal_encoding(), // no own color
             transforms: Vec::new(), mark_style: None,
-            data_source: None, position: Some(position), blend: None, name: None, independent_y: false,
+            data_source: None, position: Some(position), blend: None, name: None, independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5316,14 +5402,14 @@ mod tests {
             encoding: xy_encoding(),
             transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: xy_encoding(),
             transforms: Vec::new(),
             mark_style: fill_style(point_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false,
+            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -7250,7 +7336,7 @@ mod tests {
             },
             transforms: Vec::new(), mark_style: None,
             data_source: None, position: None, blend: None, name: Some("point".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let reference_layer = Layer {
             mark: Mark::Rule,
@@ -7265,7 +7351,7 @@ mod tests {
                 ..Default::default()
             }),
             data_source: None, position: None, blend: None, name: Some("reference".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -7433,7 +7519,7 @@ mod tests {
             },
             transforms: Vec::new(), mark_style: None,
             data_source: None, position: None, blend: None, name: Some("scatter".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let tick_layer = Layer {
             mark: Mark::Tick,
@@ -7444,7 +7530,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: Some(MarkKwargsSpec { band_size: Some(band_size), ..Default::default() }),
             data_source: None, position: None, blend: None, name: Some("rug".into()),
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -7853,7 +7939,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let layer1 = Layer {
             mark: Mark::Point,
@@ -7868,7 +7954,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
 
         let spec = ChartSpec {
@@ -8884,6 +8970,94 @@ mod tests {
         let chart_config = super::super::chart_config::ChartConfig::default();
         try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect("a geo chart with no BreakAxis must render as before");
+    }
+
+    // ── `#172`(1) per-layer coord: the funnel refusal ───────────────────────
+
+    /// The `minimal_point_spec` fixture given two point layers, the second
+    /// carrying `coord`. Layer 0 declares none, i.e. it inherits the chart's,
+    /// which is exactly the shape Python's merge produces.
+    fn two_layer_spec_with_secondary_coord(
+        coord: Option<crate::spec::coord::CoordKind>,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let (mut spec, batch) = minimal_point_spec();
+        let layer = |coord| crate::spec::layer::Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord,
+        };
+        spec.layers = Some(vec![layer(None), layer(coord)]);
+        (spec, batch)
+    }
+
+    /// A panel-scoped per-layer coord refuses at the render funnel, naming the
+    /// layer, the coord and the property — before any geometry. Pre-`#172`(1)
+    /// there was nowhere for a layer's coord to be declared at all, and the
+    /// merged-flat path rendered the member in its sibling's coordinate system
+    /// with no diagnostic.
+    #[test]
+    fn a_panel_scoped_layer_coord_refuses_at_the_render_funnel() {
+        let (spec, batch) = two_layer_spec_with_secondary_coord(Some(
+            crate::spec::coord::CoordKind::Fixed {
+                ratio: 1.0,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+        ));
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect_err("a per-layer CoordFixed must refuse");
+        match &err {
+            RenderError::LayerCoordUnplaceable { layer, coord, property } => {
+                assert_eq!(*layer, 1, "the offending layer is named by index");
+                assert_eq!(*coord, "fm.CoordFixed");
+                assert!(property.contains("aspect ratio"), "property was {property:?}");
+            }
+            other => panic!("expected LayerCoordUnplaceable, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("layer 1"), "message must name the layer: {msg}");
+        assert!(msg.contains("fm.CoordFixed"), "message must name the coord: {msg}");
+    }
+
+    /// The other arm, and the control for the test above: a coord that declares
+    /// only placement is honored, so the same two-layer shape renders. Without
+    /// this, an over-broad predicate (refusing any per-layer coord) would pass
+    /// the refusal test while defeating the whole feature.
+    #[test]
+    fn a_placement_only_layer_coord_renders() {
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        for coord in [crate::spec::coord::CoordKind::Flip, crate::spec::coord::CoordKind::default()]
+        {
+            let (spec, batch) = two_layer_spec_with_secondary_coord(Some(coord.clone()));
+            try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+                .unwrap_or_else(|e| panic!("{coord:?} places marks and must render; got {e}"));
+        }
+    }
+
+    /// And a layered spec whose layers declare no coord at all is untouched by
+    /// the gate — the overwhelmingly common case.
+    #[test]
+    fn a_layered_spec_with_no_per_layer_coord_is_untouched_by_the_gate() {
+        let (spec, batch) = two_layer_spec_with_secondary_coord(None);
+        assert!(unplaceable_layer_coord(&spec).is_none());
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect("a layered spec declaring no per-layer coord renders as before");
     }
 
     fn structural_warnings(

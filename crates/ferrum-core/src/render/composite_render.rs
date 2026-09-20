@@ -2853,6 +2853,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y,
+            coord: None,
         };
         ChartSpec {
             data: DataRef::default(),
@@ -4796,7 +4797,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         }]);
         spec
     }

@@ -98,6 +98,7 @@ from ferrum.selection import ConditionalSpec
 
 
 from ferrum.composition import (
+    _carry_layer_coord,
     _expand_layers,
     _is_chart_or_composite,
     _merge_top_transforms,
@@ -2111,6 +2112,13 @@ class Chart(
         new = lhs._clone()
         lhs_layers, lhs_top_xforms = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+        # The RHS's own coordinate system travels with the layers it
+        # contributes (#172(1)). `new` keeps the LHS's coord at chart level --
+        # the panel's chrome, aspect ratio and scale domains are one thing --
+        # so without this the RHS's declaration was simply dropped: a
+        # `CoordFlip` rendered unflipped, silently. Stamped here, before any
+        # branch below consumes `rhs_layers`, so every merge shape carries it.
+        rhs_layers = _carry_layer_coord(rhs_layers, lhs._coord, rhs._coord)
         # Adopt the LHS's *filtered* top-level transforms (``_expand_layers``
         # strips encoding-implicit ``_PendingAggregate`` sentinels — each layer
         # aggregates its own data via ``_resolve_layer_aggregates``).  The clone

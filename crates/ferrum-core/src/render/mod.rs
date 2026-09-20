@@ -233,8 +233,18 @@ pub enum RenderError {
     /// A mark whose geometry only makes sense under one specific coordinate
     /// system was asked to render under a different one (batch E, spec §6.4).
     /// `mark` names the mark (e.g. `"mark_geoshape"`, `"mark_arc"`);
-    /// `required` names the coord kind it needs (`"Geo"`, `"Polar"`); `hint`
-    /// is the actionable `.coord(...)` call that fixes it.
+    /// `required` names the coord kind it needs (`"Geo"`, `"Polar"`).
+    ///
+    /// **The prescribed fix was removed from this message (`#172`(1)).** Both
+    /// producers used to append an actionable `hint` — `"add
+    /// .coord(fm.CoordPolar(...))"` / `"add .coord(fm.CoordGeo(...))"` — and on
+    /// the merged-flat layer path that hint named a call the caller had already
+    /// written: `LayerChart(bar, arc.coord(fm.CoordPolar()))` dropped the arc
+    /// layer's coord and then told the caller to add it. The drop is fixed (the
+    /// coord rides the wire per layer), and the prescription is gone rather than
+    /// left standing beside the fix, because a refusal that names a state
+    /// (`requires a Polar coord`) stays true wherever it is raised from, while
+    /// one that prescribes a fix is only true on some paths.
     ///
     /// Two marks refuse this way, each refusing something that previously
     /// degraded silently or misleadingly:
@@ -272,7 +282,28 @@ pub enum RenderError {
     MarkRequiresCoord {
         mark: &'static str,
         required: &'static str,
-        hint: &'static str,
+    },
+    /// A layer's own `coord` (`#172`(1)) declares a property of the whole
+    /// PANEL — an axis domain (`xlim=`/`ylim=`), axis padding (`expand=False`),
+    /// panel clipping (`clip=False`) or a fixed aspect ratio (`fm.CoordFixed`) —
+    /// which cannot be placed on one layer of a panel every layer shares.
+    ///
+    /// `layer` is the index in `spec.layers`, `coord` the constructor the caller
+    /// wrote, `property` the panel-scoped thing it declared. The predicate is
+    /// [`crate::spec::coord::panel_scoped_property`]; the single producer is
+    /// `scene_build::build_scene`'s gate, which every standalone render and
+    /// every composite leaf passes through.
+    ///
+    /// REFUSE MALFORMED, and specifically not WARN DEGRADED: rendering with the
+    /// declaration dropped is exactly the silent-substitution defect `#172`(1)
+    /// closes, and there is no degraded-but-honest version of "this layer has
+    /// its own axis domain" on a shared panel. A per-layer coord that declares
+    /// only placement (`fm.CoordFlip`, `fm.CoordPolar`, `fm.CoordGeo`, or a bare
+    /// `fm.CoordCartesian()`) is honored and never reaches here.
+    LayerCoordUnplaceable {
+        layer: usize,
+        coord: &'static str,
+        property: &'static str,
     },
     /// A layer beyond the first bound a positional channel (`x`/`y`/`x2`/`y2`)
     /// to a column that is absent from **that layer's own resolved batch** —
@@ -531,7 +562,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::ColorRangeParseFailure { .. }
         // #230-8: carries a coord name and the `BreakAxis.axis` token, not a
         // positional encoding channel — nothing here to un-flip.
-        | RenderError::BreakAxisIncompatibleCoord { .. }) => other,
+        | RenderError::BreakAxisIncompatibleCoord { .. }
+        // `#172`(1): carries a layer index, a coord constructor and the
+        // panel-scoped property it declared — no channel token either.
+        | RenderError::LayerCoordUnplaceable { .. }) => other,
     }
 }
 
@@ -676,8 +710,17 @@ impl std::fmt::Display for RenderError {
             ),
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
-            Self::MarkRequiresCoord { mark, required, hint } =>
-                write!(f, "{mark} requires a {required} coord; {hint}"),
+            Self::MarkRequiresCoord { mark, required } =>
+                write!(f, "{mark} requires a {required} coord"),
+            Self::LayerCoordUnplaceable { layer, coord, property } => write!(
+                f,
+                "layer {layer}: {coord} declares {property}, which belongs to the panel every \
+                 layer shares — a layered chart (fm.layer(...) / chart + chart) merges its \
+                 members onto one panel, so this coord cannot be placed on one of them. A \
+                 per-layer coord may declare placement only: fm.CoordFlip, fm.CoordPolar, \
+                 fm.CoordGeo, or a bare fm.CoordCartesian(). Move it to the first member \
+                 (whose coord IS the panel's), or drop it."
+            ),
             Self::LayerUnknownColumn { layer, channel, name, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 write!(
@@ -3931,7 +3974,7 @@ mod orchestration_tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -3945,7 +3988,7 @@ mod orchestration_tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true,
+            independent_y: true, coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),

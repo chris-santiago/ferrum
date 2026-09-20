@@ -59,10 +59,14 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
             let geometry_col = ctx.batch.column_by_name(GEOMETRY_COL);
             let has_geometry = geometry_col.is_some_and(|col| col.null_count() < col.len());
             if has_geometry {
+                // Names the requirement, not the fix (`#172`(1)): a geoshape
+                // LAYER carries its own `CoordGeo` through `Layer::coord` now,
+                // so the merged-flat case that used to arrive here with the
+                // prescribed `.coord(fm.CoordGeo(...))` already written renders
+                // instead. See `RenderError::MarkRequiresCoord`'s doc.
                 return Err(RenderError::MarkRequiresCoord {
                     mark: "mark_geoshape",
                     required: "Geo",
-                    hint: "add .coord(fm.CoordGeo(...))",
                 });
             }
             // #118: the column being entirely null for THIS batch (present,
@@ -756,10 +760,12 @@ mod tests {
             }
             other => panic!("expected MarkRequiresCoord, got {other:?}"),
         }
-        assert_eq!(
-            format!("{err}"),
-            "mark_geoshape requires a Geo coord; add .coord(fm.CoordGeo(...))"
-        );
+        // Names the STATE, not the fix (`#172`(1)): the prescription
+        // `"; add .coord(fm.CoordGeo(...))"` was retired with its `mark_arc`
+        // twin, because a merged-flat layer reached the identical refusal with
+        // its own `CoordGeo` already written and dropped. See
+        // `RenderError::MarkRequiresCoord`'s doc for the full rationale.
+        assert_eq!(format!("{err}"), "mark_geoshape requires a Geo coord");
     }
 
     /// No coord at all (defaults to Cartesian downstream) must refuse.

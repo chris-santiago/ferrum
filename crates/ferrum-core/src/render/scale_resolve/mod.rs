@@ -1760,18 +1760,21 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
 ///
 /// `has_x`/`has_y` are the spec-wide bindings from [`positional_binding`], not
 /// `spec.encoding`'s own slots, so a layered arc finds its theta channel
-/// wherever the spec binds it. `mark` is asked about separately from `spec`
-/// because a layered spec's drawn marks live on its layers (see
+/// wherever the spec binds it. `mark` and `coord` are asked about separately
+/// from the spec because a layered spec's drawn marks live on its layers, each
+/// with its own effective coord (`#172`(1)) — a polar ARC layer beside a
+/// Cartesian bar layer is eligible on the strength of its own coord, and passing
+/// the chart's would have denied it on the strength of its sibling's (see
 /// [`single_axis_eligible`]).
 fn mark_single_axis_eligible(
     mark: crate::spec::mark::Mark,
-    spec: &ChartSpec,
+    coord: Option<&crate::spec::coord::CoordKind>,
     has_x: bool,
     has_y: bool,
 ) -> bool {
     match mark {
         crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule => true,
-        crate::spec::mark::Mark::Arc => match &spec.coord {
+        crate::spec::mark::Mark::Arc => match coord {
             Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => match theta {
                 ferrum_scene::PolarThetaChannel::X => has_x,
                 ferrum_scene::PolarThetaChannel::Y => has_y,
@@ -1843,8 +1846,15 @@ fn single_axis_eligible(spec: &ChartSpec, has_x: bool, has_y: bool) -> bool {
         Some(layers) if !layers.is_empty() => layers
             .iter()
             .filter(|layer| layer_paints(layer) && !layer.independent_y)
-            .all(|layer| mark_single_axis_eligible(layer.mark, spec, has_x, has_y)),
-        _ => mark_single_axis_eligible(spec.mark, spec, has_x, has_y),
+            .all(|layer| {
+                mark_single_axis_eligible(
+                    layer.mark,
+                    layer.effective_coord(spec.coord.as_ref()),
+                    has_x,
+                    has_y,
+                )
+            }),
+        _ => mark_single_axis_eligible(spec.mark, spec.coord.as_ref(), has_x, has_y),
     }
 }
 
@@ -1948,7 +1958,6 @@ fn positional_binding<'a>(
     if primary.is_some() {
         return (primary.map(Cow::Borrowed), paired.map(Cow::Borrowed));
     }
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     for layer in spec.layers.iter().flatten() {
         // Names the axis SLOT, not an encoding channel, so it reads `channel`
         // directly and is unaffected by the flip normalization below — the same
@@ -1956,6 +1965,14 @@ fn positional_binding<'a>(
         if matches!(channel, PositionalChannel::Y) && layer.independent_y {
             continue;
         }
+        // Per layer, off the layer's OWN effective coord (`#172`(1)) — the same
+        // correction, for the same reason, that `numeric_domain_union`'s twin of
+        // this normalization carries: the layer `prepare::build_layers` swaps is
+        // the layer whose own coord flips, so that is the one whose authored `y`
+        // occupies this axis.
+        let coord_flipped = crate::spec::coord::flips_positional_channels(
+            layer.effective_coord(spec.coord.as_ref()),
+        );
         let encoding = if coord_flipped {
             let mut flipped = layer.encoding.clone();
             flipped.flip_positional();
@@ -2035,11 +2052,19 @@ fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError>
     let Some(layers) = spec.layers.as_deref() else {
         return Ok(());
     };
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     for (index, layer) in layers.iter().enumerate() {
         if !layer_paints(layer) {
             continue;
         }
+        // Per layer (`#172`(1)), like every other read of a layer's encoding in
+        // this module: the coordinate space to normalize into, and the coord the
+        // eligibility question below is asked about, are this layer's own. The
+        // latter is load-bearing rather than incidental — a polar `Arc` layer
+        // beside a Cartesian layer binds only its theta channel, so asking the
+        // CHART's coord would refuse it for a missing `y` its own builder is
+        // written to do without.
+        let coord = layer.effective_coord(spec.coord.as_ref());
+        let coord_flipped = crate::spec::coord::flips_positional_channels(coord);
         // The layer's own bindings, moved into the resolved channels' space —
         // the same normalization, for the same reason, as `positional_binding`.
         let own = if coord_flipped {
@@ -2059,7 +2084,7 @@ fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError>
             // is one its own builder is written to do without. Both spec-wide
             // bindings are `true` here by this function's precondition — see
             // its doc comment for why they are named rather than threaded.
-            if mark_single_axis_eligible(layer.mark, spec, /* has_x */ true, /* has_y */ true) {
+            if mark_single_axis_eligible(layer.mark, coord, /* has_x */ true, /* has_y */ true) {
                 continue;
             }
             return Err(RenderError::LayerMissingPositionalChannel {

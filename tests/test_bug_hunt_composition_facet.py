@@ -1037,21 +1037,38 @@ def test_repeat_chart_rebuild_preserves_all_params():
 # ---------------------------------------------------------------------------
 
 
-def test_layer_warns_on_coord_conflict():
-    """Layering charts with different coord systems should warn.
+def test_layer_carries_a_differing_coord_instead_of_warning():
+    """Layering charts with different coord systems CARRIES the secondary's.
 
-    Targets composition._warn_on_layer_conflicts lines 2032-2046.
+    Inverted, with a rewritten rationale, by `#172`(1) (wave 5 T13). This test
+    used to assert that `c1 + c2` warns about a coord "conflict" -- the warning
+    was truthful then, because the secondary member's coordinate system was
+    dropped and the merged chart rendered that member in the primary's system.
+    It no longer is: the RHS's coord travels with the layers it contributes
+    (`composition._carry_layer_coord` -> `Layer.coord` on the wire), so the only
+    thing `_warn_on_layer_conflicts` still reports is the theme and the facet,
+    which the primary layer genuinely does own alone.
+
+    A per-layer coord that cannot be placed on a shared panel (an axis domain,
+    an aspect ratio) now REFUSES rather than warning -- see
+    `tests/test_layer_coord.py`. Warning about a carried coord would be a false
+    report, which is why this assertion is inverted rather than relaxed.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").coord(fr.CoordFlip())
-    c2 = Chart(df).mark_line().encode(x="x", y="y")
+    c1 = Chart(df).mark_point().encode(x="x", y="y")
+    c2 = Chart(df).mark_line().encode(x="x", y="y").coord(fr.CoordFlip())
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        _ = c1 + c2
-        coord_warns = [
-            x for x in w if "coord" in str(x.message).lower() or "facet" in str(x.message).lower()
-        ]
-        assert len(coord_warns) >= 1, "Expected warning about conflicting coord/facet"
+        merged = c1 + c2
+    assert not [x for x in w if "coord" in str(x.message).lower()], (
+        f"a carried coord must not be reported as a conflict; got {[str(x.message) for x in w]}"
+    )
+    assert merged._layers[1].coord == fr.CoordFlip(), (
+        "the secondary member's own coord must ride its layer"
+    )
+    assert merged._layers[0].coord is None, (
+        "the primary member's coord IS the chart's and must not be duplicated per layer"
+    )
 
 
 def test_layer_warns_on_facet_conflict():

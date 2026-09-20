@@ -2259,7 +2259,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         }
     }
 

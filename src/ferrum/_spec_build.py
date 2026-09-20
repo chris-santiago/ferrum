@@ -23,6 +23,7 @@ from ferrum._facet import (
     build_facet_dict as _build_facet_dict_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
+from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer_transforms import _infer_agg_groupby, _lower_bin_encoding
@@ -156,12 +157,12 @@ def _warn_unbucketed_channels(enc: dict) -> None:
     This is what actually produces the ``warn_once`` for the WARN bucket
     (``x_error``/``y_error``/``x_error2``/``y_error2``/``tooltip_field``)
     and for POLAR channels left in *enc* because no ``CoordPolar`` coord
-    remapped them away (chart-level: ``_resolve_polar_remapping`` pops
-    them from `enc` before this runs when ``CoordPolar`` IS set, so this
-    never sees them in that case; the layered path has no per-layer
-    ``CoordPolar`` remap at all, so a layer's own polar channel warns here
-    unconditionally, regardless of the chart's coord) -- see the bucket
-    partition in ``chart.py``.
+    remapped them away. Both passes pop them first when a ``CoordPolar`` IS
+    set -- chart-level through ``_resolve_polar_remapping``, per-layer through
+    :func:`_remap_polar_channels` against that layer's OWN coord (`#172`(1)) --
+    so this sees a polar channel only where no polar coord claims it, which is
+    exactly when it would never render. See the bucket partition in
+    ``chart.py``.
 
     *enc* values may be either a ``ChannelBase`` instance or a plain string
     (the layered path's legitimate shorthand).
@@ -174,6 +175,56 @@ def _warn_unbucketed_channels(enc: dict) -> None:
         if _channel_field(ch) is None:
             continue
         _warn_channel_dropped(ch_name)
+
+
+def _remap_polar_channels(coord, enc: dict) -> dict:
+    """Remap ``theta``/``radius`` channel keys onto x/y for a ``CoordPolar`` *coord*.
+
+    Rust's encoding layer only knows x/y; the spec-side coord conversion in
+    ``scene_build.rs`` handles the polar->Cartesian pixel transformation. When
+    the coord is a ``CoordPolar``, ``theta`` (the angular variable) maps to
+    whichever Cartesian axis the coord declares and ``radius`` to the other,
+    with the second-extent channels mirroring the primary assignment. Any other
+    coord (including ``None``) returns *enc* untouched.
+
+    Two callers, one mapping (`#172`(1)). The chart-level pass
+    (:meth:`SpecBuildMixin._resolve_polar_remapping`) has always run this; the
+    per-layer pass in :meth:`SpecBuildMixin._build_layers_list` is new, and
+    needed the moment a LAYER could carry its own ``CoordPolar``: a member chart
+    written the documented way -- ``mark_arc().encode(theta=...)`` -- lowers its
+    ``theta`` into a layer encoding, and with no per-layer remap that channel
+    reached ``_warn_unbucketed_channels`` instead, was warned about, and was
+    dropped. The layer would then carry its coord to Rust and draw nothing with
+    it. Sharing the mapping rather than restating it is what keeps the two
+    passes from disagreeing about which axis theta lands on.
+
+    The per-layer caller passes the layer's EFFECTIVE coord (its own, else the
+    chart's), which also closes the inherited case the layered path never
+    handled: a polar chart's own layers carrying ``theta=`` had their angular
+    channel dropped regardless of any merge.
+
+    *enc* is modified in place and returned (both callers pass a shallow copy).
+    """
+    from ferrum.coord import CoordPolar
+
+    if not isinstance(coord, CoordPolar):
+        return enc
+
+    theta_ch = coord.theta  # "x" or "y"
+    radius_ch = "y" if theta_ch == "x" else "x"
+    # Second-extent channels mirror the primary axis assignment:
+    # theta2 -> x2 when theta->x, else y2; radius2 -> y2 when radius->y, else x2.
+    theta2_ch = f"{theta_ch}2"
+    radius2_ch = f"{radius_ch}2"
+    if "theta" in enc:
+        enc[theta_ch] = enc.pop("theta")
+    if "theta2" in enc:
+        enc[theta2_ch] = enc.pop("theta2")
+    if "radius" in enc:
+        enc[radius_ch] = enc.pop("radius")
+    if "radius2" in enc:
+        enc[radius2_ch] = enc.pop("radius2")
+    return enc
 
 
 def _selection_field_names(selections: list) -> set[str]:
@@ -215,17 +266,15 @@ class SpecBuildMixin:
     """
 
     def _resolve_polar_remapping(self, resolved, enc: dict) -> dict:
-        """Remap theta/radius channel keys to x/y for CoordPolar charts.
+        """Remap theta/radius channel keys to x/y for this chart's ``CoordPolar``.
 
-        Rust's encoding layer only knows x/y; the spec-side coord conversion in
-        scene_build.rs handles the polar→Cartesian pixel transformation.  When
-        CoordPolar is set, theta (the angular variable) maps to whichever
-        Cartesian axis the coord declares, and radius maps to the other.
+        The chart-level caller of :func:`_remap_polar_channels`; see that function
+        for the mapping and why it exists.
 
         Parameters
         ----------
         resolved :
-            The resolved ``Chart`` whose ``_coord`` and ``_mark`` are inspected.
+            The resolved ``Chart`` whose ``_coord`` is inspected.
         enc :
             Shallow copy of the encoding dict (already alias-remapped).  Modified
             in place and returned.
@@ -235,26 +284,7 @@ class SpecBuildMixin:
         dict
             The remapped encoding dict.
         """
-        from ferrum.coord import CoordPolar
-
-        if not isinstance(resolved._coord, CoordPolar):
-            return enc
-
-        theta_ch = resolved._coord.theta  # "x" or "y"
-        radius_ch = "y" if theta_ch == "x" else "x"
-        # Second-extent channels mirror the primary axis assignment:
-        # theta2 -> x2 when theta->x, else y2; radius2 -> y2 when radius->y, else x2.
-        theta2_ch = f"{theta_ch}2"
-        radius2_ch = f"{radius_ch}2"
-        if "theta" in enc:
-            enc[theta_ch] = enc.pop("theta")
-        if "theta2" in enc:
-            enc[theta2_ch] = enc.pop("theta2")
-        if "radius" in enc:
-            enc[radius_ch] = enc.pop("radius")
-        if "radius2" in enc:
-            enc[radius2_ch] = enc.pop("radius2")
-        return enc
+        return _remap_polar_channels(resolved._coord, enc)
 
     def _build_encoding_specs(
         self, resolved, enc: dict, agg_field_remap: dict, override_encoding: dict | None = None
@@ -487,14 +517,32 @@ class SpecBuildMixin:
             layer_enc = dict(layer.encoding)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
             layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
+            # Per-layer polar remap (`#172`(1)): a layer under a CoordPolar gets
+            # the same theta/radius -> x/y mapping the chart-level pass applies,
+            # through the same function. Without it a member chart written the
+            # documented way (`mark_arc().encode(theta=...)`) lost its angular
+            # channel to `_warn_unbucketed_channels` below and drew nothing,
+            # while carrying a polar coord to Rust -- the coord honored and the
+            # data dropped.
+            #
+            # Against the layer's EFFECTIVE coord (its own, else the chart's) --
+            # the same fallback Rust resolves through `Layer::effective_coord`,
+            # spelled here because this is the other side of the same seam. Its
+            # own alone would leave the inherited case broken: two polar arc
+            # members merge to layers where only the SECOND carries a coord (the
+            # first's is the chart's), so the first's theta would still be
+            # dropped while its sibling's rendered.
+            layer_enc = _remap_polar_channels(
+                layer.coord if layer.coord is not None else self._coord, layer_enc
+            )
 
             # Bucket-partition safety net (single enforcement point, see
             # _warn_unbucketed_channels; mirrors _build_encoding_specs's
             # chart-level call exactly). Catches per-layer x_error*/
-            # tooltip_field, and theta/radius/theta2/radius2 -- the layered
-            # path has no per-layer CoordPolar remap, so a layer's own polar
-            # channel warns and never renders regardless of the chart's
-            # coord.
+            # tooltip_field, and any theta/radius/theta2/radius2 the remap above
+            # did NOT claim -- i.e. a polar channel on a layer whose effective
+            # coord is not polar, which is exactly the case where it could never
+            # render.
             _warn_unbucketed_channels(layer_enc)
 
             encoding_dict: dict = {}
@@ -625,6 +673,17 @@ class SpecBuildMixin:
             # to a pre-#52 spec (see Layer::independent_y in Rust spec/layer.rs).
             if layer.independent_y:
                 layer_dict["independent_y"] = True
+            # Per-layer coordinate system (`#172`(1)). Only emitted when the
+            # layer carries one of its own -- absent means "inherit the chart's",
+            # which is every layer of every chart that does not mix coordinate
+            # systems, so those specs serialize byte-identically to a pre-#172
+            # wire (see `Layer::coord` in Rust `spec/layer.rs`). Serialized
+            # through `coord_wire`, the one canonical-wire-form rule
+            # (`ferrum.coord`), because this dict is deserialized by serde and
+            # has no PyO3 constructor to widen `orient="horizontal"`'s bare
+            # `"flip"` token the way the chart-level slot's does.
+            if layer.coord is not None:
+                layer_dict["coord"] = _coord_wire(layer.coord)
             out.append(layer_dict)
         return out
 

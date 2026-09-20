@@ -587,9 +587,13 @@ class TestLayeredWarnBucketParity:
 class TestLayeredPolarBucketParity:
     @pytest.mark.parametrize("channel", ["theta", "radius", "theta2", "radius2"])
     def test_per_layer_polar_channel_warns_once_and_absent(self, channel):
-        """The layered path has no per-layer CoordPolar remap, so a layer's
-        own theta/radius never renders -- warn rather than silently drop it,
-        matching the chart-level without-CoordPolar disposition."""
+        """A polar channel on a layer with NO polar coord in reach never
+        renders -- warn rather than silently drop it, matching the chart-level
+        without-CoordPolar disposition.
+
+        Unchanged by `#172`(1), and the discriminating control for the test
+        below: neither chart here sets `CoordPolar`, so the layer's effective
+        coord is Cartesian and its `theta=` could not be placed on any axis."""
         reset_warnings()
         base = fm.Chart(_df()).mark_point().encode(x="x", y="y")
         overlay = fm.Chart(_df()).mark_point().encode(x="x", y="y", **{channel: "x"})
@@ -600,14 +604,26 @@ class TestLayeredPolarBucketParity:
         assert len(warns) == 1
         assert channel not in layer_enc
 
-    def test_per_layer_polar_channel_warns_even_with_coord_polar_set(self):
-        """ferrum-spec.md §3.2's Polar bullet (2026-08-27 note): only the
-        CHART-LEVEL theta/radius participates in the CoordPolar remap; a
-        LAYER's own polar channel warns and is never rendered regardless of
-        whether the chart's coord is CoordPolar, because there is no
-        per-layer remap mechanism at all (quality-review finding --
-        the note previously read as though CoordPolar alone determined the
-        disposition, contradicting this actual behavior)."""
+    def test_per_layer_polar_channel_is_remapped_when_a_polar_coord_reaches_it(self):
+        """A layer's `theta=` under a polar coord is REMAPPED, not warned away.
+
+        Inverted, with a rewritten rationale, by `#172`(1) (wave 5 T13), and
+        ferrum-spec.md §3.2's Polar bullet moved with it (dated note,
+        2026-09-19). This test used to assert the opposite -- one `'theta'`
+        warning even with `CoordPolar` set -- on the grounds that "there is no
+        per-layer remap mechanism at all". That was a true statement about the
+        code and a defect in it: the same P1 class this file is about, a
+        channel the caller bound reaching neither the spec nor the output. The
+        layered spec build now runs the same theta/radius -> x/y remap the
+        chart-level pass runs, against the layer's EFFECTIVE coord (its own
+        `Layer.coord` if it declares one, else the chart's), so the channel
+        lands on the axis the coord assigns it.
+
+        `theta="x"` maps the angular channel onto `x`, which this layer
+        already binds, so the assertion is that the warning is GONE and the
+        chart still renders -- not that a new channel appeared. The
+        no-polar-coord control above is what keeps the warn path pinned.
+        """
         reset_warnings()
         df = _df()
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
@@ -617,7 +633,10 @@ class TestLayeredPolarBucketParity:
             warnings.simplefilter("always")
             svg = chart.to_svg()
         warns = _user_warnings(caught, contains="'theta'")
-        assert len(warns) == 1, f"expected exactly one 'theta' warning; got {caught}"
+        assert warns == [], f"a remapped polar channel must not warn; got {caught}"
+        assert "theta" not in _layer_encoding(chart), (
+            "the remap moves theta onto the coord's angular axis; it never reaches the wire"
+        )
         assert "<svg" in svg
 
 

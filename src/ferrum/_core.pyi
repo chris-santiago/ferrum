@@ -70,6 +70,24 @@ class EncodingSpec:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
+# `layers` below is a list of per-layer wire dicts (see `crate::spec::layer`):
+#   {"mark": str, "encoding": dict,
+#    # every key optional, each omitted when unset so a spec that uses none
+#    # serializes exactly as a spec predating it:
+#    "mark_style"?: dict, "transforms"?: list, "data_source"?: str,
+#    "position"?: dict, "blend"?: str, "name"?: str, "independent_y"?: bool,
+#    "coord"?: dict}
+# `coord` (per-layer coordinate system, GH #172(1)) takes the same
+# internally-tagged `{"kind": ...}` dict the chart-level `coord` accepts, and
+# places THIS layer's marks: a projection (`{"kind": "polar"|"geo"}`) or the
+# channel exchange (`{"kind": "flip"}`). Absent means "inherit the chart's".
+# Unlike the chart-level slot it does NOT accept a bare `"flip"` token — the
+# layer dict is deserialized by serde, with no constructor to widen one
+# (`ferrum.coord.coord_wire` normalizes on the Python side). A layer coord that
+# declares a PANEL property instead of a placement (`x_domain`/`y_domain`,
+# `expand: false`, `clip: false`, or `{"kind": "fixed"}`) is refused at render:
+# the layers share one panel, so one of them cannot have its own domain or
+# aspect ratio.
 class ChartSpec:
     mark: str
     x: Optional[EncodingSpec]

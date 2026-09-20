@@ -115,6 +115,21 @@ pub struct LayerPrepared {
     ///
     /// [`x_is_own`]: LayerPrepared::x_is_own
     pub y_is_own: bool,
+    /// The coordinate system this layer's marks are placed in, already resolved
+    /// against the chart's (`#172`(1)): the layer's own
+    /// [`Layer::coord`](crate::spec::layer::Layer::coord) when it declares one,
+    /// else `ChartSpec::coord`. Identical to `spec.coord` for every layer of
+    /// every spec that declares no per-layer coord, which is why the per-layer
+    /// reads downstream are byte-stable.
+    ///
+    /// Resolved HERE, once per layer, through
+    /// [`Layer::effective_coord`](crate::spec::layer::Layer::coord) so no
+    /// render-side consumer has to remember the fallback. Read by
+    /// [`build_layers`]'s flip decision and by `scene_build`'s per-layer
+    /// `DrawCtx` spec, polar projection gate, position adjustment and refusal
+    /// gates — all of which previously read the chart-level `spec.coord` and so
+    /// could not tell one layer's coordinate system from another's.
+    pub coord: Option<crate::spec::coord::CoordKind>,
 }
 
 impl LayerPrepared {
@@ -132,6 +147,9 @@ impl LayerPrepared {
             color_is_own: spec.encoding.color.is_some(),
             x_is_own: spec.encoding.x.is_some(),
             y_is_own: spec.encoding.y.is_some(),
+            // A chart with no `layers` has no per-layer coord to resolve: its
+            // sole layer's coordinate system IS the chart's.
+            coord: spec.coord.clone(),
         }
     }
 
@@ -198,6 +216,7 @@ impl LayerPrepared {
             color_is_own,
             x_is_own,
             y_is_own,
+            coord: layer.effective_coord(spec.coord.as_ref()).cloned(),
         }
     }
 
@@ -885,9 +904,10 @@ pub fn prepare_render_inputs(
 
     // --- Phase 8a: per-layer inputs + CoordFlip ---
 
-    // Build per-layer prepared inputs (swapping x↔y / x2↔y2 under CoordFlip).
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
-    let layers = build_layers(spec, coord_flipped);
+    // Build per-layer prepared inputs (swapping x↔y / x2↔y2 for every layer
+    // whose own effective coord flips — `#172`(1)).
+    let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+    let layers = build_layers(spec);
 
     // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
     // ONCE here from the layers' `independent_y` flags, then hand it to every
@@ -1265,13 +1285,22 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 }
 
 /// Build the per-layer prepared inputs, applying [`LayerPrepared::flip_coords`]
-/// to every layer when `coord_flipped` (SPINE-12) — the whole coordinate-space
-/// group (channels AND their provenance flags) swaps together.
+/// to every layer whose OWN effective coord flips (SPINE-12) — the whole
+/// coordinate-space group (channels AND their provenance flags) swaps together.
 ///
 /// Single-layer charts (`spec.layers == None`) produce exactly one
 /// [`LayerPrepared`] from the chart-level mark + encoding; multi-layer charts
 /// produce one per `Layer` (inheriting unset channels from chart level).
-fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
+///
+/// The flip decision is per layer, off [`LayerPrepared::coord`] (`#172`(1)).
+/// It used to be one chart-level boolean the caller passed in, which is the
+/// same answer for every layer of every spec that declares no per-layer coord —
+/// so this is byte-stable — but the wrong question for a spec where one layer
+/// declares `CoordFlip` and its sibling does not. The chart-level
+/// `PreparedInputs::coord_flipped` survives unchanged for the chart-level
+/// questions it answers (which axis the chrome describes, how a refusal names
+/// the channel the user wrote at chart level).
+fn build_layers(spec: &ChartSpec) -> Vec<LayerPrepared> {
     let raw: Vec<LayerPrepared> = match &spec.layers {
         None => vec![LayerPrepared::from_chart_only(spec)],
         Some(layer_vec) => layer_vec
@@ -1279,12 +1308,11 @@ fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
             .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
             .collect(),
     };
-    if !coord_flipped {
-        return raw;
-    }
     raw.into_iter()
         .map(|mut lp| {
-            lp.flip_coords();
+            if crate::spec::coord::flips_positional_channels(lp.coord.as_ref()) {
+                lp.flip_coords();
+            }
             lp
         })
         .collect()
@@ -1357,7 +1385,7 @@ fn build_axes(
     // flip context of its own (it returns `UnflippedRenderError`); resolve it
     // in here, the boundary that DOES know it, so a rejected orient names the
     // axis the user actually wrote instead of the resolved (post-flip) one.
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
     let cartesian_axes_suppressed =
         crate::spec::coord::suppresses_cartesian_axes(spec.coord.as_ref());
 
@@ -1531,7 +1559,7 @@ fn build_secondary_y_axis_inputs(
         // `UnflippedRenderError`, so this `.resolve(coord_flipped)` is not
         // optional — the compiler forces it before `?` can propagate a
         // `RenderError`.
-        let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+        let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
         let axis_input = build_axis_input(
             Channel::Y,
             layer_encoding.y.as_ref(),
@@ -3074,7 +3102,14 @@ mod tests {
             params: Vec::new(),
         };
 
-        let unflipped = build_layers(&spec, false);
+        // `build_layers` reads the flip off each layer's own effective coord
+        // (`#172`(1)) rather than taking it as an argument, so the flipped case
+        // is now spelled as the spec it always described: the same chart with
+        // `coord: Flip`. The property under test is unchanged.
+        let flipped_spec =
+            ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec.clone() };
+
+        let unflipped = build_layers(&spec);
         assert_eq!(unflipped.len(), 1, "a single-layer chart prepares one layer");
         assert_eq!(
             unflipped[0].mark_style.as_ref().unwrap().value_axis,
@@ -3087,7 +3122,7 @@ mod tests {
             "control premise: the channels did not move either"
         );
 
-        let flipped = build_layers(&spec, true);
+        let flipped = build_layers(&flipped_spec);
         assert_eq!(
             flipped[0].encoding.x.as_ref().unwrap().field,
             "value",
@@ -3104,10 +3139,10 @@ mod tests {
 
         // A layer carrying no mark kwargs at all must survive the flip
         // untouched — the `None` arm, which is every chart in the corpus.
-        let mut bare = spec.clone();
+        let mut bare = flipped_spec.clone();
         bare.mark_style = None;
         assert!(
-            build_layers(&bare, true)[0].mark_style.is_none(),
+            build_layers(&bare)[0].mark_style.is_none(),
             "a layer with no mark kwargs gains none from the flip"
         );
     }
@@ -5086,7 +5121,7 @@ mod tests {
                 position: None,
                 blend: None,
                 name: None,
-                independent_y: false,
+                independent_y: false, coord: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -5094,7 +5129,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None, blend: None, name: None, independent_y: false,
+            position: None, blend: None, name: None, independent_y: false, coord: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -5248,7 +5283,7 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
-            position: None, blend: None, name: None, independent_y: false,
+            position: None, blend: None, name: None, independent_y: false, coord: None,
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
@@ -6377,7 +6412,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6395,7 +6430,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true,
+            independent_y: true, coord: None,
         };
 
         let spec = ChartSpec {
@@ -6479,7 +6514,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6497,7 +6532,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true,
+            independent_y: true, coord: None,
         };
 
         let spec = ChartSpec {
@@ -6579,7 +6614,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false,
+            independent_y: false, coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6593,7 +6628,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true,
+            independent_y: true, coord: None,
         };
 
         let spec = ChartSpec {

@@ -979,16 +979,25 @@ All positional and appearance channels accept:
 >   explicit-error-column feature exists for `mark_errorbar`; it
 >   computes its own extents), and `tooltip_field` used as a top-level
 >   channel (it is documented as valid only inside `Tooltip(*fields)`).
-> - **Polar** (`theta`, `radius`, `theta2`, `radius2`): on the
->   **chart-level** encoding, remapped to `x`/`y` and rendered when
->   `CoordPolar` is set on the chart; when it is not set, they now warn
->   once instead of being silently dropped (the prior safety-net
->   whitelist that exempted them from any warning regardless of coord is
->   gone). On a **layer's own** encoding (`Chart + Chart`, `Chart.layer()`),
->   there is no per-layer `CoordPolar` remap, so a layer's own polar
->   channel warns once and is never rendered *regardless of whether the
->   chart's coord is `CoordPolar`* — only the chart-level channel
->   participates in the remap.
+> - **Polar** (`theta`, `radius`, `theta2`, `radius2`): remapped to `x`/`y` and
+>   rendered when the encoding's **effective** `CoordPolar` is set, warned once
+>   (and absent from the spec) when it is not. For the chart-level encoding the
+>   effective coord is the chart's; for a **layer's own** encoding
+>   (`Chart + Chart`, `Chart.layer()`) it is that layer's own `coord` if it
+>   declares one, else the chart's.
+>
+>   > **Dated note (2026-09-19, wave 5 T13 — GH #172(1)):** the layer half of
+>   > this bullet changed. It previously read "there is no per-layer `CoordPolar`
+>   > remap, so a layer's own polar channel warns once and is never rendered
+>   > *regardless of whether the chart's coord is `CoordPolar`*". That is no
+>   > longer true: layers carry a coordinate system of their own (see §3.16's
+>   > per-layer coord note) and the layer pass runs the same remap against the
+>   > layer's effective coord, so `fm.layer(bar, arc_chart.coord(fm.CoordPolar(theta="x")))`
+>   > renders the arc member's `theta=` channel, and a polar chart's own layers
+>   > carrying `theta=` render too. A polar channel on a layer whose effective
+>   > coord is NOT polar still warns once and is still absent from the spec —
+>   > that is the case where it could never render, and it is the discriminating
+>   > control in `tests/test_finding_p1.py`.
 > - **Facet** (`facet`, `facet_row`, `facet_col`): unchanged — resolved
 >   through `resolved._facet`, never through the encoding-warn path.
 >
@@ -2950,6 +2959,8 @@ Applied via `.coord()` on `Chart`.
 | `CoordFixed(ratio=1.0, *, xlim=None, ylim=None, expand=True, clip=True)` | Fixed aspect ratio. `ratio` = y units per x unit; default 1.0 enforces equal scaling on both axes. Required for geographic projections, correlation matrices, and any chart where axis unit equality is semantically meaningful. | `ratio` |
 
 > **Dated note (2026-09-06, batch E task 6 — F-L02-09 + verified arc-error sibling, `mark_geoshape` and `mark_arc` refuse a wrong coord instead of rendering wrong or empty):** `mark_geoshape` with a `__geometry__` column present under any coord other than `CoordGeo` (the default `CoordCartesian`, or an explicitly set `CoordFlip`/`CoordPolar`/`CoordFixed`), and `mark_arc` under any coord other than `CoordPolar`, both now raise `ValueError` (`MarkRequiresCoord`, mirroring the mold `UnsupportedChannelCombination` already uses) naming the mark and the `.coord()` call that fixes it — e.g. `"mark_arc requires a Polar coord; add .coord(fm.CoordPolar(...))"`. Neither mark previously refused: `mark_arc` under a non-Polar coord failed later with a generic missing-channel error that did not name the real cause, and `mark_geoshape` with geometry under a non-Geo coord rendered a silently empty panel — axis furniture only, no `<path>`/`<circle>`/`<polyline>` geometry (`geoshape.rs`'s non-Geo arm fell through to `MarkBuildResult::empty`). `mark_geoshape` with **no** geometry column present is unaffected under any coord (stays an empty scene, as documented). `mark_image` is explicitly untouched by this guard — it keeps its own documented behavior of an empty scene under a non-Cartesian coord. A chart already using the correct coord for its mark renders byte-identically. Interactive-only, disclosed: `fm.layer(cartesian_chart, polar_arc_chart).interactive()` now refuses with this same `MarkRequiresCoord` error instead of silently rendering the arc layer as if it were Cartesian — the merged-flat interactive lowering drops a secondary layer's own `coord` (already warned at `composition.py:3303`: "secondary layer's theme/facet/coord is ignored"), so by the time the arc mark resolves it genuinely has no Polar coord to satisfy its own guard. **Static** `to_svg()`/`to_png()` on the identical mixed-coord layered chart is unaffected — the composite overlay tree renders each layer against its own coord and was already correct; verified live (`fm.layer(line_chart, arc_chart.coord(fm.CoordPolar(theta="x"))).to_svg()` renders, `.interactive()` on the same chart raises). The coord-drop itself (rather than the refusal) is a filed follow-up candidate, not fixed by this batch.
+
+> **Dated note (2026-09-19, wave 5 T13 — GH #172(1), a layer carries its own coordinate system):** the note above is superseded in two respects, and the coord-drop it filed as a follow-up is closed. (1) **A layer carries a coord.** `Layer` gained an additive `coord` wire slot (skip-if-absent, so a spec declaring none serializes byte-identically), and `Chart + Chart` — hence `LayerChart`, `.interactive()`, and `resolve={"y": "independent"}`, which all merge through it — carries each secondary member's own coordinate system onto the layers it contributes instead of dropping it. `fm.layer(bar, arc_chart.coord(fm.CoordPolar(theta="x")))` therefore renders the arc member's wedges on **both** output kinds rather than refusing on the interactive one, and `fm.layer(bar, point_chart.coord(fm.CoordFlip()))` renders the point member **flipped** rather than silently unflipped — the half of the defect that produced no diagnostic at all. A layer's coord places that layer's marks; the panel's chrome (Cartesian axes, the polar boundary), its aspect ratio and its scale domains stay the chart-level coord's, which matches what the static composite path draws for the same composition. A per-layer coord that declares a PANEL property instead of a placement — `xlim=`/`ylim=`, `expand=False`, `clip=False`, or `CoordFixed(ratio=)` — is refused with a typed `ValueError` naming the layer, the coord and the property, because the layers share one panel and one of them cannot have its own domain or aspect ratio. Placement-only coords (`CoordFlip`, `CoordPolar`, `CoordGeo`, a bare `CoordCartesian()`) are honored. The `Chart + Chart` merge warning accordingly no longer names `coord`: it now reads "secondary layer's theme/facet is ignored", since the coord is no longer ignored. (2) **The refusal messages no longer prescribe a fix.** `"mark_arc requires a Polar coord; add .coord(fm.CoordPolar(...))"` became `"mark_arc requires a Polar coord"` (and the `mark_geoshape`/`CoordGeo` twin with it). The prescription was false on exactly the path that mattered: the merged-flat layer reached it with the prescribed call already written and dropped. What still refuses is a chart with no such coord anywhere, for which the state is the whole diagnosis.
 
 ---
 

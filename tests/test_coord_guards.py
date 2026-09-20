@@ -7,8 +7,16 @@ silently rendered nothing (no error, no warning), and `mark_arc` under any
 other coord surfaced the generic, misleading `"encoding 'y' expected
 EncodingSpec, got None"` from scale resolution instead of naming the real
 problem. Both now refuse with a typed `ValueError` (Rust
-`RenderError::MarkRequiresCoord`, surfaced through PyO3) naming the mark,
-the required coord, and the `.coord(...)` fix.
+`RenderError::MarkRequiresCoord`, surfaced through PyO3) naming the mark and
+the required coord.
+
+The message named the `.coord(...)` fix too until `#172`(1) (wave 5 T13)
+retired the prescription: a merged-flat layer carrying its own `CoordPolar`/
+`CoordGeo` used to reach these same refusals with that coord dropped, so the
+message told the caller to add the call they had written. The coord now rides
+`Layer.coord` per layer (`tests/test_layer_coord.py`), and what still reaches
+here is a chart with no such coord anywhere — for which the state is the whole
+diagnosis.
 
 Covers every non-matching coord kind named in the design spec's edge-case
 list (§9): default/absent, explicit Cartesian, CoordFlip, and the
@@ -73,13 +81,22 @@ def test_geoshape_polar_coord_refuses_crosswise():
         chart.to_svg()
 
 
-def test_geoshape_message_names_the_fix():
+def test_geoshape_message_names_the_requirement_not_a_fix():
+    """The message states what is missing and prescribes nothing.
+
+    Inverted, with a rewritten rationale, by `#172`(1) (wave 5 T13): it used to
+    pin the trailing `"; add .coord(fm.CoordGeo(...))"`. That prescription was
+    false on the path it mattered on -- a merged-flat layer carrying its OWN
+    `CoordGeo` reached this same refusal with the coord dropped, so the caller
+    was told to add what they had already written. The drop is fixed
+    (`Layer.coord`), and the prescription is retired rather than left standing
+    beside the fix: a refusal that names a state is true wherever it is raised
+    from, while one that names a fix is true only on some paths.
+    """
     chart = fm.Chart(_BARE_POLYGON).mark_geoshape()
     with pytest.raises(ValueError) as exc_info:
         chart.to_svg()
-    assert str(exc_info.value) == (
-        "mark_geoshape requires a Geo coord; add .coord(fm.CoordGeo(...))"
-    )
+    assert str(exc_info.value) == "mark_geoshape requires a Geo coord"
 
 
 def test_geoshape_matching_coord_renders_without_error():
@@ -133,13 +150,13 @@ def test_arc_geo_coord_refuses_crosswise():
         chart.to_svg()
 
 
-def test_arc_message_names_the_fix():
+def test_arc_message_names_the_requirement_not_a_fix():
+    """The twin of `test_geoshape_message_names_the_requirement_not_a_fix` --
+    same inversion, same rationale, same `#172`(1) reason. See that test."""
     chart = fm.Chart(_pie_df()).mark_arc().encode(x="val:Q", color="cat:N")
     with pytest.raises(ValueError) as exc_info:
         chart.to_svg()
-    assert str(exc_info.value) == (
-        "mark_arc requires a Polar coord; add .coord(fm.CoordPolar(...))"
-    )
+    assert str(exc_info.value) == "mark_arc requires a Polar coord"
 
 
 def test_arc_matching_coord_renders_without_error():

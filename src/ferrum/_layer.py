@@ -58,6 +58,24 @@ class _Layer:
     # when True, so absent/false round-trips byte-identically with
     # pre-#52 specs.
     independent_y: bool = False
+    #: This layer's OWN coordinate system (`#172`(1)) -- a coord value class
+    #: (``CoordFlip``/``CoordPolar``/...) or the ``"flip"`` string
+    #: ``mark_*(orient="horizontal")`` stamps on a chart. ``None`` means
+    #: "inherit the chart's", which is every layer any other producer builds.
+    #:
+    #: The one producer is the ``Chart + Chart`` merge
+    #: (:func:`ferrum.composition._carry_layer_coord`), which is where a member
+    #: chart's coord used to be dropped: the merge keeps the LHS's coord at
+    #: chart level, so the RHS's had nowhere to go and the merged render placed
+    #: that member's marks in a coordinate system the caller never asked for --
+    #: silently, for a ``CoordFlip``. ``LayerChart`` reaches it through the same
+    #: merge (``_build_merged``), so the interactive and independent-y routes
+    #: are covered by the one stamp.
+    #:
+    #: ``_spec_build._build_layers_list`` serializes it onto the wire layer dict
+    #: only when set, so a layer that declares none round-trips byte-identically
+    #: with a pre-`#172` spec (see ``Layer::coord`` in Rust ``spec/layer.rs``).
+    coord: Any = None
 
 
 def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:

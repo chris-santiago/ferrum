@@ -4280,18 +4280,61 @@ def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
     new._transforms = existing
 
 
+def _carry_layer_coord(rhs_layers: list, lhs_coord, rhs_coord) -> list:
+    """Stamp the RHS chart's own coordinate system onto the layers it contributes.
+
+    `#172`(1). ``Chart + Chart`` keeps the LHS's coord at chart level (``new =
+    lhs._clone()``), which is correct -- the panel has one coordinate system for
+    its chrome, its aspect ratio and its scale domains. What was NOT correct is
+    that the RHS's coord then had nowhere to go: the merged render placed that
+    member's marks in the LHS's system. A secondary ``CoordFlip`` rendered
+    unflipped with no error at all, and a secondary ``CoordPolar`` refused with a
+    message naming the ``.coord()`` call the caller had already written.
+
+    Each RHS layer therefore carries the coordinate system its own chart
+    declared. Three cases, all decided on the WIRE form (see
+    :func:`ferrum.coord._coord_wire`, which is also what makes
+    ``mark_bar(orient="horizontal")``'s bare ``"flip"`` token and an explicit
+    ``.coord(fm.CoordFlip())`` compare as the one coordinate system they are):
+
+    - the two charts agree: nothing is stamped, so every chart that does not mix
+      coordinate systems serializes exactly as before;
+    - the RHS declares its own: that coord is stamped;
+    - the RHS declares NONE while the LHS does: a plain ``CoordCartesian()`` is
+      stamped, because "inherit" and "Cartesian" are the same thing at chart
+      level but not here -- without it, a Cartesian point layer merged onto a
+      polar chart would be projected into the circle, which is the same silent
+      substitution read from the other direction.
+
+    A layer that already carries a coord of its own (a nested ``(a + b) + c``,
+    where ``b``'s layers were stamped by the inner merge) keeps it: the coord
+    belongs to the chart that declared it, not to the merge that moved it.
+    """
+    from ferrum.coord import CoordCartesian, _coord_wire
+
+    if _coord_wire(rhs_coord) == _coord_wire(lhs_coord):
+        return rhs_layers
+    if rhs_coord is None:
+        rhs_coord = CoordCartesian()
+    return [
+        layer if layer.coord is not None else replace(layer, coord=rhs_coord)
+        for layer in rhs_layers
+    ]
+
+
 def _warn_on_layer_conflicts(lhs, rhs) -> None:
-    """Warn when layered chart ``+`` would silently discard RHS theme/facet/coord."""
-    if (
-        (rhs._theme is not None and rhs._theme != lhs._theme)
-        or rhs._facet != lhs._facet
-        or rhs._coord != lhs._coord
-    ):
+    """Warn when layered chart ``+`` would silently discard RHS theme/facet.
+
+    ``coord`` is no longer on that list: since `#172`(1) the RHS's coordinate
+    system travels with the layers it contributes (:func:`_carry_layer_coord`),
+    so naming it here would report a drop that no longer happens. The theme and
+    the facet ARE still the primary layer's alone.
+    """
+    if (rhs._theme is not None and rhs._theme != lhs._theme) or rhs._facet != lhs._facet:
         import warnings
 
         warnings.warn(
-            "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
-            "primary layer wins.",
+            "Layered chart `+`: secondary layer's theme/facet is ignored; primary layer wins.",
             UserWarning,
             stacklevel=3,
         )

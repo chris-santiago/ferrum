@@ -91,6 +91,90 @@ pub fn suppresses_cartesian_axes(coord: Option<&CoordKind>) -> bool {
     matches!(coord, Some(CoordKind::Polar { .. }) | Some(CoordKind::Geo { .. }))
 }
 
+/// Whether this coordinate system exchanges the positional channels.
+///
+/// One owner for the question, asked by the five stages that must agree about
+/// which slot a channel occupies: `prepare::build_layers` applies the swap,
+/// `scale_resolve`'s `numeric_domain_union` / `positional_binding` /
+/// `validate_drawing_layers_can_plot` read a layer's encoding in the resolved
+/// axis's space, and `scene_build`'s per-layer loop adjusts positions and names
+/// refused channels in it.
+///
+/// It exists because `#172`(1) made the question per LAYER: those five sites
+/// each carried their own `matches!(spec.coord, Some(CoordKind::Flip))` against
+/// the CHART's coord, which is the wrong subject for a layer that declares its
+/// own — and five hand-copies of one predicate is how the swap and its
+/// consumers would drift apart one edit at a time. Callers pass
+/// `Layer::effective_coord(...)` for a per-layer question and
+/// `spec.coord.as_ref()` for a chart-level one (which axis the chrome
+/// describes, which channel a chart-level refusal names).
+///
+/// Takes an `Option` because both slots are optional and absent means
+/// Cartesian.
+pub fn flips_positional_channels(coord: Option<&CoordKind>) -> bool {
+    matches!(coord, Some(CoordKind::Flip))
+}
+
+/// What *this* coord declares that belongs to the whole PANEL rather than to
+/// one layer's marks — `None` when the coord is entirely a per-layer placement
+/// rule and can therefore ride a single layer of a shared panel.
+///
+/// `#172`(1)'s refusal predicate. A per-layer coord is honorable exactly when
+/// everything it declares is about where that layer's own marks go: the
+/// projection (`Polar`/`Geo`, applied per mark batch) or the channel exchange
+/// (`Flip`, applied to that layer's encoding). An axis domain, a padding
+/// choice, a clip decision, or an aspect ratio is a property of the panel every
+/// layer shares, so there is no honest way to apply it to one of them — the
+/// render refuses and names it (`RenderError::LayerCoordUnplaceable`) instead
+/// of rendering a chart with the declaration silently dropped, which is what
+/// the merged-flat path did for EVERY per-layer coord before this.
+///
+/// The returned string is the user-facing spelling of the property, for the
+/// refusal message: the caller wrote `fm.CoordFixed(ratio=…)`, not
+/// `CoordKind::Fixed { ratio }`.
+pub fn panel_scoped_property(coord: &CoordKind) -> Option<&'static str> {
+    match coord {
+        // A plain `CoordCartesian()` declares nothing the panel owns — it is
+        // the default, spelled out, and is honored as the no-op it is (which
+        // is load-bearing: Python stamps exactly this on a secondary layer
+        // whose own chart declared no coord under a projected chart-level one,
+        // so that layer opts out of the projection without claiming anything).
+        CoordKind::Cartesian { x_domain, y_domain, expand, clip } => {
+            cartesian_panel_property(*x_domain, *y_domain, *expand, *clip)
+        }
+        // Fixed is Cartesian plus an aspect ratio, and the ratio alone is
+        // already panel-scoped, so the whole variant is — named as the ratio
+        // whichever other field the caller also set.
+        CoordKind::Fixed { .. } => Some("a fixed aspect ratio (fm.CoordFixed(ratio=...))"),
+        CoordKind::Flip | CoordKind::Polar { .. } | CoordKind::Geo { .. } => None,
+    }
+}
+
+/// The panel-scoped half of a Cartesian coord, in the order a caller would
+/// most likely have written it. Split out so the `Fixed` arm above reads as
+/// the one-line statement it is rather than repeating four checks it answers
+/// the same way regardless.
+fn cartesian_panel_property(
+    x_domain: Option<(f64, f64)>,
+    y_domain: Option<(f64, f64)>,
+    expand: bool,
+    clip: bool,
+) -> Option<&'static str> {
+    if x_domain.is_some() {
+        return Some("an x-axis domain (xlim=)");
+    }
+    if y_domain.is_some() {
+        return Some("a y-axis domain (ylim=)");
+    }
+    if !expand {
+        return Some("axis padding (expand=False)");
+    }
+    if !clip {
+        return Some("panel clipping (clip=False)");
+    }
+    None
+}
+
 /// Convert a spec-side `CoordKind` to the scene-side equivalent.
 ///
 /// `Flip` maps to Cartesian — Python handles the channel swap before this point.
@@ -244,6 +328,105 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let parsed: CoordKind = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
+    }
+
+    /// `#172`(1): exactly `Flip` exchanges the positional channels, and `None`
+    /// (no coord) does not. Enumerated variant by variant rather than sampled,
+    /// because five stages read this one answer to decide which slot a channel
+    /// occupies: a wrong `true` swaps a layer's encoding nothing else swapped,
+    /// and a wrong `false` leaves a flipped layer reading its own channels in
+    /// the wrong space.
+    #[test]
+    fn only_flip_exchanges_the_positional_channels() {
+        assert!(flips_positional_channels(Some(&CoordKind::Flip)));
+        for unswapped in [
+            CoordKind::default(),
+            CoordKind::Fixed {
+                ratio: 1.0,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            CoordKind::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+            },
+            CoordKind::Geo { projection: GeoProjection::Mercator },
+        ] {
+            assert!(
+                !flips_positional_channels(Some(&unswapped)),
+                "{unswapped:?} does not exchange x and y"
+            );
+        }
+        assert!(!flips_positional_channels(None), "no coord= means Cartesian");
+    }
+
+    /// `#172`(1)'s refusal predicate, both arms. The placement-only coords must
+    /// return `None` — a `Some` for any of them would refuse the very
+    /// compositions this field exists to honor — and each panel-scoped field
+    /// must be named, since the refusal message quotes it back to the caller.
+    #[test]
+    fn panel_scoped_property_names_only_what_the_panel_owns() {
+        let placement = [
+            CoordKind::Flip,
+            CoordKind::default(),
+            CoordKind::Polar {
+                theta: PolarThetaChannel::Y,
+                start_angle: 1.0,
+                direction: PolarDirection::CounterClockwise,
+                inner_radius: 20.0,
+                outer_radius: Some(100.0),
+                pad_angle: 0.1,
+            },
+            CoordKind::Geo { projection: GeoProjection::Mercator },
+        ];
+        for coord in &placement {
+            assert_eq!(
+                panel_scoped_property(coord),
+                None,
+                "{coord:?} declares only where this layer's marks go"
+            );
+        }
+
+        let cartesian = |x_domain, y_domain, expand, clip| CoordKind::Cartesian {
+            x_domain,
+            y_domain,
+            expand,
+            clip,
+        };
+        assert_eq!(
+            panel_scoped_property(&cartesian(Some((0.0, 1.0)), None, true, true)),
+            Some("an x-axis domain (xlim=)")
+        );
+        assert_eq!(
+            panel_scoped_property(&cartesian(None, Some((0.0, 1.0)), true, true)),
+            Some("a y-axis domain (ylim=)")
+        );
+        assert_eq!(
+            panel_scoped_property(&cartesian(None, None, false, true)),
+            Some("axis padding (expand=False)")
+        );
+        assert_eq!(
+            panel_scoped_property(&cartesian(None, None, true, false)),
+            Some("panel clipping (clip=False)")
+        );
+        // Fixed is panel-scoped through its ratio alone, so even the
+        // otherwise-default construction refuses.
+        assert_eq!(
+            panel_scoped_property(&CoordKind::Fixed {
+                ratio: 1.0,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            }),
+            Some("a fixed aspect ratio (fm.CoordFixed(ratio=...))")
+        );
     }
 
     #[test]

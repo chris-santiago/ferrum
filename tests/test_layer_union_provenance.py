@@ -498,11 +498,16 @@ def layered_specs(chart) -> list[dict]:
 #: it guards against (chart-level ``mark: "bar"`` + an injected scale + no bar
 #: layer) is one a new lowering could introduce without anyone noticing, since
 #: its only symptom is an axis quietly losing its zero anchor. Known upcoming
-#: work that touches this: per-layer coord (`#172`(1)) changes what a `Layer`
-#: carries, and any catplot/displot layer restructuring changes who builds one.
-#: Seven of the nine entries below reach the assertion today (the two point-first
-#: entries skip it by design — their chart-level mark is not a bar), so the list
-#: is non-vacuous as written.
+#: work that touches this: any catplot/displot layer restructuring changes who
+#: builds a `Layer`.
+#:
+#: Per-layer coord (`#172`(1), wave 5 T13) landed and is the reason for the last
+#: two entries: the merge now stamps the RHS member's own coordinate system onto
+#: the layers it contributes, which is a new layered-lowering SHAPE (a layer
+#: carrying a `coord` its siblings do not) reachable from the ordinary `+` and
+#: `fm.layer` spellings. Nine of the eleven entries below reach the assertion
+#: today (the two point-first entries skip it by design — their chart-level mark
+#: is not a bar), so the list is non-vacuous as written.
 LAYERED_LOWERINGS = {
     "bar + point": lambda: bar_chart() + point_chart(),
     "point + bar": lambda: point_chart() + bar_chart(),
@@ -515,6 +520,13 @@ LAYERED_LOWERINGS = {
         bar_chart(), point_chart(), resolve={"y": "independent"}
     ),
     "fm.layer of a layered bar": lambda: fm.layer(bar_chart() + point_chart(), point_chart()),
+    # `#172`(1): the member's own coord rides its layers. Both spellings, since
+    # a channel-exchanging coord (`CoordFlip`) and a projecting one
+    # (`CoordPolar`) reach different consumers of `Layer.coord`.
+    "bar + flipped point member": lambda: bar_chart() + point_chart(flip=True),
+    "fm.layer bar + polar point member": lambda: fm.layer(
+        bar_chart(), point_chart().coord(fm.CoordPolar(theta="x"))
+    ),
 }
 
 

@@ -8,6 +8,37 @@ from typing import Literal, get_args, get_type_hints
 from ferrum._validate import validate_choice
 
 
+def _coord_wire(coord) -> dict | None:
+    """Return the canonical wire dict for a chart's or layer's ``_coord`` slot.
+
+    A coord reaches serialization in one of three shapes, and this is the one
+    place that knows all three:
+
+    - a coord value class, which states its own wire form via ``to_spec_dict()``;
+    - the bare ``"flip"`` token ``mark_*(orient="horizontal")`` stamps on a chart
+      (``Chart._set_mark``), widened here to ``{"kind": "flip"}``;
+    - ``None``, which passes through.
+
+    Why the string is widened rather than forwarded (`#172`(1)): Rust's
+    ``ChartSpec`` constructor accepts a bare token for the CHART-level slot
+    (``coerce_coord``), but ``Layer.coord`` is deserialized by serde from the
+    layer dict, where the internally-tagged ``{"kind": ...}`` form is the only
+    one. Normalizing here gives the two slots one wire vocabulary instead of a
+    chart-level dialect and a layer-level one, and gives the merge a form it can
+    COMPARE: ``CoordFlip() == "flip"`` is ``False``, so comparing objects would
+    read an orient-flipped bar and an explicitly flipped one as different
+    coordinate systems.
+    """
+    if coord is None:
+        return None
+    if hasattr(coord, "to_spec_dict"):
+        spec = coord.to_spec_dict()
+        # CoordFlip's own `to_spec_dict` predates the dict form and returns the
+        # bare token; widen it the same way.
+        return {"kind": spec} if isinstance(spec, str) else spec
+    return {"kind": coord}
+
+
 @dataclass(frozen=True)
 class CoordFlip:
     """Flip the x and y axes — e.g. for horizontal bar charts.

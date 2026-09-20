@@ -4691,10 +4691,15 @@ fn assert_arc_requires_polar(coord: Option<CoordKind>) {
         }
         other => panic!("expected MarkRequiresCoord, got {other:?}"),
     }
-    assert_eq!(
-        format!("{err}"),
-        "mark_arc requires a Polar coord; add .coord(fm.CoordPolar(...))"
-    );
+    // The message names the STATE, and (since `#172`(1)) no longer prescribes
+    // the fix. The prescription was `"; add .coord(fm.CoordPolar(...))"`, and it
+    // was false on the path that mattered most: a merged-flat `LayerChart(bar,
+    // arc.coord(fm.CoordPolar()))` reached this same refusal after DROPPING the
+    // arc layer's coord, so the caller was told to add what they had written.
+    // That drop is fixed — the coord now rides `Layer::coord` — and the
+    // prescription is retired rather than left standing beside the fix, because
+    // a refusal naming a state stays true on every path that raises it.
+    assert_eq!(format!("{err}"), "mark_arc requires a Polar coord");
 }
 
 /// No coord at all (defaults to Cartesian downstream) must refuse.
@@ -6637,7 +6642,7 @@ fn layer_with(mark: crate::spec::mark::Mark, encoding: crate::spec::encoding::En
         position: None,
         blend: None,
         name: None,
-        independent_y: false,
+        independent_y: false, coord: None,
     }
 }
 
@@ -6933,7 +6938,7 @@ fn an_independent_y_layer_does_not_supply_the_primary_y_binding() {
     use crate::spec::mark::Mark;
 
     let secondary = Layer {
-        independent_y: true,
+        independent_y: true, coord: None,
         ..layer_with(
             Mark::Line,
             crate::spec::encoding::Encoding {

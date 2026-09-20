@@ -1434,7 +1434,7 @@ mod tests {
             data_source: None,
             position: None,
             blend: None,
-            independent_y: false,
+            independent_y: false, coord: None,
             color_is_own: color_field.is_some(),
             x_is_own: false,
             y_is_own: false,
