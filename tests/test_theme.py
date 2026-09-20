@@ -261,7 +261,7 @@ def _sample_for(key: str):
     arm (enum keys get a valid variant, not the generic ``"x"`` placeholder).
     """
     dash_keys = {"grid_dash", "major_grid_dash", "minor_grid_dash", "reference_line_dash"}
-    bool_keys = {"axis_line", "grid", "minor"}
+    bool_keys = {"axis_line", "grid", "minor", "cull_labels"}
     f64_keys = {
         "padding",
         "font_size",

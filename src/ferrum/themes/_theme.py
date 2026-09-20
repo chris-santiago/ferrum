@@ -110,10 +110,28 @@ area_opacity, opacity : optional
     strip_padding : float, optional
         Vertical padding around facet strip titles (default 6).
     cull_threshold : int, optional
-        Minimum number of pixels between adjacent axis tick labels before
-        culling kicks in. Labels are dropped until the remaining labels are at
-        least this many pixels apart. Default 8 (set in Rust). Set to ``0`` to
-        disable culling entirely.
+        Minimum number of pixels required between adjacent axis tick labels.
+        Labels are dropped until the remaining labels are at least this many
+        pixels apart. Default 8 (set in Rust). Set to ``0`` for no gap
+        requirement, which also disables dropping unless ``cull_labels=True``.
+    cull_labels : bool, optional
+        Whether the layout engine may DROP tick labels to reach
+        ``cull_threshold``'s gap. Unset, it follows ``cull_threshold``
+        (dropping allowed for a positive value, forbidden at ``0``), which is
+        the behavior before the two were separable. Set it explicitly to get
+        the combinations that coupling cannot express --
+        ``Theme(cull_threshold=30, cull_labels=False)`` keeps a 30px gap
+        driving the flat / wrap / font-shrink / rotate stages but never
+        drops a label. Every label survives regardless of density; which
+        *stage* the survivors land in does not: sparse enough and the gap
+        is satisfiable early (flat or a shallow rotation), dense enough and
+        the cascade falls through every earlier stage to its last resort,
+        rotated -90 degrees and possibly overlapping. Mid-label elision
+        (truncation with an ellipsis), the nominal step after that, is
+        gated on freeing width that a -90-degree label's truncation can't
+        actually reclaim, so it essentially never fires. Both arms --
+        sparse-stays-flat and dense-falls-through-to-rotated -- are pinned
+        by ``tests/test_label_gap_policy.py::test_cull_labels_false_stage_depends_on_density``.
 
     Fallbacks
     ---------

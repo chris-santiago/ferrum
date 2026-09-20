@@ -113,6 +113,106 @@ pub enum LabelOverlap {
     Rotate,
 }
 
+/// How much horizontal room the x tick-label cascade must leave between
+/// adjacent VISIBLE labels, and whether it is allowed to drop labels to get
+/// it (`#146`, spec §4.4).
+///
+/// Before this type the two questions were one `u32`
+/// (`Theme(cull_threshold=N)`): `0` meant both "require no gap" and "never
+/// cull", and any positive `N` meant both "require `N` px" and "culling
+/// allowed". That conflation made "keep an `N` px gap driving the flat /
+/// wrap / font-shrink / rotate stages, but never drop a label" unspellable.
+/// The two fields are now independent, and all four combinations are
+/// meaningful:
+///
+/// | `gap_px` | `cull` | Meaning |
+/// |---|---|---|
+/// | `0` | `false` | No gap requirement, never drop a label (legacy `cull_threshold=0`) |
+/// | `N` | `true` | Require `N` px, drop labels if that is the only way (legacy `cull_threshold=N`) |
+/// | `N` | `false` | **New:** require `N` px of every presentation stage (S0-S3), then keep every label regardless — WHICH stage they land in depends on density: sparse enough and the gap is satisfiable early (flat / shallow rotation); dense enough and the cascade falls through to rotated -90°, possibly overlapping (elision at that angle almost never has enough width to truncate, so it essentially never fires). Both arms pinned by `tests/test_label_gap_policy.py::test_cull_labels_false_stage_depends_on_density` |
+/// | `0` | `true` | **New:** drop labels only where they genuinely overlap, with no extra gap |
+///
+/// # Public spelling
+/// `Theme(cull_threshold=N)` sets the magnitude and, unless `cull_labels=` is
+/// also given, the legacy mode along with it — see
+/// [`from_cull_threshold`](Self::from_cull_threshold) and
+/// [`with_overrides`](Self::with_overrides), the two places that mapping
+/// lives. `Theme(cull_labels=False)` sets the mode alone.
+///
+/// # The default is deliberately two independent constants
+/// [`DEFAULT_GAP_PX`](Self::DEFAULT_GAP_PX) and
+/// [`DEFAULT_CULL`](Self::DEFAULT_CULL) are separate, so the open question of
+/// what the default *magnitude* should be (`#134`) can be settled by editing
+/// one number here, with no second change to the Theme key surface and no
+/// coupled flip of the default mode. Deriving the default mode from the
+/// default magnitude (`DEFAULT_GAP_PX > 0`) would have re-introduced exactly
+/// the conflation this type removes, one level up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelGapPolicy {
+    /// Minimum pixel gap required between adjacent visible x tick labels.
+    gap_px: u32,
+    /// Whether the cascade may drop labels (stride-cull) to satisfy the gap.
+    cull: bool,
+}
+
+impl LabelGapPolicy {
+    /// Default minimum gap, in pixels. `#134` owns this value and is still
+    /// open; it can move without touching [`DEFAULT_CULL`](Self::DEFAULT_CULL),
+    /// the Theme keys, or any call site.
+    pub const DEFAULT_GAP_PX: u32 = 8;
+    /// Whether the default policy may drop labels. Independent of
+    /// [`DEFAULT_GAP_PX`](Self::DEFAULT_GAP_PX) on purpose.
+    pub const DEFAULT_CULL: bool = true;
+
+    /// The legacy `Theme(cull_threshold=N)` mapping, and the ONLY place the
+    /// old coupling of magnitude to mode is written: `0` forbids culling,
+    /// any positive value allows it. Keeping it in one named function is what
+    /// makes "no existing spelling moves" checkable.
+    pub const fn from_cull_threshold(gap_px: u32) -> Self {
+        Self { gap_px, cull: gap_px > 0 }
+    }
+
+    /// Resolve the two independent `Theme` wire keys against `self` (the
+    /// theme's current policy). `cull_threshold=` sets the magnitude;
+    /// `cull_labels=` sets the mode and always wins. With `cull_threshold=`
+    /// alone the mode follows [`from_cull_threshold`](Self::from_cull_threshold),
+    /// so that spelling keeps its pre-split meaning exactly; with neither, the
+    /// policy is unchanged.
+    pub fn with_overrides(self, cull_threshold: Option<u32>, cull_labels: Option<bool>) -> Self {
+        let legacy = cull_threshold.map(Self::from_cull_threshold).unwrap_or(self);
+        Self {
+            gap_px: legacy.gap_px,
+            cull: cull_labels.unwrap_or(legacy.cull),
+        }
+    }
+
+    /// Minimum pixel gap the cascade must leave between adjacent visible
+    /// labels. Shrinks every presentation stage's (S0-S3) fit budget; S5's
+    /// elision fallback is deliberately exempt (see its fit test's own
+    /// comment). See [`cascade_collision_recovery`]'s doc.
+    pub const fn gap_px(&self) -> u32 {
+        self.gap_px
+    }
+
+    /// The gap as the `f64` budget term every cascade stage subtracts.
+    fn gap(&self) -> f64 {
+        self.gap_px as f64
+    }
+
+    /// Whether the cascade may drop labels (S4) to satisfy the gap. `false`
+    /// sends a still-colliding axis to S5 (elision, which leaves an
+    /// infeasible truncation intact) instead.
+    pub const fn may_cull(&self) -> bool {
+        self.cull
+    }
+}
+
+impl Default for LabelGapPolicy {
+    fn default() -> Self {
+        Self { gap_px: Self::DEFAULT_GAP_PX, cull: Self::DEFAULT_CULL }
+    }
+}
+
 /// Per-axis style/positioning overrides, bundled so a future field is a one-line
 /// struct addition instead of a five-site thread (mirrors `LegendStyleOpts` on
 /// the legend side). Every field is `Option` and falls back to the shared theme
@@ -1050,11 +1150,16 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
 /// finalized, so it uses worst-case inputs (longest label, estimated slot
 /// width). Over-reservation is acceptable; under-reservation causes clipping.
 ///
-/// `cull_threshold` (spec §4.6, D9) shrinks every
+/// `label_gap`'s pixel gap (spec §4.6, D9) shrinks every
 /// stage's fit budget by that many pixels — SYNC'd with
 /// `cascade_collision_recovery`'s identical treatment; see that function's
 /// doc for why the gap has to move with the fit test itself rather than
 /// only floor a stride once collision was already detected by pure overlap.
+/// The policy's cull MODE is deliberately not read here: S4 (cull) and S5
+/// (elide) reserve the same full -90° extent, so the band is the same
+/// whichever of them the real cascade lands on. Taking the whole policy
+/// rather than a bare gap keeps this predictor's signature SYNC'd with the
+/// cascade it mirrors.
 ///
 /// Algorithm (mirrors the cascade order in `cascade_collision_recovery`):
 /// 0. If `show_labels` is false, return `0.0` — no text draws, so no band
@@ -1112,7 +1217,7 @@ pub(crate) fn estimate_x_label_band(
     label_angle_override: Option<f64>,
     metrics: &dyn TextMetrics,
     estimated_slot_w: f64,
-    cull_threshold: u32,
+    label_gap: LabelGapPolicy,
     label_padding: Option<f64>,
     tick_size: f64,
     show_labels: bool,
@@ -1163,13 +1268,13 @@ pub(crate) fn estimate_x_label_band(
         );
     }
 
-    // `cull_threshold` must shrink this predictor's
+    // The requested gap must shrink this predictor's
     // budget exactly as it shrinks `cascade_collision_recovery`'s — a
-    // positive threshold can force the REAL cascade past flat/wrap/a
+    // positive gap can force the REAL cascade past flat/wrap/a
     // shallow rotation even when raw overlap would have been fine, and the
     // predictor must reach the same conclusion or it under-reserves the
-    // band (clipping risk). At `cull_threshold == 0` this is a no-op.
-    let cull_gap = cull_threshold as f64;
+    // band (clipping risk). At `gap_px == 0` this is a no-op.
+    let cull_gap = label_gap.gap();
     let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
 
     // S0 — flat (#97, spec §4.1): the same `tick_size + label_pad_eff` standoff
@@ -2001,11 +2106,17 @@ fn wrap_label_to_line_count(
 /// the maximum line count across labels, unaffected by whether shorter
 /// siblings are later uniformized up to it).
 ///
-/// At `cull_threshold == 0`, returns `natural_labels` unchanged — this is
+/// Keyed on the requested gap MAGNITUDE alone, not on
+/// [`LabelGapPolicy::may_cull`]: uniform degradation is what a gap
+/// requirement asks for, and is unrelated to whether the axis is permitted
+/// to drop labels further down the cascade. So the parameter is the bare
+/// `gap_px`.
+///
+/// At `gap_px == 0`, returns `natural_labels` unchanged — this is
 /// the pre-task, per-label wrap result byte-for-byte (the byte-identity
 /// requirement; pre-task never uniformized either, so
 /// preserving whatever raggedness it could produce at `0` IS the contract,
-/// not a violation of it). At `cull_threshold > 0`, computes
+/// not a violation of it). At `gap_px > 0`, computes
 /// `target_lines` as the max natural line count across the axis's sibling
 /// labels, then re-packs (via `wrap_label_to_line_count`) any label whose
 /// natural count falls short — every sibling resolves to the SAME line
@@ -2014,12 +2125,12 @@ fn wrap_label_to_line_count(
 fn uniformize_wrapped_labels(
     raw_labels: &[String],
     natural_labels: Vec<String>,
-    cull_threshold: u32,
+    gap_px: u32,
     max_width: f64,
     font_size: f64,
     metrics: &dyn TextMetrics,
 ) -> Vec<String> {
-    if cull_threshold == 0 {
+    if gap_px == 0 {
         return natural_labels;
     }
     let target_lines = natural_labels
@@ -2111,7 +2222,7 @@ fn stamp_override_angle_with_elide(
 
 /// Try, in cascade order, S0 (flat) -> S1 (wrap) -> S2a (font-reduced flat)
 /// -> S2b (font-reduced wrap) -> S3 (rotate) against `labels` within
-/// `slot_w`, honoring `cull_threshold`'s pixel-gap budget identically at
+/// `slot_w`, honoring `label_gap`'s pixel-gap budget identically at
 /// every stage (spec §4.6, D9 — see `cascade_collision_recovery`'s doc for
 /// why the gap has to shrink every stage's budget, not just floor S4's
 /// stride). Returns `None` if no stage resolves collision, i.e. even -90°
@@ -2138,7 +2249,7 @@ fn resolve_presentation(
     labels: &[String],
     slot_w: f64,
     label_font_size: f64,
-    cull_threshold: u32,
+    label_gap: LabelGapPolicy,
     metrics: &dyn TextMetrics,
 ) -> Option<CascadeResult> {
     let all_visible = vec![true; labels.len()];
@@ -2148,9 +2259,9 @@ fn resolve_presentation(
         .collect();
     let line_h = metrics.line_height(label_font_size);
 
-    // See `cascade_collision_recovery`'s doc for why `cull_threshold` must
+    // See `cascade_collision_recovery`'s doc for why the requested gap must
     // shrink every stage's budget, not just S4's stride floor.
-    let cull_gap = cull_threshold as f64;
+    let cull_gap = label_gap.gap();
     let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
 
     // S0 — Flat: if no label exceeds the threshold, done.
@@ -2181,7 +2292,7 @@ fn resolve_presentation(
             let final_labels = uniformize_wrapped_labels(
                 labels,
                 wrapped_labels,
-                cull_threshold,
+                label_gap.gap_px(),
                 threshold,
                 label_font_size,
                 metrics,
@@ -2230,7 +2341,7 @@ fn resolve_presentation(
             let final_labels = uniformize_wrapped_labels(
                 labels,
                 wrapped_labels,
-                cull_threshold,
+                label_gap.gap_px(),
                 threshold,
                 reduced_fs,
                 metrics,
@@ -2303,23 +2414,31 @@ fn merge_survivor_labels(
 /// order (S0 flat -> S1 wrap -> S2 font shrink -> S3 rotate -> S4 cull -> S5 elide),
 /// returning as soon as one resolves all collisions.
 ///
-/// `cull_threshold` (spec §4.6, F-L07-04 / D9) is the minimum pixel gap
-/// required between adjacent VISIBLE tick labels — `Theme.cull_threshold`'s
+/// [`LabelGapPolicy`] (spec §4.6, F-L07-04 / D9; `#146`) carries the two
+/// independent things the old `cull_threshold: u32` conflated.
+///
+/// [`gap_px`](LabelGapPolicy::gap_px) is the minimum pixel gap
+/// required between adjacent VISIBLE tick labels — `Theme(cull_threshold=)`'s
 /// docstring — not a label-count gate, and not merely an S4 stride floor:
 /// it shrinks the fit BUDGET of every stage, S0
-/// through S3, since "does this arrangement leave at least `cull_threshold`
+/// through S3, since "does this arrangement leave at least `gap_px`
 /// px between labels" is a stronger question than "do labels overlap at
 /// all." A stage only resolves collision when it ALSO satisfies the gap —
 /// so a chart whose labels already fit flat (or rotate cleanly) with plenty
-/// of raw overlap headroom can still need culling once a large
-/// `cull_threshold` is requested. `0` disables S4 (culling) entirely — every
-/// earlier stage's budget collapses back to the pure-overlap check (no gap
-/// requirement beyond non-overlap), and a densely-collided axis falls to S5
-/// (elision) instead of ever dropping a label. Any positive value enables
-/// S4, which then drops just enough labels (by stride) to satisfy the same
-/// additive gap requirement the earlier stages enforce. See
+/// of raw overlap headroom can still need culling once a large gap is
+/// requested. At `0` every stage's budget collapses back to the pure-overlap
+/// check (no gap requirement beyond non-overlap). See
 /// `rotated_x_label_footprint`'s doc for why -90° rotation (S3's last angle)
 /// is a real fit test rather than an automatic pass.
+///
+/// [`may_cull`](LabelGapPolicy::may_cull) gates S4 alone. `false` sends a
+/// still-collided axis to S5 (elision, which leaves an infeasible truncation
+/// intact) rather than ever dropping a label; `true` lets S4 drop just enough
+/// labels (by stride) to satisfy the same additive gap requirement the
+/// earlier stages enforce. The legacy `Theme(cull_threshold=N)` spelling
+/// couples the two ([`LabelGapPolicy::from_cull_threshold`]), so `0` still
+/// means "no gap AND never cull" and `N` still means "`N` px AND may cull" —
+/// what the split adds is the other two corners of that square.
 ///
 /// `label_overlap` (B5 unit 6b) biases the cascade onto an explicit primitive
 /// instead of running the graduated flow:
@@ -2340,7 +2459,7 @@ fn cascade_collision_recovery(
     labels: &[String],
     slot_w: f64,
     label_font_size: f64,
-    cull_threshold: u32,
+    label_gap: LabelGapPolicy,
     label_overlap: Option<LabelOverlap>,
     metrics: &dyn TextMetrics,
 ) -> CascadeResult {
@@ -2392,7 +2511,7 @@ fn cascade_collision_recovery(
     // full N-label set at `slot_w`. See `resolve_presentation`'s doc; it is
     // the extracted, reusable body of these four stages, shared with S4's
     // post-cull re-attempt below.
-    if let Some(result) = resolve_presentation(labels, slot_w, label_font_size, cull_threshold, metrics) {
+    if let Some(result) = resolve_presentation(labels, slot_w, label_font_size, label_gap, metrics) {
         return result;
     }
 
@@ -2405,14 +2524,14 @@ fn cascade_collision_recovery(
         .map(|s| metrics.measure_width(s, label_font_size))
         .collect();
     let line_h = metrics.line_height(label_font_size);
-    let cull_gap = cull_threshold as f64;
+    let cull_gap = label_gap.gap();
 
     // S4 — Tick culling: PIXEL-GAP semantic (spec §4.6, F-L07-04 / D9).
-    // `cull_threshold` is the minimum required pixel gap between adjacent
-    // VISIBLE tick labels (`Theme.cull_threshold`'s docstring), not a label
-    // COUNT gate — `cull_threshold == 0` disables culling entirely: the
-    // cascade falls through to S5 elision instead of ever dropping a label,
-    // regardless of how many labels there are.
+    // The gap is a required pixel distance between adjacent VISIBLE tick
+    // labels, never a label COUNT gate; whether this stage runs at all is
+    // the policy's own `may_cull` (`#146`), so a policy that forbids culling
+    // falls through to S5 elision instead of ever dropping a label,
+    // regardless of how many labels there are or how wide the gap is.
     // Use -90 degrees (last/steepest angle in cascade) for the STRIDE
     // computation below — the smallest possible footprint of any
     // presentation, so it gives the minimum stride any presentation could
@@ -2421,7 +2540,7 @@ fn cascade_collision_recovery(
     let best_angle = *ANGLE_CASCADE.last().unwrap(); // -90.0
     let cos_best = best_angle.to_radians().cos().abs();
 
-    if cull_threshold > 0 {
+    if label_gap.may_cull() {
         // Find max footprint at the best angle (same real-fit formula as S3 —
         // a bare `w * cos_best` projection is ~0 at -90° and would never
         // trigger culling; see `rotated_x_label_footprint`'s doc).
@@ -2431,14 +2550,14 @@ fn cascade_collision_recovery(
             .fold(0.0_f64, f64::max);
 
         // Minimum stride N such that the widest rotated label's footprint
-        // PLUS the required `cull_threshold` gap fits within N slots — the
+        // PLUS the required gap fits within N slots — the
         // SAME additive gap requirement S0-S3 enforce above
-        // (`footprint <= effective_slot_w - cull_threshold`), just solved
+        // (`footprint <= effective_slot_w - gap_px`), just solved
         // for stride instead of a fixed angle:
-        //   footprint + cull_threshold <= N * slot_w
-        //   N >= (footprint + cull_threshold) / slot_w
+        //   footprint + gap_px <= N * slot_w
+        //   N >= (footprint + gap_px) / slot_w
         // A zero-width label set still culls down to a spaced subset when
-        // `slot_w` alone can't satisfy `cull_threshold`
+        // `slot_w` alone can't satisfy the gap
         // ("threshold larger than any gap culls down to a spaced subset").
         let stride = if slot_w <= 0.0 {
             1_u32
@@ -2477,7 +2596,7 @@ fn cascade_collision_recovery(
                 &survivor_labels,
                 effective_slot_w,
                 label_font_size,
-                cull_threshold,
+                label_gap,
                 metrics,
             ) {
                 Some(presentation) => (
@@ -2497,7 +2616,7 @@ fn cascade_collision_recovery(
             };
         }
 
-        // stride == 1 means labels already sit >= cull_threshold apart at
+        // stride == 1 means labels already sit >= `gap_px` apart at
         // -90 without dropping any — return as rotated, not culled.
         return CascadeResult {
             labels: labels.to_vec(),
@@ -2534,9 +2653,10 @@ fn cascade_collision_recovery(
     // less than `ELIDE_MIN_WIDTH_CONTRIBUTION_PX` to its footprint, no
     // amount of truncation across the axis can help, and eliding anyway
     // would only destroy content for nothing — fall back to `Rotated` with
-    // every label intact at `best_angle`, the pre-task outcome for a
-    // `cull_threshold` the user explicitly set to `0` (disabling culling),
-    // rather than collapsing a legible axis into an axis of bare ellipses.
+    // every label intact at `best_angle`, the outcome for a policy whose
+    // `may_cull` is false (reached by `cull_threshold=0` and by
+    // `cull_labels=False` at any gap), rather than collapsing a legible axis
+    // into an axis of bare ellipses.
     const ELIDE_MIN_WIDTH_CONTRIBUTION_PX: f64 = 1.0;
     let max_width_contribution = widths.iter().fold(0.0_f64, |acc, w| acc.max(cos_best * w));
     if max_width_contribution < ELIDE_MIN_WIDTH_CONTRIBUTION_PX {
@@ -2549,6 +2669,20 @@ fn cascade_collision_recovery(
         };
     }
 
+    // NOTE (quality review, `#146`): this fit test is `projected > slot_w`,
+    // with no `cull_gap` term — unlike S0-S4 above, which all subtract the
+    // gap from the available width. That is deliberate, not a missed spot:
+    // S5 is reached only because truncation is already the last resort, and
+    // charging it the gap on top of the raw slot width would shrink an
+    // already-minimal budget further, elide MORE text than a genuine
+    // overlap requires, for a gap that a `-90°` truncation could never buy
+    // back anyway (the label's own width barely contributes to its
+    // footprint at that angle — see `ELIDE_MIN_WIDTH_CONTRIBUTION_PX`
+    // above). Before `#146` this asymmetry was unreachable: S5 was only
+    // ever entered at `gap_px == 0`, where subtracting the gap would have
+    // been a no-op either way. The `{N, false}` state now reaches S5 with a
+    // nonzero gap and exposes it for the first time. Do not "fix" this by
+    // adding a gap term here — that would destroy text for no gain.
     let mut elided_count: u32 = 0;
     let elided_labels: Vec<String> = labels
         .iter()
@@ -2585,7 +2719,7 @@ pub fn layout_x_axis(
     label_font_size: f64,
     title_font_size: f64,
     axis_title_padding: f64,
-    cull_threshold: u32,
+    label_gap: LabelGapPolicy,
     tick_size: f64,
     metrics: &dyn TextMetrics,
 ) -> (AxisLayout, Option<AxisLabelWarning>) {
@@ -2658,7 +2792,7 @@ pub fn layout_x_axis(
             &input.tick_labels,
             cascade_slot_w,
             label_font_size,
-            cull_threshold,
+            label_gap,
             input.overrides.label_overlap,
             metrics,
         );
@@ -2818,6 +2952,14 @@ pub fn layout_x_axis(
 mod tests {
     use super::*;
     use crate::scale::discrete::DiscreteLayout;
+
+    /// The pre-`#146` `cull_threshold: u32` argument, as the policy it maps
+    /// to. Every call site reading `legacy_gap(N)` asserts the legacy
+    /// `Theme(cull_threshold=N)` behavior, which the mode/magnitude split
+    /// leaves unchanged.
+    fn legacy_gap(cull_threshold: u32) -> LabelGapPolicy {
+        LabelGapPolicy::from_cull_threshold(cull_threshold)
+    }
 
     /// Test helper: `AxisInput::new` plus the theme-default fold
     /// `AxesInput::apply_show_defaults` performs in production, so per-axis
@@ -3063,7 +3205,7 @@ mod tests {
         let m = mock(10.0); // 10 px/char
         let labels = vec!["ab".into(), "cd".into()]; // 20 px each
         // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 4.0, true);
         // Flat band == tick_size(4.0) + label_pad_eff(2.0) + line_height(11) = 19.2.
         let expected = 4.0 + 2.0 + m.line_height(11.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
@@ -3078,7 +3220,7 @@ mod tests {
         // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
         let labels = vec!["aa_bb_cc".into()];
         // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, 0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, legacy_gap(0), None, 4.0, true);
         let expected = 4.0 + 2.0 + 3.0 * m.line_height(11.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
@@ -3091,7 +3233,7 @@ mod tests {
         // 12-char label, no break points → 120 px, cannot wrap.
         let labels = vec!["abcdefghijkl".into()];
         let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, 0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, legacy_gap(0), None, 4.0, true);
         // Must exceed the flat single-line band (a rotated/vertical reservation).
         assert!(band > m.line_height(11.0), "rotated band must exceed flat: {band}");
     }
@@ -3103,7 +3245,7 @@ mod tests {
         let m = mock(10.0);
         let labels = vec!["abc".into()];
         // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, 0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, 4.0, true);
         let expected = rotated_x_label_extent(-45.0, 30.0, 11.0, m.line_height(11.0), 4.0, 2.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
@@ -3492,10 +3634,10 @@ mod tests {
         let input = axis_input(AxisOrient::Bottom, None, labels, None);
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let (axis, _) =
-            layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, 8, tick_size, &m);
+            layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, legacy_gap(8), tick_size, &m);
 
         let band =
-            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, 0, None, tick_size, true);
+            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
 
         let theme = crate::layout::ThemeInputs::default();
         let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None).into_nodes();
@@ -3561,7 +3703,7 @@ mod tests {
         input.categorical_placement =
             Some(CategoricalPlacement::Absolute(vec![67.5, 122.5, 177.5, 232.5]));
         let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
     }
@@ -3579,7 +3721,7 @@ mod tests {
             let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
             input.categorical_placement =
                 Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
-            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
             axis.ticks.iter().map(|t| t.position).collect::<Vec<f64>>()
         };
 
@@ -3603,7 +3745,7 @@ mod tests {
         let input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
         assert!(input.categorical_placement.is_none());
         let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![137.5, 212.5, 287.5, 362.5]);
     }
@@ -3673,7 +3815,7 @@ mod tests {
         let angle = |placement: Option<CategoricalPlacement>| {
             let mut input = axis_input(AxisOrient::Bottom, None, labels.clone(), None);
             input.categorical_placement = placement;
-            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
             axis.ticks[0].label_angle
         };
         let panel_extent = |layout| Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
@@ -3818,7 +3960,7 @@ mod tests {
         input.orient = AxisOrient::Top;
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 30, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(30), 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Top);
         // Axis line at the panel top, not the bottom.
         assert!((axis.axis_line.y - 50.0).abs() < 1e-9);
@@ -3839,7 +3981,7 @@ mod tests {
         );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 30, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(30), 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Bottom);
         assert!((axis.axis_line.y - (50.0 + 200.0)).abs() < 1e-9);
         let title = axis.title.unwrap();
@@ -3857,7 +3999,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 50.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert_eq!(axis.ticks.len(), 4);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
@@ -3876,7 +4018,7 @@ mod tests {
         );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!((axis.ticks[0].position - (100.0 + 50.0)).abs() < 1e-9);
         assert!((axis.ticks[1].position - (100.0 + 150.0)).abs() < 1e-9);
         assert!((axis.ticks[2].position - (100.0 + 250.0)).abs() < 1e-9);
@@ -3902,7 +4044,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided);
@@ -3919,7 +4061,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
         }
@@ -3938,7 +4080,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 95.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -30.0);
             assert!(!t.elided, "rotated projection should fit; no elision");
@@ -3958,7 +4100,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -45.0);
             assert!(t.elided, "expected all 20 labels to be elided with override");
@@ -3984,7 +4126,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided, "cascade should resolve at -90 without elision");
@@ -4003,7 +4145,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert!(t.elided);
             assert!(t.label.is_char_boundary(t.label.len()));
@@ -4093,7 +4235,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
 
         assert!(axis.minor_ticks.is_empty(), "gate off must produce no minors");
         assert_eq!(axis.ticks.len(), 4);
@@ -4136,7 +4278,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
 
         // Majors unchanged: 2 labeled ticks at 100 and 300.
         assert_eq!(axis.ticks.len(), 2);
@@ -4207,7 +4349,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
 
         assert!(axis.minor_ticks.is_empty(), "no positions → no minors");
         assert_eq!(axis.ticks.len(), 3);
@@ -4241,7 +4383,7 @@ mod tests {
 
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
 
         // Inset band (8, 592), span 584 → minor at f=0.25: 8 + 0.25*584 = 154.
         assert_eq!(axis.minor_ticks.len(), 1);
@@ -4267,7 +4409,7 @@ mod tests {
             major: vec![0.25],
             minor: Vec::new(),
         });
-        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         let major_px = major_axis.ticks[0].position;
         assert!(
             (minor_px - major_px).abs() < 1e-9,
@@ -4454,7 +4596,7 @@ mod tests {
         // "AAAA"=4*10=40 <= 90 -> no collision -> S0 flat.
         let labels: Vec<String> = vec!["AAAA".into(), "BBBB".into(), "CCCC".into(), "DDDD".into()];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Flat);
@@ -4478,7 +4620,7 @@ mod tests {
             "minimal_context".into(),
         ];
         let m = mock(6.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Wrapped);
@@ -4504,7 +4646,7 @@ mod tests {
             measure: |text: &str, font_size: f64| text.chars().count() as f64 * font_size * 0.5,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 60.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 60.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(result.angle, 0.0);
         assert_eq!(result.strategy, CascadeStrategy::FontReduced);
         let expected_fs = 11.0 * 0.82;
@@ -4529,7 +4671,7 @@ mod tests {
             "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 80.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -60.0 });
         assert_eq!(result.angle, -60.0);
         assert!(result.font_size.is_none());
@@ -4557,7 +4699,7 @@ mod tests {
             "ABCDEF".into(), "GHIJKL".into(), "MNOPQR".into(), "STUVWX".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 55.0, 11.0, 0, None, &m);
+        let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
         assert_eq!(result.angle, -45.0);
     }
@@ -4578,7 +4720,7 @@ mod tests {
         // "LONGCATEGORY00".."LONGCATEGORY19" = 14 chars * 10px/char = 140px each.
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 // max footprint at -90 ~= line_h = 13.2; stride is the additive
@@ -4604,7 +4746,7 @@ mod tests {
     fn cascade_cull_threshold_zero_never_culls() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
         assert!(
             !matches!(result.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=0 must never cull; got {:?}",
@@ -4627,7 +4769,7 @@ mod tests {
     fn cascade_genuinely_fitting_rotation_wins_over_culling() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 22.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 22.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -4651,7 +4793,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
         // 20 > 8 (cull_threshold) -> culling eligible.
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
@@ -4678,19 +4820,179 @@ mod tests {
         let m = MockMetrics { measure: |_text: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
         let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
 
-        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
         assert!(
             matches!(disabled.strategy, CascadeStrategy::Elided { .. }),
             "cull_threshold=0 must disable culling entirely; expected Elided, got {:?}",
             disabled.strategy
         );
 
-        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, 1, None, &m);
+        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(1), None, &m);
         assert!(
             matches!(enabled.strategy, CascadeStrategy::Culled { .. }),
             "cull_threshold=1 must enable culling; expected Culled, got {:?}",
             enabled.strategy
         );
+    }
+
+    /// `#146` / spec §4.4 — mode and magnitude are now independent, and the
+    /// legacy integer spelling still maps onto exactly the two corners it
+    /// always meant.
+    ///
+    /// The last two assertions below are this test's actual guarantee: the
+    /// default's `cull` mode survives a change to the default's `gap_px`.
+    /// They do NOT prove `Default` is independently *implemented* today —
+    /// at the current constants (`DEFAULT_GAP_PX = 8`, `DEFAULT_CULL =
+    /// true`) a `Default` rewritten as `Self::from_cull_threshold(Self::
+    /// DEFAULT_GAP_PX)` would compute `cull: 8 > 0 == true`, which is
+    /// bit-identical to the real `DEFAULT_CULL`. That rewrite is an
+    /// equivalent mutant *right now* — it changes the implementation
+    /// without changing any observable value, so no assertion on `Default`'s
+    /// output can distinguish it, and none should try to (chasing an
+    /// equivalent mutant is how the source-grep version of this test got
+    /// written and then reverted). The rewrite stops being equivalent the
+    /// moment `#134` moves `DEFAULT_GAP_PX` to `0`: a derived `Default`
+    /// would then silently compute `cull: 0 > 0 == false`, while the real
+    /// (independent) one still yields `DEFAULT_CULL`. The `d.may_cull() ==
+    /// LabelGapPolicy::DEFAULT_CULL` assertion is exactly what catches that
+    /// — it fails the instant the coincidence breaks, which is the moment
+    /// this guard is actually needed.
+    #[test]
+    fn label_gap_policy_default_mode_survives_default_gap_change() {
+        assert_eq!(LabelGapPolicy::from_cull_threshold(0).gap_px(), 0);
+        assert!(!LabelGapPolicy::from_cull_threshold(0).may_cull());
+        assert_eq!(LabelGapPolicy::from_cull_threshold(30).gap_px(), 30);
+        assert!(LabelGapPolicy::from_cull_threshold(30).may_cull());
+
+        // The default is the legacy default gap plus an INDEPENDENTLY
+        // declared mode, so `#134` can move `DEFAULT_GAP_PX` alone — even to
+        // `0` — without silently flipping culling off with it.
+        let d = LabelGapPolicy::default();
+        assert_eq!(d.gap_px(), LabelGapPolicy::DEFAULT_GAP_PX);
+        assert_eq!(d.may_cull(), LabelGapPolicy::DEFAULT_CULL);
+    }
+
+    /// `#146` — the two Theme keys resolve in one place, and `cull_labels=`
+    /// wins over the magnitude's legacy implication without disturbing it.
+    #[test]
+    fn label_gap_policy_with_overrides_resolves_both_theme_keys() {
+        let base = LabelGapPolicy::default();
+
+        // Neither key: unchanged.
+        assert_eq!(base.with_overrides(None, None), base);
+
+        // `cull_threshold=` alone keeps its pre-split meaning on BOTH axes.
+        assert_eq!(base.with_overrides(Some(0), None), LabelGapPolicy::from_cull_threshold(0));
+        assert_eq!(base.with_overrides(Some(30), None), LabelGapPolicy::from_cull_threshold(30));
+
+        // `cull_labels=` alone changes only the mode.
+        let no_cull = base.with_overrides(None, Some(false));
+        assert_eq!(no_cull.gap_px(), LabelGapPolicy::DEFAULT_GAP_PX);
+        assert!(!no_cull.may_cull());
+
+        // Both: the explicit mode wins over the magnitude's implication, in
+        // both directions — these are the two states the old `u32` could not
+        // spell.
+        let gap_no_cull = base.with_overrides(Some(30), Some(false));
+        assert_eq!(gap_no_cull.gap_px(), 30);
+        assert!(!gap_no_cull.may_cull());
+        let no_gap_cull = base.with_overrides(Some(0), Some(true));
+        assert_eq!(no_gap_cull.gap_px(), 0);
+        assert!(no_gap_cull.may_cull());
+    }
+
+    /// `#146` / spec §4.4 — "require a gap of N px AND never drop a label" is
+    /// a distinct cascade outcome from both legacy spellings at the same
+    /// fixture. `{gap: 30, cull: false}` must keep every label (S5's
+    /// infeasible-truncation guard leaves them intact at -90°) where
+    /// `{gap: 30, cull: true}` drops some, and must NOT collapse to
+    /// `{gap: 0, cull: false}`, whose wider S0-S3 budget resolves flat.
+    #[test]
+    fn cascade_gap_without_culling_is_distinct_from_both_legacy_spellings() {
+        let m = MockMetrics { measure: |_t: &str, _fs: f64| 20.0, line_h_factor: 1.2 };
+        let labels: Vec<String> = (0..12).map(|i| format!("L{i}")).collect();
+        let slot_w = 40.0;
+
+        // `{gap: 0, cull: false}`: 36px of budget for a 20px label -> S0 flat.
+        let no_gap = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(0), None, &m);
+        assert!(
+            matches!(no_gap.strategy, CascadeStrategy::Flat),
+            "no gap requirement must resolve flat here; got {:?}",
+            no_gap.strategy
+        );
+        assert!(no_gap.visible.iter().all(|v| *v));
+
+        // `{gap: 30, cull: true}`: 6px of budget -> every stage fails -> S4 culls.
+        let gap_cull = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(30), None, &m);
+        assert!(
+            matches!(gap_cull.strategy, CascadeStrategy::Culled { .. }),
+            "a 30px gap with culling allowed must cull; got {:?}",
+            gap_cull.strategy
+        );
+        assert!(
+            gap_cull.visible.iter().any(|v| !*v),
+            "culling must actually drop labels"
+        );
+
+        // `{gap: 30, cull: false}`: same failed stages, but S4 is closed, so
+        // every label survives at the steepest angle. Distinct from BOTH.
+        let gap_no_cull = cascade_collision_recovery(
+            &labels,
+            slot_w,
+            11.0,
+            LabelGapPolicy::from_cull_threshold(30).with_overrides(None, Some(false)),
+            None,
+            &m,
+        );
+        assert!(
+            gap_no_cull.visible.iter().all(|v| *v),
+            "a policy that forbids culling must never drop a label; got {:?}",
+            gap_no_cull.strategy
+        );
+        assert_eq!(
+            gap_no_cull.angle, -90.0,
+            "the gap still drove the cascade past flat/wrap/font-shrink/rotate"
+        );
+        assert_ne!(
+            gap_no_cull.angle, no_gap.angle,
+            "gap-30-never-cull must not collapse onto gap-0-never-cull"
+        );
+    }
+
+    /// `#146` — the fourth corner: no gap requirement, but culling permitted.
+    /// Unreachable from the old integer (`0` forbade culling too), so this
+    /// pins that it culls on genuine overlap alone, without the extra gap.
+    #[test]
+    fn cascade_culling_without_a_gap_requirement_culls_only_on_overlap() {
+        let m = MockMetrics { measure: |_t: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
+        let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
+        let policy = LabelGapPolicy::from_cull_threshold(0).with_overrides(None, Some(true));
+        assert_eq!(policy.gap_px(), 0);
+
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, policy, None, &m);
+        assert!(
+            matches!(result.strategy, CascadeStrategy::Culled { .. }),
+            "culling permitted at gap 0 must still cull a genuinely overlapping axis; \
+             got {:?}",
+            result.strategy
+        );
+    }
+
+    /// `#146` — the gap MAGNITUDE alone drives the wrap-uniformization
+    /// post-process, independent of whether culling is permitted, so the
+    /// mode split cannot silently change wrapped label text.
+    #[test]
+    fn uniformize_keys_on_gap_magnitude_not_cull_mode() {
+        let m = MockMetrics { measure: |t: &str, _fs: f64| t.len() as f64 * 6.0, line_h_factor: 1.2 };
+        let raw = vec!["One Two Three Four".to_string(), "Two Words".to_string()];
+        let natural: Vec<String> =
+            vec!["One Two\nThree Four".to_string(), "Two Words".to_string()];
+
+        let at_zero = uniformize_wrapped_labels(&raw, natural.clone(), 0, 60.0, 11.0, &m);
+        assert_eq!(at_zero, natural, "gap 0 must leave the natural wrap untouched");
+
+        let at_eight = uniformize_wrapped_labels(&raw, natural.clone(), 8, 60.0, 11.0, &m);
+        assert_ne!(at_eight, natural, "a positive gap must uniformize the sibling line counts");
     }
 
     #[test]
@@ -4712,7 +5014,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
         match result.strategy {
             CascadeStrategy::Elided { count } => {
                 assert!(count > 0, "expected some labels elided");
@@ -4746,7 +5048,7 @@ mod tests {
     fn cascade_s5_realistic_widths_falls_back_to_rotated_not_elision() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
         assert_eq!(
             result.strategy,
             CascadeStrategy::Rotated { angle: -90.0 },
@@ -4785,7 +5087,7 @@ mod tests {
         .map(String::from)
         .collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 12.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 12.0, 11.0, legacy_gap(8), None, &m);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 2, "expected stride 2, got {stride}");
@@ -4822,7 +5124,7 @@ mod tests {
     fn cascade_culled_survivors_stay_rotated_when_still_too_wide() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(8), None, &m);
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 assert_eq!(stride, 3, "expected stride 3, got {stride}");
@@ -4866,7 +5168,7 @@ mod tests {
 
         // The real cascade, at this fixture, resolves Culled { stride: 2 }
         // at angle 0.0 (flat) — see the pin above.
-        let cascade_result = cascade_collision_recovery(&labels, 12.0, label_font_size, 8, None, &m);
+        let cascade_result = cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m);
         assert_eq!(cascade_result.angle, 0.0);
 
         // The actual space flat rendering needs.
@@ -4881,7 +5183,7 @@ mod tests {
             None,
             &m,
             12.0,
-            8,
+            legacy_gap(8),
             None,
             tick_size,
             true,
@@ -4932,7 +5234,7 @@ mod tests {
         ];
         let m = mock(5.0); // fixed_width: chars * 5
         let slot_w = 600.0 / 9.0; // ~66.67
-        let result = cascade_collision_recovery(&labels, slot_w, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, slot_w, 11.0, legacy_gap(8), None, &m);
         // Verify: no elision.
         assert!(
             !matches!(result.strategy, CascadeStrategy::Elided { .. }),
@@ -4967,7 +5269,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0, "override should force -90");
             // Labels should not be wrapped (override bypasses cascade).
@@ -4993,7 +5295,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 0, 4.0, &m);
+        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(0), 4.0, &m);
         assert!(
             matches!(warning, Some(AxisLabelWarning::LabelsElided { .. })),
             "expected LabelsElided warning; got {:?}",
@@ -5012,7 +5314,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!(warning.is_none(), "rotation should not produce LabelsElided warning");
     }
 
@@ -5027,7 +5329,7 @@ mod tests {
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
         let expected = tick_size + 2.0 + line_h; // label_pad_eff default = 2.0
         assert!(
             (band - expected).abs() < 1e-9,
@@ -5050,7 +5352,7 @@ mod tests {
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
         let expected = tick_size + 2.0 + 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
@@ -5076,11 +5378,11 @@ mod tests {
         // Flat case (same fixture as `estimate_flat_labels`).
         let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let flat_off =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, false);
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, false);
         assert_eq!(flat_off, 0.0, "labels-off flat band reserves nothing");
         // Contrast: labels drawn DOES reserve the #97 standoff for the same input.
         let flat_on =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
         assert!(
             (flat_on - (tick_size + 2.0 + line_h)).abs() < 1e-9,
             "labels-on flat band should still be tick_size + label_pad_eff + line_h"
@@ -5092,7 +5394,8 @@ mod tests {
         for padding in [Some(40.0), Some(-100.0)] {
             assert_eq!(
                 estimate_x_label_band(
-                    &flat_labels, 11.0, None, &m, 100.0, 0, padding, tick_size, false,
+                    &flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), padding, tick_size,
+                    false,
                 ),
                 0.0,
                 "labels-off band must be zero for label_padding={padding:?}"
@@ -5103,14 +5406,14 @@ mod tests {
         // and reserve the full `rotated_x_label_extent`.
         assert_eq!(
             estimate_x_label_band(
-                &flat_labels, 11.0, Some(-45.0), &m, 100.0, 0, None, tick_size, false,
+                &flat_labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, tick_size, false,
             ),
             0.0,
             "#182 widened the gate past flat/wrapped: a rotated labels-off axis reserves nothing"
         );
         assert!(
             estimate_x_label_band(
-                &flat_labels, 11.0, Some(-45.0), &m, 100.0, 0, None, tick_size, true,
+                &flat_labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, tick_size, true,
             ) > 0.0,
             "the same rotated axis WITH labels drawn still reserves its extent"
         );
@@ -5125,10 +5428,10 @@ mod tests {
         let m6 = mock(6.0);
         let line_h6 = m6.line_height(11.0);
         let wrapped_off =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, false);
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, legacy_gap(0), None, tick_size, false);
         assert_eq!(wrapped_off, 0.0, "labels-off wrapped band reserves nothing");
         let wrapped_on =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, true);
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, legacy_gap(0), None, tick_size, true);
         assert!(
             (wrapped_on - (tick_size + 2.0 + 2.0 * line_h6)).abs() < 1e-9,
             "labels-on wrapped band should still be tick_size + label_pad_eff + 2*line_h"
@@ -5155,7 +5458,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
         // Full geometric extent (mirrors the render pivot): the old too-tight
         // formula was `sin·max_w + cos·line_h`; the band now adds the pivot
         // offset `tick_size + label_pad + sin·font_size` on top of it.
@@ -5182,7 +5485,7 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, legacy_gap(0), None, tick_size, true);
         // At -90°: sin=1, cos=0 → full vertical extent =
         // tick_size + label_pad + font_size + max_label_w.
         let label_pad = 2.0; // default
@@ -5200,7 +5503,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, legacy_gap(0), None, tick_size, true);
         // Full geometric extent at -45° (mirrors the render pivot).
         let angle_rad = (-45.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
@@ -5221,7 +5524,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, 0, None, 4.0, true);
+        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, legacy_gap(0), None, 4.0, true);
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -5238,7 +5541,7 @@ mod tests {
             line_h_factor: 1.2,
         };
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, legacy_gap(0), None, tick_size, true);
         // Vertical fallback: tick_size + label_pad + font_size + max_label_w.
         // At 1e18 the additive terms vanish into float epsilon, so the band is
         // dominated by max_label_w (1e18). Compare with a generous tolerance.
@@ -5275,7 +5578,7 @@ mod tests {
         let line_h = m.line_height(font_size);
         let max_label_w = 100.0; // 10 chars * 10px
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
 
         // Cascade resolves at -60° here.
         let angle_rad = (-60.0_f64).to_radians();
@@ -5301,7 +5604,7 @@ mod tests {
         let m = MockMetrics { measure: |_, _| 5_000.0, line_h_factor: 1.2 };
         let font_size = 11.0;
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, legacy_gap(0), None, tick_size, true);
         let label_pad = 2.0; // default
         let expected = tick_size + label_pad + font_size + 5_000.0;
         assert!(
@@ -5319,8 +5622,8 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 0.0, true);
-        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 8.0, true);
+        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 0.0, true);
+        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 8.0, true);
         let expected_ts0 = 0.0 + 2.0 + line_h;
         assert!(
             (band_ts0 - expected_ts0).abs() < 1e-9,
@@ -5345,8 +5648,8 @@ mod tests {
         ];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, Some(2.0), tick_size, true);
-        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, Some(12.0), tick_size, true);
+        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), Some(2.0), tick_size, true);
+        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), Some(12.0), tick_size, true);
         let delta = 12.0 - 2.0;
         assert!(
             (band_wider - band_default - delta).abs() < 1e-6,
@@ -5382,7 +5685,7 @@ mod tests {
         let true_extent =
             tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, 0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
         assert!(
             band >= true_extent,
             "band ({band}) must cover the true label extent ({true_extent}) so the \
@@ -5444,7 +5747,7 @@ mod tests {
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
             &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            8, tick_size, &m,
+            legacy_gap(8), tick_size, &m,
         );
 
         // The labels must have rotated (non-zero angle) for this test to be meaningful.
@@ -5500,7 +5803,7 @@ mod tests {
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
             &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            8, tick_size, &m,
+            legacy_gap(8), tick_size, &m,
         );
         // All flat.
         for t in &axis.ticks {
@@ -5547,7 +5850,7 @@ mod tests {
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
             &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            8, tick_size, &m,
+            legacy_gap(8), tick_size, &m,
         );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
@@ -5576,7 +5879,7 @@ mod tests {
         labels_on.overrides.show_labels = Some(true);
         let (axis_on, _) = layout_x_axis(
             &labels_on, panel_area, 0, label_font_size, title_font_size, title_padding,
-            8, tick_size, &m,
+            legacy_gap(8), tick_size, &m,
         );
         let title_on = axis_on.title.expect("title present");
         assert!(
@@ -5617,7 +5920,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert_eq!(axis.ticks.len(), 3);
         assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "got {}", axis.ticks[0].position);
         assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
@@ -5639,7 +5942,7 @@ mod tests {
         );
         let panel = Rect { x: 100.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!((axis.ticks[0].position - 108.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 692.0).abs() < 1e-9);
     }
@@ -5657,7 +5960,7 @@ mod tests {
         assert!(input.tick_projection.is_none());
         let panel = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!((axis.ticks[0].position - 150.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 250.0).abs() < 1e-9);
         assert!((axis.ticks[2].position - 350.0).abs() < 1e-9);
@@ -5723,7 +6026,7 @@ mod tests {
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         // Each label is 70px wide. Uniform slot=100 → would stay flat (70<90).
         let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         // The tightest gap is between fractions 0.965 and 1.0 over inset span 584:
         // 0.035 * 584 ≈ 20.4px. 70px labels cannot stay flat at that gap, so the
         // cascade must rotate (non-zero angle) — proving it used the real min gap,
@@ -5750,7 +6053,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0));
     }
 
@@ -5765,7 +6068,7 @@ mod tests {
         //     cos(-60)*80 = 40.0 ≤ 40 → passes at -60.
         let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, 0, label_padding, 4.0, true)
+        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, legacy_gap(0), label_padding, 4.0, true)
     }
 
     #[test]
@@ -5798,7 +6101,7 @@ mod tests {
         let labels = dense_labels();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::ShowAll), &m);
+            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::ShowAll), &m);
         assert_eq!(result.strategy, CascadeStrategy::Flat);
         assert_eq!(result.angle, 0.0);
         assert!(result.visible.iter().all(|v| *v), "ShowAll must keep all labels visible");
@@ -5811,7 +6114,7 @@ mod tests {
         let labels = dense_labels();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Parity), &m);
+            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Parity), &m);
         assert_eq!(result.strategy, CascadeStrategy::Culled { stride: 2 });
         let visible: Vec<bool> = result.visible;
         assert_eq!(visible, vec![true, false, true, false, true, false]);
@@ -5825,7 +6128,7 @@ mod tests {
         let labels = dense_labels();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Rotate), &m);
+            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Rotate), &m);
         let steepest = *ANGLE_CASCADE.last().unwrap();
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: steepest });
         assert_eq!(result.angle, steepest);
@@ -5838,8 +6141,8 @@ mod tests {
         let labels = dense_labels();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let greedy =
-            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Greedy), &m);
-        let default = cascade_collision_recovery(&labels, 40.0, 11.0, 8, None, &m);
+            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Greedy), &m);
+        let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(greedy.strategy, default.strategy);
         assert_eq!(greedy.angle, default.angle);
         assert_eq!(greedy.visible, default.visible);
@@ -5872,7 +6175,7 @@ mod tests {
         input.overrides.label_overlap = Some(LabelOverlap::Parity);
         let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);
+        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, legacy_gap(8), 4.0, &m);
         let culled: Vec<bool> = axis.ticks.iter().map(|t| t.culled).collect();
         assert_eq!(culled, vec![false, true, false, true, false, true]);
     }
@@ -5890,7 +6193,7 @@ mod tests {
         input.overrides.label_overlap = Some(LabelOverlap::ShowAll);
         let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);
+        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, legacy_gap(8), 4.0, &m);
         assert!(axis.ticks.iter().all(|t| !t.culled), "ShowAll must cull nothing");
         assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0), "ShowAll stays flat");
     }

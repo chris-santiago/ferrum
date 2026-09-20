@@ -158,7 +158,10 @@ Notes:
 | `tick_color` | str | Tick mark color. |
 | `tick_size` | float | Tick mark length. |
 | `tick_width` | float | Tick mark width. |
-| `cull_threshold` | int | Minimum pixel gap required between adjacent tick labels; labels are dropped until the remaining ones are at least this many pixels apart. Set to `0` to disable culling entirely. |
+| `cull_threshold` | int | Minimum pixel gap required between adjacent tick labels. Labels are dropped until the remaining ones are at least this many pixels apart, unless `cull_labels=False` says otherwise. Set to `0` for no gap requirement (which also disables dropping, unless `cull_labels=True`). |
+| `cull_labels` | bool | May the layout engine DROP tick labels to reach `cull_threshold`'s gap? Defaults to yes for a positive `cull_threshold` and no for `0` (the pre-split behavior). Set it explicitly to separate the two: `Theme(cull_threshold=30, cull_labels=False)` keeps a 30px gap driving the wrap / font-shrink / rotate stages but never drops a label. |
+
+`cull_labels` is a theme-wide default; an explicit per-axis `fm.Axis(label_overlap=...)` always wins over it. `fm.Axis(label_overlap="parity")` still drops every other label, and `label_overlap="rotate"` / `"true"` still force their own outcome, even under a theme-wide `cull_labels=False` — the per-axis spelling short-circuits the cascade before `cull_labels` is ever consulted.
 
 ### Marks
 

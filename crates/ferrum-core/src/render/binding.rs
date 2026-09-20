@@ -620,6 +620,7 @@ const THEME_KNOWN_KEYS: &[&str] = &[
     "row_padding",
     // Axis label culling
     "cull_threshold",
+    "cull_labels",
 ];
 
 /// The color-typed subset of [`THEME_KNOWN_KEYS`] — keys whose values are
@@ -760,8 +761,10 @@ struct ThemeOverridesSpec {
     column_padding: Option<f64>,
     row_padding: Option<f64>,
 
-    // Axis label culling
+    // Axis label culling — magnitude and mode, independently settable
+    // (`#146`; see `layout::LabelGapPolicy`).
     cull_threshold: Option<u32>,
+    cull_labels: Option<bool>,
 }
 
 fn parse_color_val(s: &str) -> PyResult<super::color::Color> {
@@ -904,8 +907,10 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     if let Some(v) = spec.column_padding { t.padding.column_padding = v; }
     if let Some(v) = spec.row_padding { t.padding.row_padding = v; }
 
-    // Axis label culling
-    if let Some(v) = spec.cull_threshold { t.cull_threshold = v; }
+    // Axis label culling — one resolution for both keys, so `cull_threshold=`
+    // alone keeps its pre-split meaning and `cull_labels=` can override the
+    // mode at any gap (`#146`).
+    t.label_gap = t.label_gap.with_overrides(spec.cull_threshold, spec.cull_labels);
 
     Ok(())
 }
@@ -948,6 +953,58 @@ mod theme_dict_tests {
             assert_eq!(t.colors.background_color.red, 0xFF);
             assert_eq!(t.colors.background_color.green, 0x00);
             assert_eq!(t.colors.background_color.blue, 0x00);
+        });
+    }
+
+    /// `#146` — the two axis-label-culling keys are independent on the wire.
+    /// `cull_threshold=` alone still means what it always meant (magnitude
+    /// AND mode); `cull_labels=` sets the mode alone; together they reach the
+    /// two states the single integer could not spell.
+    #[test]
+    fn cull_threshold_and_cull_labels_resolve_independently() {
+        use crate::layout::LabelGapPolicy;
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Neither key: the built-in default.
+            let d = PyDict::new(py);
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap, LabelGapPolicy::default());
+
+            // `cull_threshold` alone: the legacy coupling, both directions.
+            let d = PyDict::new(py);
+            d.set_item("cull_threshold", 0_u32).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap.gap_px(), 0);
+            assert!(!t.label_gap.may_cull(), "cull_threshold=0 still disables culling");
+
+            let d = PyDict::new(py);
+            d.set_item("cull_threshold", 30_u32).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap.gap_px(), 30);
+            assert!(t.label_gap.may_cull(), "a positive cull_threshold still enables culling");
+
+            // `cull_labels` alone: the mode moves, the default gap does not.
+            let d = PyDict::new(py);
+            d.set_item("cull_labels", false).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap.gap_px(), LabelGapPolicy::DEFAULT_GAP_PX);
+            assert!(!t.label_gap.may_cull());
+
+            // Both: the new "gap of N AND never cull" state.
+            let d = PyDict::new(py);
+            d.set_item("cull_threshold", 30_u32).unwrap();
+            d.set_item("cull_labels", false).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap.gap_px(), 30);
+            assert!(!t.label_gap.may_cull());
+
+            // And its mirror: no gap requirement, culling permitted.
+            let d = PyDict::new(py);
+            d.set_item("cull_threshold", 0_u32).unwrap();
+            d.set_item("cull_labels", true).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.label_gap.gap_px(), 0);
+            assert!(t.label_gap.may_cull());
         });
     }
 
@@ -1107,7 +1164,7 @@ mod theme_dict_tests {
             "minor_grid_dash",
             "reference_line_dash",
         ];
-        const BOOL_KEYS: &[&str] = &["axis_line", "grid", "minor"];
+        const BOOL_KEYS: &[&str] = &["axis_line", "grid", "minor", "cull_labels"];
         const F64_KEYS: &[&str] = &[
             "padding",
             "font_size",

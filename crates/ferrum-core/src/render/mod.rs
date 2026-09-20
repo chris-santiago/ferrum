@@ -3608,6 +3608,201 @@ mod orchestration_tests {
         assert!(svg.contains(">c<") || svg.contains(">c</text>"));
     }
 
+    /// Build a two-panel faceted bar chart over `n_cats` unique categories on
+    /// x, with `resolve.x` set by `x_resolve`. Dense enough on a narrow
+    /// viewport that the x-label cascade must degrade, so the rendered tick
+    /// count is a live readout of the label-gap policy.
+    fn dense_faceted_categorical(
+        n_cats: usize,
+        x_resolve: crate::layout::ResolveMode,
+    ) -> (ChartSpec, RecordBatch) {
+        let cats: Vec<String> = (0..n_cats).map(|i| format!("Cat{i:02}")).collect();
+        let mut x_vals: Vec<String> = Vec::new();
+        let mut y_vals: Vec<f64> = Vec::new();
+        let mut panels: Vec<String> = Vec::new();
+        for panel in ["A", "B"] {
+            for (i, c) in cats.iter().enumerate() {
+                x_vals.push(c.clone());
+                y_vals.push(i as f64 + 1.0);
+                panels.push(panel.to_string());
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("panel", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(x_vals)),
+                Arc::new(Float64Array::from(y_vals)),
+                Arc::new(StringArray::from(panels)),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "panel".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve {
+                    x: x_resolve,
+                    y: crate::layout::ResolveMode::Shared,
+                },
+            }),
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        (spec, batch)
+    }
+
+    /// Count the rendered `CatNN` x tick labels in an SVG. Every category
+    /// label is unique, so this is the visible-label count, not a node count.
+    fn count_cat_labels(svg: &str) -> usize {
+        (0..100)
+            .filter(|i| svg.contains(&format!(">Cat{i:02}<")))
+            .count()
+    }
+
+    /// Render `spec`/`batch` under a theme whose label-gap policy is `policy`.
+    fn render_with_label_gap(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+        policy: crate::layout::LabelGapPolicy,
+    ) -> String {
+        let theme = ThemeInputs { label_gap: policy, ..ThemeInputs::default() };
+        render_svg(
+            spec,
+            batch,
+            &theme,
+            Viewport { width: 900.0, height: 400.0 },
+            &config::RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .unwrap()
+        .bytes
+    }
+
+    /// `#146` / spec §4.3 — THE DEFECT. An independent-x facet axis must honor
+    /// `Theme(cull_threshold=)` exactly as the shared-x path does.
+    ///
+    /// `scene_build::resolve_panel_axes` rebuilds a per-panel x axis for an
+    /// independent-x facet, and used to pass the compile-time
+    /// `DEFAULT_CULL_THRESHOLD` into `layout_x_axis` where every other call
+    /// site passes the theme's own value. The theme key was therefore entirely
+    /// INERT on that path: a dense axis rendered the same label count at every
+    /// setting. This asserts the count MOVES, and in the same direction the
+    /// shared-x path moves, which a hardcoded default cannot do.
+    #[test]
+    fn render_svg_independent_x_facet_honors_theme_cull_threshold() {
+        use crate::layout::{LabelGapPolicy, ResolveMode};
+
+        let (spec, batch) = dense_faceted_categorical(24, ResolveMode::Independent);
+        let wide = render_with_label_gap(
+            &spec,
+            &batch,
+            LabelGapPolicy::from_cull_threshold(60),
+        );
+        let none = render_with_label_gap(&spec, &batch, LabelGapPolicy::from_cull_threshold(0));
+        let default = render_with_label_gap(&spec, &batch, LabelGapPolicy::default());
+
+        let (n_wide, n_none, n_default) =
+            (count_cat_labels(&wide), count_cat_labels(&none), count_cat_labels(&default));
+        assert_eq!(
+            n_none, 24,
+            "cull_threshold=0 must keep every label on an independent-x facet; got {n_none}"
+        );
+        assert!(
+            n_wide < n_default,
+            "a 60px gap must drop MORE labels than the default on an independent-x \
+             facet axis (pre-fix all three were equal); got wide={n_wide} default={n_default}"
+        );
+        assert!(
+            n_default < n_none,
+            "the default gap must drop labels an independent-x facet axis keeps at \
+             cull_threshold=0; got default={n_default} none={n_none}"
+        );
+    }
+
+    /// The independent-x fix reaches the same conclusion the shared-x path
+    /// does: same data, same theme, same visible-label count on both facet
+    /// resolutions. Pre-fix the independent side was pinned to the default
+    /// whatever the theme said, so this held only at the default value.
+    #[test]
+    fn render_svg_independent_and_shared_facet_x_agree_on_label_gap() {
+        use crate::layout::{LabelGapPolicy, ResolveMode};
+
+        for gap in [0_u32, 8, 60] {
+            let policy = LabelGapPolicy::from_cull_threshold(gap);
+            let (ind_spec, ind_batch) = dense_faceted_categorical(24, ResolveMode::Independent);
+            let (sh_spec, sh_batch) = dense_faceted_categorical(24, ResolveMode::Shared);
+            let n_ind = count_cat_labels(&render_with_label_gap(&ind_spec, &ind_batch, policy));
+            let n_sh = count_cat_labels(&render_with_label_gap(&sh_spec, &sh_batch, policy));
+            assert_eq!(
+                n_ind, n_sh,
+                "independent-x and shared-x facets must cull alike at cull_threshold={gap}"
+            );
+        }
+    }
+
+    /// `#146` / spec §4.4, criterion 5 — the previously unspellable state.
+    /// "Require a gap of N px AND never drop a label" must be observably
+    /// distinct from BOTH legacy spellings on the same chart.
+    #[test]
+    fn render_svg_gap_without_culling_differs_from_both_legacy_spellings() {
+        use crate::layout::{LabelGapPolicy, ResolveMode};
+
+        let (spec, batch) = dense_faceted_categorical(24, ResolveMode::Independent);
+        let no_gap = render_with_label_gap(&spec, &batch, LabelGapPolicy::from_cull_threshold(0));
+        let gap_cull =
+            render_with_label_gap(&spec, &batch, LabelGapPolicy::from_cull_threshold(60));
+        let gap_no_cull = render_with_label_gap(
+            &spec,
+            &batch,
+            LabelGapPolicy::from_cull_threshold(60).with_overrides(None, Some(false)),
+        );
+
+        assert_eq!(
+            count_cat_labels(&gap_no_cull),
+            24,
+            "a policy that forbids culling must keep every label"
+        );
+        assert!(
+            count_cat_labels(&gap_cull) < 24,
+            "the legacy gap-60 spelling must still drop labels"
+        );
+        assert_ne!(
+            gap_no_cull, no_gap,
+            "gap-60-never-cull must differ from no-gap-never-cull: the gap still \
+             drives the flat/wrap/font-shrink/rotate stages"
+        );
+        assert_ne!(
+            gap_no_cull, gap_cull,
+            "gap-60-never-cull must differ from gap-60-may-cull"
+        );
+    }
+
     /// #133, end to end through the real per-panel independent-facet-axis
     /// surface (`scene_build::resolve_panel_axes`'s `TickFormatMode::Immediate`
     /// path) — the third surface the issue's "both paths" phrasing did not

@@ -21,14 +21,12 @@ pub const DEFAULT_TITLE_FONT_SIZE: f64 = 13.0;
 pub(crate) const ANGLE_CASCADE: [f64; 5] = [0.0, -30.0, -45.0, -60.0, -90.0];
 /// Multiplicative factor applied to font size on each shrink step.
 pub(crate) const FONT_SHRINK_FACTOR: f64 = 0.82;
-/// Default maximum number of visible tick labels before culling kicks in.
-pub(crate) const DEFAULT_CULL_THRESHOLD: u32 = 8;
 
 use serde::{Deserialize, Serialize};
 
 pub use self::axis::{
-    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelOverlap, TickLayout,
-    TickProjection,
+    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelGapPolicy, LabelOverlap,
+    TickLayout, TickProjection,
 };
 pub(crate) use self::axis::AxisStyleOverrides;
 pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
@@ -594,7 +592,13 @@ impl Default for ThemeReferenceLine {
 /// Fields are organized into logical sub-structs. Accessor methods provide
 /// backward-compatible flat access for consumers that prefer `theme.field_name`
 /// style.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Default` is derived: the Paper Ink default identity (2026-05-12; warm
+/// cream background, blue lead mark, warm-tinted grid — see
+/// `docs/superpowers/specs/2026-05-12-custom-themes-design.md` §4) lives in
+/// each sub-struct's own `Default`, which is where a default value should be
+/// read and changed.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ThemeInputs {
     pub padding: ThemePadding,
     pub sizes: ThemeRenderSizes,
@@ -607,29 +611,12 @@ pub struct ThemeInputs {
     pub reference_line: ThemeReferenceLine,
 
     // Axis label overhaul
-    /// Maximum number of visible tick labels before culling kicks in.
-    /// Values above this threshold trigger label density reduction.
-    pub cull_threshold: u32,
-}
-
-impl Default for ThemeInputs {
-    fn default() -> Self {
-        // Paper Ink default identity (2026-05-12).
-        // Warm cream background, blue lead mark, warm-tinted grid.
-        // See docs/superpowers/specs/2026-05-12-custom-themes-design.md §4.
-        Self {
-            padding: ThemePadding::default(),
-            sizes: ThemeRenderSizes::default(),
-            colors: ThemeColors::default(),
-            typography: ThemeTypography::default(),
-            legend: ThemeLegend::default(),
-            grid: ThemeGrid::default(),
-            axis: ThemeAxis::default(),
-            palette: ThemePalette::default(),
-            reference_line: ThemeReferenceLine::default(),
-            cull_threshold: DEFAULT_CULL_THRESHOLD,
-        }
-    }
+    /// Minimum pixel gap the x tick-label cascade keeps between adjacent
+    /// visible labels, and whether it may drop labels to get it. Set by
+    /// `Theme(cull_threshold=)` / `Theme(cull_labels=)`; see
+    /// [`LabelGapPolicy`] for the four combinations and for where the
+    /// default's value lives.
+    pub label_gap: LabelGapPolicy,
 }
 
 /// 840: the strip-band size shared by the facet reservation, the per-panel column
@@ -910,7 +897,7 @@ fn reserve_axis_bands(
             axes.x.overrides.label_angle,
             metrics,
             estimated_slot_w,
-            theme.cull_threshold,
+            theme.label_gap,
             axes.x.overrides.label_padding,
             axes.x.tick_size(theme),
             axes.x.show_labels(),
@@ -1448,7 +1435,7 @@ fn auto_padding_for_axis_titles(
                     axes.x.overrides.label_angle,
                     metrics,
                     plot_w / n_labels as f64,
-                    theme.cull_threshold,
+                    theme.label_gap,
                     axes.x.overrides.label_padding,
                     axes.x.tick_size(theme),
                     axes.x.show_labels(),
@@ -1913,7 +1900,7 @@ fn layout_panel_axes(
                     x_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
-                    theme.cull_threshold,
+                    theme.label_gap,
                     x_input.tick_size(theme),
                     metrics,
                 );
@@ -2658,7 +2645,7 @@ mod tests {
         let mut axes = dummy_axes();
         // 20 long unsplittable x labels + a forced override angle: the
         // override branch's own collision check (not the graduated cascade)
-        // deterministically elides regardless of `cull_threshold`.
+        // deterministically elides regardless of the label-gap policy.
         axes.x = axis_input(
             AxisOrient::Bottom,
             None,

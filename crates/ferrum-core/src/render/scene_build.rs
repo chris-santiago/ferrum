@@ -1128,7 +1128,13 @@ fn resolve_panel_axes(
             x_label_fs,
             theme.typography.title_font_size,
             theme.padding.axis_title_padding,
-            crate::layout::DEFAULT_CULL_THRESHOLD,
+            // `#146`/spec §4.3: the theme's own policy, exactly as the three
+            // `layout::compute_layout` call sites pass it. This site used to
+            // hardcode the compile-time default, which made
+            // `Theme(cull_threshold=)` and `Theme(cull_labels=)` entirely
+            // inert on an independent-x facet axis while the shared-axis
+            // paths honored them.
+            theme.label_gap,
             x_input.tick_size(theme),
             facet_metrics,
         );
@@ -11123,7 +11129,7 @@ mod tests {
             11.0,
             13.0,
             8.0,
-            0,
+            crate::layout::LabelGapPolicy::from_cull_threshold(0),
             4.0,
             &m,
         );
@@ -11426,7 +11432,7 @@ mod tests {
                 11.0,
                 13.0,
                 8.0,
-                0,
+                crate::layout::LabelGapPolicy::from_cull_threshold(0),
                 4.0,
                 &m,
             );
