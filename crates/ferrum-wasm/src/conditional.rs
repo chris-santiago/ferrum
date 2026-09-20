@@ -1,8 +1,12 @@
-use ferrum_scene::{ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode};
+use ferrum_scene::{ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, SceneNode};
+// `Panel` is named only by the wasm32 render entry and this module's host tests
+// — every other signature here takes the panels inside an `InstanceLayout`.
+#[cfg(any(target_arch = "wasm32", test))]
+use ferrum_scene::Panel;
 
 use crate::scene_load::{
     batch_instance_spans, color_to_linear, stroke_dash_index, CircleInstance, DrawKind,
-    PackedBatchMeta, RectInstance,
+    InstanceLayout, PackedBatchMeta, RectInstance,
 };
 use crate::selection_state::SelectionState;
 
@@ -43,12 +47,15 @@ pub(crate) fn apply_conditionals_and_render(
 ) -> Result<String, wasm_bindgen::JsValue> {
     // Apply conditional encodings to produce dimmed/highlighted instance colors.
     let updates = resolve_conditionals_with_packed(
-        panels,
+        InstanceLayout {
+            panels,
+            packed_batch_meta: &loaded_data.packed_batch_meta,
+            draw_commands: &loaded_data.draw_commands,
+        },
         conditionals,
         &interaction_state.selections,
         &loaded_data.circle_instances,
         &loaded_data.rect_instances,
-        &loaded_data.packed_batch_meta,
     );
 
     // Re-upload only the instance buffers that changed (circle and rect
@@ -88,15 +95,13 @@ pub struct ConditionalUpdates {
 /// non-test host build does not flag it as dead code (host coverage is via the
 /// `#[cfg(test)]` unit test below).
 #[cfg(any(target_arch = "wasm32", test))]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_crossfilter_to_panel(
-    panels: &[Panel],
+    layout: InstanceLayout<'_>,
     target_panel: usize,
     selection: &SelectionState,
     dimmed_opacity: f64,
     circles: &mut [CircleInstance],
     rects: &mut [RectInstance],
-    packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
 ) {
     // A filtered-in mark keeps its opacity; a filtered-out mark is dimmed.
     // The targeted channel is implied by the value variant (`Opacity`); the
@@ -110,7 +115,7 @@ pub(crate) fn apply_crossfilter_to_panel(
         return;
     }
 
-    for span in batch_instance_spans(panels, packed_batch_meta) {
+    for span in batch_instance_spans(layout) {
         if span.panel_idx != target_panel {
             continue;
         }
@@ -150,39 +155,26 @@ pub(crate) struct InstanceBuffers<'a> {
     pub(crate) rect_offset: usize,
 }
 
-pub fn resolve_conditionals(
-    panels: &[Panel],
-    conditionals: &[ConditionalEncoding],
-    selections: &HashMap<String, SelectionState>,
-    base_circles: &[CircleInstance],
-    base_rects: &[RectInstance],
-) -> ConditionalUpdates {
-    resolve_conditionals_with_packed(
-        panels,
-        conditionals,
-        selections,
-        base_circles,
-        base_rects,
-        &HashMap::new(),
-    )
-}
-
+/// Apply every conditional encoding to a scene's instance buffers.
+///
+/// `layout` locates each mark batch's instances, and must come from the same
+/// loader pass that produced `base_circles`/`base_rects` (see
+/// [`InstanceLayout`]). The returned buffers are copies of those, with the
+/// selected/unselected value written onto the instances each conditional claims.
 pub fn resolve_conditionals_with_packed(
-    panels: &[Panel],
+    layout: InstanceLayout<'_>,
     conditionals: &[ConditionalEncoding],
     selections: &HashMap<String, SelectionState>,
     base_circles: &[CircleInstance],
     base_rects: &[RectInstance],
-    packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
 ) -> ConditionalUpdates {
     let mut circles = base_circles.to_vec();
     let mut rects = base_rects.to_vec();
 
     // Instance addresses come from the shared `batch_instance_spans` walk:
-    // packed batches sit at their absolute sidecar `instance_start`,
-    // non-packed batches follow in scene-graph order after ALL packed
-    // instances (`load_scene_with_packed` builds the arrays packed-first).
-    for span in batch_instance_spans(panels, packed_batch_meta) {
+    // packed batches sit at their absolute sidecar `instance_start`, non-packed
+    // batches at the offsets the loader recorded on their own draw commands.
+    for span in batch_instance_spans(layout) {
         for cond in conditionals {
             let Some(sel) = selections.get(&cond.selection_name) else {
                 continue;
@@ -574,6 +566,82 @@ mod tests {
     // longer dispatches on it (WASM-05: value is the source of truth).
     use ferrum_scene::{ChannelName, Color, FieldValue, LayoutScale};
 
+    use crate::scene_load::{load_scene, DrawCommand, MarkDrawTarget};
+
+    /// One mark draw command in the shape `SceneCollector::emit` records it:
+    /// `count` instances of `kind` at `start`, owned by `(panel_idx,
+    /// batch_idx)`.
+    ///
+    /// Spelled out by hand only for the packed fixtures below, whose absolute
+    /// sidecar offsets are asserted in the test's own layout comment; building
+    /// the binary sidecar instead would add a fourth copy of the packer's byte
+    /// format to this crate. Non-packed fixtures use [`loader_draw_commands`].
+    fn mark_cmd(
+        kind: DrawKind,
+        start: usize,
+        count: usize,
+        panel_idx: usize,
+        batch_idx: usize,
+    ) -> DrawCommand {
+        DrawCommand::new(
+            kind,
+            start,
+            count,
+            Some(MarkDrawTarget {
+                panel_id: panel_idx,
+                batch_idx,
+                y_slot: 0,
+                plot_area: Some([0.0, 0.0, 500.0, 500.0]),
+                additive: false,
+            }),
+        )
+    }
+
+    /// The draw commands the REAL loader records for these panels.
+    ///
+    /// `batch_instance_spans` reads a non-packed batch's instance offsets off
+    /// these commands (GH #105), so a hand-assembled list would pin the very
+    /// assumption the fix removed. Running `load_scene` instead means the
+    /// offsets under test are the ones production assigns.
+    fn loader_draw_commands(panels: &[Panel]) -> Vec<DrawCommand> {
+        let scene = ferrum_scene::SceneGraph {
+            width: 500.0,
+            height: 500.0,
+            background: None,
+            title: vec![],
+            panels: panels.to_vec(),
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: ferrum_scene::InteractionConfig::default(),
+            chart_description: None,
+        };
+        load_scene(&scene).draw_commands
+    }
+
+    /// [`resolve_conditionals_with_packed`] for a scene with no packed batches:
+    /// an empty sidecar map, and the loader's own draw commands.
+    fn resolve_conditionals(
+        panels: &[Panel],
+        conditionals: &[ConditionalEncoding],
+        selections: &HashMap<String, SelectionState>,
+        base_circles: &[CircleInstance],
+        base_rects: &[RectInstance],
+    ) -> ConditionalUpdates {
+        let draw_commands = loader_draw_commands(panels);
+        resolve_conditionals_with_packed(
+            InstanceLayout {
+                panels,
+                packed_batch_meta: &HashMap::new(),
+                draw_commands: &draw_commands,
+            },
+            conditionals,
+            selections,
+            base_circles,
+            base_rects,
+        )
+    }
+
     // ── D6 crossfilter: apply_crossfilter_to_panel dims only the target panel ─
 
     #[test]
@@ -685,13 +753,16 @@ mod tests {
         };
 
         apply_crossfilter_to_panel(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &HashMap::new(),
+                draw_commands: &loader_draw_commands(&panels),
+            },
             1,
             &sel,
             0.15,
             &mut circles,
             &mut rects,
-            &HashMap::new(),
         );
 
         // Source panel (index 0) mark must be untouched (full opacity).
@@ -798,13 +869,16 @@ mod tests {
             y_range: None,
         };
         apply_crossfilter_to_panel(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &HashMap::new(),
+                draw_commands: &loader_draw_commands(&panels),
+            },
             0,
             &sel,
             0.15,
             &mut circles,
             &mut rects,
-            &HashMap::new(),
         );
         assert!(
             (circles[0].opacity - 1.0).abs() < 1e-6,
@@ -2661,13 +2735,18 @@ mod tests {
             },
         );
 
+        // The sole batch is packed: its instances sit at the absolute sidecar
+        // range, which is what the loader stamps on its one draw command.
         let result = resolve_conditionals_with_packed(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[mark_cmd(DrawKind::Circle, 0, 3, 0, 0)],
+            },
             &conditionals,
             &selections,
             &base_circles,
             &[],
-            &packed_meta,
         );
 
         let red_r = srgb_to_linear(1.0);
@@ -2806,13 +2885,18 @@ mod tests {
             },
         );
 
+        // The sole batch is packed: its instances sit at the absolute sidecar
+        // range, which is what the loader stamps on its one draw command.
         let result = resolve_conditionals_with_packed(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[mark_cmd(DrawKind::Rect, 0, 2, 0, 0)],
+            },
             &conditionals,
             &selections,
             &[],
             &base_rects,
-            &packed_meta,
         );
 
         // Rect 0 center (25,25) is inside brush — opacity should be 1.0.
@@ -2996,13 +3080,23 @@ mod tests {
             },
         );
 
+        // Loader layout: the 2 packed circles are prepended, so batch 1's own
+        // (non-packed) instance is appended at flat index 2 — the offset the
+        // loader stamps on batch 1's draw command, and the one the span walk
+        // reads back off it (GH #105).
         let result = resolve_conditionals_with_packed(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[
+                    mark_cmd(DrawKind::Circle, 0, 2, 0, 0),
+                    mark_cmd(DrawKind::Circle, 2, 1, 0, 1),
+                ],
+            },
             &conditionals,
             &selections,
             &base_circles,
             &[],
-            &packed_meta,
         );
 
         // Non-packed circle (index 2) has data_idx=99 which IS selected.
@@ -3188,13 +3282,22 @@ mod tests {
             },
         );
 
+        // Loader layout, as documented above: packed batch 1 at [0..3], then
+        // non-packed batch 0 appended at [3]. Those are the offsets the loader
+        // stamps on each batch's own draw command.
         let result = resolve_conditionals_with_packed(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[
+                    mark_cmd(DrawKind::Circle, 0, 3, 0, 1),
+                    mark_cmd(DrawKind::Circle, 3, 1, 0, 0),
+                ],
+            },
             &conditionals,
             &selections,
             &base_circles,
             &[],
-            &packed_meta,
         );
 
         // The packed region (circles[0..3]) should receive if_not = 0.15 from the
@@ -3363,14 +3466,23 @@ mod tests {
             },
         );
 
+        // Loader layout, as documented above: packed batch 1 at [0..3], then
+        // non-packed batch 0 appended at [3]. Those are the offsets the loader
+        // stamps on each batch's own draw command.
         apply_crossfilter_to_panel(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[
+                    mark_cmd(DrawKind::Circle, 0, 3, 0, 1),
+                    mark_cmd(DrawKind::Circle, 3, 1, 0, 0),
+                ],
+            },
             0,
             &sel,
             0.15,
             &mut circles,
             &mut rects,
-            &packed_meta,
         );
 
         // Packed circles (inside brush) must keep full opacity.
@@ -3532,13 +3644,18 @@ mod tests {
             },
         );
 
+        // The sole batch is packed: its instances sit at the absolute sidecar
+        // range, which is what the loader stamps on its one draw command.
         let result = resolve_conditionals_with_packed(
-            &panels,
+            InstanceLayout {
+                panels: &panels,
+                packed_batch_meta: &packed_meta,
+                draw_commands: &[mark_cmd(DrawKind::Circle, 0, 3, 0, 0)],
+            },
             &conditionals,
             &selections,
             &base_circles,
             &[],
-            &packed_meta,
         );
 
         // Marks 0 and 2 carry cat="a" → selected → opacity 1.0.

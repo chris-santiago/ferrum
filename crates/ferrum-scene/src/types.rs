@@ -268,20 +268,32 @@ pub struct MarkBatch {
     ///
     /// Not fixed here because the fix is not local. `panel.marks` index order
     /// is an implicit paint-order invariant relied on independently by
-    /// `hit_test.rs` (topmost-first `.rev()` scan), `spatial_index.rs`
-    /// (`entries_for_panel`), and `scene_load.rs`'s `batch_instance_spans`
-    /// (consumed by `conditional.rs` crossfilter dimming and `transition.rs`
-    /// keyed-transition pairing, both of which must stay in lock-step with the
-    /// flat circle/rect instance array's layout). Making the WASM loader honor
-    /// the SVG hoist means re-deriving all four walks against one explicit
-    /// paint-order list, with no existing coverage guarding a silent mismatch
-    /// (wrong topmost hit, wrong crossfilter target, wrong transition
-    /// pairing).
+    /// `hit_test.rs` (topmost-first `.rev()` scan) and `spatial_index.rs`
+    /// (`entries_for_panel`). Making the WASM loader honor the SVG hoist means
+    /// re-deriving those walks against one explicit paint-order list, with no
+    /// existing coverage guarding a silent mismatch (a wrong topmost hit).
+    ///
+    /// **`scene_load.rs`'s `batch_instance_spans` is no longer one of them (GH
+    /// #105, wave 6A).** It used to re-derive each mark batch's slice of the
+    /// flat circle/rect instance arrays by counting `Circle`/`Rect` nodes in
+    /// `panel.marks`, and THAT is what put it in lock-step with the loader's
+    /// collection order — a lock-step it was already failing, since chrome
+    /// shares those same arrays. It now reads each span off the `DrawCommand`
+    /// the loader recorded while appending those very instances, so the offsets
+    /// follow whatever order the loader collects in. Its consumers —
+    /// `conditional.rs` crossfilter dimming and `transition.rs` keyed-transition
+    /// pairing — are therefore no longer at risk from a reorder here. What the
+    /// walk still requires is narrower: that a command's stamped `(panel,
+    /// batch)` identity match the `panel.marks` enumeration it is read against,
+    /// which `scene_load::InstanceLayout` encodes by bundling the panels, the
+    /// packed sidecar metadata, and the draw commands of ONE loader pass.
     ///
     /// That work is tracked as a batch-E close follow-up issue — "unify the
     /// four order-dependent WASM walks against one explicit paint-order list"
-    /// — not as an instruction embedded in this doc. This field's own contract
-    /// is only the scissor escape described above.
+    /// — not as an instruction embedded in this doc. The issue's title predates
+    /// #105; the span walk has since dropped out of that set, leaving the two
+    /// walks above plus the SVG hoist itself. This field's own contract is only
+    /// the scissor escape described above.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub clip: bool,
 }

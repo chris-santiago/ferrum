@@ -265,7 +265,7 @@ pub struct PackedBatchMeta {
 /// The packed binary sidecar encodes it as a `u32` (`0` = circle, `1` = rect);
 /// [`DrawKind::try_from`] decodes that wire value once at unpack time so no
 /// downstream site re-interprets the raw magic numbers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DrawKind {
     Circle,
     Rect,
@@ -326,12 +326,69 @@ pub struct DrawCommand {
     /// or translate sibling panels' marks. Meaningless (always 0) for non-mark
     /// commands, which always draw with the identity transform.
     pub panel_id: usize,
+    /// For mark draw commands, the index within `panel.marks` of the batch that
+    /// contributed these instances; `None` for chrome commands, which belong to
+    /// no batch.
+    ///
+    /// Together with `panel_id` this makes every mark command self-identifying,
+    /// which is what lets `batch_instance_spans` read a batch's TRUE instance
+    /// offsets off the command the loader recorded (GH #105) instead of
+    /// re-deriving them from node counts. An exit-fade command synthesized by
+    /// `transition::apply_run` also carries `None`: it addresses an appended
+    /// block past every batch's own span, not a batch's span.
+    pub batch_idx: Option<usize>,
     /// Y-scale slot these instances map through (secondary-y-axis, GH #52),
     /// copied from the owning `MarkBatch::y_slot`. `0` = the primary/left-axis
     /// scale — the byte-stable default for every single-y chart. Lets the render
     /// loop compose this layer's per-slot rescale affine with the panel affine.
     /// Meaningless for non-mark commands (always 0).
     pub y_slot: usize,
+}
+
+/// Which mark batch one run of instances came from, and how the render loop
+/// must draw it.
+///
+/// Groups the five per-batch attributes a mark draw command carries. Chrome
+/// collection passes `None` instead of this, so the "meaningless for non-mark
+/// commands" values (`additive: false`, `plot_area: None`, `panel_id: 0`,
+/// `batch_idx: None`, `y_slot: 0`) are set in one place rather than spelled out
+/// at every chrome call site.
+#[derive(Clone, Copy, Debug)]
+pub struct MarkDrawTarget {
+    /// Index of the panel that owns these instances.
+    pub panel_id: usize,
+    /// Index within `panel.marks` of the batch that produced them.
+    pub batch_idx: usize,
+    /// Y-scale slot the batch maps through (secondary-y-axis, GH #52).
+    pub y_slot: usize,
+    /// The panel plot area to scissor to, or `None` for a clip-exempt batch
+    /// (`MarkBatch::clip == false`).
+    pub plot_area: Option<[f32; 4]>,
+    /// Draw with the additive-blend pipeline instead of normal alpha blend.
+    pub additive: bool,
+}
+
+impl DrawCommand {
+    /// One command covering `count` instances of `kind` starting at `start`,
+    /// tagged with its mark provenance (`Some`) or as chrome (`None`).
+    pub(crate) fn new(
+        kind: DrawKind,
+        start: usize,
+        count: usize,
+        mark: Option<MarkDrawTarget>,
+    ) -> Self {
+        DrawCommand {
+            kind,
+            instance_start: start as u32,
+            instance_count: count as u32,
+            additive: mark.is_some_and(|m| m.additive),
+            is_mark: mark.is_some(),
+            plot_area: mark.and_then(|m| m.plot_area),
+            panel_id: mark.map_or(0, |m| m.panel_id),
+            batch_idx: mark.map(|m| m.batch_idx),
+            y_slot: mark.map_or(0, |m| m.y_slot),
+        }
+    }
 }
 
 /// The number of distinct y-scale slots a panel's marks map through
@@ -497,29 +554,18 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(false, false, None, 0, 0);
+        self.emit(None);
     }
 
     /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
     /// polygons, polylines) and immediately emit draw commands for any new
-    /// circle/rect instances with the given blend mode, plot area, owning panel
-    /// index, and y-scale slot.
-    ///
-    /// The trailing parameters (`batch_cap`/`batch_join`/`y_slot`) are per-batch
-    /// attributes forwarded straight from the source `MarkBatch`; grouping them
-    /// would only add an intermediate struct without reducing the fan-out at the
-    /// single call site, so the arg count is allowed here (matching
-    /// `render::upload_transform_and_render`).
-    #[allow(clippy::too_many_arguments)]
+    /// circle/rect instances, tagged with the batch they came from.
     pub fn collect_mark(
         &mut self,
         nodes: &[SceneNode],
-        additive: bool,
-        plot_area: Option<[f32; 4]>,
-        panel_id: usize,
+        target: MarkDrawTarget,
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
-        y_slot: usize,
     ) {
         collect_nodes(
             nodes,
@@ -532,7 +578,7 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(additive, true, plot_area, panel_id, y_slot);
+        self.emit(Some(target));
     }
 
     /// Collect `nodes` into the annotation mesh.
@@ -562,50 +608,35 @@ impl SceneCollector {
         );
         // Emit draw commands for any Circle/Rect annotation nodes so they
         // appear at the correct z-order (after mark batches).
-        self.emit(false, false, None, 0, 0);
+        self.emit(None);
     }
 
     /// Emit draw commands for any circles/rects added since the last snapshot.
     ///
-    /// `panel_id`/`y_slot` are only meaningful for mark commands
-    /// (`is_mark == true`); the render loop composes that (panel, slot) pair's
-    /// affine. Non-mark commands always draw with the identity transform, so
-    /// callers pass `0` for both.
-    fn emit(
-        &mut self,
-        additive: bool,
-        is_mark: bool,
-        plot_area: Option<[f32; 4]>,
-        panel_id: usize,
-        y_slot: usize,
-    ) {
+    /// `mark` is `Some` for a mark batch — carrying the provenance both the
+    /// render loop (which (panel, slot) affine and scissor to bind) and
+    /// [`batch_instance_spans`] (which batch owns these instance slots) read —
+    /// and `None` for chrome, which always draws with the identity transform.
+    fn emit(&mut self, mark: Option<MarkDrawTarget>) {
         let new_c = self.circles.len();
         if new_c > self.prev_c {
-            self.draw_commands.push(DrawCommand {
-                kind: DrawKind::Circle,
-                instance_start: self.prev_c as u32,
-                instance_count: (new_c - self.prev_c) as u32,
-                additive,
-                is_mark,
-                plot_area,
-                panel_id,
-                y_slot,
-            });
+            self.draw_commands.push(DrawCommand::new(
+                DrawKind::Circle,
+                self.prev_c,
+                new_c - self.prev_c,
+                mark,
+            ));
         }
         self.prev_c = new_c;
 
         let new_r = self.rects.len();
         if new_r > self.prev_r {
-            self.draw_commands.push(DrawCommand {
-                kind: DrawKind::Rect,
-                instance_start: self.prev_r as u32,
-                instance_count: (new_r - self.prev_r) as u32,
-                additive,
-                is_mark,
-                plot_area,
-                panel_id,
-                y_slot,
-            });
+            self.draw_commands.push(DrawCommand::new(
+                DrawKind::Rect,
+                self.prev_r,
+                new_r - self.prev_r,
+                mark,
+            ));
         }
         self.prev_r = new_r;
     }
@@ -1168,6 +1199,18 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 scene_full_extent
             };
 
+            // Provenance for every command this batch emits: which (panel,
+            // batch) owns the instances, and how to draw them. Recorded on the
+            // command so `batch_instance_spans` can address this batch's
+            // instances without re-deriving the flat-array layout (GH #105).
+            let target = MarkDrawTarget {
+                panel_id: panel_idx,
+                batch_idx,
+                y_slot: batch.y_slot,
+                plot_area: batch_draw_plot_area,
+                additive,
+            };
+
             // If this batch has packed binary instances, emit a draw command
             // from the packed metadata (the instances were already added by
             // unpack_binary_instances above, and already layout-scaled by
@@ -1175,16 +1218,12 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             // from nodes.
             let key = (panel_idx as u32, batch_idx as u32);
             if let Some(meta) = batch_meta.get(&key) {
-                collector.draw_commands.push(DrawCommand {
-                    kind: meta.kind,
-                    instance_start: meta.instance_start as u32,
-                    instance_count: meta.instance_count as u32,
-                    additive,
-                    is_mark: true,
-                    plot_area: batch_draw_plot_area,
-                    panel_id: panel_idx,
-                    y_slot: batch.y_slot,
-                });
+                collector.draw_commands.push(DrawCommand::new(
+                    meta.kind,
+                    meta.instance_start,
+                    meta.instance_count,
+                    Some(target),
+                ));
             } else {
                 // Mark batches → mark mesh (zoom transform). Record this
                 // batch's mesh index range tagged with its y-slot so the render
@@ -1193,15 +1232,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 // draws byte-identically to the former per-panel recording.
                 let mesh_start = collector.mesh.indices.len() as u32;
                 let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
-                collector.collect_mark(
-                    &scaled_nodes,
-                    additive,
-                    batch_draw_plot_area,
-                    panel_idx,
-                    batch.stroke_cap,
-                    batch.stroke_join,
-                    batch.y_slot,
-                );
+                collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join);
                 let mesh_end = collector.mesh.indices.len() as u32;
                 collector.record_mark_mesh_panel(
                     mesh_start,
@@ -1504,9 +1535,13 @@ pub(crate) struct BatchInstanceSpan<'a> {
     pub(crate) circles: std::ops::Range<usize>,
     /// This batch's slice of [`SceneData::rect_instances`].
     pub(crate) rects: std::ops::Range<usize>,
+    /// The loader's own draw command for this batch's circles, and for its
+    /// rects. `None` for a kind the batch contributed no instances of.
+    circle_cmd: Option<&'a DrawCommand>,
+    rect_cmd: Option<&'a DrawCommand>,
 }
 
-impl BatchInstanceSpan<'_> {
+impl<'a> BatchInstanceSpan<'a> {
     /// Object-constancy keys for this batch (GH #93), read from whichever
     /// carrier it uses: the packed sidecar for a packed batch, `MarkBatch`
     /// for a JSON-node batch. The packer moves keys from one to the other, so
@@ -1517,84 +1552,111 @@ impl BatchInstanceSpan<'_> {
             None => self.batch.keys.as_deref(),
         }
     }
-}
 
-/// Compute the total number of packed circle and rect instances.
-///
-/// [`load_scene_with_packed`] builds the flat instance arrays packed-FIRST:
-/// all packed instances are prepended by [`unpack_binary_instances`], then
-/// non-packed instances are appended in scene-graph walk order. Non-packed
-/// batches therefore start at the total packed count.
-fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>) -> (usize, usize) {
-    let total_packed_circles: usize = packed_batch_meta
-        .values()
-        .filter(|m| m.kind == DrawKind::Circle)
-        .map(|m| m.instance_count)
-        .sum();
-    let total_packed_rects: usize = packed_batch_meta
-        .values()
-        .filter(|m| m.kind == DrawKind::Rect)
-        .map(|m| m.instance_count)
-        .sum();
-    (total_packed_circles, total_packed_rects)
-}
-
-/// Number of circle and rect instances one non-packed batch contributes.
-///
-/// Only `Circle`/`Rect` nodes become instances; every other node kind
-/// (lines, paths, text, …) is tessellated into mesh and contributes none.
-pub(crate) fn count_instances(batch: &MarkBatch) -> (usize, usize) {
-    let mut nc = 0usize;
-    let mut nr = 0usize;
-    for node in &batch.nodes {
-        match node {
-            SceneNode::Circle { .. } => nc += 1,
-            SceneNode::Rect { .. } => nr += 1,
-            _ => {}
+    /// The draw command that paints this batch's instances of `kind`, or `None`
+    /// when the batch contributed none. Consumers that need to re-target a
+    /// batch's command (the transition matcher's exit-fade block) read it from
+    /// here rather than searching the command list by instance range.
+    pub(crate) fn command(&self, kind: DrawKind) -> Option<&'a DrawCommand> {
+        match kind {
+            DrawKind::Circle => self.circle_cmd,
+            DrawKind::Rect => self.rect_cmd,
         }
     }
-    (nc, nr)
+}
+
+/// One scene's flat instance-array layout.
+///
+/// The three borrows must come from the SAME [`load_scene_with_packed`] pass:
+/// the draw commands carry the instance offsets the loader actually assigned,
+/// which only describe those panels and that sidecar metadata. Bundling them
+/// is what keeps a call site from pairing a scene's panels with another
+/// scene's commands.
+///
+/// `panels` may be either the raw `SceneGraph::panels` or the baked geometry
+/// (`bake_panels`) — baking rewrites coordinates only, never batch or node
+/// counts, so the spans are identical for both.
+#[derive(Clone, Copy)]
+pub struct InstanceLayout<'a> {
+    pub panels: &'a [Panel],
+    pub packed_batch_meta: &'a HashMap<(u32, u32), PackedBatchMeta>,
+    pub draw_commands: &'a [DrawCommand],
+}
+
+/// Index every mark draw command by the `(panel, batch, kind)` it was recorded
+/// for, so the span walk below is a lookup rather than a scan per batch.
+///
+/// The loader emits at most one command per batch per kind, so a key collision
+/// is impossible for loader-built commands; `or_insert` keeps the first in walk
+/// order if a hand-built list ever contains one.
+fn mark_commands_by_batch(
+    draw_commands: &[DrawCommand],
+) -> HashMap<(usize, usize, DrawKind), &DrawCommand> {
+    let mut by_batch = HashMap::new();
+    for cmd in draw_commands {
+        if let (true, Some(batch_idx)) = (cmd.is_mark, cmd.batch_idx) {
+            by_batch
+                .entry((cmd.panel_id, batch_idx, cmd.kind))
+                .or_insert(cmd);
+        }
+    }
+    by_batch
+}
+
+/// The instance range a draw command covers, or an empty range when the batch
+/// emitted no command for that kind.
+fn command_range(cmd: Option<&DrawCommand>) -> std::ops::Range<usize> {
+    match cmd {
+        Some(c) => {
+            let start = c.instance_start as usize;
+            start..start + c.instance_count as usize
+        }
+        None => 0..0,
+    }
 }
 
 /// Locate every mark batch's instances in the flat circle/rect arrays.
 ///
 /// This is the ONE definition of the loader's flat-array layout for consumers
-/// that need to address a specific batch's instances: packed batches live at
-/// their sidecar `instance_start` (an absolute index, assigned first), and
-/// non-packed batches follow in scene-graph walk order starting after ALL
-/// packed instances. Both the conditional-encoding/crossfilter path
-/// (`conditional.rs`) and the keyed-transition matcher (`transition.rs`) walk
-/// through here rather than re-deriving the offsets, because the two must stay
-/// in lock-step with each other and with `load_scene_with_packed`.
+/// that need to address a specific batch's instances. Both the
+/// conditional-encoding/crossfilter path (`conditional.rs`) and the
+/// keyed-transition matcher (`transition.rs`) walk through here rather than
+/// re-deriving the offsets.
 ///
-/// `panels` may be either the raw `SceneGraph::panels` or the baked geometry
-/// (`bake_panels`) — baking rewrites coordinates only, never batch or node
-/// counts, so the spans are identical for both.
+/// **The offsets are the loader's own, not a re-derivation (GH #105).** A
+/// non-packed batch's span is read off the [`DrawCommand`] that
+/// `SceneCollector::emit` recorded while it appended those very instances, so
+/// it is correct by construction no matter what else shares the flat arrays.
+/// That matters because chrome shares them, on both sides of a panel's marks:
+/// [`load_scene_with_packed`] collects `scene.title`, then per panel `grid`,
+/// `below_marks`, the marks, `axes`, `strip_title`, `chrome_above`,
+/// `annotations`, then `scene.legend` and `scene.decorations` — and a `Circle`
+/// or `Rect` node in ANY of those becomes an instance in the same two arrays.
+/// The former walk counted `Circle`/`Rect` nodes in `panel.marks` alone, so
+/// anything collected ahead of a batch displaced its span: grid band rects
+/// (`configure_grid(band_colors=…)`) shift their own panel, facet strip-title
+/// backgrounds (`.facet(col=…)`) shift every LATER panel, and a `below_marks`
+/// `annotate_rect` shifts its own panel too. All three ship today.
 ///
-/// **Standing assumption, inherited from the conditional/crossfilter path this
-/// walk was extracted from:** non-packed offsets are derived from mark batches
-/// ALONE, but chrome nodes share the same flat circle/rect arrays and are
-/// collected before a panel's marks (title, grid, `below_marks`). A Circle or
-/// Rect node in any of those shifts every subsequent non-packed mark span, and
-/// since #93 that assumption governs transition pairing as well as conditional
-/// dimming. A `below_marks` `annotate_rect` chart is the shape that would
-/// expose it. Packed batches are immune (their `instance_start` is absolute).
-/// Tracked as GH #105.
-pub(crate) fn batch_instance_spans<'a>(
-    panels: &'a [Panel],
-    packed_batch_meta: &'a HashMap<(u32, u32), PackedBatchMeta>,
-) -> Vec<BatchInstanceSpan<'a>> {
-    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
-    let mut circle_offset = total_packed_circles;
-    let mut rect_offset = total_packed_rects;
+/// A packed batch keeps reading its absolute sidecar range: the sidecar is the
+/// authority for packed instances (`unpack_binary_instances` prepends them
+/// before the walk begins), and the command the loader emits for it is built
+/// from that same range.
+pub(crate) fn batch_instance_spans<'a>(layout: InstanceLayout<'a>) -> Vec<BatchInstanceSpan<'a>> {
+    let by_batch = mark_commands_by_batch(layout.draw_commands);
 
     let mut spans = Vec::new();
-    for (panel_idx, panel) in panels.iter().enumerate() {
+    for (panel_idx, panel) in layout.panels.iter().enumerate() {
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
+            let circle_cmd = by_batch
+                .get(&(panel_idx, batch_idx, DrawKind::Circle))
+                .copied();
+            let rect_cmd = by_batch
+                .get(&(panel_idx, batch_idx, DrawKind::Rect))
+                .copied();
+
             let key = (panel_idx as u32, batch_idx as u32);
-            let (packed, circles, rects) = match packed_batch_meta.get(&key) {
-                // Packed batch: instances sit at the absolute sidecar range,
-                // and do NOT advance the non-packed running offsets.
+            let (packed, circles, rects) = match layout.packed_batch_meta.get(&key) {
                 Some(meta) => {
                     let range = meta.instance_start..meta.instance_start + meta.instance_count;
                     match meta.kind {
@@ -1602,14 +1664,7 @@ pub(crate) fn batch_instance_spans<'a>(
                         DrawKind::Rect => (Some(meta), 0..0, range),
                     }
                 }
-                None => {
-                    let (n_circles, n_rects) = count_instances(batch);
-                    let circles = circle_offset..circle_offset + n_circles;
-                    let rects = rect_offset..rect_offset + n_rects;
-                    circle_offset += n_circles;
-                    rect_offset += n_rects;
-                    (None, circles, rects)
-                }
+                None => (None, command_range(circle_cmd), command_range(rect_cmd)),
             };
             spans.push(BatchInstanceSpan {
                 panel_idx,
@@ -1618,6 +1673,8 @@ pub(crate) fn batch_instance_spans<'a>(
                 packed,
                 circles,
                 rects,
+                circle_cmd,
+                rect_cmd,
             });
         }
     }
@@ -5050,7 +5107,18 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, 0, None, None, 0);
+        collector.collect_mark(
+            &nodes,
+            MarkDrawTarget {
+                panel_id: 0,
+                batch_idx: 0,
+                y_slot: 0,
+                plot_area: None,
+                additive: false,
+            },
+            None,
+            None,
+        );
 
         assert_eq!(collector.circles.len(), 1);
         // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
@@ -5098,7 +5166,18 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, 0, None, None, 0);
+        collector.collect_mark(
+            &nodes,
+            MarkDrawTarget {
+                panel_id: 0,
+                batch_idx: 0,
+                y_slot: 0,
+                plot_area: None,
+                additive: false,
+            },
+            None,
+            None,
+        );
 
         assert_eq!(collector.rects.len(), 1);
         assert!(
@@ -6120,6 +6199,271 @@ mod tests {
         assert_eq!(
             second_circle.center[0], ANNOTATION_CX,
             "the SECOND Circle draw command must draw the annotations circle (cx={ANNOTATION_CX})"
+        );
+    }
+
+    // ── GH #105: instance spans come from the loader's own draw commands ──
+    //
+    // Chrome and marks share ONE flat rect array, and chrome lands in it on
+    // both sides of a panel's marks: `panel.grid` before them (grid band rects
+    // from `configure_grid(band_colors=…)`), `panel.strip_title` after them
+    // (facet strip backgrounds). Both shapes ship today, so a span walk that
+    // counted mark nodes alone mis-addressed real charts.
+
+    /// One panel of a span-probe scene.
+    struct SpanProbePanel {
+        /// Chrome band rects in `panel.grid`, collected BEFORE this panel's
+        /// marks. Mirrors `configure_grid(band_colors=…)`.
+        grid_rects: usize,
+        /// x positions of this panel's rect marks, each distinct so an instance
+        /// read back out of the flat array identifies itself.
+        mark_xs: &'static [f64],
+        /// Chrome rects in `panel.strip_title`, collected AFTER this panel's
+        /// marks (and so before the NEXT panel's). Mirrors `.facet(col=…)`.
+        strip_rects: usize,
+    }
+
+    /// x positions reserved for chrome rects, disjoint from every `mark_xs`
+    /// used below, so a span that addresses chrome is visible as such.
+    const GRID_BAND_X: f64 = 1000.0;
+    const STRIP_BG_X: f64 = 2000.0;
+
+    fn probe_rect_at(x: f64) -> SceneNode {
+        SceneNode::Rect {
+            x,
+            y: 0.0,
+            w: 4.0,
+            h: 10.0,
+            style: default_fill_stroke(),
+            corner_radius: 0.0,
+        }
+    }
+
+    fn span_probe_scene(specs: &[SpanProbePanel]) -> SceneGraph {
+        use ferrum_scene::{BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, Rect};
+
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 500.0,
+            h: 400.0,
+        };
+        SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: specs
+                .iter()
+                .enumerate()
+                .map(|(panel_idx, spec)| Panel {
+                    id: panel_idx,
+                    plot_area: area,
+                    clip: area,
+                    coord: CoordKind::Cartesian {
+                        x_domain: None,
+                        y_domain: None,
+                        expand: true,
+                        clip: true,
+                        y_domains: Vec::new(),
+                    },
+                    grid: (0..spec.grid_rects)
+                        .map(|i| probe_rect_at(GRID_BAND_X + i as f64))
+                        .collect(),
+                    marks: vec![MarkBatch {
+                        clip: true,
+                        polar_spans: None,
+                        glyph_anchors: None,
+                        kind: ferrum_scene::MarkBatchKind::Bar,
+                        nodes: spec.mark_xs.iter().copied().map(probe_rect_at).collect(),
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
+                        y_slot: 0,
+                    }],
+                    axes: vec![],
+                    annotations: vec![],
+                    strip_title: (0..spec.strip_rects)
+                        .map(|i| probe_rect_at(STRIP_BG_X + i as f64))
+                        .collect(),
+                    layout_scale: LayoutScale::identity(),
+                    below_marks: Vec::new(),
+                    chrome_above: Vec::new(),
+                })
+                .collect(),
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    /// Load `scene` and report each mark batch's rect span together with the x
+    /// positions those slots actually hold — the only assertion shape that
+    /// distinguishes "the right offsets" from "offsets that happen to be in
+    /// range".
+    fn probe_rect_spans(
+        scene: &SceneGraph,
+    ) -> (SceneData, Vec<(std::ops::Range<usize>, Vec<f32>)>) {
+        let data = load_scene(scene);
+        let spans = batch_instance_spans(InstanceLayout {
+            panels: &scene.panels,
+            packed_batch_meta: &data.packed_batch_meta,
+            draw_commands: &data.draw_commands,
+        });
+        let reported = spans
+            .iter()
+            .map(|span| {
+                let xs = data.rect_instances[span.rects.clone()]
+                    .iter()
+                    .map(|r| r.position[0])
+                    .collect();
+                (span.rects.clone(), xs)
+            })
+            .collect();
+        (data, reported)
+    }
+
+    /// Grid band rects (`configure_grid(band_colors=…)`) are collected into the
+    /// flat rect array BEFORE the panel's own marks, so the bar span starts
+    /// after them. The former node-counting walk reported `0..4` here, whose
+    /// four slots are grid bands.
+    #[test]
+    fn grid_band_rects_do_not_shift_the_mark_span() {
+        let scene = span_probe_scene(&[SpanProbePanel {
+            grid_rects: 5,
+            mark_xs: &[100.0, 200.0, 300.0, 400.0],
+            strip_rects: 0,
+        }]);
+        let (data, spans) = probe_rect_spans(&scene);
+
+        assert_eq!(
+            data.rect_instances.len(),
+            9,
+            "5 grid bands and 4 bars share ONE flat rect array"
+        );
+        assert_eq!(spans.len(), 1, "one mark batch → one span");
+        assert_eq!(
+            spans[0].0,
+            5..9,
+            "the bars sit after the 5 grid bands, not at 0..4"
+        );
+        assert_eq!(
+            spans[0].1,
+            vec![100.0, 200.0, 300.0, 400.0],
+            "the span must address the BARS; a span of grid bands would read \
+             back x = {GRID_BAND_X}…"
+        );
+    }
+
+    /// Facet strip-title background rects are collected AFTER their own panel's
+    /// marks, so they shift every LATER panel's span. Plain `.facet(col=…)`
+    /// emits one per panel with no configuration at all.
+    #[test]
+    fn strip_title_rects_do_not_shift_later_panels_mark_spans() {
+        let scene = span_probe_scene(&[
+            SpanProbePanel {
+                grid_rects: 0,
+                mark_xs: &[10.0, 20.0],
+                strip_rects: 1,
+            },
+            SpanProbePanel {
+                grid_rects: 0,
+                mark_xs: &[30.0, 40.0],
+                strip_rects: 1,
+            },
+        ]);
+        let (data, spans) = probe_rect_spans(&scene);
+
+        assert_eq!(
+            data.rect_instances.len(),
+            6,
+            "2 bars + 1 strip bg per panel, all in ONE flat rect array"
+        );
+        assert_eq!(spans.len(), 2, "one batch per panel");
+        assert_eq!(spans[0].0, 0..2, "panel 0's bars come first");
+        assert_eq!(spans[0].1, vec![10.0, 20.0]);
+        assert_eq!(
+            spans[1].0,
+            3..5,
+            "panel 1's bars start after panel 0's strip background, not at 2..4"
+        );
+        assert_eq!(
+            spans[1].1,
+            vec![30.0, 40.0],
+            "panel 1's span must address ITS bars; the pre-fix 2..4 aliased \
+             panel 0's strip background at x = {STRIP_BG_X}"
+        );
+    }
+
+    /// Negative control: with no chrome sharing the rect array, the spans are
+    /// the plain contiguous layout. Without this, a fix that shifted every span
+    /// by a constant would satisfy the two tests above.
+    #[test]
+    fn chrome_free_scene_spans_stay_contiguous_from_zero() {
+        let scene = span_probe_scene(&[
+            SpanProbePanel {
+                grid_rects: 0,
+                mark_xs: &[10.0, 20.0],
+                strip_rects: 0,
+            },
+            SpanProbePanel {
+                grid_rects: 0,
+                mark_xs: &[30.0, 40.0],
+                strip_rects: 0,
+            },
+        ]);
+        let (data, spans) = probe_rect_spans(&scene);
+
+        assert_eq!(data.rect_instances.len(), 4, "marks only");
+        assert_eq!(spans[0].0, 0..2);
+        assert_eq!(spans[0].1, vec![10.0, 20.0]);
+        assert_eq!(spans[1].0, 2..4);
+        assert_eq!(spans[1].1, vec![30.0, 40.0]);
+    }
+
+    /// The provenance the span walk reads: every mark command names its
+    /// `(panel_id, batch_idx)`, and every chrome command names no batch. A
+    /// chrome command that claimed a batch index would be found by the span
+    /// lookup instead of the batch's own command.
+    #[test]
+    fn draw_commands_tag_marks_with_their_batch_and_chrome_with_none() {
+        let scene = span_probe_scene(&[
+            SpanProbePanel {
+                grid_rects: 2,
+                mark_xs: &[10.0],
+                strip_rects: 1,
+            },
+            SpanProbePanel {
+                grid_rects: 0,
+                mark_xs: &[20.0],
+                strip_rects: 1,
+            },
+        ]);
+        let data = load_scene(&scene);
+
+        let tagged: Vec<(bool, usize, Option<usize>)> = data
+            .draw_commands
+            .iter()
+            .map(|c| (c.is_mark, c.panel_id, c.batch_idx))
+            .collect();
+        assert_eq!(
+            tagged,
+            vec![
+                (false, 0, None), // panel 0 grid bands
+                (true, 0, Some(0)),
+                (false, 0, None), // panel 0 strip background
+                (true, 1, Some(0)),
+                (false, 0, None), // panel 1 strip background
+            ],
+            "mark commands carry their (panel, batch); chrome commands carry no batch"
         );
     }
 

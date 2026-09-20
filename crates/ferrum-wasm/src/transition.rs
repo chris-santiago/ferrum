@@ -24,7 +24,7 @@ use ferrum_scene::Panel;
 
 use crate::error::WasmRenderError;
 use crate::scene_load::{
-    batch_instance_spans, BatchInstanceSpan, CircleInstance, DrawCommand, DrawKind,
+    batch_instance_spans, BatchInstanceSpan, CircleInstance, DrawCommand, DrawKind, InstanceLayout,
     PackedBatchMeta, RectInstance, SceneData,
 };
 
@@ -146,18 +146,6 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 
 // ── Keyed pairing (spec §4.3 / GH #93) ──────────────────────────────────────
 
-/// One side of a transition: everything the matcher needs to locate a scene's
-/// mark instances and read their keys.
-///
-/// `panels` may be raw `SceneGraph::panels` or baked geometry — see
-/// [`batch_instance_spans`].
-#[derive(Clone, Copy)]
-pub(crate) struct TransitionSide<'a> {
-    pub(crate) panels: &'a [Panel],
-    pub(crate) packed_batch_meta: &'a HashMap<(u32, u32), PackedBatchMeta>,
-    pub(crate) draw_commands: &'a [DrawCommand],
-}
-
 /// The flat GPU instance arrays of one scene side.
 #[derive(Clone, Copy)]
 pub(crate) struct Instances<'a> {
@@ -214,8 +202,8 @@ impl SceneSnapshot {
     }
 
     /// This snapshot as the old side of a pairing.
-    pub(crate) fn side(&self) -> TransitionSide<'_> {
-        TransitionSide {
+    pub(crate) fn side(&self) -> InstanceLayout<'_> {
+        InstanceLayout {
             panels: &self.panels,
             packed_batch_meta: &self.packed_batch_meta,
             draw_commands: &self.draw_commands,
@@ -305,9 +293,9 @@ pub(crate) struct TransitionFrame {
 /// instances of each kind pair by key when [`aligned_keys`] yields unique keys
 /// for both sides, and positionally otherwise — the fallback is per batch and
 /// total, never partial.
-pub(crate) fn plan_transition(old: TransitionSide<'_>, new: TransitionSide<'_>) -> TransitionPlan {
-    let old_spans = batch_instance_spans(old.panels, old.packed_batch_meta);
-    let new_spans = batch_instance_spans(new.panels, new.packed_batch_meta);
+pub(crate) fn plan_transition(old: InstanceLayout<'_>, new: InstanceLayout<'_>) -> TransitionPlan {
+    let old_spans = batch_instance_spans(old);
+    let new_spans = batch_instance_spans(new);
     let old_by_id: HashMap<(usize, usize), &BatchInstanceSpan<'_>> = old_spans
         .iter()
         .map(|s| ((s.panel_idx, s.batch_idx), s))
@@ -345,9 +333,13 @@ pub(crate) fn plan_transition(old: TransitionSide<'_>, new: TransitionSide<'_>) 
             any_keyed |= matches!(pairing, RunPairing::Keyed { .. });
 
             let has_exits = matches!(&pairing, RunPairing::Keyed { exits, .. } if !exits.is_empty());
+            // Exits are painted with this batch's own command, re-targeted onto
+            // the appended block: the new side's when the batch still draws,
+            // the old side's when every one of its instances left.
             let exit_draw = if has_exits {
-                find_draw_command(new.draw_commands, kind, &new_range)
-                    .or_else(|| find_draw_command(old.draw_commands, kind, &old_range))
+                new_span
+                    .command(kind)
+                    .or_else(|| old_span.and_then(|s| s.command(kind)))
                     .cloned()
             } else {
                 None
@@ -484,23 +476,6 @@ fn keyed_pairing(
     Some(RunPairing::Keyed { sources, exits })
 }
 
-/// The draw command covering exactly `range` in the `kind` instance array.
-///
-/// The loader emits at most one command per batch per kind, spanning that
-/// batch's contiguous instances, so an exact `(kind, start, count)` match
-/// identifies it unambiguously.
-fn find_draw_command<'a>(
-    commands: &'a [DrawCommand],
-    kind: DrawKind,
-    range: &std::ops::Range<usize>,
-) -> Option<&'a DrawCommand> {
-    commands.iter().find(|c| {
-        c.kind == kind
-            && c.instance_start as usize == range.start
-            && c.instance_count as usize == range.len()
-    })
-}
-
 /// Seed the output array with the new scene's instances, then interpolate the
 /// indices both scenes share.
 ///
@@ -580,6 +555,13 @@ fn apply_run<T: InstanceLerp>(
                         exit_draws.push(DrawCommand {
                             instance_start: start as u32,
                             instance_count: appended as u32,
+                            // The exit block sits past every batch's own span,
+                            // so it addresses no batch: keeping the template's
+                            // `batch_idx` would give two commands the same
+                            // (panel, batch, kind) identity (GH #105). The
+                            // transform-relevant fields ARE inherited, so the
+                            // fade draws with its panel's affine and scissor.
+                            batch_idx: None,
                             ..template.clone()
                         });
                     }
@@ -1046,6 +1028,7 @@ mod b4_transition_tests {
 #[cfg(not(target_arch = "wasm32"))]
 mod keyed_pairing_tests {
     use super::*;
+    use crate::scene_load::MarkDrawTarget;
     use ferrum_scene::{
         BlendMode, Color, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Rect,
         SceneNode,
@@ -1188,19 +1171,26 @@ mod keyed_pairing_tests {
 
     /// One circle draw command per `(instance_start, instance_count)` span —
     /// the loader emits exactly one per batch per kind, covering that batch's
-    /// contiguous run.
+    /// contiguous run, tagged with that batch's index. Mirrors
+    /// `SceneCollector::emit`'s output for a panel of `spans.len()` circle
+    /// batches, which is what `batch_instance_spans` reads the offsets off.
     fn circle_draws(spans: &[(u32, u32)]) -> Vec<DrawCommand> {
         spans
             .iter()
-            .map(|&(instance_start, instance_count)| DrawCommand {
-                kind: DrawKind::Circle,
-                instance_start,
-                instance_count,
-                additive: false,
-                is_mark: true,
-                plot_area: Some([0.0, 0.0, 100.0, 100.0]),
-                panel_id: 0,
-                y_slot: 0,
+            .enumerate()
+            .map(|(batch_idx, &(instance_start, instance_count))| {
+                DrawCommand::new(
+                    DrawKind::Circle,
+                    instance_start as usize,
+                    instance_count as usize,
+                    Some(MarkDrawTarget {
+                        panel_id: 0,
+                        batch_idx,
+                        y_slot: 0,
+                        plot_area: Some([0.0, 0.0, 100.0, 100.0]),
+                        additive: false,
+                    }),
+                )
             })
             .collect()
     }
@@ -1219,12 +1209,12 @@ mod keyed_pairing_tests {
     ) -> TransitionPlan {
         let empty = HashMap::new();
         plan_transition(
-            TransitionSide {
+            InstanceLayout {
                 panels: old_panels,
                 packed_batch_meta: &empty,
                 draw_commands: old_draws,
             },
-            TransitionSide {
+            InstanceLayout {
                 panels: new_panels,
                 packed_batch_meta: &empty,
                 draw_commands: new_draws,
@@ -1604,6 +1594,85 @@ mod keyed_pairing_tests {
         assert!(mid.circles.is_empty(), "a rect batch touches no circles");
     }
 
+    // ── GH #105: chrome in the shared rect array must not capture a run ───
+
+    /// A panel whose `grid` carries `bands` chrome rects — the shape
+    /// `configure_grid(band_colors=…)` emits, collected into the SAME flat rect
+    /// array as the marks and BEFORE them — plus one keyed rect batch with a bar
+    /// at each x in `xs`.
+    fn banded_rect_panel(bands: usize, xs: &[f64], keys: &[&str]) -> Panel {
+        let bar_at = |x: f64| SceneNode::Rect {
+            x,
+            y: 0.0,
+            w: 4.0,
+            h: 10.0,
+            style: style(),
+            corner_radius: 0.0,
+        };
+        let mut p = rect_panel(0, Some(keys));
+        p.grid = (0..bands).map(|i| bar_at(BAND_X + i as f64)).collect();
+        p.marks[0].nodes = xs.iter().copied().map(bar_at).collect();
+        p
+    }
+
+    /// x of the first grid band. Far from every bar x below, so an instance
+    /// identifies itself as chrome or as a mark by position alone.
+    const BAND_X: f64 = 500.0;
+
+    /// The symptom behind the span fix, end to end: a keyed bar must
+    /// interpolate from ITS OWN old bar, even though two grid bands occupy the
+    /// first slots of the same flat rect array.
+    ///
+    /// Both sides go through the real loader, so the spans under test are the
+    /// ones production assigns. Before the fix the run addressed `0..2` — the
+    /// bands — so the keyed writes landed on chrome (dragging a background band
+    /// into a bar's geometry) while the bars fell through to `chrome_fill` and
+    /// interpolated index-wise, pairing "a" with "b"'s old position.
+    #[test]
+    fn keyed_bars_interpolate_from_bars_not_grid_bands() {
+        // old bars: a at 0, b at 10.   new bars: b at 100, a at 300.
+        let old_scene = scene_of(banded_rect_panel(2, &[0.0, 10.0], &["a", "b"]));
+        let new_scene = scene_of(banded_rect_panel(2, &[100.0, 300.0], &["b", "a"]));
+        let old = SceneSnapshot::from_scene_data(
+            crate::scene_load::load_scene(&old_scene),
+            old_scene.panels.clone(),
+        );
+        let new = SceneSnapshot::from_scene_data(
+            crate::scene_load::load_scene(&new_scene),
+            new_scene.panels.clone(),
+        );
+
+        let plan = plan_transition(old.side(), new.side());
+        assert!(
+            matches!(plan, TransitionPlan::Keyed { .. }),
+            "both sides carry unique keys, so the batch pairs by key"
+        );
+        let mid = interpolate(&plan, old.instances(), new.instances(), 0.5);
+
+        assert_eq!(mid.rects.len(), 4, "2 grid bands + 2 bars, nothing appended");
+        assert_eq!(
+            mid.rects[0].position[0], BAND_X as f32,
+            "grid band 0 is not a mark: it holds still (pre-fix the keyed run \
+             overwrote it with bar geometry)"
+        );
+        assert_eq!(
+            mid.rects[1].position[0],
+            BAND_X as f32 + 1.0,
+            "grid band 1 holds still too"
+        );
+        assert_eq!(
+            mid.rects[2].position[0], 55.0,
+            "new bar 'b' (x=100) pairs with old bar 'b' (x=10) → 55; \
+             pre-fix it index-zipped from old bar 'a' (x=0) → 50"
+        );
+        assert_eq!(
+            mid.rects[3].position[0], 150.0,
+            "new bar 'a' (x=300) pairs with old bar 'a' (x=0) → 150; \
+             pre-fix it index-zipped from old bar 'b' (x=10) → 155"
+        );
+        assert!(mid.exit_draws.is_empty(), "no key left the scene");
+    }
+
     // ── Old-side identity: snapshot vs. JSON re-parse (spec §4.3) ────────
     //
     // A batch above the 1000-mark pack threshold ships with empty `nodes` AND
@@ -1772,12 +1841,12 @@ mod keyed_pairing_tests {
         let old_meta = meta_for(&["a", "b"]);
         let new_meta = meta_for(&["b", "a"]);
         let plan = plan_transition(
-            TransitionSide {
+            InstanceLayout {
                 panels: &panels,
                 packed_batch_meta: &old_meta,
                 draw_commands: &draws(2),
             },
-            TransitionSide {
+            InstanceLayout {
                 panels: &panels,
                 packed_batch_meta: &new_meta,
                 draw_commands: &draws(2),

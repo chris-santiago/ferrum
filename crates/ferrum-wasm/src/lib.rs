@@ -44,14 +44,14 @@ use crate::pipelines::RenderPipelines;
 #[cfg(target_arch = "wasm32")]
 use crate::render::GpuBuffers;
 #[cfg(target_arch = "wasm32")]
-use crate::scene_load::SceneData;
+use crate::scene_load::{InstanceLayout, SceneData};
 #[cfg(target_arch = "wasm32")]
 use crate::selection_state::InteractionState;
 #[cfg(target_arch = "wasm32")]
 use crate::spatial_index::SpatialIndex;
 #[cfg(target_arch = "wasm32")]
 use crate::transition::{
-    ease_in_out_cubic, plan_transition, Instances, SceneSnapshot, TransitionPlan, TransitionSide,
+    ease_in_out_cubic, plan_transition, Instances, SceneSnapshot, TransitionPlan,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::zoom_pan::ZoomPanState;
@@ -261,7 +261,7 @@ impl WasmRenderer {
         // and interpolate exactly as they did before keys existed.
         let plan = plan_transition(
             old.side(),
-            TransitionSide {
+            InstanceLayout {
                 panels: &loaded.scene.panels,
                 packed_batch_meta: &new_data.packed_batch_meta,
                 draw_commands: &new_data.draw_commands,
@@ -780,12 +780,15 @@ impl WasmRenderer {
         // already be at final on-screen position for a ratio-fitted panel.
         let conditionals = &loaded.scene.interaction.conditionals;
         let updates = conditional::resolve_conditionals_with_packed(
-            &loaded.baked_panels,
+            InstanceLayout {
+                panels: &loaded.baked_panels,
+                packed_batch_meta: &loaded.data.packed_batch_meta,
+                draw_commands: &loaded.data.draw_commands,
+            },
             conditionals,
             &self.interaction_state.selections,
             &loaded.data.circle_instances,
             &loaded.data.rect_instances,
-            &loaded.data.packed_batch_meta,
         );
         let mut circles = updates.circle_instances;
         let mut rects = updates.rect_instances;
@@ -835,13 +838,16 @@ impl WasmRenderer {
 
             let sel = SelectionState::Interval { x_range, y_range };
             conditional::apply_crossfilter_to_panel(
-                &loaded.baked_panels,
+                InstanceLayout {
+                    panels: &loaded.baked_panels,
+                    packed_batch_meta: &loaded.data.packed_batch_meta,
+                    draw_commands: &loaded.data.draw_commands,
+                },
                 target_panel,
                 &sel,
                 conditional::CROSSFILTER_DIM_OPACITY,
                 &mut circles,
                 &mut rects,
-                &loaded.data.packed_batch_meta,
             );
         }
 
