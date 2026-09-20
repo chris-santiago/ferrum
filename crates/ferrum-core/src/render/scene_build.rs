@@ -17,7 +17,6 @@ use super::prepare::PreparedInputs;
 use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
-    CLIP_ID_PREFIX,
 };
 
 /// The `(coord name, BreakAxis.axis token)` of the first `BreakAxis`
