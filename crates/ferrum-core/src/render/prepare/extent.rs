@@ -143,16 +143,18 @@ pub(crate) fn fix_transform_extents_for_facet(
             // `extent`). Pin each axis only when that axis is unset, so a
             // partially user-specified extent keeps the user value on the set
             // axis and gains the global pin on the unset one (archaeology R5).
+            // Kde2D carries a single `(f64, f64, f64, f64)` extent field, not
+            // two separate per-axis fields — `pin_single_extent` is generic
+            // over the extent's tuple shape, so it pins this the same way as
+            // the 1-D arms above rather than needing its own hand-rolled match.
             TransformSpec::Kde2D(spec) if spec.extent.is_none() => {
-                // Kde2D carries a single `(f64, f64, f64, f64)` extent field,
-                // not two separate per-axis fields — treat it like a 1-D pin.
-                match crate::transform::kde_2d::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::Kde2D(crate::transform::kde_2d::Kde2DSpec {
-                        extent: Some(extent),
+                pin_single_extent(crate::transform::kde_2d::global_extent(spec, batch), |e| {
+                    TransformSpec::Kde2D(crate::transform::kde_2d::Kde2DSpec {
+                        extent: Some(e),
                         ..spec.clone()
-                    }),
-                    None => t.clone(),
-                }
+                    })
+                })
+                .unwrap_or_else(|| t.clone())
             }
             TransformSpec::Bin2D(spec)
                 if spec.extent_x.is_none() || spec.extent_y.is_none() =>
@@ -210,16 +212,16 @@ pub(crate) fn fix_transform_extents_for_facet(
         .collect()
 }
 
-/// Helper for 1-D (single-extent) transforms: if `global` is `Some`, call
-/// `build` to produce the pinned transform variant; otherwise return `None`
-/// (caller falls back to the original transform unchanged).
+/// Helper for single-extent transforms: if `global` is `Some`, call `build`
+/// to produce the pinned transform variant; otherwise return `None` (caller
+/// falls back to the original transform unchanged). Generic over the extent
+/// value's own shape (`E`) rather than fixed to `(f64, f64)`, so both the
+/// 1-D arms' `(f64, f64)` extent and `Kde2D`'s single `(f64, f64, f64, f64)`
+/// extent field share this one spelling of the pin idiom.
 #[inline]
-fn pin_single_extent<T, F>(
-    global: Option<(f64, f64)>,
-    build: F,
-) -> Option<T>
+fn pin_single_extent<E, T, F>(global: Option<E>, build: F) -> Option<T>
 where
-    F: FnOnce((f64, f64)) -> T,
+    F: FnOnce(E) -> T,
 {
     global.map(build)
 }
@@ -245,4 +247,353 @@ where
             current_y.or(Some((y_lo, y_hi))),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+
+    use crate::transform::core::TransformSpec;
+    use crate::transform::registry::{all_transform_kinds, entry_for_kind};
+
+    use super::fix_transform_extents_for_facet;
+
+    /// A one-column batch: Float64 field `v` = [0.3, 0.5, 1.2, 4.8, 9.7].
+    /// Shared by every 1-D single-extent pin probe below (`Bin`, `Violin`,
+    /// `Kde`, `DataBin`, `DensityData` all read a field literally named
+    /// `v`) — these probes only need a finite, non-empty range to pin
+    /// against ("did the arm pin it"), not the disjoint-panel values
+    /// `render/prepare/mod.rs`'s richer per-variant tests use to pin exact
+    /// niced-vs-raw numeric outputs ("what did it pin it to").
+    fn v_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![0.3, 0.5, 1.2, 4.8, 9.7]))],
+        )
+        .unwrap()
+    }
+
+    /// A two-column batch: Float64 `x`/`y`. Shared by every 2-D dual-extent
+    /// pin probe below (`Kde2D`, `Bin2D`, `Hex`, `Raster`).
+    fn xy_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 10.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 100.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    // ── Per-kind behavioral pin probes ─────────────────────────────────────
+    //
+    // Each builds a real `TransformSpec` with its extent unset, runs the
+    // REAL `fix_transform_extents_for_facet`, and asserts the RETURNED
+    // spec's extent field(s) came back `Some(..)`. This observes the arm
+    // doing its job rather than asserting a name appears in a literal —
+    // spec-review cycle 1 proved by mutation (forcing the real `Bin2D`
+    // arm's guard to `if false`, so `Bin2D` silently stopped being pinned)
+    // that the previous hand-typed `handled` literal did not catch an
+    // existing arm disappearing, only a new field name appearing with no
+    // matching literal entry. Each probe returns its own kind name so the
+    // guard test below can fold "is this kind behaviorally covered" and
+    // "is the covered set exactly the registry's extent-carrying set" into
+    // one assertion, mirroring `assert_params_match_serde_fields`'s
+    // return-the-kind-you-checked pattern (`transform/registry/tests.rs`).
+
+    fn assert_bin_pins() -> &'static str {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        let spec = BinSpec {
+            field: "v".into(),
+            mode: BinMode::Fixed { n: 10 },
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec)], &v_batch());
+        let TransformSpec::Bin(pinned) = &out[0] else { panic!("expected a Bin transform back") };
+        assert!(pinned.extent.is_some(), "bin: extent was not pinned — is the Bin arm still there?");
+        "bin"
+    }
+
+    fn assert_violin_pins() -> &'static str {
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::violin::ViolinSpec;
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: Vec::new(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Violin(spec)], &v_batch());
+        let TransformSpec::Violin(pinned) = &out[0] else {
+            panic!("expected a Violin transform back")
+        };
+        assert!(pinned.extent.is_some(), "violin: extent was not pinned — is the Violin arm still there?");
+        "violin"
+    }
+
+    fn assert_kde_pins() -> &'static str {
+        use crate::transform::kde::{BandwidthSpec, KdeSpec};
+        let spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Kde(spec)], &v_batch());
+        let TransformSpec::Kde(pinned) = &out[0] else { panic!("expected a Kde transform back") };
+        assert!(pinned.extent.is_some(), "kde: extent was not pinned — is the Kde arm still there?");
+        "kde"
+    }
+
+    fn assert_kde2d_pins() -> &'static str {
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::kde_2d::Kde2DSpec;
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: None,
+            groupby: vec![],
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Kde2D(spec)], &xy_batch());
+        let TransformSpec::Kde2D(pinned) = &out[0] else {
+            panic!("expected a Kde2D transform back")
+        };
+        assert!(pinned.extent.is_some(), "kde_2d: extent was not pinned — is the Kde2D arm still there?");
+        "kde_2d"
+    }
+
+    fn assert_bin2d_pins() -> &'static str {
+        use crate::transform::bin_2d::Bin2DSpec;
+        use crate::transform::bin_mode::BinMode;
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Fixed { n: 10 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin2D(spec)], &xy_batch());
+        let TransformSpec::Bin2D(pinned) = &out[0] else {
+            panic!("expected a Bin2D transform back")
+        };
+        assert!(
+            pinned.extent_x.is_some() && pinned.extent_y.is_some(),
+            "bin_2d: extent_x/extent_y were not pinned — is the Bin2D arm still there?"
+        );
+        "bin_2d"
+    }
+
+    fn assert_hex_pins() -> &'static str {
+        use crate::transform::hex::HexSpec;
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Hex(spec)], &xy_batch());
+        let TransformSpec::Hex(pinned) = &out[0] else { panic!("expected a Hex transform back") };
+        assert!(
+            pinned.extent_x.is_some() && pinned.extent_y.is_some(),
+            "hex: extent_x/extent_y were not pinned — is the Hex arm still there?"
+        );
+        "hex"
+    }
+
+    fn assert_raster_pins() -> &'static str {
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Raster(spec)], &xy_batch());
+        let TransformSpec::Raster(pinned) = &out[0] else {
+            panic!("expected a Raster transform back")
+        };
+        assert!(
+            pinned.extent_x.is_some() && pinned.extent_y.is_some(),
+            "raster: extent_x/extent_y were not pinned — is the Raster arm still there?"
+        );
+        "raster"
+    }
+
+    fn assert_data_bin_pins() -> &'static str {
+        use crate::transform::data_bin::DataBinSpec;
+        let spec = DataBinSpec {
+            field: "v".into(),
+            as_: None,
+            maxbins: Some(10),
+            step: None,
+            nice: false,
+            name: None,
+            extent: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec)], &v_batch());
+        let TransformSpec::DataBin(pinned) = &out[0] else {
+            panic!("expected a DataBin transform back")
+        };
+        assert!(pinned.extent.is_some(), "data_bin: extent was not pinned — is the DataBin arm still there?");
+        "data_bin"
+    }
+
+    fn assert_density_data_pins() -> &'static str {
+        use crate::transform::density_data::DensityDataSpec;
+        let spec = DensityDataSpec {
+            field: "v".into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: None,
+            cumulative: false,
+            kernel: crate::transform::kde::default_kernel(),
+            as_: ("value".into(), "density".into()),
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec)], &v_batch());
+        let TransformSpec::DensityData(pinned) = &out[0] else {
+            panic!("expected a DensityData transform back")
+        };
+        assert!(
+            pinned.extent.is_some(),
+            "density_data: extent was not pinned — is the DensityData arm still there?"
+        );
+        "density_data"
+    }
+
+    /// `fix_transform_extents_for_facet`'s match ends in a wildcard
+    /// (`_ => t.clone()`), which is deliberate — `TransformSpec` has 42
+    /// variants and only 9 carry an extent to pin, so an exhaustive
+    /// wildcard-free match (the `ScaleSpec::positional_extent` precedent)
+    /// would add 33 no-op arms. But a wildcard means a new extent-carrying
+    /// variant can land with no pin and nothing fails: archaeology bug #7's
+    /// exact failure mode, which already re-armed once for `DensityData`
+    /// (`render/prepare/mod.rs`'s density-data facet-extent test comment
+    /// records the incident).
+    ///
+    /// This guard closes that gap at test time instead of compile time, and
+    /// derives BOTH sides of its equality from real code — not a
+    /// hand-maintained literal on either side (spec-review cycle 1 found the
+    /// first version of this test derived only the right-hand side):
+    ///
+    /// - `extent_carrying` (right-hand side): every kind in
+    ///   `all_transform_kinds()` (the canonical enumeration — the same
+    ///   `for_each_transform!` table `TransformSpec`'s 42 variants are
+    ///   generated from) whose `entry_for_kind(kind).params` carries one of
+    ///   the four extent field names. The registry's `params` list is
+    ///   itself drift-proven equal to each spec struct's real serde fields
+    ///   by `params_match_spec_struct_serde_fields`
+    ///   (`transform/registry/tests.rs`), so this derives "does this kind
+    ///   carry an extent field" from that data instead of a second
+    ///   hand-maintained field list — the
+    ///   `accepted_keys_for_scale_type_matches_every_variants_serialized_keys`
+    ///   (`spec/encoding.rs`) precedent.
+    /// - `covered` (left-hand side): the kinds whose `assert_*_pins` probe,
+    ///   just above, actually ran the REAL `fix_transform_extents_for_facet`
+    ///   and observed its output extent field(s) come back `Some(..)`. A
+    ///   probe panics (with a message naming the kind) before this line is
+    ///   even reached if its arm is disabled, deleted, or falls through to
+    ///   the wildcard — so `covered` reflects live behavior, not a list a
+    ///   human typed and could forget to update.
+    ///
+    /// Field NAME is not field TYPE: `outliers`'s `extent: f64` is an IQR
+    /// multiplier (`transform/outliers.rs`'s `OutliersSpec::extent`), not a
+    /// value-axis range, and the registry's string-keyed `params` cannot
+    /// express that distinction. It is excluded by name, with this comment
+    /// as the reason, rather than silently matched.
+    #[test]
+    fn handled_extent_kinds_match_extent_carrying_spec_fields() {
+        const EXTENT_FIELD_NAMES: &[&str] =
+            &["extent", "extent_x", "extent_y", "count_scale_extent"];
+        const NAME_ONLY_EXCLUSIONS: &[&str] = &["outliers"];
+
+        let extent_carrying: BTreeSet<&str> = all_transform_kinds()
+            .into_iter()
+            .filter(|kind| !NAME_ONLY_EXCLUSIONS.contains(kind))
+            .filter(|kind| {
+                let params = entry_for_kind(kind).unwrap().params;
+                EXTENT_FIELD_NAMES.iter().any(|f| params.contains(f))
+            })
+            .collect();
+
+        // Every element here only enters `covered` if the REAL function
+        // actually pinned that kind's extent field(s) for an unset-extent
+        // spec, just above — a disabled or deleted arm panics before this
+        // line runs, rather than silently leaving the set unchanged.
+        let covered: BTreeSet<&str> = [
+            assert_bin_pins(),
+            assert_violin_pins(),
+            assert_kde_pins(),
+            assert_kde2d_pins(),
+            assert_bin2d_pins(),
+            assert_hex_pins(),
+            assert_raster_pins(),
+            assert_data_bin_pins(),
+            assert_density_data_pins(),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            covered, extent_carrying,
+            "fix_transform_extents_for_facet's behaviorally-covered kinds have drifted from \
+             the extent-carrying TransformSpec variants (a field named extent / extent_x / \
+             extent_y / count_scale_extent).\n\
+             covered here but no longer/never extent-carrying: {:?}\n\
+             extent-carrying but NOT covered by a pin probe above — a new variant is missing \
+             both its facet pin and its coverage: {:?}",
+            covered.difference(&extent_carrying).collect::<Vec<_>>(),
+            extent_carrying.difference(&covered).collect::<Vec<_>>(),
+        );
+    }
 }
