@@ -86,6 +86,55 @@ pub(crate) enum PositionAdjustReason {
     Message(String),
 }
 
+/// Which of the two ways a per-layer `coord` (`#172`(1)) cannot be placed on a
+/// layer of a shared panel — the detail carried by
+/// [`RenderError::LayerCoordUnplaceable`], whose doc has the policy.
+///
+/// Same shape and purpose as [`PositionAdjustReason`] above: one refusal whose
+/// `Display` composes a common frame around a structured reason, rather than two
+/// refusals a caller could tell apart.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LayerCoordUnplaceableReason {
+    /// The coord declares a property of the whole PANEL — an axis domain
+    /// (`xlim=`/`ylim=`), axis padding (`expand=False`), panel clipping
+    /// (`clip=False`) or a fixed aspect ratio (`fm.CoordFixed`). The string is
+    /// [`crate::spec::coord::panel_scoped_property`]'s answer: the user-facing
+    /// spelling of the thing declared.
+    ///
+    /// Answerable from the coord alone, so it is asked at `build_scene`'s top,
+    /// before any geometry.
+    PanelProperty(&'static str),
+    /// The coord leaves this layer's positional channels in the opposite space
+    /// from the panel's axes, and one of the columns that lands on an axis cannot
+    /// be drawn against it: a categorical column on a continuous axis, or a
+    /// column that cannot be a category key on a categorical one.
+    ///
+    /// Not answerable from the coord alone — it needs the resolved scales and the
+    /// layer's own columns — so it is asked in `build_scene`'s per-layer loop, at
+    /// the same site as the sibling positional-column gate
+    /// (`validate_layer_positional_columns`).
+    ///
+    /// This is the class the wave-5 close review found still silent: a member
+    /// whose `CoordFlip` puts its categorical column on the panel's quantitative
+    /// axis drew ZERO marks, with no warning and no error, on all three
+    /// merged-flat routes. The sibling reason above already refused the same
+    /// caller mistake spelled with `fm.CoordFixed`, so the two answers to one
+    /// question are now one answer.
+    ///
+    /// `channel` is the RESOLVED (post-flip) axis the column landed on, `column`
+    /// its name, `dtype` the pre-formatted Arrow dtype (`{:?}`), and `axis_kind`
+    /// the panel axis's kind in user words (`"continuous"` / `"categorical"`).
+    /// `channel` is deliberately NOT un-flipped for `Display`: it names the
+    /// PANEL's axis, which is the thing the caller has to reconcile, not a
+    /// channel they wrote.
+    ExchangedChannelUnservable {
+        channel: &'static str,
+        column: String,
+        dtype: String,
+        axis_kind: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
@@ -283,27 +332,37 @@ pub enum RenderError {
         mark: &'static str,
         required: &'static str,
     },
-    /// A layer's own `coord` (`#172`(1)) declares a property of the whole
-    /// PANEL — an axis domain (`xlim=`/`ylim=`), axis padding (`expand=False`),
-    /// panel clipping (`clip=False`) or a fixed aspect ratio (`fm.CoordFixed`) —
-    /// which cannot be placed on one layer of a panel every layer shares.
+    /// A layer's own `coord` (`#172`(1)) cannot be placed on one layer of a panel
+    /// every layer shares. `layer` is the index in `spec.layers`, `coord` the
+    /// constructor the caller wrote, and `reason` which of the two ways it is
+    /// unplaceable — see [`LayerCoordUnplaceableReason`].
     ///
-    /// `layer` is the index in `spec.layers`, `coord` the constructor the caller
-    /// wrote, `property` the panel-scoped thing it declared. The predicate is
-    /// [`crate::spec::coord::panel_scoped_property`]; the single producer is
-    /// `scene_build::build_scene`'s gate, which every standalone render and
-    /// every composite leaf passes through.
+    /// ONE refusal with two reasons rather than two refusals, deliberately: a
+    /// caller who wrote an unplaceable per-layer coord is owed the same sentence
+    /// whichever property of it could not be honored, and must not be able to
+    /// tell from the message which gate spoke. The two producers are
+    /// `scene_build::build_scene`'s chart-level gate (the panel-property reason,
+    /// asked before any geometry) and its per-layer gate (the channel-exchange
+    /// reason, which needs the resolved scales); both funnel every standalone
+    /// render and every composite leaf, so all three merged-flat routes (static
+    /// `chart + chart`, `resolve={"y": "independent"}`, `.interactive()`) refuse
+    /// identically.
     ///
     /// REFUSE MALFORMED, and specifically not WARN DEGRADED: rendering with the
     /// declaration dropped is exactly the silent-substitution defect `#172`(1)
-    /// closes, and there is no degraded-but-honest version of "this layer has
-    /// its own axis domain" on a shared panel. A per-layer coord that declares
-    /// only placement (`fm.CoordFlip`, `fm.CoordPolar`, `fm.CoordGeo`, or a bare
-    /// `fm.CoordCartesian()`) is honored and never reaches here.
+    /// closes, and neither reason has a degraded-but-honest version — there is no
+    /// partial sense in which one layer of a shared panel has its own axis domain,
+    /// or in which a categorical column is drawn against a continuous axis.
     LayerCoordUnplaceable {
         layer: usize,
         coord: &'static str,
-        property: &'static str,
+        /// Boxed, for `clippy::result_large_err` and nothing else: the reason's
+        /// two owned strings would widen `RenderError` past the point where the
+        /// composite wrappers that embed it (`CompositeResolveError`,
+        /// `CompositeRenderError`) exceed the 128-byte threshold, taxing every
+        /// `Result` in those modules for a variant constructed at most once per
+        /// failed render. Sibling reasons stay unboxed because they are small.
+        reason: Box<LayerCoordUnplaceableReason>,
     },
     /// A layer beyond the first bound a positional channel (`x`/`y`/`x2`/`y2`)
     /// to a column that is absent from **that layer's own resolved batch** —
@@ -712,15 +771,44 @@ impl std::fmt::Display for RenderError {
                 write!(f, "invalid format spec {spec:?}: {reason}"),
             Self::MarkRequiresCoord { mark, required } =>
                 write!(f, "{mark} requires a {required} coord"),
-            Self::LayerCoordUnplaceable { layer, coord, property } => write!(
-                f,
-                "layer {layer}: {coord} declares {property}, which belongs to the panel every \
-                 layer shares — a layered chart (fm.layer(...) / chart + chart) merges its \
-                 members onto one panel, so this coord cannot be placed on one of them. A \
-                 per-layer coord may declare placement only: fm.CoordFlip, fm.CoordPolar, \
-                 fm.CoordGeo, or a bare fm.CoordCartesian(). Move it to the first member \
-                 (whose coord IS the panel's), or drop it."
-            ),
+            // One frame, two reasons (see `LayerCoordUnplaceableReason`): the
+            // prefix, the "cannot be placed on one of them" spine and the closing
+            // instruction are shared verbatim, so a caller cannot tell which of
+            // the two gates refused them. Only the middle clause — what about
+            // this coord could not be honored — and the remedy specific to it
+            // differ.
+            Self::LayerCoordUnplaceable { layer, coord, reason } => {
+                let (cause, remedy) = match &**reason {
+                    LayerCoordUnplaceableReason::PanelProperty(property) => (
+                        format!("{coord} declares {property}, which belongs to the panel every layer shares"),
+                        "A per-layer coord may declare placement only: fm.CoordFlip, \
+                         fm.CoordPolar, fm.CoordGeo, or a bare fm.CoordCartesian().",
+                    ),
+                    LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+                        channel,
+                        column,
+                        dtype,
+                        axis_kind,
+                    } => (
+                        format!(
+                            "{coord} leaves this layer's positional channels in the opposite \
+                             space from the panel's axes, and the panel's {channel} axis is \
+                             {axis_kind} while the column that lands on it ('{column}': \
+                             {dtype}) cannot be drawn against a {axis_kind} axis"
+                        ),
+                        "The panel's axes are resolved from the first member, so a member \
+                         whose channels sit in the opposite space can only be placed where \
+                         both of its columns suit the axes they land on.",
+                    ),
+                };
+                write!(
+                    f,
+                    "layer {layer}: {cause} — a layered chart (fm.layer(...) / chart + chart) \
+                     merges its members onto one panel, so this coord cannot be placed on one \
+                     of them. {remedy} Move it to the first member (whose coord IS the \
+                     panel's), or drop it."
+                )
+            }
             Self::LayerUnknownColumn { layer, channel, name, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 write!(
@@ -4582,4 +4670,5 @@ mod golden_tests {
         check_golden("faceted_scatter", &result.bytes);
     }
 }
+
 

@@ -16,6 +16,13 @@ section): ``chart + chart`` static, ``LayerChart(resolve={"y":
 moved one and not the others would mean a caller was patched rather than the
 path.
 
+Each of those three rows exists twice: once with both positional axes
+CONTINUOUS (the original matrix) and once with an ORDINAL primary axis (the
+wave-5 close review's F1 -- a band ladder is built by a different mechanism
+than a numeric extent, and only the numeric one had been taught to read each
+layer's own effective coord, so all three routes silently dropped the member's
+marks on a categorical axis while the continuous rows passed).
+
 Every geometric assertion here is derived from the render itself rather than
 from a hand-computed pixel: the control layer draws the same data at two
 known domain endpoints, which pins the data->pixel map exactly (the scale is
@@ -171,6 +178,97 @@ def test_independent_y_static_honors_a_secondary_layers_flip():
         f"the flipped layer's own y slot spans its 'bx' domain over the full plot "
         f"height ({ph:.3f}); got {max(ys) - min(ys):.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The same three routes on an ORDINAL positional axis (wave-5 close review F1).
+#
+# Every row above resolves both axes CONTINUOUSLY, which is exactly why a green
+# suite missed this: the flipped member's categories reach a band ladder by a
+# different mechanism than its values reach a numeric extent
+# (`scale_resolve::domain::positional_category_union`, not `numeric_domain_union`),
+# and only the numeric one had been taught to read each layer's OWN effective
+# coord. Measured on the ordinal shape before the fix, on all three routes: the
+# member drew ZERO nodes, with no warning and no error, while the x ladder
+# carried three spurious bands enumerated from its VALUE column
+# (`['a','b','c','40','50','60']`).
+#
+# The ladder itself is asserted in `test_layer_ordinal_domain_union.py`; these
+# rows assert what the routes owe -- that the member draws at all.
+# ---------------------------------------------------------------------------
+
+#: Categorical primary axis, and a secondary member on its own frame so its
+#: columns are renamed by the merge and its contribution is observable.
+ORDINAL_CONTROL = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
+#: Authored `x=`value / `y=`category, so post-flip its CATEGORIES occupy the
+#: rendered x axis -- the half of the shape a shared band ladder can serve.
+ORDINAL_SECONDARY = pl.DataFrame({"cat2": ["x", "y", "z"], "val2": [40.0, 50.0, 60.0]})
+
+
+def _ordinal_control():
+    return fm.Chart(ORDINAL_CONTROL).mark_bar().encode(x=fm.X("cat", type_="N"), y="val")
+
+
+def _ordinal_secondary_flipped():
+    return (
+        fm.Chart(ORDINAL_SECONDARY)
+        .mark_point()
+        .encode(x="val2", y=fm.Y("cat2", type_="N"))
+        .coord(fm.CoordFlip())
+    )
+
+
+def test_flat_merge_honors_a_secondary_layers_flip_on_an_ordinal_axis():
+    """`chart + chart.coord(CoordFlip())` with a categorical primary axis."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg = (_ordinal_control() + _ordinal_secondary_flipped()).to_svg()
+
+    assert len(_circles(svg)) == 3, (
+        "the flipped member draws one mark per row; zero is the silent drop this row exists for"
+    )
+
+
+def test_interactive_layer_honors_a_secondary_layers_flip_on_an_ordinal_axis():
+    """The interactive merged-flat scene -- the route the drop was reported on."""
+    layered = fm.layer(_ordinal_control(), _ordinal_secondary_flipped())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scene_json, _packed = layered._render_interactive()
+    panels = json.loads(scene_json)["panels"]
+    assert len(panels) == 1, "LayerChart interactive is always one scene panel"
+    by_kind = {batch["kind"]: batch["nodes"] for batch in panels[0]["marks"]}
+    assert len(by_kind["bar"]) == 3, "premise: the primary layer draws its three bars"
+    assert len(by_kind["point"]) == 3, (
+        "the flipped member must emit three nodes; pre-fix it emitted zero, silently"
+    )
+
+
+def test_independent_y_static_honors_a_secondary_layers_flip_on_an_ordinal_axis():
+    """`resolve={"y": "independent"}` static -- the third route, same path."""
+    layered = fm.layer(
+        _ordinal_control(), _ordinal_secondary_flipped(), resolve={"y": "independent"}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg = layered.to_svg()
+
+    assert len(_circles(svg)) == 3
+
+
+def test_the_continuous_row_is_the_control_that_always_passed():
+    """Stated as its own row so the ordinal rows above cannot be read as new coverage
+    of something the continuous ones already covered.
+
+    Same composition shape with both axes quantitative: this is what the three
+    rows at the top of this module assert geometrically, and it passed before the
+    fix. Its presence here is the negative control for the claim that the ordinal
+    path, specifically, was the gap.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg = (_control_chart() + _secondary_line(fm.CoordFlip())).to_svg()
+    assert len(polylines(svg)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +445,112 @@ def test_panel_scoped_secondary_layer_coord_refuses_naming_it(coord, name):
         message = str(err.value)
         assert name in message, f"the refusal must name the coord it dropped; got {message!r}"
         assert "layer 1" in message, f"the refusal must name the layer; got {message!r}"
+
+
+# ---------------------------------------------------------------------------
+# The second way a per-layer coord cannot be placed: the exchange itself is
+# unserviceable, because the panel's axes cannot draw the columns it moves onto
+# them (wave-5 close remediation). `fm.CoordFlip` declares no panel property, so
+# it passes the gate above and used to reach the mark builders, whose swallowing
+# column reads dropped the member with no error and no warning -- while the same
+# caller mistake spelled `fm.CoordFixed` refused loudly two tests up. One
+# question, two answers; now one.
+# ---------------------------------------------------------------------------
+
+#: One frame, one categorical x, one quantitative y. Both members bind the SAME
+#: columns, which is what makes the exchange unserviceable: the flipped member's
+#: y becomes the Utf8 column while the panel's y axis stays quantitative.
+SHARED_FRAME = pl.DataFrame({"cat": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
+
+
+def _shared_bar():
+    return fm.Chart(SHARED_FRAME).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
+
+
+def _shared_point_flipped():
+    return (
+        fm.Chart(SHARED_FRAME)
+        .mark_point()
+        .encode(x=fm.X("cat", type_="N"), y="v")
+        .coord(fm.CoordFlip())
+    )
+
+
+@pytest.mark.parametrize("route", ["flat", "interactive"])
+def test_an_unserviceable_layer_flip_refuses_in_the_panel_propertys_words(route):
+    """The refusal a caller cannot distinguish from the panel-property one.
+
+    Asserted on message CONTENT, not merely that something raised: the property
+    being fixed is that the two gates speak with one voice, so the shared frame
+    ("layer 1: <coord>", "cannot be placed on one of them", the closing
+    instruction) is asserted verbatim alongside the diagnosable part (which axis,
+    which column, which dtype).
+
+    Only the two routes that merge onto one panel appear here. The other two are
+    the control below: they give the member its own y scale or its own panel, so
+    the panel CAN hold it and it renders.
+    """
+    layered = fm.layer(_shared_bar(), _shared_point_flipped())
+    call = (
+        (_shared_bar() + _shared_point_flipped()).to_svg
+        if route == "flat"
+        else (layered._render_interactive)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError) as err:
+            call()
+
+    message = str(err.value)
+    # The frame shared verbatim with `test_panel_scoped_secondary_layer_coord_refuses_naming_it`.
+    assert message.startswith("layer 1: fm.CoordFlip"), message
+    assert "cannot be placed on one of them" in message, message
+    assert "Move it to the first member (whose coord IS the panel's), or drop it." in message, (
+        message
+    )
+    # The diagnosable part: which axis could not take which column.
+    assert "y axis is continuous" in message, message
+    assert "'cat'" in message, message
+    assert "Utf8" in message, message
+
+
+def test_the_routes_that_can_hold_the_flipped_member_still_render_it():
+    """The control: refusal is scoped to the panel that genuinely cannot hold it.
+
+    `resolve={"y": "independent"}` gives the flipped member its own y slot, which
+    IS categorical, and `fm.layer(...).to_svg()` keeps every member a separate
+    composite leaf with its own scales. Both draw all three of its marks, so
+    neither may refuse -- a gate spelled "a per-layer flip plus an ordinal axis
+    refuses" would pass the test above and break both of these.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        independent = fm.layer(
+            _shared_bar(), _shared_point_flipped(), resolve={"y": "independent"}
+        ).to_svg()
+        composite = fm.layer(_shared_bar(), _shared_point_flipped()).to_svg()
+
+    for name, svg in (("independent-y", independent), ("composite leaves", composite)):
+        assert len(_circles(svg)) == 3, f"{name}: the flipped member must draw its three marks"
+
+
+def test_a_numeric_category_column_makes_the_same_exchange_placeable():
+    """The discriminating control, and the measurement that found the mechanism.
+
+    Identical composition over an INTEGER category column: the panel's continuous
+    y can read it, so the exchange is placeable and the chart renders. This is why
+    the refusal names a column and an axis rather than a coord and an axis kind --
+    it is the column that decides.
+    """
+    frame = pl.DataFrame({"k": [1, 2, 3], "v": [3.0, 1.0, 2.0]})
+    bar = fm.Chart(frame).mark_bar().encode(x=fm.X("k", type_="O"), y="v")
+    flipped = (
+        fm.Chart(frame).mark_point().encode(x=fm.X("k", type_="O"), y="v").coord(fm.CoordFlip())
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg = (bar + flipped).to_svg()
+    assert len(_circles(svg)) == 3
 
 
 def test_a_plain_cartesian_secondary_layer_coord_renders():

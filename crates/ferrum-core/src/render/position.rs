@@ -1070,24 +1070,57 @@ fn jitter_axis_values(
 // Stack
 // ---------------------------------------------------------------------------
 
-/// Resolve whether a Stack's cumulated *value* column lives on X (GH #77).
+/// Resolve whether a Stack's cumulated *value* column lives on X **as rendered**
+/// (GH #77).
 ///
-/// The single canonical triad: an explicit `value_axis` always wins
-/// (`Some(X)` → true, `Some(Y)` → false); `None` falls back to
-/// `coord_flipped` — real `CoordFlip` always structurally puts value on X
-/// (prepare.rs's `build_layers` swap convention). Shared by [`apply_stack`]
-/// (the draw-time cumulation) and `axis_batch_for_x`/`axis_batch_for_y`
-/// (the scale-resolve domain-widening preview, GH #77 follow-up) so the two
-/// passes can never disagree about which axis holds the value.
+/// Shared by [`apply_stack`] (the draw-time cumulation) and
+/// `axis_batch_for_x`/`axis_batch_for_y` (the scale-resolve domain-widening
+/// preview, GH #77 follow-up) so the passes can never disagree about which axis
+/// holds the value. Every one of the three passes reads
+/// `PositionAdjust::Stack::value_axis` off the spec and the flip off
+/// `spec.coord`, so this is the single place the two meet.
+///
+/// # The two spaces, and why this is an XOR rather than a precedence
+///
+/// `value_axis` is the producer's declaration about the series it AUTHORED
+/// (`desugar_histogram(orientation="horizontal")` remaps its count onto `x` and
+/// says `value_axis="x"`), while `coord_flipped` is a TRANSFORMATION applied to
+/// that authored series afterwards. So a declared axis is not the final answer:
+/// the flip moves it, exactly as it moves the channels themselves. Undeclared
+/// means the authored default, vertical (value on y), which the flip likewise
+/// moves onto x — so all four cells fall out of one expression, "authored on x,
+/// then flipped an odd number of times".
+///
+/// This is the close-review F3 fix. The former shape was a PRECEDENCE
+/// (`Some(X) => true, Some(Y) => false, None => coord_flipped`) — correct for
+/// `mark_style.value_axis`, whose copy [`LayerPrepared::flip_coords`]
+/// (crate::render::prepare) has ALREADY swapped into post-flip space before
+/// `DrawCtx::series_curve_axis` reads it, and wrong here, where nothing swaps
+/// `position` and the declaration arrives as authored. Mirroring that triad's
+/// formula across the space boundary is what made the two disagree: measured,
+/// `mark_histogram(bins=3, orientation="horizontal", multiple="stack")
+/// .encode(y="v:Q", color="g:N").coord(CoordFlip())` drew nine rects, four of
+/// them sharing one `y`/`height` with overlapping widths — the bin-start column
+/// cumulated and the count column used as the bin key — where both its unflipped
+/// spelling and its vertical twin drew the same correct three.
+///
+/// `position`'s declaration is therefore reconciled HERE rather than swapped in
+/// `flip_coords`' eager coordinate-space group: all three of its consumers
+/// already carry the real `coord_flipped` and all three reach it through this
+/// function, whereas two of them (`axis_batch_for_x`/`axis_batch_for_y`) read
+/// `spec.position`/`spec.layers` RAW, so an eager swap would have to be applied
+/// at those two sites as well — a rule in three places instead of one. See
+/// `flip_coords`' doc for the other half of that split.
+///
+/// Only `Some(_)` + `coord_flipped` changes answer: `None` (every chart with no
+/// explicit declaration, flipped or not) and every unflipped chart resolve
+/// exactly as before, which is what keeps stacked-bar output byte-identical.
 pub(crate) fn resolve_stack_value_on_x(
     value_axis: Option<StackValueAxis>,
     coord_flipped: bool,
 ) -> bool {
-    match value_axis {
-        Some(StackValueAxis::X) => true,
-        Some(StackValueAxis::Y) => false,
-        None => coord_flipped,
-    }
+    let authored_on_x = matches!(value_axis, Some(StackValueAxis::X));
+    authored_on_x != coord_flipped
 }
 
 /// Position-adjust a layer's batch for a stacked layout.
@@ -1411,15 +1444,24 @@ pub(crate) fn apply_stack(
     // always the same column regardless of axis, so mark drawers (`bar.rs`,
     // `area.rs`) that consume it need an explicit signal for which scale to
     // map it through — they can't infer it from the batch shape alone.
-    // Absence of the key (the `!value_on_x` branch below) is the pre-#77
-    // default and keeps every existing vertical-stack mark byte-identical.
-    let new_schema = if value_on_x {
-        let mut metadata = batch.schema().metadata().clone();
+    // Absence of the key is the pre-#77 default and keeps every existing
+    // vertical-stack mark byte-identical.
+    //
+    // ONE schema build, carrying the input metadata forward on both paths, for
+    // the reason `apply_jitter` states at its own build (close review F5): this
+    // used to stamp into a clone of `batch.schema().metadata()` on the
+    // `value_on_x` path and build a bare `Schema::new(new_fields)` on the other —
+    // two builds in one function disagreeing about whether input metadata
+    // survives, the third member of the retype/schema/metadata family `apply_dodge`
+    // already gets right on every path. Byte-identical today (the only live
+    // producer of batch metadata is `apply_dodge_ordinal`, and `apply_position`
+    // applies exactly one adjustment per layer, so nothing can chain into here),
+    // which is why it is drift rather than a defect.
+    let mut metadata = batch.schema().metadata().clone();
+    if value_on_x {
         BatchPositionMeta::stamp_stack_value_on_x(&mut metadata);
-        Arc::new(Schema::new(new_fields).with_metadata(metadata))
-    } else {
-        Arc::new(Schema::new(new_fields))
-    };
+    }
+    let new_schema = Arc::new(Schema::new(new_fields).with_metadata(metadata));
     RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
         reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
@@ -2524,6 +2566,139 @@ mod tests {
         assert_eq!(ba.value(1), 3.0);
         assert_eq!(ba.value(2), 0.0);
         assert_eq!(ba.value(3), 2.0);
+    }
+
+    /// The whole triad, as a table (close review F3). `value_axis` is the
+    /// AUTHORED declaration and `coord_flipped` is a transformation applied
+    /// after it, so the rendered answer is the XOR — not the precedence its
+    /// post-flip sibling `DrawCtx::series_curve_axis` correctly uses on its own
+    /// already-swapped copy.
+    ///
+    /// The two `Some(_)` + flip cells are the ones that changed. Every other cell
+    /// is asserted here too, because they are what keeps stacked output
+    /// byte-identical and a "fix" that moved them would be a regression nothing
+    /// else in this module pins at this granularity.
+    #[test]
+    fn a_flip_moves_an_authored_stack_value_axis_and_leaves_the_rest_alone() {
+        use crate::spec::position::StackValueAxis::{X, Y};
+        // Unflipped: the declaration is already the rendered answer.
+        assert!(!resolve_stack_value_on_x(None, false), "undeclared, unflipped → value on y");
+        assert!(resolve_stack_value_on_x(Some(X), false), "declared x, unflipped → value on x");
+        assert!(!resolve_stack_value_on_x(Some(Y), false), "declared y, unflipped → value on y");
+        // Flipped: every authored axis moves to the other one.
+        assert!(resolve_stack_value_on_x(None, true), "undeclared + flip → the default y moves to x");
+        assert!(
+            !resolve_stack_value_on_x(Some(X), true),
+            "declared x + flip → the flip moves it BACK to y; answering `true` here is the F3 \
+             defect (a horizontal stacked histogram under CoordFlip cumulating its bin column)"
+        );
+        assert!(
+            resolve_stack_value_on_x(Some(Y), true),
+            "declared y + flip → the mirror of the same defect"
+        );
+    }
+
+    /// The F3 defect at the cumulation seam: an authored horizontal stack
+    /// (`value_axis: X`, what `desugar_histogram(orientation="horizontal")`
+    /// stamps) under a real `CoordFlip` must cumulate the POST-flip y column —
+    /// the value — and group by the post-flip x — the bins.
+    ///
+    /// The fixture is the measured shape reduced to four rows: post-flip
+    /// `x = bin_start` (the category), `y = count` (the value). Pre-fix the triad
+    /// answered "value on x" and the two roles swapped, so `bin_start` was
+    /// cumulated and `count` became the bin key — which is exactly what the
+    /// nine-rect render showed.
+    #[test]
+    fn an_authored_horizontal_stack_under_a_flip_cumulates_the_post_flip_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+        // Post-flip encoding, as `prepare::build_layers` hands it to the draw
+        // pass: the authored y (bins) is on x, the authored x (counts) on y.
+        let enc = enc_xy("bin_start", "count", Some("grp"));
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let out =
+            apply_position(&batch, Some(&pos), &dummy_scales(), &enc, true, &mut Vec::new()).unwrap();
+
+        let counts = out.column(out.schema().index_of("count").unwrap());
+        let counts = counts.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            (counts.value(0), counts.value(1), counts.value(2), counts.value(3)),
+            (3.0, 8.0, 2.0, 6.0),
+            "the COUNT column cumulates within each bin"
+        );
+        let bins = out.column(out.schema().index_of("bin_start").unwrap());
+        let bins = bins.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            (bins.value(0), bins.value(1), bins.value(2), bins.value(3)),
+            (0.0, 0.0, 1.0, 1.0),
+            "…and the bin column is left exactly as it arrived — pre-fix it was the one cumulated"
+        );
+        assert!(
+            !BatchPositionMeta::from_batch(&out).stack_value_on_x(),
+            "the value landed on y as rendered, so the horizontal-value marker must NOT be stamped"
+        );
+    }
+
+    /// Input schema metadata survives a stack, on both paths (close review F5).
+    ///
+    /// `apply_stack` built the output schema twice — once with the input metadata
+    /// cloned (the `value_on_x` path) and once bare — so the common vertical path
+    /// dropped whatever the input carried. Inert today, since no producer can
+    /// chain into a stack, and asserted here so the two paths cannot drift apart
+    /// again: `apply_jitter` and `apply_dodge` both carry it forward already.
+    #[test]
+    fn a_stack_carries_input_schema_metadata_forward_on_both_paths() {
+        let fields = vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("__probe__".to_string(), "kept".to_string());
+        let schema = Arc::new(Schema::new(fields).with_metadata(metadata));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("x", "y", Some("g"));
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        for coord_flipped in [false, true] {
+            let out =
+                apply_position(&batch, Some(&pos), &dummy_scales(), &enc, coord_flipped, &mut Vec::new())
+                    .unwrap();
+            assert_eq!(
+                out.schema().metadata().get("__probe__").map(String::as_str),
+                Some("kept"),
+                "coord_flipped={coord_flipped}: input metadata must survive the stack"
+            );
+        }
     }
 
     #[test]

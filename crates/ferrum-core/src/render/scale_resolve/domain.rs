@@ -910,6 +910,13 @@ fn distinct_positional_categories_shared(
 /// layers share their positional columns — every composite-mark chart, every
 /// same-frame `+` — resolves byte-identically to before.
 ///
+/// …and only when that column can be a category **key**, which is the same
+/// question as "can a mark address a band on it" and is asked through
+/// [`crate::render::arrow_cast::ensure_category_keyable`] — see the gate in the
+/// loop for why that makes the skip lossless, why the enumeration below still
+/// propagates every other failure with `?`, and why this is deliberately not a
+/// `Quantitative`/`Temporal` type test.
+///
 /// **One batch per field, via [`locate_field`], not a union across every named
 /// output** — the one deliberate narrowing relative to
 /// [`numeric_domain_union`]. A numeric extent is order-free, so unioning
@@ -973,13 +980,6 @@ pub(in crate::render) fn positional_category_union(
     // Membership set rather than `Vec::contains`: the ladder can run to hundreds
     // of categories and every layer would re-scan it.
     let mut seen: std::collections::HashSet<String> = domain.iter().cloned().collect();
-    // COORDINATE SPACE — the same reconciliation `numeric_domain_union`'s layer
-    // loop documents at length: `channel`/`field` are POST-flip (derived from the
-    // rendering encoding), while `spec.layers` is the spec as AUTHORED, so the
-    // layer encoding is moved into the channel's own space before any read. One
-    // flipped clone answers both reads below, which is what keeps "this layer's
-    // category column" and "this layer's own opposite coordinate" in one space.
-    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     for layer in layers {
         // An `independent_y` layer owns its own y axis (GH #52) and must not
         // widen the primary y ladder, exactly as it does not widen the primary
@@ -987,6 +987,30 @@ pub(in crate::render) fn positional_category_union(
         if channel == "y" && layer.independent_y {
             continue;
         }
+        // COORDINATE SPACE — the same reconciliation `numeric_domain_union`'s
+        // layer loop documents at length: `channel`/`field` are POST-flip
+        // (derived from the rendering encoding), while `spec.layers` is the spec
+        // as AUTHORED, so the layer encoding is moved into the channel's own
+        // space before any read. One flipped clone answers both reads below,
+        // which is what keeps "this layer's category column" and "this layer's
+        // own opposite coordinate" in one space.
+        //
+        // WHOSE space is per layer, and the read is therefore INSIDE the loop
+        // (`#172`(1), close review F1): the layer `prepare::build_layers` swaps
+        // is the one whose OWN effective coord flips, so that is the layer whose
+        // authored `y` occupies this x axis. This loop read the CHART's flip for
+        // every layer until then — hoisted above the loop, where a per-layer
+        // answer cannot be expressed — and a member carrying its own `CoordFlip`
+        // therefore contributed its AUTHORED channel: measured, `bar(x="cat:N")
+        // + point(x="v2:Q", y="cat2:N").coord(CoordFlip())` enumerated the
+        // point layer's value column as three spurious bands (`['a','b','c',
+        // '4','5','6']`) while the layer's real post-flip categories never
+        // reached the ladder at all, so it drew 0 of its 3 circles. That is
+        // precisely the defect this function exists to fix, reopened one level
+        // down for the shape per-layer coord made expressible.
+        let coord_flipped = crate::spec::coord::flips_positional_channels(
+            layer.effective_coord(spec.coord.as_ref()),
+        );
         let flipped = coord_flipped.then(|| {
             let mut e = layer.encoding.clone();
             e.flip_positional();
@@ -1008,6 +1032,51 @@ pub(in crate::render) fn positional_category_union(
         let Some(located) = locate_field(layer_field, primary_batch, transform_outputs) else {
             continue;
         };
+        // A column that cannot be a category KEY cannot be a category BAND
+        // either, so it contributes nothing and that is lossless (close review
+        // F2). The two halves of that sentence are one dtype set by
+        // construction: [`crate::render::arrow_cast::ensure_category_keyable`]
+        // admits exactly what `distinct_values_in_order` (this ladder) and
+        // `col_as_ordinal_category_str` (the per-row key every mark builder
+        // reads a band position through) accept — pinned by
+        // `category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does`.
+        // So for a layer whose own column this rejects, no band the ladder could
+        // have grown would ever have been addressed by a mark.
+        //
+        // Asked as a positive statement about what this axis can serve, BEFORE
+        // the read, rather than by swallowing the read's error: the enumeration
+        // below keeps its `?`, so a failure from any OTHER cause still refuses
+        // the render instead of quietly shortening the ladder. That distinction
+        // is the point — this skip is provably lossless, an `unwrap_or` would
+        // also have hidden failures that are not.
+        //
+        // Without it the ordinal side REFUSED where its numeric sibling shrugs
+        // (`numeric_domain_union`'s `union_field(lf).unwrap_or(false)`, "the
+        // field may not exist in all batches"): measured,
+        // `bar(x="cat:N") + line(x="when:T")` raised `column 'when' has
+        // unsupported dtype: Timestamp(...)` for a composition that rendered
+        // before this function existed. A temporal-x layer beside a
+        // categorical-x layer is not malformed, so REFUSE MALFORMED does not
+        // reach it; the layer simply places no mark on a band axis, exactly as
+        // it did before, and the mark builders reach the same verdict about the
+        // same column independently (`col_as_positional_category_str(..)
+        // Err(_) => empty`).
+        //
+        // Deliberately NOT a `type_`/dtype INFERENCE gate
+        // (`infer_spec_type(layer_enc, ..)`), which is a different question —
+        // "which scale would this channel build" — already answered upstream for
+        // this axis. Answering it again here would drop a QUANTITATIVE layer
+        // column whose values the band ladder can and does serve: measured,
+        // `bar(x="cat:N") + point(x="n:Q")` draws its 2 points on the two bands
+        // `'10'`/`'20'` this loop adds for them, and an unannotated integer
+        // column (`x="yr"` over `Int64`, which infers Quantitative) is the same
+        // shape — both would silently lose every mark, which is the defect this
+        // function exists to prevent.
+        if crate::render::arrow_cast::ensure_category_keyable(layer_field, located.col.data_type())
+            .is_err()
+        {
+            continue;
+        }
         let own_paired = own_paired_enc.map(|e| e.field.as_str());
         let mut cats = distinct_positional_categories_shared(
             located.batch,
@@ -2141,6 +2210,127 @@ mod tests {
             category_ladder(FLIPPED, "y", "cat", Some("grp")),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
             "the authored x field must widen the post-flip y axis"
+        );
+    }
+
+    /// The flip is per LAYER, not per chart (`#172`(1), close review F1): a
+    /// member carrying its OWN `CoordFlip` inside an unflipped chart widens each
+    /// axis from the channel it occupies POST-flip, exactly as the chart-level
+    /// case above does.
+    ///
+    /// RED (verified in place): hoist the `coord_flipped` read back out of the
+    /// loop — where only the chart's flip can be read — and the two answers
+    /// below trade places, i.e. the flipped member's value column is enumerated
+    /// as bands on the axis its categories were supposed to reach. The two
+    /// assertions are the two halves of that defect: no column from the wrong
+    /// channel on the ladder, AND the layer's own post-flip column present.
+    #[test]
+    fn a_layer_with_its_own_flip_widens_the_axis_its_post_flip_channel_occupies() {
+        // `coord` sits beside the layer's `encoding`, not inside it — a
+        // mis-nested key deserializes to "no coord" and would pass this test for
+        // the wrong reason, which is what the premise below rules out.
+        const LAYER_FLIP: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}},"coord":{"kind":"flip"}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(LAYER_FLIP).unwrap();
+        assert!(
+            spec.coord.is_none() && spec.layers.as_ref().unwrap()[1].coord.is_some(),
+            "premise: an unflipped chart whose second member carries its own flip"
+        );
+
+        assert_eq!(
+            category_ladder(LAYER_FLIP, "x", "cat", Some("grp")),
+            vec!["c".to_string(), "a".to_string(), "r".to_string()],
+            "the flipped member's authored y (`grp__rhs`) is what occupies x"
+        );
+        assert_eq!(
+            category_ladder(LAYER_FLIP, "y", "grp", Some("cat")),
+            vec!["p".to_string(), "q".to_string(), "b".to_string()],
+            "…and its authored x (`cat__rhs`) is what occupies y"
+        );
+    }
+
+    /// A chart-level flip still reaches a layer that declares no coord of its
+    /// own — the `effective_coord` fallback, asserted here because the per-layer
+    /// read above could satisfy its own test by ignoring `spec.coord` entirely.
+    #[test]
+    fn a_layer_without_its_own_coord_still_takes_the_charts_flip() {
+        const CHART_FLIP_ONLY: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}}}],"coord":{"kind":"flip"}}"#;
+        assert_eq!(
+            category_ladder(CHART_FLIP_ONLY, "x", "grp", Some("cat")),
+            vec!["p".to_string(), "q".to_string(), "r".to_string()],
+        );
+    }
+
+    /// A layer whose own column cannot be a category KEY contributes nothing,
+    /// and says so by skipping rather than by refusing the render (close review
+    /// F2). A `Timestamp` layer field beside a categorical axis is the measured
+    /// shape: `bar(x="cat:N") + line(x="when:T")` raised
+    /// `UnsupportedDtype` for a composition that rendered before this function
+    /// existed, where `numeric_domain_union`'s layer loop shrugs at the same
+    /// class of unreadable field.
+    ///
+    /// The `Err` is still reachable — the enumeration below the gate keeps its
+    /// `?`. What the gate removes is the one case where refusing is provably
+    /// pointless: no mark could have addressed a band on this column either,
+    /// since the per-row keyer admits exactly the dtypes the gate does.
+    #[test]
+    fn a_layer_field_that_cannot_be_a_category_key_is_skipped_not_raised() {
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new(
+                "when",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c"), Some("a")])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+                Arc::new(TimestampMillisecondArray::from(vec![Some(0_i64), Some(86_400_000)])),
+            ],
+        )
+        .unwrap();
+        const TEMPORAL_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"line","encoding":{"x":{"field":"when","type":"temporal"},"y":{"field":"val"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(TEMPORAL_LAYER).unwrap();
+        assert_eq!(
+            positional_category_union("x", "cat", Some("val"), &batch, &HashMap::new(), &spec, false)
+                .expect("a temporal layer field must skip, not refuse the whole ladder"),
+            vec!["c".to_string(), "a".to_string()],
+        );
+    }
+
+    /// The gate is about the COLUMN, not about the declared type: a quantitative
+    /// layer channel over a numeric column still contributes, because the band
+    /// ladder can serve it and its marks do land on those bands. Measured:
+    /// `bar(x="cat:N") + point(x="n:Q")` draws its 2 points on the two bands
+    /// this adds. An `infer_spec_type`-based gate would drop both — and would
+    /// also drop an unannotated integer categorical, which infers Quantitative.
+    #[test]
+    fn a_quantitative_layer_column_the_ladder_can_serve_still_contributes() {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("n", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c"), Some("a")])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+                Arc::new(arrow::array::Int64Array::from(vec![Some(10), Some(20)])),
+            ],
+        )
+        .unwrap();
+        const QUANTITATIVE_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"n","type":"quantitative"},"y":{"field":"val"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(QUANTITATIVE_LAYER).unwrap();
+        assert_eq!(
+            positional_category_union("x", "cat", Some("val"), &batch, &HashMap::new(), &spec, false)
+                .unwrap(),
+            vec!["c".to_string(), "a".to_string(), "10".to_string(), "20".to_string()],
         );
     }
 

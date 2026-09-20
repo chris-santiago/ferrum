@@ -62,10 +62,20 @@ impl DrawCtx<'_> {
     ///
     /// So the composition is a PRECEDENCE, not a disjunction: a declaration
     /// answers outright, and the transformations only speak for an undeclared
-    /// series. This mirrors
-    /// [`resolve_stack_value_on_x`](crate::render::position) exactly — the same
-    /// `Some(X) => true, Some(Y) => false, None => coord_flipped` triad, for the
-    /// same reason — so the crate composes this fact one way, not two.
+    /// series.
+    ///
+    /// A precedence is correct *because this declaration is already post-flip*:
+    /// [`LayerPrepared::flip_coords`](crate::render::prepare) swapped it with the
+    /// channels, so the flip has been spent by the time it is read here and
+    /// `Some(Y)` genuinely means "vertical as rendered". Its sibling
+    /// [`resolve_stack_value_on_x`](crate::render::position) answers the same
+    /// question for `PositionAdjust::Stack::value_axis`, which arrives AUTHORED
+    /// (nothing swaps `position`), and so composes the two as an XOR instead.
+    /// The two are one rule — "reconcile a channel-naming declaration with the
+    /// flip, exactly once" — applied in the two spaces their inputs live in.
+    /// Copying this precedence onto the authored field was the close-review F3
+    /// defect: it spends the flip zero times, and a flipped horizontal stack
+    /// cumulated its bin column. Read that function's doc before changing either.
     ///
     /// A disjunction shipped briefly and was wrong for exactly one input:
     /// `mark_density(orientation="horizontal").coord(CoordFlip())`. Flipping the

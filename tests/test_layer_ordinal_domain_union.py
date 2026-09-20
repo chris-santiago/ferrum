@@ -19,10 +19,19 @@ in the same place for the disjoint case and fail `partial_overlap` and
 Scoped to the cross-layer union. The sibling module `test_layer_merge_category_domain.py`
 owns `#247`B (when a null claims the `null` band) and its policy controls; this
 module asserts the union preserves that rule rather than re-litigating it.
+
+Two later sections extend the same subject from the wave-5 close review: which
+coordinate space a layer's column is read in when the LAYER carries its own
+`CoordFlip` (F1), and which layer columns the ladder will serve at all (F2).
+Both are properties of the union loop. `test_layer_coord.py` owns the
+complementary statement -- that a member's own coord is honored on each of the
+three merged-flat routes -- and its ordinal row is the route-level sibling of
+F1's section here.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 
 import polars as pl
@@ -265,6 +274,135 @@ def test_a_reference_line_layers_structural_nulls_open_no_band():
 
     assert axis_tick_labels(svg, axis="x") == ["a", "b", "c"]
     assert len(data_bar_rects(mark_layer(svg))) == 3
+
+
+# ---------------------------------------------------------------------------
+# Whose coordinate space the layer's column lives in (wave-5 close review F1),
+# and which columns the ladder will serve at all (F2). Both are properties of
+# the union loop, so they live here rather than in `test_layer_coord.py` --
+# which owns the complementary statement, that a member's own coord is honored
+# on each of the three merged-flat routes.
+# ---------------------------------------------------------------------------
+
+#: The flipped member binds its own (renamed, cross-frame) columns, so its
+#: contribution is observable: authored `x=val2` / `y=cat2`, i.e. post-flip its
+#: CATEGORIES occupy x and its values occupy y.
+FLIPPED_MEMBER = pl.DataFrame({"cat2": ["x", "y", "z"], "val2": [40.0, 50.0, 60.0]})
+
+
+def test_a_members_own_flip_decides_which_of_its_columns_reaches_the_ladder():
+    """The flip is per LAYER, not per chart.
+
+    A member carrying its own `CoordFlip` inside an unflipped chart has its
+    authored y on the rendered x axis, so THAT is the column the x ladder takes.
+    Measured pre-fix (the loop read the chart's flip, hoisted above the loop
+    where a per-layer answer cannot be expressed): the ladder was
+    `['a','b','c','40','50','60']` -- the member's VALUE column enumerated as
+    three spurious bands, stealing band width from the real categories -- and the
+    member drew 0 of its 3 circles, because the categories it needed a band for
+    never reached the ladder. Both halves are asserted; either alone passes for a
+    render that is still wrong.
+    """
+    left = fm.Chart(LEFT).mark_bar().encode(x=fm.X("cat", type_="N"), y="val")
+    flipped = (
+        fm.Chart(FLIPPED_MEMBER)
+        .mark_point()
+        .encode(x="val2", y=fm.Y("cat2", type_="N"))
+        .coord(fm.CoordFlip())
+    )
+    svg = (left + flipped).to_svg()
+
+    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c", "x", "y", "z"], (
+        "the member's post-flip x (its `cat2` categories) is what widens the x ladder"
+    )
+    assert circle_count(svg) == 3, "…and with bands to occupy, all three of its marks draw"
+
+
+def test_an_unflipped_twin_of_the_same_member_is_the_control():
+    """The same member without the flip: its AUTHORED x is the categorical one.
+
+    The two tests differ by one `.coord()` call, so a "fix" that ignored coords
+    entirely would have to fail one of them.
+    """
+    left = fm.Chart(LEFT).mark_bar().encode(x=fm.X("cat", type_="N"), y="val")
+    plain = fm.Chart(FLIPPED_MEMBER).mark_point().encode(x=fm.X("cat2", type_="N"), y="val2")
+    svg = (left + plain).to_svg()
+
+    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c", "x", "y", "z"]
+    assert circle_count(svg) == 3
+
+
+def test_a_temporal_layer_field_beside_a_categorical_axis_renders():
+    """A layer column the ladder cannot enumerate is skipped, not refused (F2).
+
+    Measured pre-fix: this raised `column 'when' has unsupported dtype:
+    Timestamp(Millisecond, None) (cannot enumerate distinct values)` -- the
+    ordinal side refusing where its numeric sibling
+    (`numeric_domain_union`'s layer loop, "the field may not exist in all
+    batches") shrugs. A temporal-x layer beside a categorical-x layer is not
+    malformed, so REFUSE MALFORMED does not reach it: the bar layer draws, and the
+    line layer places nothing on a band axis, which is what it did before the
+    cross-layer ladder existed at all.
+    """
+    cat = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
+    stamps = pl.DataFrame(
+        {
+            "when": [
+                datetime.datetime(2020, 1, 1),
+                datetime.datetime(2020, 2, 1),
+                datetime.datetime(2020, 3, 1),
+            ],
+            "v2": [4.0, 5.0, 6.0],
+        }
+    )
+    svg = (
+        fm.Chart(cat).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
+        + fm.Chart(stamps).mark_line().encode(x=fm.X("when", type_="T"), y="v2")
+    ).to_svg()
+
+    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c"], (
+        "no band is invented for a column no mark could key against"
+    )
+    assert len(data_bar_rects(mark_layer(svg))) == 3, "the categorical layer still draws"
+
+
+def test_a_genuinely_unreadable_axis_column_still_refuses():
+    """The skip is for a LAYER's contribution, not for the axis's own column.
+
+    The same `Timestamp` column bound as a nominal axis — i.e. as the thing the
+    ladder is made of — must still raise, naming the column. This is the half that
+    keeps F2's fix from being a blanket swallow: only the layer-contribution read
+    is gated, and only by a property (can this be a category key at all) that
+    makes the skip lossless.
+    """
+    stamps = pl.DataFrame(
+        {
+            "when": [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 2, 1)],
+            "v2": [4.0, 5.0],
+        }
+    )
+    with pytest.raises(ValueError, match="when"):
+        fm.Chart(stamps).mark_bar().encode(x=fm.X("when", type_="N"), y="v2").to_svg()
+
+
+def test_a_quantitative_layer_column_the_ladder_can_serve_still_bands_and_draws():
+    """The gate asks about the COLUMN, not about the declared type.
+
+    A quantitative layer channel over a numeric column gets bands and its marks
+    land on them — so gating on `Quantitative`/`Temporal` instead would silently
+    drop these two points (and would also drop an unannotated integer
+    categorical, which infers Quantitative). Byte-identical to before the F2 gate,
+    which is the point.
+    """
+    cat = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
+    numeric = pl.DataFrame({"n": [10, 20], "v2": [4.0, 5.0]})
+    svg = (
+        fm.Chart(cat).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
+        + fm.Chart(numeric).mark_point().encode(x="n", y="v2")
+    ).to_svg()
+
+    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c", "10", "20"]
+    assert circle_count(svg) == 2
 
 
 # ---------------------------------------------------------------------------

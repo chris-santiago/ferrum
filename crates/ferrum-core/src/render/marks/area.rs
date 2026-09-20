@@ -87,11 +87,15 @@ impl<'a> BottomEdge<'a> {
             // `(cx, base_y)`, varying y at the row's own x.
             //
             // These disagree with `series_curve_axis()` in one combination:
-            // `CoordFlip` + an explicit `Stack(value_axis="y")`, where
-            // `resolve_stack_value_on_x` returns `false` while `coord_flipped()`
-            // returns `true`. Reading the arm is the correct answer there —
-            // that stack cumulates the RENDERING y column, which is an ordinary
-            // vertical stack in screen space and so genuinely x-parameterized.
+            // `CoordFlip` + an explicit `Stack(value_axis="x")`, where
+            // `resolve_stack_value_on_x` returns `false` (the flip moves the
+            // authored x-value back onto y) while `coord_flipped()` returns
+            // `true`. Reading the arm is the correct answer there — that stack
+            // cumulates the RENDERING y column, which is an ordinary vertical
+            // stack in screen space and so genuinely x-parameterized. (Before the
+            // close-review F3 fix this combination was spelled `value_axis="y"`
+            // + `CoordFlip`; the triad spends the flip now, so it is the
+            // `value_axis="x"` spelling that reaches this arm under a flip.)
             Self::StackBase { value_on_x, .. } => {
                 if *value_on_x { CurveAxis::Y } else { CurveAxis::X }
             }
@@ -1878,8 +1882,12 @@ mod tests {
     /// each self-answering arm's expected reply, so a regression to
     /// "delegate everything to the series" fails here. That is the latent seam
     /// the spec reviewer flagged: under `CoordFlip` + an explicit
-    /// `Stack(value_axis="y")` the stamp says vertical while the flip says
+    /// `Stack(value_axis="x")` the stamp says vertical while the flip says
     /// horizontal, and the arm is the one that matches the points being built.
+    /// (That combination was `value_axis="y"` before the close-review F3 fix
+    /// taught `resolve_stack_value_on_x` to spend the flip — see its doc. The
+    /// arm-vs-series disagreement it pins is unchanged; only which declaration
+    /// reaches it under a flip moved.)
     #[test]
     fn every_point_building_bottom_edge_arm_answers_from_its_own_construction() {
         use crate::spec::encoding::{DataType as SDT, EncodingSpec};

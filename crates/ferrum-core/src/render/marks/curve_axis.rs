@@ -10,8 +10,9 @@
 //!   — `CoordFlip`, a `__stack_value_on_x__` stamp, or (since `#172`(2)) a
 //!   producer's `value_axis="x"` declaration makes it `Y`.
 //! - `area` reads `BottomEdge::axis`, which deliberately DISAGREES with the
-//!   series under `CoordFlip` + an explicit `Stack(value_axis="y")`, because the
-//!   arm that builds the bottom point is the one that knows what was built. Its
+//!   series wherever a flipped chart's stack still cumulated the rendering y
+//!   column ([`Stack::ValueOnY`] names the two specs that do), because the arm
+//!   that builds the bottom point is the one that knows what was built. Its
 //!   `Baseline` arm defers to the series, so it inherits the declaration too.
 //! - `ribbon` reads `band_curve_axis` — `X` for a `y`..`y2` band at a shared x,
 //!   `Y` for the `x`..`x2` band `CoordFlip` produces.
@@ -64,11 +65,21 @@ const PLOT: Rect = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
 enum Stack {
     /// No `__stack_y_base__` column and no stamp.
     None,
-    /// `Stack(value_axis="x")` — the cumulated value landed on x. Stamped
-    /// `__stack_value_on_x__`, which is what `series_curve_axis` reads.
+    /// The cumulated value landed on x — `Stack(value_axis="x")` unflipped, or an
+    /// undeclared/`"y"` stack under a flip. Stamped `__stack_value_on_x__`, which
+    /// is what `series_curve_axis` reads.
     ValueOnX,
-    /// `Stack(value_axis="y")` — a base column with no stamp. The ordinary
-    /// vertical stack, and the arm that disagrees with the series under a flip.
+    /// A base column with no `__stack_value_on_x__` stamp: the cumulated value
+    /// landed on y. The ordinary vertical stack, and the arm that disagrees with
+    /// the series under a flip.
+    ///
+    /// Two real specs produce it, and which one does depends on the flip:
+    /// `Stack(value_axis="y")` (or an undeclared stack) unflipped, and
+    /// `Stack(value_axis="x")` UNDER a flip — the flip moves the authored
+    /// x-value back onto y, see
+    /// [`resolve_stack_value_on_x`](crate::render::position::resolve_stack_value_on_x).
+    /// The rows below pin batch shape against drawn geometry, so they are
+    /// indifferent to which of the two wrote the batch.
     ValueOnY,
 }
 
@@ -227,8 +238,10 @@ const STACK_Y: Shape = Shape {
     y2: false,
     x2: false,
 };
+/// A flipped chart whose stack cumulated the RENDERING y column — see
+/// [`Stack::ValueOnY`] for the two specs that spell it.
 const FLIP_STACK_Y: Shape = Shape {
-    name: "CoordFlip + Stack(value_axis=y)",
+    name: "CoordFlip + a stack whose value landed on y",
     flip: true,
     stack: Stack::ValueOnY,
     y2: false,

@@ -62,10 +62,19 @@ impl Layer {
     ///
     /// The single expression of the fallback. `LayerPrepared` resolves its
     /// `coord` slot through this call, so every render-side consumer reads an
-    /// already-resolved answer, and the two spec-side readers that work from
-    /// `spec.layers` directly (`scale_resolve::numeric_domain_union` and
-    /// `positional_binding`, which run before `prepare`'s layers exist) call it
+    /// already-resolved answer, and every spec-side reader that works from
+    /// `spec.layers` directly (they run before `prepare`'s layers exist) calls it
     /// rather than spelling `.or()` themselves.
+    ///
+    /// The set of those readers is exactly this method's call sites — stated as a
+    /// rule, not as a list, because the list rotted inside four commits: it named
+    /// `numeric_domain_union` and `positional_binding`, and
+    /// `scale_resolve::domain::positional_category_union` (added between the two
+    /// commits, and reading the CHART's flip for every layer) was neither in it
+    /// nor converted alongside them. `rg effective_coord` is the enumeration.
+    /// A new reader of `spec.layers` that asks about coordinate space belongs
+    /// here; one that reads the chart's `coord` directly for a per-layer question
+    /// is the bug this method exists to make unspellable.
     pub fn effective_coord<'a>(
         &'a self,
         chart_coord: Option<&'a crate::spec::coord::CoordKind>,

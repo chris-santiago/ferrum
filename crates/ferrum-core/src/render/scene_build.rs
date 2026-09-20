@@ -119,7 +119,11 @@ pub fn build_scene(
     // so one check covers the merged-flat path's three public routes (static
     // `chart + chart`, `resolve={"y": "independent"}`, and `.interactive()`).
     if let Some((layer, coord, property)) = unplaceable_layer_coord(spec) {
-        return Err(RenderError::LayerCoordUnplaceable { layer, coord, property });
+        return Err(RenderError::LayerCoordUnplaceable {
+            layer,
+            coord,
+            reason: Box::new(crate::render::LayerCoordUnplaceableReason::PanelProperty(property)),
+        });
     }
 
     let background = config.background.or(Some(theme.colors.background_color));
@@ -1825,6 +1829,23 @@ fn build_panel_mark_batches(
         // inherited channel the normalization then cleared and no builder ever
         // read — a working chart turned into a hard error.
         validate_layer_positional_columns(li, &layer_spec.encoding, own_batch, layer_flipped)?;
+        // `#172`(1)'s second refusal reason (wave-5 close remediation). Asked
+        // here, after the presence gate above and before the mark-shape gate
+        // below, because the three answer one escalating question about this
+        // layer: is the column there, can the axis it lands on draw it, does the
+        // mark have the channels it needs. Needs `scales`, which is why it cannot
+        // join the chart-level gate at the top of this function.
+        validate_layer_coord_exchange_is_servable(
+            li,
+            // Read off the synthetic per-layer spec rather than re-cloning: this
+            // is the same coord every mark builder below is answered with.
+            layer_spec.coord.as_ref(),
+            layer_flipped,
+            prep.coord_flipped,
+            &layer_spec.encoding,
+            own_batch,
+            scales,
+        )?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
@@ -3539,6 +3560,98 @@ fn validate_layer_positional_columns(
                 channel,
                 name: enc.field.clone(),
                 coord_flipped,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a layer whose own coord puts its positional channels in the opposite
+/// space from the panel's axes when an axis there cannot draw the column that
+/// lands on it — `#172`(1)'s second unplaceable reason
+/// ([`crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable`]).
+///
+/// **The shape.** `fm.layer(bar, point.coord(fm.CoordFlip()))` over
+/// `x="cat:N", y="v:Q"`: the flipped member's channels are exchanged, so its `y`
+/// is now the Utf8 category column while the panel's y axis — resolved from the
+/// first member, whose coord IS the panel's — is quantitative. `col_as_f64`
+/// cannot read `cat`, the mark builder's own `.ok()`-swallowing read turns that
+/// into an empty batch, and the member vanished from the render with no error and
+/// no warning on all three merged-flat routes. A member spelling the same mistake
+/// with `fm.CoordFixed` has always refused loudly here; this is the same question
+/// with one answer now.
+///
+/// **Why it is a refusal and not a widening of the scales.** A layer's coord
+/// places that layer's marks; the panel's chrome and scale domains stay the
+/// chart's (see [`crate::spec::layer::Layer::coord`]). Honoring this shape would
+/// mean resolving the exchanged layer through SWAPPED scale slots, which is a
+/// second scale-resolution mechanism for one feature and a change to that scope.
+/// One merged panel cannot hold both a categorical and a continuous y.
+///
+/// **What makes the gate narrow enough to be byte-stable.** It evaluates only
+/// when this layer's flip state DIFFERS from the chart's, which no spec without a
+/// per-layer coord can produce (a layer that declares none inherits the chart's,
+/// so the two agree by construction). Layer 0 is exempt for a stronger reason:
+/// the panel's axes are resolved from its own post-flip encoding
+/// (`prepare`'s `rendering_encoding = layers[0].encoding`), so its columns suit
+/// them by construction and the question is already answered.
+///
+/// **The servability question is the crate's existing pair, not a new dtype
+/// list.** A categorical axis serves exactly what
+/// [`crate::render::arrow_cast::ensure_category_keyable`] admits (the same set
+/// the band ladder enumerates and the per-row keyer reads), and a continuous one
+/// exactly what [`crate::render::arrow_cast::supported_numeric_dtype`] admits
+/// (the set `col_as_f64` reads). So "can the axis draw this column" is answered
+/// by the same two predicates the drawing itself goes through, and cannot drift
+/// from them.
+///
+/// Checks `x` before `y` so the reported axis is deterministic when a layer gets
+/// both wrong. `x2`/`y2` are deliberately out of scope: a span endpoint that
+/// cannot be read is a pre-existing shape with its own (unchanged) per-mark
+/// handling, and widening this gate to it would refuse charts that render today
+/// for a reason `#172`(1) is not about.
+fn validate_layer_coord_exchange_is_servable(
+    layer_index: usize,
+    layer_coord: Option<&crate::spec::coord::CoordKind>,
+    layer_flipped: bool,
+    chart_flipped: bool,
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    scales: &scale_resolve::ResolvedScales,
+) -> Result<(), RenderError> {
+    if layer_index == 0 || layer_flipped == chart_flipped {
+        return Ok(());
+    }
+    // Reachable only with a per-layer coord, so the effective coord here IS the
+    // layer's own declaration and names what the caller wrote.
+    let Some(coord) = layer_coord else { return Ok(()) };
+    for (channel, enc, scale) in [
+        ("x", encoding.x.as_ref(), &scales.x),
+        ("y", encoding.y.as_ref(), &scales.y),
+    ] {
+        let Some(enc) = enc else { continue };
+        // Absence is the sibling gate's refusal to make, not this one's.
+        let Some(column) = batch.column_by_name(&enc.field) else { continue };
+        let dtype = column.data_type();
+        let (servable, axis_kind) = match scale {
+            scale_resolve::ScaleKind::Ordinal(_) => (
+                crate::render::arrow_cast::ensure_category_keyable(&enc.field, dtype).is_ok(),
+                "categorical",
+            ),
+            _ => (crate::render::arrow_cast::supported_numeric_dtype(dtype), "continuous"),
+        };
+        if !servable {
+            return Err(RenderError::LayerCoordUnplaceable {
+                layer: layer_index,
+                coord: coord_spelling(coord),
+                reason: Box::new(
+                    crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+                        channel,
+                        column: enc.field.clone(),
+                        dtype: format!("{dtype:?}"),
+                        axis_kind,
+                    },
+                ),
             });
         }
     }
@@ -9021,10 +9134,15 @@ mod tests {
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a per-layer CoordFixed must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable { layer, coord, property } => {
+            RenderError::LayerCoordUnplaceable { layer, coord, reason } => {
                 assert_eq!(*layer, 1, "the offending layer is named by index");
                 assert_eq!(*coord, "fm.CoordFixed");
-                assert!(property.contains("aspect ratio"), "property was {property:?}");
+                match &**reason {
+                    crate::render::LayerCoordUnplaceableReason::PanelProperty(property) => {
+                        assert!(property.contains("aspect ratio"), "property was {property:?}");
+                    }
+                    other => panic!("expected the panel-property reason, got {other:?}"),
+                }
             }
             other => panic!("expected LayerCoordUnplaceable, got {other:?}"),
         }
@@ -9046,6 +9164,145 @@ mod tests {
             try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
                 .unwrap_or_else(|e| panic!("{coord:?} places marks and must render; got {e}"));
         }
+    }
+
+    /// The same two-layer shape over a CATEGORICAL primary axis, whose category
+    /// column dtype is the fixture's only variable. `categorical` picks Utf8
+    /// (unreadable by a continuous scale) or Int64 (readable by both kinds), which
+    /// is the exact axis the wave-5 close measurement turned on: the Utf8 spelling
+    /// drew zero marks for the flipped member, the integer spelling drew all of
+    /// them.
+    fn two_layer_ordinal_spec_with_flipped_secondary(
+        utf8_categories: bool,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SpecType, Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let cat = || {
+            Some(EncodingSpec {
+                field: "cat".into(),
+                type_: Some(SpecType::Nominal),
+                ..Default::default()
+            })
+        };
+        let val = || Some(EncodingSpec { field: "v".into(), ..Default::default() });
+        let encoding = || Encoding { x: cat(), y: val(), ..Default::default() };
+        let layer = |coord| crate::spec::layer::Layer {
+            mark: Mark::Point,
+            encoding: encoding(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: encoding(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![layer(None), layer(Some(crate::spec::coord::CoordKind::Flip))]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let (cat_field, cat_col): (Field, arrow::array::ArrayRef) = if utf8_categories {
+            (
+                Field::new("cat", DataType::Utf8, false),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            )
+        } else {
+            (
+                Field::new("cat", DataType::Int64, false),
+                Arc::new(Int64Array::from(vec![1_i64, 2])),
+            )
+        };
+        let schema = Arc::new(Schema::new(vec![cat_field, Field::new("v", DataType::Float64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![cat_col, Arc::new(Float64Array::from(vec![1.0_f64, 5.0]))],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// `#172`(1)'s second reason: a member whose `CoordFlip` puts its categorical
+    /// column on the panel's continuous axis refuses, in the same words as the
+    /// panel-property reason above.
+    ///
+    /// Before the wave-5 close remediation this rendered with the member's marks
+    /// silently absent — no error, no warning — while the identical caller mistake
+    /// spelled `fm.CoordFixed` refused loudly at the gate above: two answers to
+    /// one question. The assertion is on the message, not merely on the error
+    /// variant, because "a caller cannot tell which gate refused them" is the
+    /// property being fixed.
+    #[test]
+    fn a_layer_flip_the_panels_axes_cannot_serve_refuses_in_the_same_words() {
+        let (spec, batch) = two_layer_ordinal_spec_with_flipped_secondary(true);
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect_err("a flipped member whose y is categorical must refuse");
+        match &err {
+            RenderError::LayerCoordUnplaceable { layer, coord, reason } => {
+                assert_eq!(*layer, 1, "the offending layer is named by index");
+                assert_eq!(*coord, "fm.CoordFlip");
+                match &**reason {
+                    crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+                        channel,
+                        column,
+                        axis_kind,
+                        ..
+                    } => {
+                        assert_eq!(*channel, "y", "the panel axis that cannot serve the column");
+                        assert_eq!(column, "cat");
+                        assert_eq!(*axis_kind, "continuous");
+                    }
+                    other => panic!("expected the channel-exchange reason, got {other:?}"),
+                }
+            }
+            other => panic!("expected LayerCoordUnplaceable, got {other:?}"),
+        }
+        let msg = err.to_string();
+        // The frame shared with the panel-property reason, asserted verbatim.
+        assert!(msg.starts_with("layer 1: fm.CoordFlip"), "{msg}");
+        assert!(msg.contains("cannot be placed on one of them"), "{msg}");
+        assert!(
+            msg.contains("Move it to the first member (whose coord IS the panel's), or drop it."),
+            "{msg}"
+        );
+        // …and the part that makes it diagnosable.
+        assert!(msg.contains("'cat'"), "message must name the column: {msg}");
+        assert!(msg.contains("Utf8"), "message must name the dtype: {msg}");
+    }
+
+    /// The discriminating control: the same shape whose category column is an
+    /// INTEGER renders, because a continuous axis can read it.
+    ///
+    /// This is what keeps the gate from being "refuse a flipped member on an
+    /// ordinal axis". The refusal is about one column and one axis, and this row
+    /// is the measured case that proved the mechanism (an integer category column
+    /// drew all of its marks where the Utf8 one drew none).
+    #[test]
+    fn a_layer_flip_whose_columns_both_axes_can_serve_still_renders() {
+        let (spec, batch) = two_layer_ordinal_spec_with_flipped_secondary(false);
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        try_build_scene_for_with_chart_config(&spec, &batch, &chart_config).expect(
+            "an integer category column is readable by both axis kinds, so the flip is placeable",
+        );
     }
 
     /// And a layered spec whose layers declare no coord at all is untouched by

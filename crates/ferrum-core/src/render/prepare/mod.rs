@@ -244,6 +244,29 @@ impl LayerPrepared {
     /// It is equally load-bearing for `mark_style.value_axis` (`#172`(2)) —
     /// the third member of the group, and the field whose omission from this
     /// method proved the doc comment above right.
+    ///
+    /// # The one coordinate-space field this method deliberately does NOT swap
+    ///
+    /// `position`'s `PositionAdjust::Stack::value_axis` names a channel too, and
+    /// is authored pre-flip by the same desugars — so by the rule above it is a
+    /// member of this group, and the close review was right that it had been
+    /// left out of it. It is reconciled at
+    /// [`resolve_stack_value_on_x`](crate::render::position::resolve_stack_value_on_x)
+    /// instead of here, because unlike `mark_style.value_axis` it has THREE
+    /// consumers, each of which already carries the real `coord_flipped`, and two
+    /// of them (`position::axis_batch_for_x`/`axis_batch_for_y`, the
+    /// domain-widening preview) read `spec.position`/`spec.layers` RAW —
+    /// `LayerPrepared` does not exist yet when they run. Swapping the field here
+    /// would leave those two reading the authored declaration against the real
+    /// flip, i.e. one rule in three places, so the reconciliation lives at the
+    /// single point all three already funnel through. `mark_style.value_axis` has
+    /// the opposite shape — its consumer (`DrawCtx::series_curve_axis`) reads the
+    /// post-flip `LayerPrepared` and holds no authored copy to reconcile — which
+    /// is why that one is swapped eagerly, here.
+    ///
+    /// The invariant this method owns is unchanged: a coordinate-space field is
+    /// either swapped here or reconciled at its own single resolver, and a field
+    /// that does neither is the omission. Both halves are now named.
     fn flip_coords(&mut self) {
         // The channel swap itself (x↔y with x2↔y2, Phase 10c-pre) is
         // `Encoding::flip_positional` — the crate's single expression of the

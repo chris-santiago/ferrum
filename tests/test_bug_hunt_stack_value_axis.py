@@ -473,6 +473,121 @@ def test_horizontal_stacked_histogram_coord_flip_primitive_still_works():
 
 
 # ---------------------------------------------------------------------------
+# Test 4b — the declared value axis composed with a real CoordFlip
+# (wave-5 close review F3)
+# ---------------------------------------------------------------------------
+
+#: Six rows, three bins, one group per bin — so a correct render draws exactly
+#: three rects and a cumulation that mixed up the value and bin columns cannot
+#: coincide with it.
+_FLIP_FRAME = pl.DataFrame({"v": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5], "g": list("aabbcc")})
+
+
+def _rect_fractions(svg: str) -> list[tuple[float, float, float, float]]:
+    """Every data rect as a fraction of the plot rect, sorted.
+
+    Fractions rather than pixels so the two spellings stay comparable even if
+    their axis label bands differ in width; sorted because rect emission order
+    follows the layer/group walk, which is not the subject here.
+    """
+    px, py, pw, ph = plot_rect(svg)
+    return sorted(
+        (
+            round((r["x"] - px) / pw, 4),
+            round((r["y"] - py) / ph, 4),
+            round(r["width"] / pw, 4),
+            round(r["height"] / ph, 4),
+        )
+        for r in _data_rects(svg)
+    )
+
+
+def test_a_declared_horizontal_stack_under_coord_flip_is_its_vertical_twin():
+    """``orientation="horizontal"`` + ``CoordFlip()`` == the plain vertical stack.
+
+    The two transformations compose: the desugar puts the value on x and says so
+    (``Stack(value_axis="x")``), then the user's flip moves it back to y — so the
+    result must be pixel-for-pixel the vertical spelling of the same data.
+
+    Pre-fix ``resolve_stack_value_on_x`` applied a PRECEDENCE (the declaration
+    answers outright, ignoring the flip) borrowed from its post-flip sibling
+    ``DrawCtx::series_curve_axis``, so the flip was spent zero times: measured,
+    this chart drew NINE rects, four of them sharing one ``y``/``height`` with
+    overlapping widths, i.e. the bin-start column cumulated and the count column
+    used as the bin key. Both halves are asserted — the rect count alone would
+    pass for a chart that drew three wrong rects.
+    """
+    flipped = (
+        fm.Chart(_FLIP_FRAME)
+        .mark_histogram(bins=3, orientation="horizontal", multiple="stack")
+        .encode(y="v:Q", color="g:N")
+        .coord(fm.CoordFlip())
+        .to_svg()
+    )
+    vertical_twin = (
+        fm.Chart(_FLIP_FRAME)
+        .mark_histogram(bins=3, multiple="stack")
+        .encode(x="v:Q", color="g:N")
+        .to_svg()
+    )
+    assert len(_data_rects(vertical_twin)) == 3, "premise: the twin draws one rect per bin"
+    assert _rect_fractions(flipped) == _rect_fractions(vertical_twin), (
+        "a flipped horizontal stack must land exactly where its vertical twin does"
+    )
+
+
+def test_an_unflipped_horizontal_stack_still_stacks_along_x():
+    """The control for the test above: without the flip, nothing moves.
+
+    The declaration alone still puts the value on x, so this is the byte-stable
+    half — a "fix" that simply ignored ``value_axis`` would pass the flipped
+    assertion above and fail here.
+    """
+    svg = (
+        fm.Chart(_FLIP_FRAME)
+        .mark_histogram(bins=3, orientation="horizontal", multiple="stack")
+        .encode(y="v:Q", color="g:N")
+        .to_svg()
+    )
+    rects = _data_rects(svg)
+    assert len(rects) == 3, f"expected one rect per bin; got {len(rects)}"
+    # Bins run down the y axis and the counts along x: every rect starts at the
+    # same left edge (one group per bin, so each is the first segment).
+    assert len({round(r["x"], 1) for r in rects}) == 1, rects
+    assert len({round(r["y"], 1) for r in rects}) == 3, rects
+
+
+def test_an_explicitly_declared_vertical_stack_under_a_flip_moves_with_it():
+    """The mirror of F3: ``Stack(value_axis="y")`` + ``CoordFlip`` is horizontal.
+
+    Nobody in ``src/ferrum/`` stamps ``value_axis="y"`` (the desugars emit
+    ``"x"`` or nothing), so this is reachable only by a caller writing it out —
+    and it was broken in the same way and for the same reason: the flip must
+    move a declared y-value onto x, exactly as it moves an undeclared one.
+    Asserted against the undeclared spelling of the same request, which is what
+    "redundantly stating the default" has to mean.
+    """
+    declared = (
+        fm.Chart(_FLIP_FRAME)
+        .mark_bar(position=Stack(by="g", value_axis="y"))
+        .encode(x="g:N", y="v:Q", color="g")
+        .coord(fm.CoordFlip())
+        .to_svg()
+    )
+    undeclared = (
+        fm.Chart(_FLIP_FRAME)
+        .mark_bar(position=Stack(by="g"))
+        .encode(x="g:N", y="v:Q", color="g")
+        .coord(fm.CoordFlip())
+        .to_svg()
+    )
+    assert _data_rects(undeclared), "premise: the undeclared flipped stack draws"
+    assert _rect_fractions(declared) == _rect_fractions(undeclared), (
+        "declaring the default axis explicitly cannot change where a flipped stack lands"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 5 — wire byte-stability guard
 # ---------------------------------------------------------------------------
 
