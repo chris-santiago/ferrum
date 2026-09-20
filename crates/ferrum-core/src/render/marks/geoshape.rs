@@ -16,7 +16,7 @@ use geojson::{Geometry, Value as GeoValue};
 
 use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, ClearablePaint, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::RenderError;
 use crate::spec::coord::CoordKind as SpecCoord;
@@ -181,13 +181,12 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     // ── Style setup ───────────────────────────────────────────────────
 
     // Geoshape fill/stroke are not yet threaded for provenance-gated paint
-    // clearing (out of this fix round's scope, mirrors arc.rs); a cleared
-    // constant fill/stroke here still serializes as `rgba(0,0,0,0.000)`.
+    // clearing (out of this fix round's scope, mirrors arc.rs) — hence the
+    // `uncleared` constructor; a cleared constant fill/stroke here still
+    // serializes as `rgba(0,0,0,0.000)`.
     let fill_style = to_scene_fill_stroke(
-        Some(fill),
-        false,
-        stroke,
-        false,
+        ClearablePaint::Paint(fill),
+        ClearablePaint::uncleared(stroke),
         ctx.mark_style.paint.stroke_width,
         ctx.mark_style.paint.opacity,
         None,

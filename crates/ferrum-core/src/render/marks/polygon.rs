@@ -24,7 +24,7 @@ use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{to_scene_fill_stroke, MarkBuildResult, MetadataColumns};
+    use crate::render::draw::{to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let empty = || MarkBuildResult::empty(MarkBatchKind::Polygon);
@@ -231,13 +231,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 rings: vec![exterior],
                 // Polygon fill/stroke are not yet threaded for provenance-gated
                 // paint clearing (out of this fix round's scope, mirrors
-                // arc.rs); a cleared constant fill/stroke here still
-                // serializes as `rgba(0,0,0,0.000)`.
+                // arc.rs) — hence the `uncleared` constructor; a cleared
+                // constant fill/stroke here still serializes as
+                // `rgba(0,0,0,0.000)`.
                 style: to_scene_fill_stroke(
-                    Some(fill),
-                    false,
-                    ctx.mark_style.paint.stroke,
-                    false,
+                    ClearablePaint::Paint(fill),
+                    ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
                     ctx.mark_style.paint.stroke_width,
                     group_opacity,
                     None,

@@ -24,7 +24,7 @@
 use crate::layout::TextAnchor;
 use crate::render::draw::{
     col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
-    DrawCtx,
+    ClearablePaint, DrawCtx,
 };
 use crate::render::format::{format_numeric, format_time, format_with_spec};
 use crate::render::mark_nodes::MarkNodes;
@@ -148,8 +148,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // text's baseline theme style carries no mark-aware fill override (see
     // `resolve_mark_style`'s `Mark::Text` arm).
     //
-    // The "fill set by user" gate reads `ctx.mark_style.paint.fill_is_user_set`
-    // — the *layer-resolved* flag — rather than `ctx.spec.mark_style` (the raw
+    // The "fill set by user" gate reads `ctx.mark_style.paint.fill_source`
+    // — the *layer-resolved* provenance — rather than `ctx.spec.mark_style` (the raw
     // `MarkKwargsSpec`). `ctx.spec` is `scene_build.rs`'s synthetic per-layer
     // `ChartSpec`, whose `mark_style` field is NOT overridden per layer (it
     // stays the chart-level kwargs via `..spec.clone()`), so a
@@ -157,9 +157,9 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // a `LayerChart` (e.g. `mark_bar(fill=...) + mark_text()` would wrongly
     // read the bar's fill as "the text layer's fill was set"). `ctx.mark_style`
     // is always built via `resolve_mark_style(layer.mark_style.as_ref(), ...)`
-    // for THIS layer, so its `fill_is_user_set` is correct in both flat and
+    // for THIS layer, so its `fill_source` is correct in both flat and
     // layered charts.
-    let base_text_color = if ctx.mark_style.paint.fill_is_user_set {
+    let base_text_color = if ctx.mark_style.paint.fill_source.is_user_set() {
         ctx.mark_style.paint.fill
     } else {
         ctx.theme.colors.font_color
@@ -266,15 +266,17 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         // resolved constant (`base_text_color`, see above).
         // Text color has no cleared-paint concept (it is not a `FillStroke`
         // paint slot; a `"none"` fill on a text mark is not a supported
-        // clear), so the cleared half of `resolve_fill_color`'s result is
-        // discarded here.
-        let (row_color, _) = resolve_fill_color(
+        // clear), so the fallback goes in as a plain `Paint` and the resolved
+        // paint comes back out as a plain color — a `Paint` fallback can only
+        // resolve to `Paint`, so `color_or`'s argument is unreachable here and
+        // repeats the same fallback rather than inventing a second one.
+        let row_color = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            base_text_color,
-            false,
-        );
+            ClearablePaint::Paint(base_text_color),
+        )
+        .color_or(base_text_color);
 
         acc.push(SceneNode::Text {
             x: px + dx,

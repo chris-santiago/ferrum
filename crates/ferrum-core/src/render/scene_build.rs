@@ -1720,7 +1720,7 @@ fn build_panel_mark_batches(
             // being overwritten by an inherited one; a clear declares no color
             // at all — it declares the channel unpainted, and the mark builders
             // carry that intent separately in
-            // `MarkPaint::{fill,stroke}_cleared`, which survive the color scale.
+            // `MarkPaint::{fill,stroke}_source`, which survive the color scale.
             // Reading a clear as "own paint" is what made
             // `mark_ribbon().encode(color=…)` draw ONE merged band in the theme
             // default fill under a full multi-category legend: `desugar_ribbon`
@@ -1732,9 +1732,9 @@ fn build_panel_mark_batches(
             // grey dashed chance diagonal, `stroke="#9ca3af"`) declare a real
             // color and are unaffected, as is a layer that clears one channel
             // and paints the other.
-            let has_own_literal_paint = (mark_style.paint.stroke_is_user_set
-                && !mark_style.paint.stroke_cleared)
-                || (mark_style.paint.fill_is_user_set && !mark_style.paint.fill_cleared);
+            let has_own_literal_paint = mark_style.paint.stroke_source
+                == crate::render::draw::PaintSource::UserColor
+                || mark_style.paint.fill_source == crate::render::draw::PaintSource::UserColor;
             if layer.mark == crate::spec::mark::Mark::Text || has_own_literal_paint {
                 layer_spec_encoding.color = None;
             }
@@ -4883,7 +4883,8 @@ mod tests {
     /// `mark_bar(fill="#00aa00") + mark_text()`, with the bar's fill placed
     /// on the BAR LAYER's own `mark_style` (not the chart level): the bar
     /// layer's fill must never leak into the text layer's color. Before the
-    /// `fill_is_user_set` flag moved onto the layer-resolved `MarkPaint`,
+    /// fill's provenance (then a `fill_is_user_set` flag, since typed into
+    /// `PaintSource`) moved onto the layer-resolved `MarkPaint`,
     /// `ctx.spec.mark_style` (the chart-level kwargs) reported "fill was set"
     /// for every layer, wrongly triggering `ctx.mark_style.paint.fill` (the
     /// TEXT layer's own resolved paint, which theme-defaults to `mark_color`,
@@ -4914,7 +4915,7 @@ mod tests {
     /// Cycle-2 finding: `LayerPrepared::from_chart_and_layer`'s
     /// `layer.mark_style.clone().or_else(|| spec.mark_style.clone())`
     /// fallback let a kwarg-less text layer resolve that copied chart-level
-    /// fill — passing `fill_is_user_set = true` with the BAR's green — even
+    /// fill — reporting a user-set fill source carrying the BAR's green — even
     /// though `layered_bar_fill_does_not_leak_into_text_color` above (which
     /// sets ONLY `bar_fill`, with chart-level `mark_style` absent — a shape
     /// `+` never actually produces) already passed. This is the shape that

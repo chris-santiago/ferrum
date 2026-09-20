@@ -699,7 +699,11 @@ mod tests {
         // Explicit constant stroke override — simulates what boxplot whisker layers do.
         let overrides = MarkKwargsSpec { stroke: Some("#6b7280".into()), stroke_dash: Some(vec![]), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule).unwrap();
-        assert!(mark_style.paint.stroke_is_user_set, "stroke_is_user_set must be true after explicit override");
+        assert_eq!(
+            mark_style.paint.stroke_source,
+            crate::render::draw::PaintSource::UserColor,
+            "the stroke source must be the user's color after an explicit override",
+        );
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {

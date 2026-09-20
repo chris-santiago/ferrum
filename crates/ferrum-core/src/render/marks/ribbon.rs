@@ -122,7 +122,7 @@ fn resolve_shared_pixels(
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
     };
     use ferrum_scene::{MarkBatchKind, PathCmd};
 
@@ -296,24 +296,25 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         cmds.push(PathCmd::Close);
 
         // Color resolution — mirrors draw().
-        // `fill_cleared` (T8 quality-review c2): true only when the color-scale
-        // lookup missed (or there was no group) AND the constant fill was
-        // cleared by a literal "none"/"transparent" — a scale-resolved `solid`
-        // color is never a user paint-clear. `stroke` is always the literal
-        // constant (never scale-driven for ribbon), so `stroke_cleared` follows
-        // it unconditionally.
-        let (fill, fill_cleared, stroke) = if has_color_groups {
-            let looked_up = key
+        // The fill paint is `Cleared` (T8 quality-review c2) only when the
+        // color-scale lookup missed (or there was no group) AND the constant
+        // fill was cleared by a literal "none"/"transparent" — a scale-resolved
+        // `solid` color is never a user paint-clear. `stroke` is always the
+        // literal constant (never scale-driven for ribbon), so its own
+        // provenance carries through unconditionally.
+        let fill = if has_color_groups {
+            match key
                 .as_deref()
-                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)));
-            let fill_cleared = looked_up.is_none() && ctx.mark_style.paint.fill_cleared;
-            let solid = looked_up.unwrap_or(ctx.mark_style.paint.fill);
-            let fill = crate::render::color::with_opacity(solid, ctx.mark_style.paint.opacity);
-            (Some(fill), fill_cleared, ctx.mark_style.paint.stroke)
+                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
+            {
+                Some(solid) => ClearablePaint::Paint(solid),
+                None => ctx.mark_style.paint.fill_paint(),
+            }
         } else {
-            let fill = crate::render::color::with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
-            (Some(fill), ctx.mark_style.paint.fill_cleared, ctx.mark_style.paint.stroke)
-        };
+            ctx.mark_style.paint.fill_paint()
+        }
+        .map(|c| crate::render::color::with_opacity(c, ctx.mark_style.paint.opacity));
+        let stroke = ctx.mark_style.paint.stroke_paint();
         // Dash resolution mirrors line.rs: sampled once from the group's
         // representative row. Only a resolved categorical `StrokeDashScale`
         // (dash_cols.categorical == Some) applies a pattern here — a numeric
@@ -335,9 +336,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         });
         let style = to_scene_fill_stroke(
             fill,
-            fill_cleared,
             stroke,
-            ctx.mark_style.paint.stroke_cleared,
             ctx.mark_style.paint.stroke_width,
             1.0,
             dash_vec.as_deref(),

@@ -1,7 +1,7 @@
 //! Internal: build legend scene nodes from a LegendLayout.
 
 use crate::layout::{LegendDirection, LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
-use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style};
+use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style, ClearablePaint};
 use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::render::svg::fmt_f;
 use ferrum_scene::{RawAnchor, SceneNode};
@@ -222,10 +222,8 @@ pub fn build_legend(
             // its fixed 5px radius (default scale = 1.0 → byte-identical).
             let kind = crate::render::marks::point::shape_from_str(shape_name);
             let style = crate::render::marks::point::ShapeStyle {
-                fill: Some(color),
-                fill_cleared: false,
-                stroke: None,
-                stroke_cleared: false,
+                fill: ClearablePaint::Paint(color),
+                stroke: ClearablePaint::Absent,
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_opacity: 1.0,
@@ -240,14 +238,20 @@ pub fn build_legend(
                 cx: sx,
                 cy: sy,
                 r: radius,
-                style: to_scene_fill_stroke(Some(color), false, None, false, 0.0, 1.0, None),
+                style: to_scene_fill_stroke(
+                    ClearablePaint::Paint(color),
+                    ClearablePaint::Absent,
+                    0.0,
+                    1.0,
+                    None,
+                ),
             });
         } else {
             // A positive `symbol_stroke_width` outlines the swatch in its own
             // color; otherwise no stroke (the historical fill-only swatch).
             let (swatch_stroke, swatch_stroke_w) = match symbol_stroke_w {
-                Some(w) => (Some(color), w),
-                None => (None, 0.0),
+                Some(w) => (ClearablePaint::Paint(color), w),
+                None => (ClearablePaint::Absent, 0.0),
             };
             // `symbol_size` scales each swatch dimension by `swatch_scale`
             // (default 1.0 → byte-identical). Circle r=4, square side=8 (half
@@ -258,7 +262,13 @@ pub fn build_legend(
                         cx: sx,
                         cy: sy,
                         r: swatch_r,
-                        style: to_scene_fill_stroke(Some(color), false, swatch_stroke, false, swatch_stroke_w, 1.0, None),
+                        style: to_scene_fill_stroke(
+                            ClearablePaint::Paint(color),
+                            swatch_stroke,
+                            swatch_stroke_w,
+                            1.0,
+                            None,
+                        ),
                     });
                 }
                 SymbolKind::Square => {
@@ -268,7 +278,13 @@ pub fn build_legend(
                         y: sy - half,
                         w: 2.0 * half,
                         h: 2.0 * half,
-                        style: to_scene_fill_stroke(Some(color), false, swatch_stroke, false, swatch_stroke_w, 1.0, None),
+                        style: to_scene_fill_stroke(
+                            ClearablePaint::Paint(color),
+                            swatch_stroke,
+                            swatch_stroke_w,
+                            1.0,
+                            None,
+                        ),
                         corner_radius: 0.0,
                     });
                 }

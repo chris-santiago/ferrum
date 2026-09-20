@@ -34,7 +34,8 @@ const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke_full, to_scene_stroke, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke_full, to_scene_stroke, ClearablePaint, MarkBuildResult,
+        MetadataColumns,
     };
     use ferrum_scene::MarkBatchKind;
 
@@ -205,16 +206,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
             // The Path variant's stroke is not yet threaded for provenance-gated
-            // paint clearing (out of this fix round's scope, mirrors arc.rs); a
-            // cleared constant stroke here still serializes as
-            // `rgba(0,0,0,0.000)`. The linear (non-Path) Polyline variant below
-            // is `StrokeStyle`-shaped and excluded from clearing entirely per
-            // spec (`StrokeStyle.color` has no absent representation).
+            // paint clearing (out of this fix round's scope, mirrors arc.rs) —
+            // hence the non-cleared `Paint`; a cleared constant stroke here
+            // still serializes as `rgba(0,0,0,0.000)`. The linear (non-Path)
+            // Polyline variant below is `StrokeStyle`-shaped and excluded from
+            // clearing entirely per spec (`StrokeStyle.color` has no absent
+            // representation).
             let style = to_scene_fill_stroke_full(
-                None,
-                false,
-                Some(stroke_color),
-                false,
+                ClearablePaint::Absent,
+                ClearablePaint::Paint(stroke_color),
                 group_stroke_width,
                 1.0,
                 effective_dash,

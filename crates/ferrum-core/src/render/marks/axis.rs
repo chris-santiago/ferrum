@@ -563,7 +563,7 @@ pub fn build_grid(
                     continue;
                 }
                 if let Ok(fill) = crate::render::color::parse_color(band_color_str) {
-                    use crate::render::draw::to_scene_fill_stroke;
+                    use crate::render::draw::{to_scene_fill_stroke, ClearablePaint};
                     nodes.push(GridNode {
                         node: SceneNode::Rect {
                             x: plot_area.x,
@@ -571,10 +571,8 @@ pub fn build_grid(
                             w: plot_area.w,
                             h: bot - top,
                             style: to_scene_fill_stroke(
-                                Some(fill),
-                                false,
-                                None,
-                                false,
+                                ClearablePaint::Paint(fill),
+                                ClearablePaint::Absent,
                                 0.0,
                                 1.0,
                                 None,

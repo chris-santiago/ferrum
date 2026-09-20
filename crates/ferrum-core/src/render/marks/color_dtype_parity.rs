@@ -637,10 +637,12 @@ fn ribbon_bands_and_legend(spec_json: &str) -> (Vec<String>, Vec<String>) {
 ///
 /// RED before the fix, both dtypes: `mark_ribbon` emitted ONE merged
 /// self-intersecting band in the theme default fill under a two-swatch legend,
-/// because `desugar_ribbon`'s `stroke="none"` set `stroke_is_user_set` and so
-/// tripped `scene_build`'s own-color exemption, which strips an inherited color
-/// channel from any layer carrying its own literal paint. A paint *clear* is
-/// not a paint the inherited color could overwrite, so it must not trip it.
+/// because `desugar_ribbon`'s `stroke="none"` counted as a user-set stroke and
+/// so tripped `scene_build`'s own-color exemption, which strips an inherited
+/// color channel from any layer carrying its own literal paint. A paint *clear*
+/// is not a paint the inherited color could overwrite, so it must not trip it —
+/// which is why that gate now tests for `PaintSource::UserColor` exactly,
+/// rather than for user-set-ness minus cleared-ness.
 ///
 /// The legend comparison is what makes this discriminating: counting bands
 /// alone would pass a ribbon that split into two bands of the same color, and

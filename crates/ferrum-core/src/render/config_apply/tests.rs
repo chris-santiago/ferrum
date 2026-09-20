@@ -1556,14 +1556,24 @@ mod chart_config_application_tests {
         //     theme mark color rather than dropping the row or panicking.
         let scale = color_scale.as_ref().expect("scale survives");
         assert_eq!(
-            draw::resolve_fill_color(Some(scale), Some("b"), None, theme_fallback, false).0,
-            theme_fallback,
+            draw::resolve_fill_color(
+                Some(scale),
+                Some("b"),
+                None,
+                draw::ClearablePaint::Paint(theme_fallback),
+            ),
+            draw::ClearablePaint::Paint(theme_fallback),
             "an omitted category must still paint, in the fallback color"
         );
         // The listed categories keep a real scale color, distinct from fallback.
         assert_ne!(
-            draw::resolve_fill_color(Some(scale), Some("a"), None, theme_fallback, false).0,
-            theme_fallback,
+            draw::resolve_fill_color(
+                Some(scale),
+                Some("a"),
+                None,
+                draw::ClearablePaint::Paint(theme_fallback),
+            ),
+            draw::ClearablePaint::Paint(theme_fallback),
         );
 
         // (3) The legend carries exactly the two listed categories.

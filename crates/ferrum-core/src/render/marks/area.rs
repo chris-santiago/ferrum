@@ -187,7 +187,8 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Tra
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, to_scene_fill_stroke_full, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke, to_scene_fill_stroke_full, ClearablePaint, MarkBuildResult,
+        MetadataColumns,
     };
     use ferrum_scene::MarkBatchKind;
 
@@ -367,13 +368,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             _ => ctx.mark_style.paint.fill,
         };
         // Area fill/border are not yet threaded for provenance-gated paint
-        // clearing (out of this fix round's scope, mirrors arc.rs); a cleared
-        // constant fill/stroke here still serializes as `rgba(0,0,0,0.000)`.
+        // clearing (out of this fix round's scope, mirrors arc.rs) — hence the
+        // `uncleared` constructors; a cleared constant fill/stroke here still
+        // serializes as `rgba(0,0,0,0.000)`.
         let style = to_scene_fill_stroke_full(
-            Some(fill),
-            false,
-            ctx.mark_style.paint.stroke,
-            false,
+            ClearablePaint::Paint(fill),
+            ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
             ctx.mark_style.paint.stroke_width,
             1.0,
             None,
@@ -395,10 +395,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if ctx.mark_style.area.line_border == Some(true) {
             let line_cmds = build_top_line_cmds(&top, trace);
             let border_style = to_scene_fill_stroke(
-                None,
-                false,
-                Some(stroke_color),
-                false,
+                ClearablePaint::Absent,
+                ClearablePaint::Paint(stroke_color),
                 ctx.mark_style.paint.stroke_width.max(1.0),
                 1.0,
                 None,
@@ -415,10 +413,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let top_cmds = build_top_line_cmds(&top, trace);
             let sw = ctx.mark_style.paint.stroke_width.max(1.0);
             let border_style = to_scene_fill_stroke(
-                None,
-                false,
-                Some(stroke_color),
-                false,
+                ClearablePaint::Absent,
+                ClearablePaint::Paint(stroke_color),
                 sw,
                 1.0,
                 None,

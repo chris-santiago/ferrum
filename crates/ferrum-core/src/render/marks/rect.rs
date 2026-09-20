@@ -107,17 +107,16 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
         let w = (px_hi - px_lo).abs().max(0.5);
         let h = (py_hi - py_lo).abs().max(0.5);
 
-        let (fill, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
+            ctx.mark_style.paint.fill_paint(),
         );
         // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
         let row_opacity =
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-        let fill = with_opacity(fill, row_opacity);
+        let fill = fill.map(|c| with_opacity(c, row_opacity));
 
         let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
@@ -130,12 +129,10 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
-        let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
+        let effective_stroke = resolve_effective_stroke(
             row_stroke_width,
-            ctx.mark_style.paint.stroke,
-            ctx.mark_style.paint.stroke_cleared,
+            ctx.mark_style.paint.stroke_paint(),
             fill,
-            fill_cleared,
             stroke_width_values.is_some(),
         );
         let row_dash = resolve_row_stroke_dash(
@@ -146,10 +143,8 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
         );
 
         let style = to_scene_fill_stroke_full(
-            Some(fill),
-            fill_cleared,
+            fill,
             effective_stroke,
-            effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
             row_dash.as_deref(),
@@ -268,16 +263,15 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             // Ordinal rects consume only the categorical half of the color
             // read (this path has no continuous fill), so `num_value` is
             // always None — see the loader call at the top of this fn.
-            let (fill, fill_cleared) = resolve_fill_color(
+            let fill = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
-                ctx.mark_style.paint.fill,
-                ctx.mark_style.paint.fill_cleared,
+                ctx.mark_style.paint.fill_paint(),
             );
             let row_opacity =
                 resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-            let fill = with_opacity(fill, row_opacity);
+            let fill = fill.map(|c| with_opacity(c, row_opacity));
 
             let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
@@ -287,12 +281,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 .filter(|v| *v >= 0.0 && v.is_finite())
                 .unwrap_or(ctx.mark_style.paint.stroke_width);
 
-            let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
+            let effective_stroke = resolve_effective_stroke(
                 row_stroke_width,
-                ctx.mark_style.paint.stroke,
-                ctx.mark_style.paint.stroke_cleared,
+                ctx.mark_style.paint.stroke_paint(),
                 fill,
-                fill_cleared,
                 stroke_width_values.is_some(),
             );
             let row_dash = resolve_row_stroke_dash(
@@ -303,10 +295,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             );
 
             let style = to_scene_fill_stroke_full(
-                Some(fill),
-                fill_cleared,
+                fill,
                 effective_stroke,
-                effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
                 row_dash.as_deref(),
@@ -367,16 +357,15 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             // Ordinal rects consume only the categorical half of the color
             // read (this path has no continuous fill), so `num_value` is
             // always None — see the loader call at the top of this fn.
-            let (fill, fill_cleared) = resolve_fill_color(
+            let fill = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
-                ctx.mark_style.paint.fill,
-                ctx.mark_style.paint.fill_cleared,
+                ctx.mark_style.paint.fill_paint(),
             );
             let row_opacity =
                 resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-            let fill = with_opacity(fill, row_opacity);
+            let fill = fill.map(|c| with_opacity(c, row_opacity));
 
             let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
@@ -386,12 +375,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 .filter(|v| *v >= 0.0 && v.is_finite())
                 .unwrap_or(ctx.mark_style.paint.stroke_width);
 
-            let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
+            let effective_stroke = resolve_effective_stroke(
                 row_stroke_width,
-                ctx.mark_style.paint.stroke,
-                ctx.mark_style.paint.stroke_cleared,
+                ctx.mark_style.paint.stroke_paint(),
                 fill,
-                fill_cleared,
                 stroke_width_values.is_some(),
             );
             let row_dash = resolve_row_stroke_dash(
@@ -402,10 +389,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             );
 
             let style = to_scene_fill_stroke_full(
-                Some(fill),
-                fill_cleared,
+                fill,
                 effective_stroke,
-                effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
                 row_dash.as_deref(),
@@ -564,18 +549,17 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        let (fill, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
+            ctx.mark_style.paint.fill_paint(),
         );
         // Resolve per-row opacity (through scale if present).
         let row_opacity =
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
 
-        let fill = with_opacity(fill, row_opacity);
+        let fill = fill.map(|c| with_opacity(c, row_opacity));
 
         let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
@@ -588,12 +572,10 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
-        let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
+        let effective_stroke = resolve_effective_stroke(
             row_stroke_width,
-            ctx.mark_style.paint.stroke,
-            ctx.mark_style.paint.stroke_cleared,
+            ctx.mark_style.paint.stroke_paint(),
             fill,
-            fill_cleared,
             stroke_width_values.is_some(),
         );
         let row_dash = resolve_row_stroke_dash(
@@ -604,10 +586,8 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
         );
 
         let style = to_scene_fill_stroke_full(
-            Some(fill),
-            fill_cleared,
+            fill,
             effective_stroke,
-            effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
             row_dash.as_deref(),

@@ -1525,7 +1525,8 @@ fn every_point_shape_kind_is_covered_by_the_exact_anchor_contract() {
     let br = guide_break();
     let remap = guide_remap(&br);
     let style = || ShapeStyle {
-        fill: None, fill_cleared: false, stroke: None, stroke_cleared: false,
+        fill: crate::render::draw::ClearablePaint::Absent,
+        stroke: crate::render::draw::ClearablePaint::Absent,
         stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, fill_opacity: 1.0,
         stroke_dash: None, angle: 0.0,
     };

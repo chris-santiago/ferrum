@@ -165,33 +165,79 @@ pub struct DrawCtx<'a> {
     pub mark_style: &'a MarkStyle,
 }
 
+/// Where one of [`MarkPaint`]'s two constant paints came from.
+///
+/// This three-state provenance replaced the `{fill,stroke}_is_user_set` +
+/// `{fill,stroke}_cleared` boolean pairs (wave 6A T7, `#110`). The pairs could
+/// spell a fourth state the domain does not have — "inherited but cleared" —
+/// and every reader had to know that `cleared` is only meaningful when
+/// `is_user_set` holds; the enum makes the illegal combination unrepresentable
+/// and turns the four-field read at `scene_build.rs`'s literal-paint gate into
+/// one comparison.
+///
+/// "User-set" means the value resolved from an explicit `mark_kwargs` override
+/// (spec §4.4, 2026-08-28 T4 amendment), never merely inherited from the mark's
+/// theme-aware default. An *unparseable* override is neither variant: it fails
+/// the whole render with [`RenderError::InvalidColor`] (batch-A Task 8), so the
+/// "resolved or refused" reading holds with no third outcome.
+///
+/// The source is recorded on the *layer-resolved* [`MarkPaint`] (each layer
+/// calls [`resolve_mark_style`] independently), so it is correct in both flat
+/// and layered charts — unlike reading the raw chart-level `mark_kwargs` off
+/// `ChartSpec.mark_style`, which a layered chart's synthetic per-layer
+/// `ChartSpec` does NOT override (it stays the chart-level value via
+/// `..spec.clone()` in `scene_build.rs::build_panel_mark_batches`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintSource {
+    /// Inherited from the mark-aware theme default: the user named no color for
+    /// this slot.
+    Inherited,
+    /// Resolved from an explicit user override that named a color — anything
+    /// [`parse_color`] accepts, or the `"theme:label"` theme-lookup sentinel.
+    UserColor,
+    /// Resolved from the explicit `"none"`/`"transparent"` paint clear.
+    ///
+    /// The slot's *value* is still
+    /// [`color::TRANSPARENT`](super::color::TRANSPARENT) (that is what
+    /// [`resolve_paint_color`] resolves the sentinel to, so the clear travels as
+    /// an ordinary color no fill fallback can resurrect); this variant is the
+    /// *provenance* that [`ClearablePaint::scene_paint`] gates the omitted
+    /// attribute on. A paint that merely equals `TRANSPARENT` by value — an
+    /// explicit `fill="#00000000"`, or `opacity=0` composed onto black — is
+    /// [`UserColor`](PaintSource::UserColor) and keeps serializing
+    /// byte-identically (T8 quality-review c2, spec §4.1 2026-09-01 amendment,
+    /// spec §7).
+    UserClear,
+}
+
+impl PaintSource {
+    /// The provenance of one `fill=`/`stroke=` override string. Called beside
+    /// the [`resolve_paint_color`] that resolves the same string's *value*, so
+    /// value and provenance are written in one place and cannot drift.
+    fn from_override(value: &str) -> Self {
+        if is_paint_clear_sentinel(value) { Self::UserClear } else { Self::UserColor }
+    }
+
+    /// `true` for either explicit-override variant. Rule/segment renderers read
+    /// this to enforce the precedence "explicit constant stroke > per-row color
+    /// encoding > fill fallback" ([`resolve_stroke_color`]), and `text.rs` reads
+    /// it to decide whether its constant color fallback is the resolved `fill`
+    /// or the theme font color.
+    pub fn is_user_set(self) -> bool {
+        !matches!(self, Self::Inherited)
+    }
+}
+
 /// Cross-cutting paint applied to **every** mark family: fill/stroke colors,
-/// stroke width, mark opacity, dash pattern, and rect/bar corner radius. These
-/// are the only style fields read by more than one mark family, so they form the
-/// shared base of [`MarkStyle`].
+/// their provenance, stroke width, mark opacity, dash pattern, and rect/bar
+/// corner radius. These are the only style fields read by more than one mark
+/// family, so they form the shared base of [`MarkStyle`].
 ///
-/// `stroke_is_user_set` is `true` when `stroke` was set by an explicit user
-/// `mark_kwargs` override (including the `"theme:label"` sentinel), not merely
-/// inherited from the mark's theme default. Used by rule/segment renderers to
-/// enforce the precedence: explicit constant stroke > per-row color encoding >
-/// fill fallback.
-///
-/// `fill_is_user_set` is the `fill` analog (spec §4.4, 2026-08-28 T4
-/// amendment): `true` only when `fill` actually resolved from an explicit user
-/// `mark_kwargs` override — the `"theme:label"` sentinel, the explicit `"none"`
-/// clear, or a color string [`parse_color`] accepts — never merely inherited
-/// from the mark's theme-aware default. An *unparseable* string sets neither the
-/// flag nor the paint: it fails the whole render with
-/// [`RenderError::InvalidColor`] (batch-A Task 8), so the "resolved or refused"
-/// reading of the flag holds with no third outcome. Set on
-/// the *layer-resolved* `MarkPaint` (each layer calls `resolve_mark_style`
-/// independently), so it is correct in both flat and layered charts — unlike
-/// reading the raw chart-level `mark_kwargs` off `ChartSpec.mark_style`, which
-/// a layered chart's synthetic per-layer `ChartSpec` does NOT override (it
-/// stays the chart-level value via `..spec.clone()` in
-/// `scene_build.rs::build_panel_mark_batches`). Used by `text.rs` to decide
-/// whether its constant color fallback is the resolved `fill` or the theme
-/// font color.
+/// `fill`/`stroke` carry the resolved *value*; `fill_source`/`stroke_source`
+/// carry where it came from. Marks that build a scene paint out of a slot go
+/// through [`fill_paint`](MarkPaint::fill_paint) /
+/// [`stroke_paint`](MarkPaint::stroke_paint), which pair the two into one
+/// [`ClearablePaint`] rather than letting a call site re-pair them by hand.
 #[derive(Debug, Clone)]
 pub struct MarkPaint {
     pub fill: Color,
@@ -200,20 +246,55 @@ pub struct MarkPaint {
     pub opacity: f64,
     pub corner_radius: f64,
     pub stroke_dash: Option<Vec<f64>>,
-    pub stroke_is_user_set: bool,
-    pub fill_is_user_set: bool,
-    /// `true` only when `fill` resolved via the `"none"`/`"transparent"` clear
-    /// sentinel in [`resolve_paint_color`] — never when it merely *equals*
-    /// [`color::TRANSPARENT`](super::color::TRANSPARENT) by value (an explicit
-    /// `fill="#00000000"`, or `opacity=0` composed onto black, both resolve a
-    /// real color that happens to be zero-alpha). This is the provenance flag
-    /// [`normalize_scene_paint`] gates on (T8 quality-review c2, spec §4.1
-    /// 2026-09-01 amendment): a cleared paint omits its SVG/scene-JSON
-    /// attribute, but a same-valued-but-not-cleared paint must keep
-    /// serializing byte-identically (spec §7).
-    pub fill_cleared: bool,
-    /// The `stroke` analog of [`fill_cleared`](MarkPaint::fill_cleared).
-    pub stroke_cleared: bool,
+    pub stroke_source: PaintSource,
+    pub fill_source: PaintSource,
+}
+
+impl MarkPaint {
+    /// The constant `fill` slot as one paint: [`ClearablePaint::Cleared`] when
+    /// the user cleared it, else the resolved color. Never
+    /// [`Absent`](ClearablePaint::Absent) — every mark style resolves a fill.
+    ///
+    /// **The source wins over the value.** See [`stroke_paint`](Self::stroke_paint)
+    /// for why that is safe rather than lossy; the fill case is the simpler one,
+    /// since `fill` is a plain `Color` with no absent spelling to discard.
+    pub fn fill_paint(&self) -> ClearablePaint {
+        match self.fill_source {
+            PaintSource::UserClear => ClearablePaint::Cleared,
+            _ => ClearablePaint::Paint(self.fill),
+        }
+    }
+
+    /// The constant `stroke` slot as one paint: [`ClearablePaint::Cleared`] when
+    /// the user cleared it, [`Absent`](ClearablePaint::Absent) when this mark's
+    /// style resolves no stroke at all, else the resolved color. The
+    /// cleared/absent split is load-bearing, not cosmetic — see
+    /// [`resolve_effective_stroke`].
+    ///
+    /// **The source wins over the value**, and that is the one pairing this type
+    /// still leaves representable: `stroke` and `stroke_source` are independent
+    /// fields, so `UserClear` alongside `stroke: None` can be written by hand
+    /// (the crate's own tests assign these fields directly), and this projection
+    /// answers `Cleared` for it — shutting the RMARK-04 rescue gate that the
+    /// bare `None` would have opened. That is the deliberate reading, not an
+    /// oversight: a clear is a *decision about this slot*, and it outranks the
+    /// absence of a value under it. It is also lossless, because a cleared
+    /// paint's color is `TRANSPARENT` by definition rather than by storage
+    /// ([`ClearablePaint::color`]) — the `None` the projection discards would
+    /// have resolved to exactly nothing a reader could have used.
+    ///
+    /// [`resolve_mark_style`] never produces that pairing: it writes
+    /// `Some(TRANSPARENT)` and `UserClear` together, in one place, from one
+    /// override string.
+    pub fn stroke_paint(&self) -> ClearablePaint {
+        match self.stroke_source {
+            PaintSource::UserClear => ClearablePaint::Cleared,
+            // The one caller of `uncleared` that is NOT `#110` migration debt:
+            // the clear is already honored by the arm above, so what reaches
+            // here has no clear to drop.
+            _ => ClearablePaint::uncleared(self.stroke),
+        }
+    }
 }
 
 /// Text/label-mark overrides (`mark_text`, `mark_label`). `None` = fall back to
@@ -364,10 +445,8 @@ impl MarkStyle {
                 opacity: theme.sizes.default_opacity,
                 corner_radius: 0.0,
                 stroke_dash: None,
-                stroke_is_user_set: false,
-                fill_is_user_set: false,
-                fill_cleared: false,
-                stroke_cleared: false,
+                stroke_source: PaintSource::Inherited,
+                fill_source: PaintSource::Inherited,
             },
             text: TextStyle::default(),
             line: LineStyle::default(),
@@ -417,12 +496,13 @@ fn resolve_paint_color(value: &str, theme: &ThemeInputs) -> Result<Color, Render
 
 /// `true` when `value` is the `"none"`/`"transparent"` paint-clear sentinel
 /// (trimmed, case-folded) — the same predicate [`resolve_paint_color`] checks
-/// ahead of parsing. Exposed separately so [`resolve_mark_style`] can record
-/// *why* a paint resolved to [`color::TRANSPARENT`](super::color::TRANSPARENT)
-/// (a genuine user clear) as opposed to merely resolving to that value (a real
-/// color that happens to be zero-alpha, e.g. `"#00000000"`), rather than
-/// re-deriving it from the resolved `Color` after the fact — which is exactly
-/// the by-value ambiguity `fill_cleared`/`stroke_cleared` exist to avoid.
+/// ahead of parsing. Exposed separately so [`PaintSource::from_override`] can
+/// record *why* a paint resolved to
+/// [`color::TRANSPARENT`](super::color::TRANSPARENT) (a genuine user clear) as
+/// opposed to merely resolving to that value (a real color that happens to be
+/// zero-alpha, e.g. `"#00000000"`), rather than re-deriving it from the resolved
+/// `Color` after the fact — which is exactly the by-value ambiguity
+/// [`PaintSource::UserClear`] exists to avoid.
 fn is_paint_clear_sentinel(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("transparent")
@@ -508,17 +588,15 @@ pub fn resolve_mark_style(
     }
 
     // Both paints resolve or refuse — there is no third "silently keep the
-    // theme default" outcome, so `*_is_user_set` is set unconditionally
+    // theme default" outcome, so `*_source` is written unconditionally
     // alongside the value it describes.
     if let Some(ref value) = o.stroke {
         style.paint.stroke = Some(resolve_paint_color(value, theme)?);
-        style.paint.stroke_is_user_set = true;
-        style.paint.stroke_cleared = is_paint_clear_sentinel(value);
+        style.paint.stroke_source = PaintSource::from_override(value);
     }
     if let Some(ref value) = o.fill {
         style.paint.fill = resolve_paint_color(value, theme)?;
-        style.paint.fill_is_user_set = true;
-        style.paint.fill_cleared = is_paint_clear_sentinel(value);
+        style.paint.fill_source = PaintSource::from_override(value);
     }
 
     // Text-mark-specific fields
@@ -914,37 +992,117 @@ pub fn to_scene_color(c: Color) -> ferrum_scene::Color {
     ferrum_scene::Color { r: c.red, g: c.green, b: c.blue, a: c.alpha }
 }
 
-/// Normalize a resolved scene paint, collapsing a **user-cleared** paint to
-/// `None` so it never serializes as an explicit `rgba(0,0,0,0.000)` attribute
-/// in SVG or as a zero-alpha color in interactive scene JSON — both outputs
-/// walk the same [`ferrum_scene::SceneGraph`], so this has to happen at
-/// construction, before a `FillStroke`/paint field is built, not at either
-/// output's emission step.
+/// One paint slot on its way into a scene node: the color to paint, or the
+/// reason there is none.
 ///
-/// `cleared` is the caller's *provenance* signal (from
-/// [`MarkPaint::fill_cleared`]/[`stroke_cleared`](MarkPaint::stroke_cleared)),
-/// never a value test on `c` (T8 quality-review c2, spec §4.1 2026-09-01
-/// amendment). Gating on `c == TRANSPARENT` instead — the pre-c2 shape of
-/// this function — aliased any resolved paint that merely *equals*
-/// `color::TRANSPARENT` by value (`fill="#00000000"`, or `opacity=0`
-/// composed onto black) with a genuine `"none"`/`"transparent"` clear,
-/// silently moving those charts' SVG bytes and violating spec §7's
-/// hex-only byte-identity invariant. `cleared` is `true` only when the
-/// literal sentinel matched at the mark-style boundary, so a same-valued
-/// but never-cleared paint keeps serializing exactly as before.
+/// This is the typed replacement (wave 6A T7, `#110`) for the `(Color, bool)` /
+/// `(Option<Color>, bool)` pairs that [`resolve_fill_color`],
+/// [`resolve_effective_stroke`] and the `to_scene_fill_stroke*` constructors
+/// threaded as unlabeled positional booleans, and for the `normalize_scene_paint`
+/// gate they fed. A slot's value and its cleared-ness travel together, so a
+/// fallback can no longer substitute one paint's color while keeping the other's
+/// provenance.
 ///
-/// Callers must derive `cleared` from state captured *before* any
-/// `Option`-based fallback decision (`unwrap_or`, [`resolve_effective_stroke`]'s
-/// stroke-width rescue, a color-scale lookup) has run — a scale-resolved
-/// per-row color is never "cleared" even if the constant paint underneath it
-/// was, and a fallback that substitutes the *other* paint (e.g. stroke
-/// rescued from fill) must carry that other paint's own cleared-ness, not
-/// this one's.
-pub fn normalize_scene_paint(
-    c: Option<ferrum_scene::Color>,
-    cleared: bool,
-) -> Option<ferrum_scene::Color> {
-    if cleared { None } else { c }
+/// [`Cleared`](Self::Cleared) and [`Absent`](Self::Absent) both serialize to no
+/// attribute, which is the *whole* observable difference between them today.
+/// They stay distinct for two reasons: they are different facts at the call site
+/// (this mark has no stroke at all, versus the user asked for none), and
+/// [`resolve_effective_stroke`]'s stroke-width rescue fires on `Absent` ONLY —
+/// NF-A7 (spec §4.1), an explicit `stroke="none"` must beat the rescue rather
+/// than be repainted in the fill color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearablePaint {
+    /// Paint this color.
+    Paint(Color),
+    /// The user cleared this slot with the `"none"`/`"transparent"` sentinel
+    /// ([`PaintSource::UserClear`]). Its *value* is
+    /// [`color::TRANSPARENT`](super::color::TRANSPARENT) — see
+    /// [`color`](Self::color) — but it serializes as nothing.
+    Cleared,
+    /// This slot has no paint at all: a mark style that resolves no stroke, a
+    /// hollow point's fill, a line's absent fill.
+    Absent,
+}
+
+impl ClearablePaint {
+    /// A never-cleared paint from an `Option<Color>`: `Some` paints, `None` is
+    /// [`Absent`](Self::Absent).
+    ///
+    /// Passing a [`MarkPaint`] slot through this constructor marks a site that
+    /// has NOT yet threaded paint-clear provenance
+    /// (`area`/`arc`/`geoshape`/`polygon`/`line`, `#110`'s migration half): for
+    /// those a cleared constant still serializes as `rgba(0,0,0,0.000)`, and
+    /// their fill analog spells the same debt as `Paint(paint.fill)`. Prefer
+    /// [`MarkPaint::stroke_paint`] wherever the clear should be honored.
+    ///
+    /// So `grep uncleared(` is T12's worklist, with **one** exception to skip:
+    /// [`MarkPaint::stroke_paint`]'s own call, which is the clear-honoring path
+    /// itself and reaches this constructor only after the clear is handled.
+    pub fn uncleared(c: Option<Color>) -> Self {
+        match c {
+            Some(c) => Self::Paint(c),
+            None => Self::Absent,
+        }
+    }
+
+    /// The scene color to serialize, or `None` to omit the attribute entirely.
+    ///
+    /// A **user-cleared** paint collapses to `None` here so it never serializes
+    /// as an explicit `rgba(0,0,0,0.000)` attribute in SVG or as a zero-alpha
+    /// color in interactive scene JSON — both outputs walk the same
+    /// [`ferrum_scene::SceneGraph`], so this has to happen at construction,
+    /// before a `FillStroke`/paint field is built, not at either output's
+    /// emission step.
+    ///
+    /// The gate is *provenance*, never a value test on the color (T8
+    /// quality-review c2, spec §4.1 2026-09-01 amendment). Gating on
+    /// `c == TRANSPARENT` instead — the pre-c2 shape of this code — aliased any
+    /// resolved paint that merely *equals* `color::TRANSPARENT` by value
+    /// (`fill="#00000000"`, or `opacity=0` composed onto black) with a genuine
+    /// `"none"`/`"transparent"` clear, silently moving those charts' SVG bytes
+    /// and violating spec §7's hex-only byte-identity invariant. Only the
+    /// literal sentinel matched at the mark-style boundary produces
+    /// [`Cleared`](Self::Cleared), so a same-valued but never-cleared paint keeps
+    /// serializing exactly as before.
+    pub fn scene_paint(self) -> Option<ferrum_scene::Color> {
+        match self {
+            Self::Paint(c) => Some(to_scene_color(c)),
+            Self::Cleared | Self::Absent => None,
+        }
+    }
+
+    /// The color this slot *resolved to*, for callers that paint something else
+    /// in it rather than emitting it as this node's own paint attribute.
+    ///
+    /// A clear resolves to [`color::TRANSPARENT`](super::color::TRANSPARENT),
+    /// exactly as [`resolve_paint_color`] resolves the sentinel, so a glyph drawn
+    /// in a cleared fill's color (point's `cross`/`vline`/`hline` arms) stays
+    /// invisible instead of falling back to a visible default. Use
+    /// [`scene_paint`](Self::scene_paint) for the attribute itself: that is the
+    /// one reader for which a clear is *absence*, not transparency.
+    pub fn color(self) -> Option<Color> {
+        match self {
+            Self::Paint(c) => Some(c),
+            Self::Cleared => Some(super::color::TRANSPARENT),
+            Self::Absent => None,
+        }
+    }
+
+    /// [`color`](Self::color) with a fallback for [`Absent`](Self::Absent).
+    pub fn color_or(self, fallback: Color) -> Color {
+        self.color().unwrap_or(fallback)
+    }
+
+    /// Apply `f` to a [`Paint`](Self::Paint)'s color — composing per-row opacity,
+    /// typically. [`Cleared`](Self::Cleared) and [`Absent`](Self::Absent) pass
+    /// through: neither has a color to compose onto, and both serialize to
+    /// nothing either way.
+    pub fn map(self, f: impl FnOnce(Color) -> Color) -> Self {
+        match self {
+            Self::Paint(c) => Self::Paint(f(c)),
+            other => other,
+        }
+    }
 }
 
 /// Build a [`FillStroke`](ferrum_scene::FillStroke) with `fill_opacity`,
@@ -955,29 +1113,22 @@ pub fn normalize_scene_paint(
 /// swatches, axis fills, strip backgrounds, area/line group styles). Marks that
 /// *do* resolve per-row `fill_opacity`/`stroke_opacity`/`angle` should call
 /// [`to_scene_fill_stroke_full`] instead of patching the returned struct
-/// afterward — that variant takes all ten fields so the caller receives a
+/// afterward — that variant takes every field so the caller receives a
 /// finished `FillStroke` in one call.
 ///
-/// `fill_cleared`/`stroke_cleared` sit directly beside the paint they
-/// describe (not appended at the end) so a call site reads as "this value,
-/// and whether it was cleared" rather than two unlabeled trailing booleans —
-/// see [`normalize_scene_paint`] for what they gate. Most callers of this
-/// mark family never resolve a user paint-clear at this call site (legend
-/// swatches, axis bands, strip backgrounds, area borders, arc/geoshape/polygon
-/// fills derived from a color scale) and pass `false, false`.
+/// Each paint arrives as one [`ClearablePaint`] rather than as a color plus an
+/// unlabeled trailing boolean. Most callers of this arity never resolve a user
+/// paint-clear at the call site (legend swatches, axis bands, strip backgrounds,
+/// area borders, arc/geoshape/polygon fills derived from a color scale) and pass
+/// [`ClearablePaint::Paint`]/[`Absent`](ClearablePaint::Absent) directly.
 pub fn to_scene_fill_stroke(
-    fill: Option<Color>,
-    fill_cleared: bool,
-    stroke: Option<Color>,
-    stroke_cleared: bool,
+    fill: ClearablePaint,
+    stroke: ClearablePaint,
     stroke_width: f64,
     opacity: f64,
     stroke_dash: Option<&[f64]>,
 ) -> ferrum_scene::FillStroke {
-    to_scene_fill_stroke_full(
-        fill, fill_cleared, stroke, stroke_cleared, stroke_width, opacity, stroke_dash, 1.0, 1.0,
-        0.0,
-    )
+    to_scene_fill_stroke_full(fill, stroke, stroke_width, opacity, stroke_dash, 1.0, 1.0, 0.0)
 }
 
 /// Build a complete [`FillStroke`](ferrum_scene::FillStroke), including the
@@ -988,18 +1139,16 @@ pub fn to_scene_fill_stroke(
 /// per-row (point, rect, area, line) call this directly so they no longer build
 /// a partial `FillStroke` and patch the three fields by hand at the call site.
 ///
-/// A **user-cleared** paint (`fill_cleared`/`stroke_cleared` — provenance from
-/// [`MarkPaint`], never a value test) is normalized to `None` here via
-/// [`normalize_scene_paint`], so it never serializes as an explicit
+/// A [`ClearablePaint::Cleared`] paint (provenance from [`MarkPaint`], never a
+/// value test) serializes as nothing via
+/// [`ClearablePaint::scene_paint`], so it never emits an explicit
 /// `rgba(0,0,0,0.000)`. A paint that merely *resolves to* `color::TRANSPARENT`
 /// without having been cleared (`fill="#00000000"`, or `opacity=0` composed
 /// onto black) keeps serializing byte-identically, per spec §7.
 #[allow(clippy::too_many_arguments)]
 pub fn to_scene_fill_stroke_full(
-    fill: Option<Color>,
-    fill_cleared: bool,
-    stroke: Option<Color>,
-    stroke_cleared: bool,
+    fill: ClearablePaint,
+    stroke: ClearablePaint,
     stroke_width: f64,
     opacity: f64,
     stroke_dash: Option<&[f64]>,
@@ -1008,8 +1157,8 @@ pub fn to_scene_fill_stroke_full(
     angle: f64,
 ) -> ferrum_scene::FillStroke {
     ferrum_scene::FillStroke {
-        fill: normalize_scene_paint(fill.map(to_scene_color), fill_cleared),
-        stroke: normalize_scene_paint(stroke.map(to_scene_color), stroke_cleared),
+        fill: fill.scene_paint(),
+        stroke: stroke.scene_paint(),
         stroke_width,
         opacity,
         stroke_dash: stroke_dash.map(|d| d.to_vec()),
@@ -1043,8 +1192,8 @@ pub fn to_scene_stroke(
 ///
 /// Precedence (preserved byte-for-byte from commit a450ef1 — explicit constant
 /// stroke beats inherited color encoding):
-/// - `stroke_is_user_set` → the explicit user `stroke=` wins; fall back to fill
-///   when `stroke` is somehow `None`.
+/// - `stroke_source.is_user_set()` → the explicit user `stroke=` wins; fall back
+///   to fill when `stroke` is somehow `None`.
 /// - otherwise → per-row color encoding wins, then the theme stroke, then fill.
 ///
 /// Used by rule/segment (and any axis-aligned/diagonal line mark) so the
@@ -1057,7 +1206,7 @@ pub fn to_scene_stroke(
 /// too, with no extra case.
 pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> Color {
     let p = &ms.paint;
-    if p.stroke_is_user_set {
+    if p.stroke_source.is_user_set() {
         p.stroke.unwrap_or(p.fill)
     } else {
         row_color.or(p.stroke).unwrap_or(p.fill)
@@ -1074,29 +1223,24 @@ pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> 
 /// renderer. The [`ColorInput::Category`] branch maps the row's category string
 /// via `lookup`. `scale` is `None` when the chart has no color scale.
 ///
-/// Returns `(color, cleared)`: `cleared` mirrors `fallback_cleared` whenever
-/// the fallback is actually used (no scale, or the scale lookup misses) and
-/// is always `false` when a scale lookup succeeds — a color-scale value is
-/// never a user paint-clear, however it happens to render (T8 quality-review
-/// c2). Callers that don't need per-row cleared provenance may discard the
-/// second element.
+/// A scale lookup that hits returns [`ClearablePaint::Paint`] — a color-scale
+/// value is never a user paint-clear, however it happens to render (T8
+/// quality-review c2). A miss, or an absent scale, returns `fallback` unchanged,
+/// clear and all, so the constant paint's provenance survives the lookup.
 pub(crate) fn resolve_fill_color(
     scale: Option<&ColorScale>,
     cat_value: Option<&str>,
     num_value: Option<f64>,
-    fallback: Color,
-    fallback_cleared: bool,
-) -> (Color, bool) {
-    let Some(s) = scale else { return (fallback, fallback_cleared) };
-    match s.input() {
-        ColorInput::Numeric => match num_value.filter(|v| v.is_finite()).and_then(|v| s.lookup_f64(v)) {
-            Some(c) => (c, false),
-            None => (fallback, fallback_cleared),
-        },
-        ColorInput::Category => match cat_value.and_then(|v| s.lookup(v)) {
-            Some(c) => (c, false),
-            None => (fallback, fallback_cleared),
-        },
+    fallback: ClearablePaint,
+) -> ClearablePaint {
+    let Some(s) = scale else { return fallback };
+    let looked_up = match s.input() {
+        ColorInput::Numeric => num_value.filter(|v| v.is_finite()).and_then(|v| s.lookup_f64(v)),
+        ColorInput::Category => cat_value.and_then(|v| s.lookup(v)),
+    };
+    match looked_up {
+        Some(c) => ClearablePaint::Paint(c),
+        None => fallback,
     }
 }
 
@@ -1111,34 +1255,34 @@ pub(crate) fn resolve_fill_color(
 /// `stroke_width` *column* is bound (`stroke_width_col_present`) — so a constant
 /// `stroke_width` with no stroke color stays strokeless, exactly as before.
 ///
-/// Byte-identical to the inline `if row_stroke_width > 0.0 && base_stroke
-/// .is_none() && stroke_width_values.is_some() { Some(fill) } else { base_stroke }`
-/// blocks that bar/rect/point each carried.
+/// The rescue returns `fill` *whole*, not just its color: it paints the stroke
+/// in the fill color, so a cleared fill rescued into the stroke slot is still a
+/// cleared paint (T8 quality-review c2).
 ///
-/// NF-A7 (spec §4.1): an explicit `stroke="none"` beats this rescue. It does so
-/// structurally, without a case here — `resolve_mark_style` resolves the clear
-/// to [`color::TRANSPARENT`](super::color::TRANSPARENT), so `base_stroke` is
-/// `Some(transparent)` rather than `None`, the `is_none()` gate never opens, and
-/// the row paints no visible stroke however wide the bound width column says.
+/// NF-A7 (spec §4.1): an explicit `stroke="none"` beats this rescue, because
+/// only [`ClearablePaint::Absent`] opens the gate — a cleared stroke is
+/// [`Cleared`](ClearablePaint::Cleared), a distinct state, and the row paints no
+/// visible stroke however wide the bound width column says. (Before the paint
+/// typing this held indirectly: the clear resolved to `Some(transparent)`, so the
+/// `is_none()` gate never opened.)
 ///
-/// Returns `(stroke, cleared)`: `cleared` is `base_stroke_cleared` when the
-/// rescue does not fire, and `fill_cleared` when it does (the rescue paints
-/// the stroke *in the fill color*, so a cleared fill rescued into the stroke
-/// slot is still a cleared paint — T8 quality-review c2). Callers that don't
-/// need per-row cleared provenance may discard the second element.
+/// This is the one rescue for the whole family. `bar`/`point` each carried a
+/// hand-rolled copy of the same three-line block until wave 6A T7 folded them
+/// onto this helper; `rect` already called it.
 #[inline]
 pub(crate) fn resolve_effective_stroke(
     row_stroke_width: f64,
-    base_stroke: Option<Color>,
-    base_stroke_cleared: bool,
-    fill: Color,
-    fill_cleared: bool,
+    base_stroke: ClearablePaint,
+    fill: ClearablePaint,
     stroke_width_col_present: bool,
-) -> (Option<Color>, bool) {
-    if row_stroke_width > 0.0 && base_stroke.is_none() && stroke_width_col_present {
-        (Some(fill), fill_cleared)
+) -> ClearablePaint {
+    if row_stroke_width > 0.0
+        && matches!(base_stroke, ClearablePaint::Absent)
+        && stroke_width_col_present
+    {
+        fill
     } else {
-        (base_stroke, base_stroke_cleared)
+        base_stroke
     }
 }
 
@@ -1434,8 +1578,9 @@ mod tests {
     // --- Batch A Task 8: strict color parsing at the mark-style boundary ---
     //
     // These replace `resolve_mark_style_invalid_color_silently_skipped` and
-    // `resolve_mark_style_invalid_fill_leaves_fill_is_user_set_false`, which
-    // pinned the pre-batch-A contract: an unparseable `fill=`/`stroke=` left
+    // `resolve_mark_style_invalid_fill_leaves_fill_is_user_set_false` (both
+    // long deleted, and named for a boolean wave 6A T7 replaced with
+    // `PaintSource`), which pinned the pre-batch-A contract: an unparseable `fill=`/`stroke=` left
     // the mark painted in its theme default with no diagnostic. Both inputs
     // are now typed refusals (spec §4.1/§6), so the old assertions are the
     // deliberate contract change, not a regression.
@@ -1451,7 +1596,7 @@ mod tests {
             (style.paint.fill.red, style.paint.fill.green, style.paint.fill.blue),
             (70, 130, 180)
         );
-        assert!(style.paint.fill_is_user_set);
+        assert_eq!(style.paint.fill_source, PaintSource::UserColor);
     }
 
     /// The `rgb()` functional form resolves too, and the resolved paint is
@@ -1508,28 +1653,32 @@ mod tests {
     // --- "none" clears paint (spec §4.1) ---
 
     /// `fill="none"` is an explicit clear, never a parse error: the paint
-    /// becomes fully transparent AND `fill_is_user_set` is set, so
-    /// `text.rs`'s constant-color fallback uses the cleared paint instead of
-    /// silently painting the theme font color.
+    /// becomes fully transparent AND its source is `UserClear` (a user-set
+    /// state), so `text.rs`'s constant-color fallback uses the cleared paint
+    /// instead of silently painting the theme font color.
     #[test]
-    fn resolve_mark_style_none_fill_clears_paint_and_marks_user_set() {
+    fn resolve_mark_style_none_fill_clears_paint_and_sets_fill_source_to_user_clear() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { fill: Some("none".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text).unwrap();
         assert_eq!(style.paint.fill.alpha, 0, "'none' must clear the fill");
-        assert!(style.paint.fill_is_user_set, "'none' is a user-set clear, not an absent fill");
+        assert_eq!(
+            style.paint.fill_source,
+            PaintSource::UserClear,
+            "'none' is a user-set clear, not an absent fill",
+        );
     }
 
     /// `stroke="none"` likewise, and the cleared stroke is *present* (a
     /// transparent color) rather than `None`, so no fill fallback resurrects it.
     #[test]
-    fn resolve_mark_style_none_stroke_clears_paint_and_marks_user_set() {
+    fn resolve_mark_style_none_stroke_clears_paint_and_sets_stroke_source_to_user_clear() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { stroke: Some("none".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule).unwrap();
         let stroke = style.paint.stroke.expect("a cleared stroke is present-but-transparent");
         assert_eq!(stroke.alpha, 0, "'none' must clear the stroke");
-        assert!(style.paint.stroke_is_user_set);
+        assert_eq!(style.paint.stroke_source, PaintSource::UserClear);
         assert_eq!(
             resolve_stroke_color(&style, None).alpha,
             0,
@@ -1563,14 +1712,14 @@ mod tests {
         let fill_style = resolve_mark_style(Some(&fill_overrides), &theme, &Mark::Text)
             .unwrap_or_else(|e| panic!("'transparent' must clear the fill, not refuse: {e}"));
         assert_eq!(fill_style.paint.fill.alpha, 0, "'transparent' must clear the fill");
-        assert!(fill_style.paint.fill_is_user_set);
+        assert_eq!(fill_style.paint.fill_source, PaintSource::UserClear);
 
         let stroke_overrides = MarkKwargsSpec { stroke: Some("transparent".into()), ..Default::default() };
         let stroke_style = resolve_mark_style(Some(&stroke_overrides), &theme, &Mark::Rule)
             .unwrap_or_else(|e| panic!("'transparent' must clear the stroke, not refuse: {e}"));
         let stroke = stroke_style.paint.stroke.expect("a cleared stroke is present-but-transparent");
         assert_eq!(stroke.alpha, 0, "'transparent' must clear the stroke");
-        assert!(stroke_style.paint.stroke_is_user_set);
+        assert_eq!(stroke_style.paint.stroke_source, PaintSource::UserClear);
     }
 
     /// The `"transparent"` clear is matched case-insensitively after
@@ -1628,41 +1777,42 @@ mod tests {
         assert_eq!(style.paint.fill.blue,  0x66, "sentinel fill.blue must be label_color.blue");
     }
 
-    // --- fill_is_user_set (Task 4 remediation, spec §4.4, 2026-08-28 T4
-    // amendment) ---
+    // --- `MarkPaint::fill_source` (Task 4 remediation, spec §4.4,
+    // 2026-08-28 T4 amendment; the `fill_is_user_set` boolean it began as was
+    // typed into `PaintSource` by wave 6A T7) ---
 
     #[test]
-    fn resolve_mark_style_no_fill_override_leaves_fill_is_user_set_false() {
+    fn resolve_mark_style_no_fill_override_leaves_fill_source_inherited() {
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
-        assert!(!style.paint.fill_is_user_set);
+        assert_eq!(style.paint.fill_source, PaintSource::Inherited);
     }
 
     #[test]
-    fn resolve_mark_style_hex_fill_sets_fill_is_user_set_true() {
+    fn resolve_mark_style_hex_fill_sets_fill_source_to_user_color() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { fill: Some("#ff0000".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text).unwrap();
-        assert!(style.paint.fill_is_user_set);
+        assert_eq!(style.paint.fill_source, PaintSource::UserColor);
         assert_eq!(style.paint.fill.red, 0xff);
     }
 
     #[test]
-    fn resolve_mark_style_theme_label_fill_sentinel_sets_fill_is_user_set_true() {
+    fn resolve_mark_style_theme_label_fill_sentinel_sets_fill_source_to_user_color() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { fill: Some("theme:label".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text).unwrap();
-        assert!(style.paint.fill_is_user_set);
+        assert_eq!(style.paint.fill_source, PaintSource::UserColor);
     }
 
-    /// An unparseable `fill=` value never sets `fill_is_user_set` — a
+    /// An unparseable `fill=` value never leaves `fill_source` user-set — a
     /// downstream constant-fallback consumer (e.g. `text.rs`) must not be told
     /// the user successfully set a fill. Since batch-A Task 8 that guarantee
-    /// holds by refusal rather than by a silently-unset flag: the render stops
-    /// before any consumer can read the flag at all. (The refusal itself is
-    /// asserted by `resolve_mark_style_invalid_fill_is_typed_error`.)
+    /// holds by refusal rather than by a silently-unwritten source: the render
+    /// stops before any consumer can read the source at all. (The refusal
+    /// itself is asserted by `resolve_mark_style_invalid_fill_is_typed_error`.)
     #[test]
-    fn resolve_mark_style_invalid_fill_never_reports_a_user_set_fill() {
+    fn resolve_mark_style_invalid_fill_refuses_before_writing_a_fill_source() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { fill: Some("notacolor".into()), ..Default::default() };
         assert!(resolve_mark_style(Some(&overrides), &theme, &Mark::Text).is_err());
@@ -1763,10 +1913,10 @@ mod tests {
 
     #[test]
     fn resolve_stroke_color_user_set_ignores_row_color() {
-        // stroke_is_user_set = true → explicit stroke wins regardless of row color.
+        // A user-set stroke source → explicit stroke wins regardless of row color.
         let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule).unwrap();
         ms.paint.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
-        ms.paint.stroke_is_user_set = true;
+        ms.paint.stroke_source = PaintSource::UserColor;
         let row_color = Some(crate::render::color::from_rgb(0xAA, 0xBB, 0xCC));
         // Present row color is ignored.
         let c = resolve_stroke_color(&ms, row_color);
@@ -1781,7 +1931,7 @@ mod tests {
         let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule).unwrap();
         ms.paint.stroke = None;
         ms.paint.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
-        ms.paint.stroke_is_user_set = true;
+        ms.paint.stroke_source = PaintSource::UserColor;
         let c = resolve_stroke_color(&ms, Some(crate::render::color::from_rgb(0xAA, 0xBB, 0xCC)));
         assert_eq!((c.red, c.green, c.blue), (0x44, 0x55, 0x66),
             "user-set stroke with None stroke must fall back to fill");
@@ -1792,7 +1942,7 @@ mod tests {
         let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule).unwrap();
         ms.paint.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
         ms.paint.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
-        ms.paint.stroke_is_user_set = false;
+        ms.paint.stroke_source = PaintSource::Inherited;
         // Row color present → it wins over theme stroke and fill.
         let row = crate::render::color::from_rgb(0xAA, 0xBB, 0xCC);
         let c = resolve_stroke_color(&ms, Some(row));
@@ -1804,7 +1954,7 @@ mod tests {
         let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule).unwrap();
         ms.paint.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
         ms.paint.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
-        ms.paint.stroke_is_user_set = false;
+        ms.paint.stroke_source = PaintSource::Inherited;
         // No row color → theme stroke wins.
         let c = resolve_stroke_color(&ms, None);
         assert_eq!((c.red, c.green, c.blue), (0x11, 0x22, 0x33));
@@ -1823,33 +1973,62 @@ mod tests {
     #[test]
     fn resolve_effective_stroke_rescues_unset_stroke_with_fill() {
         let fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
+        let fill_paint = ClearablePaint::Paint(fill);
         assert_eq!(
-            resolve_effective_stroke(2.0, None, false, fill, false, true),
-            (Some(fill), false),
+            resolve_effective_stroke(2.0, ClearablePaint::Absent, fill_paint, true),
+            fill_paint,
             "positive width + bound width column + no stroke → stroke painted in the fill color"
         );
         // The gate stays narrow: a constant width (no bound column) does not rescue.
-        assert_eq!(resolve_effective_stroke(2.0, None, false, fill, false, false), (None, false));
+        assert_eq!(
+            resolve_effective_stroke(2.0, ClearablePaint::Absent, fill_paint, false),
+            ClearablePaint::Absent,
+        );
         // Nor does a zero-width row.
-        assert_eq!(resolve_effective_stroke(0.0, None, false, fill, false, true), (None, false));
+        assert_eq!(
+            resolve_effective_stroke(0.0, ClearablePaint::Absent, fill_paint, true),
+            ClearablePaint::Absent,
+        );
+    }
+
+    /// A rescued *cleared* fill stays cleared in the stroke slot: the rescue
+    /// paints the stroke in the fill's paint, provenance included, so the
+    /// cleared-ness cannot be dropped on the way across (T8 quality-review c2).
+    #[test]
+    fn resolve_effective_stroke_rescue_carries_the_fills_cleared_ness() {
+        assert_eq!(
+            resolve_effective_stroke(2.0, ClearablePaint::Absent, ClearablePaint::Cleared, true),
+            ClearablePaint::Cleared,
+        );
     }
 
     /// NF-A7: `stroke="none"` beats the rescue. A user who cleared the stroke
     /// and bound a `stroke_width` column gets NO visible stroke — not a stroke
-    /// silently painted in the fill color.
+    /// silently painted in the fill color. The clear is a state of its own
+    /// (`Cleared`, not `Absent`), which is what keeps the rescue gate shut.
     #[test]
     fn resolve_effective_stroke_cleared_stroke_beats_the_width_rescue() {
         let theme = ThemeInputs::default();
         let overrides = MarkKwargsSpec { stroke: Some("none".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rect).unwrap();
         let fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
-        let (effective, cleared) = resolve_effective_stroke(
-            2.0, style.paint.stroke, style.paint.stroke_cleared, fill, false, true,
+        let effective = resolve_effective_stroke(
+            2.0,
+            style.paint.stroke_paint(),
+            ClearablePaint::Paint(fill),
+            true,
         );
-        let effective = effective.expect("a cleared stroke is present-but-transparent");
-        assert_eq!(effective.alpha, 0, "the cleared stroke must stay invisible");
-        assert_ne!(effective, fill, "the fill must not be resurrected as the stroke");
-        assert!(cleared, "the rescue did not fire (base_stroke was Some), so cleared carries through from base_stroke_cleared");
+        assert_eq!(
+            effective,
+            ClearablePaint::Cleared,
+            "the rescue did not fire, so the cleared stroke carries through",
+        );
+        assert_eq!(
+            effective.color().expect("a cleared paint still resolves to a color").alpha,
+            0,
+            "the cleared stroke must stay invisible",
+        );
+        assert_eq!(effective.scene_paint(), None, "and it must not serialize at all");
     }
 
     /// Full-pipeline proof of the same NF-A7 invariant, at the `resolve_effective_stroke`
@@ -1857,15 +2036,13 @@ mod tests {
     /// `render_svg`): `fm.Chart(df).mark_rect(fill="none").encode(x="xc:N", y="yc:N",
     /// stroke_width="w:Q")` must emit NO `stroke` attribute on any cell.
     ///
-    /// The two unit tests above pin `resolve_effective_stroke`'s return value directly
-    /// but neither drives `fill_cleared=true` while the rescue actually fires (the first
-    /// passes `fill_cleared=false`; the second's `base_stroke` is `Some`, so the rescue
-    /// never opens), so neither discriminates the report's exact mutant — swapping the
-    /// rescue's `(Some(fill), fill_cleared)` for `(Some(fill), base_stroke_cleared)`. This
-    /// test drives that branch through the real mark builder: a bound `stroke_width`
-    /// column, a positive per-row width, and no explicit stroke color opens the rescue
-    /// gate, while `fill="none"` supplies `fill_cleared=true` — exactly the case the
-    /// mutant desyncs `cleared` from.
+    /// The unit tests above pin `resolve_effective_stroke`'s return value directly
+    /// (including the cleared-fill rescue), but only at the helper. This test drives
+    /// the same branch through the real mark builder: a bound `stroke_width` column,
+    /// a positive per-row width, and no explicit stroke color opens the rescue gate,
+    /// while `fill="none"` makes the rescued paint a cleared one — the case the
+    /// mutation report's mutant (returning the base stroke's provenance instead of
+    /// the fill's) desyncs.
     #[test]
     fn fill_none_rect_with_bound_stroke_width_emits_no_stroke_attribute() {
         use crate::layout::Viewport;
@@ -1960,20 +2137,28 @@ mod tests {
             palette: std::borrow::Cow::Owned(vec![red, blue]),
         };
         let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
-        // "a" → palette[0] = red; num_value is ignored for categorical.
-        let (c, cleared) = resolve_fill_color(Some(&scale), Some("a"), Some(99.0), fallback, false);
-        assert_eq!((c.red, c.green, c.blue), (0xFF, 0x00, 0x00));
-        assert!(!cleared, "a scale lookup hit is never cleared");
+        let paint = ClearablePaint::Paint(fallback);
+        // "a" → palette[0] = red; num_value is ignored for categorical. A hit is
+        // always a plain `Paint`, never the fallback's provenance.
+        assert_eq!(
+            resolve_fill_color(Some(&scale), Some("a"), Some(99.0), ClearablePaint::Cleared),
+            ClearablePaint::Paint(red),
+            "a scale lookup hit is never cleared",
+        );
         // "b" → palette[1] = blue.
-        let (c2, _) = resolve_fill_color(Some(&scale), Some("b"), None, fallback, false);
-        assert_eq!((c2.red, c2.green, c2.blue), (0x00, 0x00, 0xFF));
-        // Unknown category → fallback.
-        let (c3, cleared3) = resolve_fill_color(Some(&scale), Some("z"), None, fallback, true);
-        assert_eq!((c3.red, c3.green, c3.blue), (0x77, 0x77, 0x77));
-        assert!(cleared3, "a scale-lookup miss falls back to fallback_cleared");
+        assert_eq!(
+            resolve_fill_color(Some(&scale), Some("b"), None, paint),
+            ClearablePaint::Paint(blue),
+        );
+        // Unknown category → the fallback paint, cleared-ness and all.
+        assert_eq!(resolve_fill_color(Some(&scale), Some("z"), None, paint), paint);
+        assert_eq!(
+            resolve_fill_color(Some(&scale), Some("z"), None, ClearablePaint::Cleared),
+            ClearablePaint::Cleared,
+            "a scale-lookup miss keeps the fallback's clear",
+        );
         // No category string → fallback.
-        let (c4, _) = resolve_fill_color(Some(&scale), None, None, fallback, false);
-        assert_eq!((c4.red, c4.green, c4.blue), (0x77, 0x77, 0x77));
+        assert_eq!(resolve_fill_color(Some(&scale), None, None, paint), paint);
     }
 
     #[test]
@@ -1982,27 +2167,29 @@ mod tests {
         use crate::render::scale_resolve::ColorScale;
         let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
         let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme, midpoint: None };
-        let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
+        let paint = ClearablePaint::Paint(crate::render::color::from_rgb(0x77, 0x77, 0x77));
         // The continuous branch must consume the f64 directly (no round-trip):
         // the resolved color equals scale.lookup_f64(value).
         let v = 3.0;
-        let (c, cleared) = resolve_fill_color(Some(&scale), Some("ignored"), Some(v), fallback, false);
-        let expected = scale.lookup_f64(v).unwrap();
-        assert_eq!((c.red, c.green, c.blue), (expected.red, expected.green, expected.blue));
-        assert!(!cleared, "a scale lookup hit is never cleared");
+        assert_eq!(
+            resolve_fill_color(Some(&scale), Some("ignored"), Some(v), ClearablePaint::Cleared),
+            ClearablePaint::Paint(scale.lookup_f64(v).unwrap()),
+            "a scale lookup hit is never cleared",
+        );
         // Non-finite / absent numeric → fallback.
-        let (c2, _) = resolve_fill_color(Some(&scale), None, Some(f64::NAN), fallback, false);
-        assert_eq!((c2.red, c2.green, c2.blue), (0x77, 0x77, 0x77));
-        let (c3, _) = resolve_fill_color(Some(&scale), None, None, fallback, false);
-        assert_eq!((c3.red, c3.green, c3.blue), (0x77, 0x77, 0x77));
+        assert_eq!(resolve_fill_color(Some(&scale), None, Some(f64::NAN), paint), paint);
+        assert_eq!(resolve_fill_color(Some(&scale), None, None, paint), paint);
     }
 
     #[test]
     fn resolve_fill_color_no_scale_returns_fallback() {
-        let fallback = crate::render::color::from_rgb(0x12, 0x34, 0x56);
-        let (c, cleared) = resolve_fill_color(None, Some("a"), Some(1.0), fallback, true);
-        assert_eq!((c.red, c.green, c.blue), (0x12, 0x34, 0x56));
-        assert!(cleared, "no scale → fallback_cleared passes through unchanged");
+        let paint = ClearablePaint::Paint(crate::render::color::from_rgb(0x12, 0x34, 0x56));
+        assert_eq!(resolve_fill_color(None, Some("a"), Some(1.0), paint), paint);
+        assert_eq!(
+            resolve_fill_color(None, Some("a"), Some(1.0), ClearablePaint::Cleared),
+            ClearablePaint::Cleared,
+            "no scale → the fallback paint passes through unchanged",
+        );
     }
 
     /// B6: When no format is specified, the existing default behavior (trim trailing zeros)

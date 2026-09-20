@@ -8,7 +8,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, x_field, y_field, DrawCtx, EmptyReason, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
@@ -128,13 +128,10 @@ impl<'a> StrokeChannels<'a> {
     /// clamped, defaulted) by the shared [`OpacityResolver`]; bar's
     /// `fill_opacity ← opacity` fallback lives in that resolver
     /// (`OpacityFallback::BarLike`).
-    #[allow(clippy::too_many_arguments)]
     fn row_fill_stroke(
         &self,
-        fill: Option<ferrum_scene::Color>,
-        fill_cleared: bool,
-        stroke: Option<ferrum_scene::Color>,
-        stroke_cleared: bool,
+        fill: ClearablePaint,
+        stroke: ClearablePaint,
         base: &BarBaseStyle<'_>,
         fill_opacity: f64,
         stroke_opacity: f64,
@@ -155,34 +152,25 @@ impl<'a> StrokeChannels<'a> {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
 
-        // When stroke_width encoding produces a positive value but no explicit
-        // stroke color exists, use the fill color as the stroke so the width is
-        // visible in SVG (stroke-width is only emitted when stroke is Some).
-        // The rescue paints the stroke in the fill color, so `effective_stroke`'s
-        // cleared-ness follows the fill's, not the (absent) stroke's.
-        let (effective_stroke, effective_stroke_cleared) =
-            if stroke_width > 0.0 && stroke.is_none() && self.width.is_some() {
-                (fill, fill_cleared)
-            } else {
-                (stroke, stroke_cleared)
-            };
+        // RMARK-04's stroke-width rescue, shared with rect/point: a positive
+        // per-row width over an *absent* stroke paints the stroke in the fill
+        // color (cleared-ness included), while a `stroke="none"` clear is a
+        // distinct state that never opens the gate. Bar carried a hand-rolled
+        // copy of this block, plus its own `FillStroke` literal, until wave 6A
+        // T7 folded both onto the shared helpers.
+        let effective_stroke =
+            resolve_effective_stroke(stroke_width, stroke, fill, self.width.is_some());
 
-        // Normalize a **user-cleared** paint (provenance from `fill_cleared`/
-        // `effective_stroke_cleared`, never a value test — T8 quality-review c2)
-        // to `None` *after* the width-rescue decision above, not before —
-        // normalizing earlier would make a cleared stroke indistinguishable
-        // from an absent one and wrongly re-trigger the rescue. See
-        // `normalize_scene_paint`'s doc comment.
-        let fs = ferrum_scene::FillStroke {
-            fill: crate::render::draw::normalize_scene_paint(fill, fill_cleared),
-            stroke: crate::render::draw::normalize_scene_paint(effective_stroke, effective_stroke_cleared),
+        let fs = crate::render::draw::to_scene_fill_stroke_full(
+            fill,
+            effective_stroke,
             stroke_width,
             opacity,
-            stroke_dash: effective_dash,
-            stroke_opacity,
+            effective_dash.as_deref(),
             fill_opacity,
+            stroke_opacity,
             angle,
-        };
+        );
         (fs, corner_radius)
     }
 }
@@ -319,15 +307,13 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let inner_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, base);
         let outer_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, top);
 
-        let (fill_color, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
-        );
-        let fill_c = crate::render::draw::to_scene_color(with_opacity(fill_color, ctx.mark_style.paint.opacity));
-        let stroke_sc = ctx.mark_style.paint.stroke.map(crate::render::draw::to_scene_color);
+            ctx.mark_style.paint.fill_paint(),
+        )
+        .map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
         let base_style = BarBaseStyle {
             stroke_width: ctx.mark_style.paint.stroke_width,
             opacity: ctx.mark_style.paint.opacity,
@@ -336,8 +322,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, _) = sc.row_fill_stroke(
-            Some(fill_c), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
-            &base_style, fill_opacity, stroke_opacity, i,
+            fill, ctx.mark_style.paint.stroke_paint(), &base_style, fill_opacity, stroke_opacity, i,
         );
 
         let commands = wedge_path(
@@ -369,7 +354,7 @@ fn empty_result() -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_color};
+    use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -462,17 +447,13 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let top_y = rect_top_y + y_offsets[i];
         if is_zero_extent(bar_width, height) { zero_extent_drops += 1; continue; }
 
-        let (fill_color, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
-        );
-        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
-
-        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
-        let fill_sc = to_scene_color(fill);
+            ctx.mark_style.paint.fill_paint(),
+        )
+        .map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
         let base = BarBaseStyle {
             stroke_width: ctx.mark_style.paint.stroke_width,
             opacity: ctx.mark_style.paint.opacity,
@@ -481,8 +462,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
-            &base, fill_opacity, stroke_opacity, i,
+            fill, ctx.mark_style.paint.stroke_paint(), &base, fill_opacity, stroke_opacity, i,
         );
 
         acc.push(SceneNode::Rect {
@@ -512,7 +492,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_color};
+    use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -632,17 +612,13 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         if is_zero_extent(width, bar_height) { zero_extent_drops += 1; continue; }
 
-        let (fill_color, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
-        );
-        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
-
-        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
-        let fill_sc = to_scene_color(fill);
+            ctx.mark_style.paint.fill_paint(),
+        )
+        .map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
         let base = BarBaseStyle {
             stroke_width: ctx.mark_style.paint.stroke_width,
             opacity: ctx.mark_style.paint.opacity,
@@ -651,8 +627,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
-            &base, fill_opacity, stroke_opacity, i,
+            fill, ctx.mark_style.paint.stroke_paint(), &base, fill_opacity, stroke_opacity, i,
         );
 
         acc.push(SceneNode::Rect {
@@ -682,7 +657,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_color};
+    use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -820,17 +795,13 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         if is_zero_extent(width, height) { zero_extent_drops += 1; continue; }
 
-        let (fill_color, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
-        );
-        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
-
-        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
-        let fill_sc = to_scene_color(fill);
+            ctx.mark_style.paint.fill_paint(),
+        )
+        .map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
         let base = BarBaseStyle {
             stroke_width: ctx.mark_style.paint.stroke_width,
             opacity: ctx.mark_style.paint.opacity,
@@ -839,8 +810,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
-            &base, fill_opacity, stroke_opacity, i,
+            fill, ctx.mark_style.paint.stroke_paint(), &base, fill_opacity, stroke_opacity, i,
         );
 
         acc.push(SceneNode::Rect {
@@ -870,7 +840,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_color};
+    use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -950,17 +920,13 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let width = (px_right - row_base_x).max(0.0);
         if is_zero_extent(width, height) { zero_extent_drops += 1; continue; }
 
-        let (fill_color, fill_cleared) = resolve_fill_color(
+        let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.paint.fill,
-            ctx.mark_style.paint.fill_cleared,
-        );
-        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
-
-        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
-        let fill_sc = to_scene_color(fill);
+            ctx.mark_style.paint.fill_paint(),
+        )
+        .map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
         let base = BarBaseStyle {
             stroke_width: ctx.mark_style.paint.stroke_width,
             opacity: ctx.mark_style.paint.opacity,
@@ -969,8 +935,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
-            &base, fill_opacity, stroke_opacity, i,
+            fill, ctx.mark_style.paint.stroke_paint(), &base, fill_opacity, stroke_opacity, i,
         );
 
         acc.push(SceneNode::Rect {

@@ -1778,7 +1778,7 @@ mod tests {
     }
 
     /// An explicit constant `stroke=` mark-kwarg must still win over a color
-    /// encoding (the `stroke_is_user_set` precedence `resolve_stroke_color`
+    /// encoding (the user-set-`PaintSource` precedence `resolve_stroke_color`
     /// implements crate-wide) — mirrors `segment_uses_explicit_stroke_color`
     /// combined with a color encoding present. This is the same precedence
     /// boxplot/errorbar composite tick layers rely on to keep their neutral
