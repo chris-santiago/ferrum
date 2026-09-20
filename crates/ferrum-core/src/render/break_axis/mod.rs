@@ -9,732 +9,46 @@
 //! The pixel range follows SVG conventions: the origin is at the top-left, so
 //! for the Y axis `plot_top` (small pixel value) corresponds to a large data
 //! value and `plot_bottom` (large pixel value) corresponds to a small data value.
+//!
+//! # Module layout
+//! The four jobs that do not need `BreakRemap`'s private state live in their
+//! own files: [`scale`] (the piecewise domain/pixel math), [`indicators`] (the
+//! slash/zigzag/wave glyphs), [`placement`] (which model a mark batch's
+//! geometry meets a break under) and [`geometry`] (the `self`-free polygon and
+//! path clipping). What remains here is the scene rewrite: [`BreakRemap`] and
+//! its single `impl`, kept whole deliberately. `#229` proposed cutting that
+//! `impl` along a remap/clip line, but it is one block whose two halves share
+//! a dozen private accessors over four private fields, so the cut would have
+//! had to publish `axis`, `domain`, `pixels`, `result` and `ClippedNodes`'
+//! `sources`/`source_len` to a sibling module — fields whose invariants the
+//! types depend on. The four files above are the seam that needs no such
+//! widening.
+
+mod geometry;
+mod indicators;
+mod placement;
+mod scale;
 
 use std::collections::HashSet;
 
-use ferrum_scene::{FillStroke, MarkBatchKind, PathCmd, SceneNode};
+use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
-use crate::layout::{Rect, ThemeInputs};
-use crate::render::draw::to_scene_stroke;
 use crate::render::marks;
 
-// ── Public types ─────────────────────────────────────────────────────────────
+pub use self::indicators::build_break_indicators;
+pub use self::placement::{BreakPlacement, BREAK_HIDDEN};
+pub use self::scale::{
+    apply_break_to_scale, broken_scale_map, gap_containing, gap_spanned_by, BreakResult,
+    ScaleSegment,
+};
 
-/// Segments of a broken scale. Each segment covers a contiguous range of the
-/// original data domain and maps to a contiguous range of pixels.
-///
-/// Constructed by `apply_break_to_scale` and consumed by `broken_scale_map`,
-/// which [`BreakRemap`] calls to re-position scene coordinates onto the broken
-/// axis.
-#[derive(Debug, Clone)]
-pub struct ScaleSegment {
-    /// Lower bound of the data-space range covered by this segment.
-    pub data_lo: f64,
-    /// Upper bound of the data-space range covered by this segment.
-    pub data_hi: f64,
-    /// Lower bound of the pixel-space range for this segment (top for Y axis).
-    pub pixel_lo: f64,
-    /// Upper bound of the pixel-space range for this segment (bottom for Y axis).
-    pub pixel_hi: f64,
-}
-
-impl ScaleSegment {
-    /// This segment's data range as an ordered `(lo, hi)` pair.
-    ///
-    /// `data_lo`/`data_hi` are stored in domain order, which is ascending for
-    /// every scale `apply_break_to_scale` builds; the ordering here makes the
-    /// range comparisons below independent of that.
-    pub fn ordered_data(&self) -> (f64, f64) {
-        (self.data_lo.min(self.data_hi), self.data_lo.max(self.data_hi))
-    }
-
-    /// True when `value` lies within this segment's data range (inclusive of
-    /// both bounds — a value exactly on a gap edge belongs to the segment).
-    pub fn contains(&self, value: f64) -> bool {
-        let (lo, hi) = self.ordered_data();
-        value >= lo && value <= hi
-    }
-
-    /// Map a data value onto this segment's pixel range.
-    ///
-    /// The value is clamped into the segment first, so a caller that has
-    /// already intersected an extent against [`ScaleSegment::ordered_data`]
-    /// cannot produce an out-of-segment pixel from float drift at the
-    /// boundary — the failure mode that made the old per-vertex remap emit
-    /// `BREAK_HIDDEN` spikes in the middle of a clipped area.
-    pub fn pixel_for(&self, value: f64) -> f64 {
-        let t = if self.data_hi != self.data_lo {
-            ((value - self.data_lo) / (self.data_hi - self.data_lo)).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-        self.pixel_lo + t * (self.pixel_hi - self.pixel_lo)
-    }
-}
-
-/// Output of `apply_break_to_scale` — a piecewise mapping and the pixel
-/// positions of the break indicators.
-///
-/// `segments` is used by `broken_scale_map` for mark position adjustment;
-/// `indicator_pixels` is used by `build_break_indicators`.
-#[derive(Debug, Clone)]
-pub struct BreakResult {
-    /// Ordered list of contiguous data segments (excluding the gaps).
-    /// Consumed by `broken_scale_map` to map data values to pixel positions,
-    /// which [`BreakRemap`] drives for break-axis scene re-positioning.
-    pub segments: Vec<ScaleSegment>,
-    /// Pixel midpoints of each break indicator, along the broken axis.
-    pub indicator_pixels: Vec<f64>,
-    /// How many of the requested gaps survived [`normalize_gaps`] — i.e. how
-    /// many removed a real slice of the domain, after clipping to it and
-    /// merging overlaps.
-    ///
-    /// Zero means the `BreakAxis` is a no-op: every gap fell outside the
-    /// domain, or the axis had no numeric domain to clip against at all.
-    /// That case is otherwise invisible (no indicator, no moved mark), so
-    /// `scene_build::build_panel_breaks` reads this to emit
-    /// [`RenderWarning::BreakAxisIneffective`](crate::render::RenderWarning::BreakAxisIneffective)
-    /// rather than letting a structural feature disappear in silence.
-    /// A gap that merely touches a domain edge still counts here — it
-    /// removes data even though it draws no indicator.
-    pub effective_gaps: usize,
-}
-
-// ── Scale computation ─────────────────────────────────────────────────────────
-
-/// Clip `gaps` to the domain `d_lo`/`d_hi` — **in either order** — then sort
-/// and merge them into disjoint, ascending ranges.
-///
-/// The domain bounds are read as an unordered pair. A reversed scale
-/// (`LinearScale(reverse=True)`) reports a DESCENDING `data_domain()`, and
-/// clipping against it endpoint-wise discarded every gap: `g[0].max(1000.0)`
-/// and `g[1].min(0.0)` can never satisfy `hi > lo`, so a `BreakAxis` on a
-/// reversed axis silently rendered an unbroken chart. Which data range a gap
-/// removes is orientation-free; the orientation belongs to the pixel
-/// assignment in [`apply_break_to_scale`].
-///
-/// A GAP's own bounds are read as written, not sorted: `[850, 150]` describes
-/// an empty interval and removes nothing. That stays a no-op — but no longer
-/// a silent one, since `effective_gaps` then reaches zero and the caller
-/// warns.
-///
-/// Merging is what makes overlapping and nested gaps well-defined: `[100, 900]`
-/// plus `[200, 300]` is one removed range `[100, 900]`, not two. Without it the
-/// segment walk below took the *last* gap's upper bound as its cursor, so a
-/// nested gap moved the cursor backwards and re-admitted data the enclosing gap
-/// had removed; and the reserved indicator space counted a break the scale never
-/// draws. Adjacent gaps (`hi == lo`) merge too — they remove one contiguous
-/// range and get one indicator, so they must reserve one indicator's pixels.
-///
-/// A non-finite bound (`NaN`/`±inf`) is dropped before clipping rather than
-/// clipped against the domain: `f64::max`/`f64::min` return the *non-NaN*
-/// argument (Rust docs), so without this guard `[NaN, NaN].max(d_lo).min(d_hi)`
-/// resolved to `[d_lo, d_hi]` — a domain-covering gap that silently erased
-/// every datum (BRK-1, `design-docs/superpowers/followups/
-/// 2026-05-15-code-archaeology.md`). #92/#148 refuse a non-finite gap at
-/// `BreakAxis` construction and at the wire gate, so this normal path no
-/// longer sees one; this filter is defense-in-depth for any caller that
-/// builds a `BreakAxisSpec` directly (e.g. this module's own unit tests) —
-/// `apply_break_to_scale` stays infallible per the `chart_config.rs:184-195`
-/// layering doctrine, so a malformed gap is treated as absent (dropping
-/// `effective_gaps`, which the caller already warns on) rather than erroring.
-fn normalize_gaps(gaps: &[[f64; 2]], d_lo: f64, d_hi: f64) -> Vec<(f64, f64)> {
-    let (d_lo, d_hi) = (d_lo.min(d_hi), d_lo.max(d_hi));
-    let mut clipped: Vec<(f64, f64)> = gaps
-        .iter()
-        .filter(|g| g[0].is_finite() && g[1].is_finite())
-        .filter_map(|g| {
-            let g_lo = g[0].max(d_lo);
-            let g_hi = g[1].min(d_hi);
-            if g_hi > g_lo { Some((g_lo, g_hi)) } else { None }
-        })
-        .collect();
-    // f64 gap bounds are finite data values; Equal is the safe NaN fallback.
-    clipped.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(clipped.len());
-    for (g_lo, g_hi) in clipped {
-        match merged.last_mut() {
-            Some(prev) if g_lo <= prev.1 => prev.1 = prev.1.max(g_hi),
-            _ => merged.push((g_lo, g_hi)),
-        }
-    }
-    merged
-}
-
-/// Build a piecewise scale that skips `gaps` in the data domain.
-///
-/// `original_domain` is the full `(lo, hi)` of the axis before breaking.
-/// `pixel_range` is the BROKEN SCALE'S OWN pixel range
-/// ([`ScaleKind::pixel_range`](crate::render::scale_resolve::ScaleKind::pixel_range)),
-/// i.e. the padded one the unbroken scale places data in, as
-/// `(axis_start_px, axis_end_px)` in that scale's orientation — for a
-/// continuous Y that is `(bottom, top)`. It is NOT the raw plot rect: the
-/// segments built here must tile the same span [`BreakRemap`] reverse-maps
-/// from, because re-placing a coordinate is a round trip through both
-/// (`BreakRemap::data_at` divides by the scale's range, `ScaleSegment::
-/// pixel_for` multiplies by a slice of THIS range). Handing the raw rect in
-/// while the remap read the padded range made that round trip lossy in
-/// exactly the padding band: every effective break silently deleted up to
-/// `SCALE_PADDING_MAX_PX` of axis padding, so a broken axis's ticks, marks
-/// and gridlines sat up to 8px off their unbroken positions and a gap
-/// stepping over the domain boundary moved the whole chart (#226).
-/// `break_size` is the pixel height/width reserved for each indicator.
-///
-/// `original_domain` may be given in EITHER order. A reversed scale reports a
-/// descending `(lo, hi)`; the domain is normalized to ascending here and the
-/// orientation is carried into the pixel assignment instead — `d_hi` simply
-/// starts at the far end of `pixel_range`. Segments therefore always run
-/// ascending in data, whichever way the axis is drawn, and every downstream
-/// reader (`contains`, `pixel_for`, `gap_containing`) stays orientation-free.
-///
-/// Segments are allocated proportionally to their data-domain fraction of the
-/// total non-gap span. Gaps that fall entirely outside `original_domain` are
-/// ignored (and counted: see [`BreakResult::effective_gaps`], which the caller
-/// turns into a warning rather than a silent no-op), and gaps that overlap (or
-/// merely touch) each other are merged into one before segments are computed —
-/// see [`normalize_gaps`].
-pub fn apply_break_to_scale(
-    original_domain: (f64, f64),
-    gaps: &[[f64; 2]],
-    pixel_range: (f64, f64),
-    break_size: f64,
-) -> BreakResult {
-    let (raw_lo, raw_hi) = original_domain;
-    let descending = raw_hi < raw_lo;
-    let (d_lo, d_hi) = (raw_lo.min(raw_hi), raw_lo.max(raw_hi));
-    // The pixel end `d_lo` sits at, and the direction the walk runs in. For an
-    // ascending domain this is `pixel_range` unchanged (byte-identical to
-    // every break rendered before reversed scales were handled); for a
-    // descending one the two ends swap, so the smallest data value keeps the
-    // pixel the unbroken scale put it at.
-    let (px_lo, px_hi) = if descending {
-        (pixel_range.1, pixel_range.0)
-    } else {
-        pixel_range
-    };
-    let total_px = (px_hi - px_lo).abs();
-
-    let valid_gaps = normalize_gaps(gaps, d_lo, d_hi);
-
-    if valid_gaps.is_empty() {
-        // No effective gaps — single segment spanning the full domain.
-        return BreakResult {
-            segments: vec![ScaleSegment {
-                data_lo: d_lo,
-                data_hi: d_hi,
-                pixel_lo: px_lo,
-                pixel_hi: px_hi,
-            }],
-            indicator_pixels: Vec::new(),
-            effective_gaps: 0,
-        };
-    }
-
-    // Build ordered list of retained data ranges (domain minus gaps).
-    // `normalize_gaps` already sorted and merged, so the cursor only ever
-    // moves forward: a nested gap can no longer walk it backwards and
-    // re-admit a range an enclosing gap had removed.
-    let mut segment_ranges: Vec<(f64, f64)> = Vec::new();
-    let mut cursor = d_lo;
-    for (g_lo, g_hi) in &valid_gaps {
-        if cursor < *g_lo {
-            segment_ranges.push((cursor, *g_lo));
-        }
-        cursor = *g_hi;
-    }
-    if cursor < d_hi {
-        segment_ranges.push((cursor, d_hi));
-    }
-
-    // Total data span retained (excluding gaps).
-    let total_data_span: f64 = segment_ranges.iter().map(|(lo, hi)| hi - lo).sum();
-
-    // Pixels available for data segments, after reserving space for the break
-    // indicators. Counted per indicator ACTUALLY EMITTED — one between each
-    // pair of adjacent segments, which is what `indicator_pixels` below
-    // derives from `segments.windows(2)` — not per removed range. A gap that
-    // touches `d_lo` or `d_hi` removes a range without separating two
-    // segments, so it draws no indicator and must withhold no pixels; before
-    // this it withheld one `break_size` for an indicator that never appeared,
-    // leaving a dead band at the plot edge.
-    let n_breaks = segment_ranges.len().saturating_sub(1) as f64;
-    let pixels_for_data = (total_px - n_breaks * break_size).max(1.0);
-
-    // Assign pixel ranges to each data segment proportionally.
-    let mut segments: Vec<ScaleSegment> = Vec::new();
-    let mut px_cursor = px_lo;
-
-    for (seg_lo, seg_hi) in &segment_ranges {
-        let data_fraction = if total_data_span > 0.0 {
-            (seg_hi - seg_lo) / total_data_span
-        } else {
-            1.0 / segment_ranges.len() as f64
-        };
-        let seg_px = pixels_for_data * data_fraction;
-        let seg_px_hi = px_cursor + seg_px * (px_hi - px_lo).signum();
-        segments.push(ScaleSegment {
-            data_lo: *seg_lo,
-            data_hi: *seg_hi,
-            pixel_lo: px_cursor,
-            pixel_hi: seg_px_hi,
-        });
-        // Advance past this segment and the following break indicator
-        // (unless this is the last segment).
-        px_cursor = seg_px_hi;
-        if segments.len() < segment_ranges.len() {
-            px_cursor += break_size * (px_hi - px_lo).signum();
-        }
-    }
-
-    // Indicator pixel midpoints: midpoint between each pair of adjacent segments.
-    let indicator_pixels: Vec<f64> = segments
-        .windows(2)
-        .map(|w| (w[0].pixel_hi + w[1].pixel_lo) / 2.0)
-        .collect();
-
-    BreakResult {
-        segments,
-        indicator_pixels,
-        effective_gaps: valid_gaps.len(),
-    }
-}
-
-/// Map a single data value to its pixel position under the broken scale.
-///
-/// Returns `None` when `value` falls within a gap.
-///
-/// Consumed by [`BreakRemap::coord`] to re-position mark coordinates onto the
-/// broken axis; also exercised directly by this module's unit tests.
-pub fn broken_scale_map(value: f64, result: &BreakResult) -> Option<f64> {
-    result
-        .segments
-        .iter()
-        .find(|seg| seg.contains(value))
-        .map(|seg| seg.pixel_for(value))
-}
-
-/// The gap in `result` that contains `value`, as a `(lo, hi)` data-space
-/// pair — the band between two consecutive visible segments.
-///
-/// `None` when `value` maps onto a visible segment (including exactly on a
-/// gap boundary, which belongs to its adjacent segment — [`ScaleSegment`]'s
-/// bounds are inclusive, so gaps are open intervals) or lies outside the
-/// domain entirely.
-///
-/// Consumed by the BreakAxis annotation break router (spec §4 H5, F-L08-07,
-/// #228) to tell an annotation a gap swallowed from one it merely reaches, and
-/// to name the mechanism in `RenderWarning::AnnotationSuppressedByBreak`.
-pub fn gap_containing(value: f64, result: &BreakResult) -> Option<(f64, f64)> {
-    if broken_scale_map(value, result).is_some() {
-        return None;
-    }
-    result.segments.windows(2).find_map(|w| {
-        let (_, hi0) = w[0].ordered_data();
-        let (lo1, _) = w[1].ordered_data();
-        (value > hi0 && value < lo1).then_some((hi0, lo1))
-    })
-}
-
-/// The first gap in `result` that the closed interval between `a` and `b`
-/// (given in either order) covers ENTIRELY.
-///
-/// The companion of [`gap_containing`], which answers the same question for a
-/// single point. Between them they decide whether an interval's closure meets
-/// any gap's interior: either an endpoint is inside a gap (`gap_containing`),
-/// or neither is and the interval reaches across one (here). An extent that
-/// straddles a gap has no in-gap endpoint at all, which is why it survived
-/// the endpoint-only suppression test and painted straight across the break.
-///
-/// Consumed by the BreakAxis annotation break router (spec §4 H5, #228) for the
-/// extent-shaped annotation kinds, where it answers "does this break reach the
-/// interval at all"; whether anything of it SURVIVES is
-/// [`BreakRemap::data_extent_visible`]'s question.
-pub fn gap_spanned_by(a: f64, b: f64, result: &BreakResult) -> Option<(f64, f64)> {
-    let (lo, hi) = (a.min(b), a.max(b));
-    result.segments.windows(2).find_map(|w| {
-        let (_, hi0) = w[0].ordered_data();
-        let (lo1, _) = w[1].ordered_data();
-        (lo <= hi0 && hi >= lo1).then_some((hi0, lo1))
-    })
-}
-
-// ── Indicator rendering ───────────────────────────────────────────────────────
-
-/// Render break indicators at `result.indicator_pixels` for the given axis and style.
-///
-/// `plot_area` provides the perpendicular extent (e.g. for a Y-axis break, the
-/// x-extent of the plot area determines where the indicators are drawn).
-pub fn build_break_indicators(
-    result: &BreakResult,
-    plot_area: &Rect,
-    axis: &str,
-    break_size: f64,
-    break_style: &str,
-    theme: &ThemeInputs,
-) -> Vec<SceneNode> {
-    let mut nodes = Vec::new();
-
-    let stroke = to_scene_stroke(theme.colors.axis_line_color, theme.sizes.axis_line_width, 1.0, None, None, None);
-
-    for &indicator_px in &result.indicator_pixels {
-        let new_nodes = match break_style {
-            "gap" => Vec::new(),
-            "zigzag" => build_zigzag_indicator(indicator_px, plot_area, axis, break_size, stroke.clone()),
-            "wave" => build_wave_indicator(indicator_px, plot_area, axis, break_size, stroke.clone()),
-            _ => build_slash_indicator(indicator_px, plot_area, axis, break_size, stroke.clone()),
-        };
-        nodes.extend(new_nodes);
-    }
-
-    nodes
-}
-
-/// Two parallel diagonal slashes (`//`) at the break position.
-fn build_slash_indicator(
-    indicator_px: f64,
-    plot_area: &Rect,
-    axis: &str,
-    break_size: f64,
-    stroke: ferrum_scene::StrokeStyle,
-) -> Vec<SceneNode> {
-    let half = break_size / 2.0;
-    let diag = 6.0; // diagonal extension in pixels
-
-    if axis == "y" {
-        let x1 = plot_area.x + plot_area.w * 0.35;
-        let x2 = plot_area.x + plot_area.w * 0.65;
-        let x_mid = (x1 + x2) / 2.0;
-
-        vec![
-            // First slash
-            SceneNode::Line {
-                x1: x_mid - diag / 2.0,
-                y1: indicator_px - half,
-                x2: x_mid + diag / 2.0,
-                y2: indicator_px + half,
-                style: stroke.clone(),
-            },
-            // Second slash (offset to the right)
-            SceneNode::Line {
-                x1: x_mid - diag / 2.0 + diag,
-                y1: indicator_px - half,
-                x2: x_mid + diag / 2.0 + diag,
-                y2: indicator_px + half,
-                style: stroke,
-            },
-        ]
-    } else {
-        // x-axis break
-        let y1 = plot_area.y + plot_area.h * 0.35;
-        let y2 = plot_area.y + plot_area.h * 0.65;
-        let y_mid = (y1 + y2) / 2.0;
-
-        vec![
-            SceneNode::Line {
-                x1: indicator_px - half,
-                y1: y_mid - diag / 2.0,
-                x2: indicator_px + half,
-                y2: y_mid + diag / 2.0,
-                style: stroke.clone(),
-            },
-            SceneNode::Line {
-                x1: indicator_px - half,
-                y1: y_mid - diag / 2.0 + diag,
-                x2: indicator_px + half,
-                y2: y_mid + diag / 2.0 + diag,
-                style: stroke,
-            },
-        ]
-    }
-}
-
-/// A zigzag path at the break position.
-fn build_zigzag_indicator(
-    indicator_px: f64,
-    plot_area: &Rect,
-    axis: &str,
-    break_size: f64,
-    stroke: ferrum_scene::StrokeStyle,
-) -> Vec<SceneNode> {
-    let half = break_size / 2.0;
-    let amplitude = 5.0;
-    let n_zags = 4i32;
-
-    let commands = if axis == "y" {
-        let x_center = plot_area.x + plot_area.w / 2.0;
-        let mut cmds = Vec::new();
-        cmds.push(PathCmd::MoveTo { x: x_center - amplitude, y: indicator_px - half });
-        for i in 0..=n_zags {
-            let t = i as f64 / n_zags as f64;
-            let y = indicator_px - half + t * break_size;
-            let x = if i % 2 == 0 {
-                x_center - amplitude
-            } else {
-                x_center + amplitude
-            };
-            cmds.push(PathCmd::LineTo { x, y });
-        }
-        cmds
-    } else {
-        let y_center = plot_area.y + plot_area.h / 2.0;
-        let mut cmds = Vec::new();
-        cmds.push(PathCmd::MoveTo { x: indicator_px - half, y: y_center - amplitude });
-        for i in 0..=n_zags {
-            let t = i as f64 / n_zags as f64;
-            let x = indicator_px - half + t * break_size;
-            let y = if i % 2 == 0 {
-                y_center - amplitude
-            } else {
-                y_center + amplitude
-            };
-            cmds.push(PathCmd::LineTo { x, y });
-        }
-        cmds
-    };
-
-    vec![SceneNode::Path {
-        commands,
-        style: FillStroke {
-            fill: None,
-            stroke: Some(stroke.color),
-            stroke_width: stroke.width,
-            opacity: stroke.opacity,
-            stroke_dash: None,
-            stroke_opacity: 1.0,
-            fill_opacity: 1.0,
-            angle: 0.0,
-        },
-        closed: false,
-    }]
-}
-
-/// A wave/tilde path at the break position.
-fn build_wave_indicator(
-    indicator_px: f64,
-    plot_area: &Rect,
-    axis: &str,
-    break_size: f64,
-    stroke: ferrum_scene::StrokeStyle,
-) -> Vec<SceneNode> {
-    let half = break_size / 2.0;
-    let amplitude = 4.0;
-    let n_steps = 20i32;
-
-    let commands = if axis == "y" {
-        let x_center = plot_area.x + plot_area.w / 2.0;
-        let mut cmds = Vec::new();
-        cmds.push(PathCmd::MoveTo {
-            x: x_center,
-            y: indicator_px - half,
-        });
-        for i in 1..=n_steps {
-            let t = i as f64 / n_steps as f64;
-            let y = indicator_px - half + t * break_size;
-            let x = x_center + amplitude * (std::f64::consts::PI * 2.0 * t).sin();
-            cmds.push(PathCmd::LineTo { x, y });
-        }
-        cmds
-    } else {
-        let y_center = plot_area.y + plot_area.h / 2.0;
-        let mut cmds = Vec::new();
-        cmds.push(PathCmd::MoveTo {
-            x: indicator_px - half,
-            y: y_center,
-        });
-        for i in 1..=n_steps {
-            let t = i as f64 / n_steps as f64;
-            let x = indicator_px - half + t * break_size;
-            let y = y_center + amplitude * (std::f64::consts::PI * 2.0 * t).sin();
-            cmds.push(PathCmd::LineTo { x, y });
-        }
-        cmds
-    };
-
-    vec![SceneNode::Path {
-        commands,
-        style: FillStroke {
-            fill: None,
-            stroke: Some(stroke.color),
-            stroke_width: stroke.width,
-            opacity: stroke.opacity,
-            stroke_dash: None,
-            stroke_opacity: 1.0,
-            fill_opacity: 1.0,
-            angle: 0.0,
-        },
-        closed: false,
-    }]
-}
+use self::geometry::{
+    clip_to_band, path_commands, polygon_points, push_line_pieces, rounded_rect_piece,
+    set_triangle_vertices, straight_path_points, triangle_vertices,
+};
+use self::placement::is_hidden;
 
 // ── Scene remapping ───────────────────────────────────────────────────────────
-
-/// Coordinate used to park geometry that falls inside a break gap off-screen.
-///
-/// A large off-screen value rather than NaN, which would panic the SVG
-/// serializer. Which geometry is hidden this way, and which is clipped
-/// instead, is decided per mark batch by [`BreakPlacement`].
-pub const BREAK_HIDDEN: f64 = -99999.0;
-
-/// Whether `c` is the hidden-sentinel pixel [`BreakRemap::remap_node`]'s
-/// `Line` arm writes for a coordinate that fell inside a gap.
-///
-/// Exact equality, not a tolerance band: `remap_node`'s `Line` arm writes
-/// `BREAK_HIDDEN` verbatim (`*a = self.coord(*a).unwrap_or(BREAK_HIDDEN)`,
-/// no offset), which is the producer [`BreakRemap::data_at`]'s poison guard
-/// (#230-9) reads from when a coordinate a prior step already hid is handed
-/// back through `data_at`/`coord` — so `== BREAK_HIDDEN` is the precise
-/// question "did this coordinate hide", not an approximation of it, for all
-/// three of its callers: `data_at`, [`BreakRemap::clip_extent`] (whose own
-/// poison guard on its raw input pixels was added cycle-2), and
-/// [`BreakRemap::remap_arrowhead`]'s shaft-direction filter (defensive since
-/// the split hands it placed pieces, never sentinels).
-/// [`BreakRemap::remap_glyph_node`]'s hide path is a different producer: it
-/// offsets a multi-coordinate glyph's other coordinates by `c - anchor`
-/// around the sentinel, so those coordinates do NOT satisfy this exact
-/// test — a caller reading glyph-hidden coordinates needs its own,
-/// necessarily inexact, threshold. A real pixel is never within a fraction
-/// of `BREAK_HIDDEN` either way, so the distinction is academic in
-/// practice; it is named here so the next caller does not have to
-/// re-derive which producer it is reading from.
-fn is_hidden(c: f64) -> bool {
-    c == BREAK_HIDDEN
-}
-
-/// How a mark batch's geometry meets a broken axis.
-///
-/// The three models exist because "the mark is inside the gap" means three
-/// different things depending on what the mark's pixels encode, and applying
-/// one model to all of them is what produced the defects this enum replaces:
-/// extent-clipping a *glyph* dropped in-gap diamonds and squares out of the
-/// node list (losing their `data_indices`/tooltip rows) while in-gap circles
-/// were merely hidden, and cut the surviving ones flat at the gap edge.
-///
-/// The mapping is per [`MarkBatchKind`] and exhaustive, so a new mark kind has
-/// to answer this question rather than inherit an accident.
-///
-/// `annotation::CutRouting` (private to that module, so not a resolvable
-/// doc link from here) asks this same question for annotations and answers
-/// it with the same three placements, under the same names (`ClipExtent`,
-/// `MoveVertices`, `MoveVerticesAndGlyph`) minus the two glyph-only variants
-/// annotations never need. The two enums are not linked by the type system —
-/// keep them in correspondence by hand if either grows a new variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BreakPlacement {
-    /// The mark's pixel *extent* along the axis is data (a bar's height, an
-    /// area's band, a violin's outline), so it is clipped to the visible
-    /// segments: one sub-mark per segment it intersects, none when it lies
-    /// wholly inside a gap. A `Polygon` node clips its rings in place, so it
-    /// stays one node with one row. See [`BreakRemap::clip_nodes`].
-    ClipExtent,
-    /// The mark is a fixed-size glyph anchored at one data position (a point's
-    /// shape, a tick or rug dash, a text label). It translates to its anchor's
-    /// compressed position — keeping its drawn size and shape — and hides whole
-    /// when the anchor is inside a gap. Never resized, never split, never
-    /// dropped, so glyph batches stay 1:1 with their rows whatever `shape=`
-    /// they carry. See [`BreakRemap::remap_glyph_node`].
-    MoveGlyph,
-    /// The mark emits a glyph plus a *connector* to it: `mark_label`'s text
-    /// with its optional leader line. The text moves as a glyph; the leader's
-    /// two ends are two different data positions, so each is placed on its own
-    /// and the data end keeps touching its data point.
-    ///
-    /// This exists as its own model — rather than as a node-shape test inside
-    /// [`BreakPlacement::MoveGlyph`] — because `SceneNode::Line` has two
-    /// producers with opposite meanings: a label's leader (a connector) and a
-    /// tick's dash (drawn size, not data). Only the batch kind can tell them
-    /// apart. See [`BreakRemap::remap_label_node`].
-    MoveGlyphAndConnector,
-    /// The mark is connected *stroked* geometry whose every vertex is its own
-    /// data position (a line, a rule, a segment shaft). It is SPLIT into one
-    /// sub-node per visible piece: the stroke is cut at the gap edges it
-    /// crosses, each piece carries the vertices lying in one segment plus the
-    /// interpolated crossing points where it enters and leaves that segment,
-    /// and the portion inside a gap is not drawn at all. See
-    /// [`BreakRemap::split_nodes`].
-    ///
-    /// The sentinel model this replaces placed each vertex independently and
-    /// parked the in-gap ones at [`BREAK_HIDDEN`], which left the stroke
-    /// *connected* to them: a line crossing a gap drew a spike off-canvas and
-    /// back (#230-1, measured as
-    /// `<polyline points="74.714,420.961 345.357,-99999 616,16">`). It
-    /// survives as the 1→1 fallback for stroked geometry no faithful split
-    /// exists for — a curved `Path`, whose crossing point is not a vertex of
-    /// anything this module can re-spell ([`BreakRemap::remap_node`]).
-    MoveVertices,
-    /// The mark is vertex-placed stroked geometry that also carries a
-    /// fixed-size glyph derived from it: `mark_segment`'s shaft plus its
-    /// optional `arrow=True` arrowhead. The shaft splits per visible piece
-    /// (exactly [`BreakPlacement::MoveVertices`]); the head is then REBUILT at
-    /// its tip's placed position from the endpoints of the piece that REACHES
-    /// that tip, so it keeps both its drawn size and its alignment with the
-    /// geometry it terminates, whose slope the break changes.
-    ///
-    /// The mirror of [`BreakPlacement::MoveGlyphAndConnector`], and it exists
-    /// for the same reason: only the batch kind knows that a closed `Path` in
-    /// a `Segment` batch is an arrowhead. Placing its three vertices one by
-    /// one scaled the head by the segment's own compression ratio — a 20px
-    /// head became ~90px tall and sheared under a `(150, 850)` gap; rigidly
-    /// translating it instead fixed the size but froze the pre-break
-    /// direction, leaving the head pointing 16° off the shaft it terminates.
-    /// A head whose tip falls inside a gap is dropped: no piece reaches it, so
-    /// there is nothing for it to terminate.
-    /// See [`BreakRemap::split_segment_nodes`].
-    MoveVerticesAndGlyph,
-}
-
-impl BreakPlacement {
-    /// The placement model for a mark batch of `kind`.
-    ///
-    /// Exhaustive by construction: a new [`MarkBatchKind`] is a compile error
-    /// here rather than an inherited default.
-    pub fn for_kind(kind: MarkBatchKind) -> Self {
-        match kind {
-            // Extent geometry: the span between two data values is the mark.
-            // `Polygon` (mark_polygon, mark_geoshape, and mark_violin, which
-            // lowers to the polygon mark) is here rather than with the lines
-            // because its rings are FILLED: placing their vertices one by one
-            // would park the in-gap ones off-canvas and paint the fill as a
-            // column across the break, which is worse than the unplaced render
-            // it replaced. Clipping the rings is the same answer the area fill
-            // already gets.
-            MarkBatchKind::Bar
-            | MarkBatchKind::Area
-            | MarkBatchKind::Rect
-            | MarkBatchKind::Ribbon
-            | MarkBatchKind::Polygon => Self::ClipExtent,
-            // Glyphs: one data position, a drawn size that is not data. `Tick`
-            // is here for its dash (a rug's 8px mark is drawn size, so it must
-            // survive compression intact); `Image` for the same reason even
-            // though no image node is moved yet — see
-            // [`BreakRemap::for_each_along`], which names it a deliberate no-op.
-            MarkBatchKind::Point
-            | MarkBatchKind::Tick
-            | MarkBatchKind::Text
-            | MarkBatchKind::Image => Self::MoveGlyph,
-            // `mark_label` alone mixes a glyph with a connector to it.
-            MarkBatchKind::Label => Self::MoveGlyphAndConnector,
-            // Connected stroked geometry: every vertex is a data position.
-            // `Arc` is polar-only geometry (its batches come from `mark_arc`
-            // and polar bars). A chart combining `Polar` coordinates with any
-            // `BreakAxis` now refuses at the render funnel
-            // (`RenderError::BreakAxisIncompatibleCoord`, #230-8) before this
-            // placement model — or any other break geometry — is ever built,
-            // so this arm is unreachable for a real polar+break chart. (The
-            // prior claim here, that Cartesian breaks are "suppressed" under
-            // polar coords, was false: polar projection runs during batch
-            // build, then the break fold reverse-mapped the already-projected
-            // pixels through the Cartesian scale it replaced, destroying the
-            // geometry silently.) It keeps the vertex model — not a separate
-            // polar one — as the defensive default should `Arc` ever reach
-            // this match under a non-polar coord.
-            MarkBatchKind::Line | MarkBatchKind::Rule | MarkBatchKind::Arc => Self::MoveVertices,
-            // `mark_segment` alone mixes vertex-placed shafts with an attached
-            // fixed-size glyph (`arrow=True`'s head).
-            MarkBatchKind::Segment => Self::MoveVerticesAndGlyph,
-        }
-    }
-}
 
 /// A break resolved against the unbroken scale it replaces.
 ///
@@ -1034,13 +348,6 @@ enum ShaftTip {
     Hidden,
 }
 
-/// Which side of a boundary a half-plane clip keeps.
-#[derive(Clone, Copy)]
-enum Side {
-    AtLeast,
-    AtMost,
-}
-
 /// One [`BreakRemap::clip_extent_bands`] result: a pixel-space `(lo, hi)`
 /// band plus which of its two edges (`lo`, the smaller pixel value, and
 /// `hi`, the larger) a gap cut rather than the extent's own endpoint.
@@ -1050,6 +357,63 @@ struct ClippedBand {
     hi: f64,
     cut_lo: bool,
     cut_hi: bool,
+}
+
+/// What [`BreakRemap::split_polyline`] produced: the surviving pieces, and
+/// whether producing them required CUTTING the source.
+///
+/// `cut` is reported by the producer, set at the moment it departs from the
+/// source vertices — it drops one (a vertex inside a gap, an edge wholly
+/// inside one, a vertex with no data position at all) or substitutes an
+/// interpolated gap-edge crossing for one. It is deliberately NOT derivable
+/// from `pieces`: a cut can drop a boundary vertex and insert a crossing in
+/// the same edge, so one piece with the source's own vertex count is a shape
+/// BOTH an uncut walk and a genuine cut can produce (spec-review cycle-2
+/// finding: a `pieces.len() == 1 && piece.len() == points.len()` test read
+/// that shape as uncut and handed the in-gap vertex back to `remap_node`,
+/// which parks it at `BREAK_HIDDEN` — the #230-1 spike this whole mechanism
+/// exists to remove). Geometric comparison of the output against the input
+/// vertices is the same class of inference and fails the same way, since a
+/// crossing can land exactly on a dropped vertex's position.
+struct PolylineSplit {
+    pieces: Vec<Vec<(f64, f64)>>,
+    cut: bool,
+}
+
+/// Which of a clipped rect piece's four edges a break's gap produced — the
+/// crate's typed-`Copy`-struct idiom for "which edges" ([`GridRectEnds`],
+/// `marks/axis.rs`), in place of four positional `bool`s a call site could
+/// silently transpose.
+///
+/// Exactly two of the four are ever set for one split: a Y split can only
+/// cut `top`/`bottom` (the `left`/`right` edges are the rect's own `x` /
+/// `x + w`, untouched by a Y clip); an X split can only cut `left`/`right`.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct CutEdges {
+    top: bool,
+    right: bool,
+    bottom: bool,
+    left: bool,
+}
+
+impl CutEdges {
+    /// Whether ANY edge was cut — the common early-out for "this piece is
+    /// exactly the source rect, unclipped".
+    fn any(self) -> bool {
+        self.top || self.right || self.bottom || self.left
+    }
+
+    /// Whether each of the four corners — top-left, top-right, bottom-right,
+    /// bottom-left, in that order — touches a cut edge. A corner squares
+    /// whenever EITHER of its two adjacent edges is cut.
+    fn corners(self) -> [bool; 4] {
+        [
+            self.top || self.left,
+            self.top || self.right,
+            self.bottom || self.right,
+            self.bottom || self.left,
+        ]
+    }
 }
 
 impl<'a> BreakRemap<'a> {
@@ -2255,380 +1619,16 @@ fn for_each_path_cmd_coord(cmd: &mut PathCmd, is_y: bool, f: &mut impl FnMut(&mu
     }
 }
 
-/// The three vertices of an arrowhead triangle node, tip first — the shape
-/// `draw::arrowhead_path_with_opacity` emits (`MoveTo` tip, `LineTo` left,
-/// `LineTo` right, `Close`).
-///
-/// `None` for any other closed path, which routes the node to the per-vertex
-/// remap instead of the arrowhead rebuild.
-fn triangle_vertices(node: &SceneNode) -> Option<[(f64, f64); 3]> {
-    let SceneNode::Path { commands, .. } = node else {
-        return None;
-    };
-    let points = polygon_points(commands)?;
-    match points[..] {
-        [tip, left, right] => Some([tip, left, right]),
-        _ => None,
-    }
-}
-
-/// Overwrite an arrowhead triangle node's three vertices in place, keeping
-/// its style and command shape. The inverse of [`triangle_vertices`].
-fn set_triangle_vertices(node: &mut SceneNode, points: [(f64, f64); 3]) {
-    let SceneNode::Path { commands, .. } = node else {
-        return;
-    };
-    let mut vertices = points.iter();
-    for cmd in commands.iter_mut() {
-        if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = cmd {
-            if let Some(&(nx, ny)) = vertices.next() {
-                *x = nx;
-                *y = ny;
-            }
-        }
-    }
-}
-
-/// What [`BreakRemap::split_polyline`] produced: the surviving pieces, and
-/// whether producing them required CUTTING the source.
-///
-/// `cut` is reported by the producer, set at the moment it departs from the
-/// source vertices — it drops one (a vertex inside a gap, an edge wholly
-/// inside one, a vertex with no data position at all) or substitutes an
-/// interpolated gap-edge crossing for one. It is deliberately NOT derivable
-/// from `pieces`: a cut can drop a boundary vertex and insert a crossing in
-/// the same edge, so one piece with the source's own vertex count is a shape
-/// BOTH an uncut walk and a genuine cut can produce (spec-review cycle-2
-/// finding: a `pieces.len() == 1 && piece.len() == points.len()` test read
-/// that shape as uncut and handed the in-gap vertex back to `remap_node`,
-/// which parks it at `BREAK_HIDDEN` — the #230-1 spike this whole mechanism
-/// exists to remove). Geometric comparison of the output against the input
-/// vertices is the same class of inference and fails the same way, since a
-/// crossing can land exactly on a dropped vertex's position.
-struct PolylineSplit {
-    pieces: Vec<Vec<(f64, f64)>>,
-    cut: bool,
-}
-
-/// Push one `Line` node per piece of a split two-vertex stroke.
-///
-/// A two-vertex source is one edge, and one edge contributes exactly two points
-/// to each piece it reaches (its entry and its exit), so every piece here is a
-/// straight `Line` — the node kind the source had. Shared by the plain split and
-/// the segment-batch split so a shaft and a rule cannot be re-spelled
-/// differently.
-///
-/// That two-point invariant is ENFORCED rather than assumed: a `Line` is the one
-/// node kind with no way to spell an interior vertex, so a three-point piece
-/// arriving here could only be rendered by discarding its middle — a silently
-/// wrong stroke. The `debug_assert` costs nothing in release and turns a future
-/// caller handing in a longer polyline into a test failure instead.
-fn push_line_pieces(
-    pieces: &[Vec<(f64, f64)>],
-    style: &ferrum_scene::StrokeStyle,
-    out: &mut Vec<SceneNode>,
-) {
-    for piece in pieces {
-        debug_assert_eq!(
-            piece.len(),
-            2,
-            "a `Line` piece is one edge's entry and exit; got {piece:?}"
-        );
-        let (a, b) = (piece[0], piece[piece.len() - 1]);
-        out.push(SceneNode::Line {
-            x1: a.0,
-            y1: a.1,
-            x2: b.0,
-            y2: b.1,
-            style: style.clone(),
-        });
-    }
-}
-
-/// Spell `points` as a path: a leading `MoveTo`, then `LineTo` per vertex, then
-/// `Close` when the path is closed.
-///
-/// The inverse of [`polygon_points`]/[`straight_path_points`], and the one
-/// spelling both rewrites emit — the clipped area ring and the split step line.
-fn path_commands(points: &[(f64, f64)], closed: bool) -> Vec<PathCmd> {
-    let mut commands = Vec::with_capacity(points.len() + usize::from(closed));
-    for (i, &(x, y)) in points.iter().enumerate() {
-        commands.push(if i == 0 {
-            PathCmd::MoveTo { x, y }
-        } else {
-            PathCmd::LineTo { x, y }
-        });
-    }
-    if closed {
-        commands.push(PathCmd::Close);
-    }
-    commands
-}
-
-/// Which of a clipped rect piece's four edges a break's gap produced — the
-/// crate's typed-`Copy`-struct idiom for "which edges" ([`GridRectEnds`],
-/// `marks/axis.rs`), in place of four positional `bool`s a call site could
-/// silently transpose.
-///
-/// Exactly two of the four are ever set for one split: a Y split can only
-/// cut `top`/`bottom` (the `left`/`right` edges are the rect's own `x` /
-/// `x + w`, untouched by a Y clip); an X split can only cut `left`/`right`.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-struct CutEdges {
-    top: bool,
-    right: bool,
-    bottom: bool,
-    left: bool,
-}
-
-impl CutEdges {
-    /// Whether ANY edge was cut — the common early-out for "this piece is
-    /// exactly the source rect, unclipped".
-    fn any(self) -> bool {
-        self.top || self.right || self.bottom || self.left
-    }
-
-    /// Whether each of the four corners — top-left, top-right, bottom-right,
-    /// bottom-left, in that order — touches a cut edge. A corner squares
-    /// whenever EITHER of its two adjacent edges is cut.
-    fn corners(self) -> [bool; 4] {
-        [
-            self.top || self.left,
-            self.top || self.right,
-            self.bottom || self.right,
-            self.bottom || self.left,
-        ]
-    }
-}
-
-/// Build one clipped rect piece's scene node — a `Path` with arcs on only
-/// the UNCUT corners when a cut edge would otherwise round a corner the gap
-/// itself produced, a plain `Rect` in every other case (#230-2).
-///
-/// A piece stays a `Rect` rather than converting to a `Path` in THREE cases,
-/// each because the conversion would either add no information or would
-/// actively cost the piece something only `Rect`-ness carries (SVG
-/// centre-anchored rotation, WASM hit-testing, R-tree membership, batch
-/// packing eligibility):
-///
-/// - **No cut edge, or no radius.** The common case — an unbroken chart, or
-///   a break whose gaps miss the piece entirely — and byte-identical to what
-///   this code emitted before #230-2.
-/// - **Every surviving corner is squared** (quality-review finding, cycle
-///   3): a piece cut on both edges of one axis (the middle slice of a
-///   two-gap break) has no corner left to round, so its outline is already a
-///   plain four-cornered box. It emits `Rect { corner_radius: 0.0 }` rather
-///   than a `Path` that would spell the identical geometry while forfeiting
-///   `Rect`-only behavior for no visual gain.
-/// - **`style.angle != 0.0`** (quality-review finding, cycle 3):
-///   `SceneNode::Rect` rotates about its own centre
-///   (`svg_walk.rs::emit_node`'s `Rect` arm), while `SceneNode::Path` rotates
-///   about its first `MoveTo` — a converted piece would silently jump to a
-///   different rotation anchor than its unbroken rounded sibling (hundreds
-///   of pixels, measured), and lose the rotation entirely in WASM, which
-///   never reads `style.angle` for a `Path`. A rotated piece keeps the plain
-///   `Rect`, uncut radius and all, rather than corrupt its anchor: the
-///   un-squared cut edge in that specific rotated+rounded+broken three-way
-///   combination is a documented residual (`ferrum-spec.md`'s #230-2 dated
-///   note), not a silent regression.
-fn rounded_rect_piece(
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    style: FillStroke,
-    corner_radius: f64,
-    cut: CutEdges,
-) -> SceneNode {
-    if corner_radius <= 0.0 || !cut.any() || style.angle != 0.0 {
-        return SceneNode::Rect { x, y, w, h, style, corner_radius };
-    }
-    if cut.corners().iter().all(|&squared| squared) {
-        return SceneNode::Rect { x, y, w, h, style, corner_radius: 0.0 };
-    }
-    SceneNode::Path {
-        commands: square_cut_rounded_rect_path(x, y, w, h, corner_radius, cut),
-        style,
-        closed: true,
-    }
-}
-
-/// A rounded rect's outline, clockwise from the top edge, with the radius
-/// zeroed on every corner `cut` touches — a corner squares whenever EITHER
-/// of its two adjacent edges is cut. Never called with all four corners
-/// squared; [`rounded_rect_piece`] takes the plain-`Rect` branch for that.
-///
-/// `radius` is clamped per axis, matching SVG `<rect rx ry>` semantics
-/// exactly: `rx` clamps to `w / 2` and `ry` clamps to `h / 2`, INDEPENDENTLY
-/// of each other. An SVG `<rect>` gets that clamp for free from the
-/// rendering rules, but a hand-built arc path does not, so a piece shorter
-/// than the requested radius on only one axis (a thin sliver left after a
-/// gap eats most of a bar) needs it spelled out here to match what the
-/// plain-`Rect` branch would have rendered for the same dimensions — a
-/// single shared scalar clamped by `min(w/2, h/2)` would round the uncut
-/// corners of a narrow-but-tall piece more tightly than an unsplit rect of
-/// the same size does, since `rx` and `ry` never actually collapse to one
-/// number unless `w == h`.
-fn square_cut_rounded_rect_path(
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    radius: f64,
-    cut: CutEdges,
-) -> Vec<PathCmd> {
-    let radius = radius.max(0.0);
-    let rx = radius.min(w / 2.0);
-    let ry = radius.min(h / 2.0);
-    let [squared_tl, squared_tr, squared_br, squared_bl] = cut.corners();
-    let corner = |squared: bool| -> (f64, f64) { if squared { (0.0, 0.0) } else { (rx, ry) } };
-    let (rx_tl, ry_tl) = corner(squared_tl);
-    let (rx_tr, ry_tr) = corner(squared_tr);
-    let (rx_br, ry_br) = corner(squared_br);
-    let (rx_bl, ry_bl) = corner(squared_bl);
-
-    let mut cmds = Vec::with_capacity(9);
-    cmds.push(PathCmd::MoveTo { x: x + rx_tl, y });
-    cmds.push(PathCmd::LineTo { x: x + w - rx_tr, y });
-    if rx_tr > 0.0 || ry_tr > 0.0 {
-        cmds.push(PathCmd::ArcTo {
-            rx: rx_tr,
-            ry: ry_tr,
-            rotation: 0.0,
-            large_arc: false,
-            sweep: true,
-            x: x + w,
-            y: y + ry_tr,
-        });
-    }
-    cmds.push(PathCmd::LineTo { x: x + w, y: y + h - ry_br });
-    if rx_br > 0.0 || ry_br > 0.0 {
-        cmds.push(PathCmd::ArcTo {
-            rx: rx_br,
-            ry: ry_br,
-            rotation: 0.0,
-            large_arc: false,
-            sweep: true,
-            x: x + w - rx_br,
-            y: y + h,
-        });
-    }
-    cmds.push(PathCmd::LineTo { x: x + rx_bl, y: y + h });
-    if rx_bl > 0.0 || ry_bl > 0.0 {
-        cmds.push(PathCmd::ArcTo {
-            rx: rx_bl,
-            ry: ry_bl,
-            rotation: 0.0,
-            large_arc: false,
-            sweep: true,
-            x,
-            y: y + h - ry_bl,
-        });
-    }
-    cmds.push(PathCmd::LineTo { x, y: y + ry_tl });
-    if rx_tl > 0.0 || ry_tl > 0.0 {
-        cmds.push(PathCmd::ArcTo {
-            rx: rx_tl,
-            ry: ry_tl,
-            rotation: 0.0,
-            large_arc: false,
-            sweep: true,
-            x: x + rx_tl,
-            y,
-        });
-    }
-    cmds.push(PathCmd::Close);
-    cmds
-}
-
-/// The vertices of an OPEN path whose every command draws a straight line —
-/// `LineTo` plus the `HLineTo`/`VLineTo` shorthand `mark_line`'s three `step*`
-/// interpolations are written with.
-///
-/// `None` for anything a break cannot cut faithfully: a curve command
-/// (`QuadTo`/`CubicTo`/`ArcTo`), a second subpath, or a `Close` (a closed ring
-/// belongs to [`polygon_points`] and the polygon clip). That is the documented
-/// split-vs-fallback boundary of [`BreakRemap::split_nodes`].
-fn straight_path_points(commands: &[PathCmd]) -> Option<Vec<(f64, f64)>> {
-    let mut points: Vec<(f64, f64)> = Vec::with_capacity(commands.len());
-    for (i, cmd) in commands.iter().enumerate() {
-        let (x, y) = match (i, cmd) {
-            (0, PathCmd::MoveTo { x, y }) => (*x, *y),
-            (_, PathCmd::LineTo { x, y }) => (*x, *y),
-            // The shorthand carries only the coordinate that moves; the other
-            // one is the current point's, which is the previous vertex.
-            (_, PathCmd::HLineTo { x }) => (*x, points.last()?.1),
-            (_, PathCmd::VLineTo { y }) => (points.last()?.0, *y),
-            _ => return None,
-        };
-        points.push((x, y));
-    }
-    (points.len() >= 2).then_some(points)
-}
-
-/// The vertices of a path built only from `MoveTo`/`LineTo` (plus an optional
-/// trailing `Close`) — the shape every area fill emits under the linear and
-/// step interpolations.
-///
-/// `None` for anything else (curve commands, multiple subpaths), which routes
-/// the node to the per-vertex remap instead of the polygon clip.
-fn polygon_points(commands: &[PathCmd]) -> Option<Vec<(f64, f64)>> {
-    let mut points = Vec::with_capacity(commands.len());
-    for (i, cmd) in commands.iter().enumerate() {
-        match cmd {
-            PathCmd::MoveTo { x, y } if i == 0 => points.push((*x, *y)),
-            PathCmd::LineTo { x, y } => points.push((*x, *y)),
-            PathCmd::Close if i + 1 == commands.len() => {}
-            _ => return None,
-        }
-    }
-    (points.len() >= 3).then_some(points)
-}
-
-/// Clip a polygon of `(along, across)` points to `lo <= along <= hi`.
-///
-/// Sutherland–Hodgman against the two boundaries; `across` is interpolated
-/// linearly at each crossing. Returns fewer than three points when nothing
-/// survives.
-fn clip_to_band(points: &[(f64, f64)], lo: f64, hi: f64) -> Vec<(f64, f64)> {
-    let lower = clip_half_plane(points, lo, Side::AtLeast);
-    if lower.len() < 3 {
-        return Vec::new();
-    }
-    clip_half_plane(&lower, hi, Side::AtMost)
-}
-
-fn clip_half_plane(points: &[(f64, f64)], bound: f64, side: Side) -> Vec<(f64, f64)> {
-    let inside = |along: f64| match side {
-        Side::AtLeast => along >= bound,
-        Side::AtMost => along <= bound,
-    };
-    let mut out: Vec<(f64, f64)> = Vec::with_capacity(points.len() + 2);
-    for (i, &cur) in points.iter().enumerate() {
-        let prev = points[(i + points.len() - 1) % points.len()];
-        let (cur_in, prev_in) = (inside(cur.0), inside(prev.0));
-        if cur_in != prev_in {
-            let denom = cur.0 - prev.0;
-            let t = if denom.abs() < f64::EPSILON {
-                0.0
-            } else {
-                (bound - prev.0) / denom
-            };
-            out.push((bound, prev.1 + t * (cur.1 - prev.1)));
-        }
-        if cur_in {
-            out.push(cur);
-        }
-    }
-    out
-}
-
 // Test coverage lives in `tests.rs` (precedent: `render/scale_resolve/tests.rs`,
 // `projection/mod.rs`, `transform/stats/mod.rs`, and this wave's own
 // `annotation/mod.rs`) — the module grew too large for an inline
 // `mod tests { ... }` block: at 2618 lines the inline test body (`mod tests`
 // starting at line 2619) reached 2622 lines, exceeding the source module
 // above it and crossing the promotion threshold in this crate's Rust
-// test-module convention.
+// test-module convention. The source has since split four ways (see the
+// module header), but the tests stay in one file: they exercise the whole
+// break through its public surface rather than one job at a time, and
+// `use super::*` reaches every re-export, so partitioning them by the new
+// file names would cut across what each test actually covers.
 #[cfg(test)]
 mod tests;

@@ -12,8 +12,10 @@
 //! motion: every test below is unchanged from its inline form, still
 //! exercising the real functions in `super::*`.
 
+use ferrum_scene::MarkBatchKind;
+
 use super::*;
-use crate::layout::ThemeInputs;
+use crate::layout::{Rect, ThemeInputs};
 
 fn plot() -> Rect {
     Rect { x: 50.0, y: 50.0, w: 300.0, h: 300.0 }

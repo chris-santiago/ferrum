@@ -198,22 +198,41 @@ def test_break_sentinel_matches_the_rust_constant_it_mirrors():
     The Python value is only an allow-list-free explanation of an off-canvas
     coordinate as long as it is the value the renderer actually parks marks at.
 
-    The constant lives in ``render/break_axis/mod.rs`` (batch H T3 moved the
-    scene-remapping code next to the piecewise scale it remaps through, from
-    ``render/scene_build.rs``; the wave-2 close promoted that single file to a
-    directory module when its ported tests outgrew it).
+    The constant lives in ``render/break_axis/placement.rs`` (batch H T3 moved
+    the scene-remapping code next to the piecewise scale it remaps through,
+    from ``render/scene_build.rs``; the wave-2 close promoted that single file
+    to a directory module when its ported tests outgrew it; wave 6A T6 split
+    the source four ways and the sentinel landed beside the
+    ``BreakPlacement`` dispatch that decides which geometry is parked there).
+
+    The search is over the whole directory, but the assertion still names one
+    file, and both halves of that are deliberate. Reading every file is what
+    lets this pin catch a *second* declaration or a deleted one, which a grep
+    of a single named file cannot see. Naming the expected file is what makes
+    a later re-home of the constant fail here — on purpose. That failure is
+    the notification, not a false alarm: this test is the Python end of a
+    cross-language contract, so when the Rust end moves, someone has to
+    confirm the value still matches and update the name below. The failure
+    message prints the locations actually found, so the fix is one line.
     """
-    rust = (
+    break_axis = (
         Path(__file__).resolve().parent.parent
         / "crates"
         / "ferrum-core"
         / "src"
         / "render"
         / "break_axis"
-        / "mod.rs"
-    ).read_text()
+    )
+    declarations = [
+        path.name
+        for path in sorted(break_axis.glob("*.rs"))
+        if "pub const BREAK_HIDDEN: f64 = -99999.0;" in path.read_text()
+    ]
     assert corpus.BREAK_HIDDEN == -99999.0
-    assert "pub const BREAK_HIDDEN: f64 = -99999.0;" in rust
+    assert declarations == ["placement.rs"], (
+        f"exactly one file in {break_axis.name}/ must declare the sentinel at "
+        f"the value Python mirrors; got {declarations}"
+    )
 
 
 def test_off_viewport_respects_the_break_sentinel(tmp_path):
