@@ -107,8 +107,19 @@ _ROLE_CONTRACT = [
     # Color/Fill's role param is the class's own (derived) _honored_kwargs,
     # not the bare APPEARANCE_COLOR/APPEARANCE_SCHEME constant -- neither
     # constant carries "condition" any more (2026-09-11, batch-H close cycle
-    # 3), but both channels genuinely honor it via the derivation, and
-    # expected_keys below (pinning the pre-existing contract) still does.
+    # 3), but both channels genuinely honor it via the derivation (accepted
+    # at construction without a warn), and "condition" survives in
+    # _REPRESENTATIVE_KWARGS so this row still constructs Color/Fill WITH
+    # condition= -- not just channels that were never given it. Even so,
+    # expected_keys below omits "condition": the per-channel serializer
+    # (`to_encoding_spec_dict`, via `_SPEC_DICT_ORDER`) no longer reads that
+    # key at all (#237, 2026-09-20). Nothing strips `condition` from the
+    # channel's own `_kwargs` here -- this row never goes through
+    # `Chart.encode()`'s separate strip-and-rebuild step -- the serializer
+    # itself just stops looking. Every reachable conditional spelling
+    # (`encode()`'s two forms, `Layer(encoding=...)`'s two forms) routes the
+    # real value through `ChartSpec.conditionals` instead, via that
+    # different, encode()-only mechanism.
     (
         fm.Color,
         fm.Color._honored_kwargs,
@@ -118,7 +129,6 @@ _ROLE_CONTRACT = [
             "scale",
             "title",
             "legend",
-            "condition",
             "sort",
             "scheme",
         },
@@ -132,7 +142,6 @@ _ROLE_CONTRACT = [
             "scale",
             "title",
             "legend",
-            "condition",
             "scheme",
         },
     ),
@@ -157,7 +166,9 @@ _ROLE_CONTRACT = [
         },
     ),
     # StrokeDash/Size likewise use their own derived _honored_kwargs as the
-    # kwarg filter, for the same reason.
+    # kwarg filter, for the same reason -- both are also constructed WITH
+    # condition= (it survives the role filter the same way it does for
+    # Color/Fill above) and both still omit it from expected_keys (#237).
     (
         fm.StrokeDash,
         fm.StrokeDash._honored_kwargs,
@@ -167,7 +178,6 @@ _ROLE_CONTRACT = [
             "scale",
             "title",
             "legend",
-            "condition",
             "sort",
         },
     ),
@@ -180,7 +190,6 @@ _ROLE_CONTRACT = [
             "scale",
             "title",
             "legend",
-            "condition",
         },
     ),
     (fm.FillOpacity, APPEARANCE_FULL, {"field", "type_", "scale", "title", "legend"}),
@@ -212,14 +221,31 @@ def test_spec_dict_emits_pinned_keys_per_role(channel_cls, role, expected_keys):
 
     Pins the serialization contract so iterating _honored_kwargs cannot drift
     from what the old hard-coded serializer emitted. ``role`` is the kwarg
-    filter for this row: for a channel whose ``expected_keys`` includes
-    ``condition``, ``role`` is that class's own (derived) ``_honored_kwargs``
-    rather than a bare imported constant -- ``condition`` is no longer a
-    static role-set member (2026-09-11, batch-H close cycle 3):
-    ``ChannelBase.__init_subclass__`` derives it per channel from the
+    filter for this row: for a condition-honoring channel (Color, Fill,
+    StrokeDash, Size), ``role`` is that class's own (derived)
+    ``_honored_kwargs`` rather than a bare imported constant -- ``condition``
+    is no longer a static role-set member (2026-09-11, batch-H close cycle
+    3): ``ChannelBase.__init_subclass__`` derives it per channel from the
     conditional vocabulary, so a shared role constant (``APPEARANCE_SORT``,
     ``APPEARANCE_FULL``, ...) can no longer describe a condition-honoring
     channel's real honored set on its own.
+
+    Because ``role`` includes ``"condition"`` for those four rows, ``kw``
+    (filtered from ``_REPRESENTATIVE_KWARGS`` below) does too, so ``ch`` is
+    actually constructed with ``condition=...`` for Color/Fill/StrokeDash/
+    Size -- this asserts that a channel genuinely GIVEN ``condition=`` still
+    omits it from the wire, not merely that a channel never given it does
+    (which would be true of every channel, condition-honoring or not, and
+    would not pin anything). None of the rows' ``expected_keys`` includes
+    ``"condition"``: `to_encoding_spec_dict` (`_SPEC_DICT_ORDER`) simply
+    never reads that key any more (#237, 2026-09-20) -- ``ch._kwargs`` still
+    carries it, nothing strips it, the serializer just does not look. This
+    is a DIFFERENT code path from ``Chart.encode()``'s separate
+    strip-and-rebuild step (which routes the real conditional through
+    ``ChartSpec.conditionals`` instead) -- this test exercises
+    ``to_encoding_spec_dict()`` directly, the same way the one remaining
+    unstripped writer (`Chart.layer(_Layer(...))`'s passthrough, safe by
+    convention only, not by type) would reach it.
     """
     reset_warnings()
     kw = {k: v for k, v in _REPRESENTATIVE_KWARGS.items() if k in role}

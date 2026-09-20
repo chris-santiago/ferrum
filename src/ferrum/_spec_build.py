@@ -599,13 +599,17 @@ class SpecBuildMixin:
                     # This allowlist is still hand-curated against Rust's
                     # ``EncodingSpec`` (`crates/ferrum-core/src/spec/encoding.rs`),
                     # not derived from it, so it can drift from what the struct
-                    # actually accepts -- exactly what quality review caught here
-                    # (batch-F task 8 cycle 2): ``condition`` (a public honored
-                    # kwarg on every appearance channel, `encoding/_honored.py`,
-                    # `_emit_condition`) was missing entirely, and ``aggregate``
-                    # is dead weight (no handler ever emits it into `d`, so it
-                    # can never match `opt_key in d`; kept only because removing
-                    # it is a separate cleanup from this fix).
+                    # actually accepts. ``aggregate`` is dead weight here (no
+                    # handler ever emits it into `d`, so it can never match
+                    # `opt_key in d`); kept because removing it is a separate
+                    # cleanup from this allowlist's job. ``condition`` was
+                    # removed (#237, 2026-09-20): `d` (`ch.to_encoding_spec_dict()`)
+                    # never carries a ``"condition"`` key any more -- the
+                    # per-channel condition path has exactly one mechanism now,
+                    # ``ChartSpec.conditionals``, populated upstream by
+                    # `_strip_layer_conditionals` before `d` is built -- so
+                    # forwarding it here would have been dead code even before
+                    # the key existed to forward.
                     for opt_key in (
                         "title",
                         "aggregate",
@@ -617,7 +621,6 @@ class SpecBuildMixin:
                         "sort",
                         "stack",
                         "impute",
-                        "condition",
                     ):
                         if opt_key in d:
                             enc_json_dict[opt_key] = d[opt_key]

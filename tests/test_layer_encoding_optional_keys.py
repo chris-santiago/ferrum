@@ -19,11 +19,12 @@ constructor. Two keys had drifted between the two paths:
   format="percent")`` -- ``_emit_format`` derives ``format_type="number"``
   from the preset) raise ``unknown field 'format_type'``.
 - ``condition``: a public honored kwarg on every conditional-honoring
-  appearance channel (``ferrum.encoding._channel_policy.channel_honors_condition``,
-  ``_emit_condition`` in ``encoding/base.py``). The chart-level path forwards
-  it; the layer path's allowlist simply never listed it, so it was silently
-  dropped -- the same "wire key vanishes" bug class F-L09-08 fixed for
-  ``title=""``, just a different key.
+  appearance channel (``ferrum.encoding._channel_policy.channel_honors_condition``).
+  At the time of this fix, the chart-level path forwarded it (via the
+  now-deleted ``_emit_condition`` in ``encoding/base.py``); the layer path's
+  allowlist simply never listed it, so it was silently dropped -- the same
+  "wire key vanishes" bug class F-L09-08 fixed for ``title=""``, just a
+  different key.
 
 .. note::
    ``test_layer_condition_reaches_the_wire`` originally pinned ``condition=``
@@ -34,7 +35,12 @@ constructor. Two keys had drifted between the two paths:
    the same real pipeline ``encode(<channel>=cond)`` already used -- so the
    test below now pins the translated shape instead of the inert one. A
    non-``ConditionalSpec`` ``condition=`` value (e.g. a raw dict) raises
-   ``TypeError`` at encode time, naming the two working forms.
+   ``TypeError`` at encode time, naming the two working forms. ``#237``
+   (2026-09-20) later deleted ``_emit_condition`` and the now-dead
+   ``"condition"`` allowlist entries entirely -- no channel serializes a
+   per-channel ``condition`` key any more, on either path -- so this test's
+   "not in color_enc" assertion is no longer contingent on the allowlist's
+   omission; it holds unconditionally.
 
 Both tests use ``resolve={"y": "independent"}`` so the assertion exercises
 the real public ``.to_svg()``/``.to_json()`` path: default (shared-y)

@@ -244,14 +244,6 @@ def _emit_format_type(value: Any, out: dict) -> None:
         out["format_type"] = value
 
 
-def _emit_condition(value: Any, out: dict) -> None:
-    # Serialize ConditionalSpec or raw dict as opaque JSON for Rust.
-    if hasattr(value, "to_spec_dict"):
-        out["condition"] = value.to_spec_dict()
-    elif isinstance(value, dict):
-        out["condition"] = value
-
-
 def _emit_passthrough(key: str):
     """Return a handler that copies a non-None kwarg verbatim under *key*."""
 
@@ -265,6 +257,21 @@ def _emit_passthrough(key: str):
 # Canonical emission order, preserved from the previous hard-coded serializer so
 # the resulting dict layout is byte-stable.  ``to_encoding_spec_dict`` walks this
 # list and skips keys the channel does not honor.
+#
+# ``condition`` is deliberately absent (#237, 2026-09-20): a per-channel
+# ``condition=`` kwarg is still honored -- ``ChannelBase.__init_subclass__``
+# derives the honored-kwarg bit from the conditional vocabulary, so
+# construction still accepts it without warning -- but it is never emitted
+# here. Every reachable spelling of a conditional (``encode(channel=cond)``,
+# ``encode(channel=Channel(field, condition=cond))``, and their ``Layer(...)``
+# equivalents) is stripped from the channel object before serialization and
+# routed instead through the chart-level ``ChartSpec.conditionals`` list --
+# see ``chart.py``'s ``_append_conditional``/``_strip_layer_conditionals``.
+# The per-channel wire key this used to feed (``EncodingSpec.condition`` in
+# Rust) had no reader; keeping two mechanisms for one feature was the
+# defect. The Rust field itself stays, tolerated and consumer-less, because
+# ``EncodingSpec`` denies unknown fields and dropping the field would turn a
+# spec saved before this fix into a parse error.
 _SPEC_DICT_ORDER = (
     "type",
     "scale",
@@ -278,7 +285,6 @@ _SPEC_DICT_ORDER = (
     "format",
     "format_type",
     "formatType",
-    "condition",
 )
 
 _SPEC_DICT_HANDLERS = {
@@ -294,7 +300,6 @@ _SPEC_DICT_HANDLERS = {
     "format": _emit_format,
     "format_type": _emit_format_type,
     "formatType": _emit_format_type,
-    "condition": _emit_condition,
 }
 
 

@@ -30,6 +30,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._coerce import normalize_for_rust, to_arrow_table
 from ferrum._core import ChartSpec
 from ferrum.axis import Axis
 from ferrum.configure import AxisConfig
@@ -389,6 +390,37 @@ def test_top_level_chartspec_typo_key_is_rejected() -> None:
     j["marrk"] = "point"  # typo of "mark"; the real "mark" stays "point"
     with pytest.raises(ValueError, match="unknown field"):
         ChartSpec.from_json(json.dumps(j))
+
+
+def test_per_channel_condition_key_still_parses_and_renders() -> None:
+    """A per-channel ``condition`` key -- the wire shape ferrum emitted before
+    ``#237`` deleted the Python-side ``_emit_condition`` writer -- still
+    parses under ``deny_unknown_fields`` and still renders, unlike every
+    typo'd key above.
+
+    ``EncodingSpec.condition`` (``spec/encoding.rs``) is deliberately
+    retained: tolerated, and consumer-less. Dropping it too would turn a
+    spec persisted by a pre-``#237`` ferrum into an ``unknown field`` parse
+    failure, since ``EncodingSpec`` denies unknown fields and
+    ``ChartSpec.from_json`` is the live render path every ``Chart.to_svg()``
+    call goes through (``_render.py:558``). This is the positive control for
+    the ``deny_unknown_fields`` rejections above it: the per-channel
+    ``condition`` key was retired as a *writer* (nothing in ``src/ferrum/``
+    emits it any more -- the real mechanism is ``ChartSpec.conditionals``),
+    not as an accepted wire field.
+    """
+    from ferrum._core import render_svg
+
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="a", y="b")
+    j = json.loads(chart.to_spec().to_json())
+    j["encoding"]["x"]["condition"] = {}  # the retired writer's old wire shape
+    spec = ChartSpec.from_json(json.dumps(j))  # must not raise "unknown field"
+    assert spec.x.condition == {}  # the tolerated field round-trips, unread
+
+    data = normalize_for_rust(to_arrow_table(chart._data))
+    svg = render_svg(spec, data, viewport=(400.0, 300.0), theme={}, chart_config=None)
+    assert svg.startswith("<svg")
 
 
 # ===========================================================================

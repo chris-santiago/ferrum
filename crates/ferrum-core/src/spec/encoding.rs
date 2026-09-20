@@ -862,6 +862,20 @@ pub struct EncodingSpec {
     pub sort: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    // Retained, tolerated, and consumer-less (#237, 2026-09-20): the Python
+    // per-channel `condition=` serializer (`_emit_condition`) was deleted --
+    // it had no reader here or anywhere else in the crate (`grep -rn
+    // "\.condition" crates/ferrum-core/src crates/ferrum-wasm/src` outside
+    // this file matches only unrelated `.conditionals` hits, the real,
+    // chart-level mechanism `ChartSpec.conditionals` uses). Dropping this
+    // field too would not make an old saved spec's `"condition"` key
+    // *ignored* -- `EncodingSpec` carries `#[serde(deny_unknown_fields)]`, so
+    // `ChartSpec::from_json` (the live render path, `_render.py`) would
+    // reject any spec persisted before this fix with "unknown field
+    // `condition`". Kept solely to preserve that round-trip; the field is
+    // still accepted and read back verbatim by the PyO3 constructor/getter
+    // below and pinned by `tests/test_core_stub_parity.py`, but nothing in
+    // the render path consults it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

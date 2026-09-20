@@ -577,12 +577,13 @@ def _strip_layer_conditionals(
     spellings and ``Chart.conditional()`` -- but unlike those three, a
     layer's ``encoding`` dict never passes through ``Chart.encode()``, so a
     channel-carried ``condition=`` used to serialize straight into the dead
-    per-layer ``EncodingSpec.condition`` blob (``_emit_condition``; nothing
-    on the Rust side reads it -- ``crates/ferrum-core/src/spec/encoding.rs``
-    stores it as an opaque ``serde_json::Value``) instead of the chart's
-    real ``conditionals`` pipeline. Accepted, serialized, and inert -- the
-    exact silent-drop shape this batch's ``encode()`` work removed for every
-    other entry point, one code path over.
+    per-layer ``EncodingSpec.condition`` blob (formerly via the Python-side
+    ``_emit_condition``, deleted by ``#237``; nothing on the Rust side reads
+    the field -- ``crates/ferrum-core/src/spec/encoding.rs`` stores it as an
+    opaque, tolerated ``serde_json::Value`` for wire-compat only) instead of
+    the chart's real ``conditionals`` pipeline. Accepted, serialized, and
+    inert -- the exact silent-drop shape this batch's ``encode()`` work
+    removed for every other entry point, one code path over.
 
     Mirrors **both** of ``encode()``'s conditional branches, not just the
     channel-carried one (2026-09-11, batch-H close cycle 4, S2: the bare
@@ -1741,9 +1742,11 @@ class Chart(
                     # append to _conditionals, auto-register the selection),
                     # except the base field encoding also has to be preserved.
                     # Rebuild the channel without `condition` in its kwargs so
-                    # it no longer round-trips through _emit_condition's inert
-                    # nested EncodingSpec.condition blob -- the real
-                    # conditional now lives only in _conditionals. The wire
+                    # it never reaches to_encoding_spec_dict -- the per-channel
+                    # EncodingSpec.condition blob it would have round-tripped
+                    # through had exactly one writer (_emit_condition, deleted
+                    # by #237) and no reader; the real conditional lives only
+                    # in _conditionals. The wire
                     # channel resolves through the SAME vocabulary the
                     # encode(<channel>=cond) form above uses, so the two
                     # spellings cannot disagree about which channels accept a
