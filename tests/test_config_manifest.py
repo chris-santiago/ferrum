@@ -1099,3 +1099,222 @@ def test_wire_gate_refuses_reversed_break_axis_gap():
         "chart config: structural[0] (break_axis).gaps[0]: start (200.0) must be less than end (100.0)"
         in msg
     )
+
+
+def test_wire_gate_refuses_out_of_vocabulary_break_axis_token():
+    """`#229`(2)'s wire half, sibling to the two `gaps` pins above.
+
+    `BreakAxis.axis` is typed in Rust (`spec::axis::AlignAxis`), so a third
+    token is malformed input. It is refused at the same array-item VALUE gate
+    the `gaps` checks above come from, in ferrum's own voice and naming the
+    item and its index — not left to serde's downstream ``chart_config:
+    unknown variant `z` `` , which names neither and carries a different
+    prefix. Pre-`#229`(2) this deserialized as a plain string, failed every
+    downstream ``axis == "y"`` test and rendered as an **x** break with no
+    diagnostic.
+
+    This asserts the message a caller actually receives, through
+    ``chart.to_svg()`` — i.e. through ``pyo3_serde``/``chart_config_from_dict``
+    — because it is the string ``ferrum-spec.md`` and the changelog quote
+    verbatim. The Rust-side unit test
+    (``chart_config.rs::structural_break_axis_refuses_an_out_of_vocabulary_axis_token``)
+    covers the serde path, which remains for a consumer reaching
+    ``Deserialize`` without this gate in front of it (a saved spec read
+    straight through serde, say). The gate owns the VOCABULARY for every key
+    spelling ``json.dumps`` can produce — see
+    ``test_wire_gate_refuses_every_json_dumps_key_spelling_out_of_vocabulary``,
+    which derives its cases from ``json.dumps`` rather than listing them — and
+    serde keeps the SHAPE errors, pinned by
+    ``test_wire_gate_leaves_break_axis_axis_shape_errors_to_serde``.
+    """
+    chart = _chart_with_raw_config_layer(
+        {"structural": [{"type": "break_axis", "axis": "z", "gaps": [[10.0, 20.0]]}]}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    assert (
+        str(exc_info.value) == "chart config: structural[0] (break_axis).axis: axis must be one of "
+        "['x', 'y']; got 'z'"
+    )
+
+
+def test_wire_gate_break_axis_token_refusal_is_case_sensitive():
+    """The vocabulary is the lowercase wire token, not a case-insensitive
+    spelling: `"Y"` is as malformed as `"z"`, and the refusal echoes what was
+    received rather than silently lowercasing it. Discriminating against a
+    fix that "helpfully" normalizes case — the Python constructor does not,
+    so the wire gate must not either."""
+    chart = _chart_with_raw_config_layer(
+        {"structural": [{"type": "break_axis", "axis": "Y", "gaps": [[10.0, 20.0]]}]}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    assert "got 'Y'" in str(exc_info.value)
+
+
+def test_wire_gate_accepts_both_break_axis_tokens():
+    """The negative control the two refusals above need: the gate accepts
+    exactly the vocabulary it names, so neither pin is passing because the
+    gate refuses everything."""
+    for axis in ("x", "y"):
+        chart = _chart_with_raw_config_layer(
+            {"structural": [{"type": "break_axis", "axis": axis, "gaps": [[1.5, 2.5]]}]}
+        )
+        assert chart.to_svg().startswith("<svg"), axis
+
+
+def test_wire_gate_refuses_out_of_vocabulary_break_axis_token_in_map_spelling():
+    """A unit variant has TWO wire spellings and the gate must cover both.
+
+    Besides ``"axis": "y"``, serde's derived impl accepts the externally-tagged
+    single-key map ``"axis": {"y": null}`` — which is why its own type error
+    says "expected string **or** map". The first cut of this gate checked only
+    the string and let the map form through on its non-string carve-out, so
+    ``{"z": null}`` still reached serde and got the opaque
+    ``chart_config: unknown variant `z` ... at line 1 column N``: one user
+    error, two differently-worded refusals. Both spellings now get the same
+    sentence. This pin covers the ``str``-keyed map; the *completeness* claim
+    over every key type ``json.dumps`` coerces is
+    ``test_wire_gate_refuses_every_json_dumps_key_spelling_out_of_vocabulary``
+    below, which derives its cases from the transform instead of enumerating
+    shapes.
+    """
+    chart = _chart_with_raw_config_layer(
+        {"structural": [{"type": "break_axis", "axis": {"z": None}, "gaps": [[10.0, 20.0]]}]}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    assert (
+        str(exc_info.value) == "chart config: structural[0] (break_axis).axis: axis must be one of "
+        "['x', 'y']; got 'z'"
+    )
+
+
+def test_wire_gate_map_spelling_of_a_valid_break_axis_token_still_renders():
+    """The control that makes the pin above a vocabulary check rather than a
+    ban on the map spelling: ``{"y": null}`` is a *valid* input serde accepts,
+    and it renders byte-identically to the string spelling. A gate that
+    refused the map form outright would pass the pin above and break this."""
+
+    def svg_for(axis_value):
+        chart = _chart_with_raw_config_layer(
+            {"structural": [{"type": "break_axis", "axis": axis_value, "gaps": [[1.5, 2.5]]}]}
+        )
+        return chart.to_svg()
+
+    assert svg_for({"y": None}) == svg_for("y")
+    assert svg_for({"x": None}) == svg_for("x")
+
+
+def test_wire_gate_refuses_every_json_dumps_key_spelling_out_of_vocabulary():
+    """The completeness pin, derived from the transform rather than from shapes.
+
+    The gate reads the caller's **pre-JSON Python object**, while the vocabulary
+    it guards is defined over what ``json.dumps`` *emits*. So the question "does
+    the gate see every token a caller can present" is a question about
+    ``json.dumps``, and CPython answers it: its encoder coerces exactly five key
+    types — ``str``, ``float``, ``bool``, ``None``, ``int`` — and raises
+    ``TypeError: keys must be str, int, float, bool or None, not X`` for
+    everything else (pinned by the boundary test below). Covering those five is
+    therefore complete, with nothing behind it.
+
+    Two earlier cuts of this gate claimed completeness from probed shapes and
+    were false both times: the first covered only ``"axis": "z"``; the second
+    covered ``{"z": None}`` but not the non-``str`` keys ``json.dumps``
+    *coerces* into keys, so ``{1: None}``, ``{True: None}``, ``{None: None}``,
+    ``{1.5: None}``, ``{nan: None}`` and ``{inf: None}`` all still reached
+    serde's opaque ``unknown variant``.
+
+    Each expected token here is computed **by asking ``json.dumps``**, not
+    written out, so this test cannot drift from the spelling the bridge actually
+    produces — which is the point: ``1e16`` must echo ``1e+16`` (Python's
+    ``float.__repr__``, where a Rust-side format would write
+    ``10000000000000000``), ``True`` must echo ``true`` rather than ``1``
+    (``bool`` is an ``int`` subclass and ``json`` spells it ``true``), and a
+    30-digit ``int`` must survive at full precision.
+    """
+    out_of_vocabulary_keys = [
+        "z",
+        1,
+        -3,
+        10**30,
+        True,
+        False,
+        None,
+        1.5,
+        -0.0,
+        1e16,
+        1e-7,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ]
+    for key in out_of_vocabulary_keys:
+        # The token the bridge would hand serde, asked of json itself.
+        expected_token = json.loads(json.dumps({key: None})).popitem()[0]
+        assert expected_token not in ("x", "y"), (
+            f"fixture error: {key!r} spells an IN-vocabulary token"
+        )
+        chart = _chart_with_raw_config_layer(
+            {"structural": [{"type": "break_axis", "axis": {key: None}, "gaps": [[10.0, 20.0]]}]}
+        )
+        with pytest.raises(ValueError) as exc_info:
+            chart.to_svg()
+        msg = str(exc_info.value)
+        assert msg == (
+            "chart config: structural[0] (break_axis).axis: axis must be one of "
+            f"['x', 'y']; got '{expected_token}'"
+        ), (key, msg)
+        # The whole point: serde's opaque message is not what the caller gets.
+        assert "unknown variant" not in msg, (key, msg)
+
+
+def test_json_dumps_key_coercion_boundary_is_the_five_types_the_gate_covers():
+    """The other edge of the derivation: a key type ``json.dumps`` does NOT
+    coerce never reaches serde at all, so the five types above are the whole
+    space the gate has to cover.
+
+    This pins the premise of the completeness argument rather than ferrum
+    behavior, so that a future CPython change widening the accepted key set
+    fails here — beside the gate that would then be incomplete — instead of
+    silently reopening the hole.
+
+    (The refusal for such a key is a raw ``TypeError`` from ``json.dumps``
+    inside the PyO3 bridge, which is pre-existing for *any* malformed
+    ``chart_config`` dict and logged as a follow-up. Asserted here as the
+    current fact, not endorsed as the right voice.)
+    """
+    for key in [(1, 2), frozenset({1}), b"y", 1 + 2j]:
+        with pytest.raises(TypeError, match="keys must be str, int, float, bool or None"):
+            json.dumps({key: None})
+
+    chart = _chart_with_raw_config_layer(
+        {"structural": [{"type": "break_axis", "axis": {(1, 2): None}, "gaps": [[10.0, 20.0]]}]}
+    )
+    with pytest.raises(TypeError, match="keys must be str, int, float, bool or None"):
+        chart.to_svg()
+
+
+def test_wire_gate_leaves_break_axis_axis_shape_errors_to_serde():
+    """The documented carve-outs: this gate owns the vocabulary, serde owns the
+    SHAPE. A value that names no token — a non-string/non-dict, or a dict whose
+    key count is not exactly one — walks past the gate and is reported by
+    serde, which describes those shapes better than the gate could. Pinned so
+    the carve-outs are a stated contract rather than an accident of the
+    ``let ... else`` ladder."""
+    cases = [
+        (7, "expected string or map"),
+        (None, "expected string or map"),
+        ({}, "expected map with a single key"),
+        ({"x": None, "y": None}, "expected map with a single key"),
+    ]
+    for axis_value, expected in cases:
+        chart = _chart_with_raw_config_layer(
+            {"structural": [{"type": "break_axis", "axis": axis_value, "gaps": [[10.0, 20.0]]}]}
+        )
+        with pytest.raises(ValueError) as exc_info:
+            chart.to_svg()
+        msg = str(exc_info.value)
+        assert expected in msg, (axis_value, msg)
+        # Not the gate's message: these shapes name no token to report.
+        assert "axis must be one of" not in msg, (axis_value, msg)

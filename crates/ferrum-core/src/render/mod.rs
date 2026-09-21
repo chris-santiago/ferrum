@@ -36,6 +36,7 @@ pub const CLIP_ID_PREFIX: &str = "ferrum-clip-";
 use serde::{Deserialize, Serialize};
 
 use crate::layout::LayoutWarning;
+use crate::spec::axis::AlignAxis;
 use crate::transform::context::TransformWarning;
 
 /// The user-facing detail carried by [`RenderError::PositionAdjustFailed`]
@@ -534,7 +535,7 @@ pub enum RenderError {
     /// built. A composite leaf combining either coord with a break
     /// therefore refuses per-leaf, exactly like every other per-leaf
     /// render error.
-    BreakAxisIncompatibleCoord { coord: &'static str, axis: String },
+    BreakAxisIncompatibleCoord { coord: &'static str, axis: AlignAxis },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -839,10 +840,22 @@ impl std::fmt::Display for RenderError {
                      but the resolved scale is not temporal"
                 )
             }
+            // `{:?}` over the wire TOKEN, never over `axis` itself: the
+            // delivered text quotes the token (`BreakAxis(axis="y")`), which is
+            // what `Debug` on the `String` this field used to be produced and
+            // what callers' assertions read. `Debug` on `AlignAxis` would print
+            // the variant (`BreakAxis(axis=Y)`) — see `#229`(2) and the
+            // `Display` impl on [`AlignAxis`]. Pinned verbatim by this file's
+            // `tests::break_family_messages_are_byte_identical_after_the_axis_retype`,
+            // which asserts the whole sentence on both axis tokens; Python's
+            // `tests/test_break_axis_geometry.py::
+            // test_polar_coord_with_break_axis_on_x_names_that_axis` pins the
+            // quoting from the caller's side.
             Self::BreakAxisIncompatibleCoord { coord, axis } => write!(
                 f,
-                "BreakAxis(axis={axis:?}) is not supported under {coord} coordinates; \
-                 remove the break or render this chart under Cartesian coords"
+                "BreakAxis(axis={:?}) is not supported under {coord} coordinates; \
+                 remove the break or render this chart under Cartesian coords",
+                axis.wire_name()
             ),
         }
     }
@@ -1114,7 +1127,7 @@ pub enum RenderWarning {
     /// element, and claiming a user-call count here would be dishonest for
     /// exactly the multi-primitive desugars this rollup exists to cover.
     AnnotationSuppressedByBreak {
-        axis: String,
+        axis: AlignAxis,
         kinds: Vec<String>,
     },
     /// An EXTENT-shaped annotation (rect, span, line, arrow, bracket) on a
@@ -1143,7 +1156,7 @@ pub enum RenderWarning {
     /// [`AnnotationSuppressedByBreak`](Self::AnnotationSuppressedByBreak)'s
     /// doc for why that matters for the leading count).
     AnnotationSpansBreakGap {
-        axis: String,
+        axis: AlignAxis,
         kinds: Vec<String>,
     },
     /// A `BreakAxis` resolved to zero effective gaps, so the chart rendered
@@ -1153,7 +1166,7 @@ pub enum RenderWarning {
     /// for a gap to clip against. `reason` says which. Emitted because a
     /// structural feature that silently does nothing is indistinguishable
     /// from one the renderer failed to honor.
-    BreakAxisIneffective { axis: String, reason: String },
+    BreakAxisIneffective { axis: AlignAxis, reason: String },
     /// A `BreakAxis` was declared on an axis whose resolved scale is
     /// continuous but NOT linear in data (`log`, `pow`/`sqrt`, `symlog`).
     /// The break is applied post-hoc in pixel space and reverse-maps
@@ -1173,7 +1186,7 @@ pub enum RenderWarning {
     /// mark placement asks a PIXEL one, and on these scales the two answers
     /// diverge — an annotation can be suppressed as in-gap in the same render
     /// where a mark at a nominally in-gap value draws.
-    BreakAxisOnNonlinearScale { axis: String, scale_kind: String },
+    BreakAxisOnNonlinearScale { axis: AlignAxis, scale_kind: String },
     /// A `BreakAxis` clip split one mark batch's nodes (1→N) while one of
     /// that batch's per-node sidecars (`data_indices`, tooltips, hrefs,
     /// descriptions, keys, polar spans) had the wrong length, so it could not
@@ -1197,7 +1210,7 @@ pub enum RenderWarning {
     /// joins it explicitly (quality-review cycle-3): a `RepeatChart`
     /// replicating one conflicting template across N panels reports the
     /// authored mistake once at the composite boundary, not once per panel.
-    BreakAxisMergeConflict { axis: String, field: String },
+    BreakAxisMergeConflict { axis: AlignAxis, field: String },
     /// A continuous color encoding named a `scheme`/`cmap` (via `encoding.scheme`
     /// or a scale spec's own `scheme` field) that is not a recognized continuous
     /// scheme name (#240-4b, routed rider). Falls back to the theme's default
@@ -1528,24 +1541,24 @@ mod tests {
                 fields: vec!["domain_min".into(), "nice".into()],
             },
             RenderWarning::AnnotationSuppressedByBreak {
-                axis: "y".into(),
+                axis: AlignAxis::Y,
                 kinds: vec!["text".into(), "line".into()],
             },
             RenderWarning::AnnotationSpansBreakGap {
-                axis: "y".into(),
+                axis: AlignAxis::Y,
                 kinds: vec!["rect".into(), "span".into()],
             },
             RenderWarning::BreakAxisIneffective {
-                axis: "y".into(),
+                axis: AlignAxis::Y,
                 reason: "no gap overlaps the axis domain (0, 100)".into(),
             },
             RenderWarning::BreakAxisOnNonlinearScale {
-                axis: "y".into(),
+                axis: AlignAxis::Y,
                 scale_kind: "log".into(),
             },
             RenderWarning::BreakClipSidecarMisaligned { mark: "bar".into() },
             RenderWarning::BreakAxisMergeConflict {
-                axis: "y".into(),
+                axis: AlignAxis::Y,
                 field: "break_style".into(),
             },
             RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() },
@@ -1662,7 +1675,7 @@ mod tests {
         // displayed at all, then — once displayed — repeated per primitive
         // instead of deduping; this must be able to catch either regressing).
         let suppressed = RenderWarning::AnnotationSuppressedByBreak {
-            axis: "y".into(),
+            axis: AlignAxis::Y,
             kinds: vec!["line".into(), "text".into(), "line".into(), "text".into()],
         };
         let suppressed_text = format!("{suppressed}");
@@ -1684,7 +1697,7 @@ mod tests {
         // noun and the same genuine, deduped `kinds` display for the same
         // reason — see `AnnotationSuppressedByBreak`'s doc.
         let spans = RenderWarning::AnnotationSpansBreakGap {
-            axis: "y".into(),
+            axis: AlignAxis::Y,
             kinds: vec!["rect".into(), "span".into(), "rect".into()],
         };
         let spans_text = format!("{spans}");
@@ -1721,6 +1734,84 @@ mod tests {
         assert!(
             !too_few_stops_text.contains("GradientTooFewStops"),
             "{too_few_stops_text}"
+        );
+    }
+
+    /// `#229`(2): retyping the break axis from `String` to [`AlignAxis`] left
+    /// every break-family message byte-for-byte what it was.
+    ///
+    /// The whole sentence is pinned, not a substring, because the risk this
+    /// guards is a formatting change that still contains the substrings: the
+    /// six `{axis}` arms would print `Y` (the variant) rather than `y` (the
+    /// token) without [`AlignAxis`]'s `Display`, and
+    /// `BreakAxisIncompatibleCoord` would print `axis=Y` rather than
+    /// `axis="y"` if its `{:?}` were applied to the enum instead of to
+    /// `wire_name()`. The quoted `axis="y"` is the delivered text
+    /// `Debug`-on-a-`String` produced before the retype; `tests/
+    /// test_break_axis_geometry.py::test_polar_coord_with_break_axis_on_x_names_that_axis`
+    /// pins the same quoting from Python for the x token.
+    #[test]
+    fn break_family_messages_are_byte_identical_after_the_axis_retype() {
+        assert_eq!(
+            RenderError::BreakAxisIncompatibleCoord { coord: "Polar", axis: AlignAxis::Y }
+                .to_string(),
+            "BreakAxis(axis=\"y\") is not supported under Polar coordinates; \
+             remove the break or render this chart under Cartesian coords"
+        );
+        assert_eq!(
+            RenderError::BreakAxisIncompatibleCoord { coord: "Geo", axis: AlignAxis::X }
+                .to_string(),
+            "BreakAxis(axis=\"x\") is not supported under Geo coordinates; \
+             remove the break or render this chart under Cartesian coords"
+        );
+
+        assert_eq!(
+            RenderWarning::AnnotationSuppressedByBreak {
+                axis: AlignAxis::Y,
+                kinds: vec!["line".into(), "text".into()],
+            }
+            .to_string(),
+            "2 annotation elements (line, text) on the y axis fell inside a \
+             BreakAxis gap and were suppressed"
+        );
+        assert_eq!(
+            RenderWarning::AnnotationSpansBreakGap {
+                axis: AlignAxis::X,
+                kinds: vec!["bracket".into()],
+            }
+            .to_string(),
+            "1 annotation element (bracket) on the x axis spans a BreakAxis gap \
+             and was suppressed"
+        );
+        assert_eq!(
+            RenderWarning::BreakAxisIneffective {
+                axis: AlignAxis::Y,
+                reason: "no gap overlaps the axis domain (10, 950)".into(),
+            }
+            .to_string(),
+            "BreakAxis on the y axis had no effect: no gap overlaps the axis \
+             domain (10, 950)"
+        );
+        assert_eq!(
+            RenderWarning::BreakAxisOnNonlinearScale {
+                axis: AlignAxis::X,
+                scale_kind: "log".into(),
+            }
+            .to_string(),
+            "BreakAxis on the x axis targets a log scale; break placement is \
+             computed with a linear pixel-to-data map, so the removed range and \
+             the indicator position can differ from the gap you asked for, and \
+             annotation suppression (which reads the data value directly) can \
+             disagree with where marks are placed"
+        );
+        assert_eq!(
+            RenderWarning::BreakAxisMergeConflict {
+                axis: AlignAxis::Y,
+                field: "break_style".into(),
+            }
+            .to_string(),
+            "multiple BreakAxis specs on the y axis disagree on break_style; \
+             the first declaration's value was kept"
         );
     }
 
@@ -4313,7 +4404,7 @@ mod orchestration_tests {
 
     /// `prepare_and_layout`-level proof that the axis_y2 fill branch fires on
     /// a REAL secondary-y axis input: `chart_config.axis_y2.min_band` lands
-    /// on `prep.axes.secondary_y[0].overrides.min_band` — via the SAME
+    /// on `prep.axes.secondary_y[0].overrides.placement.min_band` — via the SAME
     /// `apply_axis_config_to_axis_input` fill-only path `axis`/`axis_x`/
     /// `axis_y` use — and lands on NEITHER of the primary x/y axes, proving
     /// the fill is scoped to the secondary axis only.
@@ -4335,12 +4426,12 @@ mod orchestration_tests {
 
         assert_eq!(output.prep.axes.secondary_y.len(), 1, "fixture must produce exactly one secondary axis");
         assert_eq!(
-            output.prep.axes.secondary_y[0].overrides.min_band,
+            output.prep.axes.secondary_y[0].overrides.placement.min_band,
             Some(123.0),
             "axis_y2.min_band must fill the secondary axis's own overrides"
         );
-        assert_eq!(output.prep.axes.x.overrides.min_band, None, "axis_y2 must not leak onto the primary x axis");
-        assert_eq!(output.prep.axes.y.overrides.min_band, None, "axis_y2 must not leak onto the primary y axis");
+        assert_eq!(output.prep.axes.x.overrides.placement.min_band, None, "axis_y2 must not leak onto the primary x axis");
+        assert_eq!(output.prep.axes.y.overrides.placement.min_band, None, "axis_y2 must not leak onto the primary y axis");
     }
 
     /// The F-L07-06 flip: end to end through `render_svg` (a real render

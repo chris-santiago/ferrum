@@ -6,6 +6,7 @@ use ferrum_scene::{
 };
 
 use crate::layout::{AxisLayout, LayoutResult, Rect, ResolveMode, ThemeInputs};
+use crate::spec::axis::AlignAxis;
 use crate::spec::chart::ChartSpec;
 
 use super::arrow_cast::col_as_identity_key_str;
@@ -19,7 +20,7 @@ use super::{
     break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
 };
 
-/// The `(coord name, BreakAxis.axis token)` of the first `BreakAxis`
+/// The `(coord name, BreakAxis.axis)` of the first `BreakAxis`
 /// structural spec, if `spec.coord` is `Polar` or `Geo` and
 /// `chart_config.structural` carries at least one — the combination #230-8
 /// refuses (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). Both
@@ -35,14 +36,14 @@ use super::{
 fn break_axis_incompatible_coord(
     spec: &ChartSpec,
     chart_config: &super::chart_config::ChartConfig,
-) -> Option<(&'static str, String)> {
+) -> Option<(&'static str, AlignAxis)> {
     let coord = match &spec.coord {
         Some(crate::spec::coord::CoordKind::Polar { .. }) => "Polar",
         Some(crate::spec::coord::CoordKind::Geo { .. }) => "Geo",
         _ => return None,
     };
     chart_config.structural.iter().find_map(|item| match item {
-        StructuralSpec::BreakAxis(b) => Some((coord, b.axis.clone())),
+        StructuralSpec::BreakAxis(b) => Some((coord, b.axis)),
         _ => None,
     })
 }
@@ -66,11 +67,15 @@ fn break_axis_incompatible_coord(
 /// this function only finds the first offender and names the variant for the
 /// message.
 fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, &'static str, &'static str)> {
-    spec.layers.iter().flatten().enumerate().find_map(|(index, layer)| {
-        let coord = layer.coord.as_ref()?;
-        let property = crate::spec::coord::panel_scoped_property(coord)?;
-        Some((index, coord_spelling(coord), property))
-    })
+    spec.layers
+        .iter()
+        .flatten()
+        .enumerate()
+        .find_map(|(index, layer)| {
+            let coord = layer.coord.as_ref()?;
+            let property = crate::spec::coord::panel_scoped_property(coord)?;
+            Some((index, coord_spelling(coord), property))
+        })
 }
 
 /// The user-facing constructor name for a coord, for refusal messages: the
@@ -122,7 +127,9 @@ pub fn build_scene(
         return Err(RenderError::LayerCoordUnplaceable {
             layer,
             coord,
-            reason: Box::new(crate::render::LayerCoordUnplaceableReason::PanelProperty(property)),
+            reason: Box::new(crate::render::LayerCoordUnplaceableReason::PanelProperty(
+                property,
+            )),
         });
     }
 
@@ -363,7 +370,10 @@ pub fn build_scene(
         let break_results = if merged_breaks.is_empty() {
             Vec::new()
         } else {
-            let PanelBreaks { indicators, results } = build_panel_breaks(
+            let PanelBreaks {
+                indicators,
+                results,
+            } = build_panel_breaks(
                 &merged_breaks,
                 &scales,
                 &panel.plot_area,
@@ -393,10 +403,10 @@ pub fn build_scene(
         let break_remaps: Vec<break_axis::BreakRemap<'_>> = break_results
             .iter()
             .filter_map(|(axis, result)| {
-                let scale = if axis == "y" { &scales.y } else { &scales.x };
+                let scale = scale_on_axis(&scales, *axis);
                 let domain = scale.data_domain()?;
                 Some(break_axis::BreakRemap::new(
-                    axis,
+                    *axis,
                     domain,
                     scale.pixel_range(),
                     result,
@@ -1117,26 +1127,25 @@ fn resolve_panel_axes(
         // categorical facet axis places its labels at the scale's band centers,
         // matching the marks. `None` for continuous scales.
         x_input.categorical_placement = scales.x.categorical_placement();
-        let x_label_fs = x_input
-            .overrides
-            .label_font_size
-            .unwrap_or(theme.typography.label_font_size);
+        // `#146`/spec §4.3: the context carries the theme's own gap policy,
+        // exactly as the three `layout::compute_layout` call sites do. This
+        // site used to hardcode the compile-time default, which made
+        // `Theme(cull_threshold=)` and `Theme(cull_labels=)` entirely inert on
+        // an independent-x facet axis while the shared-axis paths honored them.
+        // `LabelBandCtx::for_axis` is the ONE production derivation of the
+        // panel's font size, gap, tick size and metrics, so this site cannot
+        // drift from the three `layout::compute_layout` sites by re-deriving
+        // them differently. It is a single obvious home, not an enforced
+        // invariant: the struct's fields are `pub`, so a hand-assembled context
+        // with a hardcoded gap is still spellable.
+        let ctx = crate::layout::LabelBandCtx::for_axis(&x_input, theme, facet_metrics);
         let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
             &x_input,
             panel.plot_area,
             panel_idx,
-            x_label_fs,
             theme.typography.title_font_size,
             theme.padding.axis_title_padding,
-            // `#146`/spec §4.3: the theme's own policy, exactly as the three
-            // `layout::compute_layout` call sites pass it. This site used to
-            // hardcode the compile-time default, which made
-            // `Theme(cull_threshold=)` and `Theme(cull_labels=)` entirely
-            // inert on an independent-x facet axis while the shared-axis
-            // paths honored them.
-            theme.label_gap,
-            x_input.tick_size(theme),
-            facet_metrics,
+            &ctx,
         );
         Some(new_x_layout)
     } else {
@@ -1169,7 +1178,8 @@ fn resolve_panel_axes(
         y_input.categorical_placement = scales.y.categorical_placement();
         let y_label_fs = y_input
             .overrides
-            .label_font_size
+            .labels
+            .font_size
             .unwrap_or(theme.typography.label_font_size);
         let (new_y_layout, _warn) = crate::layout::axis::layout_y_axis(
             &y_input,
@@ -1231,15 +1241,28 @@ fn break_grid_node(
     remap: &break_axis::BreakRemap<'_>,
     plot_area: Rect,
 ) -> Vec<marks::axis::GridNode> {
-    if remap.axis() != grid_node.placed_along {
+    // Cross-vocabulary on purpose (`#229`(2)): `placed_along` is a CHANNEL
+    // token from `Dimension::channel_token()`, a wider space than the break
+    // axis's two values, so the break's typed axis meets it through
+    // `wire_name()` rather than by retyping the channel vocabulary. Do not
+    // "finish" the retype here — see `crate::spec::axis`'s module doc.
+    if remap.axis().wire_name() != grid_node.placed_along {
         return vec![grid_node];
     }
-    let marks::axis::GridNode { node, placed_along, rect_ends } = grid_node;
+    let marks::axis::GridNode {
+        node,
+        placed_along,
+        rect_ends,
+    } = grid_node;
     let mut pieces = remap.clip_nodes(vec![node]).nodes;
-    restore_grid_rect_ends(&mut pieces, rect_ends, plot_area, remap.axis() == "y");
+    restore_grid_rect_ends(&mut pieces, rect_ends, plot_area, remap.axis().is_y());
     pieces
         .into_iter()
-        .map(|node| marks::axis::GridNode { node, placed_along, rect_ends })
+        .map(|node| marks::axis::GridNode {
+            node,
+            placed_along,
+            rect_ends,
+        })
         .collect()
 }
 
@@ -1297,7 +1320,9 @@ fn outermost_rect_pieces(pieces: &[SceneNode], is_y: bool) -> (Option<usize>, Op
     let (mut lo_piece, mut hi_piece) = (None, None);
     let (mut lowest, mut highest) = (f64::INFINITY, f64::NEG_INFINITY);
     for (i, node) in pieces.iter().enumerate() {
-        let SceneNode::Rect { x, y, w, h, .. } = node else { continue };
+        let SceneNode::Rect { x, y, w, h, .. } = node else {
+            continue;
+        };
         let (start, end) = if is_y { (*y, *y + *h) } else { (*x, *x + *w) };
         if start < lowest {
             lowest = start;
@@ -1319,7 +1344,9 @@ fn outermost_rect_pieces(pieces: &[SceneNode], is_y: bool) -> (Option<usize>, Op
 /// caller-held copy, so writing both ends of one piece composes instead of the
 /// second write undoing the first.
 fn set_rect_edges(node: &mut SceneNode, is_y: bool, lo: Option<f64>, hi: Option<f64>) {
-    let SceneNode::Rect { x, y, w, h, .. } = node else { return };
+    let SceneNode::Rect { x, y, w, h, .. } = node else {
+        return;
+    };
     let (start, len) = if is_y { (y, h) } else { (x, w) };
     if let Some(edge) = lo {
         *len += *start - edge;
@@ -1433,10 +1460,12 @@ fn route_panel_axes_and_grid(
     // so a break on the primary y scale is not its break (spec §4 H4).
     let break_axis_nodes = |mut nodes: marks::axis::AxisNodes, y_slot: usize| {
         for remap in breaks {
-            if remap.axis() != nodes.placed_along {
+            // Cross-vocabulary on purpose, same boundary as `break_grid_node`'s
+            // (`#229`(2)): `placed_along` is a channel token, not an axis value.
+            if remap.axis().wire_name() != nodes.placed_along {
                 continue;
             }
-            if y_slot != 0 && remap.axis() == "y" {
+            if y_slot != 0 && remap.axis().is_y() {
                 continue;
             }
             remap.remap_axis_chrome(&mut nodes.data_positioned);
@@ -1786,8 +1815,10 @@ fn build_panel_mark_batches(
         // present, so those composite ticks are unaffected by this
         // normalization and keep the fixed `tick_size*2.0` length regardless
         // of the `band_size` they set on themselves).
-        if matches!(layer.mark, crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick)
-            && layer_spec_encoding.x2.is_none()
+        if matches!(
+            layer.mark,
+            crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick
+        ) && layer_spec_encoding.x2.is_none()
             && layer_spec_encoding.y2.is_none()
         {
             match (layer.x_is_own, layer.y_is_own) {
@@ -2813,7 +2844,25 @@ struct PanelBreaks {
     /// `(axis, BreakResult)` pairs, one per broken axis, used by the caller to
     /// remap this panel's mark, chrome, and annotation coordinates through the
     /// broken scale.
-    results: Vec<(String, break_axis::BreakResult)>,
+    results: Vec<(AlignAxis, break_axis::BreakResult)>,
+}
+
+/// The resolved scale a break on `axis` applies to.
+///
+/// The ONE place that choice is made. `build_scene`'s `BreakRemap` build and
+/// `build_panel_breaks`' effectiveness test must pick the same scale for the
+/// same axis — the comment inside `build_panel_breaks` promises exactly that —
+/// and an exhaustive match over [`AlignAxis`] is what keeps the promise, where
+/// the two `if axis == "y" { &scales.y } else { &scales.x }` copies it replaces
+/// each carried their own "everything else is x" assumption.
+fn scale_on_axis(
+    scales: &scale_resolve::ResolvedScales,
+    axis: AlignAxis,
+) -> &scale_resolve::ScaleKind {
+    match axis {
+        AlignAxis::Y => &scales.y,
+        AlignAxis::X => &scales.x,
+    }
 }
 
 /// The name of `scale`'s kind when it is continuous but NOT linear in data,
@@ -2853,7 +2902,7 @@ enum BreakFact {
 
 /// One `(axis, fact)` pair, and how many panels reported it.
 struct PanelFact {
-    axis: String,
+    axis: AlignAxis,
     fact: BreakFact,
     /// The first reporting panel's payload, verbatim. For [`BreakFact::NoOverlap`]
     /// that payload names the panel's own domain, which a later panel's report
@@ -2924,7 +2973,7 @@ impl BreakWarningLedger {
     /// letting a later, equally-reporting panel's disagreement go unnoticed.
     fn note_panel_fact(
         &mut self,
-        axis: &str,
+        axis: AlignAxis,
         fact: BreakFact,
         panel_idx: usize,
         warning: impl FnOnce() -> RenderWarning,
@@ -2941,7 +2990,7 @@ impl BreakWarningLedger {
                 }
             }
             None => self.panel_facts.push(PanelFact {
-                axis: axis.to_string(),
+                axis,
                 fact,
                 warning: warning(),
                 first_panel: panel_idx,
@@ -2994,7 +3043,13 @@ impl BreakWarningLedger {
 /// nothing a reader could act on: it is reported once, verbatim, regardless
 /// of which shape triggered qualification.
 fn qualified_for_partial_panels(entry: PanelFact, panels: usize) -> RenderWarning {
-    let PanelFact { warning, first_panel, panels_reporting, diverged, .. } = entry;
+    let PanelFact {
+        warning,
+        first_panel,
+        panels_reporting,
+        diverged,
+        ..
+    } = entry;
     match warning {
         RenderWarning::BreakAxisIneffective { axis, reason } => {
             let qualifier = if panels_reporting == panels && diverged {
@@ -3036,7 +3091,7 @@ fn qualified_for_partial_panels(entry: PanelFact, panels: usize) -> RenderWarnin
 /// nested, and unsorted gaps, and it is exercised on the union exactly as it
 /// always was on one spec's list.
 struct MergedBreak {
-    axis: String,
+    axis: AlignAxis,
     gaps: Vec<[f64; 2]>,
     /// First declaration wins; `size_conflict` records that a later same-axis
     /// spec asked for a different value, so the dropped knob is named rather
@@ -3071,7 +3126,7 @@ fn merge_break_specs(
                 group.size_conflict |= spec_brk.break_size != group.break_size;
             }
             None => merged.push(MergedBreak {
-                axis: spec_brk.axis.clone(),
+                axis: spec_brk.axis,
                 gaps: spec_brk.gaps.clone(),
                 break_size: spec_brk.break_size,
                 size_conflict: false,
@@ -3083,13 +3138,13 @@ fn merge_break_specs(
     for group in &merged {
         if group.style_conflict {
             ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
-                axis: group.axis.clone(),
+                axis: group.axis,
                 field: "break_style".to_string(),
             });
         }
         if group.size_conflict {
             ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
-                axis: group.axis.clone(),
+                axis: group.axis,
                 field: "break_size".to_string(),
             });
         }
@@ -3118,7 +3173,7 @@ fn build_panel_breaks(
 ) -> PanelBreaks {
     ledger.enter_panel();
     let mut indicators: Vec<SceneNode> = Vec::new();
-    let mut results: Vec<(String, break_axis::BreakResult)> = Vec::new();
+    let mut results: Vec<(AlignAxis, break_axis::BreakResult)> = Vec::new();
 
     for group in merged {
         // ONE predicate decides whether this break does anything, and it is
@@ -3130,14 +3185,14 @@ fn build_panel_breaks(
         // answer match the render: an ordinal `BreakAxis(gap=(0.2, 0.4))` used
         // to draw a slash indicator over a scale nothing moved on, and warn
         // nothing, because the fabricated domain made its gap look effective.
-        let scale = if group.axis == "y" { &scales.y } else { &scales.x };
+        let scale = scale_on_axis(scales, group.axis);
         let Some(data_domain) = scale.data_domain() else {
             // No numeric domain at all: no remap downstream, so no indicator
             // here and no result entry (one would be filtered out by that same
             // `data_domain()` test).
-            ledger.note_panel_fact(&group.axis, BreakFact::Ordinal, panel_idx, || {
+            ledger.note_panel_fact(group.axis, BreakFact::Ordinal, panel_idx, || {
                 RenderWarning::BreakAxisIneffective {
-                    axis: group.axis.clone(),
+                    axis: group.axis,
                     reason: "the axis is ordinal, so its gaps have no numeric \
                              data range to remove"
                         .to_string(),
@@ -3178,9 +3233,9 @@ fn build_panel_breaks(
             // chart, which is what the warning below promises. Disclosed
             // behavior change — see ferrum-spec.md's batch-H dated note.
             let (lo, hi) = data_domain;
-            ledger.note_panel_fact(&group.axis, BreakFact::NoOverlap, panel_idx, || {
+            ledger.note_panel_fact(group.axis, BreakFact::NoOverlap, panel_idx, || {
                 RenderWarning::BreakAxisIneffective {
-                    axis: group.axis.clone(),
+                    axis: group.axis,
                     reason: format!("no gap overlaps the axis domain ({lo}, {hi})"),
                 }
             });
@@ -3192,9 +3247,9 @@ fn build_panel_breaks(
         // a different data range than the one asked for. Unfixed here (the
         // scale-level inverse is a filed follow-up), but no longer silent.
         if let Some(scale_kind) = nonlinear_scale_kind(scale) {
-            ledger.note_panel_fact(&group.axis, BreakFact::NonlinearScale, panel_idx, || {
+            ledger.note_panel_fact(group.axis, BreakFact::NonlinearScale, panel_idx, || {
                 RenderWarning::BreakAxisOnNonlinearScale {
-                    axis: group.axis.clone(),
+                    axis: group.axis,
                     scale_kind: scale_kind.to_string(),
                 }
             });
@@ -3203,17 +3258,20 @@ fn build_panel_breaks(
         indicators.extend(break_axis::build_break_indicators(
             &break_result,
             plot_area,
-            &group.axis,
+            group.axis,
             group.break_size,
             &group.break_style,
             theme,
         ));
 
         // Stash the break result so the caller can remap this panel's marks.
-        results.push((group.axis.clone(), break_result));
+        results.push((group.axis, break_result));
     }
 
-    PanelBreaks { indicators, results }
+    PanelBreaks {
+        indicators,
+        results,
+    }
 }
 
 /// Build the chart's `Inset` bodies against the reference panel's plot rect.
@@ -3258,7 +3316,11 @@ fn build_chart_insets(
         } else {
             spec_inset
         };
-        nodes.extend(inset::build_inset_nodes(inset_to_build, plot_area, inset_idx));
+        nodes.extend(inset::build_inset_nodes(
+            inset_to_build,
+            plot_area,
+            inset_idx,
+        ));
         inset_idx += 1;
     }
     nodes
@@ -3284,7 +3346,7 @@ fn remap_mark_batch_through_break(
     remap: &break_axis::BreakRemap<'_>,
     warnings: &mut Vec<RenderWarning>,
 ) {
-    if batch.y_slot != 0 && remap.axis() == "y" {
+    if batch.y_slot != 0 && remap.axis().is_y() {
         return;
     }
     match break_axis::BreakPlacement::for_kind(batch.kind) {
@@ -3630,21 +3692,28 @@ fn validate_layer_coord_exchange_is_servable(
     }
     // Reachable only with a per-layer coord, so the effective coord here IS the
     // layer's own declaration and names what the caller wrote.
-    let Some(coord) = layer_coord else { return Ok(()) };
+    let Some(coord) = layer_coord else {
+        return Ok(());
+    };
     for (channel, enc, scale) in [
         ("x", encoding.x.as_ref(), &scales.x),
         ("y", encoding.y.as_ref(), &scales.y),
     ] {
         let Some(enc) = enc else { continue };
         // Absence is the sibling gate's refusal to make, not this one's.
-        let Some(column) = batch.column_by_name(&enc.field) else { continue };
+        let Some(column) = batch.column_by_name(&enc.field) else {
+            continue;
+        };
         let dtype = column.data_type();
         let (servable, axis_kind) = match scale {
             scale_resolve::ScaleKind::Ordinal(_) => (
                 crate::render::arrow_cast::ensure_category_keyable(&enc.field, dtype).is_ok(),
                 "categorical",
             ),
-            _ => (crate::render::arrow_cast::supported_numeric_dtype(dtype), "continuous"),
+            _ => (
+                crate::render::arrow_cast::supported_numeric_dtype(dtype),
+                "continuous",
+            ),
         };
         if !servable {
             return Err(RenderError::LayerCoordUnplaceable {
@@ -4226,7 +4295,12 @@ mod tests {
                 ..Default::default()
             });
             let mut nodes = Vec::new();
-            build_title(&layout_with_subtitle("Sub"), &spec, &ThemeInputs::default(), &mut nodes);
+            build_title(
+                &layout_with_subtitle("Sub"),
+                &spec,
+                &ThemeInputs::default(),
+                &mut nodes,
+            );
             let color_of = |want: &str| {
                 nodes
                     .iter()
@@ -4340,7 +4414,10 @@ mod tests {
             &spec,
             &batch,
             &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -4442,7 +4519,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
         let mut layer1 = y_enc("y1");
         layer1.independent_y = layer1_independent;
@@ -4654,7 +4732,10 @@ mod tests {
     fn try_build_scene_for_capturing_warnings(
         spec: &ChartSpec,
         batch: &RecordBatch,
-    ) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
+    ) -> (
+        Result<ferrum_scene::SceneGraph, RenderError>,
+        Vec<RenderWarning>,
+    ) {
         try_build_scene_capturing(
             spec,
             batch,
@@ -4673,7 +4754,10 @@ mod tests {
         spec: &ChartSpec,
         batch: &RecordBatch,
         chart_config: &super::super::chart_config::ChartConfig,
-    ) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
+    ) -> (
+        Result<ferrum_scene::SceneGraph, RenderError>,
+        Vec<RenderWarning>,
+    ) {
         let theme = ThemeInputs::default();
         let viewport = crate::layout::Viewport {
             width: 600.0,
@@ -4795,40 +4879,68 @@ mod tests {
         use std::sync::Arc;
 
         let fill_style = |hex: Option<&str>| {
-            hex.map(|h| MarkKwargsSpec { fill: Some(h.into()), ..Default::default() })
+            hex.map(|h| MarkKwargsSpec {
+                fill: Some(h.into()),
+                ..Default::default()
+            })
         };
         let xy_encoding = || Encoding {
-            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
         let bar_layer = Layer {
             mark: Mark::Bar,
             encoding: Encoding {
-                color: bar_own_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                color: bar_own_color_field.map(|f| EncodingSpec {
+                    field: f.into(),
+                    ..Default::default()
+                }),
                 ..xy_encoding()
             },
             transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
             encoding: Encoding {
-                color: text_own_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                color: text_own_color_field.map(|f| EncodingSpec {
+                    field: f.into(),
+                    ..Default::default()
+                }),
                 ..xy_encoding()
             },
             transforms: Vec::new(),
             mark_style: fill_style(text_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
 
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
-                color: chart_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                color: chart_color_field.map(|f| EncodingSpec {
+                    field: f.into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -4851,22 +4963,34 @@ mod tests {
             Field::new("y", DataType::Float64, false),
             Field::new("cat", DataType::Utf8, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(StringArray::from(vec!["a", "b"])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
     /// Every `SceneNode::Text`'s resolved color, across every panel/mark-batch
     /// in the scene, in emission order.
     fn text_node_colors(scene: &ferrum_scene::SceneGraph) -> Vec<ferrum_scene::Color> {
-        scene.panels.iter()
+        scene
+            .panels
+            .iter()
             .flat_map(|p| p.marks.iter())
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Text)
             .flat_map(|m| m.nodes.iter())
-            .filter_map(|n| if let SceneNode::Text { style, .. } = n { Some(style.color) } else { None })
+            .filter_map(|n| {
+                if let SceneNode::Text { style, .. } = n {
+                    Some(style.color)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -4881,9 +5005,16 @@ mod tests {
         let scene = build_scene_for(&spec, &batch);
         let colors = text_node_colors(&scene);
         assert_eq!(colors.len(), 2, "expected 2 text nodes");
-        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
-        assert!(colors.iter().all(|c| *c == red),
-            "text layer's own fill='#ff0000' must be honored inside a LayerChart; got {colors:?}");
+        let red = ferrum_scene::Color {
+            r: 0xff,
+            g: 0x00,
+            b: 0x00,
+            a: 255,
+        };
+        assert!(
+            colors.iter().all(|c| *c == red),
+            "text layer's own fill='#ff0000' must be honored inside a LayerChart; got {colors:?}"
+        );
     }
 
     /// `mark_bar(fill="#00aa00") + mark_text()`, with the bar's fill placed
@@ -4909,8 +5040,16 @@ mod tests {
         let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
         assert!(colors.iter().all(|c| *c == font_color),
             "the bar layer's fill must not leak into text's color; expected theme font color, got {colors:?}");
-        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
-        assert!(colors.iter().all(|c| *c != green), "text must not render the bar's green fill");
+        let green = ferrum_scene::Color {
+            r: 0x00,
+            g: 0xaa,
+            b: 0x00,
+            a: 255,
+        };
+        assert!(
+            colors.iter().all(|c| *c != green),
+            "text must not render the bar's green fill"
+        );
     }
 
     /// The REAL Python-lowered shape for `mark_bar(fill="#00aa00") +
@@ -4936,9 +5075,16 @@ mod tests {
         let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
         assert!(colors.iter().all(|c| *c == font_color),
             "the chart-level (hoisted-from-layer-0) fill must not leak into a kwarg-less text layer's color; expected theme font color, got {colors:?}");
-        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
-        assert!(colors.iter().all(|c| *c != green),
-            "text must not render the hoisted bar fill via the chart-level mark_style fallback");
+        let green = ferrum_scene::Color {
+            r: 0x00,
+            g: 0xaa,
+            b: 0x00,
+            a: 255,
+        };
+        assert!(
+            colors.iter().all(|c| *c != green),
+            "text must not render the hoisted bar fill via the chart-level mark_style fallback"
+        );
     }
 
     /// Chart-level `color=` + a colorless text layer (the `heatmap(annot=True)`
@@ -5026,20 +5172,40 @@ mod tests {
         let curve_layer = Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
-                color: Some(EncodingSpec { field: "class".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
+                color: Some(EncodingSpec {
+                    field: "class".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: Some("line".into()),
-            independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("line".into()),
+            independent_y: false,
+            coord: None,
         };
         let reference_layer = Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -5048,26 +5214,46 @@ mod tests {
                 stroke_dash: Some(vec![4.0, 4.0]),
                 ..Default::default()
             }),
-            data_source: None, position: None, blend: None, name: Some("reference".into()),
-            independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("reference".into()),
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 // Mirrors `roc_chart`'s chart-level `color="class"` (set for
                 // the shared legend, not declared by either raw layer above).
-                color: Some(EncodingSpec { field: "class".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "class".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(),
+            facet: None,
             layers: Some(vec![curve_layer, reference_layer]),
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
 
         let rows_per_class = 4;
@@ -5080,19 +5266,31 @@ mod tests {
             Field::new("y", DataType::Float64, false),
             Field::new("class", DataType::Utf8, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(classes)),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(classes)),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
     /// Every `SceneNode::Polyline`'s stroke color, in one mark batch, in
     /// emission order.
     fn polyline_strokes(batch: &ferrum_scene::MarkBatch) -> Vec<ferrum_scene::Color> {
-        batch.nodes.iter()
-            .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style.color) } else { None })
+        batch
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Polyline { style, .. } = n {
+                    Some(style.color)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -5112,7 +5310,10 @@ mod tests {
     /// the Python golden (`tests/test_phase_9_e2e.py::test_catplot_box_golden`).
     fn roc_reference_line_layered_spec_no_own_paint(n_classes: usize) -> (ChartSpec, RecordBatch) {
         let (mut spec, batch) = roc_reference_line_layered_spec(n_classes);
-        let layers = spec.layers.as_mut().expect("roc_reference_line_layered_spec always sets layers");
+        let layers = spec
+            .layers
+            .as_mut()
+            .expect("roc_reference_line_layered_spec always sets layers");
         layers[1].mark_style = None;
         (spec, batch)
     }
@@ -5128,16 +5329,27 @@ mod tests {
         let (spec, batch) = roc_reference_line_layered_spec(2);
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel
+            .marks
+            .iter()
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
             .collect();
-        assert_eq!(line_batches.len(), 2, "expected one mark batch per layer (curve + reference)");
+        assert_eq!(
+            line_batches.len(),
+            2,
+            "expected one mark batch per layer (curve + reference)"
+        );
 
         let reference_strokes = polyline_strokes(line_batches[1]);
         assert_eq!(reference_strokes.len(), 1,
             "the reference layer must collapse to exactly one polyline (no color-driven fan-out); got {} polylines with strokes {:?}",
             reference_strokes.len(), reference_strokes);
-        let gray = ferrum_scene::Color { r: 0xAA, g: 0xAA, b: 0xAA, a: 255 };
+        let gray = ferrum_scene::Color {
+            r: 0xAA,
+            g: 0xAA,
+            b: 0xAA,
+            a: 255,
+        };
         assert_eq!(reference_strokes[0], gray,
             "the reference layer's own literal stroke='#AAAAAA' must win over the inherited chart-level \
              color scale's first-domain-entry color; got {:?}", reference_strokes[0]);
@@ -5154,7 +5366,9 @@ mod tests {
         let (spec, batch) = roc_reference_line_layered_spec(3);
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel
+            .marks
+            .iter()
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
             .collect();
         assert_eq!(line_batches.len(), 2);
@@ -5170,9 +5384,17 @@ mod tests {
             "the reference layer must render exactly one polyline regardless of the chart's class \
              cardinality (no per-class fan-out from an inherited-only color channel); got {} with strokes {:?}",
             reference_strokes.len(), reference_strokes);
-        let gray = ferrum_scene::Color { r: 0xAA, g: 0xAA, b: 0xAA, a: 255 };
-        assert_eq!(reference_strokes[0], gray,
-            "the reference layer's own literal stroke must win; got {:?}", reference_strokes[0]);
+        let gray = ferrum_scene::Color {
+            r: 0xAA,
+            g: 0xAA,
+            b: 0xAA,
+            a: 255,
+        };
+        assert_eq!(
+            reference_strokes[0], gray,
+            "the reference layer's own literal stroke must win; got {:?}",
+            reference_strokes[0]
+        );
     }
 
     /// Negative branch of the gate (the `catplot(kind="box", hue=x)` shape):
@@ -5191,13 +5413,19 @@ mod tests {
         let (spec, batch) = roc_reference_line_layered_spec_no_own_paint(3);
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel
+            .marks
+            .iter()
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
             .collect();
         assert_eq!(line_batches.len(), 2);
 
         let curve_strokes = polyline_strokes(line_batches[0]);
-        assert_eq!(curve_strokes.len(), 3, "control: the curve layer's own color must still fan out");
+        assert_eq!(
+            curve_strokes.len(),
+            3,
+            "control: the curve layer's own color must still fan out"
+        );
 
         let reference_strokes = polyline_strokes(line_batches[1]);
         assert_eq!(reference_strokes.len(), 3,
@@ -5215,7 +5443,9 @@ mod tests {
         }
         let mut distinct: Vec<ferrum_scene::Color> = Vec::new();
         for c in &reference_strokes {
-            if !distinct.contains(c) { distinct.push(*c); }
+            if !distinct.contains(c) {
+                distinct.push(*c);
+            }
         }
         assert_eq!(distinct.len(), 3,
             "3 classes must paint 3 distinct inherited colors, matching the legend; got {reference_strokes:?}");
@@ -5250,24 +5480,45 @@ mod tests {
         use std::sync::Arc;
 
         let xy_encoding = || Encoding {
-            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let text_layer = Layer {
             mark: Mark::Text,
             encoding: xy_encoding(), // layer 0; NO own color
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let bar_layer = Layer {
             mark: Mark::Bar,
             encoding: Encoding {
-                color: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "cat".into(),
+                    ..Default::default()
+                }),
                 ..xy_encoding()
             },
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5275,31 +5526,47 @@ mod tests {
             encoding: Encoding {
                 // Chart-level color, mirroring Python's `+` copy-up of the
                 // bar layer's own `encode(color="cat")`.
-                color: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "cat".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(),
+            facet: None,
             layers: Some(vec![text_layer, bar_layer]),
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
             Field::new("cat", DataType::Utf8, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(StringArray::from(vec!["a", "b"])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
 
         let scene = build_scene_for(&spec, &batch);
-        assert!(!scene.legend.is_empty(),
+        assert!(
+            !scene.legend.is_empty(),
             "the legend must still render when the colored layer is NOT layer 0 \
-             (text, which has no color of its own, is layer 0 here); legend was empty");
+             (text, which has no color of its own, is layer 0 here); legend was empty"
+        );
     }
 
     /// Shared bar+text spec/batch for the dodge/stack position-grouping
@@ -5321,49 +5588,85 @@ mod tests {
         use std::sync::Arc;
 
         let xy_ordinal_encoding = || Encoding {
-            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
-            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            x: Some(EncodingSpec {
+                field: "cat".into(),
+                type_: Some(SDT::Ordinal),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let bar_layer = Layer {
             mark: Mark::Bar,
             encoding: Encoding {
-                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "g".into(),
+                    ..Default::default()
+                }),
                 ..xy_ordinal_encoding()
             },
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: Some(position.clone()), blend: None, name: None, independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: Some(position.clone()),
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
             encoding: xy_ordinal_encoding(), // no own color
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: Some(position), blend: None, name: None, independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: Some(position),
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
-                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "g".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(),
+            facet: None,
             layers: Some(vec![bar_layer, text_layer]),
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
             Field::new("y", DataType::Float64, false),
             Field::new("g", DataType::Utf8, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(StringArray::from(vec!["A", "A", "B", "B"])),
-            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
-            Arc::new(StringArray::from(vec!["L1", "L2", "L1", "L2"])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "B", "B"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["L1", "L2", "L1", "L2"])),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
@@ -5382,26 +5685,47 @@ mod tests {
     fn layered_dodged_text_over_colored_bar_tracks_bar_position() {
         use crate::spec::position::PositionAdjust;
 
-        let position = PositionAdjust::Dodge { by: None, padding: 0.05 };
+        let position = PositionAdjust::Dodge {
+            by: None,
+            padding: 0.05,
+        };
         let (spec, batch) = text_over_bar_position_spec(position);
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
 
-        let bar_centers: Vec<f64> = panel.marks[0].nodes.iter().filter_map(|n| {
-            if let SceneNode::Rect { x, w, .. } = n { Some(x + w / 2.0) } else { None }
-        }).collect();
-        let text_xs: Vec<f64> = panel.marks[1].nodes.iter().filter_map(|n| {
-            if let SceneNode::Text { x, .. } = n { Some(*x) } else { None }
-        }).collect();
+        let bar_centers: Vec<f64> = panel.marks[0]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Rect { x, w, .. } = n {
+                    Some(x + w / 2.0)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let text_xs: Vec<f64> = panel.marks[1]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Text { x, .. } = n {
+                    Some(*x)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(bar_centers.len(), 4, "expected 4 dodged bars");
         assert_eq!(text_xs.len(), 4, "expected 4 text labels");
 
         // Sanity: dodge actually separated the two groups within category
         // "A" — collapsed grouping (the regression) would put both at the
         // same undodged band center.
-        assert_ne!(text_xs[0], text_xs[1],
-            "dodged labels within the same x-category must land at different x; got {text_xs:?}");
+        assert_ne!(
+            text_xs[0], text_xs[1],
+            "dodged labels within the same x-category must land at different x; got {text_xs:?}"
+        );
 
         // The real assertion: each label tracks its own bar's dodge slot.
         for (i, (&bar_cx, &text_x)) in bar_centers.iter().zip(text_xs.iter()).enumerate() {
@@ -5436,20 +5760,38 @@ mod tests {
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
 
-        let bar_tops: Vec<f64> = panel.marks[0].nodes.iter().filter_map(|n| {
-            if let SceneNode::Rect { y, .. } = n { Some(*y) } else { None }
-        }).collect();
-        let text_ys: Vec<f64> = panel.marks[1].nodes.iter().filter_map(|n| {
-            if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
-        }).collect();
+        let bar_tops: Vec<f64> = panel.marks[0]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Rect { y, .. } = n {
+                    Some(*y)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let text_ys: Vec<f64> = panel.marks[1]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Text { y, .. } = n {
+                    Some(*y)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(bar_tops.len(), 4, "expected 4 stacked bar segments");
         assert_eq!(text_ys.len(), 4, "expected 4 text labels");
 
         // Sanity: stacking actually separated the two segments within
         // category "A" — collapsed grouping (the regression) would leave
         // both labels at their raw (unstacked) y.
-        assert_ne!(text_ys[0], text_ys[1],
-            "stacked labels within the same x-category must land at different y; got {text_ys:?}");
+        assert_ne!(
+            text_ys[0], text_ys[1],
+            "stacked labels within the same x-category must land at different y; got {text_ys:?}"
+        );
 
         // The real assertion: each label tracks its own bar segment's
         // stacked (cumulative-top) position.
@@ -5473,18 +5815,34 @@ mod tests {
     /// `mark_text(fill='#ff0000') + mark_bar()` rendered red bars.
     #[test]
     fn layered_text_fill_hoisted_does_not_leak_into_bar_color() {
-        let (spec, batch) = bar_text_layered_spec(None, Some("#ff0000"), None, None, None, Some("#ff0000"));
+        let (spec, batch) =
+            bar_text_layered_spec(None, Some("#ff0000"), None, None, None, Some("#ff0000"));
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
-        let bar_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0].nodes.iter().filter_map(|n| {
-            if let SceneNode::Rect { style, .. } = n { Some(style.fill) } else { None }
-        }).collect();
+        let bar_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Rect { style, .. } = n {
+                    Some(style.fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(bar_fills.len(), 2, "expected 2 bars");
         let mark_color = to_scene_color(ThemeInputs::default().colors.mark_color);
-        assert!(bar_fills.iter().all(|c| *c == Some(mark_color)),
-            "bars must render the theme default fill; expected {mark_color:?}, got {bar_fills:?}");
-        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
+        assert!(
+            bar_fills.iter().all(|c| *c == Some(mark_color)),
+            "bars must render the theme default fill; expected {mark_color:?}, got {bar_fills:?}"
+        );
+        let red = ferrum_scene::Color {
+            r: 0xff,
+            g: 0x00,
+            b: 0x00,
+            a: 255,
+        };
         assert!(bar_fills.iter().all(|c| *c != Some(red)),
             "the text layer's hoisted fill must not leak into the bar layer's color; got {bar_fills:?}");
     }
@@ -5509,11 +5867,20 @@ mod tests {
         use std::sync::Arc;
 
         let fill_style = |hex: Option<&str>| {
-            hex.map(|h| MarkKwargsSpec { fill: Some(h.into()), ..Default::default() })
+            hex.map(|h| MarkKwargsSpec {
+                fill: Some(h.into()),
+                ..Default::default()
+            })
         };
         let xy_encoding = || Encoding {
-            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let bar_layer = Layer {
@@ -5521,14 +5888,24 @@ mod tests {
             encoding: xy_encoding(),
             transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: xy_encoding(),
             transforms: Vec::new(),
             mark_style: fill_style(point_fill),
-            data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5552,10 +5929,14 @@ mod tests {
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
@@ -5571,14 +5952,27 @@ mod tests {
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
-        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1].nodes.iter().filter_map(|n| {
-            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
-        }).collect();
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Circle { style, .. } = n {
+                    Some(style.fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(point_fills.len(), 2, "expected 2 points");
         let mark_color = to_scene_color(ThemeInputs::default().colors.mark_color);
         assert!(point_fills.iter().all(|c| *c == Some(mark_color)),
             "points must render the theme default fill; expected {mark_color:?}, got {point_fills:?}");
-        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
+        let green = ferrum_scene::Color {
+            r: 0x00,
+            g: 0xaa,
+            b: 0x00,
+            a: 255,
+        };
         assert!(point_fills.iter().all(|c| *c != Some(green)),
             "the bar layer's hoisted fill must not leak into the point layer's color; got {point_fills:?}");
     }
@@ -5591,14 +5985,28 @@ mod tests {
     /// blue, not the bar's green and not a paint-stripped fallback.
     #[test]
     fn layered_point_own_fill_wins_over_hoisted_bar_fill() {
-        let (spec, batch) = bar_point_layered_spec(Some("#00aa00"), Some("#0000ff"), Some("#00aa00"));
+        let (spec, batch) =
+            bar_point_layered_spec(Some("#00aa00"), Some("#0000ff"), Some("#00aa00"));
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1].nodes.iter().filter_map(|n| {
-            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
-        }).collect();
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Circle { style, .. } = n {
+                    Some(style.fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(point_fills.len(), 2);
-        let blue = ferrum_scene::Color { r: 0x00, g: 0x00, b: 0xff, a: 255 };
+        let blue = ferrum_scene::Color {
+            r: 0x00,
+            g: 0x00,
+            b: 0xff,
+            a: 255,
+        };
         assert!(point_fills.iter().all(|c| *c == Some(blue)),
             "the point layer's own fill must win over the hoisted chart-level fallback; got {point_fills:?}");
     }
@@ -5621,32 +6029,66 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None,
-            mark_style: Some(MarkKwargsSpec { fill: Some("#ff00ff".into()), ..Default::default() }),
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(MarkKwargsSpec {
+                fill: Some("#ff00ff".into()),
+                ..Default::default()
+            }),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-            Arc::new(Float64Array::from(vec![0.0, 1.0])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
 
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0].nodes.iter().filter_map(|n| {
-            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
-        }).collect();
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0]
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Circle { style, .. } = n {
+                    Some(style.fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(point_fills.len(), 2);
-        let magenta = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0xff, a: 255 };
+        let magenta = ferrum_scene::Color {
+            r: 0xff,
+            g: 0x00,
+            b: 0xff,
+            a: 255,
+        };
         assert!(point_fills.iter().all(|c| *c == Some(magenta)),
             "a flat chart's own mark_style.fill must render unaffected by the layered-only scope extension; got {point_fills:?}");
     }
@@ -5809,9 +6251,18 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
-                key: Some(EncodingSpec { field: "k".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
+                key: Some(EncodingSpec {
+                    field: "k".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -5848,7 +6299,10 @@ mod tests {
         // proves `extract_keys` ran on this real pipeline, not that the
         // packer merely no-ops on an absent/empty vector.
         assert_eq!(
-            scene.panels[0].marks[0].keys.as_deref().map(<[String]>::len),
+            scene.panels[0].marks[0]
+                .keys
+                .as_deref()
+                .map(<[String]>::len),
             Some(n),
             "build_scene must populate MarkBatch.keys for a >=1000-row key=-encoded batch \
              before packing runs"
@@ -5919,7 +6373,11 @@ mod tests {
             );
             cursor += len;
         }
-        assert_eq!(cursor, packed.len(), "no trailing bytes after the keys section");
+        assert_eq!(
+            cursor,
+            packed.len(),
+            "no trailing bytes after the keys section"
+        );
         decoded
     }
 
@@ -5945,9 +6403,18 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
-                key: Some(EncodingSpec { field: key_field_name.into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
+                key: Some(EncodingSpec {
+                    field: key_field_name.into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6006,7 +6473,8 @@ mod tests {
         assert_eq!(pre_pack_keys.len(), n);
         let pre_pack_unique: HashSet<&String> = pre_pack_keys.iter().collect();
         assert_eq!(
-            pre_pack_unique.len(), n,
+            pre_pack_unique.len(),
+            n,
             "1200 distinct six-digit ids must produce 1200 distinct keys, not 2 \
              (the format_numeric aliasing this fixture targets — see extract_keys's doc)"
         );
@@ -6029,7 +6497,8 @@ mod tests {
         );
         let packed_unique: HashSet<&String> = decoded.iter().collect();
         assert_eq!(
-            packed_unique.len(), n,
+            packed_unique.len(),
+            n,
             "packed keys must stay injective: 1200 rows -> 1200 unique keys"
         );
     }
@@ -6066,7 +6535,8 @@ mod tests {
         );
         let unique: HashSet<&String> = keys.iter().collect();
         assert_eq!(
-            unique.len(), n,
+            unique.len(),
+            n,
             "distinct i64 ids past 2^53 must produce distinct keys, not collapse to one"
         );
     }
@@ -6081,9 +6551,9 @@ mod tests {
     /// same-instant-only equality check would miss.
     #[test]
     fn extract_keys_coerces_realistic_2026_timestamp_key_column_injectively() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::TimestampMillisecondArray;
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use crate::spec::encoding::{Encoding, EncodingSpec};
         use std::collections::HashSet;
         use std::sync::Arc;
 
@@ -6101,7 +6571,10 @@ mod tests {
         )
         .unwrap();
         let encoding = Encoding {
-            key: Some(EncodingSpec { field: "t".into(), ..Default::default() }),
+            key: Some(EncodingSpec {
+                field: "t".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let data_indices: Vec<usize> = (0..n).collect();
@@ -6115,7 +6588,8 @@ mod tests {
         );
         let unique: HashSet<&String> = keys.iter().collect();
         assert_eq!(
-            unique.len(), n,
+            unique.len(),
+            n,
             "50 distinct present-day timestamps must produce 50 distinct keys, not 1"
         );
     }
@@ -6152,7 +6626,10 @@ mod tests {
 
         let epochs: Vec<i64> = vec![1_767_225_600_000, 1_767_225_601_000];
         let encoding = Encoding {
-            key: Some(EncodingSpec { field: "t".into(), ..Default::default() }),
+            key: Some(EncodingSpec {
+                field: "t".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let idx = [0usize, 1];
@@ -6176,7 +6653,10 @@ mod tests {
         let ts_keys = extract_keys(&encoding, &ts_batch, Some(&idx));
         assert_eq!(
             ts_keys,
-            Some(vec!["1767225600000".to_string(), "1767225601000".to_string()])
+            Some(vec![
+                "1767225600000".to_string(),
+                "1767225601000".to_string()
+            ])
         );
 
         // Fact 1: retyping the same epochs to Float64 does not move the keys.
@@ -6206,19 +6686,26 @@ mod tests {
     /// covers it, closing that gap as a side effect.
     #[test]
     fn extract_keys_coerces_boolean_key_column_instead_of_silently_dropping() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::BooleanArray;
         use arrow::datatypes::{DataType, Field, Schema};
-        use crate::spec::encoding::{Encoding, EncodingSpec};
         use std::sync::Arc;
 
-        let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "flag",
+            DataType::Boolean,
+            false,
+        )]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
         )
         .unwrap();
         let encoding = Encoding {
-            key: Some(EncodingSpec { field: "flag".into(), ..Default::default() }),
+            key: Some(EncodingSpec {
+                field: "flag".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let data_indices = [0usize, 1, 2];
@@ -6226,7 +6713,11 @@ mod tests {
         let keys = extract_keys(&encoding, &batch, Some(&data_indices));
         assert_eq!(
             keys,
-            Some(vec!["true".to_string(), "false".to_string(), "true".to_string()]),
+            Some(vec![
+                "true".to_string(),
+                "false".to_string(),
+                "true".to_string()
+            ]),
             "a Boolean key= column must coerce to true/false strings, not silently drop"
         );
     }
@@ -6237,7 +6728,10 @@ mod tests {
             spec,
             batch,
             &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6483,8 +6977,8 @@ mod tests {
             vec!["0".into(), "5".into(), "10".into()],
             None,
         );
-        primary_input.overrides.show_domain = Some(true);
-        primary_input.overrides.show_grid = Some(true);
+        primary_input.overrides.domain.show = Some(true);
+        primary_input.overrides.grid.show = Some(true);
         let (primary_y, _warn) = crate::layout::axis::layout_y_axis(
             &primary_input,
             panel.plot_area,
@@ -6510,8 +7004,8 @@ mod tests {
             ],
             None,
         );
-        secondary_input.overrides.show_grid = Some(true); // deliberately try to leak into the grid
-        secondary_input.overrides.show_domain = Some(true);
+        secondary_input.overrides.grid.show = Some(true); // deliberately try to leak into the grid
+        secondary_input.overrides.domain.show = Some(true);
         let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
             &secondary_input,
             panel.plot_area,
@@ -7201,7 +7695,10 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -7236,7 +7733,10 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -7338,7 +7838,10 @@ mod tests {
             &flipped_spec,
             &batch,
             &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -7356,7 +7859,10 @@ mod tests {
             &unflipped_spec,
             &batch,
             &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -7388,10 +7894,22 @@ mod tests {
     ) -> crate::spec::encoding::Encoding {
         use crate::spec::encoding::EncodingSpec;
         crate::spec::encoding::Encoding {
-            x: x.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
-            y: y.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
-            x2: x2.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
-            y2: y2.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+            x: x.map(|f| EncodingSpec {
+                field: f.into(),
+                ..Default::default()
+            }),
+            y: y.map(|f| EncodingSpec {
+                field: f.into(),
+                ..Default::default()
+            }),
+            x2: x2.map(|f| EncodingSpec {
+                field: f.into(),
+                ..Default::default()
+            }),
+            y2: y2.map(|f| EncodingSpec {
+                field: f.into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -7418,7 +7936,11 @@ mod tests {
         let nothing_bound = rule_encoding(None, None, None, None);
         let err2 = validate_mark_encoding(&Mark::Rule, &nothing_bound, false)
             .expect_err("no positional channel at all must be rejected for mark_rule");
-        assert_eq!(format!("{err2}"), format!("{err}"), "both invalid shapes share one message");
+        assert_eq!(
+            format!("{err2}"),
+            format!("{err}"),
+            "both invalid shapes share one message"
+        );
     }
 
     // ── Batch-A Task 13 spec c3: a rule layer's span axis is its OWN ────────
@@ -7449,18 +7971,33 @@ mod tests {
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "shap_value".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "feature".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "shap_value".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "feature".into(),
+                    type_: Some(SDT::Ordinal),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: Some("point".into()),
-            independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("point".into()),
+            independent_y: false,
+            coord: None,
         };
         let reference_layer = Layer {
             mark: Mark::Rule,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "_ref_zero".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "_ref_zero".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -7469,23 +8006,41 @@ mod tests {
                 stroke_dash: Some(vec![4.0, 4.0]),
                 ..Default::default()
             }),
-            data_source: None, position: None, blend: None, name: Some("reference".into()),
-            independent_y: false, coord: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("reference".into()),
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "shap_value".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "feature".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "shap_value".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "feature".into(),
+                    type_: Some(SDT::Ordinal),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(),
+            facet: None,
             layers: Some(vec![point_layer, reference_layer]),
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
 
         let features = ["f0", "f0", "f1", "f1"];
@@ -7497,20 +8052,28 @@ mod tests {
             Field::new("feature", DataType::Utf8, false),
             Field::new("_ref_zero", DataType::Float64, true),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(shap)),
-            Arc::new(StringArray::from(features.to_vec())),
-            Arc::new(ref_zero),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(shap)),
+                Arc::new(StringArray::from(features.to_vec())),
+                Arc::new(ref_zero),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
     /// Every `SceneNode::Line`'s endpoints in one mark batch, in emission order.
     fn line_endpoints(batch: &ferrum_scene::MarkBatch) -> Vec<(f64, f64, f64, f64)> {
-        batch.nodes.iter().filter_map(|n| match n {
-            SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
-            _ => None,
-        }).collect()
+        batch
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The cycle-3 regression, pinned: a rule layer that declares only `x`
@@ -7533,10 +8096,16 @@ mod tests {
         let (spec, batch) = beeswarm_shaped_zero_line_spec();
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let rule_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+        let rule_batches: Vec<&ferrum_scene::MarkBatch> = panel
+            .marks
+            .iter()
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
             .collect();
-        assert_eq!(rule_batches.len(), 1, "expected exactly one rule mark batch (the reference layer)");
+        assert_eq!(
+            rule_batches.len(),
+            1,
+            "expected exactly one rule mark batch (the reference layer)"
+        );
 
         let lines = line_endpoints(rule_batches[0]);
         assert_eq!(lines.len(), 1,
@@ -7544,13 +8113,25 @@ mod tests {
              got {} — more than one means the inherited ordinal y drove the geometry",
             lines.len());
         let (x1, y1, x2, y2) = lines[0];
-        assert_eq!(x1, x2, "a vertical zero line must keep one x for both endpoints; got x1={x1}, x2={x2}");
-        assert_ne!(y1, y2, "a vertical zero line must span the panel height, not collapse");
+        assert_eq!(
+            x1, x2,
+            "a vertical zero line must keep one x for both endpoints; got x1={x1}, x2={x2}"
+        );
+        assert_ne!(
+            y1, y2,
+            "a vertical zero line must span the panel height, not collapse"
+        );
         let plot = panel.plot_area;
-        assert!((y1 - plot.y).abs() < 1e-9 && (y2 - (plot.y + plot.h)).abs() < 1e-9,
-            "the span must run the full panel height ({}..{}); got {y1}..{y2}", plot.y, plot.y + plot.h);
-        assert!(x1 > plot.x && x1 < plot.x + plot.w,
-            "the line must sit inside the panel at the x=0 position; got x={x1} for plot {plot:?}");
+        assert!(
+            (y1 - plot.y).abs() < 1e-9 && (y2 - (plot.y + plot.h)).abs() < 1e-9,
+            "the span must run the full panel height ({}..{}); got {y1}..{y2}",
+            plot.y,
+            plot.y + plot.h
+        );
+        assert!(
+            x1 > plot.x && x1 < plot.x + plot.w,
+            "the line must sit inside the panel at the x=0 position; got x={x1} for plot {plot:?}"
+        );
     }
 
     /// The mirror, and the negative control for the normalization's direction:
@@ -7578,16 +8159,29 @@ mod tests {
 
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let rule_batch = panel.marks.iter()
+        let rule_batch = panel
+            .marks
+            .iter()
             .find(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
             .expect("the reference layer must emit a rule batch");
         let lines = line_endpoints(rule_batch);
-        assert_eq!(lines.len(), 1, "one non-null anchor row → one horizontal span");
+        assert_eq!(
+            lines.len(),
+            1,
+            "one non-null anchor row → one horizontal span"
+        );
         let (x1, y1, x2, y2) = lines[0];
-        assert_eq!(y1, y2, "a horizontal span must keep one y for both endpoints");
+        assert_eq!(
+            y1, y2,
+            "a horizontal span must keep one y for both endpoints"
+        );
         let plot = panel.plot_area;
-        assert!((x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
-            "the span must run the full panel width ({}..{}); got {x1}..{x2}", plot.x, plot.x + plot.w);
+        assert!(
+            (x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
+            "the span must run the full panel width ({}..{}); got {x1}..{x2}",
+            plot.x,
+            plot.x + plot.w
+        );
     }
 
     // ── Batch-E task-3, cycle 3 (quality-review gate): tick's own-span-axis
@@ -7632,49 +8226,87 @@ mod tests {
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "b".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), mark_style: None,
-            data_source: None, position: None, blend: None, name: Some("scatter".into()),
-            independent_y: false, coord: None,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("scatter".into()),
+            independent_y: false,
+            coord: None,
         };
         let tick_layer = Layer {
             mark: Mark::Tick,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
-            mark_style: Some(MarkKwargsSpec { band_size: Some(band_size), ..Default::default() }),
-            data_source: None, position: None, blend: None, name: Some("rug".into()),
-            independent_y: false, coord: None,
+            mark_style: Some(MarkKwargsSpec {
+                band_size: Some(band_size),
+                ..Default::default()
+            }),
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some("rug".into()),
+            independent_y: false,
+            coord: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "b".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(),
+            facet: None,
             layers: Some(vec![point_layer, tick_layer]),
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Float64, false),
             Field::new("b", DataType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![10.0_f64, 90.0])),
-            Arc::new(Float64Array::from(vec![1.0_f64, 5.0])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0_f64, 90.0])),
+                Arc::new(Float64Array::from(vec![1.0_f64, 5.0])),
+            ],
+        )
+        .unwrap();
         (spec, batch)
     }
 
@@ -7694,7 +8326,9 @@ mod tests {
         let (spec, batch) = layered_rug_tick_spec(0.5);
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let tick_batch = panel.marks.iter()
+        let tick_batch = panel
+            .marks
+            .iter()
             .find(|m| m.kind == ferrum_scene::MarkBatchKind::Tick)
             .expect("the rug layer must emit a tick mark batch");
         let lines = line_endpoints(tick_batch);
@@ -7703,18 +8337,25 @@ mod tests {
         let plot = panel.plot_area;
         let expected_len = 0.5 * plot.h;
         let fixed_len = ThemeInputs::default().sizes.tick_size * 2.0;
-        assert!((expected_len - fixed_len).abs() > 1.0,
+        assert!(
+            (expected_len - fixed_len).abs() > 1.0,
             "fixture sanity: band_size-scaled length must be measurably different \
-             from the fixed length, or this test cannot discriminate the bug");
+             from the fixed length, or this test cannot discriminate the bug"
+        );
 
         for (x1, y1, x2, y2) in &lines {
-            assert_eq!(x1, x2, "a rug tick under a chart-level x/y merge must stay vertical (x-rug)");
+            assert_eq!(
+                x1, x2,
+                "a rug tick under a chart-level x/y merge must stay vertical (x-rug)"
+            );
             let len = (y1 - y2).abs();
-            assert!((len - expected_len).abs() < 1e-6,
+            assert!(
+                (len - expected_len).abs() < 1e-6,
                 "a tick layer declaring only its own x must honor band_size (0.5 * panel.h = \
                  {expected_len}) even though the merged encoding inherits a y from its sibling \
                  layer; got length {len} (fixed tick_size*2.0 = {fixed_len} would mean the \
-                 own-span-axis normalization did not reach Mark::Tick)");
+                 own-span-axis normalization did not reach Mark::Tick)"
+            );
         }
     }
 
@@ -7736,7 +8377,9 @@ mod tests {
         }
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
-        let tick_batch = panel.marks.iter()
+        let tick_batch = panel
+            .marks
+            .iter()
             .find(|m| m.kind == ferrum_scene::MarkBatchKind::Tick)
             .expect("the tick layer must emit a tick mark batch");
         let lines = line_endpoints(tick_batch);
@@ -7745,10 +8388,12 @@ mod tests {
         let fixed_len = ThemeInputs::default().sizes.tick_size * 2.0;
         for (_, y1, _, y2) in &lines {
             let len = (y1 - y2).abs();
-            assert_eq!(len, fixed_len,
+            assert_eq!(
+                len, fixed_len,
                 "a tick layer declaring its OWN x AND y must keep the fixed tick_size*2.0 \
                  length regardless of band_size, even when layered alongside a sibling — \
-                 this is the boxplot/errorbar composite-tick shape, unaffected by the rug fix");
+                 this is the boxplot/errorbar composite-tick shape, unaffected by the rug fix"
+            );
         }
     }
 
@@ -7795,8 +8440,11 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
         let schema = Arc::new(Schema::new(vec![Field::new("z", DataType::Float64, false)]));
-        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))])
-            .unwrap()
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))],
+        )
+        .unwrap()
     }
 
     /// FLAT path (`LayerPrepared::from_chart_only`): a coord-flipped rule that
@@ -7827,7 +8475,10 @@ mod tests {
             "one horizontal span per row of `z`; got {flipped:?}"
         );
         for (x1, y1, x2, y2) in &flipped {
-            assert_eq!(y1, y2, "a flipped `x=` span is HORIZONTAL; got {x1},{y1} → {x2},{y2}");
+            assert_eq!(
+                y1, y2,
+                "a flipped `x=` span is HORIZONTAL; got {x1},{y1} → {x2},{y2}"
+            );
         }
         assert_eq!(
             flipped, unflipped,
@@ -7889,7 +8540,10 @@ mod tests {
             flipped.len()
         );
         let (x1, y1, x2, y2) = flipped[0];
-        assert_eq!(y1, y2, "under flip the layer's own channel spans HORIZONTALLY");
+        assert_eq!(
+            y1, y2,
+            "under flip the layer's own channel spans HORIZONTALLY"
+        );
         let plot = flipped_scene.panels[0].plot_area;
         assert!(
             (x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
@@ -7905,10 +8559,17 @@ mod tests {
 
         let unflipped_scene = build_scene_for(&unflipped_spec, &batch);
         let unflipped = rule_lines(&unflipped_scene);
-        assert_eq!(unflipped.len(), 1, "the mirror draws one line too; got {unflipped:?}");
+        assert_eq!(
+            unflipped.len(),
+            1,
+            "the mirror draws one line too; got {unflipped:?}"
+        );
         let (ux1, uy1, ux2, uy2) = unflipped[0];
         let uplot = unflipped_scene.panels[0].plot_area;
-        assert_eq!(ux1, ux2, "unflipped, that same own channel spans VERTICALLY");
+        assert_eq!(
+            ux1, ux2,
+            "unflipped, that same own channel spans VERTICALLY"
+        );
         assert!(
             (uy1 - uplot.y).abs() < 1e-9 && (uy2 - (uplot.y + uplot.h)).abs() < 1e-9,
             "the mirror span must run the full panel height; got {uy1}..{uy2}"
@@ -7954,8 +8615,8 @@ mod tests {
     #[test]
     fn validate_mark_encoding_rule_accepts_all_five_supported_shapes() {
         let shapes = [
-            rule_encoding(None, Some("y"), None, None),          // horizontal span
-            rule_encoding(Some("x"), None, None, None),          // vertical span
+            rule_encoding(None, Some("y"), None, None), // horizontal span
+            rule_encoding(Some("x"), None, None, None), // vertical span
             rule_encoding(Some("x"), Some("y"), None, Some("y2")), // ordinal-x ranged
             rule_encoding(Some("x"), Some("y"), Some("x2"), None), // ordinal-y ranged
             rule_encoding(Some("x"), Some("y"), Some("x2"), Some("y2")), // diagonal
@@ -8058,7 +8719,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
         let layer1 = Layer {
             mark: Mark::Point,
@@ -8073,7 +8735,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
 
         let spec = ChartSpec {
@@ -8176,7 +8839,10 @@ mod tests {
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("layer 1"), "message must name the layer: {msg}");
+        assert!(
+            msg.contains("layer 1"),
+            "message must name the layer: {msg}"
+        );
         assert!(msg.contains("'y0'"), "message must name the column: {msg}");
     }
 
@@ -8250,8 +8916,8 @@ mod tests {
     fn inherited_absent_color_on_non_owning_layer_still_renders() {
         pyo3::Python::initialize();
         let (spec, batch) = layer_gate_binned_spec();
-        let with_color = try_build_scene_for(&spec, &batch)
-            .expect("an inherited absent color must not refuse");
+        let with_color =
+            try_build_scene_for(&spec, &batch).expect("an inherited absent color must not refuse");
 
         let mut without_color = spec.clone();
         without_color.encoding.color = None;
@@ -8321,8 +8987,15 @@ mod tests {
 
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         let scene = result.expect("a zero-row layer is skipped, not refused");
-        assert_eq!(panel_mark_batch_node_counts(&scene).len(), 1, "only layer 0 renders");
-        assert!(warnings.is_empty(), "a zero-row data_source layer must stay silent: {warnings:?}");
+        assert_eq!(
+            panel_mark_batch_node_counts(&scene).len(),
+            1,
+            "only layer 0 renders"
+        );
+        assert!(
+            warnings.is_empty(),
+            "a zero-row data_source layer must stay silent: {warnings:?}"
+        );
     }
 
     // ── Wave-1 close remediation (S3-1): provisional-pass vs. panel-real-pass
@@ -8335,11 +9008,11 @@ mod tests {
     /// twice, and an N-panel facet emitted it N+1 times. `optional_facet`
     /// controls whether `grp` (2 distinct values) drives a 2-panel facet.
     fn color_scheme_typo_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::Encoding;
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
-        use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::Encoding;
 
         let facet = faceted.then(|| crate::layout::FacetSpec {
             field: "grp".into(),
@@ -8354,8 +9027,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 color: Some(EncodingSpec {
                     field: "v".into(),
                     scheme: Some("not-a-real-scheme".into()),
@@ -8414,7 +9093,8 @@ mod tests {
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         result.expect("scene must build despite the unrecognized scheme");
         assert_eq!(
-            count_unknown_color_scheme(&warnings), 1,
+            count_unknown_color_scheme(&warnings),
+            1,
             "a flat chart must report an unrecognized scheme exactly once, not once per \
              resolution pass; got {warnings:?}"
         );
@@ -8432,7 +9112,8 @@ mod tests {
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         result.expect("scene must build despite the unrecognized scheme");
         assert_eq!(
-            count_unknown_color_scheme(&warnings), 2,
+            count_unknown_color_scheme(&warnings),
+            2,
             "a 2-panel facet must report an unrecognized scheme exactly once per panel \
              (2), not once per (provisional + panel) resolution pass (3); got {warnings:?}"
         );
@@ -8448,11 +9129,11 @@ mod tests {
     /// constructor (mirrors `scale_resolve::tests::sequential_stops_raw_dict_edges`'s
     /// construction).
     fn gradient_too_few_stops_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, ScaleSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
-        use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::{Encoding, ScaleSpec};
 
         let facet = faceted.then(|| crate::layout::FacetSpec {
             field: "grp".into(),
@@ -8467,8 +9148,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 color: Some(EncodingSpec {
                     field: "v".into(),
                     scale: Some(ScaleSpec::Sequential {
@@ -8531,7 +9218,8 @@ mod tests {
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         result.expect("scene must build despite the too-few-stops gradient");
         assert_eq!(
-            count_gradient_too_few_stops(&warnings), 1,
+            count_gradient_too_few_stops(&warnings),
+            1,
             "a flat chart must report a too-few-stops gradient exactly once, not once per \
              resolution pass; got {warnings:?}"
         );
@@ -8548,7 +9236,8 @@ mod tests {
         let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
         result.expect("scene must build despite the too-few-stops gradient");
         assert_eq!(
-            count_gradient_too_few_stops(&warnings), 2,
+            count_gradient_too_few_stops(&warnings),
+            2,
             "a 2-panel facet must report a too-few-stops gradient exactly once per panel \
              (2), not once per (provisional + panel) resolution pass (3); got {warnings:?}"
         );
@@ -8565,11 +9254,11 @@ mod tests {
     #[test]
     fn group_cardinality_degenerate_still_fans_out_once_per_facet_panel() {
         pyo3::Python::initialize();
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::Encoding;
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
-        use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::Encoding;
 
         let n_cats = 300;
         let cats: Vec<String> = (0..n_cats).map(|i| format!("c{i}")).collect();
@@ -8593,8 +9282,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "cat".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -8864,7 +9559,7 @@ mod tests {
     /// it into a per-panel break build and a chart-level inset build.
     struct StructuralOutput {
         extra_annotations: Vec<SceneNode>,
-        break_results: Vec<(String, break_axis::BreakResult)>,
+        break_results: Vec<(AlignAxis, break_axis::BreakResult)>,
     }
 
     /// The single-panel structural answer: the chart-level same-axis merge,
@@ -8883,18 +9578,28 @@ mod tests {
     ) -> StructuralOutput {
         let mut ledger = BreakWarningLedger::default();
         let merged = merge_break_specs(structural, &mut ledger);
-        let PanelBreaks { indicators, results } =
-            build_panel_breaks(&merged, scales, plot_area, theme, 0, &mut ledger);
+        let PanelBreaks {
+            indicators,
+            results,
+        } = build_panel_breaks(&merged, scales, plot_area, theme, 0, &mut ledger);
         ledger.flush(warnings);
         let mut extra_annotations = indicators;
         extra_annotations.extend(build_chart_insets(structural, scales, plot_area));
-        StructuralOutput { extra_annotations, break_results: results }
+        StructuralOutput {
+            extra_annotations,
+            break_results: results,
+        }
     }
 
     /// The plot rect these structural tests share: y runs 20 (top) to 320
     /// (bottom), x runs 20 to 320.
     fn structural_plot() -> crate::layout::Rect {
-        crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 }
+        crate::layout::Rect {
+            x: 20.0,
+            y: 20.0,
+            w: 300.0,
+            h: 300.0,
+        }
     }
 
     /// A `ResolvedScales` carrying just the two positional scales — the only
@@ -8928,9 +9633,9 @@ mod tests {
         ))
     }
 
-    fn break_spec(axis: &str, gaps: Vec<[f64; 2]>) -> StructuralSpec {
+    fn break_spec(axis: AlignAxis, gaps: Vec<[f64; 2]>) -> StructuralSpec {
         StructuralSpec::BreakAxis(super::super::chart_config::BreakAxisSpec {
-            axis: axis.to_string(),
+            axis,
             gaps,
             break_size: 12.0,
             break_style: "slash".to_string(),
@@ -8955,15 +9660,29 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "b".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -9016,20 +9735,26 @@ mod tests {
         let (mut spec, batch) = minimal_point_spec();
         spec.coord = Some(polar_coord());
         let chart_config =
-            chart_config_with_structural(vec![break_spec("y", vec![[20.0, 80.0]])]);
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[20.0, 80.0]])]);
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("polar + BreakAxis must refuse at the render funnel");
         match &err {
             RenderError::BreakAxisIncompatibleCoord { coord, axis } => {
                 assert_eq!(*coord, "Polar");
-                assert_eq!(axis, "y");
+                assert_eq!(*axis, AlignAxis::Y);
             }
             other => panic!("expected BreakAxisIncompatibleCoord, got {other:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("BreakAxis"), "message must name BreakAxis: {msg}");
+        assert!(
+            msg.contains("BreakAxis"),
+            "message must name BreakAxis: {msg}"
+        );
         assert!(msg.contains('y'), "message must name the axis token: {msg}");
-        assert!(msg.contains("Polar"), "message must name the polar coordinate: {msg}");
+        assert!(
+            msg.contains("Polar"),
+            "message must name the polar coordinate: {msg}"
+        );
     }
 
     /// A polar chart with no `BreakAxis` at all is untouched by this gate.
@@ -9047,7 +9772,8 @@ mod tests {
     #[test]
     fn cartesian_coord_with_break_axis_renders_normally() {
         let (spec, batch) = minimal_point_spec();
-        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[2.0, 4.0]])]);
+        let chart_config =
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[2.0, 4.0]])]);
         try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect("Cartesian + BreakAxis is the existing, unrefused combination");
     }
@@ -9066,19 +9792,26 @@ mod tests {
     fn geo_coord_with_break_axis_refuses_before_any_geometry_is_built() {
         let (mut spec, batch) = minimal_point_spec();
         spec.coord = Some(geo_coord());
-        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[2.0, 4.0]])]);
+        let chart_config =
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[2.0, 4.0]])]);
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("Geo + BreakAxis must refuse at the render funnel");
         match &err {
             RenderError::BreakAxisIncompatibleCoord { coord, axis } => {
                 assert_eq!(*coord, "Geo");
-                assert_eq!(axis, "y");
+                assert_eq!(*axis, AlignAxis::Y);
             }
             other => panic!("expected BreakAxisIncompatibleCoord, got {other:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("BreakAxis"), "message must name BreakAxis: {msg}");
-        assert!(msg.contains("Geo"), "message must name the geo coordinate: {msg}");
+        assert!(
+            msg.contains("BreakAxis"),
+            "message must name BreakAxis: {msg}"
+        );
+        assert!(
+            msg.contains("Geo"),
+            "message must name the geo coordinate: {msg}"
+        );
     }
 
     /// A geo chart with no `BreakAxis` at all is untouched by this gate.
@@ -9104,8 +9837,14 @@ mod tests {
         let layer = |coord| crate::spec::layer::Layer {
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "b".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -9128,25 +9867,31 @@ mod tests {
     /// with no diagnostic.
     #[test]
     fn a_panel_scoped_layer_coord_refuses_at_the_render_funnel() {
-        let (spec, batch) = two_layer_spec_with_secondary_coord(Some(
-            crate::spec::coord::CoordKind::Fixed {
+        let (spec, batch) =
+            two_layer_spec_with_secondary_coord(Some(crate::spec::coord::CoordKind::Fixed {
                 ratio: 1.0,
                 x_domain: None,
                 y_domain: None,
                 expand: true,
                 clip: true,
-            },
-        ));
+            }));
         let chart_config = super::super::chart_config::ChartConfig::default();
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a per-layer CoordFixed must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable { layer, coord, reason } => {
+            RenderError::LayerCoordUnplaceable {
+                layer,
+                coord,
+                reason,
+            } => {
                 assert_eq!(*layer, 1, "the offending layer is named by index");
                 assert_eq!(*coord, "fm.CoordFixed");
                 match &**reason {
                     crate::render::LayerCoordUnplaceableReason::PanelProperty(property) => {
-                        assert!(property.contains("aspect ratio"), "property was {property:?}");
+                        assert!(
+                            property.contains("aspect ratio"),
+                            "property was {property:?}"
+                        );
                     }
                     other => panic!("expected the panel-property reason, got {other:?}"),
                 }
@@ -9154,8 +9899,14 @@ mod tests {
             other => panic!("expected LayerCoordUnplaceable, got {other:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("layer 1"), "message must name the layer: {msg}");
-        assert!(msg.contains("fm.CoordFixed"), "message must name the coord: {msg}");
+        assert!(
+            msg.contains("layer 1"),
+            "message must name the layer: {msg}"
+        );
+        assert!(
+            msg.contains("fm.CoordFixed"),
+            "message must name the coord: {msg}"
+        );
     }
 
     /// The other arm, and the control for the test above: a coord that declares
@@ -9165,8 +9916,10 @@ mod tests {
     #[test]
     fn a_placement_only_layer_coord_renders() {
         let chart_config = super::super::chart_config::ChartConfig::default();
-        for coord in [crate::spec::coord::CoordKind::Flip, crate::spec::coord::CoordKind::default()]
-        {
+        for coord in [
+            crate::spec::coord::CoordKind::Flip,
+            crate::spec::coord::CoordKind::default(),
+        ] {
             let (spec, batch) = two_layer_spec_with_secondary_coord(Some(coord.clone()));
             try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
                 .unwrap_or_else(|e| panic!("{coord:?} places marks and must render; got {e}"));
@@ -9195,8 +9948,17 @@ mod tests {
                 ..Default::default()
             })
         };
-        let val = || Some(EncodingSpec { field: "v".into(), ..Default::default() });
-        let encoding = || Encoding { x: cat(), y: val(), ..Default::default() };
+        let val = || {
+            Some(EncodingSpec {
+                field: "v".into(),
+                ..Default::default()
+            })
+        };
+        let encoding = || Encoding {
+            x: cat(),
+            y: val(),
+            ..Default::default()
+        };
         let layer = |coord| crate::spec::layer::Layer {
             mark: Mark::Point,
             encoding: encoding(),
@@ -9215,7 +9977,10 @@ mod tests {
             encoding: encoding(),
             transforms: Vec::new(),
             facet: None,
-            layers: Some(vec![layer(None), layer(Some(crate::spec::coord::CoordKind::Flip))]),
+            layers: Some(vec![
+                layer(None),
+                layer(Some(crate::spec::coord::CoordKind::Flip)),
+            ]),
             coord: None,
             mark_style: None,
             position: None,
@@ -9238,7 +10003,10 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1_i64, 2])),
             )
         };
-        let schema = Arc::new(Schema::new(vec![cat_field, Field::new("v", DataType::Float64, false)]));
+        let schema = Arc::new(Schema::new(vec![
+            cat_field,
+            Field::new("v", DataType::Float64, false),
+        ]));
         let batch = RecordBatch::try_new(
             schema,
             vec![cat_col, Arc::new(Float64Array::from(vec![1.0_f64, 5.0]))],
@@ -9264,7 +10032,11 @@ mod tests {
         let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect_err("a flipped member whose y is categorical must refuse");
         match &err {
-            RenderError::LayerCoordUnplaceable { layer, coord, reason } => {
+            RenderError::LayerCoordUnplaceable {
+                layer,
+                coord,
+                reason,
+            } => {
                 assert_eq!(*layer, 1, "the offending layer is named by index");
                 assert_eq!(*coord, "fm.CoordFlip");
                 match &**reason {
@@ -9355,12 +10127,13 @@ mod tests {
                 false,
             )),
         );
-        let warnings = structural_warnings(&[break_spec("y", vec![[20.0, 200.0]])], &scales);
+        let warnings =
+            structural_warnings(&[break_spec(AlignAxis::Y, vec![[20.0, 200.0]])], &scales);
         let named: Vec<_> = warnings
             .iter()
             .filter_map(|w| match w {
                 RenderWarning::BreakAxisOnNonlinearScale { axis, scale_kind } => {
-                    Some((axis.as_str(), scale_kind.as_str()))
+                    Some((axis.wire_name(), scale_kind.as_str()))
                 }
                 _ => None,
             })
@@ -9376,8 +10149,12 @@ mod tests {
             linear_scale([0.0, 100.0], [20.0, 320.0]),
             linear_scale([0.0, 1000.0], [320.0, 20.0]),
         );
-        let warnings = structural_warnings(&[break_spec("y", vec![[150.0, 850.0]])], &scales);
-        assert!(warnings.is_empty(), "a well-formed linear break says nothing: {warnings:?}");
+        let warnings =
+            structural_warnings(&[break_spec(AlignAxis::Y, vec![[150.0, 850.0]])], &scales);
+        assert!(
+            warnings.is_empty(),
+            "a well-formed linear break says nothing: {warnings:?}"
+        );
     }
 
     /// Gaps outside the axis domain leave the chart identical to one with no
@@ -9397,7 +10174,7 @@ mod tests {
         );
         let mut warnings = Vec::new();
         let out = build_structural_nodes(
-            &[break_spec("y", vec![[150.0, 850.0]])],
+            &[break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
             &scales,
             &structural_plot(),
             &ThemeInputs::default(),
@@ -9416,7 +10193,7 @@ mod tests {
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         match &warnings[0] {
             RenderWarning::BreakAxisIneffective { axis, reason } => {
-                assert_eq!(axis, "y");
+                assert_eq!(*axis, AlignAxis::Y);
                 assert!(reason.contains("domain"), "{reason}");
                 assert!(reason.contains("100"), "the domain is named: {reason}");
             }
@@ -9425,13 +10202,13 @@ mod tests {
     }
 
     fn break_spec_styled(
-        axis: &str,
+        axis: AlignAxis,
         gaps: Vec<[f64; 2]>,
         break_size: f64,
         break_style: &str,
     ) -> StructuralSpec {
         StructuralSpec::BreakAxis(super::super::chart_config::BreakAxisSpec {
-            axis: axis.to_string(),
+            axis,
             gaps,
             break_size,
             break_style: break_style.to_string(),
@@ -9449,8 +10226,8 @@ mod tests {
             linear_scale([0.0, 1000.0], [320.0, 20.0]),
         );
         let two_specs = [
-            break_spec("y", vec![[150.0, 400.0]]),
-            break_spec("y", vec![[500.0, 850.0]]),
+            break_spec(AlignAxis::Y, vec![[150.0, 400.0]]),
+            break_spec(AlignAxis::Y, vec![[500.0, 850.0]]),
         ];
         let mut two_warnings = Vec::new();
         let two_out = build_structural_nodes(
@@ -9465,10 +10242,17 @@ mod tests {
             1,
             "same-axis specs must merge into exactly one break_results entry; \
              got {:?}",
-            two_out.break_results.iter().map(|(a, _)| a).collect::<Vec<_>>()
+            two_out
+                .break_results
+                .iter()
+                .map(|(a, _)| a)
+                .collect::<Vec<_>>()
         );
 
-        let one_spec = [break_spec("y", vec![[150.0, 400.0], [500.0, 850.0]])];
+        let one_spec = [break_spec(
+            AlignAxis::Y,
+            vec![[150.0, 400.0], [500.0, 850.0]],
+        )];
         let mut one_warnings = Vec::new();
         let one_out = build_structural_nodes(
             &one_spec,
@@ -9499,7 +10283,10 @@ mod tests {
             "merged same-axis specs must draw the same indicator positions as \
              one spec with the union of gaps"
         );
-        assert!(two_warnings.is_empty(), "a non-conflicting merge is silent: {two_warnings:?}");
+        assert!(
+            two_warnings.is_empty(),
+            "a non-conflicting merge is silent: {two_warnings:?}"
+        );
     }
 
     /// Cadence pin (spec-review cycle-2 finding, #230-4): the same-axis
@@ -9514,8 +10301,8 @@ mod tests {
             linear_scale([0.0, 100.0], [320.0, 20.0]),
         );
         let specs = [
-            break_spec("y", vec![[150.0, 200.0]]),
-            break_spec("y", vec![[300.0, 850.0]]),
+            break_spec(AlignAxis::Y, vec![[150.0, 200.0]]),
+            break_spec(AlignAxis::Y, vec![[300.0, 850.0]]),
         ];
         let warnings = structural_warnings(&specs, &scales);
         assert_eq!(
@@ -9545,7 +10332,10 @@ mod tests {
                 DiscreteLayout::UNPADDED,
             ));
         let scales = positional_scales(ordinal, linear_scale([0.0, 1000.0], [320.0, 20.0]));
-        let specs = [break_spec("x", vec![[0.2, 0.4]]), break_spec("x", vec![[0.5, 0.6]])];
+        let specs = [
+            break_spec(AlignAxis::X, vec![[0.2, 0.4]]),
+            break_spec(AlignAxis::X, vec![[0.5, 0.6]]),
+        ];
         let warnings = structural_warnings(&specs, &scales);
         assert_eq!(
             warnings.len(),
@@ -9570,15 +10360,15 @@ mod tests {
             linear_scale([0.0, 1000.0], [320.0, 20.0]),
         );
         let specs = [
-            break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "gap"),
-            break_spec_styled("y", vec![[500.0, 850.0]], 12.0, "slash"),
+            break_spec_styled(AlignAxis::Y, vec![[150.0, 400.0]], 12.0, "gap"),
+            break_spec_styled(AlignAxis::Y, vec![[500.0, 850.0]], 12.0, "slash"),
         ];
         let warnings = structural_warnings(&specs, &scales);
         let conflicts: Vec<_> = warnings
             .iter()
             .filter_map(|w| match w {
                 RenderWarning::BreakAxisMergeConflict { axis, field } => {
-                    Some((axis.as_str(), field.as_str()))
+                    Some((axis.wire_name(), field.as_str()))
                 }
                 _ => None,
             })
@@ -9617,8 +10407,8 @@ mod tests {
             linear_scale([0.0, 1000.0], [320.0, 20.0]),
         );
         let specs = [
-            break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "slash"),
-            break_spec_styled("y", vec![[500.0, 850.0]], 40.0, "slash"),
+            break_spec_styled(AlignAxis::Y, vec![[150.0, 400.0]], 12.0, "slash"),
+            break_spec_styled(AlignAxis::Y, vec![[500.0, 850.0]], 40.0, "slash"),
         ];
         let mut warnings = Vec::new();
         let out = build_structural_nodes(
@@ -9632,7 +10422,7 @@ mod tests {
             .iter()
             .filter_map(|w| match w {
                 RenderWarning::BreakAxisMergeConflict { axis, field } => {
-                    Some((axis.as_str(), field.as_str()))
+                    Some((axis.wire_name(), field.as_str()))
                 }
                 _ => None,
             })
@@ -9640,7 +10430,7 @@ mod tests {
         assert_eq!(conflicts, vec![("y", "break_size")], "got {warnings:?}");
 
         let one_spec = [break_spec_styled(
-            "y",
+            AlignAxis::Y,
             vec![[150.0, 400.0], [500.0, 850.0]],
             12.0,
             "slash",
@@ -9695,7 +10485,7 @@ mod tests {
             let scales = positional_scales(ordinal(), linear_scale([0.0, 1000.0], [320.0, 20.0]));
             let mut warnings = Vec::new();
             let out = build_structural_nodes(
-                &[break_spec("x", gaps.clone())],
+                &[break_spec(AlignAxis::X, gaps.clone())],
                 &scales,
                 &structural_plot(),
                 &ThemeInputs::default(),
@@ -9714,7 +10504,7 @@ mod tests {
             assert_eq!(warnings.len(), 1, "gaps {gaps:?}: got {warnings:?}");
             match &warnings[0] {
                 RenderWarning::BreakAxisIneffective { axis, reason } => {
-                    assert_eq!(axis, "x");
+                    assert_eq!(*axis, AlignAxis::X);
                     assert!(reason.contains("ordinal"), "{reason}");
                 }
                 other => panic!("expected BreakAxisIneffective, got {other:?}"),
@@ -9737,8 +10527,13 @@ mod tests {
                 false,
             )),
         );
-        let warnings = structural_warnings(&[break_spec("y", vec![[5000.0, 9000.0]])], &scales);
-        assert_eq!(warnings.len(), 1, "one declaration, one warning: {warnings:?}");
+        let warnings =
+            structural_warnings(&[break_spec(AlignAxis::Y, vec![[5000.0, 9000.0]])], &scales);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one declaration, one warning: {warnings:?}"
+        );
         assert!(
             matches!(&warnings[0], RenderWarning::BreakAxisIneffective { .. }),
             "the ineffective answer wins: {warnings:?}"
@@ -9757,13 +10552,16 @@ mod tests {
         );
         let mut warnings = Vec::new();
         let out = build_structural_nodes(
-            &[break_spec("y", vec![[150.0, 850.0]])],
+            &[break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
             &scales,
             &structural_plot(),
             &ThemeInputs::default(),
             &mut warnings,
         );
-        assert!(warnings.is_empty(), "a real break on a reversed axis is not a no-op: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a real break on a reversed axis is not a no-op: {warnings:?}"
+        );
         assert!(
             !out.extra_annotations.is_empty(),
             "the break indicator must be drawn on a reversed axis too"
@@ -9814,7 +10612,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(!anchors.is_empty(), "connect_style=lines emits connector lines");
+        assert!(
+            !anchors.is_empty(),
+            "connect_style=lines emits connector lines"
+        );
         for y in anchors {
             assert!(
                 y > 320.0,
@@ -9859,7 +10660,10 @@ mod tests {
                     type_: Some(crate::spec::encoding::DataType::Nominal),
                     ..Default::default()
                 }),
-                y: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "v".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -9962,9 +10766,16 @@ mod tests {
     /// identically.
     #[test]
     fn a_faceted_break_places_every_panel_on_the_broken_scale() {
-        let (broken, warnings) =
-            faceted_scene(900.0, false, vec![break_spec("y", vec![[150.0, 850.0]])]);
-        assert_eq!(broken.panels.len(), 2, "the fixture must produce two panels");
+        let (broken, warnings) = faceted_scene(
+            900.0,
+            false,
+            vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
+        );
+        assert_eq!(
+            broken.panels.len(),
+            2,
+            "the fixture must produce two panels"
+        );
 
         let p0 = panel_bar_extents(&broken.panels[0]);
         let p1 = panel_bar_extents(&broken.panels[1]);
@@ -9986,7 +10797,11 @@ mod tests {
                 "the unbroken chart draws one rect per row in panel {idx}"
             );
         }
-        assert_eq!(p0.len(), 3, "the gap-spanning bar clips into two pieces: {p0:?}");
+        assert_eq!(
+            p0.len(),
+            3,
+            "the gap-spanning bar clips into two pieces: {p0:?}"
+        );
         assert!(
             warnings.is_empty(),
             "an effective break on a linear shared-scale facet is silent: {warnings:?}"
@@ -9998,7 +10813,11 @@ mod tests {
     /// the axis was cut (or, worse, panel 0's indicator floating over them).
     #[test]
     fn a_faceted_break_draws_its_indicator_inside_every_panels_own_rect() {
-        let (scene, _) = faceted_scene(900.0, false, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (scene, _) = faceted_scene(
+            900.0,
+            false,
+            vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
+        );
         for (idx, panel) in scene.panels.iter().enumerate() {
             let xs: Vec<f64> = panel
                 .annotations
@@ -10008,7 +10827,10 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert!(!xs.is_empty(), "panel {idx} must draw its own break indicator");
+            assert!(
+                !xs.is_empty(),
+                "panel {idx} must draw its own break indicator"
+            );
             let rect = &panel.plot_area;
             for x in xs {
                 assert!(
@@ -10036,10 +10858,15 @@ mod tests {
     #[test]
     fn a_row_faceted_break_places_every_panel_at_its_own_vertical_offset() {
         let (spec, batch) = faceted_bar_spec(&[900.0, 900.0], 1);
-        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let chart_config =
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])]);
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         let scene = scene.expect("the row-stacked fixture must render");
-        assert_eq!(scene.panels.len(), 2, "ncols=1 stacks both panels vertically");
+        assert_eq!(
+            scene.panels.len(),
+            2,
+            "ncols=1 stacks both panels vertically"
+        );
 
         let (r0, r1) = (scene.panels[0].plot_area, scene.panels[1].plot_area);
         assert!(
@@ -10062,7 +10889,10 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert!(!ys.is_empty(), "panel {idx} must draw its own break indicator");
+            assert!(
+                !ys.is_empty(),
+                "panel {idx} must draw its own break indicator"
+            );
             for y in ys {
                 assert!(
                     y >= panel.plot_area.y && y <= panel.plot_area.y + panel.plot_area.h,
@@ -10090,13 +10920,20 @@ mod tests {
                 })
                 .collect()
         };
-        let (rel0, rel1) = (relative_extents(&scene.panels[0]), relative_extents(&scene.panels[1]));
+        let (rel0, rel1) = (
+            relative_extents(&scene.panels[0]),
+            relative_extents(&scene.panels[1]),
+        );
         assert_eq!(
             rel0, rel1,
             "identical data must break identically relative to each panel's \
              own y offset"
         );
-        assert_eq!(rel0.len(), 3, "the gap-spanning bar still clips under a row facet: {rel0:?}");
+        assert_eq!(
+            rel0.len(),
+            3,
+            "the gap-spanning bar still clips under a row facet: {rel0:?}"
+        );
         assert!(
             warnings.is_empty(),
             "an effective break on a linear shared-scale row facet is silent: {warnings:?}"
@@ -10119,8 +10956,11 @@ mod tests {
     /// once, not once per panel.
     #[test]
     fn a_shared_scale_facet_reports_an_ineffective_break_once_not_once_per_panel() {
-        let (_, warnings) =
-            faceted_scene(900.0, false, vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+        let (_, warnings) = faceted_scene(
+            900.0,
+            false,
+            vec![break_spec(AlignAxis::Y, vec![[2000.0, 3000.0]])],
+        );
         let reports = ineffective_reports(&warnings);
         assert_eq!(
             reports.len(),
@@ -10143,10 +10983,17 @@ mod tests {
     /// many panels share it.
     #[test]
     fn a_free_scale_facet_says_when_a_break_is_ineffective_on_only_some_panels() {
-        let (_, warnings) =
-            faceted_scene(20.0, true, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (_, warnings) = faceted_scene(
+            20.0,
+            true,
+            vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
+        );
         let reports = ineffective_reports(&warnings);
-        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        assert_eq!(
+            reports.len(),
+            1,
+            "still ONE report, not one per panel: {warnings:?}"
+        );
         let reason = reports[0];
         assert!(
             reason.contains("(10, 20)"),
@@ -10175,10 +11022,17 @@ mod tests {
     /// neither.
     #[test]
     fn a_free_scale_facet_names_the_panel_when_a_gap_misses_every_panel_with_diverging_domains() {
-        let (_, warnings) =
-            faceted_scene(30.0, true, vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+        let (_, warnings) = faceted_scene(
+            30.0,
+            true,
+            vec![break_spec(AlignAxis::Y, vec![[2000.0, 3000.0]])],
+        );
         let reports = ineffective_reports(&warnings);
-        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        assert_eq!(
+            reports.len(),
+            1,
+            "still ONE report, not one per panel: {warnings:?}"
+        );
         let reason = reports[0];
         assert!(
             reason.contains("(10, 900)"),
@@ -10243,12 +11097,16 @@ mod tests {
             ..Default::default()
         });
         let chart_config =
-            chart_config_with_structural(vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[2000.0, 3000.0]])]);
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         scene.expect("the zero-baseline facet fixture must render");
 
         let reports = ineffective_reports(&warnings);
-        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        assert_eq!(
+            reports.len(),
+            1,
+            "still ONE report, not one per panel: {warnings:?}"
+        );
         let reason = reports[0];
         assert!(
             reason.contains("facet panel 0"),
@@ -10272,7 +11130,11 @@ mod tests {
     /// a suppression.
     #[test]
     fn a_free_scale_facets_effective_panel_still_breaks() {
-        let (scene, _) = faceted_scene(20.0, true, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (scene, _) = faceted_scene(
+            20.0,
+            true,
+            vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])],
+        );
         assert_eq!(
             panel_bar_extents(&scene.panels[0]).len(),
             3,
@@ -10295,15 +11157,15 @@ mod tests {
             900.0,
             false,
             vec![
-                break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "slash"),
-                break_spec_styled("y", vec![[500.0, 850.0]], 12.0, "zigzag"),
+                break_spec_styled(AlignAxis::Y, vec![[150.0, 400.0]], 12.0, "slash"),
+                break_spec_styled(AlignAxis::Y, vec![[500.0, 850.0]], 12.0, "zigzag"),
             ],
         );
         let conflicts: Vec<_> = warnings
             .iter()
             .filter_map(|w| match w {
                 RenderWarning::BreakAxisMergeConflict { axis, field } => {
-                    Some((axis.as_str(), field.as_str()))
+                    Some((axis.wire_name(), field.as_str()))
                 }
                 _ => None,
             })
@@ -10331,7 +11193,8 @@ mod tests {
                 nice: false,
             });
         }
-        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[20.0, 200.0]])]);
+        let chart_config =
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[20.0, 200.0]])]);
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         scene.expect("a log-scaled faceted bar chart must still render");
         let nonlinear: Vec<_> = warnings
@@ -10376,7 +11239,7 @@ mod tests {
             });
         }
         let chart_config =
-            chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])]);
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         scene.expect("a log-scaled, independent-y faceted bar chart must still render");
 
@@ -10426,10 +11289,14 @@ mod tests {
             facet.resolve.y = crate::layout::facet::ResolveMode::Independent;
         }
         let chart_config =
-            chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[150.0, 850.0]])]);
         let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
         let scene = scene.expect("the three-panel fixture must render");
-        assert_eq!(scene.panels.len(), 3, "the fixture must produce three panels");
+        assert_eq!(
+            scene.panels.len(),
+            3,
+            "the fixture must produce three panels"
+        );
 
         let reports = ineffective_reports(&warnings);
         assert_eq!(
@@ -10459,7 +11326,7 @@ mod tests {
     /// matching `_bar_svg`'s panel geometry elsewhere in the test suite closely
     /// enough for hand-checkable gap arithmetic.
     fn y_remap(result: &break_axis::BreakResult) -> break_axis::BreakRemap<'_> {
-        break_axis::BreakRemap::new("y", (0.0, 1000.0), (320.0, 20.0), result)
+        break_axis::BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (320.0, 20.0), result)
     }
 
     /// The misaligned-sidecar warning, end to end through the batch remap and
@@ -10511,7 +11378,11 @@ mod tests {
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
 
-        assert_eq!(batch.nodes.len(), 2, "test sanity: the clip must split the bar");
+        assert_eq!(
+            batch.nodes.len(),
+            2,
+            "test sanity: the clip must split the bar"
+        );
         assert_eq!(
             batch.data_indices,
             Some(vec![0, 1]),
@@ -10573,7 +11444,10 @@ mod tests {
             Some(vec![7, 7]),
             "both clipped pieces point back at the row that produced them"
         );
-        assert!(warnings.is_empty(), "no noise on a well-formed batch: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "no noise on a well-formed batch: {warnings:?}"
+        );
     }
 
     // ── #230-3: exact glyph anchors (wave-2 Task 10) ──────────────────────────
@@ -10590,7 +11464,9 @@ mod tests {
 
     fn anchor_fixture_break(scale: &scale_resolve::ScaleKind) -> break_axis::BreakResult {
         break_axis::apply_break_to_scale(
-            scale.data_domain().expect("test fixture: continuous y scale"),
+            scale
+                .data_domain()
+                .expect("test fixture: continuous y scale"),
             &[[400.0, 600.0]],
             scale.pixel_range(),
             20.0,
@@ -10602,8 +11478,10 @@ mod tests {
         br: &'a break_axis::BreakResult,
     ) -> break_axis::BreakRemap<'a> {
         break_axis::BreakRemap::new(
-            "y",
-            scale.data_domain().expect("test fixture: continuous y scale"),
+            AlignAxis::Y,
+            scale
+                .data_domain()
+                .expect("test fixture: continuous y scale"),
             scale.pixel_range(),
             br,
         )
@@ -10618,7 +11496,9 @@ mod tests {
     fn remapped_point_nodes(shape: &str, y: f64) -> (Vec<SceneNode>, Option<f64>) {
         use crate::render::draw::resolve_mark_style;
         use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::{ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::encoding::{
+            ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec,
+        };
         use crate::spec::mark::Mark;
         use crate::spec::mark_style::MarkKwargsSpec;
         use arrow::array::Float64Array;
@@ -10628,45 +11508,93 @@ mod tests {
         let y_scale = ScaleSpec::Linear {
             common: ContinuousScaleCommon {
                 domain: Some(vec![0.0, 1000.0]),
-                range: None, clamp: false, padding: None, scheme: None,
-                domain_param: None, reverse: false,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
             },
-            nice: false, zero: false,
+            nice: false,
+            zero: false,
             system_injected: false,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), scale: Some(y_scale), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: Some(DataType::Quantitative),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: Some(DataType::Quantitative),
+                    scale: Some(y_scale),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            mark_style: Some(MarkKwargsSpec { shape: Some(shape.to_string()), size: Some(400.0), ..Default::default() }),
-            transforms: Vec::new(), facet: None, layers: None, coord: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+            mark_style: Some(MarkKwargsSpec {
+                shape: Some(shape.to_string()),
+                size: Some(400.0),
+                ..Default::default()
+            }),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", ArrowType::Float64, false),
             Field::new("y", ArrowType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0])),
-            Arc::new(Float64Array::from(vec![y])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0])),
+                Arc::new(Float64Array::from(vec![y])),
+            ],
+        )
+        .unwrap();
         let theme = ThemeInputs::default();
         let panel = crate::layout::PanelLayout {
-            plot_area: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
-            facet_key: None, row: 0, col: 0,
-            strip_title: None, row_strip_title: None, row_facet_key: None,
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1000.0,
+                h: 1000.0,
+            },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
         };
-        let (scales, _) = scale_resolve::resolve_scales(
-            &spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme,
-        ).unwrap();
+        let (scales, _) =
+            scale_resolve::resolve_scales(&spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme)
+                .unwrap();
         let raw_px = scales.y.to_pixel_f64(y).expect("y is finite and in-domain");
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Point).unwrap();
-        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let mark_style =
+            resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
         let result = marks::point::build(&ctx);
 
         let mut mb = MarkBatch {
@@ -10702,7 +11630,8 @@ mod tests {
             SceneNode::Path { commands, .. } => commands
                 .iter()
                 .filter_map(|c| match c {
-                    ferrum_scene::PathCmd::MoveTo { y, .. } | ferrum_scene::PathCmd::LineTo { y, .. } => Some(*y),
+                    ferrum_scene::PathCmd::MoveTo { y, .. }
+                    | ferrum_scene::PathCmd::LineTo { y, .. } => Some(*y),
                     _ => None,
                 })
                 .fold(f64::INFINITY, f64::min),
@@ -10782,7 +11711,9 @@ mod tests {
     fn remapped_text_node(y: f64, dx: f64, dy: f64) -> (SceneNode, Option<f64>, f64) {
         use crate::render::draw::resolve_mark_style;
         use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::{ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::encoding::{
+            ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec,
+        };
         use crate::spec::mark::Mark;
         use crate::spec::mark_style::MarkKwargsSpec;
         use arrow::array::Float64Array;
@@ -10792,46 +11723,96 @@ mod tests {
         let y_scale = ScaleSpec::Linear {
             common: ContinuousScaleCommon {
                 domain: Some(vec![0.0, 1000.0]),
-                range: None, clamp: false, padding: None, scheme: None,
-                domain_param: None, reverse: false,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
             },
-            nice: false, zero: false,
+            nice: false,
+            zero: false,
             system_injected: false,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), scale: Some(y_scale), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: Some(DataType::Quantitative),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: Some(DataType::Quantitative),
+                    scale: Some(y_scale),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            mark_style: Some(MarkKwargsSpec { dx: Some(dx), dy: Some(dy), ..Default::default() }),
-            transforms: Vec::new(), facet: None, layers: None, coord: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+            mark_style: Some(MarkKwargsSpec {
+                dx: Some(dx),
+                dy: Some(dy),
+                ..Default::default()
+            }),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", ArrowType::Float64, false),
             Field::new("y", ArrowType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![0.0])),
-            Arc::new(Float64Array::from(vec![y])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0])),
+                Arc::new(Float64Array::from(vec![y])),
+            ],
+        )
+        .unwrap();
         let theme = ThemeInputs::default();
         let panel = crate::layout::PanelLayout {
-            plot_area: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
-            facet_key: None, row: 0, col: 0,
-            strip_title: None, row_strip_title: None, row_facet_key: None,
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1000.0,
+                h: 1000.0,
+            },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
         };
-        let (scales, _) = scale_resolve::resolve_scales(
-            &spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme,
-        ).unwrap();
+        let (scales, _) =
+            scale_resolve::resolve_scales(&spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme)
+                .unwrap();
         let raw_px = scales.y.to_pixel_f64(y).expect("y is finite and in-domain");
-        let raw_px_x = scales.x.to_pixel_f64(0.0).expect("x is finite and in-domain");
+        let raw_px_x = scales
+            .x
+            .to_pixel_f64(0.0)
+            .expect("x is finite and in-domain");
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Text).unwrap();
-        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
         let result = marks::text::build(&ctx).unwrap();
 
         let mut mb = MarkBatch {
@@ -10860,7 +11841,6 @@ mod tests {
         (mb.nodes.into_iter().next().unwrap(), expected, raw_px_x)
     }
 
-
     #[test]
     fn text_dxdy_hides_and_moves_on_the_exact_data_position_not_the_offset() {
         // `dy` is a PIXEL offset baked into the node's own `y` at batch
@@ -10876,7 +11856,9 @@ mod tests {
         let (visible, expected, raw_px_x) = remapped_text_node(605.0, 5.0, 10.0);
         let expected =
             expected.expect("sanity: data 605.0 is outside the [400,600] gap, so this must render");
-        let SceneNode::Text { x, y, .. } = visible else { panic!("expected Text node") };
+        let SceneNode::Text { x, y, .. } = visible else {
+            panic!("expected Text node")
+        };
         assert!(
             y > -1000.0,
             "hide-test must run on the DATA position (605.0), not the dx/dy-offset \
@@ -10902,7 +11884,9 @@ mod tests {
             expected_hidden.is_none(),
             "sanity: data 450.0 is inside the [400,600] gap, so this must hide"
         );
-        let SceneNode::Text { y, .. } = hidden else { panic!("expected Text node") };
+        let SceneNode::Text { y, .. } = hidden else {
+            panic!("expected Text node")
+        };
         assert!(
             y < -1000.0,
             "hide-test must run on the DATA position (450.0, inside the gap), not the \
@@ -10936,10 +11920,21 @@ mod tests {
         let remap = anchor_fixture_remap(&linear_scale([0.0, 1000.0], [0.0, 1000.0]), &br);
         let mut batch = MarkBatch {
             kind: ferrum_scene::MarkBatchKind::Point,
-            nodes: vec![SceneNode::Circle { cx: 5.0, cy: 600.5, r: 3.0, style: FillStroke {
-                fill: None, stroke: None, stroke_width: 0.0, opacity: 1.0,
-                stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0,
-            } }],
+            nodes: vec![SceneNode::Circle {
+                cx: 5.0,
+                cy: 600.5,
+                r: 3.0,
+                style: FillStroke {
+                    fill: None,
+                    stroke: None,
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_dash: None,
+                    stroke_opacity: 1.0,
+                    fill_opacity: 1.0,
+                    angle: 0.0,
+                },
+            }],
             data_indices: Some(vec![0]),
             tooltips: None,
             hrefs: None,
@@ -10992,7 +11987,10 @@ mod tests {
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
         assert!(batch.nodes.is_empty(), "an empty batch stays empty");
-        assert!(warnings.is_empty(), "an empty batch is not a malformed one — no warning");
+        assert!(
+            warnings.is_empty(),
+            "an empty batch is not a malformed one — no warning"
+        );
     }
 
     /// The `MoveGlyphAndConnector` (label) twin of the pin above: a zero-node
@@ -11023,7 +12021,10 @@ mod tests {
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
         assert!(batch.nodes.is_empty(), "an empty batch stays empty");
-        assert!(warnings.is_empty(), "an empty batch is not a malformed one — no warning");
+        assert!(
+            warnings.is_empty(),
+            "an empty batch is not a malformed one — no warning"
+        );
     }
 
     /// End-to-end reachability pin (quality-review cycle-3 S3): `mark_label`
@@ -11050,15 +12051,29 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Label,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "cat".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -11074,7 +12089,8 @@ mod tests {
         )
         .unwrap();
 
-        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[1.2, 1.8]])]);
+        let chart_config =
+            chart_config_with_structural(vec![break_spec(AlignAxis::Y, vec![[1.2, 1.8]])]);
         let scene = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
             .expect("a mark_label chart with an unreadable x column must still render under a break, not panic");
         let label_nodes: usize = scene
@@ -11084,7 +12100,10 @@ mod tests {
             .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Label)
             .map(|m| m.nodes.len())
             .sum();
-        assert_eq!(label_nodes, 0, "the label batch legitimately produced no nodes (x is unreadable as a number)");
+        assert_eq!(
+            label_nodes, 0,
+            "the label batch legitimately produced no nodes (x is unreadable as a number)"
+        );
     }
 
     // ── Cross-axis chrome under a break (close-review cycle-2 N2) ───────────
@@ -11104,12 +12123,20 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(false);
         let scales = resolve_dual_y(&spec, &batch);
         let panel = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 },
+            plot_area: crate::layout::Rect {
+                x: 20.0,
+                y: 20.0,
+                w: 300.0,
+                h: 300.0,
+            },
             ..Default::default()
         };
         let theme = ThemeInputs::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let mut x_input = AxisInput::new(
             AxisOrient::Bottom,
@@ -11117,21 +12144,23 @@ mod tests {
             vec!["0".into(), "5".into(), "10".into()],
             None,
         );
-        x_input.overrides.show_domain = Some(true);
+        x_input.overrides.domain.show = Some(true);
         // `show_grid` is normally folded in by `AxesInput::apply_show_defaults`;
         // set it here so the debug invariant that guards that ordering holds.
-        x_input.overrides.show_grid = Some(false);
-        x_input.overrides.show_ticks = Some(true);
+        x_input.overrides.grid.show = Some(false);
+        x_input.overrides.ticks.show = Some(true);
         let (x_axis, _) = crate::layout::axis::layout_x_axis(
             &x_input,
             panel.plot_area,
             0,
-            11.0,
             13.0,
             8.0,
-            crate::layout::LabelGapPolicy::from_cull_threshold(0),
-            4.0,
-            &m,
+            &crate::layout::LabelBandCtx::new(
+                11.0,
+                crate::layout::LabelGapPolicy::from_cull_threshold(0),
+                4.0,
+                &m,
+            ),
         );
 
         let tick_lengths = |result: &PanelAxisGrid| -> Vec<f64> {
@@ -11187,8 +12216,12 @@ mod tests {
             scales.y.pixel_range(),
             12.0,
         );
-        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
-        let remap = break_axis::BreakRemap::new("y", y_domain, scales.y.pixel_range(), &result);
+        assert_eq!(
+            result.effective_gaps, 1,
+            "test sanity: the break must be real"
+        );
+        let remap =
+            break_axis::BreakRemap::new(AlignAxis::Y, y_domain, scales.y.pixel_range(), &result);
         let broken = tick_lengths(&route(std::slice::from_ref(&remap)));
 
         assert_eq!(
@@ -11219,8 +12252,8 @@ mod tests {
             linear_scale([0.0, 1000.0], [28.0, 312.0]),
             linear_scale([0.0, 1000.0], [312.0, 28.0]),
         );
-        for axis in ["x", "y"] {
-            let scale = if axis == "y" { &scales.y } else { &scales.x };
+        for axis in [AlignAxis::X, AlignAxis::Y] {
+            let scale = scale_on_axis(&scales, axis);
             let pixels = scale.pixel_range();
             let mut warnings = Vec::new();
             let out = build_structural_nodes(
@@ -11231,7 +12264,7 @@ mod tests {
                 &mut warnings,
             );
             let (named, result) = &out.break_results[0];
-            assert_eq!(named, axis);
+            assert_eq!(*named, axis);
             let (first, last) = (
                 result.segments.first().expect("two segments"),
                 result.segments.last().expect("two segments"),
@@ -11274,12 +12307,20 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(false);
         let scales = resolve_dual_y(&spec, &batch);
         let panel = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 },
+            plot_area: crate::layout::Rect {
+                x: 20.0,
+                y: 20.0,
+                w: 300.0,
+                h: 300.0,
+            },
             ..Default::default()
         };
         let theme = ThemeInputs::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let mut y_input = AxisInput::new(
             AxisOrient::Left,
@@ -11287,9 +12328,9 @@ mod tests {
             vec!["0".into(), "500".into(), "1000".into()],
             None,
         );
-        y_input.overrides.show_domain = Some(true);
-        y_input.overrides.show_grid = Some(false);
-        y_input.overrides.show_ticks = Some(true);
+        y_input.overrides.domain.show = Some(true);
+        y_input.overrides.grid.show = Some(false);
+        y_input.overrides.ticks.show = Some(true);
         let (y_axis, _) = crate::layout::axis::layout_y_axis(
             &y_input,
             panel.plot_area,
@@ -11363,8 +12404,12 @@ mod tests {
             scales.y.pixel_range(),
             12.0,
         );
-        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
-        let remap = break_axis::BreakRemap::new("y", y_domain, scales.y.pixel_range(), &result);
+        assert_eq!(
+            result.effective_gaps, 1,
+            "test sanity: the break must be real"
+        );
+        let remap =
+            break_axis::BreakRemap::new(AlignAxis::Y, y_domain, scales.y.pixel_range(), &result);
         let broken = route(std::slice::from_ref(&remap));
 
         assert_eq!(
@@ -11406,13 +12451,21 @@ mod tests {
 
             let (spec, batch) = two_layer_dual_y_spec(false);
             let scales = resolve_dual_y(&spec, &batch);
-            let plot_area = crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 };
-            let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+            let plot_area = crate::layout::Rect {
+                x: 20.0,
+                y: 20.0,
+                w: 300.0,
+                h: 300.0,
+            };
+            let m = MockMetrics {
+                measure: fixed_width(8.0),
+                line_h_factor: 1.2,
+            };
             let axis_input = |orient: AxisOrient| {
                 let mut input = AxisInput::new(orient, None, values.clone(), None);
-                input.overrides.show_domain = Some(true);
-                input.overrides.show_grid = Some(true);
-                input.overrides.show_ticks = Some(true);
+                input.overrides.domain.show = Some(true);
+                input.overrides.grid.show = Some(true);
+                input.overrides.ticks.show = Some(true);
                 input
             };
             let (y_axis, _) = crate::layout::axis::layout_y_axis(
@@ -11429,17 +12482,22 @@ mod tests {
                 &axis_input(AxisOrient::Bottom),
                 plot_area,
                 0,
-                11.0,
                 13.0,
                 8.0,
-                crate::layout::LabelGapPolicy::from_cull_threshold(0),
-                4.0,
-                &m,
+                &crate::layout::LabelBandCtx::new(
+                    11.0,
+                    crate::layout::LabelGapPolicy::from_cull_threshold(0),
+                    4.0,
+                    &m,
+                ),
             );
             Self {
                 spec,
                 scales,
-                panel: crate::layout::PanelLayout { plot_area, ..Default::default() },
+                panel: crate::layout::PanelLayout {
+                    plot_area,
+                    ..Default::default()
+                },
                 x_axis,
                 y_axis,
             }
@@ -11477,11 +12535,18 @@ mod tests {
     /// in a `(0, 1000)` domain, over the scale's OWN padded pixel range (8px
     /// inside the rect at each end, y descending — exactly what
     /// `inset_pixel_range` builds and what `build_scene` hands the remap).
-    fn grid_fixture_break(axis: &str) -> (break_axis::BreakResult, (f64, f64)) {
-        let pixels = if axis == "y" { (312.0, 28.0) } else { (28.0, 312.0) };
+    fn grid_fixture_break(axis: AlignAxis) -> (break_axis::BreakResult, (f64, f64)) {
+        let pixels = if axis.is_y() {
+            (312.0, 28.0)
+        } else {
+            (28.0, 312.0)
+        };
         let result =
             break_axis::apply_break_to_scale((0.0, 1000.0), &[[400.0, 600.0]], pixels, 12.0);
-        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
+        assert_eq!(
+            result.effective_gaps, 1,
+            "test sanity: the break must be real"
+        );
         (result, pixels)
     }
 
@@ -11535,9 +12600,7 @@ mod tests {
                 .grid
                 .iter()
                 .filter_map(|n| match n {
-                    SceneNode::Line { x1, y1, x2, y2, .. }
-                        if (x2 - x1).abs() <= f64::EPSILON =>
-                    {
+                    SceneNode::Line { x1, y1, x2, y2, .. } if (x2 - x1).abs() <= f64::EPSILON => {
                         Some((*x1, *y1, *y2))
                     }
                     _ => None,
@@ -11549,9 +12612,7 @@ mod tests {
                 .grid
                 .iter()
                 .filter_map(|n| match n {
-                    SceneNode::Line { x1, y1, x2, y2, .. }
-                        if (y2 - y1).abs() <= f64::EPSILON =>
-                    {
+                    SceneNode::Line { x1, y1, x2, y2, .. } if (y2 - y1).abs() <= f64::EPSILON => {
                         Some((*y1, *x1, *x2))
                     }
                     _ => None,
@@ -11572,7 +12633,7 @@ mod tests {
             vertical(&unbroken)
         );
 
-        for axis in ["y", "x"] {
+        for axis in [AlignAxis::Y, AlignAxis::X] {
             let (result, pixels) = grid_fixture_break(axis);
             let remap = break_axis::BreakRemap::new(axis, (0.0, 1000.0), pixels, &result);
             let broken = fixture.route(&chart_config, std::slice::from_ref(&remap));
@@ -11580,7 +12641,7 @@ mod tests {
             // The cross-axis family is untouched; the family the break owns
             // moves, which is what keeps the pin from passing on a grid the
             // break never reached.
-            let (cross_broken, cross_unbroken, own_broken, own_unbroken) = if axis == "y" {
+            let (cross_broken, cross_unbroken, own_broken, own_unbroken) = if axis.is_y() {
                 (
                     vertical(&broken),
                     vertical(&unbroken),
@@ -11626,18 +12687,24 @@ mod tests {
         let chart_config = banded_grid_config(&["#f0f0f0", "#e8e8e8"]);
 
         let unbroken = band_spans(&fixture.route(&chart_config, &[]));
-        assert!(unbroken.len() >= 3, "test sanity: the bands tile the plot; got {unbroken:?}");
+        assert!(
+            unbroken.len() >= 3,
+            "test sanity: the bands tile the plot; got {unbroken:?}"
+        );
         assert_eq!(
             (
                 unbroken.iter().map(|b| b.0).fold(f64::INFINITY, f64::min),
-                unbroken.iter().map(|b| b.1).fold(f64::NEG_INFINITY, f64::max),
+                unbroken
+                    .iter()
+                    .map(|b| b.1)
+                    .fold(f64::NEG_INFINITY, f64::max),
             ),
             (plot_area.y, plot_area.y + plot_area.h),
             "test sanity: the unbroken bands reach both rect edges"
         );
 
-        let (y_result, y_pixels) = grid_fixture_break("y");
-        let y_remap = break_axis::BreakRemap::new("y", (0.0, 1000.0), y_pixels, &y_result);
+        let (y_result, y_pixels) = grid_fixture_break(AlignAxis::Y);
+        let y_remap = break_axis::BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), y_pixels, &y_result);
         let broken = band_spans(&fixture.route(&chart_config, std::slice::from_ref(&y_remap)));
         assert_eq!(
             (
@@ -11655,10 +12722,14 @@ mod tests {
 
         // An x break owns no part of a band: its boundaries are y ticks and its
         // width is the rect's.
-        let (x_result, x_pixels) = grid_fixture_break("x");
-        let x_remap = break_axis::BreakRemap::new("x", (0.0, 1000.0), x_pixels, &x_result);
+        let (x_result, x_pixels) = grid_fixture_break(AlignAxis::X);
+        let x_remap = break_axis::BreakRemap::new(AlignAxis::X, (0.0, 1000.0), x_pixels, &x_result);
         let x_broken = fixture.route(&chart_config, std::slice::from_ref(&x_remap));
-        assert_eq!(band_spans(&x_broken), unbroken, "an x break leaves the bands alone");
+        assert_eq!(
+            band_spans(&x_broken),
+            unbroken,
+            "an x break leaves the bands alone"
+        );
         assert!(
             x_broken.grid.iter().all(|n| match n {
                 SceneNode::Rect { x, w, .. } => *x == plot_area.x && *w == plot_area.w,
@@ -11697,10 +12768,12 @@ mod tests {
         // A gap reaching the domain's low end leaves a single visible segment,
         // so the clip leaves a single piece — the both-ends-on-one-node case.
         let pixels = (312.0, 28.0);
-        let result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[0.0, 600.0]], pixels, 12.0);
-        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
-        let remap = break_axis::BreakRemap::new("y", (0.0, 1000.0), pixels, &result);
+        let result = break_axis::apply_break_to_scale((0.0, 1000.0), &[[0.0, 600.0]], pixels, 12.0);
+        assert_eq!(
+            result.effective_gaps, 1,
+            "test sanity: the break must be real"
+        );
+        let remap = break_axis::BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), pixels, &result);
         let broken = fixture.route(&chart_config, std::slice::from_ref(&remap));
         let spans = band_spans(&broken);
         assert_eq!(
@@ -11718,8 +12791,8 @@ mod tests {
 
         // The other orientation: an x break owns no part of a band, single or
         // not — neither its y extent nor its rect-wide width.
-        let (x_result, x_pixels) = grid_fixture_break("x");
-        let x_remap = break_axis::BreakRemap::new("x", (0.0, 1000.0), x_pixels, &x_result);
+        let (x_result, x_pixels) = grid_fixture_break(AlignAxis::X);
+        let x_remap = break_axis::BreakRemap::new(AlignAxis::X, (0.0, 1000.0), x_pixels, &x_result);
         let x_broken = fixture.route(&chart_config, std::slice::from_ref(&x_remap));
         assert_eq!(
             band_spans(&x_broken),
@@ -11900,9 +12973,15 @@ mod coord_flip_y2_merge_tests {
             chart_config: &chart_config,
             leaf_scales: None,
         };
-        let (_rendering_spec, scales) =
-            resolve_panel_scales(&ctx, &panel, &batch, &layer_batches, &mut warnings, (0.0, 0.0))
-                .expect("resolve_panel_scales must succeed for a flipped ranged bar");
+        let (_rendering_spec, scales) = resolve_panel_scales(
+            &ctx,
+            &panel,
+            &batch,
+            &layer_batches,
+            &mut warnings,
+            (0.0, 0.0),
+        )
+        .expect("resolve_panel_scales must succeed for a flipped ranged bar");
 
         // Post-flip: y carries `idx` alone (unranged), x carries the `lo..hi`
         // range. Compare the axis's own resolution (`provisional_scales`,
@@ -12038,9 +13117,15 @@ mod coord_flip_y2_merge_tests {
             chart_config: &chart_config,
             leaf_scales: None,
         };
-        let (_rendering_spec, scales) =
-            resolve_panel_scales(&ctx, &panel, &batch, &layer_batches, &mut warnings, (0.0, 0.0))
-                .expect("resolve_panel_scales must succeed for a flipped ranged bar");
+        let (_rendering_spec, scales) = resolve_panel_scales(
+            &ctx,
+            &panel,
+            &batch,
+            &layer_batches,
+            &mut warnings,
+            (0.0, 0.0),
+        )
+        .expect("resolve_panel_scales must succeed for a flipped ranged bar");
 
         // Pre-flip `x`/`x2` is the ranged pair, so post-flip it lands on `y`;
         // pre-flip `y` (`idx`, unranged) lands on `x`. Same defect, opposite axis.

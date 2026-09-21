@@ -17,6 +17,7 @@ use super::marks::arrowhead::{arrowhead_path, arrowhead_triangle};
 use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
 use super::RenderWarning;
 use crate::layout::geometry::Rect;
+use crate::spec::axis::AlignAxis;
 
 // ── Coordinate types ────────────────────────────────────────────────────────
 
@@ -330,7 +331,7 @@ impl<'a> ScaleContext<'a> {
         match v {
             CoordValue::Data(d) => {
                 let base = data_pixel_x(self.x_scale, &self.plot_area, *d);
-                self.fold_breaks("x", base)
+                self.fold_breaks(AlignAxis::X, base)
             }
             CoordValue::Pixel { px } => self.plot_area.x + px,
             CoordValue::Norm { norm } => self.plot_area.x + norm * self.plot_area.w,
@@ -346,7 +347,7 @@ impl<'a> ScaleContext<'a> {
         match v {
             CoordValue::Data(d) => {
                 let base = data_pixel_y(self.y_scale, &self.plot_area, *d);
-                self.fold_breaks("y", base)
+                self.fold_breaks(AlignAxis::Y, base)
             }
             CoordValue::Pixel { px } => self.plot_area.y + px,
             CoordValue::Norm { norm } => self.plot_area.y + norm * self.plot_area.h,
@@ -374,7 +375,7 @@ impl<'a> ScaleContext<'a> {
     /// unbroken domain before forward-mapping, so an out-of-domain
     /// coordinate lands at the compressed domain edge rather than at its
     /// (silently wrong) unbroken linear position.
-    fn fold_breaks(&self, axis: &str, base: f64) -> f64 {
+    fn fold_breaks(&self, axis: AlignAxis, base: f64) -> f64 {
         self.breaks
             .iter()
             .filter(|remap| remap.axis() == axis)
@@ -440,8 +441,8 @@ enum AxisCoords {
 }
 
 /// The data-space (`CoordValue::Data`) coordinates `spec` carries along
-/// `axis` (`"x"` or `"y"`), in the shape the break's suppression rule must
-/// test them — see [`AxisCoords`].
+/// `axis`, in the shape the break's suppression rule must test them — see
+/// [`AxisCoords`].
 ///
 /// Pixel/norm coordinates are plot-area-relative, not data positions, so a
 /// `BreakAxis` gap never suppresses them — they are excluded here rather than
@@ -452,14 +453,13 @@ enum AxisCoords {
 /// Exhaustive over `AnnotationSpec`'s 8 shapes, enumerated from this file's
 /// own field list (spec §4 H5's coordinate table), so a new spec variant is a
 /// compile error here rather than silently skipping break suppression for it.
-fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> AxisCoords {
-    // Branches on `axis == "y"` with x as the fallback, matching every other
-    // break-axis consumer's convention (`break_axis.rs`'s `is_y()`,
-    // `scene_build.rs`'s `if axis == "y" { &scales.y } else { &scales.x }`) —
-    // not S2 today (`BreakAxis.axis` is validated to `("x", "y")` in Python),
-    // but keeping one direction crate-wide means a future third axis value
-    // can't be suppressed as one axis and remapped as the other.
-    let is_y = axis == "y";
+fn data_coords_on_axis(spec: &AnnotationSpec, axis: AlignAxis) -> AxisCoords {
+    // Reads the axis through `AlignAxis::is_y`, the same single exhaustive
+    // match `BreakRemap::is_y` and the indicator glyphs go through (`#229`(2)):
+    // one place in the crate decides that the other axis is x, so a future
+    // third axis value cannot be suppressed as one axis and remapped as the
+    // other.
+    let is_y = axis.is_y();
     let (fields, shape): (Vec<&CoordValue>, Shape) = match spec {
         AnnotationSpec::Text { x, y, .. } => (vec![if is_y { y } else { x }], Shape::Point),
         AnnotationSpec::Arrow { x, y, x2, y2, .. } => {
@@ -473,9 +473,12 @@ fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> AxisCoords {
         }
         // A `Span`'s `start`/`end` are values on its OWN `axis` field, which
         // may differ from the axis under test — an x-span is untouched by a
-        // y-break, and vice versa.
+        // y-break, and vice versa. That field is a DIFFERENT wire field with
+        // its own accepted keys (`#229`(2) leaves it a `String` deliberately),
+        // so the two vocabularies meet through [`AlignAxis::wire_name`] rather
+        // than by retyping the span.
         AnnotationSpec::Span { axis: span_axis, start, end, .. } => {
-            if span_axis == axis {
+            if span_axis == axis.wire_name() {
                 (vec![start, end], Shape::Extent)
             } else {
                 (Vec::new(), Shape::Point)
@@ -1208,8 +1211,8 @@ pub fn build_annotations_through_breaks(
     // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
     // the emitted warnings stay in first-seen-axis order — deterministic for a
     // per-render count never large enough for O(n^2) lookup to matter.
-    let mut in_gap: Vec<(String, Vec<String>)> = Vec::new();
-    let mut spanning: Vec<(String, Vec<String>)> = Vec::new();
+    let mut in_gap: Vec<(AlignAxis, Vec<String>)> = Vec::new();
+    let mut spanning: Vec<(AlignAxis, Vec<String>)> = Vec::new();
     let mut nodes = AnnotationNodes {
         below_marks: Vec::new(),
         above_marks: Vec::with_capacity(specs.len()),
@@ -1407,9 +1410,9 @@ enum AxisFate {
 /// mechanism's per-axis rollup — see [`build_annotations_through_breaks`].
 enum BreakConflict {
     /// A real data coordinate of the annotation lies inside a gap.
-    Point { axis: String, kind: String },
+    Point { axis: AlignAxis, kind: String },
     /// No coordinate does, but the annotation's interval reaches across a gap.
-    Span { axis: String, kind: String },
+    Span { axis: AlignAxis, kind: String },
 }
 
 /// Combine every break's answer for `spec` into one verdict.
@@ -1459,7 +1462,9 @@ fn axis_break_fate(
     let result = remap.result();
     let in_gap = |value: &f64| break_axis::gap_containing(*value, result).is_some();
     let dropped = |spanning: bool| {
-        let (axis, kind) = (axis.to_string(), kind_name(spec).to_string());
+        // `axis` is `Copy` now, so the conflict takes it directly — where the
+        // `String` field it replaces had to be cloned per dropped annotation.
+        let kind = kind_name(spec).to_string();
         AxisFate::Suppressed(if spanning {
             BreakConflict::Span { axis, kind }
         } else {
@@ -1489,7 +1494,7 @@ fn axis_break_fate(
 
 /// Append `kind` to `axis`'s bucket in a per-axis rollup accumulator, creating
 /// the bucket on first sight. Shared by both drop mechanisms.
-fn accumulate_by_axis(acc: &mut Vec<(String, Vec<String>)>, axis: String, kind: String) {
+fn accumulate_by_axis(acc: &mut Vec<(AlignAxis, Vec<String>)>, axis: AlignAxis, kind: String) {
     match acc.iter_mut().find(|(a, _)| *a == axis) {
         Some((_, kinds)) => kinds.push(kind),
         None => acc.push((axis, vec![kind])),

@@ -9,6 +9,7 @@
 //! on `ScaleSpec` in `encoding.rs` for the rationale. New spec enums should tag
 //! on `"kind"` unless they have an equivalent wire-format constraint.
 
+pub(crate) mod axis;
 pub(crate) mod data_ref;
 pub(crate) mod mark;
 pub(crate) mod encoding;

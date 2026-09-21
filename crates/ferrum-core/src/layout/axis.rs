@@ -169,7 +169,10 @@ impl LabelGapPolicy {
     /// any positive value allows it. Keeping it in one named function is what
     /// makes "no existing spelling moves" checkable.
     pub const fn from_cull_threshold(gap_px: u32) -> Self {
-        Self { gap_px, cull: gap_px > 0 }
+        Self {
+            gap_px,
+            cull: gap_px > 0,
+        }
     }
 
     /// Resolve the two independent `Theme` wire keys against `self` (the
@@ -179,7 +182,9 @@ impl LabelGapPolicy {
     /// so that spelling keeps its pre-split meaning exactly; with neither, the
     /// policy is unchanged.
     pub fn with_overrides(self, cull_threshold: Option<u32>, cull_labels: Option<bool>) -> Self {
-        let legacy = cull_threshold.map(Self::from_cull_threshold).unwrap_or(self);
+        let legacy = cull_threshold
+            .map(Self::from_cull_threshold)
+            .unwrap_or(self);
         Self {
             gap_px: legacy.gap_px,
             cull: cull_labels.unwrap_or(legacy.cull),
@@ -209,93 +214,317 @@ impl LabelGapPolicy {
 
 impl Default for LabelGapPolicy {
     fn default() -> Self {
-        Self { gap_px: Self::DEFAULT_GAP_PX, cull: Self::DEFAULT_CULL }
+        Self {
+            gap_px: Self::DEFAULT_GAP_PX,
+            cull: Self::DEFAULT_CULL,
+        }
     }
 }
 
-/// Per-axis style/positioning overrides, bundled so a future field is a one-line
-/// struct addition instead of a five-site thread (mirrors `LegendStyleOpts` on
-/// the legend side). Every field is `Option` and falls back to the shared theme
-/// value (or a layout default) when `None`, so default output stays byte-identical
-/// and only a per-channel `fm.Axis(...)` / chart-level `configure_axis(...)` spec
-/// lights one up.
+/// A cascade slot paired with the bit that records whether a higher-precedence
+/// source has already spoken for it.
 ///
-/// Both the per-channel parse path (`render::prepare::encoding_axis_style_overrides`)
-/// and the chart-level apply path (`render::config_apply::apply_axis_style_to_axis_input`) write
-/// here uniformly via the `is_none()` fill-only pattern, so a higher-precedence
-/// source (per-channel, or an earlier config layer) always wins. The resolved
-/// concrete axis side is computed from [`orient`](Self::orient) into
-/// [`AxisInput::orient`] at layout-build time (x→Bottom / y→Left default).
+/// Two axis slots need this, for the identical reason: their EMPTY value is
+/// ambiguous. [`AxisInput::title`]'s `None` means BOTH "never set" and
+/// "explicitly suppressed via the `title=\"\"` sentinel", and
+/// [`LabelFormat::spec`]'s `None` means BOTH "no per-channel format" and "a
+/// per-channel temporal format already fully baked into the tick labels". A
+/// chart-level fill that tests only for emptiness therefore cannot tell
+/// "unclaimed" from "claimed and deliberately empty", and resurrects a value
+/// the caller removed — inverting the per-channel-wins cascade (D8/D12, spec
+/// §4.9). Both bugs were live and both were fixed by a companion `bool`.
+///
+/// The bit now travels INSIDE this type rather than as a sibling
+/// `*_claimed: bool` on [`AxisStyleOverrides`], which is what the two slots
+/// used to carry. What that buys, stated as what the type actually enforces
+/// rather than as impossibility: the bit is **private**, so it can only be read
+/// through [`is_claimed`](Self::is_claimed) and only written through
+/// [`claim`](Self::claim) or one of the two fill methods, each of which owns one
+/// precedence discipline end to end; and it **travels with the value it
+/// guards**, which the old `AxisStyleOverrides::title_claimed` did not — it sat
+/// in a different struct from `AxisInput::title`.
+///
+/// It does not make a third parallel boolean unrepresentable: nothing stops a
+/// future `pub foo_claimed: bool` on a cluster struct. What it does is make the
+/// disciplined shape the obvious one and the ad-hoc one visibly ad-hoc, by
+/// giving the pattern a name and one place to put the predicate.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct AxisStyleOverrides {
-    /// Explicit tick values (`fm.Axis(values=[...])` / `configure_axis(tick_values=[...])`).
-    /// When set, tick labels are replaced with formatted versions of these values.
-    pub tick_values: Option<Vec<f64>>,
-    /// Tick-label rotation angle override (`fm.Axis(label_angle=...)`). Bypasses
-    /// the collision cascade when `Some`. `None` → cascade-resolved angle.
-    pub label_angle: Option<f64>,
+pub(crate) struct Claimed<T> {
+    value: T,
+    claimed: bool,
+}
+
+impl<T> Claimed<T> {
+    /// An unclaimed slot holding `value`.
+    pub(crate) const fn new(value: T) -> Self {
+        Self {
+            value,
+            claimed: false,
+        }
+    }
+
+    /// Read the slot.
+    pub(crate) const fn get(&self) -> &T {
+        &self.value
+    }
+
+    /// Overwrite the slot, leaving the claim bit alone. Two production
+    /// disciplines use it, and neither wants the bit touched:
+    ///
+    /// - **Fresh build.** The per-channel writer
+    ///   (`render::prepare::build_axis_input`) starts from `Default` and owns
+    ///   every slot it writes, recording the claim separately via
+    ///   [`claim`](Self::claim) because "a per-channel source spoke" and "the
+    ///   value it resolved to" are independent facts.
+    /// - **Layout-time suppression on a throwaway clone.**
+    ///   `layout::compute_layout` strips the axis title from a *cloned*
+    ///   `AxisInput` for non-bottom-row / non-leftmost-column facet panels. The
+    ///   bit is left alone because nothing will ever fill that clone again, so
+    ///   the claim is meaningless on it — and carrying the original's bit
+    ///   across is exactly what the pre-`Claimed` `modified.title = None` did
+    ///   by construction. Numerically this is the majority: two of the three
+    ///   production call sites.
+    ///
+    /// A **chart-level** writer must not reach for this. Those go through
+    /// [`fill_and_claim`](Self::fill_and_claim) or
+    /// [`fill_without_claiming`](Self::fill_without_claiming), which own the
+    /// two precedence disciplines.
+    pub(crate) fn set(&mut self, value: T) {
+        self.value = value;
+    }
+
+    /// Record that a per-channel source (or an earlier, more specific
+    /// chart-level layer) owns this slot, whatever value it resolved to —
+    /// including an explicitly empty one, which is the whole point.
+    pub(crate) fn claim(&mut self) {
+        self.claimed = true;
+    }
+
+    /// Whether a higher-precedence source has spoken for this slot. The one
+    /// read of the bit; both fill methods below gate on it through here rather
+    /// than touching the field, so "is this slot claimed" has a single spelling.
+    pub(crate) const fn is_claimed(&self) -> bool {
+        self.claimed
+    }
+
+    /// Chart-level write, **claiming** discipline: `fill` sees the slot only
+    /// while it is unclaimed, and the slot becomes claimed exactly when `fill`
+    /// reports that it took it. Claiming on the way out is what stops the
+    /// next, less specific chart-level layer from overwriting the value this
+    /// one resolved.
+    ///
+    /// Used by [`AxisInput::fill_chart_level_title`]. Deliberately distinct
+    /// from [`fill_without_claiming`](Self::fill_without_claiming): the two
+    /// slots' disciplines genuinely differ, and unifying them would move
+    /// output. See that method's doc for the other half.
+    pub(crate) fn fill_and_claim(&mut self, fill: impl FnOnce(&mut T) -> bool) {
+        if self.is_claimed() {
+            return;
+        }
+        if fill(&mut self.value) {
+            self.claim();
+        }
+    }
+
+    /// Chart-level write, **non-claiming** discipline: `fill` sees the slot
+    /// only while it is unclaimed, and the bit is never set.
+    ///
+    /// Used by [`AxisStyleOverrides::fill_chart_level_label_format`]. The
+    /// format slot needs no claim on the way out because its own non-emptiness
+    /// already stops the next layer — that fill's predicate is "empty AND
+    /// unclaimed", so a filled slot is as good as a claimed one.
+    ///
+    /// **Claiming here would move output today, on a reachable public
+    /// spelling** — the hazard to weigh before "simplifying" the two
+    /// disciplines into one.
+    /// `config_apply::fill_axis_slots_specific_before_shared` runs
+    /// `apply_axis_config_to_axis_input` TWICE per axis: the specific
+    /// `axis_x`/`axis_y` layer, then the shared `axis` layer. That function
+    /// calls the format fill unconditionally for every config section present,
+    /// with a format that may be `None`. So
+    /// `configure(axis_x=AxisConfig(label_angle=45))` plus
+    /// `configure_axis(label_format=".2f")` reaches this method first with
+    /// `(None, None)`: a claim taken on that empty fill would block the shared
+    /// layer and drop the `.2f` silently. Claiming would ALSO be a lie —
+    /// asserting a per-channel claim where there was only a chart-level fill —
+    /// but the dropped format is the load-bearing reason, not the lie.
+    ///
+    /// Which is to say the separation is right in BOTH directions: claiming on
+    /// the title slot is what stops a resurrected suppressed title
+    /// ([`fill_and_claim`](Self::fill_and_claim)), and NOT claiming on the
+    /// format slot is what stops a dropped chart-level format.
+    ///
+    /// Pinned by
+    /// `render::config_apply::tests::chart_config_application_tests::shared_axis_label_format_survives_a_specific_axis_x_layer_without_one`,
+    /// which drives the real two-layer cascade over the literal wire dict that
+    /// spelling emits. Adding the claim here fails that test **and nothing else
+    /// in the crate or the Python suite** — which is why the pin exists rather
+    /// than this comment alone. (The measured counts behind that sentence are
+    /// dated in the task report; they are deliberately not repeated here,
+    /// because a test count embedded in a doc comment is wrong by the next
+    /// commit.)
+    pub(crate) fn fill_without_claiming(&mut self, fill: impl FnOnce(&mut T)) {
+        if !self.is_claimed() {
+            fill(&mut self.value);
+        }
+    }
+}
+
+/// The tick-label format slot: the d3/strftime spec string and its format-type
+/// tag, which only ever move together (every writer sets both, and the two are
+/// meaningless apart).
+///
+/// Both halves stay independently `Option` rather than collapsing into one
+/// `Option<(String, Option<String>)>`, because `spec: None` with
+/// `format_type: Some("time")` is a LIVE state, not a nonsense one:
+/// `render::config_apply::apply_label_format_to_axis`'s `tick_values` branch
+/// passes the type through to `prepare::apply_tick_format` with no spec, which
+/// formats the epoch-ms tick values with the default time formatter
+/// (`format_time(ms, 86_400_000)`) rather than passing them through.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct LabelFormat {
     /// d3-format string for tick labels (per-channel `label_format` /
-    /// chart-level `label_format_raw`). Applied after `tick_values`.
-    pub label_format: Option<String>,
-    /// `label_format`'s format-type tag (`"time"`/`"number"`/`None`),
-    /// CHART-LEVEL ONLY (D8, spec §4.5) — mirrors `label_format`'s own
-    /// chart-level-only ownership (see that field's doc): the per-channel
-    /// path resolves and applies its own format_type immediately during
+    /// chart-level `label_format_raw`). Applied after
+    /// [`AxisTickOverrides::values`].
+    pub spec: Option<String>,
+    /// [`spec`](Self::spec)'s format-type tag (`"time"`/`"number"`/`None`),
+    /// CHART-LEVEL ONLY (D8, spec §4.5) — mirrors `spec`'s own
+    /// chart-level-only ownership: the per-channel path resolves and applies
+    /// its own format_type immediately during
     /// `prepare::build_axis_tick_inputs`'s `Thread` mode (a genuinely
     /// temporal per-channel format is applied there via raw epoch-ms values
     /// before this bundle is ever consulted, so a per-channel THREADED
-    /// `label_format` — the only kind that reaches this bundle — is always
+    /// `spec` — the only kind that reaches this bundle — is always
     /// numeric by construction and never needs this field). Read by
     /// `render::config_apply::apply_label_format_to_axis` to decide whether the deferred
-    /// `label_format` string is a `chrono` strftime pattern or a d3 spec.
-    pub label_format_type: Option<String>,
-    /// Set by the per-channel prepare path (`prepare::build_axis_input`)
-    /// whenever `resolve_axis_label_format` found an explicit per-channel
-    /// format for this axis (`fm.Axis(label_format=)` / the `encoding.format`
-    /// shorthand) — regardless of whether that format ended up THREADED onto
-    /// `label_format` above (the numeric case) or applied EAGERLY to
-    /// `AxisInput.tick_labels` and then discarded (the temporal case: a
-    /// genuinely temporal per-channel format is fully baked into the labels
-    /// before this bundle is built, so `label_format` correctly threads
-    /// `None` — there is nothing left to defer).
-    ///
-    /// `label_format.is_none()` alone CANNOT distinguish "no per-channel
-    /// format claimed this axis" from "a per-channel format already fully
-    /// applied" — missing that distinction (D8) let a chart-level time
-    /// preset win the cascade over an explicit per-channel
-    /// one (`configure_axis(label_format="date_iso")` re-deriving RAW
-    /// temporal values and overwriting an already-formatted `fm.Axis(
-    /// label_format="%b %d")` axis — the batch's hard per-channel-wins
-    /// cascade constraint, violated). `render::config_apply::apply_axis_config_to_axis_input`'s
-    /// chart-level fill-only gate consults THIS flag, not `label_format
-    /// .is_none()` alone, so a per-channel-claimed axis is never touched —
-    /// chart-level's fill (and therefore `apply_label_format_to_axis`'s
-    /// central re-derivation) is skipped entirely, leaving the per-channel
-    /// labels exactly as applied.
-    pub label_format_claimed: bool,
-    /// Axis title font size. `None` → `theme.title_font_size`.
-    pub title_font_size: Option<f64>,
-    /// Axis title color. `None` → `theme.title_color`.
-    pub title_color: Option<Srgba<u8>>,
-    /// Padding between axis title and tick labels. `None` → `theme.axis_title_padding`.
-    pub title_padding: Option<f64>,
+    /// `spec` string is a `chrono` strftime pattern or a d3 spec.
+    pub format_type: Option<String>,
+}
+
+/// Tick marks and the values they sit on.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisTickOverrides {
+    /// Explicit tick values (`fm.Axis(values=[...])` / `configure_axis(tick_values=[...])`).
+    /// When set, tick labels are replaced with formatted versions of these values.
+    pub values: Option<Vec<f64>>,
+    /// Append a tick at each domain boundary (scale min/max) if not already
+    /// present. `None`/`false` → no boundary ticks.
+    pub extra: Option<bool>,
+    /// Minimum step (data units) between generated ticks; ticks closer than this
+    /// in data space are dropped. `None` → no thinning.
+    pub min_step: Option<f64>,
+    /// Tick-mark length (px) for this axis. `None` → `theme.sizes.tick_size`.
+    /// Per-axis rather than theme-global as of D12 (spec §4.9): it was the
+    /// LAST `AxisStyleSpec` field whose only carrier was the shared theme, so
+    /// `configure(axis_x=AxisConfig(tick_size=…))` had nowhere to land but a
+    /// global slot the y axis reads too — the gap Python's
+    /// `_redistribute_general_axis` was papering over.
+    pub size: Option<f64>,
+    /// Whether tick marks render. Same cascade as
+    /// [`AxisLabelOverrides::show`]. `None` → `true`.
+    pub show: Option<bool>,
+}
+
+/// Tick labels: their text, their formatting, and how the collision cascade
+/// may treat them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisLabelOverrides {
+    /// Tick-label rotation angle override (`fm.Axis(label_angle=...)`). Bypasses
+    /// the collision cascade when `Some`. `None` → cascade-resolved angle.
+    pub angle: Option<f64>,
+    /// The tick-label format and its claim bit. See [`LabelFormat`] for the
+    /// two halves and [`Claimed`] for why the claim cannot be dropped:
+    /// `spec.is_none()` alone CANNOT distinguish "no per-channel format
+    /// claimed this axis" from "a per-channel format already fully applied",
+    /// and missing that distinction (D8) let a chart-level time preset win the
+    /// cascade over an explicit per-channel one
+    /// (`configure_axis(label_format="date_iso")` re-deriving RAW temporal
+    /// values and overwriting an already-formatted `fm.Axis(label_format="%b
+    /// %d")` axis — the batch's hard per-channel-wins cascade constraint,
+    /// violated). The claim is taken by the per-channel prepare path
+    /// (`prepare::build_axis_input`) whenever `resolve_axis_label_format` found
+    /// an explicit per-channel format, regardless of whether that format ended
+    /// up THREADED onto `spec` (the numeric case) or applied EAGERLY to
+    /// `AxisInput.tick_labels` and then discarded (the temporal case).
+    pub format: Claimed<LabelFormat>,
     /// Pixel gap between the end of a tick mark and the tick label baseline.
     /// `None` → the renderer's hardcoded per-orient gaps.
-    pub label_padding: Option<f64>,
+    pub padding: Option<f64>,
     /// Tick-label color override. `None` → `theme.colors.label_color`.
-    pub label_color: Option<Srgba<u8>>,
+    pub color: Option<Srgba<u8>>,
     /// Tick-label font-size override. `None` → `theme.typography.label_font_size`.
-    pub label_font_size: Option<f64>,
+    pub font_size: Option<f64>,
+    /// Flush the first/last tick labels at the axis ends so edge labels align
+    /// within the plot bounds instead of overflowing (Vega `labelFlush`).
+    /// `None`/`false` → default anchors (byte-identical).
+    pub flush: Option<bool>,
+    /// Tick-label overlap strategy override. `None` → the unmodified collision
+    /// cascade on x, and no overlap policy at all on y (see
+    /// [`resolve_y_overlap`](crate::layout::axis::resolve_y_overlap) for y's
+    /// transpose of the four primitives).
+    pub overlap: Option<LabelOverlap>,
+    /// Whether tick labels render. `None` → `true`. Per-channel
+    /// `fm.Axis(labels=)` writes it unconditionally; chart-level
+    /// `configure_axis(labels=)` fills it only when still `None`, so
+    /// per-channel wins (D12, spec §4.9).
+    pub show: Option<bool>,
+}
+
+/// Axis-title styling. The title TEXT is not here: it is the resolved render
+/// input [`AxisInput::title`], mirroring how the resolved
+/// [`AxisInput::orient`] sits apart from its [`AxisPlacementOverrides::orient`]
+/// override input. Its claim bit rides with the text, in the `Claimed` wrapper
+/// on that field.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisTitleOverrides {
+    /// Axis title font size. `None` → `theme.title_font_size`.
+    pub font_size: Option<f64>,
+    /// Axis title color. `None` → `theme.title_color`.
+    pub color: Option<Srgba<u8>>,
+    /// Padding between axis title and tick labels. `None` → `theme.axis_title_padding`.
+    pub padding: Option<f64>,
+    /// Side/orientation of the axis title relative to its axis (e.g. a horizontal
+    /// title on a left axis). `None` → the orient-default rotation.
+    pub orient: Option<AxisOrient>,
+}
+
+/// Gridlines emitted by this axis.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisGridOverrides {
     /// Gridline color override. `None` → `theme.colors.grid_color`.
-    pub grid_color: Option<Srgba<u8>>,
+    pub color: Option<Srgba<u8>>,
     /// Gridline dash override. `None` → `theme.grid.grid_dash`.
-    pub grid_dash: Option<Vec<f64>>,
+    pub dash: Option<Vec<f64>>,
     /// Gridline width override. `None` → `theme.sizes.grid_width`.
-    pub grid_width: Option<f64>,
+    pub width: Option<f64>,
+    /// Per-axis grid-line opacity override `[0, 1]`. `None` → `theme.grid.grid_opacity`.
+    pub opacity: Option<f64>,
+    /// Whether gridlines from this axis render. `None` means "no per-axis
+    /// opinion" and is resolved against `theme.grid.grid` by
+    /// [`AxesInput::apply_show_defaults`] — the per-axis half of D4/F-L07-01
+    /// (spec §4.3). Precedence, not AND: a per-channel `Axis(grid=True)` on a
+    /// grid-less theme draws gridlines for that axis only.
+    pub show: Option<bool>,
+}
+
+/// The axis domain line.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisDomainOverrides {
     /// Domain-line color override. `None` → `theme.colors.axis_line_color`.
-    pub domain_color: Option<Srgba<u8>>,
+    pub color: Option<Srgba<u8>>,
     /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
-    pub domain_width: Option<f64>,
+    pub width: Option<f64>,
+    /// Whether the axis domain line renders. `None` means "no per-axis
+    /// opinion" and is resolved against `theme.axis.axis_line` by
+    /// [`AxesInput::apply_show_defaults`], so by layout time this is always
+    /// `Some`. Precedence (not AND): a per-channel `Axis(domain=True)` wins
+    /// over a theme that disables domain lines.
+    pub show: Option<bool>,
+}
+
+/// Where the axis group sits and in what order it paints.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisPlacementOverrides {
     /// Axis side override, validated against the channel dimension (x→top/bottom,
     /// y→left/right). `None` → the channel's default side (Bottom for x, Left for
     /// y). Resolved into the concrete [`AxisInput::orient`] at layout-build time.
@@ -303,100 +532,72 @@ pub(crate) struct AxisStyleOverrides {
     /// Shift the axis group perpendicular to its line by N px (outward positive),
     /// composing additively with the renderer's `offset` handling. `None` → no shift.
     pub translate: Option<f64>,
+    /// Shift the axis perpendicular AWAY from the plot edge by N px (Vega axis
+    /// `offset`). Composes **additively** with [`translate`](Self::translate):
+    /// the renderer applies `translate + offset` as a single outward shift.
+    /// `None`/`0` → no shift.
+    pub offset: Option<f64>,
     /// Lower bound (px) for the reserved axis margin band — reserve at least this
     /// much. `None` → dynamic band only.
     pub min_band: Option<f64>,
     /// Upper bound (px) for the reserved axis margin band — cap at this much
     /// (labels may clip past it). `None` → no cap.
     pub max_band: Option<f64>,
-    /// Per-axis grid-line opacity override `[0, 1]`. `None` → `theme.grid.grid_opacity`.
-    pub grid_opacity: Option<f64>,
-    /// Side/orientation of the axis title relative to its axis (e.g. a horizontal
-    /// title on a left axis). `None` → the orient-default rotation.
-    pub title_orient: Option<AxisOrient>,
     /// Coarse draw order relative to marks: `>= 1` → axis + grid drawn above
     /// marks; `<= 0` (default) → below marks. `None` → default (below).
     pub zindex: Option<i64>,
-    /// Append a tick at each domain boundary (scale min/max) if not already
-    /// present. `None`/`false` → no boundary ticks.
-    pub tick_extra: Option<bool>,
-    /// Minimum step (data units) between generated ticks; ticks closer than this
-    /// in data space are dropped. `None` → no thinning.
-    pub tick_min_step: Option<f64>,
-    /// Shift the axis perpendicular AWAY from the plot edge by N px (Vega axis
-    /// `offset`). Composes **additively** with [`translate`](Self::translate):
-    /// the renderer applies `translate + offset` as a single outward shift.
-    /// `None`/`0` → no shift.
-    pub offset: Option<f64>,
-    /// Flush the first/last tick labels at the axis ends so edge labels align
-    /// within the plot bounds instead of overflowing (Vega `labelFlush`).
-    /// `None`/`false` → default anchors (byte-identical).
-    pub label_flush: Option<bool>,
-    /// Tick-label overlap strategy override. `None` → the unmodified collision
-    /// cascade on x, and no overlap policy at all on y (see
-    /// [`resolve_y_overlap`](crate::layout::axis::resolve_y_overlap) for y's
-    /// transpose of the four primitives).
-    pub label_overlap: Option<LabelOverlap>,
-    /// Tick-mark length (px) for this axis. `None` → `theme.sizes.tick_size`.
-    /// Per-axis rather than theme-global as of D12 (spec §4.9): it was the
-    /// LAST `AxisStyleSpec` field whose only carrier was the shared theme, so
-    /// `configure(axis_x=AxisConfig(tick_size=…))` had nowhere to land but a
-    /// global slot the y axis reads too — the gap Python's
-    /// `_redistribute_general_axis` was papering over.
-    pub tick_size: Option<f64>,
-    /// Whether tick labels render. `None` → `true`. Per-channel
-    /// `fm.Axis(labels=)` writes it unconditionally; chart-level
-    /// `configure_axis(labels=)` fills it only when still `None`, so
-    /// per-channel wins (D12, spec §4.9).
-    pub show_labels: Option<bool>,
-    /// Whether tick marks render. Same cascade as
-    /// [`show_labels`](Self::show_labels). `None` → `true`.
-    pub show_ticks: Option<bool>,
-    /// Whether the axis domain line renders. `None` means "no per-axis
-    /// opinion" and is resolved against `theme.axis.axis_line` by
-    /// [`AxesInput::apply_show_defaults`], so by layout time this is always
-    /// `Some`. Precedence (not AND): a per-channel `Axis(domain=True)` wins
-    /// over a theme that disables domain lines.
-    pub show_domain: Option<bool>,
-    /// Whether gridlines from this axis render. `None` means "no per-axis
-    /// opinion" and is resolved against `theme.grid.grid` by
-    /// [`AxesInput::apply_show_defaults`] — the per-axis half of D4/F-L07-01
-    /// (spec §4.3). Precedence, not AND: a per-channel `Axis(grid=True)` on a
-    /// grid-less theme draws gridlines for that axis only.
-    pub show_grid: Option<bool>,
-    /// Set once the axis title slot has been claimed by a source the
-    /// chart-level config must not overwrite: a per-channel `X(title=)` /
-    /// `fm.Axis(title=)` (including the `title=""` explicit-suppress
-    /// spelling), or an earlier, more specific chart-level layer.
-    ///
-    /// [`AxisInput::title`] alone cannot carry that distinction — `None`
-    /// there means BOTH "never set" and "explicitly suppressed", so a naive
-    /// fill-only-if-`None` chart-level write would resurrect a title the
-    /// caller deliberately removed, inverting the per-channel-wins cascade.
-    /// This is the title twin of [`label_format_claimed`](Self::label_format_claimed),
-    /// which exists for the identical reason on the format slot; both are
-    /// written once at their source and read only through the one
-    /// `fill_chart_level_*` method that owns the predicate (D12, spec §4.9).
-    pub title_claimed: bool,
+}
+
+/// Per-axis style/positioning overrides, bundled so a future field is a one-line
+/// struct addition instead of a five-site thread (mirrors `LegendStyleOpts` on
+/// the legend side). Every leaf is `Option` and falls back to the shared theme
+/// value (or a layout default) when `None`, so default output stays byte-identical
+/// and only a per-channel `fm.Axis(...)` / chart-level `configure_axis(...)` spec
+/// lights one up.
+///
+/// The leaves live in six clusters named for the axis part they style — ticks,
+/// labels, title, grid, domain, placement — rather than as one flat run of 34
+/// prefix-named fields. The prefixes WERE the clustering, spelled in a
+/// convention the compiler could not hold anyone to; a new field's home is now
+/// a decision the type makes.
+///
+/// Both the per-channel parse path (`render::prepare::encoding_axis_style_overrides`)
+/// and the chart-level apply path (`render::config_apply::apply_axis_style_to_axis_input`) write
+/// here uniformly via the `is_none()` fill-only pattern, so a higher-precedence
+/// source (per-channel, or an earlier config layer) always wins. The resolved
+/// concrete axis side is computed from [`AxisPlacementOverrides::orient`] into
+/// [`AxisInput::orient`] at layout-build time (x→Bottom / y→Left default).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisStyleOverrides {
+    /// Tick marks and the values they sit on.
+    pub ticks: AxisTickOverrides,
+    /// Tick labels: text, formatting, collision policy.
+    pub labels: AxisLabelOverrides,
+    /// Axis-title styling (the title TEXT is [`AxisInput::title`]).
+    pub title: AxisTitleOverrides,
+    /// Gridlines emitted by this axis.
+    pub grid: AxisGridOverrides,
+    /// The axis domain line.
+    pub domain: AxisDomainOverrides,
+    /// Where the axis group sits and in what order it paints.
+    pub placement: AxisPlacementOverrides,
 }
 
 impl AxisStyleOverrides {
-    /// The SOLE way a chart-level source may fill
-    /// [`label_format`](Self::label_format) /
-    /// [`label_format_type`](Self::label_format_type): no-ops when the slot
-    /// is already claimed (by a per-channel format — see
-    /// [`label_format_claimed`](Self::label_format_claimed)'s doc — or by an
-    /// earlier chart-level layer that already filled `label_format`).
+    /// The SOLE way a chart-level source may fill the tick-label format
+    /// ([`AxisLabelOverrides::format`]): no-ops when the slot is already
+    /// claimed (by a per-channel format — see [`Claimed`]'s doc — or by an
+    /// earlier chart-level layer that already filled the spec).
     ///
-    /// The `label_format.is_none() && !label_format_claimed` predicate this
-    /// method now owns used to be hand-copied at its two call sites
+    /// The `spec.is_none() && !claimed` predicate this method owns used to be
+    /// hand-copied at its two call sites
     /// (`render::config_apply::apply_axis_config_to_axis_input`, `prepare::axis_style_fill_from`'s
     /// own defensive fallback write) — the SAME "is this slot actually
     /// unclaimed" question, expressed twice, on a `pub(crate)` field with no
     /// accessor discipline. A fix for the cascade-inversion bug this
     /// predicate exists to enforce was itself found missing the second
     /// writer, proving the hand-copy was already load-bearing and already
-    /// fragile. Mechanizing it here means a THIRD writer of `label_format`
+    /// fragile. Mechanizing it here means a THIRD writer of the format slot
     /// has exactly one correct way to write it, not a predicate to
     /// remember and re-derive.
     pub(crate) fn fill_chart_level_label_format(
@@ -404,10 +605,12 @@ impl AxisStyleOverrides {
         fmt: Option<String>,
         format_type: Option<String>,
     ) {
-        if self.label_format.is_none() && !self.label_format_claimed {
-            self.label_format = fmt;
-            self.label_format_type = format_type;
-        }
+        self.labels.format.fill_without_claiming(|slot| {
+            if slot.spec.is_none() {
+                slot.spec = fmt;
+                slot.format_type = format_type;
+            }
+        });
     }
 }
 
@@ -437,15 +640,17 @@ pub(crate) fn resolve_axis_title(value: Option<&str>, fallback: Option<String>) 
 pub struct AxisInput {
     /// Resolved concrete axis side, used by layout (plot-rect sizing,
     /// `layout_*_axis`) and the scene assembler. Resolved from
-    /// `overrides.orient` (default Bottom for x, Left for y) via
+    /// `overrides.placement.orient` (default Bottom for x, Left for y) via
     /// [`resolve_orient`](Self::resolve_orient) after all override layers merge.
     pub orient: AxisOrient,
     /// Resolved axis title, or `None` for "no title" (either never set, or
     /// explicitly suppressed via the `title=""` sentinel). Which of the two it
-    /// is matters for the chart-level cascade and is carried separately by
-    /// [`AxisStyleOverrides::title_claimed`] — see
-    /// [`AxisInput::fill_chart_level_title`].
-    pub title: Option<String>,
+    /// is matters for the chart-level cascade, so the slot carries its own
+    /// claim bit — see [`Claimed`] and [`AxisInput::fill_chart_level_title`].
+    /// The claim used to live across the struct boundary as
+    /// `AxisStyleOverrides::title_claimed`, a bit guarding a value it could not
+    /// see; the wrapper puts the two back together.
+    pub title: Claimed<Option<String>>,
     pub tick_labels: Vec<String>,
     /// Optional d3-format string applied to each tick label before layout
     /// (D12: `encoding.format` on x/y axes). `None` → use the scale's own
@@ -517,7 +722,7 @@ impl AxisInput {
     /// Construct an `AxisInput` with all overrides empty (so every show toggle
     /// reads its default: `true` for labels/ticks, the theme's value for
     /// domain/grid once [`AxesInput::apply_show_defaults`] has run).
-    /// `label_angle` seeds `overrides.label_angle`.
+    /// `label_angle` seeds `overrides.labels.angle`.
     pub fn new(
         orient: AxisOrient,
         title: Option<String>,
@@ -526,14 +731,17 @@ impl AxisInput {
     ) -> Self {
         Self {
             orient,
-            title,
+            title: Claimed::new(title),
             tick_labels,
             tick_format: None,
             tick_format_type: None,
             tick_projection: None,
             categorical_placement: None,
             overrides: AxisStyleOverrides {
-                label_angle,
+                labels: AxisLabelOverrides {
+                    angle: label_angle,
+                    ..AxisLabelOverrides::default()
+                },
                 ..AxisStyleOverrides::default()
             },
         }
@@ -582,17 +790,17 @@ impl AxisInput {
     /// consumers (band reservation, the two `layout_*_axis` calls, the
     /// secondary-y call, and `build_axis`).
     pub fn tick_size(&self, theme: &super::ThemeInputs) -> f64 {
-        self.overrides.tick_size.unwrap_or(theme.sizes.tick_size)
+        self.overrides.ticks.size.unwrap_or(theme.sizes.tick_size)
     }
 
-    /// Whether tick labels render (`overrides.show_labels`, default `true`).
+    /// Whether tick labels render (`overrides.labels.show`, default `true`).
     pub fn show_labels(&self) -> bool {
-        self.overrides.show_labels.unwrap_or(true)
+        self.overrides.labels.show.unwrap_or(true)
     }
 
-    /// Whether tick marks render (`overrides.show_ticks`, default `true`).
+    /// Whether tick marks render (`overrides.ticks.show`, default `true`).
     pub fn show_ticks(&self) -> bool {
-        self.overrides.show_ticks.unwrap_or(true)
+        self.overrides.ticks.show.unwrap_or(true)
     }
 
     /// Whether the axis domain line renders. `None` here means the theme
@@ -611,11 +819,11 @@ impl AxisInput {
     /// a bug the `true` default was silently masking.
     pub fn show_domain(&self) -> bool {
         debug_assert!(
-            self.overrides.show_domain.is_some(),
+            self.overrides.domain.show.is_some(),
             "AxisInput::show_domain() read before AxesInput::apply_show_defaults() \
              folded in the theme default"
         );
-        self.overrides.show_domain.unwrap_or(true)
+        self.overrides.domain.show.unwrap_or(true)
     }
 
     /// Whether gridlines from this axis render. Same "resolved by
@@ -624,11 +832,11 @@ impl AxisInput {
     /// [`show_domain`](Self::show_domain).
     pub fn show_grid(&self) -> bool {
         debug_assert!(
-            self.overrides.show_grid.is_some(),
+            self.overrides.grid.show.is_some(),
             "AxisInput::show_grid() read before AxesInput::apply_show_defaults() \
              folded in the theme default"
         );
-        self.overrides.show_grid.unwrap_or(true)
+        self.overrides.grid.show.unwrap_or(true)
     }
 
     /// The SOLE way a chart-level source may fill [`title`](Self::title):
@@ -642,18 +850,27 @@ impl AxisInput {
     /// `configure_axis(title="")` removes the field-name default rather than
     /// rendering an empty title. Mirrors
     /// [`AxisStyleOverrides::fill_chart_level_label_format`] field for field —
-    /// same hazard (a slot whose `None` is ambiguous), same one-owner fix.
+    /// same hazard (a slot whose `None` is ambiguous), same one-owner fix. The
+    /// two disciplines still differ in one respect, and deliberately so: this
+    /// one CLAIMS on the way out (see
+    /// [`Claimed::fill_and_claim`] versus
+    /// [`Claimed::fill_without_claiming`]).
+    ///
+    /// An absent `spec_title` declines the slot rather than claiming it empty:
+    /// `configure_axis()` with no `title=` must leave the next, less specific
+    /// layer free to fill it.
     pub(crate) fn fill_chart_level_title(&mut self, spec_title: Option<&str>) {
-        if self.overrides.title_claimed {
-            return;
-        }
-        let Some(raw) = spec_title else { return };
-        self.title = resolve_axis_title(Some(raw), self.title.take());
-        self.overrides.title_claimed = true;
+        self.title.fill_and_claim(|slot| match spec_title {
+            Some(raw) => {
+                *slot = resolve_axis_title(Some(raw), slot.take());
+                true
+            }
+            None => false,
+        });
     }
 
     /// Re-resolve the concrete [`orient`](Self::orient) from the
-    /// `overrides.orient` override after all override layers (per-channel,
+    /// `overrides.placement.orient` override after all override layers (per-channel,
     /// chart-level config) have merged. The override (when `Some`) is already
     /// validated against the channel dimension, so the channel is inferred from
     /// the current concrete orient and the default is its dimension edge (Bottom
@@ -664,7 +881,7 @@ impl AxisInput {
         // `AxisDimension::default_orient` (Bottom for x, Left for y) — no inline
         // `matches!(.. Top | Bottom)` discipline.
         let default = self.orient.dimension().default_orient();
-        self.orient = self.overrides.orient.unwrap_or(default);
+        self.orient = self.overrides.placement.orient.unwrap_or(default);
     }
 }
 
@@ -730,8 +947,11 @@ impl AxesInput {
             .into_iter()
             .chain(self.secondary_y.iter_mut())
         {
-            axis.overrides.show_grid.get_or_insert(theme.grid.grid);
-            axis.overrides.show_domain.get_or_insert(theme.axis.axis_line);
+            axis.overrides.grid.show.get_or_insert(theme.grid.grid);
+            axis.overrides
+                .domain
+                .show
+                .get_or_insert(theme.axis.axis_line);
         }
     }
 }
@@ -829,7 +1049,9 @@ pub struct AxisLayout {
     pub label_flush: Option<bool>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl AxisLayout {
     /// Whether this axis (and its gridlines) should be drawn above the data
@@ -861,26 +1083,26 @@ impl AxisLayout {
             ticks,
             minor_ticks,
             title,
-            tick_size: input.overrides.tick_size,
+            tick_size: input.overrides.ticks.size,
             show_labels: input.show_labels(),
             show_ticks: input.show_ticks(),
             show_domain: input.show_domain(),
             show_grid: input.show_grid(),
-            title_font_size: input.overrides.title_font_size,
-            title_color_rgba: input.overrides.title_color.map(rgba_array),
-            label_padding: input.overrides.label_padding,
-            label_color_rgba: input.overrides.label_color.map(rgba_array),
-            label_font_size: input.overrides.label_font_size,
-            grid_color_rgba: input.overrides.grid_color.map(rgba_array),
-            grid_dash: input.overrides.grid_dash.clone(),
-            grid_width: input.overrides.grid_width,
-            domain_color_rgba: input.overrides.domain_color.map(rgba_array),
-            domain_width: input.overrides.domain_width,
-            grid_opacity: input.overrides.grid_opacity,
-            translate: input.overrides.translate,
-            zindex: input.overrides.zindex,
-            offset: input.overrides.offset,
-            label_flush: input.overrides.label_flush,
+            title_font_size: input.overrides.title.font_size,
+            title_color_rgba: input.overrides.title.color.map(rgba_array),
+            label_padding: input.overrides.labels.padding,
+            label_color_rgba: input.overrides.labels.color.map(rgba_array),
+            label_font_size: input.overrides.labels.font_size,
+            grid_color_rgba: input.overrides.grid.color.map(rgba_array),
+            grid_dash: input.overrides.grid.dash.clone(),
+            grid_width: input.overrides.grid.width,
+            domain_color_rgba: input.overrides.domain.color.map(rgba_array),
+            domain_width: input.overrides.domain.width,
+            grid_opacity: input.overrides.grid.opacity,
+            translate: input.overrides.placement.translate,
+            zindex: input.overrides.placement.zindex,
+            offset: input.overrides.placement.offset,
+            label_flush: input.overrides.labels.flush,
         }
     }
 }
@@ -1056,7 +1278,7 @@ fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayou
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickLayout {
     pub position: f64,
-    pub label: String,         // may contain '\n' for multi-line labels (future task)
+    pub label: String, // may contain '\n' for multi-line labels (future task)
     pub label_angle: f64,
     pub elided: bool,
     /// Tick mark is shown but its label is hidden (label density culling).
@@ -1144,11 +1366,95 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
     cos_abs * label_w + sin_abs * line_h
 }
 
+/// The four measurement inputs [`estimate_x_label_band`] and [`layout_x_axis`]
+/// must agree on, in one value.
+///
+/// The band predictor and the real cascade are deliberate mirrors: the
+/// predictor reserves the gutter before the plot rect exists, and the cascade
+/// then lays out into that gutter. If they disagree on the label font size, the
+/// gap policy, the tick length or the text metrics, the reserved band no longer
+/// matches the rendered extent and labels clip. That agreement used to be a
+/// four-argument SYNC obligation re-satisfied by hand at four call sites (two
+/// per function, in `layout::compute_layout` and `render::scene_build`), and
+/// each function carried a `clippy::too_many_arguments` allow for the nine
+/// positional parameters it took to express it.
+///
+/// [`for_axis`](Self::for_axis) is the point: all four values derive from the
+/// same `(AxisInput, ThemeInputs, TextMetrics)` triple at every production call
+/// site, identically, so the derivation has ONE home for a fifth call site to
+/// reach for. That is a convention with an obvious default, not an enforced
+/// invariant — this struct's fields are `pub`, so a hand-assembled context with
+/// a hardcoded gap is still spellable (see [`new`](Self::new)'s doc). What the
+/// type removes is the four-value positional thread that made divergence the
+/// easy outcome.
+#[derive(Clone, Copy)]
+pub struct LabelBandCtx<'m> {
+    /// Tick-label font size, already resolved against the theme.
+    pub label_font_size: f64,
+    /// The gap/cull policy every cascade stage's fit budget subtracts.
+    pub label_gap: LabelGapPolicy,
+    /// Tick-mark length, already resolved against the theme.
+    pub tick_size: f64,
+    /// Text measurement, which must be the SAME implementation on both sides:
+    /// facet panels measure through their own metrics instance.
+    pub metrics: &'m dyn TextMetrics,
+}
+
+impl<'m> LabelBandCtx<'m> {
+    /// Resolve the context for `input` against `theme`, measured by `metrics` —
+    /// the one derivation every production call site shares.
+    pub fn for_axis(
+        input: &AxisInput,
+        theme: &super::ThemeInputs,
+        metrics: &'m dyn TextMetrics,
+    ) -> Self {
+        Self::new(
+            input
+                .overrides
+                .labels
+                .font_size
+                .unwrap_or(theme.typography.label_font_size),
+            theme.label_gap,
+            input.tick_size(theme),
+            metrics,
+        )
+    }
+
+    /// Construct a context from values resolved by the caller. Production code
+    /// uses [`for_axis`](Self::for_axis); this exists for the unit tests that
+    /// exercise one measurement input at a time against a mock metric, and is
+    /// `pub(crate)` to say so — `for_axis` is the only derivation production
+    /// should reach for. Note this does NOT make a hand-assembled context
+    /// unspellable: the struct's fields are `pub`, so a struct literal spells it
+    /// too. The single production derivation is a convention with one obvious
+    /// home, not an enforced invariant.
+    pub(crate) fn new(
+        label_font_size: f64,
+        label_gap: LabelGapPolicy,
+        tick_size: f64,
+        metrics: &'m dyn TextMetrics,
+    ) -> Self {
+        Self {
+            label_font_size,
+            label_gap,
+            tick_size,
+            metrics,
+        }
+    }
+}
+
 /// Estimate the vertical space (in pixels) needed below the x-axis to
 /// accommodate tick labels, accounting for how the collision cascade is likely
 /// to resolve. Called by the layout orchestrator **before** the plot rect is
 /// finalized, so it uses worst-case inputs (longest label, estimated slot
 /// width). Over-reservation is acceptable; under-reservation causes clipping.
+///
+/// The four inputs it shares with [`layout_x_axis`] — label font size, gap
+/// policy, tick size, metrics — arrive as one [`LabelBandCtx`], so a call site
+/// hands both functions the same value by default instead of assembling each
+/// separately. Not enforced: a caller can still build two different contexts
+/// (the fields are `pub`), so this makes agreement the path of least resistance
+/// rather than an invariant.
 ///
 /// `label_gap`'s pixel gap (spec §4.6, D9) shrinks every
 /// stage's fit budget by that many pixels — SYNC'd with
@@ -1210,18 +1516,20 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
 /// padding_delta` rather than folding into this gate: an x axis with zero tick
 /// labels but `show_labels: true` still draws its tick marks, and that corner
 /// is out of `#182`'s scope (see this task's report).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_x_label_band(
     labels: &[String],
-    label_font_size: f64,
     label_angle_override: Option<f64>,
-    metrics: &dyn TextMetrics,
     estimated_slot_w: f64,
-    label_gap: LabelGapPolicy,
     label_padding: Option<f64>,
-    tick_size: f64,
     show_labels: bool,
+    ctx: &LabelBandCtx<'_>,
 ) -> f64 {
+    let LabelBandCtx {
+        label_font_size,
+        label_gap,
+        tick_size,
+        metrics,
+    } = *ctx;
     let line_h = metrics.line_height(label_font_size);
     let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
 
@@ -1453,7 +1761,7 @@ pub(crate) fn compute_y_label_band_width(
         .iter()
         .map(|s| metrics.measure_width(s, label_font_size))
         .fold(0.0_f64, f64::max);
-    let angle = input.overrides.label_angle.unwrap_or(0.0);
+    let angle = input.overrides.labels.angle.unwrap_or(0.0);
     let labels_drawn = visible && input.show_labels();
     if !labels_drawn {
         // #182 (closes #94): a band exists if and only if something is drawn
@@ -1469,7 +1777,7 @@ pub(crate) fn compute_y_label_band_width(
         return 0.0;
     }
     let line_h = metrics.line_height(label_font_size);
-    let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
+    let label_pad = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
     rotated_y_label_extent(angle, max_label_w, line_h, tick_size, label_pad)
 }
 
@@ -1497,9 +1805,9 @@ pub fn compute_y_title_width(
     metrics: &dyn TextMetrics,
     visible: bool,
 ) -> f64 {
-    if visible && input.title.is_some() {
-        let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
-        let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
+    if visible && input.title.get().is_some() {
+        let effective_title_font_size = input.overrides.title.font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.overrides.title.padding.unwrap_or(axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
@@ -1521,9 +1829,9 @@ pub fn compute_x_title_width(
     metrics: &dyn TextMetrics,
     visible: bool,
 ) -> f64 {
-    if visible && input.title.is_some() {
-        let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
-        let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
+    if visible && input.title.get().is_some() {
+        let effective_title_font_size = input.overrides.title.font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.overrides.title.padding.unwrap_or(axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
@@ -1532,11 +1840,27 @@ pub fn compute_x_title_width(
 
 /// Build the AxisLayout for the y-axis (Left orient) of a single panel.
 /// Tick positions are uniformly spaced across `panel_area.h`; no graduated
-/// collision cascade applies to the y-axis (spec §14.4). `input.overrides.label_angle`
+/// collision cascade applies to the y-axis (spec §14.4). `input.overrides.labels.angle`
 /// (R2) is the one exception: when set, it bypasses the (absent) cascade the
 /// same way it bypasses x's cascade, rotating every tick and eliding any label
 /// whose rotated footprint still collides with its neighbor (no cull recovery
 /// on y — see `AxisLabelWarning`).
+///
+/// # Why this one is NOT on [`LabelBandCtx`], and keeps its 8 flat args
+/// Deliberate, not an unfinished migration — do not "complete" the bundle by
+/// handing this function a ctx. It shares only THREE of the four bundled values
+/// (label font size, tick size, metrics) and takes no [`LabelGapPolicy`]:
+/// stride-culling is an x-label concern, so a ctx here would carry a gap policy
+/// this function never reads. More decisive, the bundle exists to delete a
+/// *two-function sync obligation* — [`estimate_x_label_band`] reserves the band
+/// that [`layout_x_axis`] then lays out into, and they must agree or labels clip.
+/// y has no such pair: its band predictor is [`compute_y_label_band_width`], a
+/// separate 5-argument function with its own contract, so there is no agreement
+/// for a ctx to mechanise. Mechanising the y pair is a follow-up with its own
+/// design question (which three values, and whether `compute_y_label_band_width`
+/// joins), not a loose end here. Recorded because `compute_x_title_width`'s doc
+/// above cites cohesion finding LAYOUT-855 for penalising exactly this kind of
+/// axis-family asymmetry: this one is chosen and reasoned, not drift.
 #[allow(clippy::too_many_arguments)]
 pub fn layout_y_axis(
     input: &AxisInput,
@@ -1553,14 +1877,14 @@ pub fn layout_y_axis(
     let slot_h = if n > 0 { panel_area.h / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (top → bottom, in pixel order): slot `i`'s center
     // is `panel_area.y + (i + 0.5)*slot_h` via `Axis1D::uniform_center`.
-    let slot_axis = Axis1D { lo: panel_area.y, hi: panel_area.y + panel_area.h };
+    let slot_axis = Axis1D {
+        lo: panel_area.y,
+        hi: panel_area.y + panel_area.h,
+    };
     // Continuous axes: place each tick at its scale-projected pixel (mark range
     // is the inverted y range `(bottom, top)`, inset exactly like data marks).
     // Categorical axes (no projected fractions): keep the uniform-slot formula.
-    let projected = project_tick_positions(
-        input,
-        (panel_area.y + panel_area.h, panel_area.y),
-    );
+    let projected = project_tick_positions(input, (panel_area.y + panel_area.h, panel_area.y));
     // Categorical axes (F-L04-03, GH #67): place each tick at the scale's own
     // band center — the same pixel its mark gets — so labels and grid lines agree
     // with the marks. `slot_axis` is bit-for-bit the pixel interval
@@ -1604,7 +1928,7 @@ pub fn layout_y_axis(
     // and `Greedy` differ HERE and not on x — on y, `Greedy` is an explicit
     // request for the fit-based culling y otherwise never does.
     let overlap_visible = resolve_y_overlap(
-        input.overrides.label_overlap,
+        input.overrides.labels.overlap,
         &input.tick_labels,
         cascade_slot_h,
         label_font_size,
@@ -1613,13 +1937,15 @@ pub fn layout_y_axis(
     // `label_overlap = "rotate"` supplies the angle when the caller set none,
     // so the two knobs compose instead of one silently shadowing the other:
     // an explicit `label_angle` still wins (it is the more specific request).
-    let effective_angle = input
-        .overrides
-        .label_angle
-        .or_else(|| match input.overrides.label_overlap {
-            Some(LabelOverlap::Rotate) => Some(*ANGLE_CASCADE.last().unwrap()),
-            _ => None,
-        });
+    let effective_angle =
+        input
+            .overrides
+            .labels
+            .angle
+            .or_else(|| match input.overrides.labels.overlap {
+                Some(LabelOverlap::Rotate) => Some(*ANGLE_CASCADE.last().unwrap()),
+                _ => None,
+            });
     let (mut ticks, warning) = if let Some(override_angle) = effective_angle {
         // R2: label_angle_override always applies (there is no cascade to
         // bypass on y). Shared body: see
@@ -1666,7 +1992,11 @@ pub fn layout_y_axis(
     // the right edge. Any other orient is rejected upstream (`prepare.rs`
     // validates x→{top,bottom}, y→{left,right}); default to Left defensively.
     let on_right = matches!(input.orient, AxisOrient::Right);
-    let axis_x = if on_right { panel_area.x + panel_area.w } else { panel_area.x };
+    let axis_x = if on_right {
+        panel_area.x + panel_area.w
+    } else {
+        panel_area.x
+    };
     let axis_line = Rect {
         x: axis_x,
         y: panel_area.y,
@@ -1674,10 +2004,10 @@ pub fn layout_y_axis(
         h: panel_area.h,
     };
 
-    let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
-    let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
+    let effective_title_font_size = input.overrides.title.font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.overrides.title.padding.unwrap_or(axis_title_padding);
 
-    let title = input.title.as_ref().map(|text| {
+    let title = input.title.get().as_ref().map(|text| {
         // `visible: true` — `layout_y_axis` itself is only ever called for a
         // chart-level-visible axis (the panel loop gates the call on
         // `axes.show_y`/every `axes.secondary_y` entry is always emitted), so
@@ -1702,11 +2032,17 @@ pub fn layout_y_axis(
         // `title_orient` (top/bottom) renders the title flat (e.g. a horizontal
         // caption above a left axis). The default orient (no override) keeps the
         // historical rotation: `-90` on the left, `+90` on the right.
-        let angle = match input.overrides.title_orient {
+        let angle = match input.overrides.title.orient {
             Some(AxisOrient::Top) | Some(AxisOrient::Bottom) => 0.0,
             Some(AxisOrient::Right) => 90.0,
             Some(AxisOrient::Left) => -90.0,
-            None => if on_right { 90.0 } else { -90.0 },
+            None => {
+                if on_right {
+                    90.0
+                } else {
+                    -90.0
+                }
+            }
         };
         AxisTitleLayout {
             text: text.clone(),
@@ -1773,8 +2109,8 @@ fn resolve_y_overlap(
     }
 }
 
-use crate::layout::{LABEL_OVERLAP_TOLERANCE, ANGLE_CASCADE, FONT_SHRINK_FACTOR};
 use crate::layout::text_metrics::measure_multiline_width;
+use crate::layout::{ANGLE_CASCADE, FONT_SHRINK_FACTOR, LABEL_OVERLAP_TOLERANCE};
 
 /// Per-axis tick-label warning the orchestrator may emit (x's collision
 /// cascade and y's override-angle elide-to-fit recovery both surface through
@@ -1811,12 +2147,7 @@ struct CascadeResult {
 /// width fits in `max_width`. Returns the truncated label with "…" appended.
 /// If even "…" alone exceeds max_width, returns "…" anyway (caller is already
 /// in a degenerate state).
-fn elide_to_fit(
-    label: &str,
-    max_width: f64,
-    font_size: f64,
-    metrics: &dyn TextMetrics,
-) -> String {
+fn elide_to_fit(label: &str, max_width: f64, font_size: f64, metrics: &dyn TextMetrics) -> String {
     let ellipsis = '\u{2026}';
     let ellipsis_w = metrics.measure_width(&ellipsis.to_string(), font_size);
     if ellipsis_w >= max_width {
@@ -1889,7 +2220,10 @@ fn wrap_label(
     // Rule 1: underscore split.
     if label.contains('_') {
         let segments: Vec<&str> = label.split('_').collect();
-        if segments.iter().any(|s| metrics.measure_width(s, font_size) > max_width) {
+        if segments
+            .iter()
+            .any(|s| metrics.measure_width(s, font_size) > max_width)
+        {
             return None;
         }
         return Some(segments.join("\n"));
@@ -1899,7 +2233,10 @@ fn wrap_label(
     if label.contains(' ') {
         let words: Vec<&str> = label.split(' ').collect();
         // Any single word that exceeds max_width makes wrapping impossible.
-        if words.iter().any(|w| metrics.measure_width(w, font_size) > max_width) {
+        if words
+            .iter()
+            .any(|w| metrics.measure_width(w, font_size) > max_width)
+        {
             return None;
         }
         let mut lines: Vec<String> = Vec::new();
@@ -1945,7 +2282,10 @@ fn wrap_label(
         if !current.is_empty() {
             segments.push(current);
         }
-        if segments.iter().any(|s| metrics.measure_width(s, font_size) > max_width) {
+        if segments
+            .iter()
+            .any(|s| metrics.measure_width(s, font_size) > max_width)
+        {
             return None;
         }
         return Some(segments.join("\n"));
@@ -2088,7 +2428,10 @@ fn wrap_label_to_line_count(
 ) -> Option<String> {
     if !label.contains('_') && label.contains(' ') {
         let words: Vec<&str> = label.split(' ').collect();
-        if words.iter().any(|w| metrics.measure_width(w, font_size) > max_width) {
+        if words
+            .iter()
+            .any(|w| metrics.measure_width(w, font_size) > max_width)
+        {
             return None;
         }
         let groups = pack_words_to_line_count(&words, target_lines, max_width, font_size, metrics);
@@ -2213,7 +2556,9 @@ fn stamp_override_angle_with_elide(
         })
         .collect();
     let warning = if elided_count > 0 {
-        Some(AxisLabelWarning::LabelsElided { count: elided_count })
+        Some(AxisLabelWarning::LabelsElided {
+            count: elided_count,
+        })
     } else {
         None
     };
@@ -2511,7 +2856,8 @@ fn cascade_collision_recovery(
     // full N-label set at `slot_w`. See `resolve_presentation`'s doc; it is
     // the extracted, reusable body of these four stages, shared with S4's
     // post-cull re-attempt below.
-    if let Some(result) = resolve_presentation(labels, slot_w, label_font_size, label_gap, metrics) {
+    if let Some(result) = resolve_presentation(labels, slot_w, label_font_size, label_gap, metrics)
+    {
         return result;
     }
 
@@ -2691,7 +3037,11 @@ fn cascade_collision_recovery(
             let projected = rotated_x_label_footprint(best_angle, widths[i], line_h);
             if projected > slot_w {
                 elided_count += 1;
-                let budget = if cos_best > 1e-6 { slot_w / cos_best } else { slot_w };
+                let budget = if cos_best > 1e-6 {
+                    slot_w / cos_best
+                } else {
+                    slot_w
+                };
                 elide_to_fit(label, budget, label_font_size, metrics)
             } else {
                 label.clone()
@@ -2704,31 +3054,42 @@ fn cascade_collision_recovery(
         angle: best_angle,
         font_size: None,
         visible: all_visible,
-        strategy: CascadeStrategy::Elided { count: elided_count },
+        strategy: CascadeStrategy::Elided {
+            count: elided_count,
+        },
     }
 }
 
 /// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
 /// Tick positions are uniformly spaced across `panel_area.w` (spec SS14.3 step 7a).
 /// Collision policy: graduated cascade (wrap -> shrink -> rotate -> cull -> elide).
-#[allow(clippy::too_many_arguments)]
+///
+/// Takes the same [`LabelBandCtx`] as [`estimate_x_label_band`], which reserved
+/// the gutter this lays out into — see that type's doc for why the two must not
+/// be handed the four measurement inputs separately.
 pub fn layout_x_axis(
     input: &AxisInput,
     panel_area: Rect,
     panel_index: usize,
-    label_font_size: f64,
     title_font_size: f64,
     axis_title_padding: f64,
-    label_gap: LabelGapPolicy,
-    tick_size: f64,
-    metrics: &dyn TextMetrics,
+    ctx: &LabelBandCtx<'_>,
 ) -> (AxisLayout, Option<AxisLabelWarning>) {
+    let LabelBandCtx {
+        label_font_size,
+        label_gap,
+        tick_size,
+        metrics,
+    } = *ctx;
     input.debug_assert_placement_invariants();
     let n = input.tick_labels.len();
     let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
     // is `panel_area.x + (i + 0.5)*slot_w` via `Axis1D::uniform_center`.
-    let slot_axis = Axis1D { lo: panel_area.x, hi: panel_area.x + panel_area.w };
+    let slot_axis = Axis1D {
+        lo: panel_area.x,
+        hi: panel_area.x + panel_area.w,
+    };
 
     // Continuous axes: place each tick at its scale-projected pixel; categorical
     // axes (no projected fractions) keep the uniform-slot center. The closure
@@ -2770,7 +3131,7 @@ pub fn layout_x_axis(
         (None, None) => slot_w,
     };
 
-    let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
+    let (ticks, warning) = if let Some(override_angle) = input.overrides.labels.angle {
         // label_angle_override always bypasses the cascade (spec SS7). Shared
         // body: see `stamp_override_angle_with_elide`'s
         // doc for the x/y transpose (x's projection factor is `cos|angle|`
@@ -2793,7 +3154,7 @@ pub fn layout_x_axis(
             cascade_slot_w,
             label_font_size,
             label_gap,
-            input.overrides.label_overlap,
+            input.overrides.labels.overlap,
             metrics,
         );
         let is_elision_strategy = matches!(cascade.strategy, CascadeStrategy::Elided { .. });
@@ -2812,9 +3173,7 @@ pub fn layout_x_axis(
             })
             .collect();
         let warning = match cascade.strategy {
-            CascadeStrategy::Elided { count } => {
-                Some(AxisLabelWarning::LabelsElided { count })
-            }
+            CascadeStrategy::Elided { count } => Some(AxisLabelWarning::LabelsElided { count }),
             _ => None,
         };
         (ticks, warning)
@@ -2824,7 +3183,11 @@ pub fn layout_x_axis(
     // at the top edge. Any other orient is rejected upstream (`prepare.rs`
     // validates x→{top,bottom}); default to Bottom defensively.
     let on_top = matches!(input.orient, AxisOrient::Top);
-    let axis_y = if on_top { panel_area.y } else { panel_area.y + panel_area.h };
+    let axis_y = if on_top {
+        panel_area.y
+    } else {
+        panel_area.y + panel_area.h
+    };
     let axis_line = Rect {
         x: panel_area.x,
         y: axis_y,
@@ -2832,8 +3195,8 @@ pub fn layout_x_axis(
         h: 1.0,
     };
 
-    let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
-    let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
+    let effective_title_font_size = input.overrides.title.font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.overrides.title.padding.unwrap_or(axis_title_padding);
 
     // Resolved tick angle: all non-culled ticks share `label_angle` (the cascade
     // and the override path both apply a single angle). 0.0 means flat. Use any
@@ -2844,7 +3207,7 @@ pub fn layout_x_axis(
         .map(|t| t.label_angle)
         .unwrap_or(0.0);
 
-    let title = input.title.as_ref().map(|text| {
+    let title = input.title.get().as_ref().map(|text| {
         let title_h = metrics.line_height(effective_title_font_size);
         // The vertical drop from the axis line to the labels' lowest point,
         // shared with `estimate_x_label_band` via `rotated_x_label_extent` so the
@@ -2878,7 +3241,7 @@ pub fn layout_x_axis(
         // labels plus an x title) — tracked as row WRAP-1 in
         // `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`
         // (added 2026-08-28), not fixed here.
-        let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
+        let label_pad = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
         let line_h = metrics.line_height(label_font_size);
         // Widest final (possibly-elided) label that will actually render — skip
         // culled ticks since they draw no label.
@@ -2924,7 +3287,7 @@ pub fn layout_x_axis(
         // horizontal (top/bottom) axis is a flat title (`0`); a vertical
         // `title_orient` (left/right) rotates it (e.g. a vertical caption beside a
         // bottom axis).
-        let angle = match input.overrides.title_orient {
+        let angle = match input.overrides.title.orient {
             Some(AxisOrient::Left) => -90.0,
             Some(AxisOrient::Right) => 90.0,
             _ => 0.0,
@@ -2968,7 +3331,7 @@ mod tests {
     /// unconfigured axis renders) don't have to know about the
     /// `show_domain()`/`show_grid()` precondition those accessors now assert
     /// in debug builds. A test that DOES care overwrites `input.overrides
-    /// .show_domain`/`.show_grid` afterward, same as before.
+    /// .domain.show`/`.grid.show` afterward, same as before.
     fn axis_input(
         orient: AxisOrient,
         title: Option<String>,
@@ -2977,8 +3340,8 @@ mod tests {
     ) -> AxisInput {
         let new = AxisInput::new;
         let mut input = new(orient, title, tick_labels, label_angle);
-        input.overrides.show_domain = Some(true);
-        input.overrides.show_grid = Some(true);
+        input.overrides.domain.show = Some(true);
+        input.overrides.grid.show = Some(true);
         input
     }
 
@@ -2987,7 +3350,7 @@ mod tests {
     /// A default-constructed `AxisInput` (via the real `AxisInput::new`, not
     /// the `axis_input()` test helper above, which resolves the defaults
     /// itself) has never had `AxesInput::apply_show_defaults` run against it,
-    /// so `overrides.show_domain` is still `None`. Reading `show_domain()` in
+    /// so `overrides.domain.show` is still `None`. Reading `show_domain()` in
     /// that state must trip the debug-only precondition assert rather than
     /// silently returning the non-conservative `true` fallback.
     #[test]
@@ -3017,35 +3380,50 @@ mod tests {
         let red = Srgba::new(255u8, 0, 0, 255);
         let blue = Srgba::new(0u8, 0, 255, 255);
         let green = Srgba::new(0u8, 255, 0, 255);
-        let mut input = axis_input(
-            AxisOrient::Bottom,
-            Some("T".into()),
-            vec!["a".into()],
-            None,
-        );
+        let mut input = axis_input(AxisOrient::Bottom, Some("T".into()), vec!["a".into()], None);
         input.overrides = AxisStyleOverrides {
-            show_labels: Some(false),
-            show_ticks: Some(false),
-            show_domain: Some(false),
-            show_grid: Some(false),
-            title_font_size: Some(14.0),
-            title_color: Some(red),
-            label_padding: Some(3.0),
-            label_color: Some(blue),
-            label_font_size: Some(9.0),
-            grid_color: Some(green),
-            grid_dash: Some(vec![2.0, 1.0]),
-            grid_width: Some(0.7),
-            domain_color: Some(red),
-            domain_width: Some(1.3),
-            grid_opacity: Some(0.5),
-            translate: Some(4.0),
-            zindex: Some(2),
-            offset: Some(6.0),
-            label_flush: Some(true),
-            ..AxisStyleOverrides::default()
+            ticks: AxisTickOverrides {
+                show: Some(false),
+                ..AxisTickOverrides::default()
+            },
+            labels: AxisLabelOverrides {
+                show: Some(false),
+                padding: Some(3.0),
+                color: Some(blue),
+                font_size: Some(9.0),
+                flush: Some(true),
+                ..AxisLabelOverrides::default()
+            },
+            title: AxisTitleOverrides {
+                font_size: Some(14.0),
+                color: Some(red),
+                ..AxisTitleOverrides::default()
+            },
+            grid: AxisGridOverrides {
+                show: Some(false),
+                color: Some(green),
+                dash: Some(vec![2.0, 1.0]),
+                width: Some(0.7),
+                opacity: Some(0.5),
+            },
+            domain: AxisDomainOverrides {
+                show: Some(false),
+                color: Some(red),
+                width: Some(1.3),
+            },
+            placement: AxisPlacementOverrides {
+                translate: Some(4.0),
+                zindex: Some(2),
+                offset: Some(6.0),
+                ..AxisPlacementOverrides::default()
+            },
         };
-        let axis_line = Rect { x: 1.0, y: 2.0, w: 3.0, h: 1.0 };
+        let axis_line = Rect {
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 1.0,
+        };
         let layout = AxisLayout::from_input(&input, 7, axis_line, vec![], vec![], None);
 
         assert_eq!(layout.orient, AxisOrient::Bottom);
@@ -3097,7 +3475,7 @@ mod tests {
         assert_eq!(y.orient, AxisOrient::Left);
         // x axis with explicit Top override wins.
         let mut xt = axis_input(AxisOrient::Bottom, None, vec![], None);
-        xt.overrides.orient = Some(AxisOrient::Top);
+        xt.overrides.placement.orient = Some(AxisOrient::Top);
         xt.resolve_orient();
         assert_eq!(xt.orient, AxisOrient::Top);
     }
@@ -3107,7 +3485,12 @@ mod tests {
         let a = AxisLayout {
             orient: AxisOrient::Bottom,
             panel_index: 0,
-            axis_line: Rect { x: 50.0, y: 350.0, w: 500.0, h: 1.0 },
+            axis_line: Rect {
+                x: 50.0,
+                y: 350.0,
+                w: 500.0,
+                h: 1.0,
+            },
             ticks: vec![TickLayout {
                 position: 100.0,
                 label: "0".into(),
@@ -3188,7 +3571,10 @@ mod tests {
     use crate::layout::text_metrics::{fixed_width, measure_multiline_width, MockMetrics};
 
     fn mock(per_char_px: f64) -> MockMetrics<impl Fn(&str, f64) -> f64> {
-        MockMetrics { measure: fixed_width(per_char_px), line_h_factor: 1.2 }
+        MockMetrics {
+            measure: fixed_width(per_char_px),
+            line_h_factor: 1.2,
+        }
     }
 
     // ── 395: x-label cascade prediction (flat / wrap / rotate) ───────────────
@@ -3204,11 +3590,21 @@ mod tests {
     fn estimate_x_band_flat_when_label_fits() {
         let m = mock(10.0); // 10 px/char
         let labels = vec!["ab".into(), "cd".into()]; // 20 px each
-        // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 4.0, true);
+                                                     // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         // Flat band == tick_size(4.0) + label_pad_eff(2.0) + line_height(11) = 19.2.
         let expected = 4.0 + 2.0 + m.line_height(11.0);
-        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
+        assert!(
+            (band - expected).abs() < 1e-9,
+            "band={band}, expected={expected}"
+        );
     }
 
     /// S1 wrap: an underscore-splittable label that won't fit flat but whose
@@ -3220,9 +3616,19 @@ mod tests {
         // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
         let labels = vec!["aa_bb_cc".into()];
         // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, legacy_gap(0), None, 4.0, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            50.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         let expected = 4.0 + 2.0 + 3.0 * m.line_height(11.0);
-        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
+        assert!(
+            (band - expected).abs() < 1e-9,
+            "band={band}, expected={expected}"
+        );
     }
 
     /// S2/S3 rotate: a single long unsplittable label that cannot fit flat or wrap
@@ -3233,9 +3639,19 @@ mod tests {
         // 12-char label, no break points → 120 px, cannot wrap.
         let labels = vec!["abcdefghijkl".into()];
         let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, legacy_gap(0), None, 4.0, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            slot,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         // Must exceed the flat single-line band (a rotated/vertical reservation).
-        assert!(band > m.line_height(11.0), "rotated band must exceed flat: {band}");
+        assert!(
+            band > m.line_height(11.0),
+            "rotated band must exceed flat: {band}"
+        );
     }
 
     /// An explicit `label_angle` override bypasses the cascade and reserves the
@@ -3245,9 +3661,19 @@ mod tests {
         let m = mock(10.0);
         let labels = vec!["abc".into()];
         // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, 4.0, true);
+        let band = estimate_x_label_band(
+            &labels,
+            Some(-45.0),
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         let expected = rotated_x_label_extent(-45.0, 30.0, 11.0, m.line_height(11.0), 4.0, 2.0);
-        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
+        assert!(
+            (band - expected).abs() < 1e-9,
+            "band={band}, expected={expected}"
+        );
     }
 
     #[test]
@@ -3273,7 +3699,10 @@ mod tests {
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
         // Byte-identical regardless of visibility (spec §4.1: empty label
         // sets return 0.0 on y at every angle).
-        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
+        assert_eq!(
+            compute_y_label_band_width(&input, 11.0, &m, 4.0, false),
+            0.0
+        );
     }
 
     /// #97 spec §4.1 (amended 2026-08-27, gap 2): an empty label set with a
@@ -3288,7 +3717,10 @@ mod tests {
         let input = axis_input(AxisOrient::Left, None, vec![], Some(-45.0));
         let m = mock(10.0);
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
-        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
+        assert_eq!(
+            compute_y_label_band_width(&input, 11.0, &m, 4.0, false),
+            0.0
+        );
     }
 
     /// `#182` (closes `#94`), superseding this test's own pre-fix contract: a
@@ -3312,16 +3744,22 @@ mod tests {
         );
         let m = mock(10.0);
         let hidden = compute_y_label_band_width(&input, 11.0, &m, 4.0, false);
-        assert_eq!(hidden, 0.0, "a hidden axis draws no labels, so it reserves no band");
+        assert_eq!(
+            hidden, 0.0,
+            "a hidden axis draws no labels, so it reserves no band"
+        );
 
         // No override moves it, because there is nothing to move: neither the
         // standoff term `label_padding` feeds nor the rotated extent an angle
         // override selects applies to an axis that draws no labels.
         let mut padded = input.clone();
-        padded.overrides.label_padding = Some(40.0);
-        assert_eq!(compute_y_label_band_width(&padded, 11.0, &m, 4.0, false), 0.0);
+        padded.overrides.labels.padding = Some(40.0);
+        assert_eq!(
+            compute_y_label_band_width(&padded, 11.0, &m, 4.0, false),
+            0.0
+        );
         let mut rotated = input.clone();
-        rotated.overrides.label_angle = Some(-45.0);
+        rotated.overrides.labels.angle = Some(-45.0);
         assert_eq!(
             compute_y_label_band_width(&rotated, 11.0, &m, 4.0, false),
             0.0,
@@ -3355,7 +3793,7 @@ mod tests {
             vec!["0".into(), "100".into(), "10000".into()],
             None,
         );
-        input.overrides.show_labels = Some(false);
+        input.overrides.labels.show = Some(false);
         let m = mock(10.0);
 
         // `visible: true` — the axis itself is shown; only its labels are off.
@@ -3368,7 +3806,7 @@ mod tests {
         // Nothing to move: `label_padding` feeds only the standoff of a band
         // that no longer exists.
         let mut padded = input.clone();
-        padded.overrides.label_padding = Some(40.0);
+        padded.overrides.labels.padding = Some(40.0);
         let labels_off_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, true);
         assert_eq!(
             labels_off_padded, labels_off,
@@ -3379,8 +3817,9 @@ mod tests {
         // label_padding — proving the gate keys on `show_labels`, not some
         // unrelated code path that always returns zero.
         let mut labels_on_padded = padded.clone();
-        labels_on_padded.overrides.show_labels = Some(true);
-        let labels_on_padded_band = compute_y_label_band_width(&labels_on_padded, 11.0, &m, 4.0, true);
+        labels_on_padded.overrides.labels.show = Some(true);
+        let labels_on_padded_band =
+            compute_y_label_band_width(&labels_on_padded, 11.0, &m, 4.0, true);
         assert!(
             labels_on_padded_band > labels_off_padded,
             "restoring show_labels must restore the band"
@@ -3432,7 +3871,10 @@ mod tests {
         let m = mock(10.0); // 10 px/char → width 100
         let band = compute_y_label_band_width(&input, 11.0, &m, 4.0, true);
         let expected = rotated_y_label_extent(-45.0, 100.0, m.line_height(11.0), 4.0, 2.0);
-        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
+        assert!(
+            (band - expected).abs() < 1e-9,
+            "band={band}, expected={expected}"
+        );
     }
 
     /// #97 continuity gate (spec §4.1, §9.1), replacing the old pre-R2
@@ -3454,7 +3896,10 @@ mod tests {
         let band_zero = compute_y_label_band_width(&explicit_zero, 11.0, &m, 4.0, true);
         let band_tiny = compute_y_label_band_width(&tiny_angle, 11.0, &m, 4.0, true);
 
-        assert_eq!(band_none, band_zero, "no override must equal an explicit 0.0 override");
+        assert_eq!(
+            band_none, band_zero,
+            "no override must equal an explicit 0.0 override"
+        );
         assert!(
             (band_tiny - band_zero).abs() < 1e-3,
             "band at θ→0 ({band_tiny}) must approach band(0) ({band_zero}) continuously"
@@ -3475,13 +3920,21 @@ mod tests {
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
             Some(-45.0),
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 400.0 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 400.0,
+        };
         let m = mock(10.0);
         let (axis, warning) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -45.0);
             assert!(!t.culled, "y-axis has no cull recovery (spec §4-R2)");
-            assert!(!t.elided, "short single-char labels should not need elision");
+            assert!(
+                !t.elided,
+                "short single-char labels should not need elision"
+            );
         }
         assert!(warning.is_none());
     }
@@ -3502,14 +3955,29 @@ mod tests {
         // 20 ticks packed into a 200px-tall panel → slot_h = 10px. Each ~7-8
         // char label is 70-80px wide; at -45° the vertical projection
         // (w * sin(45°) ≈ 49-56px) far exceeds the 10px budget.
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let (axis, warning) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -45.0);
             assert!(!t.culled, "y-axis has no cull recovery (spec §4-R2)");
-            assert!(t.elided, "expected all 20 labels to be elided with override");
-            assert!(t.label.ends_with('\u{2026}'), "expected ellipsis suffix; got {:?}", t.label);
+            assert!(
+                t.elided,
+                "expected all 20 labels to be elided with override"
+            );
+            assert!(
+                t.label.ends_with('\u{2026}'),
+                "expected ellipsis suffix; got {:?}",
+                t.label
+            );
         }
         match warning {
             Some(AxisLabelWarning::LabelsElided { count }) => assert_eq!(count, 20),
@@ -3533,8 +4001,16 @@ mod tests {
     #[test]
     fn layout_y_axis_continuous_at_theta_zero() {
         let labels: Vec<String> = (0..20).map(|i| format!("Label_{}", i)).collect();
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let no_override = axis_input(AxisOrient::Left, None, labels.clone(), None);
         let explicit_zero = axis_input(AxisOrient::Left, None, labels.clone(), Some(0.0));
@@ -3544,8 +4020,7 @@ mod tests {
             layout_y_axis(&no_override, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let (axis_zero, warn_zero) =
             layout_y_axis(&explicit_zero, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
-        let (_, warn_tiny) =
-            layout_y_axis(&tiny_angle, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (_, warn_tiny) = layout_y_axis(&tiny_angle, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
         assert_eq!(
             axis_zero.ticks, axis_none.ticks,
@@ -3553,7 +4028,10 @@ mod tests {
         );
         assert_eq!(warn_zero, None, "θ=0 override must never elide");
         assert_eq!(warn_none, None, "no-override flat path must never elide");
-        assert_eq!(warn_tiny, None, "θ→0 must continuously never elide, not jump at exactly zero");
+        assert_eq!(
+            warn_tiny, None,
+            "θ→0 must continuously never elide, not jump at exactly zero"
+        );
     }
 
     // ── #97 acceptance (spec §9.1): reservation covers render, both axes,
@@ -3573,7 +4051,12 @@ mod tests {
         let tick_size = 4.0;
         let font_size = 11.0;
         let input = axis_input(AxisOrient::Left, None, labels, None);
-        let panel_area = Rect { x: 100.0, y: 0.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let (axis, _) = layout_y_axis(&input, panel_area, 0, font_size, 13.0, 4.0, tick_size, &m);
 
         let band = compute_y_label_band_width(&input, font_size, &m, tick_size, true);
@@ -3632,12 +4115,29 @@ mod tests {
         let tick_size = 4.0;
         let font_size = 11.0;
         let input = axis_input(AxisOrient::Bottom, None, labels, None);
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let (axis, _) =
-            layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, legacy_gap(8), tick_size, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(font_size, legacy_gap(8), tick_size, &m),
+        );
 
-        let band =
-            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &input.tick_labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(font_size, legacy_gap(0), tick_size, &m),
+        );
 
         let theme = crate::layout::ThemeInputs::default();
         let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None).into_nodes();
@@ -3664,7 +4164,12 @@ mod tests {
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
             None,
         );
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Left);
@@ -3693,17 +4198,33 @@ mod tests {
     /// (uniform slots 75 / 125 / 175 / 225). Both dimensions are deliberately
     /// unlike the absolute centers below, so an axis that ignored its placement
     /// could not accidentally agree.
-    const PLACEMENT_PANEL: Rect = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+    const PLACEMENT_PANEL: Rect = Rect {
+        x: 100.0,
+        y: 50.0,
+        w: 300.0,
+        h: 200.0,
+    };
 
     /// An `Absolute` placement (an explicit-range ordinal axis) puts each tick
     /// on the scale's own band center, NOT on the panel-uniform slot center.
     #[test]
     fn x_axis_uses_absolute_placement_when_present() {
         let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
-        input.categorical_placement =
-            Some(CategoricalPlacement::Absolute(vec![67.5, 122.5, 177.5, 232.5]));
-        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        input.categorical_placement = Some(CategoricalPlacement::Absolute(vec![
+            67.5, 122.5, 177.5, 232.5,
+        ]));
+        let m = MockMetrics {
+            measure: fixed_width(4.0),
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            PLACEMENT_PANEL,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
     }
@@ -3716,12 +4237,24 @@ mod tests {
     /// every default categorical golden byte-identical.
     #[test]
     fn x_axis_resolves_panel_extent_placement_against_this_panel() {
-        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(4.0),
+            line_h_factor: 1.2,
+        };
         let positions = |layout| {
             let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
-            input.categorical_placement =
-                Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
-            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+            input.categorical_placement = Some(CategoricalPlacement::PanelExtent {
+                layout,
+                categories: 4,
+            });
+            let (axis, _) = layout_x_axis(
+                &input,
+                PLACEMENT_PANEL,
+                0,
+                13.0,
+                4.0,
+                &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+            );
             axis.ticks.iter().map(|t| t.position).collect::<Vec<f64>>()
         };
 
@@ -3729,7 +4262,10 @@ mod tests {
         let padded_expected: Vec<f64> = (0..4)
             .map(|i| 100.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
             .collect();
-        assert_eq!(positions(DiscreteLayout::band(0.1, 0.1, 0.5)), padded_expected);
+        assert_eq!(
+            positions(DiscreteLayout::band(0.1, 0.1, 0.5)),
+            padded_expected
+        );
 
         assert_eq!(
             positions(DiscreteLayout::UNPADDED),
@@ -3744,8 +4280,18 @@ mod tests {
     fn x_axis_falls_back_to_uniform_center_without_a_placement() {
         let input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
         assert!(input.categorical_placement.is_none());
-        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let m = MockMetrics {
+            measure: fixed_width(4.0),
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            PLACEMENT_PANEL,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![137.5, 212.5, 287.5, 362.5]);
     }
@@ -3755,8 +4301,9 @@ mod tests {
     #[test]
     fn y_axis_uses_absolute_placement_when_present() {
         let mut input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
-        input.categorical_placement =
-            Some(CategoricalPlacement::Absolute(vec![67.5, 122.5, 177.5, 232.5]));
+        input.categorical_placement = Some(CategoricalPlacement::Absolute(vec![
+            67.5, 122.5, 177.5, 232.5,
+        ]));
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
@@ -3771,8 +4318,10 @@ mod tests {
         let m = mock(10.0);
         let positions = |layout| {
             let mut input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
-            input.categorical_placement =
-                Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
+            input.categorical_placement = Some(CategoricalPlacement::PanelExtent {
+                layout,
+                categories: 4,
+            });
             let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
             axis.ticks.iter().map(|t| t.position).collect::<Vec<f64>>()
         };
@@ -3781,7 +4330,10 @@ mod tests {
         let padded_expected: Vec<f64> = (0..4)
             .map(|i| 50.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
             .collect();
-        assert_eq!(positions(DiscreteLayout::band(0.1, 0.1, 0.5)), padded_expected);
+        assert_eq!(
+            positions(DiscreteLayout::band(0.1, 0.1, 0.5)),
+            padded_expected
+        );
 
         assert_eq!(
             positions(DiscreteLayout::UNPADDED),
@@ -3807,18 +4359,30 @@ mod tests {
     /// spaces or hyphens, so the wrap stage cannot absorb the difference.
     #[test]
     fn the_cascade_budget_follows_the_placement_step_not_the_panel_slot() {
-        let labels: Vec<String> = ["a", "b", "c", "d"]
-            .iter()
-            .map(|c| c.repeat(17))
-            .collect();
-        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let labels: Vec<String> = ["a", "b", "c", "d"].iter().map(|c| c.repeat(17)).collect();
+        let m = MockMetrics {
+            measure: fixed_width(4.0),
+            line_h_factor: 1.2,
+        };
         let angle = |placement: Option<CategoricalPlacement>| {
             let mut input = axis_input(AxisOrient::Bottom, None, labels.clone(), None);
             input.categorical_placement = placement;
-            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+            let (axis, _) = layout_x_axis(
+                &input,
+                PLACEMENT_PANEL,
+                0,
+                13.0,
+                4.0,
+                &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+            );
             axis.ticks[0].label_angle
         };
-        let panel_extent = |layout| Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
+        let panel_extent = |layout| {
+            Some(CategoricalPlacement::PanelExtent {
+                layout,
+                categories: 4,
+            })
+        };
 
         assert_eq!(
             angle(panel_extent(DiscreteLayout::point(0.0, 0.5))),
@@ -3844,7 +4408,10 @@ mod tests {
     /// Bug Risk 3).
     #[test]
     fn paired_band_centers_accepts_matched_length_and_rejects_mismatched() {
-        assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 2), Some(&[1.0, 2.0][..]));
+        assert_eq!(
+            paired_band_centers(Some(&[1.0, 2.0]), 2),
+            Some(&[1.0, 2.0][..])
+        );
         assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 3), None);
         // Mutation-tester (batch-C close remediation, fix 1): the carrier
         // LONGER than `tick_count` must also be refused, not just the
@@ -3920,7 +4487,12 @@ mod tests {
             None,
         );
         input.orient = AxisOrient::Right;
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Right);
@@ -3941,8 +4513,13 @@ mod tests {
             vec!["0".into(), "1".into()],
             None,
         );
-        input.overrides.title_orient = Some(AxisOrient::Top);
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        input.overrides.title.orient = Some(AxisOrient::Top);
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         // A horizontal title_orient renders the y-axis title flat (angle 0).
@@ -3958,9 +4535,21 @@ mod tests {
             None,
         );
         input.orient = AxisOrient::Top;
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(30), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(30), 4.0, &m),
+        );
         assert_eq!(axis.orient, AxisOrient::Top);
         // Axis line at the panel top, not the bottom.
         assert!((axis.axis_line.y - 50.0).abs() < 1e-9);
@@ -3979,9 +4568,21 @@ mod tests {
             vec!["a".into(), "b".into()],
             None,
         );
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(30), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(30), 4.0, &m),
+        );
         assert_eq!(axis.orient, AxisOrient::Bottom);
         assert!((axis.axis_line.y - (50.0 + 200.0)).abs() < 1e-9);
         let title = axis.title.unwrap();
@@ -3997,9 +4598,24 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 50.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 50.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert_eq!(axis.ticks.len(), 4);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
@@ -4016,9 +4632,24 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 10.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert!((axis.ticks[0].position - (100.0 + 50.0)).abs() < 1e-9);
         assert!((axis.ticks[1].position - (100.0 + 150.0)).abs() < 1e-9);
         assert!((axis.ticks[2].position - (100.0 + 250.0)).abs() < 1e-9);
@@ -4042,9 +4673,24 @@ mod tests {
             (0..8).map(|i| format!("L{}", i)).collect(),
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided);
@@ -4059,9 +4705,24 @@ mod tests {
             (0..8).map(|i| format!("L{}", i)).collect(),
             Some(-90.0),
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
         }
@@ -4078,9 +4739,24 @@ mod tests {
             (0..6).map(|i| format!("L{}", i)).collect(),
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 95.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 95.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -30.0);
             assert!(!t.elided, "rotated projection should fit; no elision");
@@ -4098,13 +4774,35 @@ mod tests {
             (0..20).map(|i| format!("Label_{}", i)).collect(),
             Some(-45.0),
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let (axis, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -45.0);
-            assert!(t.elided, "expected all 20 labels to be elided with override");
-            assert!(t.label.ends_with('\u{2026}'), "expected ellipsis suffix; got {:?}", t.label);
+            assert!(
+                t.elided,
+                "expected all 20 labels to be elided with override"
+            );
+            assert!(
+                t.label.ends_with('\u{2026}'),
+                "expected ellipsis suffix; got {:?}",
+                t.label
+            );
         }
         match warning {
             Some(AxisLabelWarning::LabelsElided { count }) => assert_eq!(count, 20),
@@ -4124,9 +4822,24 @@ mod tests {
             (0..20).map(|i| format!("Label_{}", i)).collect(),
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let (axis, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided, "cascade should resolve at -90 without elision");
@@ -4143,9 +4856,24 @@ mod tests {
             vec!["héllo wörld".into(); 20],
             Some(-45.0),
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert!(t.elided);
             assert!(t.label.is_char_boundary(t.label.len()));
@@ -4165,7 +4893,11 @@ mod tests {
         // Mirror prepare.rs: the gate empties `minor` when off. With no major
         // fractions supplied, presence of the projection is driven by the
         // minors here (these fixtures pre-date the continuous-major path).
-        let minor = if include_minor { minor_positions } else { Vec::new() };
+        let minor = if include_minor {
+            minor_positions
+        } else {
+            Vec::new()
+        };
         if !minor.is_empty() {
             input.tick_projection = Some(TickProjection {
                 padding_frac: 0.0,
@@ -4181,7 +4913,12 @@ mod tests {
     #[test]
     fn project_fractions_dropall_finite_maps_via_lerp() {
         // Finite fractions over `(0, 100)` with no padding lerp to `lo + t*(hi-lo)`.
-        let got = project_fractions(&[0.0, 0.5, 1.0], (0.0, 100.0), 0.0, NonFinitePolicy::DropAll);
+        let got = project_fractions(
+            &[0.0, 0.5, 1.0],
+            (0.0, 100.0),
+            0.0,
+            NonFinitePolicy::DropAll,
+        );
         assert_eq!(got, Some(vec![0.0, 50.0, 100.0]));
     }
 
@@ -4233,11 +4970,29 @@ mod tests {
             false,
             vec![0.1, 0.2, 0.3],
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 10.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
 
-        assert!(axis.minor_ticks.is_empty(), "gate off must produce no minors");
+        assert!(
+            axis.minor_ticks.is_empty(),
+            "gate off must produce no minors"
+        );
         assert_eq!(axis.ticks.len(), 4);
         for t in &axis.ticks {
             assert!(t.is_major, "all `ticks` entries must be majors");
@@ -4252,7 +5007,12 @@ mod tests {
             false,
             vec![0.2, 0.6],
         );
-        let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
@@ -4276,9 +5036,24 @@ mod tests {
             true,
             vec![0.125, 0.375, 0.5, 0.625, 0.875],
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 10.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
 
         // Majors unchanged: 2 labeled ticks at 100 and 300.
         assert_eq!(axis.ticks.len(), 2);
@@ -4322,7 +5097,12 @@ mod tests {
             true,
             vec![0.125, 0.375],
         );
-        let panel = Rect { x: 100.0, y: 40.0, w: 300.0, h: 200.0 };
+        let panel = Rect {
+            x: 100.0,
+            y: 40.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
@@ -4347,9 +5127,24 @@ mod tests {
             true,
             vec![],
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 10.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
 
         assert!(axis.minor_ticks.is_empty(), "no positions → no minors");
         assert_eq!(axis.ticks.len(), 3);
@@ -4381,14 +5176,29 @@ mod tests {
             minor: vec![0.25],
         });
 
-        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
 
         // Inset band (8, 592), span 584 → minor at f=0.25: 8 + 0.25*584 = 154.
         assert_eq!(axis.minor_ticks.len(), 1);
         let minor_px = axis.minor_ticks[0].position;
-        assert!((minor_px - 154.0).abs() < 1e-9, "inset projection expected 154, got {minor_px}");
+        assert!(
+            (minor_px - 154.0).abs() < 1e-9,
+            "inset projection expected 154, got {minor_px}"
+        );
 
         // The minor must NOT equal the naive origin + f*extent (0.25*600 = 150).
         assert!(
@@ -4398,18 +5208,20 @@ mod tests {
 
         // Cross-check: a MAJOR projected at the same fraction 0.25 lands at the
         // same pixel. Reuse the same inset path via projected_tick_fractions.
-        let mut major_input = axis_input(
-            AxisOrient::Bottom,
-            None,
-            vec!["q".into()],
-            None,
-        );
+        let mut major_input = axis_input(AxisOrient::Bottom, None, vec!["q".into()], None);
         major_input.tick_projection = Some(TickProjection {
             padding_frac: 0.05,
             major: vec![0.25],
             minor: Vec::new(),
         });
-        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (major_axis, _) = layout_x_axis(
+            &major_input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         let major_px = major_axis.ticks[0].position;
         assert!(
             (minor_px - major_px).abs() < 1e-9,
@@ -4639,8 +5451,10 @@ mod tests {
         // "ABCDEFGHIJ" = 10 chars. At fs=11: 10*11*0.5=55. At fs=11*0.82=9.02: 10*9.02*0.5=45.1
         // slot_w=60, threshold=54. 55>54 -> collision. 45.1<=54 -> reduced fits.
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
         ];
         let m = MockMetrics {
             measure: |text: &str, font_size: f64| text.chars().count() as f64 * font_size * 0.5,
@@ -4667,8 +5481,10 @@ mod tests {
         //        missed: 70.71<=80 alone used to auto-pass here).
         //   -60: cos(60)*100 + sin(60)*13.2 = 50.00 + 11.43 = 61.43 <= 80 -> pass!
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+            "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let result = cascade_collision_recovery(&labels, 80.0, 11.0, legacy_gap(8), None, &m);
@@ -4696,7 +5512,10 @@ mod tests {
         //        (the pre-fix bare-cos check alone, 51.96<=55, used to pass here).
         //   -45: cos(45)*60 + sin(45)*13.2 = 42.43 + 9.34 = 51.76 <= 55 -> pass at -45!
         let labels: Vec<String> = vec![
-            "ABCDEF".into(), "GHIJKL".into(), "MNOPQR".into(), "STUVWX".into(),
+            "ABCDEF".into(),
+            "GHIJKL".into(),
+            "MNOPQR".into(),
+            "STUVWX".into(),
         ];
         let m = mock(10.0);
         let result = cascade_collision_recovery(&labels, 55.0, 11.0, legacy_gap(0), None, &m);
@@ -4775,7 +5594,10 @@ mod tests {
             CascadeStrategy::Rotated { angle: -90.0 },
             "a genuinely-fitting rotation must win over culling"
         );
-        assert!(result.visible.iter().all(|v| *v), "no labels should be culled");
+        assert!(
+            result.visible.iter().all(|v| *v),
+            "no labels should be culled"
+        );
     }
 
     #[test]
@@ -4817,7 +5639,10 @@ mod tests {
     /// boundary this test used to pin: `n as u32 > cull_threshold`).
     #[test]
     fn cascade_cull_threshold_zero_vs_one_boundary() {
-        let m = MockMetrics { measure: |_text: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |_text: &str, _fs: f64| 1e18,
+            line_h_factor: 1.2,
+        };
         let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
 
         let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, legacy_gap(0), None, &m);
@@ -4882,8 +5707,14 @@ mod tests {
         assert_eq!(base.with_overrides(None, None), base);
 
         // `cull_threshold=` alone keeps its pre-split meaning on BOTH axes.
-        assert_eq!(base.with_overrides(Some(0), None), LabelGapPolicy::from_cull_threshold(0));
-        assert_eq!(base.with_overrides(Some(30), None), LabelGapPolicy::from_cull_threshold(30));
+        assert_eq!(
+            base.with_overrides(Some(0), None),
+            LabelGapPolicy::from_cull_threshold(0)
+        );
+        assert_eq!(
+            base.with_overrides(Some(30), None),
+            LabelGapPolicy::from_cull_threshold(30)
+        );
 
         // `cull_labels=` alone changes only the mode.
         let no_cull = base.with_overrides(None, Some(false));
@@ -4909,7 +5740,10 @@ mod tests {
     /// `{gap: 0, cull: false}`, whose wider S0-S3 budget resolves flat.
     #[test]
     fn cascade_gap_without_culling_is_distinct_from_both_legacy_spellings() {
-        let m = MockMetrics { measure: |_t: &str, _fs: f64| 20.0, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |_t: &str, _fs: f64| 20.0,
+            line_h_factor: 1.2,
+        };
         let labels: Vec<String> = (0..12).map(|i| format!("L{i}")).collect();
         let slot_w = 40.0;
 
@@ -4964,7 +5798,10 @@ mod tests {
     /// pins that it culls on genuine overlap alone, without the extra gap.
     #[test]
     fn cascade_culling_without_a_gap_requirement_culls_only_on_overlap() {
-        let m = MockMetrics { measure: |_t: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |_t: &str, _fs: f64| 1e18,
+            line_h_factor: 1.2,
+        };
         let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
         let policy = LabelGapPolicy::from_cull_threshold(0).with_overrides(None, Some(true));
         assert_eq!(policy.gap_px(), 0);
@@ -4983,16 +5820,24 @@ mod tests {
     /// mode split cannot silently change wrapped label text.
     #[test]
     fn uniformize_keys_on_gap_magnitude_not_cull_mode() {
-        let m = MockMetrics { measure: |t: &str, _fs: f64| t.len() as f64 * 6.0, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |t: &str, _fs: f64| t.len() as f64 * 6.0,
+            line_h_factor: 1.2,
+        };
         let raw = vec!["One Two Three Four".to_string(), "Two Words".to_string()];
-        let natural: Vec<String> =
-            vec!["One Two\nThree Four".to_string(), "Two Words".to_string()];
+        let natural: Vec<String> = vec!["One Two\nThree Four".to_string(), "Two Words".to_string()];
 
         let at_zero = uniformize_wrapped_labels(&raw, natural.clone(), 0, 60.0, 11.0, &m);
-        assert_eq!(at_zero, natural, "gap 0 must leave the natural wrap untouched");
+        assert_eq!(
+            at_zero, natural,
+            "gap 0 must leave the natural wrap untouched"
+        );
 
         let at_eight = uniformize_wrapped_labels(&raw, natural.clone(), 8, 60.0, 11.0, &m);
-        assert_ne!(at_eight, natural, "a positive gap must uniformize the sibling line counts");
+        assert_ne!(
+            at_eight, natural,
+            "a positive gap must uniformize the sibling line counts"
+        );
     }
 
     #[test]
@@ -5058,7 +5903,10 @@ mod tests {
             result.labels, labels,
             "labels must render INTACT (no truncation) when elision cannot help"
         );
-        assert!(result.visible.iter().all(|v| *v), "no labels should be culled");
+        assert!(
+            result.visible.iter().all(|v| *v),
+            "no labels should be culled"
+        );
     }
 
     /// RED proof (`configure/density_styled.svg`): culling opens up the per-surviving-label pitch,
@@ -5098,7 +5946,10 @@ mod tests {
             result.angle, 0.0,
             "culled survivors that fit flat at the culled pitch must render flat, not inherit -90° rotation"
         );
-        assert!(result.font_size.is_none(), "flat presentation uses the original font size");
+        assert!(
+            result.font_size.is_none(),
+            "flat presentation uses the original font size"
+        );
         // Survivors keep their original (unwrapped, unelided) text.
         let survivor_texts: Vec<&str> = result
             .labels
@@ -5168,7 +6019,8 @@ mod tests {
 
         // The real cascade, at this fixture, resolves Culled { stride: 2 }
         // at angle 0.0 (flat) — see the pin above.
-        let cascade_result = cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m);
+        let cascade_result =
+            cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m);
         assert_eq!(cascade_result.angle, 0.0);
 
         // The actual space flat rendering needs.
@@ -5179,14 +6031,11 @@ mod tests {
         // before it can know culling will happen).
         let estimated = estimate_x_label_band(
             &labels,
-            label_font_size,
             None,
-            &m,
             12.0,
-            legacy_gap(8),
             None,
-            tick_size,
             true,
+            &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
         assert!(
             estimated >= actual_flat_need,
@@ -5267,9 +6116,21 @@ mod tests {
             ],
             Some(-90.0),
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0, "override should force -90");
             // Labels should not be wrapped (override bypasses cascade).
@@ -5290,12 +6151,24 @@ mod tests {
             (0..6).map(|i| format!("VeryLongLabel{}", i)).collect(),
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 60.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 200.0,
+        };
         let m = MockMetrics {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(0), 4.0, &m);
+        let (_, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         assert!(
             matches!(warning, Some(AxisLabelWarning::LabelsElided { .. })),
             "expected LabelsElided warning; got {:?}",
@@ -5312,10 +6185,28 @@ mod tests {
             (0..8).map(|i| format!("L{}", i)).collect(),
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
-        assert!(warning.is_none(), "rotation should not produce LabelsElided warning");
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let (_, warning) = layout_x_axis(
+            &input,
+            panel_area,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
+        assert!(
+            warning.is_none(),
+            "rotation should not produce LabelsElided warning"
+        );
     }
 
     // --- estimate_x_label_band tests ---
@@ -5329,7 +6220,14 @@ mod tests {
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         let expected = tick_size + 2.0 + line_h; // label_pad_eff default = 2.0
         assert!(
             (band - expected).abs() < 1e-9,
@@ -5352,7 +6250,14 @@ mod tests {
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         let expected = tick_size + 2.0 + 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
@@ -5377,12 +6282,24 @@ mod tests {
 
         // Flat case (same fixture as `estimate_flat_labels`).
         let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
-        let flat_off =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, false);
+        let flat_off = estimate_x_label_band(
+            &flat_labels,
+            None,
+            100.0,
+            None,
+            false,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         assert_eq!(flat_off, 0.0, "labels-off flat band reserves nothing");
         // Contrast: labels drawn DOES reserve the #97 standoff for the same input.
-        let flat_on =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), None, tick_size, true);
+        let flat_on = estimate_x_label_band(
+            &flat_labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         assert!(
             (flat_on - (tick_size + 2.0 + line_h)).abs() < 1e-9,
             "labels-on flat band should still be tick_size + label_pad_eff + line_h"
@@ -5394,8 +6311,12 @@ mod tests {
         for padding in [Some(40.0), Some(-100.0)] {
             assert_eq!(
                 estimate_x_label_band(
-                    &flat_labels, 11.0, None, &m, 100.0, legacy_gap(0), padding, tick_size,
+                    &flat_labels,
+                    None,
+                    100.0,
+                    padding,
                     false,
+                    &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m)
                 ),
                 0.0,
                 "labels-off band must be zero for label_padding={padding:?}"
@@ -5406,14 +6327,24 @@ mod tests {
         // and reserve the full `rotated_x_label_extent`.
         assert_eq!(
             estimate_x_label_band(
-                &flat_labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, tick_size, false,
+                &flat_labels,
+                Some(-45.0),
+                100.0,
+                None,
+                false,
+                &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m)
             ),
             0.0,
             "#182 widened the gate past flat/wrapped: a rotated labels-off axis reserves nothing"
         );
         assert!(
             estimate_x_label_band(
-                &flat_labels, 11.0, Some(-45.0), &m, 100.0, legacy_gap(0), None, tick_size, true,
+                &flat_labels,
+                Some(-45.0),
+                100.0,
+                None,
+                true,
+                &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m)
             ) > 0.0,
             "the same rotated axis WITH labels drawn still reserves its extent"
         );
@@ -5427,11 +6358,23 @@ mod tests {
         ];
         let m6 = mock(6.0);
         let line_h6 = m6.line_height(11.0);
-        let wrapped_off =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, legacy_gap(0), None, tick_size, false);
+        let wrapped_off = estimate_x_label_band(
+            &wrapped_labels,
+            None,
+            100.0,
+            None,
+            false,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m6),
+        );
         assert_eq!(wrapped_off, 0.0, "labels-off wrapped band reserves nothing");
-        let wrapped_on =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, legacy_gap(0), None, tick_size, true);
+        let wrapped_on = estimate_x_label_band(
+            &wrapped_labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m6),
+        );
         assert!(
             (wrapped_on - (tick_size + 2.0 + 2.0 * line_h6)).abs() < 1e-9,
             "labels-on wrapped band should still be tick_size + label_pad_eff + 2*line_h"
@@ -5452,13 +6395,22 @@ mod tests {
         //   -60: cos(60)*100 + sin(60)*13.2 = 50.00 + 11.43 = 61.43 <= 80 -> pass!
         // Expected margin = 100 * sin(60°) + line_h * cos(60°).
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+            "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            80.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         // Full geometric extent (mirrors the render pivot): the old too-tight
         // formula was `sin·max_w + cos·line_h`; the band now adds the pivot
         // offset `tick_size + label_pad + sin·font_size` on top of it.
@@ -5466,11 +6418,7 @@ mod tests {
         let sin_abs = angle_rad.sin().abs();
         let cos_abs = angle_rad.cos().abs();
         let label_pad = 2.0; // default
-        let expected = tick_size
-            + label_pad
-            + sin_abs * 11.0
-            + sin_abs * 100.0
-            + cos_abs * line_h;
+        let expected = tick_size + label_pad + sin_abs * 11.0 + sin_abs * 100.0 + cos_abs * line_h;
         assert!(
             (band - expected).abs() < 1e-6,
             "rotated -60° band should be {expected}, got {band}"
@@ -5485,7 +6433,14 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            Some(-90.0),
+            80.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         // At -90°: sin=1, cos=0 → full vertical extent =
         // tick_size + label_pad + font_size + max_label_w.
         let label_pad = 2.0; // default
@@ -5503,17 +6458,20 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            Some(-45.0),
+            200.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         // Full geometric extent at -45° (mirrors the render pivot).
         let angle_rad = (-45.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
         let cos_abs = angle_rad.cos().abs();
         let label_pad = 2.0; // default
-        let expected = tick_size
-            + label_pad
-            + sin_abs * 11.0
-            + sin_abs * 100.0
-            + cos_abs * line_h;
+        let expected = tick_size + label_pad + sin_abs * 11.0 + sin_abs * 100.0 + cos_abs * line_h;
         assert!(
             (band - expected).abs() < 1e-6,
             "override -45° band should be {expected}, got {band}"
@@ -5524,7 +6482,14 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, legacy_gap(0), None, 4.0, true);
+        let band = estimate_x_label_band(
+            &[],
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        );
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -5541,7 +6506,14 @@ mod tests {
             line_h_factor: 1.2,
         };
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            10.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         // Vertical fallback: tick_size + label_pad + font_size + max_label_w.
         // At 1e18 the additive terms vanish into float epsilon, so the band is
         // dominated by max_label_w (1e18). Compare with a generous tolerance.
@@ -5569,8 +6541,10 @@ mod tests {
         // (`sin·max_label_w + cos·line_h`) by exactly the pivot offset
         // `tick_size + label_pad + sin·font_size`. Both sides computed explicitly.
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+            "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let font_size = 11.0;
@@ -5578,7 +6552,14 @@ mod tests {
         let line_h = m.line_height(font_size);
         let max_label_w = 100.0; // 10 chars * 10px
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            80.0,
+            None,
+            true,
+            &LabelBandCtx::new(font_size, legacy_gap(0), tick_size, &m),
+        );
 
         // Cascade resolves at -60° here.
         let angle_rad = (-60.0_f64).to_radians();
@@ -5601,10 +6582,20 @@ mod tests {
         // sin=1, cos=0: tick_size + label_pad + font_size + max_label_w.
         // Force the fallback with labels too wide for any cascade angle.
         let labels: Vec<String> = vec!["X".into(), "Y".into()];
-        let m = MockMetrics { measure: |_, _| 5_000.0, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |_, _| 5_000.0,
+            line_h_factor: 1.2,
+        };
         let font_size = 11.0;
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            10.0,
+            None,
+            true,
+            &LabelBandCtx::new(font_size, legacy_gap(0), tick_size, &m),
+        );
         let label_pad = 2.0; // default
         let expected = tick_size + label_pad + font_size + 5_000.0;
         assert!(
@@ -5622,8 +6613,22 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 0.0, true);
-        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, legacy_gap(0), None, 8.0, true);
+        let band_ts0 = estimate_x_label_band(
+            &labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 0.0, &m),
+        );
+        let band_ts8 = estimate_x_label_band(
+            &labels,
+            None,
+            100.0,
+            None,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 8.0, &m),
+        );
         let expected_ts0 = 0.0 + 2.0 + line_h;
         assert!(
             (band_ts0 - expected_ts0).abs() < 1e-9,
@@ -5643,13 +6648,29 @@ mod tests {
         // Rotated branch folds `label_pad_eff` directly into the pivot offset, so
         // band(lp = a + Δ) - band(lp = a) == Δ.
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+            "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), Some(2.0), tick_size, true);
-        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, legacy_gap(0), Some(12.0), tick_size, true);
+        let band_default = estimate_x_label_band(
+            &labels,
+            None,
+            80.0,
+            Some(2.0),
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
+        let band_wider = estimate_x_label_band(
+            &labels,
+            None,
+            80.0,
+            Some(12.0),
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
+        );
         let delta = 12.0 - 2.0;
         assert!(
             (band_wider - band_default - delta).abs() < 1e-6,
@@ -5668,8 +6689,10 @@ mod tests {
         // descent) for the cos term, it clears the labels with a small margin,
         // so the x-axis title placed just below the band cannot overlap them.
         let labels: Vec<String> = vec![
-            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
-            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+            "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let font_size = 11.0;
@@ -5685,7 +6708,14 @@ mod tests {
         let true_extent =
             tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, legacy_gap(0), None, tick_size, true);
+        let band = estimate_x_label_band(
+            &labels,
+            None,
+            80.0,
+            None,
+            true,
+            &LabelBandCtx::new(font_size, legacy_gap(0), tick_size, &m),
+        );
         assert!(
             band >= true_extent,
             "band ({band}) must cover the true label extent ({true_extent}) so the \
@@ -5739,20 +6769,37 @@ mod tests {
         );
         // 18-char labels at 10px/char = 180px in a 300px panel (slot 50) force the
         // cascade well past flat into rotation.
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let label_font_size = 11.0;
         let title_font_size = 13.0;
         let title_padding = 4.0;
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
-            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            legacy_gap(8), tick_size, &m,
+            &input,
+            panel_area,
+            0,
+            title_font_size,
+            title_padding,
+            &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
 
         // The labels must have rotated (non-zero angle) for this test to be meaningful.
-        let resolved_angle = axis.ticks.iter().find(|t| !t.culled).map(|t| t.label_angle).unwrap();
-        assert!(resolved_angle != 0.0, "labels should rotate; got angle {resolved_angle}");
+        let resolved_angle = axis
+            .ticks
+            .iter()
+            .find(|t| !t.culled)
+            .map(|t| t.label_angle)
+            .unwrap();
+        assert!(
+            resolved_angle != 0.0,
+            "labels should rotate; got angle {resolved_angle}"
+        );
 
         // Recompute the expected rotated extent from the FINAL non-culled labels.
         let max_label_w = axis
@@ -5763,7 +6810,12 @@ mod tests {
             .fold(0.0_f64, f64::max);
         let line_h = m.line_height(label_font_size);
         let extent = rotated_x_label_extent(
-            resolved_angle, max_label_w, label_font_size, line_h, tick_size, 2.0,
+            resolved_angle,
+            max_label_w,
+            label_font_size,
+            line_h,
+            tick_size,
+            2.0,
         );
 
         let title = axis.title.expect("title present");
@@ -5795,15 +6847,27 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 20.0, line_h_factor: 1.2 };
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 20.0,
+            line_h_factor: 1.2,
+        };
         let label_font_size = 11.0;
         let title_font_size = 13.0;
         let title_padding = 4.0;
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
-            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            legacy_gap(8), tick_size, &m,
+            &input,
+            panel_area,
+            0,
+            title_font_size,
+            title_padding,
+            &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
         // All flat.
         for t in &axis.ticks {
@@ -5814,8 +6878,7 @@ mod tests {
         let title_h = m.line_height(title_font_size);
         // rotated_x_label_extent(0.0, ..) collapses to tick_size + label_pad_eff + line_h.
         let label_extent = tick_size + 2.0 + line_h;
-        let expected =
-            panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
+        let expected = panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
         assert!(
             (title.anchor_y - expected).abs() < 1e-12,
             "flat title anchor_y ({}) must equal the unified formula ({expected})",
@@ -5841,16 +6904,28 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        input.overrides.show_labels = Some(false);
-        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 20.0, line_h_factor: 1.2 };
+        input.overrides.labels.show = Some(false);
+        let panel_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 20.0,
+            line_h_factor: 1.2,
+        };
         let label_font_size = 11.0;
         let title_font_size = 13.0;
         let title_padding = 4.0;
         let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
-            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            legacy_gap(8), tick_size, &m,
+            &input,
+            panel_area,
+            0,
+            title_font_size,
+            title_padding,
+            &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
@@ -5865,8 +6940,7 @@ mod tests {
         // padding_delta`; with no override `label_padding`, `padding_delta
         // == 0.0`, so the two match exactly here).
         let label_extent = line_h;
-        let expected =
-            panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
+        let expected = panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
         assert!(
             (title.anchor_y - expected).abs() < 1e-12,
             "labels-off flat title anchor_y ({}) must equal the pre-#97 bare line_h formula ({expected})",
@@ -5876,10 +6950,14 @@ mod tests {
         // Contrast: the SAME input with labels drawn gets the #97 standoff
         // and sits strictly further from the axis line.
         let mut labels_on = input.clone();
-        labels_on.overrides.show_labels = Some(true);
+        labels_on.overrides.labels.show = Some(true);
         let (axis_on, _) = layout_x_axis(
-            &labels_on, panel_area, 0, label_font_size, title_font_size, title_padding,
-            legacy_gap(8), tick_size, &m,
+            &labels_on,
+            panel_area,
+            0,
+            title_font_size,
+            title_padding,
+            &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
         let title_on = axis_on.title.expect("title present");
         assert!(
@@ -5918,13 +6996,37 @@ mod tests {
             vec![0.0, 0.5, 1.0],
             0.05,
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert_eq!(axis.ticks.len(), 3);
-        assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "got {}", axis.ticks[0].position);
-        assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
-        assert!((axis.ticks[2].position - 592.0).abs() < 1e-9, "got {}", axis.ticks[2].position);
+        assert!(
+            (axis.ticks[0].position - 8.0).abs() < 1e-9,
+            "got {}",
+            axis.ticks[0].position
+        );
+        assert!(
+            (axis.ticks[1].position - 300.0).abs() < 1e-9,
+            "got {}",
+            axis.ticks[1].position
+        );
+        assert!(
+            (axis.ticks[2].position - 592.0).abs() < 1e-9,
+            "got {}",
+            axis.ticks[2].position
+        );
         // Not at the n=3 uniform slot centers (100/300/500).
         assert!((axis.ticks[0].position - 100.0).abs() > 1.0);
         assert!((axis.ticks[2].position - 500.0).abs() > 1.0);
@@ -5940,9 +7042,21 @@ mod tests {
             vec![0.0, 1.0],
             0.05,
         );
-        let panel = Rect { x: 100.0, y: 0.0, w: 600.0, h: 200.0 };
+        let panel = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert!((axis.ticks[0].position - 108.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 692.0).abs() < 1e-9);
     }
@@ -5958,9 +7072,21 @@ mod tests {
             None,
         );
         assert!(input.tick_projection.is_none());
-        let panel = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
+        let panel = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 400.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert!((axis.ticks[0].position - 150.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 250.0).abs() < 1e-9);
         assert!((axis.ticks[2].position - 350.0).abs() < 1e-9);
@@ -5979,13 +7105,30 @@ mod tests {
             vec![1.0, 0.5, 0.0],
             0.05,
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 200.0, h: 600.0 };
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 600.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
         // inset range (592, 8): t=1 → 8 (top), t=0.5 → 300, t=0 → 592 (bottom).
-        assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "top tick; got {}", axis.ticks[0].position);
-        assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
-        assert!((axis.ticks[2].position - 592.0).abs() < 1e-9, "bottom tick; got {}", axis.ticks[2].position);
+        assert!(
+            (axis.ticks[0].position - 8.0).abs() < 1e-9,
+            "top tick; got {}",
+            axis.ticks[0].position
+        );
+        assert!(
+            (axis.ticks[1].position - 300.0).abs() < 1e-9,
+            "got {}",
+            axis.ticks[1].position
+        );
+        assert!(
+            (axis.ticks[2].position - 592.0).abs() < 1e-9,
+            "bottom tick; got {}",
+            axis.ticks[2].position
+        );
         // Not the n=3 uniform slot centers (100/300/500).
         assert!((axis.ticks[0].position - 100.0).abs() > 1.0);
     }
@@ -6000,7 +7143,12 @@ mod tests {
             None,
         );
         assert!(input.tick_projection.is_none());
-        let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let panel = Rect {
+            x: 100.0,
+            y: 50.0,
+            w: 300.0,
+            h: 200.0,
+        };
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert!((axis.ticks[0].position - 75.0).abs() < 1e-9);
@@ -6023,10 +7171,25 @@ mod tests {
             fractions,
             0.05,
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
         // Each label is 70px wide. Uniform slot=100 → would stay flat (70<90).
-        let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let m = MockMetrics {
+            measure: |_, _| 70.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         // The tightest gap is between fractions 0.965 and 1.0 over inset span 584:
         // 0.035 * 584 ≈ 20.4px. 70px labels cannot stay flat at that gap, so the
         // cascade must rotate (non-zero angle) — proving it used the real min gap,
@@ -6051,9 +7214,24 @@ mod tests {
             (0..6).map(|i| format!("L{i}")).collect(),
             None,
         );
-        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
-        let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 200.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 70.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            13.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
+        );
         assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0));
     }
 
@@ -6067,8 +7245,18 @@ mod tests {
         // S3: cos(-30)*80 ≈ 69.3 > 40, cos(-45)*80 ≈ 56.6 > 40,
         //     cos(-60)*80 = 40.0 ≤ 40 → passes at -60.
         let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, legacy_gap(0), label_padding, 4.0, true)
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        estimate_x_label_band(
+            &labels,
+            None,
+            40.0,
+            label_padding,
+            true,
+            &LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m),
+        )
     }
 
     #[test]
@@ -6099,12 +7287,24 @@ mod tests {
         // ShowAll short-circuits to flat with all ticks visible — labels may
         // overlap, but none are culled or elided.
         let labels = dense_labels();
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::ShowAll), &m);
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let result = cascade_collision_recovery(
+            &labels,
+            40.0,
+            11.0,
+            legacy_gap(8),
+            Some(LabelOverlap::ShowAll),
+            &m,
+        );
         assert_eq!(result.strategy, CascadeStrategy::Flat);
         assert_eq!(result.angle, 0.0);
-        assert!(result.visible.iter().all(|v| *v), "ShowAll must keep all labels visible");
+        assert!(
+            result.visible.iter().all(|v| *v),
+            "ShowAll must keep all labels visible"
+        );
         assert_eq!(result.labels, labels, "ShowAll must not elide any label");
     }
 
@@ -6112,9 +7312,18 @@ mod tests {
     fn label_overlap_parity_shows_every_other_label() {
         // Parity short-circuits to a stride-2 cull regardless of width.
         let labels = dense_labels();
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Parity), &m);
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let result = cascade_collision_recovery(
+            &labels,
+            40.0,
+            11.0,
+            legacy_gap(8),
+            Some(LabelOverlap::Parity),
+            &m,
+        );
         assert_eq!(result.strategy, CascadeStrategy::Culled { stride: 2 });
         let visible: Vec<bool> = result.visible;
         assert_eq!(visible, vec![true, false, true, false, true, false]);
@@ -6126,11 +7335,23 @@ mod tests {
     fn label_overlap_rotate_forces_steepest_angle_all_visible() {
         // Rotate short-circuits to the steepest cascade angle with all visible.
         let labels = dense_labels();
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let result =
-            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Rotate), &m);
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let result = cascade_collision_recovery(
+            &labels,
+            40.0,
+            11.0,
+            legacy_gap(8),
+            Some(LabelOverlap::Rotate),
+            &m,
+        );
         let steepest = *ANGLE_CASCADE.last().unwrap();
-        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: steepest });
+        assert_eq!(
+            result.strategy,
+            CascadeStrategy::Rotated { angle: steepest }
+        );
         assert_eq!(result.angle, steepest);
         assert!(result.visible.iter().all(|v| *v), "rotate keeps all labels");
     }
@@ -6139,9 +7360,18 @@ mod tests {
     fn label_overlap_greedy_matches_default_cascade() {
         // Greedy must run the unmodified cascade — identical to `None`.
         let labels = dense_labels();
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let greedy =
-            cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), Some(LabelOverlap::Greedy), &m);
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let greedy = cascade_collision_recovery(
+            &labels,
+            40.0,
+            11.0,
+            legacy_gap(8),
+            Some(LabelOverlap::Greedy),
+            &m,
+        );
         let default = cascade_collision_recovery(&labels, 40.0, 11.0, legacy_gap(8), None, &m);
         assert_eq!(greedy.strategy, default.strategy);
         assert_eq!(greedy.angle, default.angle);
@@ -6156,7 +7386,10 @@ mod tests {
     #[test]
     fn resolve_y_overlap_greedy_zero_slot_height_keeps_first_label() {
         let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: |_, _| 10.0,
+            line_h_factor: 1.2,
+        };
         let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, 0.0, 11.0, &m)
             .expect("Greedy always returns Some");
         assert!(visible[0], "the first label must always be kept");
@@ -6166,16 +7399,26 @@ mod tests {
     fn layout_x_axis_parity_culls_alternating_ticks() {
         // End-to-end through layout_x_axis: a parity override on a dense axis
         // marks alternating ticks culled.
-        let mut input = axis_input(
-            AxisOrient::Bottom,
-            None,
-            dense_labels(),
-            None,
+        let mut input = axis_input(AxisOrient::Bottom, None, dense_labels(), None);
+        input.overrides.labels.overlap = Some(LabelOverlap::Parity);
+        let panel = Rect {
+            x: 0.0,
+            y: 100.0,
+            w: 240.0,
+            h: 0.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _warn) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            11.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
         );
-        input.overrides.label_overlap = Some(LabelOverlap::Parity);
-        let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, legacy_gap(8), 4.0, &m);
         let culled: Vec<bool> = axis.ticks.iter().map(|t| t.culled).collect();
         assert_eq!(culled, vec![false, true, false, true, false, true]);
     }
@@ -6184,18 +7427,34 @@ mod tests {
     fn layout_x_axis_show_all_culls_nothing_on_dense_axis() {
         // A dense axis that the default cascade would cull renders every label
         // when label_overlap = ShowAll.
-        let mut input = axis_input(
-            AxisOrient::Bottom,
-            None,
-            dense_labels(),
-            None,
+        let mut input = axis_input(AxisOrient::Bottom, None, dense_labels(), None);
+        input.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+        let panel = Rect {
+            x: 0.0,
+            y: 100.0,
+            w: 240.0,
+            h: 0.0,
+        };
+        let m = MockMetrics {
+            measure: |_, _| 80.0,
+            line_h_factor: 1.2,
+        };
+        let (axis, _warn) = layout_x_axis(
+            &input,
+            panel,
+            0,
+            11.0,
+            4.0,
+            &LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m),
         );
-        input.overrides.label_overlap = Some(LabelOverlap::ShowAll);
-        let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
-        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, legacy_gap(8), 4.0, &m);
-        assert!(axis.ticks.iter().all(|t| !t.culled), "ShowAll must cull nothing");
-        assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0), "ShowAll stays flat");
+        assert!(
+            axis.ticks.iter().all(|t| !t.culled),
+            "ShowAll must cull nothing"
+        );
+        assert!(
+            axis.ticks.iter().all(|t| t.label_angle == 0.0),
+            "ShowAll stays flat"
+        );
     }
 
     // ── compute_x_title_width per-axis title_font_size/title_padding override
@@ -6206,9 +7465,14 @@ mod tests {
     // functions instead of the mirror's inlined `fs * 1.2 + padding` formula.
 
     fn titled_input(title_font_size: Option<f64>, title_padding: Option<f64>) -> AxisInput {
-        let mut input = axis_input(AxisOrient::Bottom, Some("Title".into()), vec!["a".into()], None);
-        input.overrides.title_font_size = title_font_size;
-        input.overrides.title_padding = title_padding;
+        let mut input = axis_input(
+            AxisOrient::Bottom,
+            Some("Title".into()),
+            vec!["a".into()],
+            None,
+        );
+        input.overrides.title.font_size = title_font_size;
+        input.overrides.title.padding = title_padding;
         input
     }
 
@@ -6227,7 +7491,10 @@ mod tests {
 
         let override_input = titled_input(Some(30.0), None);
         let gutter_override = compute_x_title_width(&override_input, theme_fs, theme_pad, &m, true);
-        assert!((gutter_override - 44.0).abs() < 1e-9, "got {gutter_override}");
+        assert!(
+            (gutter_override - 44.0).abs() < 1e-9,
+            "got {gutter_override}"
+        );
 
         assert!(
             gutter_override > gutter_default,
@@ -6241,7 +7508,10 @@ mod tests {
         let m = mock(0.0);
         let input = titled_input(Some(24.0), Some(16.0));
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
-        assert!((gutter - 44.8).abs() < 1e-9, "24*1.2+16 = 44.8, got {gutter}");
+        assert!(
+            (gutter - 44.8).abs() < 1e-9,
+            "24*1.2+16 = 44.8, got {gutter}"
+        );
     }
 
     /// No title: `compute_x_title_width` returns 0.0 regardless of font size.
@@ -6249,7 +7519,7 @@ mod tests {
     fn x_title_gutter_no_title_is_zero() {
         let m = mock(0.0);
         let mut input = axis_input(AxisOrient::Bottom, None, vec!["a".into()], None);
-        input.overrides.title_font_size = Some(100.0);
+        input.overrides.title.font_size = Some(100.0);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         assert_eq!(gutter, 0.0, "no title should mean zero gutter");
     }
@@ -6260,7 +7530,10 @@ mod tests {
         let m = mock(0.0);
         let input = titled_input(Some(0.0), None);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
-        assert!((gutter - 8.0).abs() < 1e-9, "zero font size means gutter = padding only, got {gutter}");
+        assert!(
+            (gutter - 8.0).abs() < 1e-9,
+            "zero font size means gutter = padding only, got {gutter}"
+        );
     }
 
     /// Very large per-axis font size scales the gutter proportionally.
@@ -6269,7 +7542,10 @@ mod tests {
         let m = mock(0.0);
         let input = titled_input(Some(1000.0), None);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
-        assert!((gutter - 1208.0).abs() < 1e-9, "huge font: gutter = 1000*1.2+8 = 1208, got {gutter}");
+        assert!(
+            (gutter - 1208.0).abs() < 1e-9,
+            "huge font: gutter = 1000*1.2+8 = 1208, got {gutter}"
+        );
     }
 
     /// A NaN per-axis font size propagates to a NaN gutter — `compute_x_title_width`
@@ -6280,7 +7556,10 @@ mod tests {
         let m = mock(0.0);
         let input = titled_input(Some(f64::NAN), None);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
-        assert!(gutter.is_nan(), "NaN font size should propagate to a NaN gutter");
+        assert!(
+            gutter.is_nan(),
+            "NaN font size should propagate to a NaN gutter"
+        );
     }
 
     /// An unset per-axis font size falls back to the theme font size passed in.
@@ -6289,7 +7568,10 @@ mod tests {
         let m = mock(0.0);
         let input = titled_input(None, None);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
-        assert!((gutter - 23.6).abs() < 1e-9, "13*1.2+8 = 23.6, got {gutter}");
+        assert!(
+            (gutter - 23.6).abs() < 1e-9,
+            "13*1.2+8 = 23.6, got {gutter}"
+        );
     }
 
     /// `#182` (closes `#94`): the title gutter is reserved only for an axis that
@@ -6335,7 +7617,7 @@ mod tests {
             vec!["0".into(), "100".into(), "10000".into()],
             None,
         );
-        input.overrides.show_labels = Some(false);
+        input.overrides.labels.show = Some(false);
 
         assert!(
             compute_y_title_width(&input, 13.0, 8.0, &m, true) > 0.0,
@@ -6358,7 +7640,10 @@ mod tests {
         let input = titled_input(Some(20.0), Some(12.0));
         let x_gutter = compute_x_title_width(&input, 13.0, 8.0, &m, true);
         let y_gutter = compute_y_title_width(&input, 13.0, 8.0, &m, true);
-        assert_eq!(x_gutter, y_gutter, "x and y title gutters must match for identical overrides");
+        assert_eq!(
+            x_gutter, y_gutter,
+            "x and y title gutters must match for identical overrides"
+        );
     }
 
     /// A larger per-axis title font size drives a strictly larger real
@@ -6371,8 +7656,12 @@ mod tests {
         let x_label_band = 20.0;
 
         let gutter_default = compute_x_title_width(&titled_input(None, None), 13.0, 8.0, &m, true);
-        let gutter_large = compute_x_title_width(&titled_input(Some(50.0), None), 13.0, 8.0, &m, true);
-        assert!(gutter_large > gutter_default, "a larger font must produce a larger gutter");
+        let gutter_large =
+            compute_x_title_width(&titled_input(Some(50.0), None), 13.0, 8.0, &m, true);
+        assert!(
+            gutter_large > gutter_default,
+            "a larger font must produce a larger gutter"
+        );
 
         let plot_h_default = inner_h - x_label_band - gutter_default;
         let plot_h_large = inner_h - x_label_band - gutter_large;
@@ -6387,5 +7676,4 @@ mod tests {
             "the plot-region shrink must equal the gutter's growth exactly"
         );
     }
-
 }

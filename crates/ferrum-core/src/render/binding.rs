@@ -1471,10 +1471,166 @@ fn validate_chart_config_array_section(section: &str, value: &Bound<'_, PyAny>) 
             }
         }
         if section == "structural" && type_tag == "break_axis" {
+            validate_break_axis_axis_value(item_dict, &item_section)?;
             validate_break_axis_gaps_value(item_dict, &item_section)?;
         }
     }
     Ok(())
+}
+
+/// The `#229`(2) VALUE half of the array-item gate: refuses a `break_axis`
+/// item's `axis` token that is outside the two-token vocabulary
+/// [`AlignAxis`](crate::spec::axis::AlignAxis) spells, mirroring
+/// `ferrum.structural.BreakAxis.__post_init__`'s
+/// `validate_choice("BreakAxis.axis", ..., ("x", "y"))` so the wire path and
+/// Python's construction-time refusal agree on what "malformed" means for a
+/// break axis — exactly the reason [`validate_break_axis_gaps_value`] below
+/// exists for the sibling `gaps` key.
+///
+/// Without it the refusal still happens, but downstream in the JSON bridge, as
+/// serde's `unknown variant \`z\`, expected \`x\` or \`y\`` — which names
+/// neither the item nor its index, leaks a JSON column number, and carries a
+/// different prefix (`chart_config:`) from every other refusal about this same
+/// item (`chart config: ...`).
+///
+/// # What the coverage claim is quantified over: `json.dumps`, not a shape list
+///
+/// This gate reads the caller's **pre-JSON Python object**, while the vocabulary
+/// it guards is defined over what **`json.dumps` emits** (`pyo3_serde::from_py`
+/// bridges through it). So "does this gate see every token a caller can present"
+/// is a question about that transform, and the only honest way to answer it is
+/// to derive the answer from the transform's own rules — not from a list of
+/// shapes someone happened to try. Two earlier cuts of this doc claimed
+/// completeness from probed shapes and were false both times: the first checked
+/// only `"axis": "y"` and missed the externally-tagged map `{"y": null}`
+/// `Deserialize` also accepts; the second covered that map but modelled serde's
+/// accepted JSON shapes while the input here is Python objects one transform
+/// earlier, missing every non-`str` dict key `json.dumps` COERCES into a key.
+///
+/// The transform's rules close the space. CPython's `json.encoder` key path
+/// accepts exactly five key types and raises `TypeError: keys must be str, int,
+/// float, bool or None, not X` for everything else, so:
+///
+/// | key type | JSON key `json.dumps` emits |
+/// |---|---|
+/// | `str` | itself |
+/// | `float` | `NaN` / `Infinity` / `-Infinity` when non-finite, else `float.__repr__` (`1.5`, `1e+16`) |
+/// | `bool` | `true` / `false` — checked BEFORE `int`, since `bool` is an `int` subclass |
+/// | `None` | `null` |
+/// | `int` | `str(k)`, at arbitrary precision |
+/// | anything else | never becomes a key: `json.dumps` raises first |
+///
+/// [`json_object_key_spelling`] mirrors that table in that order, so this gate
+/// sees a token for **every** single-key map a caller can get through the
+/// bridge, and the claim below is checkable against `json.dumps`'s rules rather
+/// than against examples. The four non-`str` types are out of vocabulary *by
+/// construction* — no spelling of a number, `true`/`false` or `null` can equal
+/// `x` or `y` — so fidelity of the echoed token is about naming what serde
+/// would have seen, never about the accept/reject decision.
+///
+/// What still walks past, deliberately, each left to deserialization's own
+/// "missing field" / type-mismatch error and matching the sibling gate's
+/// carve-outs: a missing `axis` key; a value that is neither a string nor a
+/// dict (`7`, `null`); a dict whose key count is not exactly one, since "which
+/// key did you mean" is not a question this gate answers better than serde; and
+/// a dict whose single key is of a non-coercible type, which `json.dumps`
+/// refuses before serde ever runs (that refusal is a raw `TypeError` from the
+/// bridge — pre-existing for every malformed `chart_config` dict, logged as a
+/// follow-up, not introduced here).
+///
+/// Whether a token is accepted is decided by
+/// [`AlignAxis::from_wire_name`](crate::spec::axis::AlignAxis::from_wire_name),
+/// which delegates to `Deserialize` — so this gate cannot become narrower than
+/// the deserializer it front-runs, by construction rather than by a test over a
+/// fixed token corpus.
+///
+/// The division of labour that leaves, stated exactly rather than as "serde is
+/// unreachable" (it is not, and an earlier draft of this doc claimed it was):
+/// **this gate owns the VOCABULARY for every key spelling `json.dumps` can
+/// produce**, so no out-of-vocabulary token reaches serde through the bridge;
+/// serde keeps the SHAPE errors, which it reports better than this gate could —
+/// `invalid type: integer \`7\`, expected string or map`, `invalid value: map,
+/// expected map with a single key`. Both halves are probed on the delivered
+/// path in `tests/test_config_manifest.py`'s break-axis block, the vocabulary
+/// half over all five key types.
+fn validate_break_axis_axis_value(item_dict: &Bound<'_, PyDict>, item_section: &str) -> PyResult<()> {
+    let Some(axis_obj) = item_dict.get_item("axis")? else {
+        return Ok(());
+    };
+    let Some(token) = break_axis_axis_token(&axis_obj) else {
+        return Ok(());
+    };
+    if crate::spec::axis::AlignAxis::from_wire_name(&token).is_some() {
+        return Ok(());
+    }
+    Err(PyValueError::new_err(format!(
+        "chart config: {item_section}.axis: axis must be one of [{}]; got '{token}'",
+        crate::spec::axis::AlignAxis::wire_token_list()
+    )))
+}
+
+/// The variant token an `axis` wire value names, in either spelling
+/// `Deserialize` accepts for a unit variant: the string itself, or the single
+/// key of an externally-tagged one-key map. `None` for every other shape, which
+/// [`validate_break_axis_axis_value`] passes to serde untouched.
+fn break_axis_axis_token(axis_obj: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(token) = axis_obj.extract::<String>() {
+        return Some(token);
+    }
+    let dict = axis_obj.cast::<PyDict>().ok()?;
+    if dict.len() != 1 {
+        return None;
+    }
+    let (key, _) = dict.iter().next()?;
+    json_object_key_spelling(&key)
+}
+
+/// The JSON object key `json.dumps` would emit for `key`, or `None` when
+/// `json.dumps` would refuse it as a key (and so raise before serde runs).
+///
+/// A faithful mirror of CPython's `json.encoder` key path, **in its order**:
+/// `str`, then `float`, then `True`/`False`, then `None`, then `int`. The order
+/// is load-bearing in one place — `bool` is an `int` subclass, and `json` spells
+/// `True` as `true`, not `1`. See [`validate_break_axis_axis_value`]'s doc for
+/// why this function exists and what its completeness is quantified over.
+///
+/// The two spellings Rust must not re-derive itself are asked of Python:
+/// `int` at arbitrary precision (`str(k)`, not a fixed-width extract, so a
+/// 30-digit key is echoed intact) and finite `float` (`float.__repr__`, which
+/// is `1e+16` where Rust's own `{}` would write `10000000000000000`).
+fn json_object_key_spelling(key: &Bound<'_, PyAny>) -> Option<String> {
+    use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+
+    if key.is_instance_of::<PyString>() {
+        return key.extract::<String>().ok();
+    }
+    if key.is_instance_of::<PyFloat>() {
+        let v = key.extract::<f64>().ok()?;
+        if v.is_nan() {
+            return Some("NaN".to_string());
+        }
+        if v.is_infinite() {
+            return Some(if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string());
+        }
+        // `json`'s `_floatstr` calls `float.__repr__(o)` — not the object's own
+        // `__repr__`, which a subclass may override — so ask a plain float.
+        return PyFloat::new(key.py(), v).repr().ok()?.extract::<String>().ok();
+    }
+    // Before `PyInt`: `bool` is an `int` subclass and `json` spells it
+    // `true`/`false`.
+    if key.is_instance_of::<PyBool>() {
+        let b = key.extract::<bool>().ok()?;
+        return Some(if b { "true" } else { "false" }.to_string());
+    }
+    if key.is_none() {
+        return Some("null".to_string());
+    }
+    if key.is_instance_of::<PyInt>() {
+        return key.str().ok()?.extract::<String>().ok();
+    }
+    // Not a key type `json.dumps` coerces: it raises `TypeError` before serde,
+    // so there is no token here to validate.
+    None
 }
 
 /// The #92 VALUE half of the array-item gate: refuses a non-finite or

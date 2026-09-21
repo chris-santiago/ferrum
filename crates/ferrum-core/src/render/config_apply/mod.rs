@@ -7,7 +7,7 @@
 //!    2. Per-axis `axis_x` / `axis_y` slot fill.
 //!    3. `configure_grid(x=…, y=…)`'s per-axis slot fill.
 //!    4. Shared `axis` slot fill.
-//!    5. Concrete axis-side re-sync from the merged `overrides.orient`.
+//!    5. Concrete axis-side re-sync from the merged `overrides.placement.orient`.
 //!    6. `axis_y2` slot fill, for every secondary y axis.
 //!    7. `tick_extra` / `tick_min_step` tick adjustment against the provisional scales.
 //!    8. `label_format` re-formatting of the tick labels.
@@ -64,9 +64,7 @@
 mod tests;
 
 use crate::layout::axis::resolve_axis_title;
-use crate::layout::{
-    LegendDirection, LegendOrient, LegendOverrides, TextAnchor, ThemeInputs,
-};
+use crate::layout::{LegendDirection, LegendOrient, LegendOverrides, TextAnchor, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
 use super::chart_config::{self, AxisConfigSpec, ChartConfig};
@@ -122,7 +120,11 @@ pub(in crate::render) fn apply_chart_config_pipeline(
     )?;
     let effective_theme = build_effective_theme_config_over_theme(prep, theme, chart_config);
     let (legend_overrides, legend_title) = resolve_legend_overrides_and_title(prep, chart_config);
-    Ok(AppliedChartConfig { effective_theme, legend_overrides, legend_title })
+    Ok(AppliedChartConfig {
+        effective_theme,
+        legend_overrides,
+        legend_title,
+    })
 }
 
 // ── Tier 1 (pass 1): chart-level legend suppression ─────────────────────────
@@ -204,7 +206,7 @@ fn fill_axis_slots_specific_before_shared(
     apply_grid_config_to_axis_inputs(axes, chart_config);
     apply_axis_config_to_axis_input(&mut axes.x, chart_config.axis.as_ref())?;
     apply_axis_config_to_axis_input(&mut axes.y, chart_config.axis.as_ref())?;
-    // Re-sync the concrete axis side from the merged `overrides.orient`: a
+    // Re-sync the concrete axis side from the merged `overrides.placement.orient`: a
     // per-channel `fm.Axis(orient=...)` already set it (so this is a no-op there
     // and per-channel wins), otherwise a chart-level `configure_axis(orient=...)`
     // filled it above and now takes effect.
@@ -225,12 +227,15 @@ fn fill_axis_slots_specific_before_shared(
     // axis always renders on the right, stacked outward, by design; a
     // per-channel `fm.Axis(orient=...)` on an `independent_y` layer is
     // overwritten the same way. So `axis_y2.orient` reaches
-    // `AxisStyleOverrides.orient` (fill-only, like every other field here)
+    // `AxisStyleOverrides`' `placement.orient` (fill-only, like every other
+    // field here)
     // but has no concrete side left to resolve onto — a `resolve_orient()`
     // call would be a no-op, not a fix, so this block does not carry one.
     if let Some(ref axis_y2_cfg) = chart_config.axis_y2 {
         if axes.secondary_y.is_empty() {
-            warnings.push(RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() });
+            warnings.push(RenderWarning::ConfigSurfaceNotPresent {
+                section: "axis_y2".to_string(),
+            });
         } else {
             for secondary in axes.secondary_y.iter_mut() {
                 apply_axis_config_to_axis_input(secondary, Some(axis_y2_cfg))?;
@@ -536,7 +541,12 @@ fn apply_chart_config_to_theme(theme: &mut ThemeInputs, config: &ChartConfig) {
     // labels; it now fills the legend-own `LegendStyleOpts.label_font_size`
     // slot in `apply_chart_config_to_legend_overrides`.
     if let Some(ref legend_cfg) = config.legend {
-        if let Some(dir) = legend_cfg.style.direction.as_deref().and_then(LegendDirection::parse) {
+        if let Some(dir) = legend_cfg
+            .style
+            .direction
+            .as_deref()
+            .and_then(LegendDirection::parse)
+        {
             theme.legend.legend_direction = Some(dir);
         }
     }
@@ -587,8 +597,8 @@ fn apply_chart_config_to_theme(theme: &mut ThemeInputs, config: &ChartConfig) {
         if let Some(ref anchor) = title.anchor {
             theme.typography.title_anchor = match anchor.as_str() {
                 "middle" => TextAnchor::Middle,
-                "end"    => TextAnchor::End,
-                _        => TextAnchor::Start,
+                "end" => TextAnchor::End,
+                _ => TextAnchor::Start,
             };
         }
         if let Some(ref c) = title.color {
@@ -703,32 +713,32 @@ fn apply_legend_cascade_to_theme(
 fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides {
     let lo = &prep.legend_overrides;
     LegendOverrides {
-        tick_count:         lo.tick_count,
-        gradient_length:    lo.gradient_length,
+        tick_count: lo.tick_count,
+        gradient_length: lo.gradient_length,
         gradient_thickness: lo.gradient_thickness,
-        direction:          lo.direction,
-        values:             lo.values.clone(),
-        legend_type:        lo.legend_type.clone(),
+        direction: lo.direction,
+        values: lo.values.clone(),
+        legend_type: lo.legend_type.clone(),
         // Per-channel `Legend(symbol_type=...)` (B5); chart-level
         // `configure_legend` fills this only when the per-channel value is absent.
-        symbol_type:        lo.symbol_type.clone(),
-        tick_min_step:      lo.tick_min_step,
+        symbol_type: lo.symbol_type.clone(),
+        tick_min_step: lo.tick_min_step,
         // 380: the 11 categorical-style fields (B5 unit 3 / 6a orphans —
         // per-channel here; chart-level fills any still None) live nested on
         // `style`. The colorbar path also reads the shared `clip_height` /
         // `label_color` / `label_font_size` from here.
         style: crate::layout::LegendStyleOpts {
             symbol_stroke_width: lo.symbol_stroke_width,
-            row_padding:         lo.row_padding,
-            column_padding:      lo.column_padding,
-            label_limit:         lo.label_limit,
-            clip_height:         lo.clip_height,
-            padding:             lo.padding,
-            title_padding:       lo.title_padding,
-            offset:              lo.offset,
-            symbol_size:         lo.symbol_size,
-            label_color:         lo.label_color.clone(),
-            label_font_size:     lo.label_font_size,
+            row_padding: lo.row_padding,
+            column_padding: lo.column_padding,
+            label_limit: lo.label_limit,
+            clip_height: lo.clip_height,
+            padding: lo.padding,
+            title_padding: lo.title_padding,
+            offset: lo.offset,
+            symbol_size: lo.symbol_size,
+            label_color: lo.label_color.clone(),
+            label_font_size: lo.label_font_size,
         },
     }
 }
@@ -752,8 +762,8 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
 /// `AxisInput::fill_chart_level_title`, `legend::aux_legend_title`'s two-rung
 /// composition) rather than the hand copy of its three arms it used to carry.
 ///
-/// No `title_claimed`-style companion bit is needed here, unlike
-/// [`crate::layout::AxisStyleOverrides::title_claimed`] on the axis side. That
+/// No claim bit is needed here, unlike the [`crate::layout::Claimed`]
+/// wrapper [`crate::layout::AxisInput::title`] carries on the axis side. That
 /// bit exists because a LATER chart-level fill has to tell "this slot was
 /// explicitly suppressed" from "this slot was never set", and
 /// `resolve_axis_title`'s `Option<String>` collapses both to `None`. Nothing
@@ -795,11 +805,10 @@ fn chart_config_legend_disabled(chart_config: &ChartConfig) -> bool {
 /// `LegendOverrides` built by `legend_overrides_from_prep`. This function
 /// fills in the `configure_legend(...)` overrides (level 3) only when the
 /// per-encoding value is absent (level 2 wins over level 3).
-fn apply_chart_config_to_legend_overrides(
-    overrides: &mut LegendOverrides,
-    config: &ChartConfig,
-) {
-    let Some(ref legend) = config.legend else { return };
+fn apply_chart_config_to_legend_overrides(overrides: &mut LegendOverrides, config: &ChartConfig) {
+    let Some(ref legend) = config.legend else {
+        return;
+    };
     let legend = &legend.style;
     if overrides.gradient_length.is_none() {
         overrides.gradient_length = legend.gradient_length;
@@ -885,20 +894,20 @@ pub(in crate::render) fn apply_axis_config_to_axis_input(
     // self-consistent regardless. Fill only when nothing higher-precedence (a
     // per-channel spec) already set the override.
     //
-    // `label_format.is_none()` ALONE is not a reliable "unclaimed" test (D8
-    // cascade-inversion fix): a per-channel TEMPORAL
+    // `labels.format.get().spec.is_none()` ALONE is not a reliable "unclaimed"
+    // test (D8 cascade-inversion fix): a per-channel TEMPORAL
     // format is applied EAGERLY to `AxisInput.tick_labels` in
-    // `prepare::build_axis_tick_inputs` and threads `label_format = None`
-    // back (nothing left to defer) — indistinguishable, by `label_format`
-    // alone, from "no per-channel format was ever set". `label_format_claimed`
+    // `prepare::build_axis_tick_inputs` and threads an empty format
+    // back (nothing left to defer) — indistinguishable, by the spec
+    // alone, from "no per-channel format was ever set". The format slot's claim
     // (set in `prepare::build_axis_input` from `resolve_axis_label_format`'s
     // own result) carries that distinction; the mechanized
     // `fill_chart_level_label_format` checks
     // BOTH, so a per-channel-claimed axis is never touched, even when its
-    // `label_format` slot happens to read `None`. See
-    // `AxisStyleOverrides::label_format_claimed`'s doc for the full account
+    // `labels.format` slot happens to read empty. See
+    // `crate::layout::Claimed`'s doc for the full account
     // and `render::apply_label_format_to_axis` for why this alone is
-    // sufficient (that fn no-ops whenever `label_format` stays `None`).
+    // sufficient (that fn no-ops whenever the slot's spec stays `None`).
     axis.overrides.fill_chart_level_label_format(
         cfg.effective_label_format().map(str::to_owned),
         cfg.effective_label_format_type().map(str::to_owned),
@@ -920,28 +929,31 @@ pub(in crate::render) fn apply_axis_config_to_axis_input(
 /// The flat `color`/`width`/`dash`/`opacity` keys are NOT applied here: they
 /// are the axis-unspecified shorthand and stay on the theme, which is exactly
 /// the fallback `build_grid` consults when an axis sets nothing of its own.
-fn apply_grid_config_to_axis_inputs(
-    axes: &mut crate::layout::AxesInput,
-    config: &ChartConfig,
-) {
+fn apply_grid_config_to_axis_inputs(axes: &mut crate::layout::AxesInput, config: &ChartConfig) {
     let Some(ref grid) = config.grid else { return };
-    for (axis, spec) in [(&mut axes.x, grid.x.as_ref()), (&mut axes.y, grid.y.as_ref())] {
+    for (axis, spec) in [
+        (&mut axes.x, grid.x.as_ref()),
+        (&mut axes.y, grid.y.as_ref()),
+    ] {
         let Some(spec) = spec else { continue };
         let o = &mut axis.overrides;
-        if o.show_grid.is_none() {
-            o.show_grid = spec.enabled;
+        if o.grid.show.is_none() {
+            o.grid.show = spec.enabled;
         }
-        if o.grid_color.is_none() {
-            o.grid_color = spec.color.as_deref().and_then(|s| color::parse_color(s).ok());
+        if o.grid.color.is_none() {
+            o.grid.color = spec
+                .color
+                .as_deref()
+                .and_then(|s| color::parse_color(s).ok());
         }
-        if o.grid_width.is_none() {
-            o.grid_width = spec.width;
+        if o.grid.width.is_none() {
+            o.grid.width = spec.width;
         }
-        if o.grid_dash.is_none() {
-            o.grid_dash = spec.dash.clone();
+        if o.grid.dash.is_none() {
+            o.grid.dash = spec.dash.clone();
         }
-        if o.grid_opacity.is_none() {
-            o.grid_opacity = spec.opacity;
+        if o.grid.opacity.is_none() {
+            o.grid.opacity = spec.opacity;
         }
     }
 }
@@ -968,7 +980,7 @@ fn apply_grid_config_to_axis_inputs(
 /// The axis TITLE is filled here too, through `AxisInput::fill_chart_level_title`
 /// — not via the style merge, because `AxisInput.title` is a resolved string
 /// whose `None` is ambiguous between "unset" and "per-channel suppressed"
-/// (see that method and `AxisStyleOverrides::title_claimed`).
+/// (see that method and `crate::layout::Claimed`).
 pub(in crate::render) fn apply_axis_style_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     style: &chart_config::AxisStyleSpec,
@@ -1038,12 +1050,13 @@ fn apply_label_format_to_axis(
     reversed: bool,
     channel: &'static str,
 ) -> Result<(), RenderError> {
-    let format_type = axis.overrides.label_format_type.clone();
+    let format_type = axis.overrides.labels.format.get().format_type.clone();
     let is_time_type = format_type.as_deref() == Some("time");
-    if let Some(tick_vals) = axis.overrides.tick_values.clone() {
+    if let Some(tick_vals) = axis.overrides.ticks.values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
-        let fmt = axis.overrides.label_format.as_deref();
+        let fmt = axis.overrides.labels.format.get().spec.clone();
+        let fmt = fmt.as_deref();
         if let Some(f) = fmt {
             // #133 predicate sharing (wave-1 close remediation): the same
             // refusal `prepare::build_axis_tick_inputs`'s two mode arms share.
@@ -1058,7 +1071,9 @@ fn apply_label_format_to_axis(
         axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
         return Ok(());
     }
-    let Some(fmt_str) = axis.overrides.label_format.clone() else { return Ok(()) };
+    let Some(fmt_str) = axis.overrides.labels.format.get().spec.clone() else {
+        return Ok(());
+    };
     if is_time_type {
         // #133 predicate sharing (wave-1 close remediation), cycle-2 N2 fix:
         // check `temporal_tick_values` directly rather than routing through
@@ -1149,7 +1164,7 @@ fn sync_tick_placement_to_tick_values(
     axis: &mut crate::layout::AxisInput,
     scale: &scale_resolve::ScaleKind,
 ) {
-    let Some(values) = axis.overrides.tick_values.clone() else {
+    let Some(values) = axis.overrides.ticks.values.clone() else {
         return;
     };
     if axis
@@ -1228,9 +1243,15 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
     cfg: &chart_config::ColorConfigSpec,
 ) -> Result<Vec<RenderWarning>, RenderError> {
     let mut warnings = Vec::new();
-    let Some(ref mut scale) = color_scale else { return Ok(warnings) };
+    let Some(ref mut scale) = color_scale else {
+        return Ok(warnings);
+    };
     match scale {
-        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme, .. } => {
+        scale_resolve::ColorScale::Continuous {
+            ref mut domain,
+            ref mut scheme,
+            ..
+        } => {
             if let Some(ref d) = cfg.domain {
                 let floats: Vec<f64> = d.iter().filter_map(|v| v.as_f64()).collect();
                 if floats.len() == 2 {
@@ -1267,10 +1288,15 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                 }
             }
         }
-        scale_resolve::ColorScale::Categorical { ref mut domain, ref mut palette } => {
+        scale_resolve::ColorScale::Categorical {
+            ref mut domain,
+            ref mut palette,
+        } => {
             if let Some(ref d) = cfg.domain {
-                let categories: Vec<String> =
-                    d.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                let categories: Vec<String> = d
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect();
                 if !categories.is_empty() {
                     // Categories the override leaves unlisted keep rendering —
                     // in the theme mark color, with no legend entry (spec §4.2,
@@ -1312,7 +1338,9 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                     // unapplied with no warning, as before.
                     Ok(_) => {}
                     Err(entry) => {
-                        return Err(RenderError::ColorRangeParseFailure { entry: entry.clone() });
+                        return Err(RenderError::ColorRangeParseFailure {
+                            entry: entry.clone(),
+                        });
                     }
                 }
             }
@@ -1341,7 +1369,9 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                         }
                     }
                     Err(entry) => {
-                        return Err(RenderError::ColorRangeParseFailure { entry: entry.clone() });
+                        return Err(RenderError::ColorRangeParseFailure {
+                            entry: entry.clone(),
+                        });
                     }
                 }
             }
@@ -1497,13 +1527,22 @@ fn apply_legend_values_to_entries(
 /// declared-type case, falling back to a tolerant "valid under either
 /// grammar" check only when `type_` is unset (fully auto-inferred from data,
 /// the one case this fn truly cannot know early).
-pub(in crate::render) fn validate_chart_format_specs(spec: &ChartSpec, chart_config: &ChartConfig) -> Result<(), RenderError> {
+pub(in crate::render) fn validate_chart_format_specs(
+    spec: &ChartSpec,
+    chart_config: &ChartConfig,
+) -> Result<(), RenderError> {
     use crate::spec::encoding::DataType;
 
     fn check_with(f: &str, is_time: bool) -> Result<(), RenderError> {
-        let result =
-            if is_time { format::validate_strftime_spec(f) } else { format::validate_d3_format_spec(f) };
-        result.map_err(|reason| RenderError::InvalidFormatSpec { spec: f.to_string(), reason })
+        let result = if is_time {
+            format::validate_strftime_spec(f)
+        } else {
+            format::validate_d3_format_spec(f)
+        };
+        result.map_err(|reason| RenderError::InvalidFormatSpec {
+            spec: f.to_string(),
+            reason,
+        })
     }
 
     /// Matches `prepare::apply_axis_format_or_thread`'s real per-channel
@@ -1525,13 +1564,16 @@ pub(in crate::render) fn validate_chart_format_specs(spec: &ChartSpec, chart_con
         // Auto-detected via '%'-containment with no explicit format_type.
         match encoding_type {
             Some(DataType::Temporal) => check_with(f, true),
-            Some(DataType::Quantitative | DataType::Nominal | DataType::Ordinal) => check_with(f, false),
+            Some(DataType::Quantitative | DataType::Nominal | DataType::Ordinal) => {
+                check_with(f, false)
+            }
             None => {
                 // Fully auto-inferred type: genuinely ambiguous early.
                 // Tolerate whichever grammar the spec actually validates
                 // under, matching whichever one its eventually-resolved
                 // scale will really use.
-                if format::validate_strftime_spec(f).is_ok() || format::validate_d3_format_spec(f).is_ok()
+                if format::validate_strftime_spec(f).is_ok()
+                    || format::validate_d3_format_spec(f).is_ok()
                 {
                     Ok(())
                 } else {
@@ -1578,7 +1620,10 @@ pub(in crate::render) fn validate_chart_format_specs(spec: &ChartSpec, chart_con
             // literal-only string ever has — so `"curency"` (no `%`) now
             // keeps the d3-grammar message unconditionally, while `"%b %d"`
             // (has a `%`, and parses) still gets the re-diagnosis.
-            if format_type != Some("time") && f.contains('%') && format::validate_strftime_spec(f).is_ok() {
+            if format_type != Some("time")
+                && f.contains('%')
+                && format::validate_strftime_spec(f).is_ok()
+            {
                 RenderError::InvalidFormatSpec {
                     spec: f.to_string(),
                     reason: format!(
@@ -1618,7 +1663,11 @@ pub(in crate::render) fn validate_chart_format_specs(spec: &ChartSpec, chart_con
             check_loose(e.format.as_deref(), e.format_type.as_deref(), e.type_)?;
         }
         if let Some(axis) = e.axis.as_deref() {
-            check_loose(axis.label_format.as_deref(), axis.label_format_type.as_deref(), e.type_)?;
+            check_loose(
+                axis.label_format.as_deref(),
+                axis.label_format_type.as_deref(),
+                e.type_,
+            )?;
         }
         if let Some(legend) = e.legend.as_deref() {
             check_legend_style(legend)?;
@@ -1661,4 +1710,3 @@ pub(in crate::render) fn validate_chart_format_specs(spec: &ChartSpec, chart_con
     }
     Ok(())
 }
-

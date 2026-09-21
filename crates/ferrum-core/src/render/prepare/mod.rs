@@ -203,7 +203,10 @@ impl LayerPrepared {
         // (`from_chart_only`, no `layers`) charts never reach this fallback
         // at all — untouched. See `MarkKwargsSpec::without_paint`'s doc
         // comment.
-        let mark_style = layer.mark_style.clone().or_else(|| spec.mark_style.clone().map(|s| s.without_paint()));
+        let mark_style = layer
+            .mark_style
+            .clone()
+            .or_else(|| spec.mark_style.clone().map(|s| s.without_paint()));
         Self {
             mark: layer.mark,
             encoding,
@@ -677,8 +680,7 @@ fn build_axis_input(
     // with a non-semantic name (e.g. "lower_whisker" / "param_value").
     let field_title = rendering_enc.and_then(|e| {
         // Explicit spec-level title takes highest priority.
-        let spec_title =
-            resolve_axis_title(spec_enc.and_then(|p| p.title.as_deref()), None);
+        let spec_title = resolve_axis_title(spec_enc.and_then(|p| p.title.as_deref()), None);
         if let Some(spec_title) = spec_title {
             return Some(spec_title);
         }
@@ -706,9 +708,10 @@ fn build_axis_input(
     // `AxisInput.title`. Capture the claim here, where the raw wire value is
     // still visible. `spec_enc.title` (the highest-priority source, resolved
     // into `field_title` above) claims the slot for the same reason.
-    let title_claimed =
-        per_channel_title.is_some() || spec_enc.and_then(|p| p.title.as_deref()).is_some();
-    let title = resolve_axis_title(per_channel_title, field_title);
+    let mut title = crate::layout::Claimed::new(resolve_axis_title(per_channel_title, field_title));
+    if per_channel_title.is_some() || spec_enc.and_then(|p| p.title.as_deref()).is_some() {
+        title.claim();
+    }
 
     // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
     // label_format_type=)` takes precedence over the shorthand
@@ -720,9 +723,9 @@ fn build_axis_input(
     // claim a format for this axis at all" BEFORE `tick_format` is moved into
     // `TickFormatMode::Thread` below — this survives even when the eventual
     // per-channel formatting is applied EAGERLY (temporal case) and threads
-    // `label_format_override = None`, which `label_format.is_none()` alone
+    // `label_format_override = None`, which `LabelFormat::spec.is_none()` alone
     // cannot distinguish from "no per-channel format". See
-    // `AxisStyleOverrides::label_format_claimed`'s doc.
+    // `layout::Claimed`'s doc.
     let label_format_claimed = tick_format.is_some();
 
     // Grid item 18: minor tick fractions from the resolved scale, projected
@@ -756,22 +759,31 @@ fn build_axis_input(
 
     // B5: per-channel axis STYLING + positioning overrides.
     let mut overrides = encoding_axis_style_overrides(enc_axis.map(Box::as_ref), channel.token())?;
-    // Seed the per-channel `label_format` (resolved via the temporal/numeric
-    // threading above) onto the bundle.
-    overrides.label_format = label_format_override;
+    // Seed the per-channel format (resolved via the temporal/numeric threading
+    // above) onto the bundle's `labels.format`. This path OWNS the whole slot:
+    // `axis_style_fill_from`'s fresh build deliberately writes neither half, so
+    // `format_type` is still `Default` here — writing the value entire keeps
+    // that explicit rather than leaving a half-written slot behind.
+    overrides.labels.format.set(crate::layout::LabelFormat {
+        spec: label_format_override,
+        format_type: None,
+    });
     // D8 cascade-inversion fix: mark the slot claimed regardless of whether
     // a format string survived to be threaded (see the capture above and
-    // `AxisStyleOverrides::label_format_claimed`'s doc).
-    overrides.label_format_claimed = label_format_claimed;
-    // Same shape for the title slot (D12): see `title_claimed`'s capture above
-    // and `AxisInput::fill_chart_level_title`.
-    overrides.title_claimed = title_claimed;
+    // `layout::Claimed`'s doc). The title slot takes its own claim where it is
+    // built, above.
+    if label_format_claimed {
+        overrides.labels.format.claim();
+    }
 
     // Per-channel `orient` selects the axis side; absent → the dimension default
-    // (Bottom for x, Left for y). The `orient` override input stays in the bundle
-    // so a later chart-level `configure_axis(orient=...)` fills it only when
+    // (Bottom for x, Left for y). The `placement.orient` override input stays in
+    // the bundle so a later chart-level `configure_axis(orient=...)` fills it only when
     // still `None` (per-channel wins), then `resolve_orient` re-syncs.
-    let orient = overrides.orient.unwrap_or(channel.default_orient());
+    let orient = overrides
+        .placement
+        .orient
+        .unwrap_or(channel.default_orient());
 
     Ok(AxisInput {
         orient,
@@ -945,8 +957,7 @@ pub fn prepare_render_inputs(
     for (i, layer) in layers.iter().enumerate() {
         if let Some(name) = &layer.data_source {
             if !transform_outputs.contains_key(name) {
-                let mut keys: Vec<&str> =
-                    transform_outputs.keys().map(|s| s.as_str()).collect();
+                let mut keys: Vec<&str> = transform_outputs.keys().map(|s| s.as_str()).collect();
                 keys.sort_unstable();
                 return Err(RenderError::TransformFailed(format!(
                     "layer {i} data_source '{name}' not found in transform outputs; \
@@ -988,15 +999,16 @@ pub fn prepare_render_inputs(
     // would "re-emit" everything. `drop_placeholder_only_warnings` is the
     // fix: filter out only the class this placeholder pass cannot honestly
     // judge, and keep the rest.
-    let (provisional_scales, provisional_scale_warnings) = crate::render::scale_resolve::resolve_scales_with_leaf_context(
-        &rendering_spec,
-        &transformed,
-        &transform_outputs,
-        (0.0, 1.0),
-        (0.0, 1.0),
-        theme,
-        leaf_scales,
-    )?;
+    let (provisional_scales, provisional_scale_warnings) =
+        crate::render::scale_resolve::resolve_scales_with_leaf_context(
+            &rendering_spec,
+            &transformed,
+            &transform_outputs,
+            (0.0, 1.0),
+            (0.0, 1.0),
+            theme,
+            leaf_scales,
+        )?;
 
     // Derive both axis inputs + their tick counts (SPINE-08/SPINE-12). The
     // rendering encoding is post-CoordFlip; the spec-level encoding (whose
@@ -1152,12 +1164,22 @@ fn run_transforms_with_facet(
     normalized: &RecordBatch,
     viewport: crate::layout::Viewport,
     theme: &crate::layout::ThemeInputs,
-) -> Result<(HashMap<String, RecordBatch>, Vec<crate::transform::context::TransformWarning>), RenderError> {
+) -> Result<
+    (
+        HashMap<String, RecordBatch>,
+        Vec<crate::transform::context::TransformWarning>,
+    ),
+    RenderError,
+> {
     let Some(fspec) = &spec.facet else {
         // No facet: unchanged pipeline (single partition = full batch); one
         // panel occupies the whole estimated viewport.
         let ctx = TransformContext {
-            panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(viewport, theme, (1, 1))),
+            panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(
+                viewport,
+                theme,
+                (1, 1),
+            )),
             ..TransformContext::default()
         };
         let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
@@ -1207,7 +1229,9 @@ fn run_transforms_with_facet(
         }
     };
     let ctx = TransformContext {
-        panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(viewport, theme, grid_dims)),
+        panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(
+            viewport, theme, grid_dims,
+        )),
         // Batch-D T9 round 3: every partition run through this ctx is one
         // facet panel, not the whole frame — see `TransformContext::is_partition`'s
         // doc and `smooth::apply_one_group`'s degenerate-input policy, the
@@ -1231,8 +1255,9 @@ fn run_transforms_with_facet(
 
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
     for ((col_value, row_value), partition_batch) in &partitions {
-        let mut panel_outputs = apply_transforms_named(&effective_transforms, partition_batch, &ctx)
-            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+        let mut panel_outputs =
+            apply_transforms_named(&effective_transforms, partition_batch, &ctx)
+                .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         // D10: per-panel imputation.
         apply_impute_to_final(&mut panel_outputs, spec);
         // Re-inject the col field (and row field when in grid mode) into every
@@ -1284,7 +1309,10 @@ fn run_transforms_with_facet(
 /// finding 3 hoisted it there so `transform::smooth::apply_grouped` could stop
 /// carrying a weaker second implementation). See that function for the
 /// union-of-fields algorithm and its guarantees.
-fn concat_batches_by_name(key: &str, batches: Vec<RecordBatch>) -> Result<RecordBatch, RenderError> {
+fn concat_batches_by_name(
+    key: &str,
+    batches: Vec<RecordBatch>,
+) -> Result<RecordBatch, RenderError> {
     crate::transform::concat::concat_by_name(
         &format!("concat facet partitions for key '{key}'"),
         batches,
@@ -1456,7 +1484,13 @@ fn build_axes(
         show_y: spec.axis_y.unwrap_or(true) && !cartesian_axes_suppressed,
         secondary_y,
     };
-    Ok(PreparedAxes { axes, x_tick_count, y_tick_count, secondary_y_scales, secondary_y_tick_counts })
+    Ok(PreparedAxes {
+        axes,
+        x_tick_count,
+        y_tick_count,
+        secondary_y_scales,
+        secondary_y_tick_counts,
+    })
 }
 
 /// Provisional secondary y-axis inputs, one per `independent_y` layer in layer
@@ -1596,7 +1630,11 @@ fn build_secondary_y_axis_inputs(
         scales.push(y_scale);
         tick_counts.push(y_tick_count);
     }
-    Ok(SecondaryYAxes { inputs, scales, tick_counts })
+    Ok(SecondaryYAxes {
+        inputs,
+        scales,
+        tick_counts,
+    })
 }
 
 /// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
@@ -1610,10 +1648,7 @@ fn build_secondary_y_axis_inputs(
 /// impute constant for y. All other columns default to null. No-ops when any of
 /// these conditions hold: no x encoding, no color encoding, impute value absent,
 /// or the batch is already complete.
-fn apply_impute(
-    batch: &RecordBatch,
-    spec: &ChartSpec,
-) -> RecordBatch {
+fn apply_impute(batch: &RecordBatch, spec: &ChartSpec) -> RecordBatch {
     use arrow::array::{Float64Array, StringArray};
 
     // Only handle `encoding.y.impute = {"value": <number>}`.
@@ -1625,21 +1660,44 @@ fn apply_impute(
         .and_then(|v| v.as_object())
         .and_then(|obj| obj.get("value"))
         .and_then(|v| v.as_f64());
-    let Some(fill) = impute_value else { return batch.clone(); };
+    let Some(fill) = impute_value else {
+        return batch.clone();
+    };
 
-    let x_enc = match spec.encoding.x.as_ref() { Some(e) => e, None => return batch.clone() };
-    let color_enc = match spec.encoding.color.as_ref() { Some(e) => e, None => return batch.clone() };
-    let y_enc = match spec.encoding.y.as_ref() { Some(e) => e, None => return batch.clone() };
+    let x_enc = match spec.encoding.x.as_ref() {
+        Some(e) => e,
+        None => return batch.clone(),
+    };
+    let color_enc = match spec.encoding.color.as_ref() {
+        Some(e) => e,
+        None => return batch.clone(),
+    };
+    let y_enc = match spec.encoding.y.as_ref() {
+        Some(e) => e,
+        None => return batch.clone(),
+    };
 
     let x_field = &x_enc.field;
     let color_field = &color_enc.field;
     let y_field = &y_enc.field;
 
     // Collect distinct x values and groups. Only handles Float64 x + Utf8 color.
-    let x_col = match batch.column_by_name(x_field) { Some(c) => c, None => return batch.clone() };
-    let color_col = match batch.column_by_name(color_field) { Some(c) => c, None => return batch.clone() };
-    let x_arr = match x_col.as_any().downcast_ref::<Float64Array>() { Some(a) => a, None => return batch.clone() };
-    let color_arr = match color_col.as_any().downcast_ref::<StringArray>() { Some(a) => a, None => return batch.clone() };
+    let x_col = match batch.column_by_name(x_field) {
+        Some(c) => c,
+        None => return batch.clone(),
+    };
+    let color_col = match batch.column_by_name(color_field) {
+        Some(c) => c,
+        None => return batch.clone(),
+    };
+    let x_arr = match x_col.as_any().downcast_ref::<Float64Array>() {
+        Some(a) => a,
+        None => return batch.clone(),
+    };
+    let color_arr = match color_col.as_any().downcast_ref::<StringArray>() {
+        Some(a) => a,
+        None => return batch.clone(),
+    };
 
     // Collect all (x, group) pairs and the full domain of each.
     use std::collections::HashSet;
@@ -1650,12 +1708,16 @@ fn apply_impute(
     groups.sort_unstable();
     groups.dedup();
 
-    if x_vals.is_empty() || groups.is_empty() { return batch.clone(); }
+    if x_vals.is_empty() || groups.is_empty() {
+        return batch.clone();
+    }
 
     // Build the set of existing (x, group) keys.
     let mut existing: HashSet<(u64, String)> = HashSet::new();
     for i in 0..batch.num_rows() {
-        if x_arr.is_null(i) || color_arr.is_null(i) { continue; }
+        if x_arr.is_null(i) || color_arr.is_null(i) {
+            continue;
+        }
         let xv = x_arr.value(i);
         let gv = color_arr.value(i).to_owned();
         existing.insert((xv.to_bits(), gv));
@@ -1667,13 +1729,17 @@ fn apply_impute(
     let mut new_y: Vec<Option<f64>> = Vec::new();
     for xv in &x_vals {
         for gv in &groups {
-            if existing.contains(&(xv.to_bits(), gv.clone())) { continue; }
+            if existing.contains(&(xv.to_bits(), gv.clone())) {
+                continue;
+            }
             new_x.push(Some(*xv));
             new_group.push(Some(gv.clone()));
             new_y.push(Some(fill));
         }
     }
-    if new_x.is_empty() { return batch.clone(); }
+    if new_x.is_empty() {
+        return batch.clone();
+    }
 
     // Append synthetic rows: build a small batch with (x, color, y) and null all other cols.
     let n_new = new_x.len();
@@ -1685,7 +1751,14 @@ fn apply_impute(
         match field.name().as_str() {
             name if name == x_field => {
                 let combined: ArrayRef = Arc::new(Float64Array::from(
-                    (0..n_orig).map(|i| if x_arr.is_null(i) { None } else { Some(x_arr.value(i)) })
+                    (0..n_orig)
+                        .map(|i| {
+                            if x_arr.is_null(i) {
+                                None
+                            } else {
+                                Some(x_arr.value(i))
+                            }
+                        })
                         .chain(new_x.iter().copied())
                         .collect::<Vec<Option<f64>>>(),
                 ));
@@ -1694,11 +1767,20 @@ fn apply_impute(
             name if name == color_field => {
                 let orig_str = orig_col.as_any().downcast_ref::<StringArray>();
                 let combined: ArrayRef = if let Some(orig_str) = orig_str {
-                    Arc::new((0..n_orig).map(|i| if orig_str.is_null(i) { None } else { Some(orig_str.value(i)) })
-                        .chain(new_group.iter().map(|v| v.as_deref()))
-                        .collect::<Vec<Option<&str>>>()
-                        .into_iter()
-                        .collect::<StringArray>())
+                    Arc::new(
+                        (0..n_orig)
+                            .map(|i| {
+                                if orig_str.is_null(i) {
+                                    None
+                                } else {
+                                    Some(orig_str.value(i))
+                                }
+                            })
+                            .chain(new_group.iter().map(|v| v.as_deref()))
+                            .collect::<Vec<Option<&str>>>()
+                            .into_iter()
+                            .collect::<StringArray>(),
+                    )
                 } else {
                     return batch.clone();
                 };
@@ -1708,7 +1790,14 @@ fn apply_impute(
                 let orig_f64 = orig_col.as_any().downcast_ref::<Float64Array>();
                 let combined: ArrayRef = if let Some(orig_f64) = orig_f64 {
                     Arc::new(Float64Array::from(
-                        (0..n_orig).map(|i| if orig_f64.is_null(i) { None } else { Some(orig_f64.value(i)) })
+                        (0..n_orig)
+                            .map(|i| {
+                                if orig_f64.is_null(i) {
+                                    None
+                                } else {
+                                    Some(orig_f64.value(i))
+                                }
+                            })
                             .chain(new_y.iter().copied())
                             .collect::<Vec<Option<f64>>>(),
                     ))
@@ -1811,9 +1900,7 @@ pub(in crate::render) fn apply_axis_domain_config_for(
         scale,
         &axis_domain_config(chart_config, axis),
         channel,
-        enc.is_some_and(|e| {
-            crate::render::scale_resolve::encoding_explicit_extent(e).is_some()
-        }),
+        enc.is_some_and(|e| crate::render::scale_resolve::encoding_explicit_extent(e).is_some()),
         warnings,
     )
 }
@@ -1911,11 +1998,13 @@ pub(crate) fn parse_axis_orient(
         "right" => AxisOrient::Right,
         // Placeholder — see the doc comment on this function.
         _ => {
-            return Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
-                channel,
-                orient: value.to_owned(),
-                coord_flipped: false,
-            }))
+            return Err(crate::render::UnflippedRenderError::new(
+                RenderError::InvalidAxisOrient {
+                    channel,
+                    orient: value.to_owned(),
+                    coord_flipped: false,
+                },
+            ))
         }
     };
     let ok = match channel {
@@ -1926,11 +2015,13 @@ pub(crate) fn parse_axis_orient(
         Ok(orient)
     } else {
         // Placeholder — see the doc comment on this function.
-        Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
-            channel,
-            orient: value.to_owned(),
-            coord_flipped: false,
-        }))
+        Err(crate::render::UnflippedRenderError::new(
+            RenderError::InvalidAxisOrient {
+                channel,
+                orient: value.to_owned(),
+                coord_flipped: false,
+            },
+        ))
     }
 }
 
@@ -1974,11 +2065,13 @@ pub(crate) fn parse_title_orient(
         "right" => Ok(AxisOrient::Right),
         // Placeholder — see the doc comment on `parse_axis_orient` above
         // (this function shares the exact same contract).
-        _ => Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
-            channel,
-            orient: value.to_owned(),
-            coord_flipped: false,
-        })),
+        _ => Err(crate::render::UnflippedRenderError::new(
+            RenderError::InvalidAxisOrient {
+                channel,
+                orient: value.to_owned(),
+                coord_flipped: false,
+            },
+        )),
     }
 }
 
@@ -2009,14 +2102,18 @@ pub(crate) fn parse_title_orient(
 ///   config layer) always wins.
 ///
 /// Field-ownership exceptions preserved bit-for-bit from the old two-mapper world:
-/// - **`label_format`** is written ONLY on the chart-level (`fill_only_if_none`)
-///   path. The per-channel/prepare path deliberately leaves it `None` here and
-///   seeds it separately from the temporal/numeric format threading
-///   (`apply_axis_format_or_thread`) after this merge runs.
-/// - **`show_*`** toggles (`grid`/`domain`/`labels`/`ticks`) live on `AxisInput`,
-///   not on this bundle, and are owned solely by the prepare path. This merge
-///   cannot touch them (they are not `AxisStyleOverrides` fields); the chart-level
-///   caller documents that single-owner contract at its call site.
+/// - The **`labels.format`** slot is written ONLY on the chart-level
+///   (`fill_only_if_none`) path. The per-channel/prepare path deliberately leaves
+///   it empty here and seeds it separately from the temporal/numeric format
+///   threading (`apply_axis_format_or_thread`) after this merge runs.
+/// - The **`show_*`** toggles are `ticks.show`, `labels.show`, `domain.show` and
+///   `grid.show` on this bundle, and this merge writes all four (see the body's
+///   own note on why they moved here from `AxisInput`). *(Corrected 2026-09-20,
+///   pre-existing: this bullet used to say they "live on `AxisInput`, not on this
+///   bundle" and that the merge "cannot touch them". Both halves were false at
+///   `HEAD` verbatim and contradicted by this same function ~80 lines below.
+///   Not a task-11 regression; corrected because it sits inside a block the
+///   rename sweep had to cover anyway.)*
 ///
 /// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
 /// [`RenderError::InvalidAxisOrient`]; an unparseable color hex string leaves the
@@ -2048,34 +2145,45 @@ pub(crate) fn axis_style_fill_from(
     // Full CSS vocabulary (names, `rgb()`, hex) — `None` for absent or
     // unparseable values, matching the pre-existing "keep the theme default"
     // behavior of every axis-style color override.
-    let opt_color = |c: &Option<String>| c.as_deref().and_then(|s| crate::render::color::parse_color(s).ok());
+    let opt_color = |c: &Option<String>| {
+        c.as_deref()
+            .and_then(|s| crate::render::color::parse_color(s).ok())
+    };
     // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
-    // `orient` is the override INPUT (validated against the dimension); the
-    // concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
+    // `placement.orient` is the override INPUT (validated against the dimension);
+    // the concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
     // all override layers merge. Validation can fail, so it is resolved eagerly
     // (before `set`) and only assigned under the same fill predicate.
-    if !fill_only_if_none || o.orient.is_none() {
-        o.orient = style
+    if !fill_only_if_none || o.placement.orient.is_none() {
+        o.placement.orient = style
             .orient
             .as_deref()
             .map(|s| parse_axis_orient(s, channel))
             .transpose()?;
     }
-    if !fill_only_if_none || o.title_orient.is_none() {
-        o.title_orient = style
+    if !fill_only_if_none || o.title.orient.is_none() {
+        o.title.orient = style
             .title_orient
             .as_deref()
             .map(|s| parse_title_orient(s, channel))
             .transpose()?;
     }
-    set(&mut o.translate, style.translate, fill_only_if_none);
-    set(&mut o.min_band, style.min_band, fill_only_if_none);
-    set(&mut o.max_band, style.max_band, fill_only_if_none);
-    set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
-    set(&mut o.zindex, style.zindex, fill_only_if_none);
-    set(&mut o.tick_size, style.tick_size, fill_only_if_none);
-    set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);
-    set(&mut o.tick_min_step, style.tick_min_step, fill_only_if_none);
+    set(
+        &mut o.placement.translate,
+        style.translate,
+        fill_only_if_none,
+    );
+    set(&mut o.placement.min_band, style.min_band, fill_only_if_none);
+    set(&mut o.placement.max_band, style.max_band, fill_only_if_none);
+    set(&mut o.grid.opacity, style.grid_opacity, fill_only_if_none);
+    set(&mut o.placement.zindex, style.zindex, fill_only_if_none);
+    set(&mut o.ticks.size, style.tick_size, fill_only_if_none);
+    set(&mut o.ticks.extra, style.tick_extra, fill_only_if_none);
+    set(
+        &mut o.ticks.min_step,
+        style.tick_min_step,
+        fill_only_if_none,
+    );
     // ── Show toggles (D12, spec §4.9) ────────────────────────────────────────
     // These four used to live as bare `bool`s on `AxisInput`, written ONLY by
     // the per-channel prepare path, because a `bool` cannot say "unset" and a
@@ -2086,21 +2194,22 @@ pub(crate) fn axis_style_fill_from(
     // inverting the cascade. `grid`/`domain` additionally carry a theme
     // fallback, folded in by `AxesInput::apply_show_defaults` after every
     // config layer has had its turn.
-    set(&mut o.show_labels, style.labels, fill_only_if_none);
-    set(&mut o.show_ticks, style.ticks, fill_only_if_none);
-    set(&mut o.show_domain, style.domain, fill_only_if_none);
-    set(&mut o.show_grid, style.grid, fill_only_if_none);
+    set(&mut o.labels.show, style.labels, fill_only_if_none);
+    set(&mut o.ticks.show, style.ticks, fill_only_if_none);
+    set(&mut o.domain.show, style.domain, fill_only_if_none);
+    set(&mut o.grid.show, style.grid, fill_only_if_none);
     // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
-    set(&mut o.offset, style.offset, fill_only_if_none);
-    set(&mut o.label_flush, style.label_flush, fill_only_if_none);
+    set(&mut o.placement.offset, style.offset, fill_only_if_none);
+    set(&mut o.labels.flush, style.label_flush, fill_only_if_none);
     set(
-        &mut o.label_overlap,
+        &mut o.labels.overlap,
         style.label_overlap.as_deref().and_then(parse_label_overlap),
         fill_only_if_none,
     );
-    set(&mut o.label_angle, style.label_angle, fill_only_if_none);
-    // `label_format` is owned by the chart-level path only. The per-channel path
-    // threads it separately after this merge, so it must stay `None` here.
+    set(&mut o.labels.angle, style.label_angle, fill_only_if_none);
+    // The `labels.format` slot is owned by the chart-level path only. The
+    // per-channel path threads it separately after this merge, so it must stay
+    // empty here.
     //
     // This fallback write is normally shadowed by `apply_axis_config_to_axis_input`'s
     // own (more complete — raw-first via `effective_label_format()`) fill
@@ -2108,29 +2217,60 @@ pub(crate) fn axis_style_fill_from(
     // the common case (it only re-derives the SAME `style.label_format`
     // that caller's fill already found — see that caller's doc). But when
     // the caller's fill is correctly SKIPPED for a per-channel-claimed axis
-    // (`label_format_claimed`, D8 cascade-inversion fix),
-    // `o.label_format` is still `None` reaching here. Routes through
+    // (the format slot's claim, D8 cascade-inversion fix),
+    // `o.labels.format`'s spec is still `None` reaching here. Routes through
     // the SAME mechanized `fill_chart_level_label_format` the caller uses
     // rather than hand-re-deriving the
     // "unclaimed" predicate a second time — this is exactly the two-writer
     // duplication that fix closed.
     if fill_only_if_none {
-        o.fill_chart_level_label_format(style.label_format.clone(), style.label_format_type.clone());
+        o.fill_chart_level_label_format(
+            style.label_format.clone(),
+            style.label_format_type.clone(),
+        );
     }
-    set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
+    set(&mut o.ticks.values, style.values.clone(), fill_only_if_none);
     // Title overrides.
-    set(&mut o.title_font_size, style.title_font_size, fill_only_if_none);
-    set(&mut o.title_color, opt_color(&style.title_color), fill_only_if_none);
-    set(&mut o.title_padding, style.title_padding, fill_only_if_none);
-    set(&mut o.label_padding, style.label_padding, fill_only_if_none);
+    set(
+        &mut o.title.font_size,
+        style.title_font_size,
+        fill_only_if_none,
+    );
+    set(
+        &mut o.title.color,
+        opt_color(&style.title_color),
+        fill_only_if_none,
+    );
+    set(&mut o.title.padding, style.title_padding, fill_only_if_none);
+    set(
+        &mut o.labels.padding,
+        style.label_padding,
+        fill_only_if_none,
+    );
     // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
-    set(&mut o.label_color, opt_color(&style.label_color), fill_only_if_none);
-    set(&mut o.label_font_size, style.label_font_size, fill_only_if_none);
-    set(&mut o.grid_color, opt_color(&style.grid_color), fill_only_if_none);
-    set(&mut o.grid_dash, style.grid_dash.clone(), fill_only_if_none);
-    set(&mut o.grid_width, style.grid_width, fill_only_if_none);
-    set(&mut o.domain_color, opt_color(&style.domain_color), fill_only_if_none);
-    set(&mut o.domain_width, style.domain_width, fill_only_if_none);
+    set(
+        &mut o.labels.color,
+        opt_color(&style.label_color),
+        fill_only_if_none,
+    );
+    set(
+        &mut o.labels.font_size,
+        style.label_font_size,
+        fill_only_if_none,
+    );
+    set(
+        &mut o.grid.color,
+        opt_color(&style.grid_color),
+        fill_only_if_none,
+    );
+    set(&mut o.grid.dash, style.grid_dash.clone(), fill_only_if_none);
+    set(&mut o.grid.width, style.grid_width, fill_only_if_none);
+    set(
+        &mut o.domain.color,
+        opt_color(&style.domain_color),
+        fill_only_if_none,
+    );
+    set(&mut o.domain.width, style.domain_width, fill_only_if_none);
     Ok(())
 }
 
@@ -2141,12 +2281,13 @@ pub(crate) fn axis_style_fill_from(
 /// `configure_axis` path uses (`fill_only_if_none = true`) — so the two cannot
 /// drift on the field set, color parsing, or orient/title_orient validation.
 ///
-/// `label_format` is left `None` here (the fresh-build path never writes it):
+/// The `labels.format` slot is left empty here (the fresh-build path never
+/// writes it):
 /// prepare resolves it through the temporal/numeric format threading
 /// (`apply_axis_format_or_thread`) and seeds it onto the bundle afterward. An
 /// unparseable color hex string yields `None` (theme fallback) rather than
-/// failing. `orient` is the validated override input; the concrete axis side is
-/// resolved into `AxisInput.orient` once all override layers merge.
+/// failing. `placement.orient` is the validated override input; the concrete axis
+/// side is resolved into `AxisInput.orient` once all override layers merge.
 ///
 /// Returns [`crate::render::UnflippedRenderError`] (R3), not `RenderError`
 /// directly: this fn has no `coord_flipped` of its own — it's `build_axes`
@@ -2175,7 +2316,7 @@ fn encoding_axis_style_overrides(
 ///
 /// Both are no-ops for ordinal axes (no `tick_projection`), when neither field is
 /// set, or when the tick count drifted, so default output is byte-identical. The
-/// effective `tick_extra`/`tick_min_step` are read off the axis input AFTER the
+/// effective `ticks.extra`/`ticks.min_step` are read off the axis input AFTER the
 /// chart-level config merge, so the per-channel value already won when present.
 /// `tick_extra` formats boundary labels with `format_numeric`, so it is scoped to
 /// non-temporal continuous axes (temporal boundary formatting needs spacing
@@ -2189,15 +2330,19 @@ pub(crate) fn adjust_axis_ticks(
     tick_count: usize,
     reversed: bool,
 ) {
-    let tick_min_step = axis.overrides.tick_min_step;
-    let tick_extra = axis.overrides.tick_extra.unwrap_or(false);
+    let tick_min_step = axis.overrides.ticks.min_step;
+    let tick_extra = axis.overrides.ticks.extra.unwrap_or(false);
     if tick_min_step.is_none() && !tick_extra {
         return;
     }
     // Only continuous axes carry a projection; ordinal axes have no numeric
     // domain to thin or bound.
-    let Some(proj) = axis.tick_projection.as_mut() else { return };
-    let Some(raw_src) = scale.tick_values_raw(tick_count) else { return };
+    let Some(proj) = axis.tick_projection.as_mut() else {
+        return;
+    };
+    let Some(raw_src) = scale.tick_values_raw(tick_count) else {
+        return;
+    };
     let is_temporal = matches!(scale, crate::render::scale_resolve::ScaleKind::Time(_));
 
     let mut raw: Vec<f64> = raw_src;
@@ -2228,14 +2373,26 @@ pub(crate) fn adjust_axis_ticks(
                 }
             }
             let mut k = 0;
-            raw.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            raw.retain(|_| {
+                let keep_it = keep[k];
+                k += 1;
+                keep_it
+            });
             let mut k = 0;
-            axis.tick_labels.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            axis.tick_labels.retain(|_| {
+                let keep_it = keep[k];
+                k += 1;
+                keep_it
+            });
             let mut k = 0;
-            proj.major.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            proj.major.retain(|_| {
+                let keep_it = keep[k];
+                k += 1;
+                keep_it
+            });
 
             // Quality-review S3 fix (2026-09-03): a chart-level TIME format
-            // (`label_format_type == "time"`) is applied AFTER this fn runs,
+            // (`labels.format`'s `format_type == "time"`) is applied AFTER this fn runs,
             // by `render::config_apply::apply_label_format_to_axis`, which re-derives raw
             // epoch-ms values via `scale.temporal_tick_values(tick_count)` —
             // an UN-thinned, full-length vec that can no longer line up with
@@ -2247,21 +2404,24 @@ pub(crate) fn adjust_axis_ticks(
             // lockstep with the tick_labels just retained — the ONE place
             // that lockstep invariant actually holds — so finalize the
             // temporal reformat HERE instead of trying to reconstruct it
-            // later. Gated on `label_format_type` specifically (chart-level-
-            // only-owned, see its doc) so a per-channel temporal format —
+            // later. Gated on the slot's `format_type` specifically (chart-
+            // level-only-owned, see `LabelFormat::format_type`'s doc) so a
+            // per-channel temporal format —
             // already fully applied before thinning ran, see
             // `apply_axis_format_or_thread` — is untouched (thinning simply
             // drops its already-correct label strings by index, same as any
             // other format). `apply_label_format_to_axis`'s own attempt
             // afterward safely no-ops on these now-thinned labels via its
             // existing length guard.
-            if is_temporal && axis.overrides.label_format_type.as_deref() == Some("time") {
-                if let Some(fmt) = axis.overrides.label_format.as_deref() {
-                    axis.tick_labels = raw
-                        .iter()
-                        .map(|&ms| crate::render::format::format_time_spec(ms as i64, fmt))
-                        .collect();
-                }
+            let fmt_slot = axis.overrides.labels.format.get();
+            let temporal_spec = (is_temporal && fmt_slot.format_type.as_deref() == Some("time"))
+                .then(|| fmt_slot.spec.clone())
+                .flatten();
+            if let Some(fmt) = temporal_spec {
+                axis.tick_labels = raw
+                    .iter()
+                    .map(|&ms| crate::render::format::format_time_spec(ms as i64, &fmt))
+                    .collect();
             }
         }
     }
@@ -2283,7 +2443,8 @@ pub(crate) fn adjust_axis_ticks(
                     continue;
                 }
                 raw.push(boundary);
-                axis.tick_labels.push(crate::render::format::format_numeric(boundary));
+                axis.tick_labels
+                    .push(crate::render::format::format_numeric(boundary));
                 proj.major.push(f);
             }
         }
@@ -2347,7 +2508,9 @@ fn apply_axis_format_or_thread(
     channel: &'static str,
 ) -> Result<(Vec<String>, Option<String>), RenderError> {
     use crate::render::format::{format_time_spec, is_time_format_spec};
-    let Some(fmt) = format else { return Ok((labels, None)) };
+    let Some(fmt) = format else {
+        return Ok((labels, None));
+    };
     if is_time_format_spec(&fmt, format_type) {
         if let Some(mut values) = scale.temporal_tick_values(tick_count) {
             if reversed {
@@ -2440,11 +2603,17 @@ pub(crate) enum TickFormatMode<'a> {
     /// `configure_axis` can still defer to the per-channel override via its
     /// `is_none()` gate, with `apply_label_format_to_axis` applying it centrally
     /// later. Mirrors [`apply_axis_format_or_thread`].
-    Thread { format: Option<String>, format_type: Option<&'a str> },
+    Thread {
+        format: Option<String>,
+        format_type: Option<&'a str>,
+    },
     /// Independent per-panel axes: apply the format IMMEDIATELY via
     /// [`apply_tick_format`] and thread nothing (the per-panel layout is built
     /// directly in `scene_build`, bypassing `apply_label_format_to_axis`).
-    Immediate { format: Option<&'a str>, format_type: Option<&'a str> },
+    Immediate {
+        format: Option<&'a str>,
+        format_type: Option<&'a str>,
+    },
 }
 
 /// `build_axis_tick_inputs`'s return shape: `(labels, projection,
@@ -2460,7 +2629,7 @@ type AxisTickInputs = (Vec<String>, Option<TickProjection>, Option<String>);
 ///
 /// Returns `(labels, projection, threaded_label_format)`. The threaded format is
 /// `Some` only under [`TickFormatMode::Thread`] for a numeric axis (the caller
-/// seeds it onto `AxisInput.overrides.label_format`); it is always `None` under
+/// seeds it onto `AxisInput.overrides.labels.format`); it is always `None` under
 /// [`TickFormatMode::Immediate`].
 ///
 /// `minor` is supplied by the caller (already projected, NOT reversed) so this fn
@@ -2499,7 +2668,10 @@ pub(crate) fn build_axis_tick_inputs(
     }
 
     let (labels, threaded) = match mode {
-        TickFormatMode::Thread { format, format_type } => apply_axis_format_or_thread(
+        TickFormatMode::Thread {
+            format,
+            format_type,
+        } => apply_axis_format_or_thread(
             labels,
             format,
             format_type,
@@ -2510,7 +2682,10 @@ pub(crate) fn build_axis_tick_inputs(
             reverse,
             channel,
         )?,
-        TickFormatMode::Immediate { format, format_type } => {
+        TickFormatMode::Immediate {
+            format,
+            format_type,
+        } => {
             if let Some(fmt) = format {
                 refuse_time_format_on_non_temporal(fmt, format_type, scale, tick_count, channel)?;
             }
@@ -2547,7 +2722,7 @@ pub(crate) fn apply_tick_format(
     format: Option<&str>,
     format_type: Option<&str>,
 ) -> Vec<String> {
-    use crate::render::format::{format_time, format_time_spec, parse_format_spec, format_parsed};
+    use crate::render::format::{format_parsed, format_time, format_time_spec, parse_format_spec};
     let is_time = format_type == Some("time");
     // Non-time with no format string is a pure pass-through (byte-identical).
     if !is_time && format.is_none() {
@@ -2630,48 +2805,53 @@ mod axis_style_fill_from_tests {
     }
 
     /// Per-channel fresh-build (`fill_only_if_none = false`) writes every
-    /// overrides field from the spec — EXCEPT `label_format`, which the
-    /// per-channel/prepare path deliberately leaves `None` (it is threaded
-    /// separately afterward). show_* toggles and non-overrides fields (title text,
-    /// tick_count, tick_size) are never written (they are not bundle fields).
+    /// overrides field from the spec — EXCEPT the `labels.format` slot, which
+    /// the per-channel/prepare path deliberately leaves empty (it is threaded
+    /// separately afterward). The non-bundle fields (title text, tick_count) are
+    /// never written because they are not on this struct at all.
+    /// *(Corrected 2026-09-20, pre-existing: this sentence used to list the
+    /// tick size among the never-written non-bundle fields and to group the
+    /// show toggles with them. Both are bundle fields — the merge writes
+    /// `o.ticks.size` and all four `show` slots. False at `HEAD` verbatim; not a
+    /// task-11 regression.)*
     #[test]
     fn fresh_build_writes_all_fields_except_label_format() {
         let spec = fully_populated_spec();
         let mut o = AxisStyleOverrides::default();
         axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
 
-        assert_eq!(o.label_angle, Some(45.0));
-        assert_eq!(o.label_font_size, Some(11.0));
-        assert_eq!(o.label_color, color::parse_color("#112233").ok());
-        // label_format MUST stay None on the per-channel/fresh-build path.
-        assert_eq!(o.label_format, None);
-        assert_eq!(o.label_overlap, Some(LabelOverlap::Parity));
-        assert_eq!(o.label_flush, Some(true));
-        assert_eq!(o.tick_extra, Some(true));
-        assert_eq!(o.tick_min_step, Some(0.5));
-        assert_eq!(o.tick_values, Some(vec![0.0, 1.0, 2.0]));
-        assert_eq!(o.grid_color, color::parse_color("#445566").ok());
-        assert_eq!(o.grid_dash, Some(vec![6.0, 3.0]));
-        assert_eq!(o.grid_width, Some(1.5));
-        assert_eq!(o.grid_opacity, Some(0.4));
-        assert_eq!(o.domain_color, color::parse_color("#778899").ok());
-        assert_eq!(o.domain_width, Some(2.0));
-        assert_eq!(o.title_font_size, Some(13.0));
-        assert_eq!(o.title_color, color::parse_color("#aabbcc").ok());
-        assert_eq!(o.title_padding, Some(8.0));
-        assert_eq!(o.title_orient, Some(crate::layout::AxisOrient::Right));
-        assert_eq!(o.label_padding, Some(3.0));
-        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
-        assert_eq!(o.translate, Some(5.0));
-        assert_eq!(o.min_band, Some(10.0));
-        assert_eq!(o.max_band, Some(40.0));
-        assert_eq!(o.offset, Some(2.0));
-        assert_eq!(o.zindex, Some(1));
+        assert_eq!(o.labels.angle, Some(45.0));
+        assert_eq!(o.labels.font_size, Some(11.0));
+        assert_eq!(o.labels.color, color::parse_color("#112233").ok());
+        // The `labels.format` slot MUST stay empty on the per-channel/fresh-build path.
+        assert_eq!(o.labels.format.get().spec, None);
+        assert_eq!(o.labels.overlap, Some(LabelOverlap::Parity));
+        assert_eq!(o.labels.flush, Some(true));
+        assert_eq!(o.ticks.extra, Some(true));
+        assert_eq!(o.ticks.min_step, Some(0.5));
+        assert_eq!(o.ticks.values, Some(vec![0.0, 1.0, 2.0]));
+        assert_eq!(o.grid.color, color::parse_color("#445566").ok());
+        assert_eq!(o.grid.dash, Some(vec![6.0, 3.0]));
+        assert_eq!(o.grid.width, Some(1.5));
+        assert_eq!(o.grid.opacity, Some(0.4));
+        assert_eq!(o.domain.color, color::parse_color("#778899").ok());
+        assert_eq!(o.domain.width, Some(2.0));
+        assert_eq!(o.title.font_size, Some(13.0));
+        assert_eq!(o.title.color, color::parse_color("#aabbcc").ok());
+        assert_eq!(o.title.padding, Some(8.0));
+        assert_eq!(o.title.orient, Some(crate::layout::AxisOrient::Right));
+        assert_eq!(o.labels.padding, Some(3.0));
+        assert_eq!(o.placement.orient, Some(crate::layout::AxisOrient::Bottom));
+        assert_eq!(o.placement.translate, Some(5.0));
+        assert_eq!(o.placement.min_band, Some(10.0));
+        assert_eq!(o.placement.max_band, Some(40.0));
+        assert_eq!(o.placement.offset, Some(2.0));
+        assert_eq!(o.placement.zindex, Some(1));
     }
 
     /// Chart-level fill (`fill_only_if_none = true`) fills only `None` slots
-    /// (higher-precedence values survive) AND owns `label_format` (the one field
-    /// the per-channel path leaves `None`).
+    /// (higher-precedence values survive) AND owns the `labels.format` slot (the
+    /// one slot the per-channel path leaves empty).
     #[test]
     fn chart_level_overwrites_no_claimed_slot_and_owns_label_format() {
         let spec = fully_populated_spec();
@@ -2684,76 +2864,96 @@ mod axis_style_fill_from_tests {
         // asymmetry was an oversight, not a decision, so the field set is now
         // exhaustive and a discipline flip on any single field fails here.
         let mut o = AxisStyleOverrides {
-            label_angle: Some(90.0),
-            grid_width: Some(99.0),
-            tick_values: Some(vec![7.0]),
-            title_font_size: Some(91.0),
-            title_color: crate::render::color::parse_color("#010203").ok(),
-            title_padding: Some(92.0),
-            label_padding: Some(93.0),
-            label_color: crate::render::color::parse_color("#040506").ok(),
-            label_font_size: Some(94.0),
-            grid_color: crate::render::color::parse_color("#070809").ok(),
-            grid_dash: Some(vec![9.0, 9.0]),
-            domain_color: crate::render::color::parse_color("#0a0b0c").ok(),
-            domain_width: Some(95.0),
-            orient: Some(AxisOrient::Top),
-            translate: Some(96.0),
-            min_band: Some(97.0),
-            max_band: Some(98.0),
-            grid_opacity: Some(0.99),
-            title_orient: Some(AxisOrient::Left),
-            zindex: Some(42),
-            tick_extra: Some(false),
-            tick_min_step: Some(0.25),
-            offset: Some(89.0),
-            label_flush: Some(false),
-            label_overlap: Some(LabelOverlap::Greedy),
-            tick_size: Some(88.0),
-            show_labels: Some(true),
-            show_ticks: Some(true),
-            show_domain: Some(true),
-            show_grid: Some(true),
-            ..AxisStyleOverrides::default()
+            ticks: crate::layout::axis::AxisTickOverrides {
+                values: Some(vec![7.0]),
+                extra: Some(false),
+                min_step: Some(0.25),
+                size: Some(88.0),
+                show: Some(true),
+            },
+            labels: crate::layout::axis::AxisLabelOverrides {
+                angle: Some(90.0),
+                format: Default::default(),
+                padding: Some(93.0),
+                color: crate::render::color::parse_color("#040506").ok(),
+                font_size: Some(94.0),
+                flush: Some(false),
+                overlap: Some(LabelOverlap::Greedy),
+                show: Some(true),
+            },
+            title: crate::layout::axis::AxisTitleOverrides {
+                font_size: Some(91.0),
+                color: crate::render::color::parse_color("#010203").ok(),
+                padding: Some(92.0),
+                orient: Some(AxisOrient::Left),
+            },
+            grid: crate::layout::axis::AxisGridOverrides {
+                color: crate::render::color::parse_color("#070809").ok(),
+                dash: Some(vec![9.0, 9.0]),
+                width: Some(99.0),
+                opacity: Some(0.99),
+                show: Some(true),
+            },
+            domain: crate::layout::axis::AxisDomainOverrides {
+                color: crate::render::color::parse_color("#0a0b0c").ok(),
+                width: Some(95.0),
+                show: Some(true),
+            },
+            placement: crate::layout::axis::AxisPlacementOverrides {
+                orient: Some(AxisOrient::Top),
+                translate: Some(96.0),
+                offset: Some(89.0),
+                min_band: Some(97.0),
+                max_band: Some(98.0),
+                zindex: Some(42),
+            },
         };
         let pre_set = o.clone();
         axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
 
         // Every pre-set slot survives (fill-only-if-None) — the whole field set,
         // asserted as one comparison so a newly added field cannot slip through
-        // by being absent from a hand-listed assertion block.
+        // by being absent from a hand-listed assertion block. The format slot is
+        // blanked on both sides because it is the one the chart-level path owns.
+        let without_format = |mut ov: AxisStyleOverrides| {
+            ov.labels.format = Default::default();
+            ov
+        };
         assert_eq!(
-            AxisStyleOverrides { label_format: None, label_format_type: None,
-                label_format_claimed: false, ..o.clone() },
-            AxisStyleOverrides { label_format: None, label_format_type: None,
-                label_format_claimed: false, ..pre_set },
+            without_format(o.clone()),
+            without_format(pre_set),
             "a chart-level fill must not overwrite ANY slot a higher-precedence \
              per-channel value already claimed"
         );
-        // `label_format` is the one field the chart-level path OWNS: the
+        // `labels.format` is the one slot the chart-level path OWNS: the
         // per-channel path leaves it `None`, so it is excluded above and
         // asserted as written here.
-        assert_eq!(o.label_format, Some(".2f".into()));
+        assert_eq!(o.labels.format.get().spec, Some(".2f".into()));
     }
 
-    /// Chart-level fill does NOT clobber a `label_format` that a per-channel value
-    /// already set (the threaded override wins).
+    /// Chart-level fill does NOT clobber a `labels.format` slot that a per-channel
+    /// value already set (the threaded override wins).
     #[test]
     fn chart_level_label_format_defers_to_existing() {
         let spec = fully_populated_spec(); // label_format = ".2f"
-        let mut o = AxisStyleOverrides {
-            label_format: Some("~s".into()), // per-channel already won
-            ..AxisStyleOverrides::default()
-        };
+        let mut o = AxisStyleOverrides::default();
+        // per-channel already won
+        o.labels.format.set(crate::layout::LabelFormat {
+            spec: Some("~s".into()),
+            format_type: None,
+        });
         axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
-        assert_eq!(o.label_format, Some("~s".into()));
+        assert_eq!(o.labels.format.get().spec, Some("~s".into()));
     }
 
     /// A cross-dimension `orient` (left/right on an x axis) fails loud on both
     /// paths, exactly as both old mappers did via `parse_axis_orient`.
     #[test]
     fn cross_dimension_orient_errors() {
-        let spec = AxisStyleSpec { orient: Some("left".into()), ..Default::default() };
+        let spec = AxisStyleSpec {
+            orient: Some("left".into()),
+            ..Default::default()
+        };
         let mut o = AxisStyleOverrides::default();
         assert!(axis_style_fill_from(&mut o, &spec, "x", false).is_err());
         let mut o = AxisStyleOverrides::default();
@@ -2764,10 +2964,13 @@ mod axis_style_fill_from_tests {
     /// than failing — preserved from both old mappers.
     #[test]
     fn bad_color_hex_falls_back_to_none() {
-        let spec = AxisStyleSpec { label_color: Some("not-a-color".into()), ..Default::default() };
+        let spec = AxisStyleSpec {
+            label_color: Some("not-a-color".into()),
+            ..Default::default()
+        };
         let mut o = AxisStyleOverrides::default();
         axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
-        assert_eq!(o.label_color, None);
+        assert_eq!(o.labels.color, None);
     }
 }
 
@@ -2798,19 +3001,31 @@ mod tick_format_tests {
     #[test]
     fn currency_format_prepends_dollar() {
         // "$,.0f" should produce "$10", "$1,000", etc.
-        assert_eq!(fmt_labels(&["10", "1000", "50"], "$,.0f"), vec!["$10", "$1,000", "$50"]);
+        assert_eq!(
+            fmt_labels(&["10", "1000", "50"], "$,.0f"),
+            vec!["$10", "$1,000", "$50"]
+        );
     }
     #[test]
     fn dotf_two_decimals() {
-        assert_eq!(fmt_labels(&["2", "2.5", "3"], ".2f"), vec!["2.00", "2.50", "3.00"]);
+        assert_eq!(
+            fmt_labels(&["2", "2.5", "3"], ".2f"),
+            vec!["2.00", "2.50", "3.00"]
+        );
     }
     #[test]
     fn dot1f_one_decimal() {
-        assert_eq!(fmt_labels(&["1", "1.5", "2"], ".1f"), vec!["1.0", "1.5", "2.0"]);
+        assert_eq!(
+            fmt_labels(&["1", "1.5", "2"], ".1f"),
+            vec!["1.0", "1.5", "2.0"]
+        );
     }
     #[test]
     fn percent_format() {
-        assert_eq!(fmt_labels(&["0.1", "0.123", "0.5"], ".1%"), vec!["10.0%", "12.3%", "50.0%"]);
+        assert_eq!(
+            fmt_labels(&["0.1", "0.123", "0.5"], ".1%"),
+            vec!["10.0%", "12.3%", "50.0%"]
+        );
     }
     #[test]
     fn comma_thousands_integer() {
@@ -2821,11 +3036,17 @@ mod tick_format_tests {
     }
     #[test]
     fn comma_dotf_thousands_decimal() {
-        assert_eq!(fmt_labels(&["1000", "2000", "3000"], ",.0f"), vec!["1,000", "2,000", "3,000"]);
+        assert_eq!(
+            fmt_labels(&["1000", "2000", "3000"], ",.0f"),
+            vec!["1,000", "2,000", "3,000"]
+        );
     }
     #[test]
     fn d_integer_format() {
-        assert_eq!(fmt_labels(&["42", "1000", "3.7"], "d"), vec!["42", "1000", "4"]);
+        assert_eq!(
+            fmt_labels(&["42", "1000", "3.7"], "d"),
+            vec!["42", "1000", "4"]
+        );
     }
     #[test]
     fn si_kilo() {
@@ -2841,7 +3062,10 @@ mod tick_format_tests {
     }
     #[test]
     fn ordinal_passthrough() {
-        assert_eq!(fmt_labels(&["setosa", "versicolor"], ".2f"), vec!["setosa", "versicolor"]);
+        assert_eq!(
+            fmt_labels(&["setosa", "versicolor"], ".2f"),
+            vec!["setosa", "versicolor"]
+        );
     }
     #[test]
     fn no_format_passthrough() {
@@ -2862,11 +3086,7 @@ mod tick_format_tests {
     #[test]
     fn time_default_when_no_pattern() {
         // No `%` pattern → default day-spacing temporal formatter (byte-stable).
-        let out = apply_tick_format(
-            vec!["1577836800000".to_string()],
-            Some(","),
-            Some("time"),
-        );
+        let out = apply_tick_format(vec!["1577836800000".to_string()], Some(","), Some("time"));
         assert_eq!(out, vec!["2020-01-01"]);
     }
 }
@@ -2881,7 +3101,9 @@ fn facet_str_arr<'a>(
 ) -> Result<&'a arrow::array::StringArray, RenderError> {
     let col = batch
         .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+        .ok_or_else(|| RenderError::UnknownColumn {
+            name: field.to_string(),
+        })?;
     col.as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .ok_or_else(|| {
@@ -2959,7 +3181,10 @@ fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGrou
     Ok(order
         .into_iter()
         .map(|v| FacetGroup {
-            key: FacetKey { field: field.to_string(), value: v.clone() },
+            key: FacetKey {
+                field: field.to_string(),
+                value: v.clone(),
+            },
             n_rows: counts[&v],
             row_key: None,
         })
@@ -2987,11 +3212,18 @@ fn group_rows_by_two_fields(
     let mut col_order: Vec<String> = Vec::new();
     let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Count rows per (row_val, col_val) pair.
-    let mut counts: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<(String, String), u64> =
+        std::collections::HashMap::new();
 
     for i in 0..batch.num_rows() {
-        let row_v = match row_arr.is_null(i) { true => continue, false => row_arr.value(i).to_string() };
-        let col_v = match col_arr.is_null(i) { true => continue, false => col_arr.value(i).to_string() };
+        let row_v = match row_arr.is_null(i) {
+            true => continue,
+            false => row_arr.value(i).to_string(),
+        };
+        let col_v = match col_arr.is_null(i) {
+            true => continue,
+            false => col_arr.value(i).to_string(),
+        };
         if row_seen.insert(row_v.clone()) {
             row_order.push(row_v.clone());
         }
@@ -3005,11 +3237,20 @@ fn group_rows_by_two_fields(
     let mut groups = Vec::with_capacity(row_order.len() * col_order.len());
     for row_v in &row_order {
         for col_v in &col_order {
-            let n_rows = counts.get(&(row_v.clone(), col_v.clone())).copied().unwrap_or(0);
+            let n_rows = counts
+                .get(&(row_v.clone(), col_v.clone()))
+                .copied()
+                .unwrap_or(0);
             groups.push(FacetGroup {
-                key: FacetKey { field: col_field.to_string(), value: col_v.clone() },
+                key: FacetKey {
+                    field: col_field.to_string(),
+                    value: col_v.clone(),
+                },
                 n_rows,
-                row_key: Some(FacetKey { field: row_field.to_string(), value: row_v.clone() }),
+                row_key: Some(FacetKey {
+                    field: row_field.to_string(),
+                    value: row_v.clone(),
+                }),
             });
         }
     }
@@ -3040,11 +3281,17 @@ fn partition_batch_by_two_fields(
     let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for i in 0..batch.num_rows() {
-        if row_arr.is_null(i) || col_arr.is_null(i) { continue; }
+        if row_arr.is_null(i) || col_arr.is_null(i) {
+            continue;
+        }
         let rv = row_arr.value(i).to_string();
         let cv = col_arr.value(i).to_string();
-        if row_seen.insert(rv.clone()) { row_order.push(rv); }
-        if col_seen.insert(cv.clone()) { col_order.push(cv); }
+        if row_seen.insert(rv.clone()) {
+            row_order.push(rv);
+        }
+        if col_seen.insert(cv.clone()) {
+            col_order.push(cv);
+        }
     }
 
     let mut result = Vec::with_capacity(row_order.len() * col_order.len());
@@ -3052,7 +3299,9 @@ fn partition_batch_by_two_fields(
         for col_v in &col_order {
             let mask: BooleanArray = (0..batch.num_rows())
                 .map(|i| {
-                    if col_arr.is_null(i) || row_arr.is_null(i) { return Some(false); }
+                    if col_arr.is_null(i) || row_arr.is_null(i) {
+                        return Some(false);
+                    }
                     Some(col_arr.value(i) == col_v.as_str() && row_arr.value(i) == row_v.as_str())
                 })
                 .collect();
@@ -3060,8 +3309,9 @@ fn partition_batch_by_two_fields(
             if !mask.iter().any(|v| v == Some(true)) {
                 continue;
             }
-            let filtered = filter_record_batch(batch, &mask)
-                .map_err(|e| RenderError::ScaleResolutionFailed(format!("partition filter: {e}")))?;
+            let filtered = filter_record_batch(batch, &mask).map_err(|e| {
+                RenderError::ScaleResolutionFailed(format!("partition filter: {e}"))
+            })?;
             result.push(((col_v.clone(), row_v.clone()), filtered));
         }
     }
@@ -3103,8 +3353,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Area,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "density".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "value".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "density".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "value".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -3129,11 +3385,17 @@ mod tests {
         // (`#172`(1)) rather than taking it as an argument, so the flipped case
         // is now spelled as the spec it always described: the same chart with
         // `coord: Flip`. The property under test is unchanged.
-        let flipped_spec =
-            ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec.clone() };
+        let flipped_spec = ChartSpec {
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            ..spec.clone()
+        };
 
         let unflipped = build_layers(&spec);
-        assert_eq!(unflipped.len(), 1, "a single-layer chart prepares one layer");
+        assert_eq!(
+            unflipped.len(),
+            1,
+            "a single-layer chart prepares one layer"
+        );
         assert_eq!(
             unflipped[0].mark_style.as_ref().unwrap().value_axis,
             Some(StackValueAxis::X),
@@ -3203,7 +3465,11 @@ mod tests {
     fn unflipped_render_error_resolve_applies_requested_flag() {
         let err = parse_axis_orient("nonsense", "x").unwrap_err();
         match err.resolve(true) {
-            RenderError::InvalidAxisOrient { channel, coord_flipped, .. } => {
+            RenderError::InvalidAxisOrient {
+                channel,
+                coord_flipped,
+                ..
+            } => {
                 assert_eq!(channel, "x");
                 assert!(coord_flipped, "resolve(true) must patch coord_flipped in");
             }
@@ -3215,9 +3481,16 @@ mod tests {
     fn unflipped_render_error_resolve_false_is_the_exempt_chains_explicit_choice() {
         let err = parse_title_orient("nonsense", "y").unwrap_err();
         match err.resolve(false) {
-            RenderError::InvalidAxisOrient { channel, coord_flipped, .. } => {
+            RenderError::InvalidAxisOrient {
+                channel,
+                coord_flipped,
+                ..
+            } => {
                 assert_eq!(channel, "y");
-                assert!(!coord_flipped, "resolve(false) is the exempt chart-level chain's explicit choice");
+                assert!(
+                    !coord_flipped,
+                    "resolve(false) is the exempt chart-level chain's explicit choice"
+                );
             }
             other => panic!("expected InvalidAxisOrient, got {other:?}"),
         }
@@ -3229,13 +3502,22 @@ mod tests {
     /// present-nonempty → use it (whitespace counts as empty).
     #[test]
     fn resolve_axis_title_three_way() {
-        assert_eq!(resolve_axis_title(None, Some("field".into())), Some("field".into()));
+        assert_eq!(
+            resolve_axis_title(None, Some("field".into())),
+            Some("field".into())
+        );
         assert_eq!(resolve_axis_title(None, None), None);
         assert_eq!(resolve_axis_title(Some(""), Some("field".into())), None);
         assert_eq!(resolve_axis_title(Some("   "), Some("field".into())), None);
-        assert_eq!(resolve_axis_title(Some("Custom"), Some("field".into())), Some("Custom".into()));
+        assert_eq!(
+            resolve_axis_title(Some("Custom"), Some("field".into())),
+            Some("Custom".into())
+        );
         // Explicit non-empty wins even with no fallback.
-        assert_eq!(resolve_axis_title(Some("Custom"), None), Some("Custom".into()));
+        assert_eq!(
+            resolve_axis_title(Some("Custom"), None),
+            Some("Custom".into())
+        );
     }
 
     /// `Channel` carries the orient default and the reverse policy.
@@ -3254,7 +3536,16 @@ mod tests {
     /// of charts.
     #[test]
     fn user_facing_channel_identity_when_not_flipped() {
-        for token in ["x", "y", "x2", "y2", "color", "size", "x2 and y2", "field_name"] {
+        for token in [
+            "x",
+            "y",
+            "x2",
+            "y2",
+            "color",
+            "size",
+            "x2 and y2",
+            "field_name",
+        ] {
             assert_eq!(user_facing_channel(token, false), token);
         }
     }
@@ -3270,7 +3561,10 @@ mod tests {
         assert_eq!(user_facing_channel("y2", true), "x2");
         // Involution: applying twice returns the original token.
         for token in ["x", "y", "x2", "y2"] {
-            assert_eq!(user_facing_channel(user_facing_channel(token, true), true), token);
+            assert_eq!(
+                user_facing_channel(user_facing_channel(token, true), true),
+                token
+            );
         }
     }
 
@@ -3278,7 +3572,14 @@ mod tests {
     /// plus compound/free-text strings) are always identity, flipped or not.
     #[test]
     fn user_facing_channel_non_positional_tokens_always_identity() {
-        for token in ["color", "size", "shape", "opacity", "x2 and y2", "some_field"] {
+        for token in [
+            "color",
+            "size",
+            "shape",
+            "opacity",
+            "x2 and y2",
+            "some_field",
+        ] {
             assert_eq!(user_facing_channel(token, true), token);
             assert_eq!(user_facing_channel(token, false), token);
         }
@@ -3316,8 +3617,14 @@ mod tests {
     #[test]
     fn build_axis_input_x_vs_y_continuous_reverse_parity() {
         let theme = crate::layout::ThemeInputs::default();
-        let x_enc = EncodingSpec { field: "v".into(), ..Default::default() };
-        let y_enc = EncodingSpec { field: "v".into(), ..Default::default() };
+        let x_enc = EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        };
+        let y_enc = EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        };
         let scale = linear_scale_0_10();
 
         let mut x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme)
@@ -3329,30 +3636,43 @@ mod tests {
         // time); do it here too, exactly as production does, so the
         // `show_domain()`/`show_grid()` checks below don't trip their
         // debug-only unresolved-precondition assert.
-        x.overrides.show_domain.get_or_insert(theme.axis.axis_line);
-        x.overrides.show_grid.get_or_insert(theme.grid.grid);
-        y.overrides.show_domain.get_or_insert(theme.axis.axis_line);
-        y.overrides.show_grid.get_or_insert(theme.grid.grid);
+        x.overrides.domain.show.get_or_insert(theme.axis.axis_line);
+        x.overrides.grid.show.get_or_insert(theme.grid.grid);
+        y.overrides.domain.show.get_or_insert(theme.axis.axis_line);
+        y.overrides.grid.show.get_or_insert(theme.grid.grid);
 
         // Orient defaults differ by channel.
         assert_eq!(x.orient, AxisOrient::Bottom);
         assert_eq!(y.orient, AxisOrient::Left);
         // Title falls through to the field name on both.
-        assert_eq!(x.title.as_deref(), Some("v"));
-        assert_eq!(y.title.as_deref(), Some("v"));
+        assert_eq!(x.title.get().as_deref(), Some("v"));
+        assert_eq!(y.title.get().as_deref(), Some("v"));
         // Show toggles default true on both.
         assert!(x.show_labels() && x.show_ticks() && x.show_domain() && x.show_grid());
         assert!(y.show_labels() && y.show_ticks() && y.show_domain() && y.show_grid());
 
         // The y tick labels are the x tick labels reversed (non-ordinal-y rule).
-        assert!(!x.tick_labels.is_empty(), "continuous axis must have labels");
+        assert!(
+            !x.tick_labels.is_empty(),
+            "continuous axis must have labels"
+        );
         let mut x_reversed = x.tick_labels.clone();
         x_reversed.reverse();
         assert_eq!(y.tick_labels, x_reversed);
 
         // The projected major fractions are likewise reversed in lockstep.
-        let x_major = x.tick_projection.as_ref().expect("x projection").major.clone();
-        let y_major = y.tick_projection.as_ref().expect("y projection").major.clone();
+        let x_major = x
+            .tick_projection
+            .as_ref()
+            .expect("x projection")
+            .major
+            .clone();
+        let y_major = y
+            .tick_projection
+            .as_ref()
+            .expect("y projection")
+            .major
+            .clone();
         let mut x_major_reversed = x_major.clone();
         x_major_reversed.reverse();
         assert_eq!(y_major, x_major_reversed);
@@ -3364,7 +3684,10 @@ mod tests {
     #[test]
     fn build_axis_input_y_ordinal_does_not_reverse() {
         let theme = crate::layout::ThemeInputs::default();
-        let enc = EncodingSpec { field: "cat".into(), ..Default::default() };
+        let enc = EncodingSpec {
+            field: "cat".into(),
+            ..Default::default()
+        };
         let scale = ordinal_scale_abc();
 
         let x = build_axis_input(Channel::X, Some(&enc), Some(&enc), &scale, 10, &theme)
@@ -3395,9 +3718,16 @@ mod tests {
             title: Some("spec".into()),
             ..Default::default()
         };
-        let a = build_axis_input(Channel::X, Some(&rendering), Some(&spec_enc), &scale, 10, &theme)
-            .expect("axis input");
-        assert_eq!(a.title.as_deref(), Some("spec"));
+        let a = build_axis_input(
+            Channel::X,
+            Some(&rendering),
+            Some(&spec_enc),
+            &scale,
+            10,
+            &theme,
+        )
+        .expect("axis input");
+        assert_eq!(a.title.get().as_deref(), Some("spec"));
 
         // explicit empty spec-level title suppresses (no fallback to field/layer).
         let spec_suppress = EncodingSpec {
@@ -3414,13 +3744,23 @@ mod tests {
             &theme,
         )
         .expect("axis input");
-        assert_eq!(b.title, None);
+        assert_eq!(*b.title.get(), None);
 
         // absent spec-level title falls through to the layer-0 title.
-        let spec_absent = EncodingSpec { field: "v".into(), ..Default::default() };
-        let c = build_axis_input(Channel::X, Some(&rendering), Some(&spec_absent), &scale, 10, &theme)
-            .expect("axis input");
-        assert_eq!(c.title.as_deref(), Some("layer"));
+        let spec_absent = EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        };
+        let c = build_axis_input(
+            Channel::X,
+            Some(&rendering),
+            Some(&spec_absent),
+            &scale,
+            10,
+            &theme,
+        )
+        .expect("axis input");
+        assert_eq!(c.title.get().as_deref(), Some("layer"));
     }
 
     // --- archaeology #7: generalized facet extent pin ---------------------------
@@ -3838,9 +4178,21 @@ mod tests {
         let TransformSpec::Bin2D(pinned_bin) = &out[1] else {
             panic!("expected a Bin2D transform back");
         };
-        assert_eq!(pinned_kde.extent, Some(user_kde), "user Kde2D extent must be preserved");
-        assert_eq!(pinned_bin.extent_x, Some(user_bin_x), "user Bin2D extent_x must be preserved");
-        assert_eq!(pinned_bin.extent_y, Some(user_bin_y), "user Bin2D extent_y must be preserved");
+        assert_eq!(
+            pinned_kde.extent,
+            Some(user_kde),
+            "user Kde2D extent must be preserved"
+        );
+        assert_eq!(
+            pinned_bin.extent_x,
+            Some(user_bin_x),
+            "user Bin2D extent_x must be preserved"
+        );
+        assert_eq!(
+            pinned_bin.extent_y,
+            Some(user_bin_y),
+            "user Bin2D extent_y must be preserved"
+        );
     }
 
     /// A faceted `Bin2D` with `extent_x` user-set but `extent_y = None` goes through
@@ -4053,8 +4405,7 @@ mod tests {
             name: None,
             extent: None,
         };
-        let out =
-            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
         let TransformSpec::DataBin(pinned) = &out[0] else {
             panic!("expected a DataBin transform back");
         };
@@ -4086,8 +4437,7 @@ mod tests {
             name: None,
             extent: Some(user_extent),
         };
-        let out =
-            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
         let TransformSpec::DataBin(pinned) = &out[0] else {
             panic!("expected a DataBin transform back");
         };
@@ -4113,7 +4463,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(Float64Array::from(vec![
-                    1.0, 2.0, 3.0,    // panel A
+                    1.0, 2.0, 3.0, // panel A
                     10.0, 20.0, 30.0, // panel B
                 ])),
                 Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
@@ -4146,7 +4496,8 @@ mod tests {
         use crate::transform::core::TransformSpec;
         let batch = density_disjoint_batch();
         let spec = base_density_spec(); // extent: None
-        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec.clone())], &batch);
+        let out =
+            fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec.clone())], &batch);
         let TransformSpec::DensityData(pinned) = &out[0] else {
             panic!("expected a DensityData transform back");
         };
@@ -4179,7 +4530,10 @@ mod tests {
         let TransformSpec::DensityData(pinned) = &out[0] else {
             panic!("expected a DensityData transform back");
         };
-        assert_eq!(pinned.extent, user, "user DensityData extent must be preserved");
+        assert_eq!(
+            pinned.extent, user,
+            "user DensityData extent must be preserved"
+        );
     }
 
     /// `DensityData::global_extent` returns raw (min, max) — no nicing, mirroring KDE.
@@ -4218,9 +4572,21 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                color: Some(EncodingSpec {
+                    field: "species".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -4236,12 +4602,14 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        params: Vec::new(),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -4249,12 +4617,20 @@ mod tests {
     fn prepare_returns_axes_and_groups_and_legend() {
         let spec = spec_color_facet();
         let batch = batch3();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
-        assert_eq!(prep.axes.x.title.as_deref(), Some("x"));
-        assert_eq!(prep.axes.y.title.as_deref(), Some("y"));
+            None,
+        )
+        .unwrap();
+        assert_eq!(prep.axes.x.title.get().as_deref(), Some("x"));
+        assert_eq!(prep.axes.y.title.get().as_deref(), Some("y"));
         assert!(!prep.axes.x.tick_labels.is_empty());
         assert_eq!(prep.facet_groups.len(), 2);
         assert_eq!(prep.facet_groups[0].n_rows, 2);
@@ -4293,8 +4669,16 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -4304,18 +4688,28 @@ mod tests {
             mark_style: None,
             position: None,
             title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
             chart_description: None,
             params: Vec::new(),
         }
     }
 
     fn prep(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
-        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        prepare_render_inputs(
+            spec,
+            batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap()
+            None,
+        )
+        .unwrap()
     }
 
     // ── M2 (batch D task 5): TransformContext.panel_pixel_size pre-layout
@@ -4393,17 +4787,39 @@ mod tests {
         let spec = raster_screen_spec();
         let batch = extent_pin_batch_2d();
         let small = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap().0;
+        )
+        .unwrap()
+        .0;
         let large = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 1200.0,
+                height: 900.0,
+            },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap().0;
+        )
+        .unwrap()
+        .0;
         let (sw, sh) = raster_grid_dims(&small);
         let (lw, lh) = raster_grid_dims(&large);
-        assert_ne!((sw, sh), (256, 256), "must not be pinned to the old hardcoded fallback");
-        assert_ne!((lw, lh), (256, 256), "must not be pinned to the old hardcoded fallback");
+        assert_ne!(
+            (sw, sh),
+            (256, 256),
+            "must not be pinned to the old hardcoded fallback"
+        );
+        assert_ne!(
+            (lw, lh),
+            (256, 256),
+            "must not be pinned to the old hardcoded fallback"
+        );
         assert!(
             lw > sw && lh > sh,
             "larger viewport must yield a larger screen grid: small=({sw},{sh}) large=({lw},{lh})"
@@ -4417,13 +4833,27 @@ mod tests {
         let spec = raster_fixed_spec(64);
         let batch = extent_pin_batch_2d();
         let small = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap().0;
+        )
+        .unwrap()
+        .0;
         let large = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 1200.0,
+                height: 900.0,
+            },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap().0;
+        )
+        .unwrap()
+        .0;
         assert_eq!(raster_grid_dims(&small), (64, 64));
         assert_eq!(raster_grid_dims(&large), (64, 64));
     }
@@ -4436,10 +4866,15 @@ mod tests {
     #[test]
     fn raster_screen_resolution_facet_grid_divides_estimate() {
         let batch = extent_pin_batch_2d();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
-        let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme).unwrap().0;
+        let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme)
+            .unwrap()
+            .0;
         let (w0, h0) = raster_grid_dims(&unfaceted);
 
         let mut faceted_spec = raster_screen_spec();
@@ -4452,7 +4887,9 @@ mod tests {
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
         });
-        let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme).unwrap().0;
+        let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme)
+            .unwrap()
+            .0;
         let (w1, h1) = raster_grid_dims(&faceted);
 
         assert_eq!(w1, w0, "one column: width estimate must be unchanged");
@@ -4472,11 +4909,27 @@ mod tests {
         let batch = price_weight_batch();
         let theme = crate::layout::ThemeInputs::default();
         let small = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 }, &theme,
-        ).unwrap().0;
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 300.0,
+                height: 200.0,
+            },
+            &theme,
+        )
+        .unwrap()
+        .0;
         let large = run_transforms_with_facet(
-            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 }, &theme,
-        ).unwrap().0;
+            &spec,
+            &batch,
+            crate::layout::Viewport {
+                width: 1200.0,
+                height: 900.0,
+            },
+            &theme,
+        )
+        .unwrap()
+        .0;
         let small_batch = small.get(FINAL_OUTPUT_KEY).unwrap();
         let large_batch = large.get(FINAL_OUTPUT_KEY).unwrap();
         assert_eq!(
@@ -4503,10 +4956,14 @@ mod tests {
         let batch = extent_pin_batch_2d();
         // 30x30 viewport with the default 16px-per-side theme padding: the
         // true inner extent is negative on both axes.
-        let viewport = crate::layout::Viewport { width: 30.0, height: 30.0 };
+        let viewport = crate::layout::Viewport {
+            width: 30.0,
+            height: 30.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("must not panic or error on a degenerate viewport").0;
+            .expect("must not panic or error on a degenerate viewport")
+            .0;
         assert_eq!(
             raster_grid_dims(&outputs),
             (1, 1),
@@ -4547,8 +5004,8 @@ mod tests {
                     0.0, 1.0, 8.0, 27.0, 64.0, 125.0, 216.0, 343.0, // "many": y = x^3
                 ])),
                 Arc::new(StringArray::from(vec![
-                    "few", "few", "few",
-                    "many", "many", "many", "many", "many", "many", "many", "many",
+                    "few", "few", "few", "many", "many", "many", "many", "many", "many", "many",
+                    "many",
                 ])),
             ],
         )
@@ -4558,17 +5015,29 @@ mod tests {
     /// A `ChartSpec` fitting a degree-3 polynomial over `x`/`y`, optionally
     /// faceted or grouped by `sp` (never both — the two are the "col=" vs
     /// "hue=" shapes this round's fix must treat symmetrically).
-    fn smooth_cubic_spec(facet: Option<crate::layout::FacetSpec>, groupby: Vec<String>) -> ChartSpec {
+    fn smooth_cubic_spec(
+        facet: Option<crate::layout::FacetSpec>,
+        groupby: Vec<String>,
+    ) -> ChartSpec {
         use crate::transform::core::TransformSpec;
         use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
         let mut spec = base_spec();
         spec.facet = facet;
         spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
-            x: "x".into(), y: "y".into(),
+            x: "x".into(),
+            y: "y".into(),
             method: SmoothMethod::Poly { degree: 3 },
-            ci: None, bandwidth: 0.75, degree: 3, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
-            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
-            inject_zero_ref: false, inject_metrics: false,
+            ci: None,
+            bandwidth: 0.75,
+            degree: 3,
+            k: crate::transform::gam::DEFAULT_BASIS_DIM,
+            n: 5,
+            seed: 0,
+            x_bins: None,
+            x_estimator: None,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             groupby,
             name: None,
             x_range: None,
@@ -4620,7 +5089,10 @@ mod tests {
         };
         let spec = smooth_cubic_spec(Some(facet), vec![]);
         let batch = facet_smooth_batch();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
         let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
@@ -4641,8 +5113,18 @@ mod tests {
         let y = float_col(out, "y");
         assert_eq!(sp.len(), 10, "5 grid points per panel x 2 panels");
 
-        let few_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "few").map(|(_, v)| *v).collect();
-        let many_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "many").map(|(_, v)| *v).collect();
+        let few_y: Vec<f64> = sp
+            .iter()
+            .zip(&y)
+            .filter(|(s, _)| *s == "few")
+            .map(|(_, v)| *v)
+            .collect();
+        let many_y: Vec<f64> = sp
+            .iter()
+            .zip(&y)
+            .filter(|(s, _)| *s == "many")
+            .map(|(_, v)| *v)
+            .collect();
         assert_eq!(few_y.len(), 5);
         assert_eq!(many_y.len(), 5);
         assert!(
@@ -4666,7 +5148,10 @@ mod tests {
     fn smooth_groupby_rank_deficient_degrades_symmetrically_with_facet() {
         let spec = smooth_cubic_spec(None, vec!["sp".into()]);
         let batch = facet_smooth_batch();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
         let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
@@ -4684,8 +5169,18 @@ mod tests {
 
         let sp = str_col(out, "sp");
         let y = float_col(out, "y");
-        let few_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "few").map(|(_, v)| *v).collect();
-        let many_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "many").map(|(_, v)| *v).collect();
+        let few_y: Vec<f64> = sp
+            .iter()
+            .zip(&y)
+            .filter(|(s, _)| *s == "few")
+            .map(|(_, v)| *v)
+            .collect();
+        let many_y: Vec<f64> = sp
+            .iter()
+            .zip(&y)
+            .filter(|(s, _)| *s == "many")
+            .map(|(_, v)| *v)
+            .collect();
         assert_eq!(few_y.len(), 5);
         assert_eq!(many_y.len(), 5);
         assert!(
@@ -4717,7 +5212,10 @@ mod tests {
             ],
         )
         .unwrap();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
         let err = run_transforms_with_facet(&spec, &batch, viewport, &theme)
@@ -4761,12 +5259,24 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0])),
-                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0])),
-                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2"])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0,
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2",
+                ])),
                 Arc::new(arrow::array::Int64Array::from(vec![
-                    None, None, None, None,
-                    Some(1), Some(1), Some(2), Some(2),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(1),
+                    Some(1),
+                    Some(2),
+                    Some(2),
                 ])),
             ],
         )
@@ -4786,12 +5296,24 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0])),
-                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0])),
-                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2"])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0,
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2",
+                ])),
                 Arc::new(arrow::array::BooleanArray::from(vec![
-                    None, None, None, None,
-                    Some(true), Some(true), Some(false), Some(false),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                    Some(true),
+                    Some(false),
+                    Some(false),
                 ])),
             ],
         )
@@ -4802,17 +5324,29 @@ mod tests {
     /// `inject_metrics: true` — combining the metrics-column presence (round
     /// 3's already-closed divergence) with whatever group-column divergence
     /// `groupby` introduces, matching the reviewer's exact repro shape.
-    fn smooth_lm_groupby_spec(facet: Option<crate::layout::FacetSpec>, groupby: Vec<String>) -> ChartSpec {
+    fn smooth_lm_groupby_spec(
+        facet: Option<crate::layout::FacetSpec>,
+        groupby: Vec<String>,
+    ) -> ChartSpec {
         use crate::transform::core::TransformSpec;
         use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
         let mut spec = base_spec();
         spec.facet = facet;
         spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
-            x: "x".into(), y: "y".into(),
+            x: "x".into(),
+            y: "y".into(),
             method: SmoothMethod::Lm,
-            ci: None, bandwidth: 0.75, degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 3, seed: 0,
-            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
-            inject_zero_ref: false, inject_metrics: true,
+            ci: None,
+            bandwidth: 0.75,
+            degree: 1,
+            k: crate::transform::gam::DEFAULT_BASIS_DIM,
+            n: 3,
+            seed: 0,
+            x_bins: None,
+            x_estimator: None,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: true,
             groupby,
             name: None,
             x_range: None,
@@ -4859,11 +5393,15 @@ mod tests {
         };
         let spec = smooth_lm_groupby_spec(Some(facet), vec!["gi".into()]);
         let batch = facet_groupby_int64_batch();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("Int64 groupby column divergence across facet panels must widen, not error").0;
+            .expect("Int64 groupby column divergence across facet panels must widen, not error")
+            .0;
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
 
         // Round 3's metrics-column fix already makes these uniform; confirm
@@ -4876,9 +5414,15 @@ mod tests {
         assert_eq!(sp.len(), gi.len());
         for (s, g) in sp.iter().zip(&gi) {
             if s == "p1" {
-                assert!(g.is_none(), "panel 'p1' produced no 'gi' groups; its rows must pad null: {gi:?}");
+                assert!(
+                    g.is_none(),
+                    "panel 'p1' produced no 'gi' groups; its rows must pad null: {gi:?}"
+                );
             } else {
-                assert!(g.is_some(), "panel 'p2' has real 'gi' groups; its rows must carry the real value: {gi:?}");
+                assert!(
+                    g.is_some(),
+                    "panel 'p2' has real 'gi' groups; its rows must carry the real value: {gi:?}"
+                );
             }
         }
         assert!(
@@ -4901,11 +5445,15 @@ mod tests {
         };
         let spec = smooth_lm_groupby_spec(Some(facet), vec!["gb".into()]);
         let batch = facet_groupby_boolean_batch();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let theme = crate::layout::ThemeInputs::default();
 
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("Boolean groupby column divergence across facet panels must widen, not error").0;
+            .expect("Boolean groupby column divergence across facet panels must widen, not error")
+            .0;
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
 
         let sp = str_col(out, "sp");
@@ -4913,9 +5461,15 @@ mod tests {
         assert_eq!(sp.len(), gb.len());
         for (s, g) in sp.iter().zip(&gb) {
             if s == "p1" {
-                assert!(g.is_none(), "panel 'p1' produced no 'gb' groups; its rows must pad null: {gb:?}");
+                assert!(
+                    g.is_none(),
+                    "panel 'p1' produced no 'gb' groups; its rows must pad null: {gb:?}"
+                );
             } else {
-                assert!(g.is_some(), "panel 'p2' has real 'gb' groups; its rows must carry the real value: {gb:?}");
+                assert!(
+                    g.is_some(),
+                    "panel 'p2' has real 'gb' groups; its rows must carry the real value: {gb:?}"
+                );
             }
         }
         assert!(
@@ -4927,9 +5481,17 @@ mod tests {
     #[test]
     fn size_encoding_produces_graduated_size_legend() {
         let mut spec = base_spec();
-        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
+        spec.encoding.size = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: None,
+            ..Default::default()
+        });
         let p = prep(&spec, &batch_pop());
-        assert_eq!(p.aux_legends.len(), 1, "expected exactly one (size) aux legend");
+        assert_eq!(
+            p.aux_legends.len(),
+            1,
+            "expected exactly one (size) aux legend"
+        );
         let AuxLegendInput::Size { entries, title } = &p.aux_legends[0] else {
             panic!("expected a Size aux legend, got {:?}", p.aux_legends[0]);
         };
@@ -4939,13 +5501,19 @@ mod tests {
         assert!(
             (4..=6).contains(&entries.len()),
             "expected ~5 graduated entries, got {}: {:?}",
-            entries.len(), entries
+            entries.len(),
+            entries
         );
         // Labels are human-friendly round numbers.
         for e in entries {
             assert!(e.radius > 0.0, "size symbol radius must be positive");
             let v: f64 = e.label.parse().expect("size legend label must be numeric");
-            assert_eq!(v.fract(), 0.0, "expected round value label, got {}", e.label);
+            assert_eq!(
+                v.fract(),
+                0.0,
+                "expected round value label, got {}",
+                e.label
+            );
         }
         // Radii increase with value (larger pop → bigger symbol).
         assert!(
@@ -4957,7 +5525,11 @@ mod tests {
     #[test]
     fn shape_encoding_produces_shape_legend_one_per_category() {
         let mut spec = base_spec();
-        spec.encoding.shape = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
+        spec.encoding.shape = Some(EncodingSpec {
+            field: "region".into(),
+            type_: None,
+            ..Default::default()
+        });
         let p = prep(&spec, &batch_pop());
         assert_eq!(p.aux_legends.len(), 1);
         let AuxLegendInput::Shape { entries, title } = &p.aux_legends[0] else {
@@ -4979,16 +5551,37 @@ mod tests {
         // 4th distinct field. Color legend is separate (legend_entries); size +
         // shape are two stacked aux blocks.
         let mut spec = base_spec();
-        spec.encoding.color = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
-        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
-        spec.encoding.shape = Some(EncodingSpec { field: "grp".into(), type_: None, ..Default::default() });
+        spec.encoding.color = Some(EncodingSpec {
+            field: "region".into(),
+            type_: None,
+            ..Default::default()
+        });
+        spec.encoding.size = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: None,
+            ..Default::default()
+        });
+        spec.encoding.shape = Some(EncodingSpec {
+            field: "grp".into(),
+            type_: None,
+            ..Default::default()
+        });
         let p = prep(&spec, &batch_pop());
         // Color drives a categorical legend (legend_entries), not an aux block.
-        assert!(!p.legend_entries.is_empty(), "color legend entries expected");
+        assert!(
+            !p.legend_entries.is_empty(),
+            "color legend entries expected"
+        );
         // Two aux blocks: size then shape, stable order.
         assert_eq!(p.aux_legends.len(), 2, "expected size + shape aux blocks");
-        assert!(matches!(p.aux_legends[0], AuxLegendInput::Size { .. }), "size first");
-        assert!(matches!(p.aux_legends[1], AuxLegendInput::Shape { .. }), "shape second");
+        assert!(
+            matches!(p.aux_legends[0], AuxLegendInput::Size { .. }),
+            "size first"
+        );
+        assert!(
+            matches!(p.aux_legends[1], AuxLegendInput::Shape { .. }),
+            "shape second"
+        );
     }
 
     #[test]
@@ -5002,11 +5595,18 @@ mod tests {
             type_: Some(crate::spec::encoding::DataType::Quantitative),
             ..Default::default()
         });
-        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
+        spec.encoding.size = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: None,
+            ..Default::default()
+        });
         let p = prep(&spec, &batch_pop());
         // Exactly one merged block, and the colorbar is suppressed.
         assert_eq!(p.aux_legends.len(), 1, "merge → single block, not two");
-        assert!(p.colorbar.is_none(), "colorbar must be suppressed in the merged case");
+        assert!(
+            p.colorbar.is_none(),
+            "colorbar must be suppressed in the merged case"
+        );
         let AuxLegendInput::Size { entries, .. } = &p.aux_legends[0] else {
             panic!("merged block should be a Size legend carrying color");
         };
@@ -5028,7 +5628,10 @@ mod tests {
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
-        assert!(p.aux_legends.is_empty(), "legend=None on size must suppress the block");
+        assert!(
+            p.aux_legends.is_empty(),
+            "legend=None on size must suppress the block"
+        );
     }
 
     #[test]
@@ -5036,7 +5639,11 @@ mod tests {
         // Regression: a color-only chart produces zero aux legends (the color
         // legend / colorbar path is untouched).
         let mut spec = base_spec();
-        spec.encoding.color = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
+        spec.encoding.color = Some(EncodingSpec {
+            field: "region".into(),
+            type_: None,
+            ..Default::default()
+        });
         let p = prep(&spec, &batch_pop());
         assert!(p.aux_legends.is_empty());
         assert!(!p.legend_entries.is_empty(), "color legend still present");
@@ -5059,10 +5666,18 @@ mod tests {
         let mut spec = spec_color_facet();
         spec.encoding.color = None;
         spec.facet = None;
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap_err();
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, RenderError::EmptyBatch));
     }
 
@@ -5090,8 +5705,16 @@ mod tests {
             data: crate::spec::data_ref::DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
-                y: Some(EncodingSpec { field: "weight".into(), type_: None, ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "price".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "weight".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
                 color: None,
                 ..Default::default()
             },
@@ -5100,12 +5723,14 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        params: Vec::new(),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -5113,16 +5738,30 @@ mod tests {
     fn prepare_single_layer_produces_one_layer_prepared() {
         let spec = single_layer_spec();
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prepared = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert_eq!(prepared.layers.len(), 1);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert!(!prepared.coord_flipped);
         // Encoding fields should match spec
-        assert_eq!(prepared.layers[0].encoding.x.as_ref().unwrap().field, "price");
-        assert_eq!(prepared.layers[0].encoding.y.as_ref().unwrap().field, "weight");
+        assert_eq!(
+            prepared.layers[0].encoding.x.as_ref().unwrap().field,
+            "price"
+        );
+        assert_eq!(
+            prepared.layers[0].encoding.y.as_ref().unwrap().field,
+            "weight"
+        );
     }
 
     #[test]
@@ -5134,8 +5773,16 @@ mod tests {
             Layer {
                 mark: Mark::Point,
                 encoding: Encoding {
-                    x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
-                    y: Some(EncodingSpec { field: "weight".into(), type_: None, ..Default::default() }),
+                    x: Some(EncodingSpec {
+                        field: "price".into(),
+                        type_: None,
+                        ..Default::default()
+                    }),
+                    y: Some(EncodingSpec {
+                        field: "weight".into(),
+                        type_: None,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 transforms: vec![],
@@ -5144,7 +5791,8 @@ mod tests {
                 position: None,
                 blend: None,
                 name: None,
-                independent_y: false, coord: None,
+                independent_y: false,
+                coord: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -5152,20 +5800,38 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None, blend: None, name: None, independent_y: false, coord: None,
+                position: None,
+                blend: None,
+                name: None,
+                independent_y: false,
+                coord: None,
             },
         ]);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prepared = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert_eq!(prepared.layers.len(), 2);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert_eq!(prepared.layers[1].mark, Mark::Line);
         // Layer 2 inherits chart-level encoding
-        assert_eq!(prepared.layers[1].encoding.x.as_ref().unwrap().field, "price");
-        assert_eq!(prepared.layers[1].encoding.y.as_ref().unwrap().field, "weight");
+        assert_eq!(
+            prepared.layers[1].encoding.x.as_ref().unwrap().field,
+            "price"
+        );
+        assert_eq!(
+            prepared.layers[1].encoding.y.as_ref().unwrap().field,
+            "weight"
+        );
     }
 
     // --- Phase 8b Task 9: named-output transform routing ---
@@ -5222,10 +5888,18 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(None);
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         // __final__ is always present.
         assert!(
             prep.transform_outputs.contains_key("__final__"),
@@ -5254,10 +5928,18 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(Some("box".into()));
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
         assert!(prep.transform_outputs.contains_key("__final__"));
         // Under fan-out semantics, named transforms run on the ORIGINAL input
@@ -5306,15 +5988,30 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
-            position: None, blend: None, name: None, independent_y: false, coord: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
         }]);
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap_err();
+            None,
+        )
+        .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("missing"), "error must name the bogus key: {msg}");
+        assert!(
+            msg.contains("missing"),
+            "error must name the bogus key: {msg}"
+        );
         // Available keys list must mention either the named transform or the sentinel.
         assert!(
             msg.contains("step1") || msg.contains("__final__"),
@@ -5328,10 +6025,18 @@ mod tests {
         let mut spec = single_layer_spec(); // x="price", y="weight"
         spec.coord = Some(CoordKind::Flip);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prepared = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert!(prepared.coord_flipped);
         // After flip: x should have "weight", y should have "price"
         assert_eq!(
@@ -5345,8 +6050,8 @@ mod tests {
             "CoordFlip should swap y←price (was x)"
         );
         // Axes titles should also reflect the flip
-        assert_eq!(prepared.axes.x.title.as_deref(), Some("weight"));
-        assert_eq!(prepared.axes.y.title.as_deref(), Some("price"));
+        assert_eq!(prepared.axes.x.title.get().as_deref(), Some("weight"));
+        assert_eq!(prepared.axes.y.title.get().as_deref(), Some("price"));
     }
 
     // --- D3 (flexibility campaign): per-channel Axis(label_format, tick_count) ---
@@ -5374,12 +6079,22 @@ mod tests {
             serde_json::json!({ "label_format": ",.0f" }),
         ));
         let batch = price_weight_batch();
-        let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
-        assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            prep.axes.x.overrides.labels.format.get().spec.as_deref(),
+            Some(",.0f")
+        );
     }
 
     #[test]
@@ -5393,19 +6108,38 @@ mod tests {
             serde_json::json!({ "grid_color": "#cccccc", "label_color": "#ff00ff", "domain_width": 3.0 }),
         ));
         let batch = price_weight_batch();
-        let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
-        let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
+            None,
+        )
+        .unwrap();
+        let gx = prep
+            .axes
+            .x
+            .overrides
+            .grid
+            .color
+            .expect("per-channel grid_color must reach x AxisInput");
         assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
-        let lx = prep.axes.x.overrides.label_color.expect("per-channel label_color must reach x AxisInput");
+        let lx = prep
+            .axes
+            .x
+            .overrides
+            .labels
+            .color
+            .expect("per-channel label_color must reach x AxisInput");
         assert_eq!([lx.red, lx.green, lx.blue], [0xff, 0x00, 0xff]);
-        assert_eq!(prep.axes.x.overrides.domain_width, Some(3.0));
+        assert_eq!(prep.axes.x.overrides.domain.width, Some(3.0));
         // The y-axis must be untouched (per-channel applies only to its own axis).
-        assert!(prep.axes.y.overrides.grid_color.is_none());
-        assert!(prep.axes.y.overrides.label_color.is_none());
+        assert!(prep.axes.y.overrides.grid.color.is_none());
+        assert!(prep.axes.y.overrides.labels.color.is_none());
     }
 
     // ── B5 unit 2: orphan positioning / tick fields ─────────────────────────
@@ -5414,13 +6148,23 @@ mod tests {
     fn per_channel_orient_reaches_axis_input() {
         // `Axis(orient="top")` on x must set the x AxisInput's orient to Top.
         let mut spec = single_layer_spec();
-        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "orient": "top" }),
+        ));
         let batch = price_weight_batch();
-        let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert_eq!(prep.axes.x.orient, AxisOrient::Top);
         // y untouched (default Left).
         assert_eq!(prep.axes.y.orient, AxisOrient::Left);
@@ -5431,15 +6175,29 @@ mod tests {
         // `Axis(orient="left")` on the x channel is a cross-dimension error and
         // must surface a RenderError rather than silently dropping.
         let mut spec = single_layer_spec();
-        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "orient": "left" }),
+        ));
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-            .expect_err("x orient='left' must fail loud");
+            None,
+        )
+        .expect_err("x orient='left' must fail loud");
         match err {
-            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
+            crate::render::RenderError::InvalidAxisOrient {
+                channel,
+                orient,
+                coord_flipped,
+            } => {
                 assert_eq!(channel, "x");
                 assert_eq!(orient, "left");
                 // Unflipped chart: `with_coord_flipped` boundary correction is a no-op.
@@ -5460,15 +6218,29 @@ mod tests {
         use crate::spec::coord::CoordKind;
         let mut spec = single_layer_spec();
         spec.coord = Some(CoordKind::Flip);
-        spec.encoding.y = Some(enc_with_axis("weight", serde_json::json!({ "orient": "left" })));
+        spec.encoding.y = Some(enc_with_axis(
+            "weight",
+            serde_json::json!({ "orient": "left" }),
+        ));
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-            .expect_err("y orient='left', swapped onto x, must fail loud");
+            None,
+        )
+        .expect_err("y orient='left', swapped onto x, must fail loud");
         match err {
-            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
+            crate::render::RenderError::InvalidAxisOrient {
+                channel,
+                orient,
+                coord_flipped,
+            } => {
                 // Resolved/internal token: the object landed on x post-swap.
                 assert_eq!(channel, "x");
                 assert_eq!(orient, "left");
@@ -5478,11 +6250,18 @@ mod tests {
         }
         let text = format!(
             "{}",
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
-            &crate::render::chart_config::ChartConfig::default(),
-            None)
-                .unwrap_err()
+            prepare_render_inputs(
+                &spec,
+                &batch,
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport {
+                    width: 600.0,
+                    height: 400.0
+                },
+                &crate::render::chart_config::ChartConfig::default(),
+                None
+            )
+            .unwrap_err()
         );
         assert_eq!(
             text,
@@ -5514,17 +6293,24 @@ mod tests {
             }),
         ));
         let batch = price_weight_batch();
-        let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
-        assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
-        assert_eq!(prep.axes.x.overrides.min_band, Some(70.0));
-        assert_eq!(prep.axes.x.overrides.max_band, Some(120.0));
-        assert_eq!(prep.axes.x.overrides.grid_opacity, Some(0.25));
-        assert_eq!(prep.axes.x.overrides.title_orient, Some(AxisOrient::Bottom));
-        assert_eq!(prep.axes.x.overrides.zindex, Some(1));
+            None,
+        )
+        .unwrap();
+        assert_eq!(prep.axes.x.overrides.placement.translate, Some(12.0));
+        assert_eq!(prep.axes.x.overrides.placement.min_band, Some(70.0));
+        assert_eq!(prep.axes.x.overrides.placement.max_band, Some(120.0));
+        assert_eq!(prep.axes.x.overrides.grid.opacity, Some(0.25));
+        assert_eq!(prep.axes.x.overrides.title.orient, Some(AxisOrient::Bottom));
+        assert_eq!(prep.axes.x.overrides.placement.zindex, Some(1));
     }
 
     #[test]
@@ -5533,20 +6319,37 @@ mod tests {
         // the step in data space, leaving fewer labels.
         let mut spec = single_layer_spec();
         let batch = price_weight_batch();
-        let baseline =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let baseline = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         let base_count = baseline.axes.x.tick_labels.len();
 
         // Pick a min_step larger than the natural tick spacing to force thinning.
-        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
-        let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "tick_min_step": 1e9 }),
+        ));
+        let mut prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         // The adjustment runs in `config_apply::resync_ticks_after_axis_merge`;
         // invoke it directly here.
         let tc = prep.x_tick_count;
@@ -5605,13 +6408,18 @@ mod tests {
         });
         // A chart-level `configure_axis(label_format="date_iso", tick_min_step=...)`
         // shape: both fields are chart-level-only-owned (see
-        // `AxisStyleOverrides::label_format_type`'s doc), set here directly to
+        // `LabelFormat::format_type`'s doc), set here directly to
         // isolate `adjust_axis_ticks`'s own behavior.
         // The reviewer's own repro value: 1.5 years, forcing roughly half of
         // the ~yearly-spaced default ticks to drop.
-        axis.overrides.tick_min_step = Some(1.5 * 365.0 * 86_400_000.0);
-        axis.overrides.label_format = Some("%Y-%m-%d".to_string());
-        axis.overrides.label_format_type = Some("time".to_string());
+        axis.overrides.ticks.min_step = Some(1.5 * 365.0 * 86_400_000.0);
+        axis.overrides
+            .labels
+            .format
+            .set(crate::layout::LabelFormat {
+                spec: Some("%Y-%m-%d".to_string()),
+                format_type: Some("time".to_string()),
+            });
 
         adjust_axis_ticks(&mut axis, &scale, tick_count, false);
 
@@ -5625,8 +6433,15 @@ mod tests {
             // The DEFAULT (year-granularity) label shape at this span is a
             // bare "2018"/"2020"-style year — an ISO "YYYY-MM-DD" shape can
             // only come from the real reformat, never a coincidence.
-            assert_eq!(label.len(), 10, "expected an ISO date after thinning, got {label:?}");
-            assert!(label.starts_with("20") && label.contains('-'), "expected an ISO date, got {label:?}");
+            assert_eq!(
+                label.len(),
+                10,
+                "expected an ISO date after thinning, got {label:?}"
+            );
+            assert!(
+                label.starts_with("20") && label.contains('-'),
+                "expected an ISO date, got {label:?}"
+            );
         }
     }
 
@@ -5648,23 +6463,46 @@ mod tests {
         )
         .unwrap();
         let mut spec = single_layer_spec();
-        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
-        let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "tick_extra": true }),
+        ));
+        let mut prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         let before = prep.axes.x.tick_labels.len();
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
         let after = prep.axes.x.tick_labels.len();
-        assert!(after > before, "tick_extra must append boundary ticks: {before} -> {after}");
+        assert!(
+            after > before,
+            "tick_extra must append boundary ticks: {before} -> {after}"
+        );
         // Labels and projected fractions stay index-aligned.
         let proj = prep.axes.x.tick_projection.as_ref().unwrap();
-        assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len(), "labels/fractions aligned");
+        assert_eq!(
+            proj.major.len(),
+            prep.axes.x.tick_labels.len(),
+            "labels/fractions aligned"
+        );
         // The exact domain-boundary labels ("3" and "97") are present.
-        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "3"), "domain min tick present");
-        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "97"), "domain max tick present");
+        assert!(
+            prep.axes.x.tick_labels.iter().any(|l| l == "3"),
+            "domain min tick present"
+        );
+        assert!(
+            prep.axes.x.tick_labels.iter().any(|l| l == "97"),
+            "domain max tick present"
+        );
     }
 
     #[test]
@@ -5675,15 +6513,28 @@ mod tests {
         // per-channel value wins. We assert the prep-stage value here, then verify
         // the chart-level apply does not overwrite it.
         let mut spec = single_layer_spec();
-        spec.encoding.x =
-            Some(enc_with_axis("price", serde_json::json!({ "grid_width": 4.0 })));
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "grid_width": 4.0 }),
+        ));
         let batch = price_weight_batch();
-        let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let mut prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
-        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            prep.axes.x.overrides.grid.width,
+            Some(4.0),
+            "per-channel value set in prep"
+        );
         // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
         let cfg = crate::render::chart_config::AxisConfigSpec {
             style: crate::render::chart_config::AxisStyleSpec {
@@ -5692,8 +6543,13 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::config_apply::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
-        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel must win over configure_axis");
+        crate::render::config_apply::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style)
+            .unwrap();
+        assert_eq!(
+            prep.axes.x.overrides.grid.width,
+            Some(4.0),
+            "per-channel must win over configure_axis"
+        );
     }
 
     #[test]
@@ -5709,21 +6565,40 @@ mod tests {
             serde_json::json!({ "grid": false, "domain": false }),
         ));
         let batch = price_weight_batch();
-        let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let mut prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         // Probing `prep.axes.{x,y}` HERE, before `AxesInput::apply_show_defaults`
         // has run (that fold happens later, right before layout, in real
         // production), is the point of this assertion — so read the raw
         // override slot with the same `unwrap_or(true)` fallback `show_grid()`/
         // `show_domain()` apply, rather than through those accessors, which
         // now assert this precondition in debug builds.
-        assert!(!prep.axes.x.overrides.show_grid.unwrap_or(true), "per-channel grid=False set in prep");
-        assert!(!prep.axes.x.overrides.show_domain.unwrap_or(true), "per-channel domain=False set in prep");
-        assert!(prep.axes.y.overrides.show_grid.unwrap_or(true), "y grid default true");
-        assert!(prep.axes.y.overrides.show_domain.unwrap_or(true), "y domain default true");
+        assert!(
+            !prep.axes.x.overrides.grid.show.unwrap_or(true),
+            "per-channel grid=False set in prep"
+        );
+        assert!(
+            !prep.axes.x.overrides.domain.show.unwrap_or(true),
+            "per-channel domain=False set in prep"
+        );
+        assert!(
+            prep.axes.y.overrides.grid.show.unwrap_or(true),
+            "y grid default true"
+        );
+        assert!(
+            prep.axes.y.overrides.domain.show.unwrap_or(true),
+            "y domain default true"
+        );
 
         // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
         // via the shared `axis` key, the same wire step
@@ -5736,22 +6611,30 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg)).unwrap();
-        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
+        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg))
+            .unwrap();
+        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg))
+            .unwrap();
 
         // Per-channel x suppression survives the conflicting chart-level toggle.
         // Same pre-`apply_show_defaults` raw-slot read as above.
         assert!(
-            !prep.axes.x.overrides.show_grid.unwrap_or(true),
+            !prep.axes.x.overrides.grid.show.unwrap_or(true),
             "per-channel grid=False must survive configure_axis(grid=True)"
         );
         assert!(
-            !prep.axes.x.overrides.show_domain.unwrap_or(true),
+            !prep.axes.x.overrides.domain.show.unwrap_or(true),
             "per-channel domain=False must survive configure_axis(domain=True)"
         );
         // The other axis (no per-channel override) is unaffected: still shown.
-        assert!(prep.axes.y.overrides.show_grid.unwrap_or(true), "y axis show_grid unaffected");
-        assert!(prep.axes.y.overrides.show_domain.unwrap_or(true), "y axis show_domain unaffected");
+        assert!(
+            prep.axes.y.overrides.grid.show.unwrap_or(true),
+            "y axis show_grid unaffected"
+        );
+        assert!(
+            prep.axes.y.overrides.domain.show.unwrap_or(true),
+            "y axis show_domain unaffected"
+        );
     }
 
     #[test]
@@ -5765,20 +6648,31 @@ mod tests {
             serde_json::json!({ "label_format": "$,.2f" }),
         ));
         let batch = price_weight_batch();
-        let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let mut prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         // Apply the threaded override exactly as render/mod.rs does.
         prep.axes.x.tick_labels = apply_tick_format(
             std::mem::take(&mut prep.axes.x.tick_labels),
-            prep.axes.x.overrides.label_format.as_deref(),
+            prep.axes.x.overrides.labels.format.get().spec.as_deref(),
             None,
         );
         // Every numeric label should now carry the "$" prefix and 2 decimals.
         assert!(
-            prep.axes.x.tick_labels.iter().all(|l| l.starts_with('$') && l.contains('.')),
+            prep.axes
+                .x
+                .tick_labels
+                .iter()
+                .all(|l| l.starts_with('$') && l.contains('.')),
             "got: {:?}",
             prep.axes.x.tick_labels
         );
@@ -5791,24 +6685,40 @@ mod tests {
         let batch = price_weight_batch();
 
         let mut default_spec = single_layer_spec();
-        default_spec.encoding.x =
-            Some(EncodingSpec { field: "price".into(), ..Default::default() });
-        let default_prep =
-            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        default_spec.encoding.x = Some(EncodingSpec {
+            field: "price".into(),
+            ..Default::default()
+        });
+        let default_prep = prepare_render_inputs(
+            &default_spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-                .unwrap();
+            None,
+        )
+        .unwrap();
 
         let mut limited_spec = single_layer_spec();
-        limited_spec.encoding.x =
-            Some(enc_with_axis("price", serde_json::json!({ "tick_count": 2 })));
-        let limited_prep =
-            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        limited_spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "tick_count": 2 }),
+        ));
+        let limited_prep = prepare_render_inputs(
+            &limited_spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-                .unwrap();
+            None,
+        )
+        .unwrap();
 
         assert!(
             limited_prep.axes.x.tick_labels.len() < default_prep.axes.x.tick_labels.len(),
@@ -5835,7 +6745,8 @@ mod tests {
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
-        p.colorbar.expect("continuous color encoding must produce a colorbar")
+        p.colorbar
+            .expect("continuous color encoding must produce a colorbar")
     }
 
     /// (a) Byte-stability: `.2f` colorbar output must match today's expected strings.
@@ -5890,7 +6801,9 @@ mod tests {
             ..Default::default()
         });
         let p = prep(&spec, &batch);
-        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+        let colorbar = p
+            .colorbar
+            .expect("continuous color encoding must produce a colorbar");
 
         // 5 ticks at t=0,0.25,0.5,0.75,1.0 → v=0,0.25,0.5,0.75,1.0
         // `.0%` → multiply by 100, 0 decimals, append `%` → "0%","25%","50%","75%","100%"
@@ -5942,7 +6855,9 @@ mod tests {
             ..Default::default()
         });
         let p = prep(&spec, &batch);
-        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+        let colorbar = p
+            .colorbar
+            .expect("continuous color encoding must produce a colorbar");
 
         // 5 ticks at t=0..1 over [1000, 100000]:
         // v = 1000, 25750, 50500, 75250, 100000
@@ -5995,7 +6910,9 @@ mod tests {
             ..Default::default()
         });
         let p = prep(&spec, &batch);
-        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+        let colorbar = p
+            .colorbar
+            .expect("continuous color encoding must produce a colorbar");
 
         // First tick (v=1000) → "1k", last tick (v=1_000_000) → "1M".
         assert_eq!(
@@ -6047,22 +6964,38 @@ mod tests {
             channel: ChannelName::Color,
             if_selected: EncodingValue::Field { name: "cat".into() },
             if_not: EncodingValue::Color {
-                value: ferrum_scene::Color { r: 200, g: 200, b: 200, a: 255 },
+                value: ferrum_scene::Color {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                    a: 255,
+                },
             },
         }];
 
         let batch = cat_batch();
-        let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
 
         assert!(
             !prep.legend_entries.is_empty(),
             "conditional Color Field must produce legend entries when base color is absent"
         );
-        let labels: Vec<&str> = prep.legend_entries.iter().map(|e| e.label.as_str()).collect();
+        let labels: Vec<&str> = prep
+            .legend_entries
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect();
         assert_eq!(
             labels,
             vec!["a", "b", "c"],
@@ -6102,9 +7035,16 @@ mod tests {
         spec.conditionals = vec![ConditionalEncoding {
             selection_name: "sel".into(),
             channel: ChannelName::Color,
-            if_selected: EncodingValue::Field { name: "region".into() },
+            if_selected: EncodingValue::Field {
+                name: "region".into(),
+            },
             if_not: EncodingValue::Color {
-                value: ferrum_scene::Color { r: 200, g: 200, b: 200, a: 255 },
+                value: ferrum_scene::Color {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                    a: 255,
+                },
             },
         }];
 
@@ -6201,7 +7141,10 @@ mod tests {
         let (labels, proj, threaded) = build_axis_tick_inputs(
             &scale,
             10,
-            TickFormatMode::Immediate { format: None, format_type: None },
+            TickFormatMode::Immediate {
+                format: None,
+                format_type: None,
+            },
             false,
             Vec::new(),
         )
@@ -6219,7 +7162,10 @@ mod tests {
         let (labels, proj, _t) = build_axis_tick_inputs(
             &scale,
             5,
-            TickFormatMode::Immediate { format: Some(".0%"), format_type: None },
+            TickFormatMode::Immediate {
+                format: Some(".0%"),
+                format_type: None,
+            },
             false,
             Vec::new(),
         )
@@ -6237,7 +7183,10 @@ mod tests {
         let (labels, proj, _t) = build_axis_tick_inputs(
             &scale,
             8,
-            TickFormatMode::Immediate { format: None, format_type: None },
+            TickFormatMode::Immediate {
+                format: None,
+                format_type: None,
+            },
             true,
             Vec::new(),
         )
@@ -6264,7 +7213,10 @@ mod tests {
         let (x_labels, x_proj, _t) = build_axis_tick_inputs(
             &scale,
             10,
-            TickFormatMode::Immediate { format: None, format_type: None },
+            TickFormatMode::Immediate {
+                format: None,
+                format_type: None,
+            },
             false,
             Vec::new(),
         )
@@ -6273,7 +7225,10 @@ mod tests {
         let (y_labels, y_proj, _t) = build_axis_tick_inputs(
             &scale,
             10,
-            TickFormatMode::Immediate { format: None, format_type: None },
+            TickFormatMode::Immediate {
+                format: None,
+                format_type: None,
+            },
             true,
             Vec::new(),
         )
@@ -6299,7 +7254,10 @@ mod tests {
         let (shared_labels, shared_proj, shared_threaded) = build_axis_tick_inputs(
             &scale,
             10,
-            TickFormatMode::Thread { format: None, format_type: None },
+            TickFormatMode::Thread {
+                format: None,
+                format_type: None,
+            },
             false,
             shared_minor.clone(),
         )
@@ -6309,7 +7267,10 @@ mod tests {
         let (indep_labels, indep_proj, indep_threaded) = build_axis_tick_inputs(
             &scale,
             10,
-            TickFormatMode::Immediate { format: None, format_type: None },
+            TickFormatMode::Immediate {
+                format: None,
+                format_type: None,
+            },
             false,
             Vec::new(),
         )
@@ -6319,13 +7280,22 @@ mod tests {
         assert_eq!(shared_labels, indep_labels);
         let shared_proj = shared_proj.expect("continuous scale yields a projection");
         let indep_proj = indep_proj.expect("continuous scale yields a projection");
-        assert_eq!(shared_proj.major, indep_proj.major, "major fractions must agree");
+        assert_eq!(
+            shared_proj.major, indep_proj.major,
+            "major fractions must agree"
+        );
         assert_eq!(shared_proj.padding_frac, indep_proj.padding_frac);
 
         // The minor vec is the only intentional divergence: shared carries the
         // caller's minor ticks; independent stays empty (no per-panel minors).
-        assert_eq!(shared_proj.minor, shared_minor, "shared path carries minor ticks");
-        assert!(indep_proj.minor.is_empty(), "independent path keeps minor empty");
+        assert_eq!(
+            shared_proj.minor, shared_minor,
+            "shared path carries minor ticks"
+        );
+        assert!(
+            indep_proj.minor.is_empty(),
+            "independent path keeps minor empty"
+        );
 
         // Neither mode threads a format when none is supplied; only Thread can
         // ever thread, and only for a numeric format string.
@@ -6400,7 +7370,10 @@ mod tests {
         let (labels, _proj, threaded) = build_axis_tick_inputs(
             &scale,
             5,
-            TickFormatMode::Thread { format: Some(".1%".to_string()), format_type: None },
+            TickFormatMode::Thread {
+                format: Some(".1%".to_string()),
+                format_type: None,
+            },
             false,
             Vec::new(),
         )
@@ -6409,7 +7382,10 @@ mod tests {
             labels.iter().any(|l| l.ends_with('%')),
             "must format as the numeric percent spec it is, got {labels:?}"
         );
-        assert_eq!(threaded, None, "the ambiguous time-shaped branch applies immediately");
+        assert_eq!(
+            threaded, None,
+            "the ambiguous time-shaped branch applies immediately"
+        );
     }
 
     // ── #52 Task 3: provisional secondary y-axis inputs ──────────────────────
@@ -6426,7 +7402,10 @@ mod tests {
         let primary = Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y0".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6435,7 +7414,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6453,14 +7433,18 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true, coord: None,
+            independent_y: true,
+            coord: None,
         };
 
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6494,14 +7478,29 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let prep = prepare_render_inputs(&spec, &batch, &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
 
-        assert_eq!(prep.axes.secondary_y.len(), 1, "one independent_y layer → one secondary axis input");
+        assert_eq!(
+            prep.axes.secondary_y.len(),
+            1,
+            "one independent_y layer → one secondary axis input"
+        );
         let secondary_axis = &prep.axes.secondary_y[0];
-        assert_eq!(secondary_axis.title.as_deref(), Some("Secondary Title"));
+        assert_eq!(
+            secondary_axis.title.get().as_deref(),
+            Some("Secondary Title")
+        );
         assert_ne!(
             secondary_axis.tick_labels, prep.axes.y.tick_labels,
             "the secondary axis resolves its OWN domain, not the primary's"
@@ -6528,7 +7527,10 @@ mod tests {
         let primary = Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y0".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6537,7 +7539,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6546,7 +7549,10 @@ mod tests {
                 // onto post-flip y, where `build_secondary_y_axis_inputs`
                 // actually validates it (see the doc comment above).
                 x: Some(enc_with_axis("x", serde_json::json!({ "orient": "top" }))),
-                y: Some(EncodingSpec { field: "y1".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y1".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6555,14 +7561,18 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true, coord: None,
+            independent_y: true,
+            coord: None,
         };
 
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6596,14 +7606,28 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let err = prepare_render_inputs(&spec, &batch, &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-            .expect_err("orient='top' on the secondary y axis must fail loud");
+            None,
+        )
+        .expect_err("orient='top' on the secondary y axis must fail loud");
         match &err {
-            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
-                assert_eq!(*channel, "y", "resolved token: secondary axes always validate as Channel::Y");
+            crate::render::RenderError::InvalidAxisOrient {
+                channel,
+                orient,
+                coord_flipped,
+            } => {
+                assert_eq!(
+                    *channel, "y",
+                    "resolved token: secondary axes always validate as Channel::Y"
+                );
                 assert_eq!(orient, "top");
                 assert!(*coord_flipped);
             }
@@ -6628,7 +7652,10 @@ mod tests {
         let primary = Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y0".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6637,7 +7664,8 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: false, coord: None,
+            independent_y: false,
+            coord: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -6651,14 +7679,18 @@ mod tests {
             position: None,
             blend: None,
             name: None,
-            independent_y: true, coord: None,
+            independent_y: true,
+            coord: None,
         };
 
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6692,11 +7724,18 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let err = prepare_render_inputs(&spec, &batch, &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let err = prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None)
-            .expect_err("orient='top' on the secondary y axis must fail loud");
+            None,
+        )
+        .expect_err("orient='top' on the secondary y axis must fail loud");
         assert_eq!(
             format!("{err}"),
             "axis orient 'top' is invalid for the y axis (expected 'left' or 'right')"
@@ -6711,8 +7750,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6743,10 +7788,18 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let prep = prepare_render_inputs(&spec, &batch, &theme,
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
-            None).unwrap();
+            None,
+        )
+        .unwrap();
         assert!(prep.axes.secondary_y.is_empty());
     }
 
@@ -6793,7 +7846,10 @@ mod tests {
                     sort: Some(sort),
                     ..Default::default()
                 }),
-                y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "val".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -6816,16 +7872,16 @@ mod tests {
     /// actually render on: `x` unflipped, `y` under `CoordFlip`. Returns the
     /// tick labels alongside every `SortSpecIgnored` reason the prepare pass
     /// produced, so a test can assert order and silence together.
-    fn category_axis_order(
-        sort: serde_json::Value,
-        flipped: bool,
-    ) -> (Vec<String>, Vec<String>) {
+    fn category_axis_order(sort: serde_json::Value, flipped: bool) -> (Vec<String>, Vec<String>) {
         let spec = sorted_bar_spec(sort, flipped);
         let prep = prepare_render_inputs(
             &spec,
             &sort_shorthand_batch(),
             &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6853,10 +7909,14 @@ mod tests {
     fn sort_shorthand_binds_to_the_authored_channel_under_flip() {
         let (unflipped, unflipped_ignored) = category_axis_order(serde_json::json!("-y"), false);
         assert_eq!(
-            unflipped, ["a", "c", "b"],
+            unflipped,
+            ["a", "c", "b"],
             "control: unflipped, sort=\"-y\" orders categories by descending val"
         );
-        assert!(unflipped_ignored.is_empty(), "control must not warn: {unflipped_ignored:?}");
+        assert!(
+            unflipped_ignored.is_empty(),
+            "control must not warn: {unflipped_ignored:?}"
+        );
 
         let (flipped, flipped_ignored) = category_axis_order(serde_json::json!("-y"), true);
         assert_eq!(
@@ -6878,12 +7938,18 @@ mod tests {
     /// both must equal the object form's flip-invariant answer.
     #[test]
     fn sort_field_object_is_flip_invariant_and_agrees_with_the_shorthand() {
-        let object_form =
-            serde_json::json!({"field": "val", "op": "sum", "order": "descending"});
+        let object_form = serde_json::json!({"field": "val", "op": "sum", "order": "descending"});
         let (unflipped, unflipped_ignored) = category_axis_order(object_form.clone(), false);
         let (flipped, flipped_ignored) = category_axis_order(object_form, true);
-        assert_eq!(unflipped, ["a", "c", "b"], "the object form names a field, not a channel");
-        assert_eq!(flipped, unflipped, "the object form was always flip-invariant");
+        assert_eq!(
+            unflipped,
+            ["a", "c", "b"],
+            "the object form names a field, not a channel"
+        );
+        assert_eq!(
+            flipped, unflipped,
+            "the object form was always flip-invariant"
+        );
         assert!(unflipped_ignored.is_empty() && flipped_ignored.is_empty());
 
         let (shorthand_flipped, _) = category_axis_order(serde_json::json!("-y"), true);
@@ -6905,7 +7971,10 @@ mod tests {
             &spec,
             &sort_shorthand_batch(),
             &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::config::RenderConfig::default(),
             &crate::render::chart_config::ChartConfig::default(),
         )
@@ -6947,7 +8016,10 @@ mod tests {
             &spec,
             &sort_shorthand_batch(),
             &crate::layout::ThemeInputs::default(),
-            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &crate::render::config::RenderConfig::default(),
             &crate::render::chart_config::ChartConfig::default(),
         )
@@ -6982,18 +8054,24 @@ mod grid_partition_tests {
         for &r in &rows {
             for &c in &cols {
                 // 2 data rows per (row, col) cell.
-                col_vals.push(c); row_vals.push(r);
-                col_vals.push(c); row_vals.push(r);
+                col_vals.push(c);
+                row_vals.push(r);
+                col_vals.push(c);
+                row_vals.push(r);
             }
         }
         let schema = Arc::new(Schema::new(vec![
             Field::new("col_cat", DataType::Utf8, false),
             Field::new("row_cat", DataType::Utf8, false),
         ]));
-        RecordBatch::try_new(schema, vec![
-            Arc::new(StringArray::from(col_vals)),
-            Arc::new(StringArray::from(row_vals)),
-        ]).unwrap()
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(col_vals)),
+                Arc::new(StringArray::from(row_vals)),
+            ],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -7002,7 +8080,8 @@ mod grid_partition_tests {
         let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
         // 3 row values × 3 col values = 9 partitions.
         assert_eq!(
-            partitions.len(), 9,
+            partitions.len(),
+            9,
             "Expected 9 composite partitions for a 3×3 grid; got {}",
             partitions.len()
         );
@@ -7014,7 +8093,8 @@ mod grid_partition_tests {
         let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
         for ((col_v, row_v), part_batch) in &partitions {
             assert_eq!(
-                part_batch.num_rows(), 2,
+                part_batch.num_rows(),
+                2,
                 "Partition ({col_v}, {row_v}) must have 2 rows; got {}",
                 part_batch.num_rows()
             );
@@ -7026,7 +8106,8 @@ mod grid_partition_tests {
         let batch = grid_3x3_batch();
         let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
         // Row-major: (r1,c1), (r1,c2), (r1,c3), (r2,c1), ...
-        let keys: Vec<(&str, &str)> = partitions.iter()
+        let keys: Vec<(&str, &str)> = partitions
+            .iter()
             .map(|((cv, rv), _)| (cv.as_str(), rv.as_str()))
             .collect();
         assert_eq!(keys[0], ("c1", "r1"), "First partition should be (c1, r1)");
@@ -7040,7 +8121,12 @@ mod grid_partition_tests {
     fn group_rows_by_two_fields_produces_correct_count_and_row_keys() {
         let batch = grid_3x3_batch();
         let groups = group_rows_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
-        assert_eq!(groups.len(), 9, "Expected 9 groups for a 3×3 grid; got {}", groups.len());
+        assert_eq!(
+            groups.len(),
+            9,
+            "Expected 9 groups for a 3×3 grid; got {}",
+            groups.len()
+        );
 
         for group in &groups {
             assert!(

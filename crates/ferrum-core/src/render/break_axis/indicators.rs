@@ -12,6 +12,7 @@ use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
 use crate::layout::{Rect, ThemeInputs};
 use crate::render::draw::to_scene_stroke;
+use crate::spec::axis::AlignAxis;
 
 use super::BreakResult;
 
@@ -22,7 +23,7 @@ use super::BreakResult;
 pub fn build_break_indicators(
     result: &BreakResult,
     plot_area: &Rect,
-    axis: &str,
+    axis: AlignAxis,
     break_size: f64,
     break_style: &str,
     theme: &ThemeInputs,
@@ -48,14 +49,14 @@ pub fn build_break_indicators(
 fn build_slash_indicator(
     indicator_px: f64,
     plot_area: &Rect,
-    axis: &str,
+    axis: AlignAxis,
     break_size: f64,
     stroke: ferrum_scene::StrokeStyle,
 ) -> Vec<SceneNode> {
     let half = break_size / 2.0;
     let diag = 6.0; // diagonal extension in pixels
 
-    if axis == "y" {
+    if axis.is_y() {
         let x1 = plot_area.x + plot_area.w * 0.35;
         let x2 = plot_area.x + plot_area.w * 0.65;
         let x_mid = (x1 + x2) / 2.0;
@@ -107,7 +108,7 @@ fn build_slash_indicator(
 fn build_zigzag_indicator(
     indicator_px: f64,
     plot_area: &Rect,
-    axis: &str,
+    axis: AlignAxis,
     break_size: f64,
     stroke: ferrum_scene::StrokeStyle,
 ) -> Vec<SceneNode> {
@@ -115,7 +116,7 @@ fn build_zigzag_indicator(
     let amplitude = 5.0;
     let n_zags = 4i32;
 
-    let commands = if axis == "y" {
+    let commands = if axis.is_y() {
         let x_center = plot_area.x + plot_area.w / 2.0;
         let mut cmds = Vec::new();
         cmds.push(PathCmd::MoveTo { x: x_center - amplitude, y: indicator_px - half });
@@ -167,7 +168,7 @@ fn build_zigzag_indicator(
 fn build_wave_indicator(
     indicator_px: f64,
     plot_area: &Rect,
-    axis: &str,
+    axis: AlignAxis,
     break_size: f64,
     stroke: ferrum_scene::StrokeStyle,
 ) -> Vec<SceneNode> {
@@ -175,7 +176,7 @@ fn build_wave_indicator(
     let amplitude = 4.0;
     let n_steps = 20i32;
 
-    let commands = if axis == "y" {
+    let commands = if axis.is_y() {
         let x_center = plot_area.x + plot_area.w / 2.0;
         let mut cmds = Vec::new();
         cmds.push(PathCmd::MoveTo {

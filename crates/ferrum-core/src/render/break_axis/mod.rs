@@ -34,6 +34,7 @@ use std::collections::HashSet;
 use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
 use crate::render::marks;
+use crate::spec::axis::AlignAxis;
 
 pub use self::indicators::build_break_indicators;
 pub use self::placement::{BreakPlacement, BREAK_HIDDEN};
@@ -66,8 +67,8 @@ use self::placement::is_hidden;
 /// not a new resolution.
 #[derive(Clone, Copy)]
 pub struct BreakRemap<'a> {
-    /// `"x"` or `"y"` — which coordinate of a node this break moves.
-    axis: &'a str,
+    /// Which coordinate of a node this break moves.
+    axis: AlignAxis,
     /// `(lo, hi)` data domain of the unbroken scale.
     domain: (f64, f64),
     /// `(lo, hi)` pixel range of the unbroken scale, in that scale's own
@@ -419,7 +420,7 @@ impl CutEdges {
 impl<'a> BreakRemap<'a> {
     /// Resolve `result` against the unbroken scale's `domain` and `pixels`.
     pub fn new(
-        axis: &'a str,
+        axis: AlignAxis,
         domain: (f64, f64),
         pixels: (f64, f64),
         result: &'a BreakResult,
@@ -427,8 +428,13 @@ impl<'a> BreakRemap<'a> {
         Self { axis, domain, pixels, result }
     }
 
-    /// `"x"` or `"y"` — the axis this break moves.
-    pub fn axis(&self) -> &str {
+    /// The axis this break moves.
+    ///
+    /// Two `scene_build` call sites compare this against a CHANNEL token
+    /// (`marks::axis::AxisNodes::placed_along`) and read
+    /// [`AlignAxis::wire_name`] to do it, crossing the two vocabularies
+    /// explicitly rather than unifying them — see that enum's module doc.
+    pub fn axis(&self) -> AlignAxis {
         self.axis
     }
 
@@ -446,7 +452,7 @@ impl<'a> BreakRemap<'a> {
     }
 
     fn is_y(&self) -> bool {
-        self.axis == "y"
+        self.axis.is_y()
     }
 
     /// Reverse-map a pixel coordinate to data on the unbroken scale, clamped

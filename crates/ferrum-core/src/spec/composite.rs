@@ -46,6 +46,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::layout::facet::ResolveMode;
+use crate::spec::axis::AlignAxis;
 use crate::spec::chart::ChartSpec;
 
 // ---------------------------------------------------------------------------
@@ -114,29 +115,6 @@ impl FromStr for CompositeLayout {
 // ---------------------------------------------------------------------------
 // ExtentAlignment
 // ---------------------------------------------------------------------------
-
-/// The axis an [`ExtentAlignment`] equalizes. `X` makes two cells in the same
-/// grid COLUMN span the same pixels horizontally; `Y` does the same for two
-/// cells in one ROW.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AlignAxis {
-    X,
-    Y,
-}
-
-impl AlignAxis {
-    /// The axis as it appears on the wire — and, for that reason, as it
-    /// appears in the warning a caller reads back
-    /// (`RenderWarning::ExtentAlignmentUnresolvable`): the token it is told
-    /// about is the token it wrote.
-    pub fn wire_name(&self) -> &'static str {
-        match self {
-            AlignAxis::X => "x",
-            AlignAxis::Y => "y",
-        }
-    }
-}
 
 /// One grid cell whose plot extent follows another cell's on one axis —
 /// **the composition declaring, on the wire, that two of its panels are meant

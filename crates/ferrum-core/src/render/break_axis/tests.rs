@@ -240,7 +240,7 @@ fn broken_scale_map_nan_value_returns_none() {
 fn build_break_indicators_slash_returns_lines() {
     let result = apply_break_to_scale((0.0, 1000.0), &[[200.0, 800.0]], (50.0, 350.0), 12.0);
     let theme = ThemeInputs::default();
-    let nodes = build_break_indicators(&result, &plot(), "y", 12.0, "slash", &theme);
+    let nodes = build_break_indicators(&result, &plot(), AlignAxis::Y, 12.0, "slash", &theme);
     assert!(!nodes.is_empty(), "slash style should produce nodes");
     let has_line = nodes.iter().any(|n| matches!(n, SceneNode::Line { .. }));
     assert!(has_line, "slash style should produce line nodes");
@@ -250,7 +250,7 @@ fn build_break_indicators_slash_returns_lines() {
 fn build_break_indicators_gap_style_returns_empty() {
     let result = apply_break_to_scale((0.0, 1000.0), &[[200.0, 800.0]], (50.0, 350.0), 12.0);
     let theme = ThemeInputs::default();
-    let nodes = build_break_indicators(&result, &plot(), "y", 12.0, "gap", &theme);
+    let nodes = build_break_indicators(&result, &plot(), AlignAxis::Y, 12.0, "gap", &theme);
     assert!(nodes.is_empty(), "gap style should produce no indicator nodes");
 }
 
@@ -258,7 +258,7 @@ fn build_break_indicators_gap_style_returns_empty() {
 fn build_break_indicators_zigzag_returns_paths() {
     let result = apply_break_to_scale((0.0, 1000.0), &[[200.0, 800.0]], (50.0, 350.0), 12.0);
     let theme = ThemeInputs::default();
-    let nodes = build_break_indicators(&result, &plot(), "y", 12.0, "zigzag", &theme);
+    let nodes = build_break_indicators(&result, &plot(), AlignAxis::Y, 12.0, "zigzag", &theme);
     let has_path = nodes.iter().any(|n| matches!(n, SceneNode::Path { .. }));
     assert!(has_path, "zigzag style should produce path nodes");
 }
@@ -267,7 +267,7 @@ fn build_break_indicators_zigzag_returns_paths() {
 fn build_break_indicators_wave_returns_paths() {
     let result = apply_break_to_scale((0.0, 1000.0), &[[200.0, 800.0]], (50.0, 350.0), 12.0);
     let theme = ThemeInputs::default();
-    let nodes = build_break_indicators(&result, &plot(), "y", 12.0, "wave", &theme);
+    let nodes = build_break_indicators(&result, &plot(), AlignAxis::Y, 12.0, "wave", &theme);
     let has_path = nodes.iter().any(|n| matches!(n, SceneNode::Path { .. }));
     assert!(has_path, "wave style should produce path nodes");
 }
@@ -276,7 +276,7 @@ fn build_break_indicators_wave_returns_paths() {
 fn build_break_indicators_x_axis() {
     let result = apply_break_to_scale((0.0, 100.0), &[[20.0, 80.0]], (50.0, 350.0), 12.0);
     let theme = ThemeInputs::default();
-    let nodes = build_break_indicators(&result, &plot(), "x", 12.0, "slash", &theme);
+    let nodes = build_break_indicators(&result, &plot(), AlignAxis::X, 12.0, "slash", &theme);
     assert!(!nodes.is_empty(), "x-axis slash should produce nodes");
 }
 
@@ -372,7 +372,7 @@ fn two_segment_break() -> BreakResult {
     apply_break_to_scale((0.0, 100.0), &[[40.0, 60.0]], (50.0, 350.0), 12.0)
 }
 
-fn remap<'a>(axis: &'a str, br: &'a BreakResult) -> BreakRemap<'a> {
+fn remap(axis: AlignAxis, br: &BreakResult) -> BreakRemap<'_> {
     BreakRemap::new(axis, (0.0, 100.0), (50.0, 350.0), br)
 }
 
@@ -392,7 +392,7 @@ fn fill_stroke() -> FillStroke {
 #[test]
 fn coord_identity_maps_pixel_to_pixel() {
     let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
-    let px = remap("x", &br).coord(200.0).unwrap();
+    let px = remap(AlignAxis::X, &br).coord(200.0).unwrap();
     assert!((px - 200.0).abs() < 1e-6, "single-segment remap must be identity; got {px}");
 }
 
@@ -401,7 +401,7 @@ fn coord_pixel_in_gap_returns_none() {
     let br = two_segment_break();
     // Pixel 200 maps back to data value 50, which falls inside the gap [40, 60].
     assert!(
-        remap("x", &br).coord(200.0).is_none(),
+        remap(AlignAxis::X, &br).coord(200.0).is_none(),
         "a pixel that reverse-maps into the gap must return None"
     );
 }
@@ -409,7 +409,7 @@ fn coord_pixel_in_gap_returns_none() {
 #[test]
 fn coord_nan_pixel_returns_none() {
     let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
-    assert!(remap("x", &br).coord(f64::NAN).is_none());
+    assert!(remap(AlignAxis::X, &br).coord(f64::NAN).is_none());
 }
 
 /// `BREAK_HIDDEN` is poison (#230-9): a pixel already parked at the
@@ -425,7 +425,7 @@ fn coord_nan_pixel_returns_none() {
 fn coord_of_break_hidden_pixel_stays_hidden_never_clamped_into_domain() {
     let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
     assert!(
-        remap("x", &br).coord(BREAK_HIDDEN).is_none(),
+        remap(AlignAxis::X, &br).coord(BREAK_HIDDEN).is_none(),
         "a BREAK_HIDDEN pixel must reverse-map to nothing, not clamp to a domain edge"
     );
 
@@ -435,7 +435,7 @@ fn coord_of_break_hidden_pixel_stays_hidden_never_clamped_into_domain() {
     // the precise shape of the pre-fix resurrection.
     let two_seg = two_segment_break();
     assert!(
-        remap("x", &two_seg).coord(BREAK_HIDDEN).is_none(),
+        remap(AlignAxis::X, &two_seg).coord(BREAK_HIDDEN).is_none(),
         "a BREAK_HIDDEN pixel must stay hidden across a real break's segments too"
     );
 }
@@ -448,7 +448,7 @@ fn coord_of_break_hidden_pixel_stays_hidden_never_clamped_into_domain() {
 #[test]
 fn data_at_of_break_hidden_pixel_is_never_a_finite_domain_value() {
     let br = two_segment_break();
-    let remap = remap("x", &br);
+    let remap = remap(AlignAxis::X, &br);
     assert!(
         remap.data_at(BREAK_HIDDEN).is_nan(),
         "BREAK_HIDDEN must not reverse-map to a finite data value"
@@ -459,7 +459,7 @@ fn data_at_of_break_hidden_pixel_is_never_a_finite_domain_value() {
 fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
     let br = two_segment_break();
     let mut node = SceneNode::Circle { cx: 200.0, cy: 100.0, r: 4.0, style: fill_stroke() };
-    remap("x", &br).remap_node(&mut node);
+    remap(AlignAxis::X, &br).remap_node(&mut node);
     let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
     assert_eq!(cx, BREAK_HIDDEN, "a mark inside the break gap must be hidden off-screen");
 }
@@ -476,7 +476,7 @@ fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
 fn remap_node_circle_moves_to_compressed_pixel_across_a_gap() {
     let br = two_segment_break();
     let mut node = SceneNode::Circle { cx: 110.0, cy: 100.0, r: 4.0, style: fill_stroke() };
-    remap("x", &br).remap_node(&mut node);
+    remap(AlignAxis::X, &br).remap_node(&mut node);
     let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
     assert!(
         (cx - 122.0).abs() < 1e-6,
@@ -493,7 +493,7 @@ fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
         style: fill_stroke(),
         closed: false,
     };
-    remap("x", &br).remap_node(&mut on_x);
+    remap(AlignAxis::X, &br).remap_node(&mut on_x);
     let SceneNode::Path { commands, .. } = &on_x else { panic!() };
     let PathCmd::HLineTo { x } = commands[0] else { panic!() };
     assert!(
@@ -506,7 +506,7 @@ fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
         style: fill_stroke(),
         closed: false,
     };
-    remap("y", &br).remap_node(&mut on_y);
+    remap(AlignAxis::Y, &br).remap_node(&mut on_y);
     let SceneNode::Path { commands, .. } = &on_y else { panic!() };
     let PathCmd::HLineTo { x } = commands[0] else { panic!() };
     assert_eq!(x, 110.0, "HLineTo.x must NOT be touched when axis == y");
@@ -520,7 +520,7 @@ fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
         style: fill_stroke(),
         closed: false,
     };
-    remap("y", &br).remap_node(&mut on_y);
+    remap(AlignAxis::Y, &br).remap_node(&mut on_y);
     let SceneNode::Path { commands, .. } = &on_y else { panic!() };
     let PathCmd::VLineTo { y } = commands[0] else { panic!() };
     assert!(
@@ -533,7 +533,7 @@ fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
         style: fill_stroke(),
         closed: false,
     };
-    remap("x", &br).remap_node(&mut on_x);
+    remap(AlignAxis::X, &br).remap_node(&mut on_x);
     let SceneNode::Path { commands, .. } = &on_x else { panic!() };
     let PathCmd::VLineTo { y } = commands[0] else { panic!() };
     assert_eq!(y, 110.0, "VLineTo.y must NOT be touched when axis == x");
@@ -550,7 +550,7 @@ fn guide_break() -> BreakResult {
 }
 
 fn guide_remap(br: &BreakResult) -> BreakRemap<'_> {
-    BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), br)
+    BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), br)
 }
 
 #[test]
@@ -661,7 +661,7 @@ fn multi_gap_extent_yields_one_piece_per_visible_segment() {
         (400.0, 0.0),
         12.0,
     );
-    let remap = BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), &br);
+    let remap = BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), &br);
     assert_eq!(remap.clip_extent(400.0, 0.0).len(), 3);
 }
 
@@ -798,7 +798,7 @@ fn corner_radius_split_rect_on_x_axis_squares_the_cut_edge() {
     // Domain [0, 1000] on x pixels 0 -> 400 (increasing with data, unlike
     // the Y guide fixture), gap (150, 850), same 12px indicator.
     let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (0.0, 400.0), 12.0);
-    let remap = BreakRemap::new("x", (0.0, 1000.0), (0.0, 400.0), &result);
+    let remap = BreakRemap::new(AlignAxis::X, (0.0, 1000.0), (0.0, 400.0), &result);
     // A rect from data 0 (pixel 0) to data 900 (pixel 360), like the Y
     // case rotated 90 degrees.
     let node = SceneNode::Rect {
@@ -916,7 +916,7 @@ fn corner_radius_fully_cut_middle_piece_stays_a_plain_rect_with_zero_radius() {
         (400.0, 0.0),
         12.0,
     );
-    let remap = BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), &br);
+    let remap = BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), &br);
     // Data 0..900, same shape as the guide's own worked example.
     let node = SceneNode::Rect {
         x: 10.0,
@@ -1404,7 +1404,7 @@ fn rug_dash_below_the_data_floor_survives_the_break() {
 #[test]
 fn measuring_a_glyph_rect_does_not_perturb_its_size() {
     let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
-    let remap = remap("y", &br);
+    let remap = remap(AlignAxis::Y, &br);
     let mut rect = SceneNode::Rect {
         x: 1.0,
         y: 100.3,
@@ -1705,7 +1705,7 @@ fn one_edge_spanning_two_gaps_emits_a_piece_per_segment_it_traverses() {
         (400.0, 0.0),
         12.0,
     );
-    let remap = BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), &br);
+    let remap = BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), &br);
     // One straight line from data 0 (px 400) to data 1000 (px 0).
     let split = remap.split_nodes(vec![SceneNode::Line {
         x1: 0.0,
@@ -2141,7 +2141,7 @@ fn a_split_realigns_its_sidecars_through_the_clip_machinery() {
 fn a_break_with_no_effective_gap_leaves_a_polyline_untouched() {
     let br = one_segment_break(0.0, 1000.0, 400.0, 0.0);
     let source = polyline(vec![(0.0, 400.0), (10.0, 200.0), (20.0, 40.0)]);
-    let split = BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), &br)
+    let split = BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), &br)
         .split_nodes(vec![source.clone()]);
     assert_eq!(split.nodes, vec![source], "no gap, no movement, no re-spelling");
     assert!(!split.is_reindexed(), "and no sidecar is disturbed");

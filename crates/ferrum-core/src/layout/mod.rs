@@ -2,13 +2,13 @@
 //! pixel rectangles for panels, axes, legend. No I/O, no rendering, no data
 //! values touched. See docs/superpowers/specs/2026-05-09-layout-engine-design.md.
 
-pub(crate) mod geometry;
-pub(crate) mod text_metrics;
-pub(crate) mod panel;
-pub(crate) mod facet;
 pub(crate) mod axis;
-pub(crate) mod legend;
 pub(crate) mod binding;
+pub(crate) mod facet;
+pub(crate) mod geometry;
+pub(crate) mod legend;
+pub(crate) mod panel;
+pub(crate) mod text_metrics;
 
 // Spec §6.1 constants.
 pub const LABEL_OVERLAP_TOLERANCE: f64 = 0.10;
@@ -25,17 +25,16 @@ pub(crate) const FONT_SHRINK_FACTOR: f64 = 0.82;
 use serde::{Deserialize, Serialize};
 
 pub use self::axis::{
-    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelGapPolicy, LabelOverlap,
-    TickLayout, TickProjection,
+    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelBandCtx, LabelGapPolicy,
+    LabelOverlap, TickLayout, TickProjection,
 };
-pub(crate) use self::axis::AxisStyleOverrides;
+pub(crate) use self::axis::{AxisStyleOverrides, Claimed, LabelFormat};
 pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
-    ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
-    AuxLegendInput, LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides,
-    LegendStyleOpts, LegendSuppression, ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry,
-    SymbolKind,
+    AuxLegendInput, ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
+    LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides, LegendStyleOpts,
+    LegendSuppression, ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -167,7 +166,9 @@ pub struct ChartTitleLayout {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutWarning {
-    PanelCollapsed { panel_index: usize },
+    PanelCollapsed {
+        panel_index: usize,
+    },
     /// `axis` is a truthful identity, but its NAMESPACE depends on
     /// `secondary_slot`: when `None`, `axis` is the index this axis was (or
     /// will be) pushed to in the shared `axis_layouts` stream (x and primary-y
@@ -196,19 +197,26 @@ pub enum LayoutWarning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secondary_slot: Option<usize>,
     },
-    LegendOverflowed { entries_dropped: u32 },
+    LegendOverflowed {
+        entries_dropped: u32,
+    },
     /// One or more facet panels were dropped because the explicit grid
     /// `nrows × ncols` is smaller than the number of facet groups.
     /// `count` is the number of dropped panels; `keys` identifies them by
     /// their facet-group key string (e.g. `"col_cat=c2"`).
-    PanelsDropped { count: u32, keys: Vec<String> },
+    PanelsDropped {
+        count: u32,
+        keys: Vec<String>,
+    },
     /// One or more grid-facet cells in the observed cartesian product of
     /// distinct(row) × distinct(col) values contain no data rows.
     /// `keys` is one entry per empty cell, formatted as
     /// `"<col_field>=<col_val>, <row_field>=<row_val>"` so the user can
     /// identify the missing data combination.  One aggregated warning is
     /// emitted listing all empty cells (spec §4/§11).
-    EmptyPartitions { keys: Vec<String> },
+    EmptyPartitions {
+        keys: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for LayoutWarning {
@@ -224,11 +232,19 @@ impl std::fmt::Display for LayoutWarning {
                 f,
                 "panel {panel_index} collapsed to zero size and was not drawn"
             ),
-            LayoutWarning::LabelsElided { axis, count, secondary_slot: None } => write!(
+            LayoutWarning::LabelsElided {
+                axis,
+                count,
+                secondary_slot: None,
+            } => write!(
                 f,
                 "{count} tick label(s) on axis {axis} were elided to avoid overlap"
             ),
-            LayoutWarning::LabelsElided { axis, count, secondary_slot: Some(_) } => write!(
+            LayoutWarning::LabelsElided {
+                axis,
+                count,
+                secondary_slot: Some(_),
+            } => write!(
                 f,
                 "{count} tick label(s) on secondary y-axis {axis} were elided to avoid overlap"
             ),
@@ -253,7 +269,10 @@ impl std::fmt::Display for LayoutWarning {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutError {
-    InvalidViewport { width: f64, height: f64 },
+    InvalidViewport {
+        width: f64,
+        height: f64,
+    },
     InvalidFacetSpec(String),
     /// `padding` and `side` are the CALLER'S actual value and the specific
     /// side that overflowed (D10, spec §4.7 — repro:
@@ -264,23 +283,33 @@ pub enum LayoutError {
     /// top/bottom), so a caller who only overrode one side always sees that
     /// side named even when the other side of the same axis still carries
     /// the theme default.
-    PaddingExceedsViewport { padding: f64, side: &'static str, viewport_dim: f64 },
+    PaddingExceedsViewport {
+        padding: f64,
+        side: &'static str,
+        viewport_dim: f64,
+    },
     EmptyFacetGroups,
 }
 
 impl std::fmt::Display for LayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LayoutError::InvalidViewport { width, height } =>
-                write!(f, "invalid viewport: width={width}, height={height} (both must be > 0)"),
-            LayoutError::InvalidFacetSpec(s) =>
-                write!(f, "invalid facet spec: {s}"),
-            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => write!(
+            LayoutError::InvalidViewport { width, height } => write!(
+                f,
+                "invalid viewport: width={width}, height={height} (both must be > 0)"
+            ),
+            LayoutError::InvalidFacetSpec(s) => write!(f, "invalid facet spec: {s}"),
+            LayoutError::PaddingExceedsViewport {
+                padding,
+                side,
+                viewport_dim,
+            } => write!(
                 f,
                 "padding {side}={padding} exceeds viewport dimension {viewport_dim}"
             ),
-            LayoutError::EmptyFacetGroups =>
-                write!(f, "facet specified but facet_groups input is empty"),
+            LayoutError::EmptyFacetGroups => {
+                write!(f, "facet specified but facet_groups input is empty")
+            }
         }
     }
 }
@@ -415,15 +444,15 @@ pub struct ThemeColors {
 
 impl Default for ThemeColors {
     fn default() -> Self {
-        let mark_blue  = palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF);
-        let text_fg    = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
+        let mark_blue = palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF);
+        let text_fg = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
         let label_gray = palette::Srgba::new(0x6B, 0x72, 0x80, 0xFF);
-        let grid_warm  = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
+        let grid_warm = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
         // Minor gridlines are lighter than major by default (derived tint of the
         // warm grid color). Overridable via `minor_grid_color`.
         let grid_minor = palette::Srgba::new(0xE8, 0xE6, 0xE4, 0xFF);
-        let bg_cream   = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
-        let strip_bg   = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
+        let bg_cream = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
+        let strip_bg = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
         Self {
             mark_color: mark_blue,
             axis_line_color: label_gray,
@@ -651,9 +680,7 @@ fn chart_title_band_height(
     let resolved_font_size = title_spec
         .font_size
         .unwrap_or(theme.typography.title_font_size);
-    let resolved_offset = title_spec
-        .offset
-        .unwrap_or(theme.typography.title_offset);
+    let resolved_offset = title_spec.offset.unwrap_or(theme.typography.title_offset);
     let title_line_h = metrics.line_height(resolved_font_size);
     let subtitle_font_size = title_spec
         .subtitle_font_size
@@ -686,9 +713,9 @@ fn reserve_chart_title(
         .unwrap_or(theme.typography.title_font_size);
     let resolved_anchor = match title_spec.anchor.as_deref() {
         Some("middle") => TextAnchor::Middle,
-        Some("end")    => TextAnchor::End,
-        Some(_)        => TextAnchor::Start,
-        None           => theme.typography.title_anchor,
+        Some("end") => TextAnchor::End,
+        Some(_) => TextAnchor::Start,
+        None => theme.typography.title_anchor,
     };
     let title_line_h = metrics.line_height(resolved_font_size);
     let subtitle_font_size = title_spec
@@ -763,21 +790,26 @@ fn reserve_legends(
     // attempted layout" skip (a suppressed channel raises no overflow warning
     // below either).
     let (color_entries, color_colorbar): (&[LegendEntry], Option<&ColorbarInput>) =
-        if suppression.color { (&[], None) } else { (legend_entries, colorbar) };
-    let (legend_layout, inner_after_legend, effective_label_font_size) = legend::layout_color_legend(
-        inner,
-        theme.legend.legend_orient,
-        theme.typography.label_font_size,
-        theme.legend.legend_direction,
-        theme.typography.legend_title_font_size,
-        theme.legend.legend_columns,
-        theme.padding.column_padding,
-        color_entries,
-        legend_title.as_deref(),
-        color_colorbar,
-        metrics,
-        legend_overrides,
-    );
+        if suppression.color {
+            (&[], None)
+        } else {
+            (legend_entries, colorbar)
+        };
+    let (legend_layout, inner_after_legend, effective_label_font_size) =
+        legend::layout_color_legend(
+            inner,
+            theme.legend.legend_orient,
+            theme.typography.label_font_size,
+            theme.legend.legend_direction,
+            theme.typography.legend_title_font_size,
+            theme.legend.legend_columns,
+            theme.padding.column_padding,
+            color_entries,
+            legend_title.as_deref(),
+            color_colorbar,
+            metrics,
+            legend_overrides,
+        );
     // A suppressed color legend never attempted layout, so nothing "dropped"
     // — a suppressed channel must not raise the unrelated overflow warning.
     let legend_dropped = if suppression.color {
@@ -785,8 +817,7 @@ fn reserve_legends(
     } else {
         legend_entries
             .len()
-            .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
-            as u32
+            .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len())) as u32
     };
 
     // 3b. Auxiliary (size / shape) legends, stacked beneath the color legend in
@@ -821,7 +852,12 @@ fn reserve_legends(
         theme.padding.column_padding,
     );
 
-    (legend_layout, aux_legends, inner_after_legend, legend_dropped)
+    (
+        legend_layout,
+        aux_legends,
+        inner_after_legend,
+        legend_dropped,
+    )
 }
 
 /// 400 stage 3 — reserve the x/y axis margin bands off `inner_after_legend`,
@@ -854,7 +890,8 @@ fn reserve_axis_bands(
     let y_label_font_size = axes
         .y
         .overrides
-        .label_font_size
+        .labels
+        .font_size
         .unwrap_or(theme.typography.label_font_size);
     // Drawn gate (#97, spec §4.1 amended 2026-08-27; widened by #182, which
     // closes #94): `axes.show_y` answers "is this Cartesian y axis drawn" —
@@ -868,7 +905,11 @@ fn reserve_axis_bands(
     // either), so only an axis that both is shown AND draws its labels reserves
     // a band at all.
     let y_label_band = axis::compute_y_label_band_width(
-        &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
+        &axes.y,
+        y_label_font_size,
+        metrics,
+        axes.y.tick_size(theme),
+        axes.show_y,
     );
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
@@ -879,11 +920,6 @@ fn reserve_axis_bands(
         let estimated_plot_w = inner_after_legend.w - y_label_band - y_title_gutter;
         let n_labels = axes.x.tick_labels.len().max(1);
         let estimated_slot_w = estimated_plot_w / n_labels as f64;
-        let x_label_font_size = axes
-            .x
-            .overrides
-            .label_font_size
-            .unwrap_or(theme.typography.label_font_size);
         // Drawn gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
         // widened by #182, which closes #94): `axes.show_x` already gates this
         // whole branch to `0.0` above (`.axis(x=False)`, or a projected coord
@@ -893,14 +929,11 @@ fn reserve_axis_bands(
         // exactly, see `estimate_x_label_band`'s doc.
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
-            x_label_font_size,
-            axes.x.overrides.label_angle,
-            metrics,
+            axes.x.overrides.labels.angle,
             estimated_slot_w,
-            theme.label_gap,
-            axes.x.overrides.label_padding,
-            axes.x.tick_size(theme),
+            axes.x.overrides.labels.padding,
             axes.x.show_labels(),
+            &LabelBandCtx::for_axis(&axes.x, theme, metrics),
         )
     } else {
         0.0
@@ -926,13 +959,13 @@ fn reserve_axis_bands(
     // dynamic value unchanged, so default output is byte-identical.
     let x_band = clamp_axis_band(
         x_label_band + x_title_gutter,
-        axes.x.overrides.min_band,
-        axes.x.overrides.max_band,
+        axes.x.overrides.placement.min_band,
+        axes.x.overrides.placement.max_band,
     );
     let y_band = clamp_axis_band(
         y_label_band + y_title_gutter,
-        axes.y.overrides.min_band,
-        axes.y.overrides.max_band,
+        axes.y.overrides.placement.min_band,
+        axes.y.overrides.placement.max_band,
     );
 
     // Secondary y-axis margin bands (secondary-y-axis, GH #52): one right-side
@@ -954,7 +987,8 @@ fn reserve_axis_bands(
         .map(|a| {
             let label_font_size = a
                 .overrides
-                .label_font_size
+                .labels
+                .font_size
                 .unwrap_or(theme.typography.label_font_size);
             // Drawn gate (#97/#182, same discipline as the primary y band
             // above): secondary y-axes have no `.axis(show=False)`-style
@@ -980,7 +1014,11 @@ fn reserve_axis_bands(
             // that plan's call, not this reservation's. Reachable only by
             // combining `CoordPolar`/`CoordGeo` with an independent-y layer.
             let label_band = axis::compute_y_label_band_width(
-                a, label_font_size, metrics, a.tick_size(theme), true,
+                a,
+                label_font_size,
+                metrics,
+                a.tick_size(theme),
+                true,
             );
             let title_gutter = axis::compute_y_title_width(
                 a,
@@ -989,7 +1027,11 @@ fn reserve_axis_bands(
                 metrics,
                 true,
             );
-            clamp_axis_band(label_band + title_gutter, a.overrides.min_band, a.overrides.max_band)
+            clamp_axis_band(
+                label_band + title_gutter,
+                a.overrides.placement.min_band,
+                a.overrides.placement.max_band,
+            )
         })
         .collect();
     let secondary_y_total: f64 = secondary_y_bands.iter().sum();
@@ -1022,7 +1064,10 @@ pub(crate) fn base_padding_insets(theme: &ThemeInputs) -> Inset {
     Inset {
         top: theme.padding.padding_top.unwrap_or(theme.padding.padding),
         right: theme.padding.padding_right.unwrap_or(theme.padding.padding),
-        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
+        bottom: theme
+            .padding
+            .padding_bottom
+            .unwrap_or(theme.padding.padding),
         left: theme.padding.padding_left.unwrap_or(theme.padding.padding),
     }
 }
@@ -1134,15 +1179,27 @@ fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMet
     let y_label_font_size = axes
         .y
         .overrides
-        .label_font_size
+        .labels
+        .font_size
         .unwrap_or(theme.typography.label_font_size);
     let raw = axis::compute_y_label_band_width(
-        &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
+        &axes.y,
+        y_label_font_size,
+        metrics,
+        axes.y.tick_size(theme),
+        axes.show_y,
     ) + axis::compute_y_title_width(
-        &axes.y, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+        &axes.y,
+        theme.typography.title_font_size,
+        theme.padding.axis_title_padding,
+        metrics,
         axes.show_y,
     );
-    clamp_axis_band(raw, axes.y.overrides.min_band, axes.y.overrides.max_band)
+    clamp_axis_band(
+        raw,
+        axes.y.overrides.placement.min_band,
+        axes.y.overrides.placement.max_band,
+    )
 }
 
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
@@ -1205,32 +1262,37 @@ fn auto_padding_for_edge_ticks(
     let y_label_font_size = axes
         .y
         .overrides
-        .label_font_size
+        .labels
+        .font_size
         .unwrap_or(theme.typography.label_font_size);
     let y_gutter = clamped_y_gutter(theme, axes, metrics);
 
     let x_label_font_size = axes
         .x
         .overrides
-        .label_font_size
+        .labels
+        .font_size
         .unwrap_or(theme.typography.label_font_size);
-    let x_flat = axes.x.overrides.label_angle.is_none_or(|a| a == 0.0);
+    let x_flat = axes.x.overrides.labels.angle.is_none_or(|a| a == 0.0);
     let x_continuous = axes.x.tick_projection.is_some();
-    let (extra_left, extra_right) =
-        if axes.show_x && axes.x.show_labels() && x_continuous && x_flat {
-            match (axes.x.tick_labels.first(), axes.x.tick_labels.last()) {
-                (Some(first), Some(last)) => {
-                    let half_first = metrics.measure_width(first, x_label_font_size) / 2.0;
-                    let half_last = metrics.measure_width(last, x_label_font_size) / 2.0;
-                    let left_cushion = base_left + if y_on_right { 0.0 } else { y_gutter };
-                    let right_cushion = base_right + if y_on_right { y_gutter } else { 0.0 };
-                    ((half_first - left_cushion).max(0.0), (half_last - right_cushion).max(0.0))
-                }
-                _ => (0.0, 0.0),
+    let (extra_left, extra_right) = if axes.show_x && axes.x.show_labels() && x_continuous && x_flat
+    {
+        match (axes.x.tick_labels.first(), axes.x.tick_labels.last()) {
+            (Some(first), Some(last)) => {
+                let half_first = metrics.measure_width(first, x_label_font_size) / 2.0;
+                let half_last = metrics.measure_width(last, x_label_font_size) / 2.0;
+                let left_cushion = base_left + if y_on_right { 0.0 } else { y_gutter };
+                let right_cushion = base_right + if y_on_right { y_gutter } else { 0.0 };
+                (
+                    (half_first - left_cushion).max(0.0),
+                    (half_last - right_cushion).max(0.0),
+                )
             }
-        } else {
-            (0.0, 0.0)
-        };
+            _ => (0.0, 0.0),
+        }
+    } else {
+        (0.0, 0.0)
+    };
 
     // Top only: the bottom cushion is `base_bottom + x_label_band +
     // x_title_gutter`, and a shown, labeled x-axis's OWN band reservation
@@ -1242,9 +1304,12 @@ fn auto_padding_for_edge_ticks(
     // benefit. The top cushion (`base_top + the chart title band`, if any)
     // has no such guaranteed floor when there's no chart title, so it can
     // genuinely need a correction.
-    let y_flat = axes.y.overrides.label_angle.is_none_or(|a| a == 0.0);
+    let y_flat = axes.y.overrides.labels.angle.is_none_or(|a| a == 0.0);
     let y_continuous = axes.y.tick_projection.is_some();
-    let extra_top = if axes.show_y && axes.y.show_labels() && y_continuous && y_flat
+    let extra_top = if axes.show_y
+        && axes.y.show_labels()
+        && y_continuous
+        && y_flat
         && !axes.y.tick_labels.is_empty()
     {
         let half_line = metrics.line_height(y_label_font_size) / 2.0;
@@ -1254,7 +1319,12 @@ fn auto_padding_for_edge_ticks(
         0.0
     };
 
-    Inset { top: extra_top, right: extra_right, bottom: 0.0, left: extra_left }
+    Inset {
+        top: extra_top,
+        right: extra_right,
+        bottom: 0.0,
+        left: extra_left,
+    }
 }
 
 /// The minimal `(extra_low, extra_high)` pair of ADDITIONAL padding needed
@@ -1398,20 +1468,23 @@ fn auto_padding_for_axis_titles(
     metrics: &dyn TextMetrics,
     base: Inset,
 ) -> AxisTitleAutoPadding {
-    let (base_left, base_right, base_top, base_bottom) = (base.left, base.right, base.top, base.bottom);
+    let (base_left, base_right, base_top, base_bottom) =
+        (base.left, base.right, base.top, base.bottom);
 
     let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
     let y_gutter = clamped_y_gutter(theme, axes, metrics);
     let plot_w = (viewport.width - base_left - base_right - y_gutter).max(0.0);
 
-    let (extra_left, extra_right, x_infeasible) = match (axes.show_x, axes.x.title.as_deref()) {
+    let (extra_left, extra_right, x_infeasible) = match (axes.show_x, axes.x.title.get().as_deref())
+    {
         (true, Some(text)) => {
             let plot_x = base_left + if y_on_right { 0.0 } else { y_gutter };
             let baseline_center = plot_x + plot_w / 2.0;
             let font_size = axes
                 .x
                 .overrides
-                .title_font_size
+                .title
+                .font_size
                 .unwrap_or(theme.typography.title_font_size);
             let half_w = metrics.measure_width(text, font_size) / 2.0;
             let (l, r) = recentering_padding(baseline_center, half_w, viewport.width);
@@ -1420,37 +1493,33 @@ fn auto_padding_for_axis_titles(
         _ => (0.0, 0.0, false),
     };
 
-    let (extra_top, extra_bottom, y_infeasible) = match (axes.show_y, axes.y.title.as_deref()) {
+    let (extra_top, extra_bottom, y_infeasible) = match (axes.show_y, axes.y.title.get().as_deref())
+    {
         (true, Some(text)) => {
-            let x_label_font_size = axes
-                .x
-                .overrides
-                .label_font_size
-                .unwrap_or(theme.typography.label_font_size);
             let n_labels = axes.x.tick_labels.len().max(1);
             let x_label_band = if axes.show_x {
                 axis::estimate_x_label_band(
                     &axes.x.tick_labels,
-                    x_label_font_size,
-                    axes.x.overrides.label_angle,
-                    metrics,
+                    axes.x.overrides.labels.angle,
                     plot_w / n_labels as f64,
-                    theme.label_gap,
-                    axes.x.overrides.label_padding,
-                    axes.x.tick_size(theme),
+                    axes.x.overrides.labels.padding,
                     axes.x.show_labels(),
+                    &LabelBandCtx::for_axis(&axes.x, theme, metrics),
                 )
             } else {
                 0.0
             };
             let x_title_gutter = axis::compute_x_title_width(
-                &axes.x, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+                &axes.x,
+                theme.typography.title_font_size,
+                theme.padding.axis_title_padding,
+                metrics,
                 axes.show_x,
             );
             let x_band = clamp_axis_band(
                 x_label_band + x_title_gutter,
-                axes.x.overrides.min_band,
-                axes.x.overrides.max_band,
+                axes.x.overrides.placement.min_band,
+                axes.x.overrides.placement.max_band,
             );
             let chart_title_h = chart_title_band_height(spec, theme, metrics);
             let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
@@ -1461,7 +1530,8 @@ fn auto_padding_for_axis_titles(
             let font_size = axes
                 .y
                 .overrides
-                .title_font_size
+                .title
+                .font_size
                 .unwrap_or(theme.typography.title_font_size);
             // The y-axis title renders rotated -90°, so its measured WIDTH
             // (unrotated) is the VERTICAL extent it actually occupies.
@@ -1473,7 +1543,12 @@ fn auto_padding_for_axis_titles(
     };
 
     AxisTitleAutoPadding {
-        inset: Inset { top: extra_top, right: extra_right, bottom: extra_bottom, left: extra_left },
+        inset: Inset {
+            top: extra_top,
+            right: extra_right,
+            bottom: extra_bottom,
+            left: extra_left,
+        },
         x_infeasible,
         y_infeasible,
     }
@@ -1563,7 +1638,10 @@ fn split_panels(
                 .iter()
                 .map(|g| format!("{}={}", g.key.field, g.key.value))
                 .collect();
-            warnings.push(LayoutWarning::PanelsDropped { count: dropped, keys: dropped_keys });
+            warnings.push(LayoutWarning::PanelsDropped {
+                count: dropped,
+                keys: dropped_keys,
+            });
         }
         // Detect empty cells in the observed cartesian product of distinct
         // row × col values (two-way grid mode only). `group_rows_by_two_fields`
@@ -1585,7 +1663,9 @@ fn split_panels(
                     // Format: "<col_field>=<col_val>, <row_field>=<row_val>"
                     // Both field names and values are present so the user can
                     // identify which data combination is missing.
-                    let row_part = g.row_key.as_ref()
+                    let row_part = g
+                        .row_key
+                        .as_ref()
                         .map(|rk| format!(", {}={}", rk.field, rk.value))
                         .unwrap_or_default();
                     format!("{}={}{}", g.key.field, g.key.value, row_part)
@@ -1640,7 +1720,12 @@ fn layout_panel_axes(
     metrics: &dyn TextMetrics,
     strip_band: f64,
     secondary_y_bands: &[f64],
-) -> (Vec<PanelLayout>, Vec<AxisLayout>, Vec<AxisLayout>, Vec<LayoutWarning>) {
+) -> (
+    Vec<PanelLayout>,
+    Vec<AxisLayout>,
+    Vec<AxisLayout>,
+    Vec<LayoutWarning>,
+) {
     let mut panels: Vec<PanelLayout> = Vec::new();
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
     // Secondary y-axis layouts, one per `independent_y` layer per panel
@@ -1653,16 +1738,28 @@ fn layout_panel_axes(
 
     // 840: column-strip and row-header-strip bands are the same shared size; the
     // column strip applies whenever faceting, the row strip only in grid mode.
-    let strip_band_height = if spec.facet.is_some() { strip_band } else { 0.0 };
+    let strip_band_height = if spec.facet.is_some() {
+        strip_band
+    } else {
+        0.0
+    };
 
     // Compute the maximum row index so non-bottom panels can suppress the
     // x-axis title (only the bottom row needs it — duplicating it in every
     // inter-row gutter is visually noisy).
-    let max_row = panel_rects.iter().map(|(r, _, _, _, _)| *r).max().unwrap_or(0);
+    let max_row = panel_rects
+        .iter()
+        .map(|(r, _, _, _, _)| *r)
+        .max()
+        .unwrap_or(0);
     // Compute the minimum column index so non-leftmost panels can suppress the
     // y-axis title (only the leftmost column needs it — duplicating it on every
     // panel in a multi-column faceted chart causes visual overlap).
-    let min_col = panel_rects.iter().map(|(_, c, _, _, _)| *c).min().unwrap_or(0);
+    let min_col = panel_rects
+        .iter()
+        .map(|(_, c, _, _, _)| *c)
+        .min()
+        .unwrap_or(0);
 
     // Width of the row-header strip on the right side of the grid region (grid
     // mode only). Mirrored from the reservation made when building panel_rects.
@@ -1675,14 +1772,21 @@ fn layout_panel_axes(
     // column so each row-header strip is emitted once, on the right edge.
     // Two-way grid facets always form a proper rectangular grid, so max_col is
     // uniform across all rows.
-    let max_col = panel_rects.iter().map(|(_, c, _, _, _)| *c).max().unwrap_or(0);
+    let max_col = panel_rects
+        .iter()
+        .map(|(_, c, _, _, _)| *c)
+        .max()
+        .unwrap_or(0);
     // Track which grid rows have already had their row-header strip emitted. In
     // a 3×3 grid, row_val "r1" appears for three panels (cols c1, c2, c3); we
     // only want one row-header strip per grid row (the rightmost col).
-    let mut emitted_row_strips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut emitted_row_strips: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
-    for (panel_index, (row, col, mut rect, facet_key, row_facet_key)) in panel_rects.into_iter().enumerate() {
+    for (panel_index, (row, col, mut rect, facet_key, row_facet_key)) in
+        panel_rects.into_iter().enumerate()
+    {
         if rect.w <= MIN_PANEL_DIM || rect.h <= MIN_PANEL_DIM {
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
             rect = Rect::ZERO;
@@ -1760,12 +1864,22 @@ fn layout_panel_axes(
                     // Too wide — shrink width.
                     let new_w = rect.h * ratio;
                     let dx = (rect.w - new_w) / 2.0;
-                    rect = Rect { x: rect.x + dx, y: rect.y, w: new_w, h: rect.h };
+                    rect = Rect {
+                        x: rect.x + dx,
+                        y: rect.y,
+                        w: new_w,
+                        h: rect.h,
+                    };
                 } else {
                     // Too tall — shrink height.
                     let new_h = rect.w / ratio;
                     let dy = (rect.h - new_h) / 2.0;
-                    rect = Rect { x: rect.x, y: rect.y + dy, w: rect.w, h: new_h };
+                    rect = Rect {
+                        x: rect.x,
+                        y: rect.y + dy,
+                        w: rect.w,
+                        h: new_h,
+                    };
                 }
             }
         }
@@ -1793,14 +1907,15 @@ fn layout_panel_axes(
                 // only the leftmost column's title is needed.
                 let y_input = if col > min_col && spec.facet.is_some() {
                     let mut modified = axes.y.clone();
-                    modified.title = None;
+                    modified.title.set(None);
                     modified
                 } else {
                     axes.y.clone()
                 };
                 let y_label_fs = y_input
                     .overrides
-                    .label_font_size
+                    .labels
+                    .font_size
                     .unwrap_or(theme.typography.label_font_size);
                 let (y_axis, ywarn) = axis::layout_y_axis(
                     &y_input,
@@ -1839,11 +1954,13 @@ fn layout_panel_axes(
             for (slot_idx, secondary_input) in axes.secondary_y.iter().enumerate() {
                 let mut sec_input = secondary_input.clone();
                 sec_input.orient = AxisOrient::Right;
-                let existing_translate = sec_input.overrides.translate.unwrap_or(0.0);
-                sec_input.overrides.translate = Some(cumulative_offset + existing_translate);
+                let existing_translate = sec_input.overrides.placement.translate.unwrap_or(0.0);
+                sec_input.overrides.placement.translate =
+                    Some(cumulative_offset + existing_translate);
                 let sec_label_fs = sec_input
                     .overrides
-                    .label_font_size
+                    .labels
+                    .font_size
                     .unwrap_or(theme.typography.label_font_size);
                 let (sec_axis, sec_warn) = axis::layout_y_axis(
                     &sec_input,
@@ -1884,25 +2001,18 @@ fn layout_panel_axes(
                 // inter-row gutter — only the bottom row's title is needed.
                 let x_input = if row < max_row && spec.facet.is_some() {
                     let mut modified = axes.x.clone();
-                    modified.title = None;
+                    modified.title.set(None);
                     modified
                 } else {
                     axes.x.clone()
                 };
-                let x_label_fs = x_input
-                    .overrides
-                    .label_font_size
-                    .unwrap_or(theme.typography.label_font_size);
                 let (x_axis, xwarn) = axis::layout_x_axis(
                     &x_input,
                     rect,
                     panel_index,
-                    x_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
-                    theme.label_gap,
-                    x_input.tick_size(theme),
-                    metrics,
+                    &LabelBandCtx::for_axis(&x_input, theme, metrics),
                 );
                 if let Some(axis::AxisLabelWarning::LabelsElided { count }) = xwarn {
                     warnings.push(LayoutWarning::LabelsElided {
@@ -1960,7 +2070,9 @@ pub fn compute_layout(
                 return Err(LayoutError::InvalidFacetSpec("ncols must be > 0".into()));
             }
             FacetMode::Grid { nrows, ncols } if *nrows == 0 || *ncols == 0 => {
-                return Err(LayoutError::InvalidFacetSpec("nrows and ncols must be > 0".into()));
+                return Err(LayoutError::InvalidFacetSpec(
+                    "nrows and ncols must be > 0".into(),
+                ));
             }
             _ => {}
         }
@@ -2016,11 +2128,20 @@ pub fn compute_layout(
             bottom: base.bottom + ticks.bottom,
             left: base.left + ticks.left,
         };
-        let titles = auto_padding_for_axis_titles(spec, theme, viewport, axes, metrics, base_after_ticks);
+        let titles =
+            auto_padding_for_axis_titles(spec, theme, viewport, axes, metrics, base_after_ticks);
         let ticks = Inset {
             top: if titles.y_infeasible { 0.0 } else { ticks.top },
-            right: if titles.x_infeasible { 0.0 } else { ticks.right },
-            bottom: if titles.y_infeasible { 0.0 } else { ticks.bottom },
+            right: if titles.x_infeasible {
+                0.0
+            } else {
+                ticks.right
+            },
+            bottom: if titles.y_infeasible {
+                0.0
+            } else {
+                ticks.bottom
+            },
             left: if titles.x_infeasible { 0.0 } else { ticks.left },
         };
         let combined = Inset {
@@ -2030,20 +2151,39 @@ pub fn compute_layout(
             left: ticks.left + titles.inset.left,
         };
         let (left, right) = cap_auto_contribution(
-            base.left, base.right, combined.left, combined.right, viewport.width,
+            base.left,
+            base.right,
+            combined.left,
+            combined.right,
+            viewport.width,
         );
         let (top, bottom) = cap_auto_contribution(
-            base.top, base.bottom, combined.top, combined.bottom, viewport.height,
+            base.top,
+            base.bottom,
+            combined.top,
+            combined.bottom,
+            viewport.height,
         );
-        Inset { top, right, bottom, left }
+        Inset {
+            top,
+            right,
+            bottom,
+            left,
+        }
     } else {
         Inset::default()
     };
     let inset = Inset {
-        top:    theme.padding.padding_top.unwrap_or(base.top + extra.top),
-        right:  theme.padding.padding_right.unwrap_or(base.right + extra.right),
-        bottom: theme.padding.padding_bottom.unwrap_or(base.bottom + extra.bottom),
-        left:   theme.padding.padding_left.unwrap_or(base.left + extra.left),
+        top: theme.padding.padding_top.unwrap_or(base.top + extra.top),
+        right: theme
+            .padding
+            .padding_right
+            .unwrap_or(base.right + extra.right),
+        bottom: theme
+            .padding
+            .padding_bottom
+            .unwrap_or(base.bottom + extra.bottom),
+        left: theme.padding.padding_left.unwrap_or(base.left + extra.left),
     };
     let inner = viewport_rect.shrink(inset);
     // Captured before the chrome reservations below shadow `inner`: this is
@@ -2141,7 +2281,13 @@ pub fn compute_layout(
         strip_band,
     );
     let (panels, axis_layouts, secondary_y_axes, panel_warnings) = layout_panel_axes(
-        panel_rects, spec, axes, theme, metrics, strip_band, &secondary_y_bands,
+        panel_rects,
+        spec,
+        axes,
+        theme,
+        metrics,
+        strip_band,
+        &secondary_y_bands,
     );
 
     // Assemble warnings in the original push order: legend overflow first, then
@@ -2149,7 +2295,9 @@ pub fn compute_layout(
     // (collapse / x-label elision).
     let mut warnings: Vec<LayoutWarning> = Vec::new();
     if legend_dropped > 0 {
-        warnings.push(LayoutWarning::LegendOverflowed { entries_dropped: legend_dropped });
+        warnings.push(LayoutWarning::LegendOverflowed {
+            entries_dropped: legend_dropped,
+        });
     }
     warnings.extend(facet_warnings);
     warnings.extend(panel_warnings);
@@ -2177,7 +2325,10 @@ mod tests {
     #[test]
     fn estimate_panel_pixel_size_subtracts_theme_padding_unfaceted() {
         let theme = ThemeInputs::default(); // padding.padding == 16.0 on every side
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         assert_eq!(
             estimate_panel_pixel_size(viewport, &theme, (1, 1)),
             (568, 368),
@@ -2188,7 +2339,10 @@ mod tests {
     #[test]
     fn estimate_panel_pixel_size_divides_by_grid_dims() {
         let theme = ThemeInputs::default();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let (w, h) = estimate_panel_pixel_size(viewport, &theme, (1, 1));
         let (fw, fh) = estimate_panel_pixel_size(viewport, &theme, (3, 2));
         assert_eq!(fw, ((w as f64) / 3.0).round() as u32);
@@ -2209,7 +2363,10 @@ mod tests {
         // complete without panicking before layout's own refusal fires.
         let mut theme = ThemeInputs::default();
         theme.padding.padding = 1000.0;
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         assert_eq!(estimate_panel_pixel_size(viewport, &theme, (1, 1)), (1, 1));
     }
 
@@ -2220,7 +2377,10 @@ mod tests {
         theme.padding.padding_right = Some(10.0);
         theme.padding.padding_top = Some(0.0);
         theme.padding.padding_bottom = Some(0.0);
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         assert_eq!(
             estimate_panel_pixel_size(viewport, &theme, (1, 1)),
             (540, 400),
@@ -2234,7 +2394,7 @@ mod tests {
     /// `compute_layout` tests that hand-build an `AxesInput` don't have to
     /// know about the `show_domain()`/`show_grid()` precondition those
     /// accessors now assert in debug builds. A test that DOES care overwrites
-    /// `input.overrides.show_domain`/`.show_grid` afterward, same as before.
+    /// `input.overrides.domain.show`/`.grid.show` afterward, same as before.
     fn axis_input(
         orient: AxisOrient,
         title: Option<String>,
@@ -2243,15 +2403,20 @@ mod tests {
     ) -> AxisInput {
         let new = AxisInput::new;
         let mut input = new(orient, title, tick_labels, label_angle);
-        input.overrides.show_domain = Some(true);
-        input.overrides.show_grid = Some(true);
+        input.overrides.domain.show = Some(true);
+        input.overrides.grid.show = Some(true);
         input
     }
 
     #[test]
     fn layout_result_round_trip_empty() {
         let r = LayoutResult {
-            viewport: Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 },
+            viewport: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 600.0,
+                h: 400.0,
+            },
             panels: vec![],
             axes: vec![],
             legend: None,
@@ -2277,11 +2442,24 @@ mod tests {
     fn layout_warning_round_trip_each_variant() {
         for w in [
             LayoutWarning::PanelCollapsed { panel_index: 2 },
-            LayoutWarning::LabelsElided { axis: 0, count: 5, secondary_slot: None },
-            LayoutWarning::LabelsElided { axis: 1, count: 2, secondary_slot: Some(1) },
+            LayoutWarning::LabelsElided {
+                axis: 0,
+                count: 5,
+                secondary_slot: None,
+            },
+            LayoutWarning::LabelsElided {
+                axis: 1,
+                count: 2,
+                secondary_slot: Some(1),
+            },
             LayoutWarning::LegendOverflowed { entries_dropped: 3 },
-            LayoutWarning::PanelsDropped { count: 1, keys: vec!["col_cat=c2".into()] },
-            LayoutWarning::EmptyPartitions { keys: vec!["col_cat=c2, row_cat=r2".into()] },
+            LayoutWarning::PanelsDropped {
+                count: 1,
+                keys: vec!["col_cat=c2".into()],
+            },
+            LayoutWarning::EmptyPartitions {
+                keys: vec!["col_cat=c2, row_cat=r2".into()],
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: LayoutWarning = serde_json::from_str(&json).unwrap();
@@ -2301,7 +2479,10 @@ mod tests {
     /// computed once via `strip_band_size` and reused at every strip site.
     #[test]
     fn strip_band_size_is_line_height_plus_padding_both_sides() {
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let mut theme = ThemeInputs::default();
         theme.sizes.strip_text_size = 12.0;
         theme.padding.strip_padding = 6.0;
@@ -2319,7 +2500,10 @@ mod tests {
     /// F-L01-04: a dimension title set -> `"{title}: {value}"` (spec §6.2).
     #[test]
     fn facet_strip_text_is_prefixed_when_title_set() {
-        assert_eq!(facet_strip_text(Some("Species"), "setosa"), "Species: setosa");
+        assert_eq!(
+            facet_strip_text(Some("Species"), "setosa"),
+            "Species: setosa"
+        );
     }
 
     fn minimal_chart_spec() -> ChartSpec {
@@ -2327,8 +2511,16 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
-                y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "a".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "b".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
                 color: None,
                 ..Default::default()
             },
@@ -2337,12 +2529,14 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        params: Vec::new(),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -2373,9 +2567,15 @@ mod tests {
     #[test]
     fn compute_layout_single_chart_no_facet_no_legend() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
@@ -2421,42 +2621,89 @@ mod tests {
     #[test]
     fn compute_layout_color_legend_suppression_reserves_no_gutter_and_draws_nothing() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let entries = vec![
             LegendEntry::new("alpha", SymbolKind::Circle),
             LegendEntry::new("beta", SymbolKind::Circle),
         ];
 
         let baseline = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[],
-            &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with no legend at all");
 
         let with_legend = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[],
-            &entries, None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with an active legend");
-        assert!(with_legend.legend.is_some(), "unsuppressed legend must be laid out");
+        assert!(
+            with_legend.legend.is_some(),
+            "unsuppressed legend must be laid out"
+        );
         assert!(
             with_legend.panels[0].plot_area.w < baseline.panels[0].plot_area.w,
             "an active legend must narrow the plot area vs. the no-legend baseline"
         );
 
         let suppressed = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[],
-            &entries, None, None, &m,
-            &legend::LegendOverrides::default(), &[],
-            CompositeLayoutSeam { legend: LegendSuppression { color: true, size: false }, ..Default::default() },
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam {
+                legend: LegendSuppression {
+                    color: true,
+                    size: false,
+                },
+                ..Default::default()
+            },
         )
         .expect("layout should succeed with a suppressed legend");
-        assert!(suppressed.legend.is_none(), "suppressed color legend must not be laid out/drawn");
-        assert!(suppressed.warnings.is_empty(), "suppression must not raise LegendOverflowed");
+        assert!(
+            suppressed.legend.is_none(),
+            "suppressed color legend must not be laid out/drawn"
+        );
+        assert!(
+            suppressed.warnings.is_empty(),
+            "suppression must not raise LegendOverflowed"
+        );
         assert_eq!(
             suppressed.panels[0].plot_area, baseline.panels[0].plot_area,
             "a suppressed legend must reserve exactly zero gutter — plot area matches the no-legend baseline"
@@ -2472,41 +2719,84 @@ mod tests {
     #[test]
     fn compute_layout_size_legend_suppression_reserves_no_gutter_but_keeps_shape_aux() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let size_entry = AuxLegendInput::Size {
             title: Some("pop".into()),
-            entries: vec![SizeLegendEntry { label: "10".into(), radius: 4.0, color_hex: None }],
+            entries: vec![SizeLegendEntry {
+                label: "10".into(),
+                radius: 4.0,
+                color_hex: None,
+            }],
         };
         let shape_entry = AuxLegendInput::Shape {
             title: Some("region".into()),
-            entries: vec![ShapeLegendEntry { label: "AS".into(), shape_name: "circle".into() }],
+            entries: vec![ShapeLegendEntry {
+                label: "AS".into(),
+                shape_name: "circle".into(),
+            }],
         };
 
         let shape_only = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[],
-            &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[shape_entry.clone()], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[shape_entry.clone()],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with only a shape aux legend");
-        assert_eq!(shape_only.aux_legends.len(), 1, "shape-only baseline must lay out one block");
+        assert_eq!(
+            shape_only.aux_legends.len(),
+            1,
+            "shape-only baseline must lay out one block"
+        );
 
         let mixed_suppressed = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[],
-            &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[size_entry, shape_entry],
-            CompositeLayoutSeam { legend: LegendSuppression { color: false, size: true }, ..Default::default() },
+            CompositeLayoutSeam {
+                legend: LegendSuppression {
+                    color: false,
+                    size: true,
+                },
+                ..Default::default()
+            },
         )
         .expect("layout should succeed with a suppressed size aux legend");
 
         assert_eq!(
-            mixed_suppressed.aux_legends.len(), 1,
+            mixed_suppressed.aux_legends.len(),
+            1,
             "only the shape block should survive size suppression"
         );
         assert!(
-            mixed_suppressed.aux_legends[0].entries.iter().all(|e| e.shape_name.is_some()),
+            mixed_suppressed.aux_legends[0]
+                .entries
+                .iter()
+                .all(|e| e.shape_name.is_some()),
             "surviving aux block must be the shape legend, not size"
         );
         assert_eq!(
@@ -2543,7 +2833,8 @@ mod tests {
     /// (4.0), `title_font_size` (13.0), and `axis_title_padding` (8.0).
     fn expected_secondary_band(theme: &ThemeInputs) -> f64 {
         let label_band = theme.sizes.tick_size + 2.0 + 3.0 * 8.0;
-        let title_gutter = theme.typography.title_font_size * 1.2 + theme.padding.axis_title_padding;
+        let title_gutter =
+            theme.typography.title_font_size * 1.2 + theme.padding.axis_title_padding;
         label_band + title_gutter
     }
 
@@ -2553,8 +2844,14 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_band_math_n1_n2_n3() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let band = expected_secondary_band(&theme);
 
@@ -2562,8 +2859,18 @@ mod tests {
             let mut axes = dummy_axes();
             axes.secondary_y = n_secondary_axes(n);
             compute_layout(
-                &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-                &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+                &spec,
+                &theme,
+                viewport,
+                &axes,
+                &[],
+                &[],
+                None,
+                None,
+                &m,
+                &legend::LegendOverrides::default(),
+                &[],
+                CompositeLayoutSeam::default(),
             )
             .expect("layout should succeed with secondary y axes")
         };
@@ -2585,9 +2892,18 @@ mod tests {
 
         // Each additional secondary axis narrows the plot area by exactly one
         // more band width — no overdraw, no double-reservation.
-        assert!((w0 - w1 - band).abs() < 1e-6, "n=0→1 shrink: {w0} - {w1} should be {band}");
-        assert!((w1 - w2 - band).abs() < 1e-6, "n=1→2 shrink: {w1} - {w2} should be {band}");
-        assert!((w2 - w3 - band).abs() < 1e-6, "n=2→3 shrink: {w2} - {w3} should be {band}");
+        assert!(
+            (w0 - w1 - band).abs() < 1e-6,
+            "n=0→1 shrink: {w0} - {w1} should be {band}"
+        );
+        assert!(
+            (w1 - w2 - band).abs() < 1e-6,
+            "n=1→2 shrink: {w1} - {w2} should be {band}"
+        );
+        assert!(
+            (w2 - w3 - band).abs() < 1e-6,
+            "n=2→3 shrink: {w2} - {w3} should be {band}"
+        );
     }
 
     /// R2 secondary-y: `label_angle` on a secondary-y `Axis(...)` (GH #52) is
@@ -2598,8 +2914,14 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_axis_honors_label_angle_override() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let mut axes = dummy_axes();
@@ -2613,14 +2935,27 @@ mod tests {
         axes.secondary_y = vec![sec];
 
         let result = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with a rotated secondary y axis");
 
         assert_eq!(result.secondary_y_axes.len(), 1);
         for t in &result.secondary_y_axes[0].ticks {
-            assert_eq!(t.label_angle, -45.0, "secondary-y override angle must reach every tick");
+            assert_eq!(
+                t.label_angle, -45.0,
+                "secondary-y override angle must reach every tick"
+            );
         }
     }
 
@@ -2638,8 +2973,14 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_and_x_elision_warnings_do_not_collide() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 400.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 400.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let mut axes = dummy_axes();
@@ -2661,8 +3002,18 @@ mod tests {
         axes.secondary_y = vec![sec];
 
         let result = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with both axes forced to elide");
 
@@ -2671,28 +3022,62 @@ mod tests {
             .iter()
             .filter(|w| matches!(w, LayoutWarning::LabelsElided { .. }))
             .collect();
-        assert_eq!(elided.len(), 2, "expected exactly one x and one secondary-y elision warning");
+        assert_eq!(
+            elided.len(),
+            2,
+            "expected exactly one x and one secondary-y elision warning"
+        );
 
         let secondary_warns: Vec<&LayoutWarning> = elided
             .iter()
-            .filter(|w| matches!(w, LayoutWarning::LabelsElided { secondary_slot: Some(_), .. }))
+            .filter(|w| {
+                matches!(
+                    w,
+                    LayoutWarning::LabelsElided {
+                        secondary_slot: Some(_),
+                        ..
+                    }
+                )
+            })
             .copied()
             .collect();
         let primary_warns: Vec<&LayoutWarning> = elided
             .iter()
-            .filter(|w| matches!(w, LayoutWarning::LabelsElided { secondary_slot: None, .. }))
+            .filter(|w| {
+                matches!(
+                    w,
+                    LayoutWarning::LabelsElided {
+                        secondary_slot: None,
+                        ..
+                    }
+                )
+            })
             .copied()
             .collect();
-        assert_eq!(secondary_warns.len(), 1, "exactly one secondary-y elision, tagged secondary_slot: Some");
-        assert_eq!(primary_warns.len(), 1, "exactly one x-axis elision, tagged secondary_slot: None");
+        assert_eq!(
+            secondary_warns.len(),
+            1,
+            "exactly one secondary-y elision, tagged secondary_slot: Some"
+        );
+        assert_eq!(
+            primary_warns.len(),
+            1,
+            "exactly one x-axis elision, tagged secondary_slot: None"
+        );
 
         // The rendered messages must be distinguishable text, not just an
         // internal tag — a user reading two warnings must be able to tell
         // them apart even without inspecting the struct fields.
         let secondary_msg = secondary_warns[0].to_string();
         let primary_msg = primary_warns[0].to_string();
-        assert!(secondary_msg.contains("secondary y-axis"), "got: {secondary_msg}");
-        assert!(!primary_msg.contains("secondary y-axis"), "got: {primary_msg}");
+        assert!(
+            secondary_msg.contains("secondary y-axis"),
+            "got: {secondary_msg}"
+        );
+        assert!(
+            !primary_msg.contains("secondary y-axis"),
+            "got: {primary_msg}"
+        );
     }
 
     /// Cycle-2 non-blocking S3 fix: `secondary_slot` must be the per-panel
@@ -2708,11 +3093,31 @@ mod tests {
     fn compute_layout_secondary_slot_is_per_panel_slot_not_vec_rank_across_facets() {
         let spec = faceted_spec(2);
         let groups = vec![
-            FacetGroup { key: FacetKey { field: "species".into(), value: "a".into() }, n_rows: 10, row_key: None },
-            FacetGroup { key: FacetKey { field: "species".into(), value: "b".into() }, n_rows: 10, row_key: None },
+            FacetGroup {
+                key: FacetKey {
+                    field: "species".into(),
+                    value: "a".into(),
+                },
+                n_rows: 10,
+                row_key: None,
+            },
+            FacetGroup {
+                key: FacetKey {
+                    field: "species".into(),
+                    value: "b".into(),
+                },
+                n_rows: 10,
+                row_key: None,
+            },
         ];
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let mut axes = dummy_axes();
@@ -2728,8 +3133,18 @@ mod tests {
         axes.secondary_y = vec![sec];
 
         let result = compute_layout(
-            &spec, &theme, viewport, &axes, &groups, &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("faceted layout should succeed with both panels' secondary axes eliding");
 
@@ -2738,12 +3153,16 @@ mod tests {
             .warnings
             .iter()
             .filter_map(|w| match w {
-                LayoutWarning::LabelsElided { secondary_slot: Some(slot), .. } => Some(Some(*slot)),
+                LayoutWarning::LabelsElided {
+                    secondary_slot: Some(slot),
+                    ..
+                } => Some(Some(*slot)),
                 _ => None,
             })
             .collect();
         assert_eq!(
-            secondary_slots.len(), 2,
+            secondary_slots.len(),
+            2,
             "expected one secondary-y elision warning per panel, got {secondary_slots:?}"
         );
         for slot in secondary_slots {
@@ -2761,31 +3180,66 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_orient_right_and_stacked_translate_offsets() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let band = expected_secondary_band(&theme);
 
         let mut axes = dummy_axes();
         axes.secondary_y = n_secondary_axes(3);
         let result = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
         assert_eq!(result.secondary_y_axes.len(), 3);
         for axis in &result.secondary_y_axes {
-            assert_eq!(axis.orient, AxisOrient::Right, "every secondary axis renders on the right");
+            assert_eq!(
+                axis.orient,
+                AxisOrient::Right,
+                "every secondary axis renders on the right"
+            );
         }
-        let offsets: Vec<f64> = result.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
-        assert!((offsets[0] - 0.0).abs() < 1e-6, "slot 1 has no preceding band: {offsets:?}");
-        assert!((offsets[1] - band).abs() < 1e-6, "slot 2 stacks past slot 1's band: {offsets:?}");
-        assert!((offsets[2] - 2.0 * band).abs() < 1e-6, "slot 3 stacks past slots 1+2: {offsets:?}");
+        let offsets: Vec<f64> = result
+            .secondary_y_axes
+            .iter()
+            .map(|a| a.translate.unwrap_or(0.0))
+            .collect();
+        assert!(
+            (offsets[0] - 0.0).abs() < 1e-6,
+            "slot 1 has no preceding band: {offsets:?}"
+        );
+        assert!(
+            (offsets[1] - band).abs() < 1e-6,
+            "slot 2 stacks past slot 1's band: {offsets:?}"
+        );
+        assert!(
+            (offsets[2] - 2.0 * band).abs() < 1e-6,
+            "slot 3 stacks past slots 1+2: {offsets:?}"
+        );
 
         // Titles thread through per axis (spec §4: each axis titled from its
         // own layer's y field/title).
-        let titles: Vec<&str> = result.secondary_y_axes.iter()
+        let titles: Vec<&str> = result
+            .secondary_y_axes
+            .iter()
             .map(|a| a.title.as_ref().unwrap().text.as_str())
             .collect();
         assert_eq!(titles, vec!["Sec1", "Sec2", "Sec3"]);
@@ -2801,26 +3255,52 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_min_band_widens_its_own_band_and_shifts_offsets() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let band = expected_secondary_band(&theme);
 
         let mut baseline_axes = dummy_axes();
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
-            &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &baseline_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
         let widened_min = band + 100.0;
         let mut widened_axes = dummy_axes();
         widened_axes.secondary_y = n_secondary_axes(2);
-        widened_axes.secondary_y[0].overrides.min_band = Some(widened_min);
+        widened_axes.secondary_y[0].overrides.placement.min_band = Some(widened_min);
         let widened = compute_layout(
-            &spec, &theme, viewport, &widened_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &widened_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2832,9 +3312,20 @@ mod tests {
             "min_band on slot 0 must narrow the plot area by exactly the delta: base={base_w}, widened={wide_w}, delta={delta}"
         );
 
-        let base_offsets: Vec<f64> = baseline.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
-        let wide_offsets: Vec<f64> = widened.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
-        assert!((wide_offsets[0] - base_offsets[0]).abs() < 1e-6, "slot 0's own offset is unaffected by its own min_band");
+        let base_offsets: Vec<f64> = baseline
+            .secondary_y_axes
+            .iter()
+            .map(|a| a.translate.unwrap_or(0.0))
+            .collect();
+        let wide_offsets: Vec<f64> = widened
+            .secondary_y_axes
+            .iter()
+            .map(|a| a.translate.unwrap_or(0.0))
+            .collect();
+        assert!(
+            (wide_offsets[0] - base_offsets[0]).abs() < 1e-6,
+            "slot 0's own offset is unaffected by its own min_band"
+        );
         assert!(
             (wide_offsets[1] - base_offsets[1] - delta).abs() < 1e-6,
             "slot 1 must stack past slot 0's WIDENED band: base={base_offsets:?}, widened={wide_offsets:?}, delta={delta}"
@@ -2847,26 +3338,52 @@ mod tests {
     #[test]
     fn compute_layout_secondary_y_max_band_caps_its_own_band_and_shifts_offsets() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 800.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 800.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let band = expected_secondary_band(&theme);
 
         let mut baseline_axes = dummy_axes();
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
-            &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &baseline_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
         let capped_max = (band - 20.0).max(1.0);
         let mut capped_axes = dummy_axes();
         capped_axes.secondary_y = n_secondary_axes(2);
-        capped_axes.secondary_y[0].overrides.max_band = Some(capped_max);
+        capped_axes.secondary_y[0].overrides.placement.max_band = Some(capped_max);
         let capped = compute_layout(
-            &spec, &theme, viewport, &capped_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &capped_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2878,8 +3395,16 @@ mod tests {
             "max_band on slot 0 must widen the plot area by exactly the delta: base={base_w}, capped={capped_w}, delta={delta}"
         );
 
-        let base_offsets: Vec<f64> = baseline.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
-        let capped_offsets: Vec<f64> = capped.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        let base_offsets: Vec<f64> = baseline
+            .secondary_y_axes
+            .iter()
+            .map(|a| a.translate.unwrap_or(0.0))
+            .collect();
+        let capped_offsets: Vec<f64> = capped
+            .secondary_y_axes
+            .iter()
+            .map(|a| a.translate.unwrap_or(0.0))
+            .collect();
         assert!(
             (base_offsets[1] - capped_offsets[1] - delta).abs() < 1e-6,
             "slot 1 must stack past slot 0's CAPPED (narrower) band: base={base_offsets:?}, capped={capped_offsets:?}, delta={delta}"
@@ -2894,14 +3419,33 @@ mod tests {
     #[test]
     fn compute_layout_no_secondary_y_is_byte_stable_with_pre_52_shape() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let axes = dummy_axes();
-        assert!(axes.secondary_y.is_empty(), "dummy_axes() default has no secondary axes");
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        assert!(
+            axes.secondary_y.is_empty(),
+            "dummy_axes() default has no secondary axes"
+        );
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -2925,7 +3469,10 @@ mod tests {
         // reservation (not just the rendered text). With metrics whose width
         // scales with font size, a bigger override → wider band → narrower plot.
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         // Font-size-sensitive metrics: width scales with the supplied font size.
         let m = MockMetrics {
             measure: |t: &str, fs: f64| t.chars().count() as f64 * fs * 0.6,
@@ -2933,18 +3480,36 @@ mod tests {
         };
 
         let baseline = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &dummy_axes(),
-            &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &dummy_axes(),
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline layout");
 
         let mut axes_big = dummy_axes();
-        axes_big.y.overrides.label_font_size = Some(40.0);
+        axes_big.y.overrides.labels.font_size = Some(40.0);
         let widened = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes_big,
-            &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes_big,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("widened layout");
 
@@ -2991,20 +3556,48 @@ mod tests {
         // A y-axis min_band of 200px must push the plot area right by at least
         // that much vs. the unset baseline.
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let baseline = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &dummy_axes(),
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
-        ).unwrap();
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &dummy_axes(),
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap();
 
         let mut axes = dummy_axes();
-        axes.y.overrides.min_band = Some(200.0);
+        axes.y.overrides.placement.min_band = Some(200.0);
         let widened = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
-        ).unwrap();
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap();
 
         let base_x = baseline.panels[0].plot_area.x;
         let wide_x = widened.panels[0].plot_area.x;
@@ -3021,24 +3614,52 @@ mod tests {
         // orient="top" must reserve the x band on the TOP and free up the bottom,
         // mirroring the default Bottom layout. Compare against the Bottom baseline.
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let mut bottom_axes = dummy_axes();
-        bottom_axes.x.title = Some("x title".into());
+        bottom_axes.x.title.set(Some("x title".into()));
         let baseline = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &bottom_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
-        ).unwrap();
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &bottom_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap();
         let base_plot = baseline.panels[0].plot_area;
 
         let mut top_axes = dummy_axes();
-        top_axes.x.title = Some("x title".into());
+        top_axes.x.title.set(Some("x title".into()));
         top_axes.x.orient = AxisOrient::Top;
         let result = compute_layout(
-            &spec, &default_theme_inputs(), viewport, &top_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
-        ).unwrap();
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &top_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap();
         let plot = result.panels[0].plot_area;
 
         // The reserved band moved from the bottom to the top: the top axis layout
@@ -3047,15 +3668,21 @@ mod tests {
         assert!(
             plot.y > base_plot.y + 5.0,
             "top-oriented x axis must reserve a top band: base y={}, top y={}",
-            base_plot.y, plot.y
+            base_plot.y,
+            plot.y
         );
         assert!(
             plot.y + plot.h > base_plot.y + base_plot.h + 5.0,
             "top-oriented x axis must free the bottom: base bottom={}, top bottom={}",
-            base_plot.y + base_plot.h, plot.y + plot.h
+            base_plot.y + base_plot.h,
+            plot.y + plot.h
         );
         // The emitted x axis line sits at the plot top.
-        let x_axis = result.axes.iter().find(|a| a.orient == AxisOrient::Top).unwrap();
+        let x_axis = result
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Top)
+            .unwrap();
         assert!((x_axis.axis_line.y - plot.y).abs() < 0.01);
     }
 
@@ -3063,11 +3690,17 @@ mod tests {
     fn compute_layout_invalid_viewport_errors() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let err = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 0.0, height: 400.0 },
+            Viewport {
+                width: 0.0,
+                height: 400.0,
+            },
             &axes,
             &[],
             &[],
@@ -3089,12 +3722,24 @@ mod tests {
     fn compute_layout_padding_exceeds_viewport_errors() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let theme = ThemeInputs { padding: ThemePadding { padding: 100.0, ..ThemePadding::default() }, ..ThemeInputs::default() };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = ThemeInputs {
+            padding: ThemePadding {
+                padding: 100.0,
+                ..ThemePadding::default()
+            },
+            ..ThemeInputs::default()
+        };
         let err = compute_layout(
             &spec,
             &theme,
-            Viewport { width: 50.0, height: 50.0 },
+            Viewport {
+                width: 50.0,
+                height: 50.0,
+            },
             &axes,
             &[],
             &[],
@@ -3107,7 +3752,11 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => {
+            LayoutError::PaddingExceedsViewport {
+                padding,
+                side,
+                viewport_dim,
+            } => {
                 assert_eq!(padding, 100.0);
                 assert_eq!(side, "left");
                 assert_eq!(viewport_dim, 50.0);
@@ -3126,15 +3775,24 @@ mod tests {
     fn compute_layout_padding_exceeds_viewport_names_the_callers_side_and_value() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = ThemeInputs {
-            padding: ThemePadding { padding_top: Some(1e9), ..ThemePadding::default() },
+            padding: ThemePadding {
+                padding_top: Some(1e9),
+                ..ThemePadding::default()
+            },
             ..ThemeInputs::default()
         };
         let err = compute_layout(
             &spec,
             &theme,
-            Viewport { width: 480.0, height: 360.0 },
+            Viewport {
+                width: 480.0,
+                height: 360.0,
+            },
             &axes,
             &[],
             &[],
@@ -3147,15 +3805,25 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => {
-                assert_eq!(padding, 1e9, "must report the CALLER's value, not the theme default");
+            LayoutError::PaddingExceedsViewport {
+                padding,
+                side,
+                viewport_dim,
+            } => {
+                assert_eq!(
+                    padding, 1e9,
+                    "must report the CALLER's value, not the theme default"
+                );
                 assert_eq!(side, "top");
                 assert_eq!(viewport_dim, 360.0);
             }
             other => panic!("expected PaddingExceedsViewport, got {:?}", other),
         }
         let msg = err.to_string();
-        assert!(msg.contains("top=1000000000"), "message must name the side and caller value: {msg}");
+        assert!(
+            msg.contains("top=1000000000"),
+            "message must name the side and caller value: {msg}"
+        );
     }
 
     // ── padding.auto (D10, spec §4.7, F-L07-08) ─────────────────────────────
@@ -3169,14 +3837,24 @@ mod tests {
             vec!["0".into(), "999999".into()],
             None,
         );
-        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
+        x.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 1.0],
+            minor: vec![],
+        });
         let y = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "5".into(), "10".into()],
             None,
         );
-        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+        AxesInput {
+            x,
+            y,
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        }
     }
 
     /// Unit-level pin of `auto_padding_for_edge_ticks`'s concrete numbers
@@ -3192,9 +3870,16 @@ mod tests {
         let axes = continuous_x_axes_with_long_last_label();
         let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
-        assert!((extra.right - 14.0).abs() < 1e-9, "extra.right = {}", extra.right);
+        assert!(
+            (extra.right - 14.0).abs() < 1e-9,
+            "extra.right = {}",
+            extra.right
+        );
         assert_eq!(extra.left, 0.0);
         assert_eq!(extra.bottom, 0.0);
     }
@@ -3209,15 +3894,25 @@ mod tests {
             vec!["-999999999999999".into(), "0".into()],
             None,
         );
-        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
+        x.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 1.0],
+            minor: vec![],
+        });
         let mut y = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "5".into(), "10".into()],
             None,
         );
-        y.overrides.max_band = Some(10.0);
-        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+        y.overrides.placement.max_band = Some(10.0);
+        AxesInput {
+            x,
+            y,
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        }
     }
 
     /// The cushion estimate previously used
@@ -3236,7 +3931,10 @@ mod tests {
         let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
         let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
         assert!(
             (extra.left - 54.0).abs() < 1e-9,
@@ -3257,16 +3955,35 @@ mod tests {
     fn padding_auto_honors_max_band_and_prevents_left_tick_overhang() {
         let spec = minimal_chart_spec();
         let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
-        let viewport = Viewport { width: 400.0, height: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 400.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let baseline = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline layout should succeed");
-        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis = baseline
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let first_tick = x_axis.ticks.first().expect("x axis has ticks");
         let half_w = m.measure_width(&first_tick.label, theme.typography.label_font_size) / 2.0;
@@ -3274,19 +3991,36 @@ mod tests {
             first_tick.position - half_w < 0.0,
             "fixture assumption broken: the capped y max_band should already clip the \
              first x tick label past the left edge (position {} - half-width {} should be < 0)",
-            first_tick.position, half_w,
+            first_tick.position,
+            half_w,
         );
 
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("auto-padded layout should succeed");
-        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis2 = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let first_tick2 = x_axis2.ticks.first().expect("x axis has ticks");
         let half_w2 = m.measure_width(&first_tick2.label, theme.typography.label_font_size) / 2.0;
@@ -3294,7 +4028,8 @@ mod tests {
             first_tick2.position - half_w2 >= -1e-9,
             "padding.auto=true should keep the first x tick label within the viewport \
              even with max_band capping the y gutter (position {} - half-width {} should be >= 0)",
-            first_tick2.position, half_w2,
+            first_tick2.position,
+            half_w2,
         );
     }
 
@@ -3307,18 +4042,37 @@ mod tests {
     fn padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport() {
         let spec = minimal_chart_spec();
         let axes = continuous_x_axes_with_long_last_label();
-        let viewport = Viewport { width: 200.0, height: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         // Baseline (auto=false, the flat 16px default): the fixture must
         // actually clip, or this test proves nothing about the fix.
         let baseline = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline layout should succeed");
-        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis = baseline
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let last_tick = x_axis.ticks.last().expect("x axis has ticks");
         let half_w = m.measure_width(&last_tick.label, theme.typography.label_font_size) / 2.0;
@@ -3326,21 +4080,39 @@ mod tests {
             last_tick.position + half_w > baseline.viewport.w,
             "fixture assumption broken: default padding should already clip the last x \
              tick label (position {} + half-width {} should exceed viewport width {})",
-            last_tick.position, half_w, baseline.viewport.w,
+            last_tick.position,
+            half_w,
+            baseline.viewport.w,
         );
 
         // Same chart, `padding.auto = true`: the SAME last tick's label no
         // longer overhangs past the viewport edge.
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("auto-padded layout should succeed");
-        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis2 = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let last_tick2 = x_axis2.ticks.last().expect("x axis has ticks");
         let half_w2 = m.measure_width(&last_tick2.label, theme.typography.label_font_size) / 2.0;
@@ -3348,7 +4120,9 @@ mod tests {
             last_tick2.position + half_w2 <= with_auto.viewport.w + 1e-9,
             "padding.auto=true should keep the last x tick label within the viewport \
              (position {} + half-width {} should not exceed viewport width {})",
-            last_tick2.position, half_w2, with_auto.viewport.w,
+            last_tick2.position,
+            half_w2,
+            with_auto.viewport.w,
         );
     }
 
@@ -3360,22 +4134,51 @@ mod tests {
     fn padding_auto_is_byte_identical_for_a_chart_with_no_continuous_axis_or_title() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let without_auto = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme
         };
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
         assert_eq!(without_auto, with_auto);
@@ -3423,8 +4226,14 @@ mod tests {
     #[test]
     fn recentering_is_feasible_matches_recentering_padding_own_bound() {
         assert!(recentering_is_feasible(20.0, 200.0), "well within span");
-        assert!(recentering_is_feasible(100.0, 200.0), "exactly the boundary (2*100 == 200)");
-        assert!(!recentering_is_feasible(150.0, 200.0), "wider than the span");
+        assert!(
+            recentering_is_feasible(100.0, 200.0),
+            "exactly the boundary (2*100 == 200)"
+        );
+        assert!(
+            !recentering_is_feasible(150.0, 200.0),
+            "wider than the span"
+        );
         // Independent of baseline_center, per recentering_padding's own derivation.
         assert!(recentering_is_feasible(60.0, 200.0));
     }
@@ -3439,7 +4248,13 @@ mod tests {
             None,
         );
         let y = axis_input(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
-        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+        AxesInput {
+            x,
+            y,
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        }
     }
 
     /// Unit-level pin of `auto_padding_for_axis_titles`'s concrete numbers
@@ -3456,15 +4271,28 @@ mod tests {
         let axes = axes_with_wide_x_title();
         let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
         let base = base_padding_insets(&theme);
         let extra = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, base);
-        assert!((extra.inset.right - 6.0).abs() < 1e-9, "extra.right = {}", extra.inset.right);
+        assert!(
+            (extra.inset.right - 6.0).abs() < 1e-9,
+            "extra.right = {}",
+            extra.inset.right
+        );
         assert_eq!(extra.inset.left, 0.0);
         assert_eq!(extra.inset.top, 0.0);
         assert_eq!(extra.inset.bottom, 0.0);
-        assert!(!extra.x_infeasible, "this title fits within the viewport once recentered");
+        assert!(
+            !extra.x_infeasible,
+            "this title fits within the viewport once recentered"
+        );
         assert!(!extra.y_infeasible, "no y title in this fixture");
     }
 
@@ -3477,16 +4305,35 @@ mod tests {
     fn padding_auto_recenters_an_overflowing_x_title_within_the_viewport() {
         let spec = minimal_chart_spec();
         let axes = axes_with_wide_x_title();
-        let viewport = Viewport { width: 200.0, height: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         let baseline = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline layout should succeed");
-        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis = baseline
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let title = x_axis.title.as_ref().expect("x axis has a title");
         let half_w = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
@@ -3494,19 +4341,37 @@ mod tests {
             title.anchor_x + half_w > baseline.viewport.w,
             "fixture assumption broken: default padding should already clip the x \
              title (anchor_x {} + half-width {} should exceed viewport width {})",
-            title.anchor_x, half_w, baseline.viewport.w,
+            title.anchor_x,
+            half_w,
+            baseline.viewport.w,
         );
 
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("auto-padded layout should succeed");
-        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis2 = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let title2 = x_axis2.title.as_ref().expect("x axis has a title");
         let half_w2 = m.measure_width(&title2.text, theme.typography.title_font_size) / 2.0;
@@ -3514,13 +4379,16 @@ mod tests {
             title2.anchor_x + half_w2 <= with_auto.viewport.w + 1e-9,
             "padding.auto=true should keep the x title within the viewport \
              (anchor_x {} + half-width {} should not exceed viewport width {})",
-            title2.anchor_x, half_w2, with_auto.viewport.w,
+            title2.anchor_x,
+            half_w2,
+            with_auto.viewport.w,
         );
         assert!(
             title2.anchor_x - half_w2 >= -1e-9,
             "padding.auto=true's recentering must not push the title past the LEFT \
              edge while fixing the right (anchor_x {} - half-width {} should be >= 0)",
-            title2.anchor_x, half_w2,
+            title2.anchor_x,
+            half_w2,
         );
     }
 
@@ -3544,26 +4412,59 @@ mod tests {
         let spec = minimal_chart_spec();
         let mut axes = axes_with_wide_x_title();
         // A title far wider than any reasonable viewport.
-        axes.x.title = Some("A".repeat(100));
-        let viewport = Viewport { width: 200.0, height: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        axes.x.title.set(Some("A".repeat(100)));
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
         let baseline = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline (auto=false) must render");
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         );
-        assert!(with_auto.is_ok(), "an unfixably-wide title must still render, not refuse: {with_auto:?}");
+        assert!(
+            with_auto.is_ok(),
+            "an unfixably-wide title must still render, not refuse: {with_auto:?}"
+        );
         assert_eq!(
-            with_auto.unwrap(), baseline,
+            with_auto.unwrap(),
+            baseline,
             "with no competing auto-padding pass on this axis, an infeasible \
              title's auto=true render must be byte-identical to auto=false",
         );
@@ -3590,37 +4491,69 @@ mod tests {
     fn padding_auto_never_worsens_an_infeasible_title_when_a_tick_correction_also_fires() {
         let spec = minimal_chart_spec();
         let axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
-        let viewport = Viewport { width: 300.0, height: 300.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 300.0,
+            height: 300.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         // Fixture assumption: the title really is infeasible at this width
         // (unlike the 700px sibling fixture, where it is feasible).
-        let title_half_w =
-            m.measure_width(&"a".repeat(66), theme.typography.title_font_size) / 2.0;
+        let title_half_w = m.measure_width(&"a".repeat(66), theme.typography.title_font_size) / 2.0;
         assert!(
             !recentering_is_feasible(title_half_w, viewport.width),
             "fixture assumption broken: title half-width {title_half_w} should \
-             exceed half the {}-wide viewport", viewport.width,
+             exceed half the {}-wide viewport",
+            viewport.width,
         );
         // And the tick pass genuinely wants left padding here — this test
         // would be vacuous if the fixture stopped exercising the tick pass.
         let ticks_alone = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
-        assert!(ticks_alone.left > 0.0, "fixture assumption broken: the tick pass should still fire");
+        assert!(
+            ticks_alone.left > 0.0,
+            "fixture assumption broken: the tick pass should still fire"
+        );
 
         let baseline = compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("baseline (auto=false) layout should succeed");
 
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("auto-padded layout should still render, not refuse");
 
@@ -3641,7 +4574,10 @@ mod tests {
     #[test]
     fn cap_auto_contribution_passes_through_when_it_already_fits() {
         // fixed 16+16=32, extra 10+10=20, span 200: 32+20=52 << 200, no cap.
-        assert_eq!(cap_auto_contribution(16.0, 16.0, 10.0, 10.0, 200.0), (10.0, 10.0));
+        assert_eq!(
+            cap_auto_contribution(16.0, 16.0, 10.0, 10.0, 200.0),
+            (10.0, 10.0)
+        );
     }
 
     #[test]
@@ -3652,14 +4588,20 @@ mod tests {
         let scale = 67.0 / 90.0;
         assert!((low - 60.0 * scale).abs() < 1e-9, "low = {low}");
         assert!((high - 30.0 * scale).abs() < 1e-9, "high = {high}");
-        assert!((low + high - 67.0).abs() < 1e-9, "sum should exactly consume the budget");
+        assert!(
+            (low + high - 67.0).abs() < 1e-9,
+            "sum should exactly consume the budget"
+        );
     }
 
     #[test]
     fn cap_auto_contribution_is_zero_when_the_fixed_floor_alone_overflows() {
         // fixed 100+100=200 already >= span 150: pre-existing failure, auto
         // must contribute nothing (not attempt a negative-budget scale).
-        assert_eq!(cap_auto_contribution(100.0, 100.0, 5.0, 5.0, 150.0), (0.0, 0.0));
+        assert_eq!(
+            cap_auto_contribution(100.0, 100.0, 5.0, 5.0, 150.0),
+            (0.0, 0.0)
+        );
     }
 
     /// The composed fixture behind findings 1 and 2: the LEFT-tick-overhang
@@ -3676,7 +4618,7 @@ mod tests {
     /// composition question from the unrelated tick-rotation cascade.
     fn axes_with_left_tick_overhang_and_a_title_the_shift_would_clip() -> AxesInput {
         let mut axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
-        axes.x.title = Some("a".repeat(66));
+        axes.x.title.set(Some("a".repeat(66)));
         axes
     }
 
@@ -3693,20 +4635,42 @@ mod tests {
     fn padding_auto_keeps_title_on_canvas_when_a_tick_correction_also_fires() {
         let spec = minimal_chart_spec();
         let axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
-        let viewport = Viewport { width: 700.0, height: 300.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 700.0,
+            height: 300.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme.clone()
         };
 
         let with_auto = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
         .expect("auto-padded layout should succeed");
-        let x_axis = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+        let x_axis = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
             .expect("x axis present");
         let title = x_axis.title.as_ref().expect("x axis has a title");
         let half_w = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
@@ -3714,12 +4678,15 @@ mod tests {
             title.anchor_x + half_w <= with_auto.viewport.w + 1e-9,
             "the title must not overhang the right edge once the tick pass has \
              also shifted the plot (anchor_x {} + half-width {} vs viewport width {})",
-            title.anchor_x, half_w, with_auto.viewport.w,
+            title.anchor_x,
+            half_w,
+            with_auto.viewport.w,
         );
         assert!(
             title.anchor_x - half_w >= -1e-9,
             "the title must not overhang the left edge either (anchor_x {} - half-width {})",
-            title.anchor_x, half_w,
+            title.anchor_x,
+            half_w,
         );
 
         // Also pin that the tick pass's own correction is genuinely still
@@ -3748,23 +4715,54 @@ mod tests {
         // larger desired tick-overhang correction than a narrow viewport
         // can possibly absorb.
         axes.x.tick_labels[0] = format!("-{}", "9".repeat(200));
-        let viewport = Viewport { width: 200.0, height: 200.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let theme = default_theme_inputs();
 
         compute_layout(
-            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         )
-        .expect("baseline (auto=false) must render — the fixture must not be pathological on its own");
+        .expect(
+            "baseline (auto=false) must render — the fixture must not be pathological on its own",
+        );
 
         let auto_theme = ThemeInputs {
-            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            padding: ThemePadding {
+                padding_auto: true,
+                ..theme.padding.clone()
+            },
             ..theme
         };
         let result = compute_layout(
-            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+            &spec,
+            &auto_theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
         );
         assert!(
             result.is_ok(),
@@ -3782,34 +4780,65 @@ mod tests {
     fn auto_padding_for_axis_titles_is_inert_when_the_axis_is_hidden() {
         let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
         let base = base_padding_insets(&theme);
 
         let mut axes_x_hidden = axes_with_wide_x_title();
         axes_x_hidden.show_x = false;
-        let extra_x = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_x_hidden, &m, base);
-        assert_eq!(extra_x.inset, Inset::default(), "a hidden x-axis's title must not be recentered");
-        assert!(!extra_x.x_infeasible, "a hidden axis's title is not even considered");
+        let extra_x =
+            auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_x_hidden, &m, base);
+        assert_eq!(
+            extra_x.inset,
+            Inset::default(),
+            "a hidden x-axis's title must not be recentered"
+        );
+        assert!(
+            !extra_x.x_infeasible,
+            "a hidden axis's title is not even considered"
+        );
 
         let mut axes_y_hidden = axes_with_wide_x_title();
-        axes_y_hidden.y.title = Some("A Wide Y Axis Title".into());
-        axes_y_hidden.x.title = None;
+        axes_y_hidden
+            .y
+            .title
+            .set(Some("A Wide Y Axis Title".into()));
+        axes_y_hidden.x.title.set(None);
         axes_y_hidden.show_y = false;
-        let extra_y = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_y_hidden, &m, base);
-        assert_eq!(extra_y.inset, Inset::default(), "a hidden y-axis's title must not be recentered");
-        assert!(!extra_y.y_infeasible, "a hidden axis's title is not even considered");
+        let extra_y =
+            auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_y_hidden, &m, base);
+        assert_eq!(
+            extra_y.inset,
+            Inset::default(),
+            "a hidden y-axis's title must not be recentered"
+        );
+        assert!(
+            !extra_y.y_infeasible,
+            "a hidden axis's title is not even considered"
+        );
     }
 
     #[test]
     fn compute_layout_serde_round_trip() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 600.0, height: 400.0 },
+            Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &axes,
             &[],
             &[],
@@ -3831,16 +4860,31 @@ mod tests {
         // byte-for-byte. (Previously this named `plot_region` as the one such
         // field; `padded_region` joins it under the same contract, so the
         // claim is now "these two and no others".)
-        assert!(result.plot_region.w > 0.0, "the computed layout has a real plot region");
+        assert!(
+            result.plot_region.w > 0.0,
+            "the computed layout has a real plot region"
+        );
         assert!(
             result.padded_region.w > result.plot_region.w,
             "the padded box is the plot region plus this chart's axis chrome"
         );
-        assert_eq!(parsed.plot_region, Rect::ZERO, "plot_region does not round-trip by design");
-        assert_eq!(parsed.padded_region, Rect::ZERO, "padded_region does not round-trip by design");
+        assert_eq!(
+            parsed.plot_region,
+            Rect::ZERO,
+            "plot_region does not round-trip by design"
+        );
+        assert_eq!(
+            parsed.padded_region,
+            Rect::ZERO,
+            "padded_region does not round-trip by design"
+        );
         assert_eq!(
             parsed,
-            LayoutResult { plot_region: Rect::ZERO, padded_region: Rect::ZERO, ..result }
+            LayoutResult {
+                plot_region: Rect::ZERO,
+                padded_region: Rect::ZERO,
+                ..result
+            }
         );
     }
 
@@ -3863,9 +4907,30 @@ mod tests {
 
     fn three_groups() -> Vec<FacetGroup> {
         vec![
-            FacetGroup { key: FacetKey { field: "species".into(), value: "setosa".into() }, n_rows: 50, row_key: None },
-            FacetGroup { key: FacetKey { field: "species".into(), value: "versicolor".into() }, n_rows: 50, row_key: None },
-            FacetGroup { key: FacetKey { field: "species".into(), value: "virginica".into() }, n_rows: 50, row_key: None },
+            FacetGroup {
+                key: FacetKey {
+                    field: "species".into(),
+                    value: "setosa".into(),
+                },
+                n_rows: 50,
+                row_key: None,
+            },
+            FacetGroup {
+                key: FacetKey {
+                    field: "species".into(),
+                    value: "versicolor".into(),
+                },
+                n_rows: 50,
+                row_key: None,
+            },
+            FacetGroup {
+                key: FacetKey {
+                    field: "species".into(),
+                    value: "virginica".into(),
+                },
+                n_rows: 50,
+                row_key: None,
+            },
         ]
     }
 
@@ -3879,12 +4944,18 @@ mod tests {
             LegendEntry::new("virginica", SymbolKind::Circle),
         ];
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &legend,
@@ -3900,12 +4971,13 @@ mod tests {
         assert_eq!(result.panels.len(), 3);
         assert_eq!(result.axes.len(), 6);
         assert!(result.legend.is_some());
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
-
-        assert_eq!(
-            result.panels[0].facet_key.as_ref().unwrap().value,
-            "setosa"
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
         );
+
+        assert_eq!(result.panels[0].facet_key.as_ref().unwrap().value, "setosa");
         assert_eq!(
             result.panels[2].facet_key.as_ref().unwrap().value,
             "virginica"
@@ -3926,12 +4998,18 @@ mod tests {
         });
         let groups = three_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &[],
@@ -3945,11 +5023,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.panels.len(), 2);
-        let dropped = result.warnings.iter().any(|w| matches!(
-            w,
-            LayoutWarning::PanelsDropped { count: 1, .. }
-        ));
-        assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+        let dropped = result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, LayoutWarning::PanelsDropped { count: 1, .. }));
+        assert!(
+            dropped,
+            "expected PanelsDropped(1); got {:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -3957,12 +5039,18 @@ mod tests {
         let spec = faceted_spec(3);
         let groups = three_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &[],
@@ -3972,17 +5060,23 @@ mod tests {
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.panels.len(), 3);
         for (i, panel) in result.panels.iter().enumerate() {
-            let strip = panel.strip_title.as_ref()
+            let strip = panel
+                .strip_title
+                .as_ref()
                 .unwrap_or_else(|| panic!("panel {i} missing strip_title"));
             assert!(!strip.text.is_empty());
             // F-L01-04: no `title` set on the FacetSpec -> bare value, no
             // "{title}: " prefix. This is the byte-identical-when-absent claim.
             let expected = &panel.facet_key.as_ref().unwrap().value;
-            assert_eq!(&strip.text, expected, "absent title must not prefix strip text");
+            assert_eq!(
+                &strip.text, expected,
+                "absent title must not prefix strip text"
+            );
             // Themes-T4: strip_text_size default flipped 13.0 → 12.0.
             assert_eq!(strip.font_size, 12.0);
             assert!(strip.anchor.0 >= panel.plot_area.x);
@@ -3998,12 +5092,18 @@ mod tests {
         spec.facet.as_mut().unwrap().title = Some("Species".into());
         let groups = three_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4013,7 +5113,8 @@ mod tests {
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.panels.len(), 3);
         for panel in &result.panels {
@@ -4037,12 +5138,18 @@ mod tests {
         spec.facet.as_mut().unwrap().row_title = Some("Region".into());
         let groups = three_groups(); // wrap-mode groups: row_key is None on all.
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4052,17 +5159,24 @@ mod tests {
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.panels.len(), 3);
         for panel in &result.panels {
             // No row-header strip exists at all in wrap mode.
-            assert!(panel.row_strip_title.is_none(), "wrap mode must never emit a row-header strip");
+            assert!(
+                panel.row_strip_title.is_none(),
+                "wrap mode must never emit a row-header strip"
+            );
             // The column strip is untouched by row_title — still bare,
             // because `title` (the field wrap mode actually reads) is unset.
             let strip = panel.strip_title.as_ref().unwrap();
             let value = &panel.facet_key.as_ref().unwrap().value;
-            assert_eq!(&strip.text, value, "row_title must not leak into the column/wrap strip");
+            assert_eq!(
+                &strip.text, value,
+                "row_title must not leak into the column/wrap strip"
+            );
         }
     }
 
@@ -4070,12 +5184,18 @@ mod tests {
     fn compute_layout_unfaceted_omits_strip_titles() {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 600.0, height: 400.0 },
+            Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
             &axes,
             &[],
             &[],
@@ -4085,7 +5205,8 @@ mod tests {
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.panels[0].strip_title.is_none());
     }
 
@@ -4110,7 +5231,10 @@ mod tests {
         let groups: Vec<FacetGroup> = ["a", "b", "c", "d"]
             .iter()
             .map(|v| FacetGroup {
-                key: FacetKey { field: "group".into(), value: v.to_string() },
+                key: FacetKey {
+                    field: "group".into(),
+                    value: v.to_string(),
+                },
                 n_rows: 10,
                 row_key: None,
             })
@@ -4133,12 +5257,18 @@ mod tests {
             show_y: true,
             secondary_y: Vec::new(),
         };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4152,7 +5282,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.panels.len(), 4, "expected 4 panels in a 2x2 grid");
-        assert_eq!(result.axes.len(), 8, "expected 8 axis layouts (2 per panel)");
+        assert_eq!(
+            result.axes.len(),
+            8,
+            "expected 8 axis layouts (2 per panel)"
+        );
 
         let y_axes: Vec<&AxisLayout> = result
             .axes
@@ -4188,8 +5322,14 @@ mod tests {
         // Short-label chart: 4 short labels ("A".."D"), no angle override.
         // Long-label chart: same geometry but labels forced to -45° via override.
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         // Short flat labels: "A"=10px fits in slot_w=600/4=150.
         let short_axes = AxesInput {
@@ -4216,7 +5356,12 @@ mod tests {
             x: axis_input(
                 AxisOrient::Bottom,
                 None,
-                vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into(), "EFGHIJKLMN".into()],
+                vec![
+                    "ABCDEFGHIJ".into(),
+                    "KLMNOPQRST".into(),
+                    "UVWXYZABCD".into(),
+                    "EFGHIJKLMN".into(),
+                ],
                 Some(-45.0),
             ),
             y: axis_input(
@@ -4231,20 +5376,36 @@ mod tests {
         };
 
         let short_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &short_axes, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &short_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let long_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &long_axes, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &long_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let short_bottom = short_result.panels[0].plot_area.y + short_result.panels[0].plot_area.h;
         let long_bottom = long_result.panels[0].plot_area.y + long_result.panels[0].plot_area.h;
@@ -4265,9 +5426,19 @@ mod tests {
     #[test]
     fn compute_layout_rotated_y_labels_reserve_smaller_left_margin_than_flat() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let y_labels = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into()];
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let y_labels = vec![
+            "ABCDEFGHIJ".into(),
+            "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(),
+        ];
 
         let flat_axes = AxesInput {
             x: axis_input(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
@@ -4285,19 +5456,35 @@ mod tests {
         };
 
         let flat_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &flat_axes, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &flat_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let rotated_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &rotated_axes, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &rotated_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let flat_x = flat_result.panels[0].plot_area.x;
         let rotated_x = rotated_result.panels[0].plot_area.x;
@@ -4314,8 +5501,14 @@ mod tests {
         // is reserved for labels. We verify by checking that the plot area
         // bottom edge equals the inner_after_legend bottom edge (no gutter).
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
 
         let axes_no_x = AxesInput {
             x: axis_input(
@@ -4335,22 +5528,39 @@ mod tests {
         };
 
         let no_x_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &axes_no_x, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes_no_x,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let with_x_result = compute_layout(
-            &spec, &default_theme_inputs(), viewport,
-            &axes_with_x, &[], &[], None, None, &m,
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes_with_x,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let no_x_bottom = no_x_result.panels[0].plot_area.y + no_x_result.panels[0].plot_area.h;
-        let with_x_bottom = with_x_result.panels[0].plot_area.y + with_x_result.panels[0].plot_area.h;
+        let with_x_bottom =
+            with_x_result.panels[0].plot_area.y + with_x_result.panels[0].plot_area.h;
 
         assert!(
             no_x_bottom > with_x_bottom,
@@ -4372,8 +5582,14 @@ mod tests {
     #[test]
     fn compute_layout_undrawn_axes_reserve_no_band_at_all() {
         let spec = minimal_chart_spec();
-        let viewport = Viewport { width: 600.0, height: 400.0 };
-        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let titled_axes = AxesInput {
             x: axis_input(
                 AxisOrient::Bottom,
@@ -4393,18 +5609,31 @@ mod tests {
         };
         let theme = default_theme_inputs();
         let result = compute_layout(
-            &spec, &theme, viewport,
-            &titled_axes, &[], &[], None, None, &m,
+            &spec,
+            &theme,
+            viewport,
+            &titled_axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let pad = theme.padding.padding;
         let plot = result.panels[0].plot_area;
         assert_eq!(
             (plot.x, plot.y, plot.w, plot.h),
-            (pad, pad, viewport.width - 2.0 * pad, viewport.height - 2.0 * pad),
+            (
+                pad,
+                pad,
+                viewport.width - 2.0 * pad,
+                viewport.height - 2.0 * pad
+            ),
             "undrawn axes must leave the padded inner rect untouched"
         );
 
@@ -4412,16 +5641,33 @@ mod tests {
         // both sides — so the equality above is the gate's work, not a fixture
         // whose bands happen to measure zero.
         let drawn = compute_layout(
-            &spec, &theme, viewport,
-            &AxesInput { show_x: true, show_y: true, ..titled_axes.clone() },
-            &[], &[], None, None, &m,
+            &spec,
+            &theme,
+            viewport,
+            &AxesInput {
+                show_x: true,
+                show_y: true,
+                ..titled_axes.clone()
+            },
+            &[],
+            &[],
+            None,
+            None,
+            &m,
             &legend::LegendOverrides::default(),
             &[],
             CompositeLayoutSeam::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let drawn_plot = drawn.panels[0].plot_area;
-        assert!(drawn_plot.x > plot.x, "a drawn y axis must reserve a left band");
-        assert!(drawn_plot.h < plot.h, "a drawn x axis must reserve a bottom band");
+        assert!(
+            drawn_plot.x > plot.x,
+            "a drawn y axis must reserve a left band"
+        );
+        assert!(
+            drawn_plot.h < plot.h,
+            "a drawn x axis must reserve a bottom band"
+        );
     }
 
     #[test]
@@ -4457,8 +5703,14 @@ mod tests {
         assert_eq!(t.typography.title_font_weight, "600");
         assert_eq!(t.typography.title_anchor, TextAnchor::Start);
         assert_eq!(t.typography.title_offset, 6.0);
-        assert_eq!(t.colors.background_color, palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF));
-        assert_eq!(t.colors.mark_color, palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF));
+        assert_eq!(
+            t.colors.background_color,
+            palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF)
+        );
+        assert_eq!(
+            t.colors.mark_color,
+            palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF)
+        );
     }
 
     // ── D5c: empty-partition warning for sparse two-way grid facets ──────────
@@ -4486,24 +5738,48 @@ mod tests {
     fn sparse_2x2_groups() -> Vec<FacetGroup> {
         vec![
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c1".into(),
+                },
                 n_rows: 1,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r1".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c2".into(),
+                },
                 n_rows: 1,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r1".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c1".into(),
+                },
                 n_rows: 1,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r2".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c2".into(),
+                },
                 n_rows: 0,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r2".into(),
+                }),
             },
         ]
     }
@@ -4515,12 +5791,18 @@ mod tests {
         let spec = sparse_grid_spec(2, 2);
         let groups = sparse_2x2_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4540,7 +5822,8 @@ mod tests {
             .filter(|w| matches!(w, LayoutWarning::EmptyPartitions { .. }))
             .collect();
         assert_eq!(
-            empty_warns.len(), 1,
+            empty_warns.len(),
+            1,
             "expected exactly one EmptyPartitions warning; got {:?}",
             result.warnings
         );
@@ -4560,8 +5843,14 @@ mod tests {
         }
 
         // No PanelsDropped (the 2×2 grid fits all 4 groups — including the empty one).
-        let dropped = result.warnings.iter().any(|w| matches!(w, LayoutWarning::PanelsDropped { .. }));
-        assert!(!dropped, "sparse grid must not emit PanelsDropped when grid is correctly sized");
+        let dropped = result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, LayoutWarning::PanelsDropped { .. }));
+        assert!(
+            !dropped,
+            "sparse grid must not emit PanelsDropped when grid is correctly sized"
+        );
     }
 
     #[test]
@@ -4572,33 +5861,63 @@ mod tests {
         // All four groups have n_rows > 0.
         let complete_groups: Vec<FacetGroup> = vec![
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c1".into(),
+                },
                 n_rows: 2,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r1".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c2".into(),
+                },
                 n_rows: 2,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r1".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c1".into(),
+                },
                 n_rows: 2,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r2".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "c2".into(),
+                },
                 n_rows: 2,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "r2".into(),
+                }),
             },
         ];
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &complete_groups,
             &[],
@@ -4630,12 +5949,18 @@ mod tests {
         let spec = faceted_spec(3); // wrap mode, ncols=3
         let groups = three_groups(); // all three groups have n_rows > 0
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 400.0 },
+            Viewport {
+                width: 800.0,
+                height: 400.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4681,24 +6006,48 @@ mod tests {
     fn two_way_2x2_groups() -> Vec<FacetGroup> {
         vec![
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "A".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "A".into(),
+                },
                 n_rows: 10,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "High".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "High".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "B".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "B".into(),
+                },
                 n_rows: 10,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "High".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "High".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "A".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "A".into(),
+                },
                 n_rows: 10,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "Low".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "Low".into(),
+                }),
             },
             FacetGroup {
-                key: FacetKey { field: "col_cat".into(), value: "B".into() },
+                key: FacetKey {
+                    field: "col_cat".into(),
+                    value: "B".into(),
+                },
                 n_rows: 10,
-                row_key: Some(FacetKey { field: "row_cat".into(), value: "Low".into() }),
+                row_key: Some(FacetKey {
+                    field: "row_cat".into(),
+                    value: "Low".into(),
+                }),
             },
         ]
     }
@@ -4716,18 +6065,34 @@ mod tests {
         let spec = two_way_grid_spec();
         let groups = two_way_2x2_groups();
         let axes = AxesInput {
-            x: axis_input(AxisOrient::Bottom, Some("x".into()), vec!["0".into(), "5".into()], None),
-            y: axis_input(AxisOrient::Left, Some("y".into()), vec!["0".into(), "5".into()], None),
+            x: axis_input(
+                AxisOrient::Bottom,
+                Some("x".into()),
+                vec!["0".into(), "5".into()],
+                None,
+            ),
+            y: axis_input(
+                AxisOrient::Left,
+                Some("y".into()),
+                vec!["0".into(), "5".into()],
+                None,
+            ),
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
         };
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4748,7 +6113,11 @@ mod tests {
             .iter()
             .filter(|p| p.row_strip_title.is_some())
             .collect();
-        assert_eq!(stripped_panels.len(), 2, "expected one row-strip per row (2 rows)");
+        assert_eq!(
+            stripped_panels.len(),
+            2,
+            "expected one row-strip per row (2 rows)"
+        );
 
         for panel in &stripped_panels {
             let strip = panel.row_strip_title.as_ref().unwrap();
@@ -4779,7 +6148,8 @@ mod tests {
 
         // Verify no row_strip label is emitted on the leftmost column (col 0 panels
         // should have row_strip_title == None in a 2-column right-side layout).
-        let left_col_panels: Vec<&PanelLayout> = result.panels.iter().filter(|p| p.col == 0).collect();
+        let left_col_panels: Vec<&PanelLayout> =
+            result.panels.iter().filter(|p| p.col == 0).collect();
         for p in left_col_panels {
             assert!(
                 p.row_strip_title.is_none(),
@@ -4795,12 +6165,18 @@ mod tests {
         let spec = two_way_grid_spec();
         let groups = two_way_2x2_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4820,8 +6196,15 @@ mod tests {
         );
 
         // Row strips: exactly 2 panels (rightmost column) have row_strip_title.
-        let row_strip_count = result.panels.iter().filter(|p| p.row_strip_title.is_some()).count();
-        assert_eq!(row_strip_count, 2, "expected 2 row-strip panels (one per row, rightmost col)");
+        let row_strip_count = result
+            .panels
+            .iter()
+            .filter(|p| p.row_strip_title.is_some())
+            .count();
+        assert_eq!(
+            row_strip_count, 2,
+            "expected 2 row-strip panels (one per row, rightmost col)"
+        );
 
         // Row strip text values must match the row_cat values.
         let row_strip_texts: Vec<&str> = result
@@ -4830,7 +6213,10 @@ mod tests {
             .filter_map(|p| p.row_strip_title.as_ref())
             .map(|s| s.text.as_str())
             .collect();
-        assert!(row_strip_texts.contains(&"High"), "expected 'High' row strip");
+        assert!(
+            row_strip_texts.contains(&"High"),
+            "expected 'High' row strip"
+        );
         assert!(row_strip_texts.contains(&"Low"), "expected 'Low' row strip");
     }
 
@@ -4844,12 +6230,18 @@ mod tests {
         spec.facet.as_mut().unwrap().row_title = Some("Region".into());
         let groups = two_way_2x2_groups();
         let axes = dummy_axes();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let result = compute_layout(
             &spec,
             &default_theme_inputs(),
-            Viewport { width: 800.0, height: 600.0 },
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
             &axes,
             &groups,
             &[],
@@ -4868,14 +6260,23 @@ mod tests {
             .filter_map(|p| p.row_strip_title.as_ref())
             .map(|s| s.text.as_str())
             .collect();
-        assert!(row_strip_texts.contains(&"Region: High"), "expected 'Region: High'; got {row_strip_texts:?}");
-        assert!(row_strip_texts.contains(&"Region: Low"), "expected 'Region: Low'; got {row_strip_texts:?}");
+        assert!(
+            row_strip_texts.contains(&"Region: High"),
+            "expected 'Region: High'; got {row_strip_texts:?}"
+        );
+        assert!(
+            row_strip_texts.contains(&"Region: Low"),
+            "expected 'Region: Low'; got {row_strip_texts:?}"
+        );
 
         // Column strips are unaffected — `title` is still unset on this spec.
         for panel in &result.panels {
             let strip = panel.strip_title.as_ref().unwrap();
             let value = &panel.facet_key.as_ref().unwrap().value;
-            assert_eq!(&strip.text, value, "column strip must stay bare when title is unset");
+            assert_eq!(
+                &strip.text, value,
+                "column strip must stay bare when title is unset"
+            );
         }
     }
 }

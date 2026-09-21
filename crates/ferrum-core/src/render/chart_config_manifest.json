@@ -301,7 +301,7 @@
   },
   "AxisConfigSpec.axis_y2.grid": {
     "honored": false,
-    "reason": "same field as AxisStyleSpec.grid, scoped to axis_y2: the value DOES reach the secondary axis's own AxisStyleOverrides.show_grid slot (and through AxesInput::apply_show_defaults to AxisLayout.show_grid), but nothing reads it \u2014 build_grid takes only the panel's primary x/y axis pair, so a secondary y axis never contributes gridlines. That is a deliberate design decision, not a wiring gap (scene_build's `a secondary y-axis must not add or alter gridlines, even with show_grid=true` test pins it) \u2014 the same disposition shape as AxisStyleSpec.orient at this position, where layout_panel_axes forces every secondary axis to Right. Verified end to end during Task 8: axis_y2 grid=True and grid=False render byte-identically. Giving it a consumer means deciding that a secondary axis may own the panel's horizontal gridlines, which is a gridline-ownership design question, not this task's plumbing."
+    "reason": "same field as AxisStyleSpec.grid, scoped to axis_y2: the value DOES reach the secondary axis's own AxisStyleOverrides.grid.show slot (and through AxesInput::apply_show_defaults to AxisLayout.show_grid), but nothing reads it \u2014 build_grid takes only the panel's primary x/y axis pair, so a secondary y axis never contributes gridlines. That is a deliberate design decision, not a wiring gap (scene_build's `a secondary y-axis must not add or alter gridlines, even with show_grid=true` test pins it) \u2014 the same disposition shape as AxisStyleSpec.orient at this position, where layout_panel_axes forces every secondary axis to Right. Verified end to end during Task 8: axis_y2 grid=True and grid=False render byte-identically. Giving it a consumer means deciding that a secondary axis may own the panel's horizontal gridlines, which is a gridline-ownership design question, not this task's plumbing."
   },
   "AxisConfigSpec.axis_y2.label_format": {
     "honored": true,
@@ -357,87 +357,87 @@
   },
   "AxisStyleSpec.domain": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_domain (Option<bool>, fill-only at chart level), resolved against theme.axis.axis_line by AxesInput::apply_show_defaults and consumed by build_axis. Per-axis for all four positions as of Task 8 (D12) \u2014 previously a global theme write."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain.show (Option<bool>, fill-only at chart level), resolved against theme.axis.axis_line by AxesInput::apply_show_defaults and consumed by build_axis. Per-axis for all four positions as of Task 8 (D12) \u2014 previously a global theme write."
   },
   "AxisStyleSpec.domain_color": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain_color, consumed by build_axis"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain.color, consumed by build_axis"
   },
   "AxisStyleSpec.domain_width": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain_width, consumed by build_axis"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain.width, consumed by build_axis"
   },
   "AxisStyleSpec.grid": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_grid (Option<bool>, fill-only at chart level so per-channel wins), resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). Per-axis for all four positions as of Task 8 (D4/D12): it no longer writes the single global theme.grid.grid, which is what made configure(axis_x=AxisConfig(grid=False)) take the y gridlines down with it."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid.show (Option<bool>, fill-only at chart level so per-channel wins), resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). Per-axis for all four positions as of Task 8 (D4/D12): it no longer writes the single global theme.grid.grid, which is what made configure(axis_x=AxisConfig(grid=False)) take the y gridlines down with it."
   },
   "AxisStyleSpec.grid_color": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_color, consumed by build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid.color, consumed by build_grid"
   },
   "AxisStyleSpec.grid_dash": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_dash, consumed by build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid.dash, consumed by build_grid"
   },
   "AxisStyleSpec.grid_opacity": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_opacity, consumed by build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid.opacity, consumed by build_grid"
   },
   "AxisStyleSpec.grid_width": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_width, consumed by build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid.width, consumed by build_grid"
   },
   "AxisStyleSpec.label_angle": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_angle, read by layout/axis.rs's collision cascade"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.angle, read by layout/axis.rs's collision cascade"
   },
   "AxisStyleSpec.label_color": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_color, consulted by build_axis/build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.color, consulted by build_axis/build_grid"
   },
   "AxisStyleSpec.label_flush": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_flush, consumed by render/marks/axis.rs edge alignment"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.flush, consumed by render/marks/axis.rs edge alignment"
   },
   "AxisStyleSpec.label_font_size": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_font_size, consulted by build_axis/build_grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.font_size, consulted by build_axis/build_grid"
   },
   "AxisStyleSpec.label_format": {
     "honored": true,
-    "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.label_format, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
+    "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.labels.format.spec, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
   },
   "AxisStyleSpec.label_format_type": {
     "honored": true,
-    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/config_apply/mod.rs, in the resync_ticks_after_axis_merge tier) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
+    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.labels.format.format_type, read by apply_label_format_to_axis (render/config_apply/mod.rs, in the resync_ticks_after_axis_merge tier) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
   },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_overlap, consumed by layout_x_axis's collision cascade AND, as of Task 8 (D12, spec \u00a74.9), by layout_y_axis via layout::axis::resolve_y_overlap \u2014 the y transpose of the same four LabelOverlap primitives, reading the same policy object. `None` still means 'no policy' on y (byte-identical), which is why Greedy and None differ there and not on x."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.overlap, consumed by layout_x_axis's collision cascade AND, as of Task 8 (D12, spec \u00a74.9), by layout_y_axis via layout::axis::resolve_y_overlap \u2014 the y transpose of the same four LabelOverlap primitives, reading the same policy object. `None` still means 'no policy' on y (byte-identical), which is why Greedy and None differ there and not on x."
   },
   "AxisStyleSpec.label_padding": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_padding, consumed by layout/axis.rs's standoff calc"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.padding, consumed by layout/axis.rs's standoff calc"
   },
   "AxisStyleSpec.labels": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_labels (Option<bool>), read via AxisInput::show_labels by the label-band reservation and threaded to AxisLayout.show_labels for render/marks/axis.rs's tick loop. The Option<bool> widening (Task 8, D12, spec \u00a74.9) is what gives the chart-level position a consumer without letting it clobber a per-channel fm.Axis(labels=)."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.show (Option<bool>), read via AxisInput::show_labels by the label-band reservation and threaded to AxisLayout.show_labels for render/marks/axis.rs's tick loop. The Option<bool> widening (Task 8, D12, spec \u00a74.9) is what gives the chart-level position a consumer without letting it clobber a per-channel fm.Axis(labels=)."
   },
   "AxisStyleSpec.max_band": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.max_band, consumed by clamp_axis_band (layout/mod.rs)"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.max_band, consumed by clamp_axis_band (layout/mod.rs)"
   },
   "AxisStyleSpec.min_band": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.min_band, consumed by clamp_axis_band (layout/mod.rs)"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.min_band, consumed by clamp_axis_band (layout/mod.rs)"
   },
   "AxisStyleSpec.offset": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.offset, consumed by render/marks/axis.rs"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.offset, consumed by render/marks/axis.rs"
   },
   "AxisStyleSpec.orient": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.orient, consumed by AxisInput::resolve_orient, for axis/axis_x/axis_y. For axis_y2 the override reaches AxisStyleOverrides.orient (fill-only, same as every other field) but has no concrete side to resolve onto: layout::layout_panel_axes unconditionally forces every secondary axis's orient to Right regardless of any override, per-channel or chart-level \u2014 deliberate design (secondary axes always stack outward on the right), not a wiring gap, so this is NOT a Task 8 item."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.orient, consumed by AxisInput::resolve_orient, for axis/axis_x/axis_y. For axis_y2 the override reaches AxisStyleOverrides.placement.orient (fill-only, same as every other field) but has no concrete side to resolve onto: layout::layout_panel_axes unconditionally forces every secondary axis's orient to Right regardless of any override, per-channel or chart-level \u2014 deliberate design (secondary axes always stack outward on the right), not a wiring gap, so this is NOT a Task 8 item."
   },
   "AxisStyleSpec.tick_count": {
     "honored": true,
@@ -453,43 +453,43 @@
   },
   "AxisStyleSpec.tick_size": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_size, read via AxisInput::tick_size by the layout band reservation, both layout_*_axis calls, and build_axis. Per-axis as of Task 8 (D12); the shared `axis` key ALSO writes theme.sizes.tick_size as the global fallback for axes the per-axis fill does not visit."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.ticks.size, read via AxisInput::tick_size by the layout band reservation, both layout_*_axis calls, and build_axis. Per-axis as of Task 8 (D12); the shared `axis` key ALSO writes theme.sizes.tick_size as the global fallback for axes the per-axis fill does not visit."
   },
   "AxisStyleSpec.ticks": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_ticks (Option<bool>), threaded to AxisLayout.show_ticks and read by render/marks/axis.rs's tick loop. Same Option<bool> widening as `labels` (Task 8, D12)."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.ticks.show (Option<bool>), threaded to AxisLayout.show_ticks and read by render/marks/axis.rs's tick loop. Same Option<bool> widening as `labels` (Task 8, D12)."
   },
   "AxisStyleSpec.title": {
     "honored": true,
-    "reason": "AxisInput::fill_chart_level_title (render::apply_axis_style_to_axis_input) \u2014 the tri-state model spec \u00a74.9 called for: AxisStyleOverrides.title_claimed records whether a per-channel title (INCLUDING the title=\"\" explicit-suppress spelling) or an earlier, more specific chart-level layer already owns the slot, so the chart-level fill can never resurrect a suppressed title nor lose to a less specific layer. The empty-string suppress sentinel works at chart level too, via the shared layout::axis::resolve_axis_title."
+    "reason": "AxisInput::fill_chart_level_title (render::apply_axis_style_to_axis_input) \u2014 the tri-state model spec \u00a74.9 called for: AxisInput.title's Claimed wrapper records whether a per-channel title (INCLUDING the title=\"\" explicit-suppress spelling) or an earlier, more specific chart-level layer already owns the slot, so the chart-level fill can never resurrect a suppressed title nor lose to a less specific layer. The empty-string suppress sentinel works at chart level too, via the shared layout::axis::resolve_axis_title."
   },
   "AxisStyleSpec.title_color": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_color"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title.color"
   },
   "AxisStyleSpec.title_font_size": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_font_size"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title.font_size"
   },
   "AxisStyleSpec.title_orient": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_orient, consumed by layout/axis.rs"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title.orient, consumed by layout/axis.rs"
   },
   "AxisStyleSpec.title_padding": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_padding"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title.padding"
   },
   "AxisStyleSpec.translate": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.translate, consumed by layout/axis.rs"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.translate, consumed by layout/axis.rs"
   },
   "AxisStyleSpec.values": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_values, consumed by apply_label_format_to_axis / sync_projected_fractions_to_tick_values, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.values"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.ticks.values, consumed by apply_label_format_to_axis / sync_projected_fractions_to_tick_values, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.values"
   },
   "AxisStyleSpec.zindex": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.zindex, consumed by layout/axis.rs's draw-order"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.placement.zindex, consumed by layout/axis.rs's draw-order"
   },
   "ChartConfig.annotations": {
     "honored": true,
@@ -557,23 +557,23 @@
   },
   "GridAxisSpec.color": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_color, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.color key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid.color, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.color key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.dash": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_dash, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.dash key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid.dash, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.dash key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.enabled": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> AxisStyleOverrides.show_grid, resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). This is the per-axis grid enable F-L07-01/D4 (spec \u00a74.3) exists for: configure_grid(x=True, y=False) now takes effect instead of being dropped whole by the old agreeing-values guard."
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> AxisStyleOverrides.grid.show, resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). This is the per-axis grid enable F-L07-01/D4 (spec \u00a74.3) exists for: configure_grid(x=True, y=False) now takes effect instead of being dropped whole by the old agreeing-values guard."
   },
   "GridAxisSpec.opacity": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_opacity, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.opacity key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid.opacity, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.opacity key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.width": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_width, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.width key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid.width, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.width key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridConfigSpec.band_colors": {
     "honored": true,

@@ -904,8 +904,8 @@ fn data_coords_on_axis_text() {
         dy: 0.0,
         z: "above_marks".into(),
     };
-    assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(vec![10.0]));
-    assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(vec![20.0]));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::X), AxisCoords::Points(vec![10.0]));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::Y), AxisCoords::Points(vec![20.0]));
 }
 
 #[test]
@@ -923,8 +923,8 @@ fn data_coords_on_axis_excludes_px_and_norm() {
         dy: 0.0,
         z: "above_marks".into(),
     };
-    assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(Vec::new()));
-    assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(Vec::new()));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::X), AxisCoords::Points(Vec::new()));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::Y), AxisCoords::Points(Vec::new()));
 }
 
 #[test]
@@ -938,8 +938,8 @@ fn data_coords_on_axis_arrow_both_endpoints() {
         stroke_width: 1.5,
         head_size: 8.0,
     };
-    assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Extent(1.0, 3.0));
-    assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Extent(2.0, 4.0));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::X), AxisCoords::Extent(1.0, 3.0));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::Y), AxisCoords::Extent(2.0, 4.0));
 }
 
 #[test]
@@ -976,8 +976,8 @@ fn data_coords_on_axis_rect_line_bracket_share_shape() {
         },
     ];
     for spec in &specs {
-        assert_eq!(data_coords_on_axis(spec, "x"), AxisCoords::Extent(1.0, 3.0));
-        assert_eq!(data_coords_on_axis(spec, "y"), AxisCoords::Extent(2.0, 4.0));
+        assert_eq!(data_coords_on_axis(spec, AlignAxis::X), AxisCoords::Extent(1.0, 3.0));
+        assert_eq!(data_coords_on_axis(spec, AlignAxis::Y), AxisCoords::Extent(2.0, 4.0));
     }
 }
 
@@ -992,8 +992,8 @@ fn data_coords_on_axis_span_gated_by_its_own_axis_field() {
         label_position: "center".into(),
         label: None,
     };
-    assert_eq!(data_coords_on_axis(&x_span, "x"), AxisCoords::Extent(1.0, 2.0));
-    assert_eq!(data_coords_on_axis(&x_span, "y"), AxisCoords::Points(Vec::new()));
+    assert_eq!(data_coords_on_axis(&x_span, AlignAxis::X), AxisCoords::Extent(1.0, 2.0));
+    assert_eq!(data_coords_on_axis(&x_span, AlignAxis::Y), AxisCoords::Points(Vec::new()));
 
     let y_span = AnnotationSpec::Span {
         axis: "y".into(),
@@ -1004,8 +1004,8 @@ fn data_coords_on_axis_span_gated_by_its_own_axis_field() {
         label_position: "center".into(),
         label: None,
     };
-    assert_eq!(data_coords_on_axis(&y_span, "y"), AxisCoords::Extent(5.0, 6.0));
-    assert_eq!(data_coords_on_axis(&y_span, "x"), AxisCoords::Points(Vec::new()));
+    assert_eq!(data_coords_on_axis(&y_span, AlignAxis::Y), AxisCoords::Extent(5.0, 6.0));
+    assert_eq!(data_coords_on_axis(&y_span, AlignAxis::X), AxisCoords::Points(Vec::new()));
 }
 
 #[test]
@@ -1023,12 +1023,12 @@ fn data_coords_on_axis_callout_includes_optional_text_position() {
         text_y: Some(CoordValue::Data(12.0)),
     };
     assert_eq!(
-        data_coords_on_axis(&with_text_pos, "x"),
+        data_coords_on_axis(&with_text_pos, AlignAxis::X),
         AxisCoords::Points(vec![1.0, 11.0]),
         "a callout's anchor and text anchor are two points, never one interval"
     );
     assert_eq!(
-        data_coords_on_axis(&with_text_pos, "y"),
+        data_coords_on_axis(&with_text_pos, AlignAxis::Y),
         AxisCoords::Points(vec![2.0, 12.0])
     );
 
@@ -1045,8 +1045,8 @@ fn data_coords_on_axis_callout_includes_optional_text_position() {
         text_x: None,
         text_y: None,
     };
-    assert_eq!(data_coords_on_axis(&no_text_pos, "x"), AxisCoords::Points(vec![1.0]));
-    assert_eq!(data_coords_on_axis(&no_text_pos, "y"), AxisCoords::Points(vec![2.0]));
+    assert_eq!(data_coords_on_axis(&no_text_pos, AlignAxis::X), AxisCoords::Points(vec![1.0]));
+    assert_eq!(data_coords_on_axis(&no_text_pos, AlignAxis::Y), AxisCoords::Points(vec![2.0]));
 }
 
 #[test]
@@ -1059,8 +1059,8 @@ fn data_coords_on_axis_image_single_anchor() {
         height: 10.0,
         anchor: "middle".into(),
     };
-    assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(vec![7.0]));
-    assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(vec![8.0]));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::X), AxisCoords::Points(vec![7.0]));
+    assert_eq!(data_coords_on_axis(&spec, AlignAxis::Y), AxisCoords::Points(vec![8.0]));
 }
 
 // ── break-aware resolve_x/resolve_y (spec §4 H5, F-L08-07) ──────────────
@@ -1075,7 +1075,7 @@ fn resolve_x_data_coord_routes_through_break_when_present() {
         10.0,
     );
     let remap = crate::render::break_axis::BreakRemap::new(
-        "x",
+        AlignAxis::X,
         (0.0, 100.0),
         (50.0, 550.0),
         &result,
@@ -1147,7 +1147,7 @@ fn resolve_y_pixel_and_norm_coords_are_unaffected_by_a_break() {
         10.0,
     );
     let remap = crate::render::break_axis::BreakRemap::new(
-        "y",
+        AlignAxis::Y,
         (0.0, 100.0),
         (20.0, 320.0),
         &result,
@@ -1333,8 +1333,8 @@ fn broken_panel(gaps: &[[f64; 2]]) -> BrokenPanel {
 impl BrokenPanel {
     /// The remap for one axis, built exactly as `scene_build` builds it:
     /// the scale's own domain and pixel range.
-    fn remap(&self, axis: &'static str) -> break_axis::BreakRemap<'_> {
-        let (pixels, result) = if axis == "y" {
+    fn remap(&self, axis: AlignAxis) -> break_axis::BreakRemap<'_> {
+        let (pixels, result) = if axis.is_y() {
             (Y_PIXELS, &self.y_result)
         } else {
             (X_PIXELS, &self.x_result)
@@ -1381,7 +1381,7 @@ fn rect_bands(nodes: &[SceneNode]) -> Vec<(f64, f64)> {
 #[test]
 fn a_straddling_rect_clips_into_one_piece_per_visible_segment() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect(0.0, 1000.0)], &[y]);
 
     // 288 data pixels split 150:150 → 144 each. Segment 0 (data 0–150)
@@ -1408,7 +1408,7 @@ fn a_straddling_rect_clips_into_one_piece_per_visible_segment() {
 #[test]
 fn a_straddling_rounded_rect_squares_only_its_cut_edge() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect_with_radius(0.0, 1000.0, 8.0)], &[y]);
 
     assert_eq!(nodes.len(), 2, "same two pieces as the unrounded case; got {nodes:?}");
@@ -1458,13 +1458,13 @@ fn arc_count(cmds: &[PathCmd]) -> usize {
 #[test]
 fn a_rect_wholly_inside_a_gap_is_suppressed_and_rolled_up() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect(300.0, 700.0)], &[y]);
 
     assert!(nodes.is_empty(), "nothing of it is visible, so nothing renders");
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["rect".to_string()]);
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
@@ -1480,7 +1480,7 @@ fn a_rect_wholly_inside_a_gap_is_suppressed_and_rolled_up() {
 #[test]
 fn an_extent_with_an_in_gap_endpoint_clips_to_its_surviving_portion() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect(100.0, 400.0)], &[y]);
 
     // Data 100 → 320 − (100/150)·144 = 224; data 150 → 176.
@@ -1497,7 +1497,7 @@ fn an_extent_with_an_in_gap_endpoint_clips_to_its_surviving_portion() {
 #[test]
 fn an_extent_clear_of_every_gap_is_untouched() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect(0.0, 140.0)], &[y]);
 
     // Data 140 → 320 − (140/150)·144 = 185.6; data 0 → 320.
@@ -1513,13 +1513,13 @@ fn an_extent_clear_of_every_gap_is_untouched() {
 #[test]
 fn a_rect_exactly_covering_the_gap_rolls_up_as_spanning() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_rect(150.0, 850.0)], &[y]);
 
     assert!(nodes.is_empty());
     match warnings.as_slice() {
         [RenderWarning::AnnotationSpansBreakGap { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["rect".to_string()]);
         }
         other => panic!("expected one AnnotationSpansBreakGap, got {other:?}"),
@@ -1535,13 +1535,13 @@ fn a_rect_exactly_covering_the_gap_rolls_up_as_spanning() {
 #[test]
 fn a_bracket_straddling_a_gap_is_dropped_whole_not_split() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let (nodes, warnings) = panel.build(&[y_bracket(100.0, 900.0)], &[y]);
 
     assert!(nodes.is_empty(), "a bracket admits no honest split");
     match warnings.as_slice() {
         [RenderWarning::AnnotationSpansBreakGap { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["bracket".to_string()]);
         }
         other => panic!("expected one AnnotationSpansBreakGap, got {other:?}"),
@@ -1556,7 +1556,7 @@ fn a_bracket_straddling_a_gap_is_dropped_whole_not_split() {
 #[test]
 fn n_spanning_annotations_roll_up_into_one_warning() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let specs = vec![
         y_bracket(100.0, 900.0),
         y_bracket(120.0, 880.0),
@@ -1568,7 +1568,7 @@ fn n_spanning_annotations_roll_up_into_one_warning() {
     assert_eq!(warnings.len(), 1, "N drops, one warning; got {warnings:?}");
     match &warnings[0] {
         RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds.len(), 3, "the count of dropped instances survives");
             assert!(kinds.iter().all(|k| k == "bracket"));
         }
@@ -1585,7 +1585,7 @@ fn a_span_clips_and_its_label_rides_the_largest_surviving_piece() {
     // (data 0–200) runs 320 → 224, the indicator 224 → 212, segment 1 (data
     // 600–1000) runs 212 → 20. The larger piece is segment 1's.
     let panel = broken_panel(&[[200.0, 600.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let span = spec(
         r#"{"type":"span","axis":"y","start":0.0,"end":1000.0,"label":"band",
                 "label_position":"middle"}"#,
@@ -1621,7 +1621,7 @@ fn a_clipped_span_label_never_lands_inside_the_gap_band() {
     // inside the indicator band, which is exactly where the old pre-clip
     // placement would have drawn the label.
     let panel = broken_panel(&[[400.0, 600.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let span = spec(
         r#"{"type":"span","axis":"y","start":0.0,"end":1000.0,"label":"band",
                 "label_position":"middle"}"#,
@@ -1650,7 +1650,7 @@ fn a_clipped_span_label_never_lands_inside_the_gap_band() {
 #[test]
 fn an_annotation_line_splits_at_the_gap_with_its_crossing_interpolated() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     // A diagonal from (norm 0, data 0) to (norm 1, data 1000): x runs
     // 50 → 550 as y runs 320 → 20.
     let line = spec(
@@ -1681,7 +1681,7 @@ fn an_annotation_line_splits_at_the_gap_with_its_crossing_interpolated() {
 #[test]
 fn an_arrow_head_rides_the_tip_piece_with_its_size_kept() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let arrow = spec(
         r#"{"type":"arrow","x":{"norm":0.0},"y":0.0,"x2":{"norm":1.0},"y2":1000.0,
                 "head_size":10.0}"#,
@@ -1740,7 +1740,7 @@ fn head_tip_and_size(node: &SceneNode) -> ((f64, f64), f64) {
 #[test]
 fn an_arrow_wholly_inside_a_gap_is_suppressed_and_warns() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let arrow = spec(
         r#"{"type":"arrow","x":{"norm":0.0},"y":300.0,"x2":{"norm":1.0},"y2":700.0}"#,
     );
@@ -1749,7 +1749,7 @@ fn an_arrow_wholly_inside_a_gap_is_suppressed_and_warns() {
     assert!(nodes.is_empty(), "no piece of the shaft survives, so no head either");
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["arrow".to_string()]);
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
@@ -1768,7 +1768,7 @@ fn an_arrow_wholly_inside_a_gap_is_suppressed_and_warns() {
 #[test]
 fn an_arrow_with_an_in_gap_tip_drops_only_the_head() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let arrow = spec(
         r#"{"type":"arrow","x":{"norm":0.0},"y":0.0,"x2":{"norm":1.0},"y2":500.0,
                 "head_size":10.0}"#,
@@ -1796,7 +1796,7 @@ fn an_arrow_with_an_in_gap_tip_drops_only_the_head() {
 #[test]
 fn point_kinds_keep_the_membership_test() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let specs = vec![
         y_text(500.0, "inside the break"),
         y_text(100.0, "outside the break"),
@@ -1815,7 +1815,7 @@ fn point_kinds_keep_the_membership_test() {
     assert_eq!(texts, vec!["outside the break"]);
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["text", "callout", "image"]);
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
@@ -1828,7 +1828,7 @@ fn point_kinds_keep_the_membership_test() {
 #[test]
 fn a_callout_box_is_never_clipped_even_across_the_gap_band() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     // Anchor at data 125 places at pixel 200; the box centres 30px above
     // that (ty = 170) and is 22px tall (14 + 2·4 padding), so it covers
     // 159…181 — straight across the 164…176 indicator band.
@@ -1849,7 +1849,7 @@ fn a_callout_box_is_never_clipped_even_across_the_gap_band() {
 #[test]
 fn an_hline_and_its_label_share_one_fate_under_a_y_break() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let hline = |value: f64| {
         vec![
             spec(&format!(
@@ -1864,7 +1864,7 @@ fn an_hline_and_its_label_share_one_fate_under_a_y_break() {
     assert!(dropped.is_empty(), "an hline in the gap takes its label with it");
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["line", "text"], "both primitives, one warning");
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
@@ -1882,7 +1882,7 @@ fn an_hline_and_its_label_share_one_fate_under_a_y_break() {
 #[test]
 fn a_clipped_line_and_a_suppressed_label_report_only_the_drop() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let x = panel.remap("x");
+    let x = panel.remap(AlignAxis::X);
     let specs = vec![
         spec(
             r#"{"type":"line","x1":0.0,"y1":{"norm":0.0},"x2":1000.0,"y2":{"norm":0.0}}"#,
@@ -1911,7 +1911,7 @@ fn a_clipped_line_and_a_suppressed_label_report_only_the_drop() {
     );
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "x");
+            assert_eq!(*axis, AlignAxis::X);
             assert_eq!(kinds, &["text".to_string()], "only the DROP is reported");
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
@@ -1923,7 +1923,7 @@ fn a_clipped_line_and_a_suppressed_label_report_only_the_drop() {
 #[test]
 fn a_drop_on_one_axis_wins_over_a_cut_on_the_other() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let (x, y) = (panel.remap("x"), panel.remap("y"));
+    let (x, y) = (panel.remap(AlignAxis::X), panel.remap(AlignAxis::Y));
     // x spans the whole domain (clippable); y sits entirely in the gap.
     let rect = spec(
         r#"{"type":"rect","x1":0.0,"y1":300.0,"x2":1000.0,"y2":700.0}"#,
@@ -1965,7 +1965,7 @@ fn no_breaks_routes_straight_to_the_plain_build() {
 #[test]
 fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let text = AnnotationSpec::Text {
         x: CoordValue::Norm { norm: 0.5 },
         y: CoordValue::Data(100.0),
@@ -2015,7 +2015,7 @@ fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
 #[test]
 fn a_mixed_coordinate_rect_drops_whole_when_its_data_bound_is_in_the_gap() {
     let panel = broken_panel(&[[150.0, 850.0]]);
-    let y = panel.remap("y");
+    let y = panel.remap(AlignAxis::Y);
     let rect = spec(
         r#"{"type":"rect","x1":{"norm":0.0},"y1":500.0,"x2":{"norm":1.0},"y2":{"px":50.0}}"#,
     );
@@ -2024,7 +2024,7 @@ fn a_mixed_coordinate_rect_drops_whole_when_its_data_bound_is_in_the_gap() {
     assert!(nodes.is_empty(), "an unreadable interval cannot be clipped; got {nodes:?}");
     match warnings.as_slice() {
         [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
-            assert_eq!(axis, "y");
+            assert_eq!(*axis, AlignAxis::Y);
             assert_eq!(kinds, &["rect".to_string()]);
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),

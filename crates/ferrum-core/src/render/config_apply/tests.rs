@@ -65,10 +65,22 @@ mod chart_config_application_tests {
         assert_eq!(theme.sizes.grid_width, default_theme.sizes.grid_width);
         assert_eq!(theme.colors.grid_color, default_theme.colors.grid_color);
         assert_eq!(theme.padding.padding, default_theme.padding.padding);
-        assert_eq!(theme.legend.legend_orient, default_theme.legend.legend_orient);
-        assert_eq!(theme.palette.color_scheme, default_theme.palette.color_scheme);
-        assert_eq!(theme.typography.label_font_size, default_theme.typography.label_font_size);
-        assert_eq!(theme.typography.title_font_size, default_theme.typography.title_font_size);
+        assert_eq!(
+            theme.legend.legend_orient,
+            default_theme.legend.legend_orient
+        );
+        assert_eq!(
+            theme.palette.color_scheme,
+            default_theme.palette.color_scheme
+        );
+        assert_eq!(
+            theme.typography.label_font_size,
+            default_theme.typography.label_font_size
+        );
+        assert_eq!(
+            theme.typography.title_font_size,
+            default_theme.typography.title_font_size
+        );
     }
 
     #[test]
@@ -84,7 +96,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config_to_theme(&mut theme, &config);
-        assert_eq!(theme.colors.grid_color, color::parse_color("#ff0000").unwrap());
+        assert_eq!(
+            theme.colors.grid_color,
+            color::parse_color("#ff0000").unwrap()
+        );
         assert_eq!(theme.sizes.grid_width, 2.0);
         assert_eq!(theme.grid.grid_opacity, 0.5);
     }
@@ -108,11 +123,22 @@ mod chart_config_application_tests {
             theme.colors.grid_color
         };
         let expected = color::parse_color("#4682b4").unwrap();
-        assert_eq!(grid_color("steelblue"), expected, "CSS name must take effect");
-        assert_eq!(grid_color("rgb(70, 130, 180)"), expected, "rgb() must take effect");
+        assert_eq!(
+            grid_color("steelblue"),
+            expected,
+            "CSS name must take effect"
+        );
+        assert_eq!(
+            grid_color("rgb(70, 130, 180)"),
+            expected,
+            "rgb() must take effect"
+        );
         assert_eq!(grid_color("#4682b4"), expected, "hex is unchanged");
         // An unparseable value keeps the theme default, as before the sweep.
-        assert_eq!(grid_color("not-a-color"), ThemeInputs::default().colors.grid_color);
+        assert_eq!(
+            grid_color("not-a-color"),
+            ThemeInputs::default().colors.grid_color
+        );
     }
 
     /// A bare `AxesInput` for the per-axis grid/toggle unit tests below: two
@@ -140,8 +166,14 @@ mod chart_config_application_tests {
         let mut axes = blank_axes();
         let config = ChartConfig {
             grid: Some(GridConfigSpec {
-                x: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
-                y: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
+                x: Some(GridAxisSpec {
+                    enabled: Some(false),
+                    ..Default::default()
+                }),
+                y: Some(GridAxisSpec {
+                    enabled: Some(false),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -161,8 +193,14 @@ mod chart_config_application_tests {
         let mut axes = blank_axes();
         let config = ChartConfig {
             grid: Some(GridConfigSpec {
-                x: Some(GridAxisSpec { enabled: Some(true), ..Default::default() }),
-                y: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
+                x: Some(GridAxisSpec {
+                    enabled: Some(true),
+                    ..Default::default()
+                }),
+                y: Some(GridAxisSpec {
+                    enabled: Some(false),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -191,10 +229,16 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_grid_config_to_axis_inputs(&mut axes, &config);
-        assert_eq!(axes.x.overrides.grid_color, color::parse_color("#ff0000").ok());
-        assert_eq!(axes.x.overrides.grid_width, Some(3.0));
-        assert!(axes.y.overrides.grid_color.is_none(), "y keeps the theme fallback");
-        assert!(axes.y.overrides.grid_width.is_none());
+        assert_eq!(
+            axes.x.overrides.grid.color,
+            color::parse_color("#ff0000").ok()
+        );
+        assert_eq!(axes.x.overrides.grid.width, Some(3.0));
+        assert!(
+            axes.y.overrides.grid.color.is_none(),
+            "y keeps the theme fallback"
+        );
+        assert!(axes.y.overrides.grid.width.is_none());
     }
 
     /// `configure_axis(grid=True)` now lands on both axes' own slots
@@ -205,7 +249,10 @@ mod chart_config_application_tests {
     fn axis_config_grid_enables_per_axis_over_a_grid_less_theme() {
         let mut axes = blank_axes();
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { grid: Some(true), ..Default::default() },
+            style: AxisStyleSpec {
+                grid: Some(true),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axes.x, Some(&cfg)).unwrap();
@@ -222,7 +269,7 @@ mod chart_config_application_tests {
     #[test]
     fn apply_show_defaults_fills_only_unopinionated_axes() {
         let mut axes = blank_axes();
-        axes.x.overrides.show_grid = Some(true);
+        axes.x.overrides.grid.show = Some(true);
         let mut theme = ThemeInputs::default();
         theme.grid.grid = false;
         theme.axis.axis_line = false;
@@ -298,7 +345,10 @@ mod chart_config_application_tests {
         // writes; the other three ThemeInputs-backed ones resolve in
         // `apply_legend_cascade_to_theme` (D7) so per-channel can win.
         apply_chart_config_to_theme(&mut theme, &config);
-        assert_eq!(theme.legend.legend_direction, Some(LegendDirection::Horizontal));
+        assert_eq!(
+            theme.legend.legend_direction,
+            Some(LegendDirection::Horizontal)
+        );
         apply_legend_cascade_to_theme(
             &mut theme,
             &prepare::LegendPreparedOverrides::default(),
@@ -321,7 +371,10 @@ mod chart_config_application_tests {
     }
 
     fn legend_config(style: LegendStyleSpec) -> ChartConfig {
-        ChartConfig { legend: Some(LegendConfigSpec { style }), ..Default::default() }
+        ChartConfig {
+            legend: Some(LegendConfigSpec { style }),
+            ..Default::default()
+        }
     }
 
     /// D7 cascade repair: for each of the three fields whose effective value
@@ -415,7 +468,10 @@ mod chart_config_application_tests {
             &mut warnings,
         );
         assert!(entries.is_empty());
-        assert!(warnings.is_empty(), "a colorbar's values must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a colorbar's values must not warn: {warnings:?}"
+        );
     }
 
     #[test]
@@ -504,7 +560,10 @@ mod chart_config_application_tests {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { label_font_size: Some(14.0), ..Default::default() },
+                style: AxisStyleSpec {
+                    label_font_size: Some(14.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -535,7 +594,10 @@ mod chart_config_application_tests {
         // `domain` is no longer a theme write (D12, spec §4.9): it is a
         // per-axis toggle, so the shared `axis` key reaches each axis's own
         // slot instead of the one global flag that could not tell x from y.
-        assert!(theme.axis.axis_line, "domain no longer mutates the global theme flag");
+        assert!(
+            theme.axis.axis_line,
+            "domain no longer mutates the global theme flag"
+        );
         let mut axes = blank_axes();
         apply_axis_config_to_axis_input(&mut axes.x, config.axis.as_ref()).unwrap();
         apply_axis_config_to_axis_input(&mut axes.y, config.axis.as_ref()).unwrap();
@@ -563,7 +625,10 @@ mod chart_config_application_tests {
         assert_eq!(theme.typography.title_font_size, 22.0);
         assert_eq!(theme.typography.title_font_weight, "700");
         assert_eq!(theme.typography.title_anchor, TextAnchor::End);
-        assert_eq!(theme.colors.title_color, color::parse_color("#123456").unwrap());
+        assert_eq!(
+            theme.colors.title_color,
+            color::parse_color("#123456").unwrap()
+        );
         assert_eq!(theme.typography.title_offset, 8.0);
         assert_eq!(theme.typography.subtitle_font_size, Some(13.0));
         assert_eq!(
@@ -609,11 +674,17 @@ mod chart_config_application_tests {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { label_font_size: Some(10.0), ..Default::default() },
+                style: AxisStyleSpec {
+                    label_font_size: Some(10.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             axis_x: Some(AxisConfigSpec {
-                style: AxisStyleSpec { label_font_size: Some(14.0), ..Default::default() },
+                style: AxisStyleSpec {
+                    label_font_size: Some(14.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -626,8 +697,16 @@ mod chart_config_application_tests {
 
         let mut axes = blank_axes();
         fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
-        assert_eq!(axes.x.overrides.label_font_size, Some(14.0), "axis_x wins on x");
-        assert_eq!(axes.y.overrides.label_font_size, Some(10.0), "y takes the shared value");
+        assert_eq!(
+            axes.x.overrides.labels.font_size,
+            Some(14.0),
+            "axis_x wins on x"
+        );
+        assert_eq!(
+            axes.y.overrides.labels.font_size,
+            Some(10.0),
+            "y takes the shared value"
+        );
     }
 
     /// The Rust half of retiring Python's `_redistribute_general_axis` (spec
@@ -644,11 +723,17 @@ mod chart_config_application_tests {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { tick_size: Some(12.0), ..Default::default() },
+                style: AxisStyleSpec {
+                    tick_size: Some(12.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             axis_x: Some(AxisConfigSpec {
-                style: AxisStyleSpec { tick_size: Some(2.0), ..Default::default() },
+                style: AxisStyleSpec {
+                    tick_size: Some(2.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -656,7 +741,11 @@ mod chart_config_application_tests {
         apply_chart_config_to_theme(&mut theme, &config);
         let mut axes = blank_axes();
         fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
-        assert_eq!(axes.x.tick_size(&theme), 2.0, "axis_x's tick_size reaches x");
+        assert_eq!(
+            axes.x.tick_size(&theme),
+            2.0,
+            "axis_x's tick_size reaches x"
+        );
         assert_eq!(axes.y.tick_size(&theme), 12.0, "y keeps the shared value");
     }
 
@@ -671,11 +760,17 @@ mod chart_config_application_tests {
         // hand-sequencing the calls, so a reorder there fails here.
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { grid_color: Some("#00ff00".into()), ..Default::default() },
+                style: AxisStyleSpec {
+                    grid_color: Some("#00ff00".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             axis_x: Some(AxisConfigSpec {
-                style: AxisStyleSpec { grid_color: Some("#0000ff".into()), ..Default::default() },
+                style: AxisStyleSpec {
+                    grid_color: Some("#0000ff".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -684,9 +779,85 @@ mod chart_config_application_tests {
         fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
         // axis_x blue (0,0,255) must win over axis green.
         assert_eq!(
-            axes.x.overrides.grid_color.map(|c| [c.red, c.green, c.blue]),
+            axes.x
+                .overrides
+                .grid
+                .color
+                .map(|c| [c.red, c.green, c.blue]),
             Some([0, 0, 255]),
             "axis_x grid_color must win over the shared axis grid_color",
+        );
+    }
+
+    /// A specific `axis_x` layer carrying NO `label_format` must not consume the
+    /// shared `axis` layer's one.
+    ///
+    /// This pins the hazard `layout::Claimed::fill_without_claiming`'s doc
+    /// describes, and it is the only executable guard on the two-discipline
+    /// split `Claimed<T>` introduced. `fill_axis_slots_specific_before_shared`
+    /// runs `apply_axis_config_to_axis_input` TWICE per axis — the specific
+    /// `axis_x`/`axis_y` layer, then the shared `axis` layer — and that fn calls
+    /// `fill_chart_level_label_format` unconditionally for every section
+    /// present, with a format that may be `None`. So the `axis_x` layer below
+    /// reaches the format slot first with `(None, None)`. Because that fill
+    /// routes through `fill_without_claiming`, the empty fill takes no claim and
+    /// the shared layer still lands `,.1f`. Were it changed to claim — the
+    /// "simplification" of collapsing the two fill disciplines into one — the
+    /// slot would be empty-but-claimed and the shared layer would be skipped,
+    /// silently dropping the user's format.
+    ///
+    /// The config is deserialized from the literal wire dict this public
+    /// spelling emits, captured from `Chart._resolve_chart_config()`:
+    ///
+    /// ```python
+    /// fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q") \
+    ///   .configure(axis_x=fm.AxisConfig(label_angle=45)) \
+    ///   .configure_axis(label_format="decimal1")
+    /// ```
+    ///
+    /// so the shape under test is the one production actually produces, not a
+    /// hand-built approximation of it. End to end the surviving format is
+    /// observable as whole-number x ticks rendering `1.0`/`2.0`/`3.0` instead of
+    /// `1`/`2`/`3`.
+    #[test]
+    fn shared_axis_label_format_survives_a_specific_axis_x_layer_without_one() {
+        let config: ChartConfig = serde_json::from_value(serde_json::json!({
+            "axis": { "label_format": ",.1f", "label_format_type": "number" },
+            "axis_x": { "label_angle": 45 }
+        }))
+        .expect("the wire dict configure(axis_x=…) + configure_axis(…) emits");
+
+        let mut axes = blank_axes();
+        fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
+
+        let format = axes.x.overrides.labels.format.get();
+        assert_eq!(
+            format.spec.as_deref(),
+            Some(",.1f"),
+            "the shared `axis` layer's label_format was dropped: the specific \
+             `axis_x` layer reached the slot first with no format, and something \
+             let that empty fill CLAIM the slot. `Claimed::fill_without_claiming` \
+             must not claim — see its doc.",
+        );
+        assert_eq!(
+            format.format_type.as_deref(),
+            Some("number"),
+            "label_format survived but its format_type did not; the two halves \
+             of `LabelFormat` are written together and must arrive together",
+        );
+        // The specific layer's own field still wins its own slot, so this is a
+        // both-landed assertion rather than a shared-layer-only one.
+        assert_eq!(
+            axes.x.overrides.labels.angle,
+            Some(45.0),
+            "the specific `axis_x` layer's label_angle must still land",
+        );
+        // The slot is filled, never claimed: a chart-level fill is not a
+        // per-channel claim, and a third config layer must still see it as
+        // unclaimed-but-filled.
+        assert!(
+            !axes.x.overrides.labels.format.is_claimed(),
+            "a chart-level format fill must not take a per-channel claim",
         );
     }
 
@@ -716,17 +887,20 @@ mod chart_config_application_tests {
             None,
         );
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { title_font_size: Some(16.0), ..Default::default() },
+            style: AxisStyleSpec {
+                title_font_size: Some(16.0),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.title_font_size, Some(16.0));
+        assert_eq!(axis.overrides.title.font_size, Some(16.0));
     }
 
     #[test]
     fn chart_config_orient_propagates_when_at_default() {
         // configure_axis(orient="top") on an x-axis with no per-channel orient
-        // override fills `overrides.orient`; `resolve_orient` then moves the
+        // override fills `overrides.placement.orient`; `resolve_orient` then moves the
         // concrete side to Top. The orphan positioning fields flow too.
         let mut axis = crate::layout::AxisInput::new(
             crate::layout::AxisOrient::Bottom,
@@ -747,49 +921,57 @@ mod chart_config_application_tests {
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         axis.resolve_orient();
         assert_eq!(axis.orient, crate::layout::AxisOrient::Top);
-        assert_eq!(axis.overrides.translate, Some(5.0));
-        assert_eq!(axis.overrides.grid_opacity, Some(0.4));
-        assert_eq!(axis.overrides.zindex, Some(1));
+        assert_eq!(axis.overrides.placement.translate, Some(5.0));
+        assert_eq!(axis.overrides.grid.opacity, Some(0.4));
+        assert_eq!(axis.overrides.placement.zindex, Some(1));
     }
 
     #[test]
     fn chart_config_cross_dimension_orient_fails_loud() {
         // configure_axis(orient="left") on an x-axis is a cross-dimension error.
-        let mut axis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Bottom,
-            None,
-            vec![],
-            None,
-        );
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, vec![], None);
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { orient: Some("left".to_string()), ..Default::default() },
+            style: AxisStyleSpec {
+                orient: Some("left".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let err = apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap_err();
-        assert!(matches!(err, RenderError::InvalidAxisOrient { channel: "x", .. }));
+        assert!(matches!(
+            err,
+            RenderError::InvalidAxisOrient { channel: "x", .. }
+        ));
     }
 
     #[test]
     fn chart_config_orient_does_not_override_per_channel() {
         // An x-axis already moved to Top by the per-channel path (which sets the
-        // `overrides.orient` INPUT, mirroring prepare.rs) must not be moved again
+        // `overrides.placement.orient` INPUT, mirroring prepare.rs) must not be moved again
         // by a conflicting chart-level orient — the chart-level fill is gated on
         // `is_none()`, so per-channel wins.
-        let mut axis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Top,
-            None,
-            vec![],
-            None,
-        );
-        axis.overrides.orient = Some(crate::layout::AxisOrient::Top); // per-channel already set Top
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Top, None, vec![], None);
+        axis.overrides.placement.orient = Some(crate::layout::AxisOrient::Top); // per-channel already set Top
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { orient: Some("bottom".to_string()), ..Default::default() },
+            style: AxisStyleSpec {
+                orient: Some("bottom".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         axis.resolve_orient();
-        assert_eq!(axis.orient, crate::layout::AxisOrient::Top, "per-channel orient must win");
-        assert_eq!(axis.overrides.orient, Some(crate::layout::AxisOrient::Top));
+        assert_eq!(
+            axis.orient,
+            crate::layout::AxisOrient::Top,
+            "per-channel orient must win"
+        );
+        assert_eq!(
+            axis.overrides.placement.orient,
+            Some(crate::layout::AxisOrient::Top)
+        );
     }
 
     #[test]
@@ -800,17 +982,16 @@ mod chart_config_application_tests {
         // chart-level `configure(axis_x=AxisConfig(orient="top"))` win — a
         // precedence inversion. With the `is_none()` sentinel the explicit
         // per-channel Bottom wins and the axis stays at the bottom.
-        let mut axis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Bottom,
-            None,
-            vec![],
-            None,
-        );
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, vec![], None);
         // Mirror prepare.rs: an explicit per-channel orient sets BOTH the concrete
-        // side and the `overrides.orient` input (even when it equals the default).
-        axis.overrides.orient = Some(crate::layout::AxisOrient::Bottom);
+        // side and the `overrides.placement.orient` input (even when it equals the default).
+        axis.overrides.placement.orient = Some(crate::layout::AxisOrient::Bottom);
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { orient: Some("top".to_string()), ..Default::default() },
+            style: AxisStyleSpec {
+                orient: Some("top".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
@@ -822,15 +1003,14 @@ mod chart_config_application_tests {
         );
 
         // y mirror: explicit per-channel Left must beat chart-level Right.
-        let mut yaxis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Left,
-            None,
-            vec![],
-            None,
-        );
-        yaxis.overrides.orient = Some(crate::layout::AxisOrient::Left);
+        let mut yaxis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Left, None, vec![], None);
+        yaxis.overrides.placement.orient = Some(crate::layout::AxisOrient::Left);
         let ycfg = AxisConfigSpec {
-            style: AxisStyleSpec { orient: Some("right".to_string()), ..Default::default() },
+            style: AxisStyleSpec {
+                orient: Some("right".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut yaxis, Some(&ycfg)).unwrap();
@@ -861,9 +1041,12 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.offset, Some(30.0));
-        assert_eq!(axis.overrides.label_flush, Some(true));
-        assert_eq!(axis.overrides.label_overlap, Some(crate::layout::LabelOverlap::Parity));
+        assert_eq!(axis.overrides.placement.offset, Some(30.0));
+        assert_eq!(axis.overrides.labels.flush, Some(true));
+        assert_eq!(
+            axis.overrides.labels.overlap,
+            Some(crate::layout::LabelOverlap::Parity)
+        );
     }
 
     #[test]
@@ -875,9 +1058,9 @@ mod chart_config_application_tests {
             vec!["0".to_string()],
             None,
         );
-        axis.overrides.offset = Some(5.0);
-        axis.overrides.label_flush = Some(false);
-        axis.overrides.label_overlap = Some(crate::layout::LabelOverlap::ShowAll);
+        axis.overrides.placement.offset = Some(5.0);
+        axis.overrides.labels.flush = Some(false);
+        axis.overrides.labels.overlap = Some(crate::layout::LabelOverlap::ShowAll);
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec {
                 offset: Some(30.0),
@@ -888,10 +1071,18 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.offset, Some(5.0), "per-channel offset must win");
-        assert_eq!(axis.overrides.label_flush, Some(false), "per-channel label_flush must win");
         assert_eq!(
-            axis.overrides.label_overlap,
+            axis.overrides.placement.offset,
+            Some(5.0),
+            "per-channel offset must win"
+        );
+        assert_eq!(
+            axis.overrides.labels.flush,
+            Some(false),
+            "per-channel label_flush must win"
+        );
+        assert_eq!(
+            axis.overrides.labels.overlap,
             Some(crate::layout::LabelOverlap::ShowAll),
             "per-channel label_overlap must win",
         );
@@ -906,11 +1097,18 @@ mod chart_config_application_tests {
             None,
         );
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { title_color: Some("#ff0000".to_string()), ..Default::default() },
+            style: AxisStyleSpec {
+                title_color: Some("#ff0000".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        let c = axis.overrides.title_color.expect("title_color should be Some");
+        let c = axis
+            .overrides
+            .title
+            .color
+            .expect("title_color should be Some");
         assert_eq!(c.red, 0xff);
         assert_eq!(c.green, 0x00);
         assert_eq!(c.blue, 0x00);
@@ -918,18 +1116,17 @@ mod chart_config_application_tests {
 
     #[test]
     fn axis_config_title_padding_propagates_to_axis_input() {
-        let mut axis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Bottom,
-            None,
-            vec![],
-            None,
-        );
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, vec![], None);
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { title_padding: Some(12.0), ..Default::default() },
+            style: AxisStyleSpec {
+                title_padding: Some(12.0),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.title_padding, Some(12.0));
+        assert_eq!(axis.overrides.title.padding, Some(12.0));
     }
 
     #[test]
@@ -940,7 +1137,10 @@ mod chart_config_application_tests {
             vec!["1000".to_string(), "2000".to_string(), "3000".to_string()],
             None,
         );
-        let cfg = AxisConfigSpec { label_format_raw: Some(",.0f".to_string()), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            label_format_raw: Some(",.0f".to_string()),
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         let scale = linear_scale(0.0, 3000.0);
         apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap();
@@ -958,7 +1158,10 @@ mod chart_config_application_tests {
         );
         let cfg = AxisConfigSpec {
             label_format_raw: Some(".1%".to_string()),
-            style: AxisStyleSpec { values: Some(vec![0.0, 0.5, 1.0]), ..Default::default() },
+            style: AxisStyleSpec {
+                values: Some(vec![0.0, 0.5, 1.0]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
@@ -1009,7 +1212,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.label_format_type.as_deref(), Some("time"));
+        assert_eq!(
+            axis.overrides.labels.format.get().format_type.as_deref(),
+            Some("time")
+        );
         apply_label_format_to_axis(&mut axis, &scale, 4, false, "x").unwrap();
         for label in &axis.tick_labels {
             assert!(
@@ -1018,7 +1224,10 @@ mod chart_config_application_tests {
             );
             // ISO date shape: YYYY-MM-DD.
             assert_eq!(label.len(), 10, "expected an ISO date, got {label:?}");
-            assert!(label.starts_with("2020-01-0"), "expected a Jan 2020 date, got {label:?}");
+            assert!(
+                label.starts_with("2020-01-0"),
+                "expected a Jan 2020 date, got {label:?}"
+            );
         }
     }
 
@@ -1044,7 +1253,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.label_format_type.as_deref(), Some("number"));
+        assert_eq!(
+            axis.overrides.labels.format.get().format_type.as_deref(),
+            Some("number")
+        );
         let scale = linear_scale(0.0, 1.0);
         apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap();
         assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
@@ -1057,7 +1269,12 @@ mod chart_config_application_tests {
         let mut axis = crate::layout::AxisInput::new(
             crate::layout::AxisOrient::Bottom,
             None,
-            vec!["1".to_string(), "2".to_string(), "3".to_string(), "11".to_string()],
+            vec![
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string(),
+                "11".to_string(),
+            ],
             None,
         );
         let cfg = AxisConfigSpec {
@@ -1074,9 +1291,9 @@ mod chart_config_application_tests {
         assert_eq!(axis.tick_labels, vec!["1st", "2nd", "3rd", "11th"]);
     }
 
-    /// D8 cascade-inversion fix: `label_format_claimed`
-    /// must block the chart-level fill EVEN THOUGH `label_format` itself
-    /// reads `None` — the exact shape `prepare::build_axis_input` produces
+    /// D8 cascade-inversion fix: the format slot's claim
+    /// must block the chart-level fill EVEN THOUGH the `labels.format` slot
+    /// itself reads empty — the exact shape `prepare::build_axis_input` produces
     /// for a per-channel TEMPORAL format (applied eagerly, threads `None`
     /// back). Simulates that shape directly (bypassing the full
     /// prepare/scale-resolve pipeline, which the end-to-end
@@ -1092,7 +1309,7 @@ mod chart_config_application_tests {
         );
         // Simulates prepare::build_axis_input's post-eager-temporal-apply
         // state: label_format threaded None, but the axis IS claimed.
-        axis.overrides.label_format_claimed = true;
+        axis.overrides.labels.format.claim();
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec {
                 label_format: Some("%Y-%m-%d".to_string()),
@@ -1103,16 +1320,19 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         // Chart-level must not have filled the slot at all.
-        assert_eq!(axis.overrides.label_format, None);
-        assert_eq!(axis.overrides.label_format_type, None);
+        assert_eq!(axis.overrides.labels.format.get().spec, None);
+        assert_eq!(axis.overrides.labels.format.get().format_type, None);
         // And apply_label_format_to_axis (which no-ops on a None label_format)
         // must leave the already-applied per-channel labels untouched.
         let scale = linear_scale(0.0, 1.0);
         apply_label_format_to_axis(&mut axis, &scale, 2, false, "x").unwrap();
-        assert_eq!(axis.tick_labels, vec!["Feb 06".to_string(), "Mar 06".to_string()]);
+        assert_eq!(
+            axis.tick_labels,
+            vec!["Feb 06".to_string(), "Mar 06".to_string()]
+        );
     }
 
-    /// The unclaimed case (control): with `label_format_claimed = false` (the
+    /// The unclaimed case (control): with the format slot unclaimed (the
     /// default), the chart-level time preset DOES fill and re-derive — this
     /// is the correct, desired "chart-level alone" behavior the claimed-flag
     /// fix must not regress.
@@ -1128,9 +1348,16 @@ mod chart_config_application_tests {
             false,
         ));
         let default_labels = scale.tick_labels(2);
-        let mut axis =
-            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, default_labels, None);
-        assert!(!axis.overrides.label_format_claimed, "default must be unclaimed");
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            default_labels,
+            None,
+        );
+        assert!(
+            !axis.overrides.labels.format.is_claimed(),
+            "default must be unclaimed"
+        );
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec {
                 label_format: Some("%Y-%m-%d".to_string()),
@@ -1140,10 +1367,16 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.label_format.as_deref(), Some("%Y-%m-%d"));
+        assert_eq!(
+            axis.overrides.labels.format.get().spec.as_deref(),
+            Some("%Y-%m-%d")
+        );
         apply_label_format_to_axis(&mut axis, &scale, 2, false, "x").unwrap();
         for label in &axis.tick_labels {
-            assert!(label.starts_with("2020-01-0"), "expected an ISO date, got {label:?}");
+            assert!(
+                label.starts_with("2020-01-0"),
+                "expected an ISO date, got {label:?}"
+            );
         }
     }
 
@@ -1225,11 +1458,14 @@ mod chart_config_application_tests {
             None,
         );
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { label_padding: Some(6.0), ..Default::default() },
+            style: AxisStyleSpec {
+                label_padding: Some(6.0),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.overrides.label_padding, Some(6.0));
+        assert_eq!(axis.overrides.labels.padding, Some(6.0));
     }
 
     #[test]
@@ -1239,15 +1475,18 @@ mod chart_config_application_tests {
             crate::layout::AxisOrient::Bottom,
             None,
             vec![],
-            Some(-45.0), // per-channel override already set (seeds overrides.label_angle)
+            Some(-45.0), // per-channel override already set (seeds overrides.labels.angle)
         );
         let cfg = AxisConfigSpec {
-            style: AxisStyleSpec { label_angle: Some(-90.0), ..Default::default() },
+            style: AxisStyleSpec {
+                label_angle: Some(-90.0),
+                ..Default::default()
+            },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         // -45.0 should win because it was already set (Some).
-        assert_eq!(axis.overrides.label_angle, Some(-45.0));
+        assert_eq!(axis.overrides.labels.angle, Some(-45.0));
     }
 
     #[test]
@@ -1257,7 +1496,10 @@ mod chart_config_application_tests {
         let mut overrides = prep_overrides;
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                style: LegendStyleSpec { gradient_length: Some(300.0), ..Default::default() },
+                style: LegendStyleSpec {
+                    gradient_length: Some(300.0),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
@@ -1270,7 +1512,10 @@ mod chart_config_application_tests {
         let mut overrides = legend_overrides_from_prep_default();
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                style: LegendStyleSpec { symbol_type: Some("square".to_string()), ..Default::default() },
+                style: LegendStyleSpec {
+                    symbol_type: Some("square".to_string()),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
@@ -1288,7 +1533,10 @@ mod chart_config_application_tests {
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
                 // configure (level 3) tries to override.
-                style: LegendStyleSpec { gradient_length: Some(300.0), ..Default::default() },
+                style: LegendStyleSpec {
+                    gradient_length: Some(300.0),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
@@ -1303,7 +1551,10 @@ mod chart_config_application_tests {
         let mut overrides = legend_overrides_from_prep_default();
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                style: LegendStyleSpec { symbol_stroke_width: Some(2.0), ..Default::default() },
+                style: LegendStyleSpec {
+                    symbol_stroke_width: Some(2.0),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
@@ -1350,15 +1601,27 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config_to_legend_overrides(&mut overrides, &config);
-        assert_eq!(overrides.style.symbol_stroke_width, Some(5.0), "per-channel wins");
+        assert_eq!(
+            overrides.style.symbol_stroke_width,
+            Some(5.0),
+            "per-channel wins"
+        );
         assert_eq!(overrides.style.row_padding, Some(18.0), "per-channel wins");
         assert_eq!(overrides.style.clip_height, Some(40.0), "per-channel wins");
         assert_eq!(overrides.tick_min_step, Some(2.0), "per-channel wins");
         assert_eq!(overrides.style.symbol_size, Some(300.0), "per-channel wins");
-        assert_eq!(overrides.style.label_color.as_deref(), Some("#ff0000"), "per-channel wins");
+        assert_eq!(
+            overrides.style.label_color.as_deref(),
+            Some("#ff0000"),
+            "per-channel wins"
+        );
         assert_eq!(overrides.style.offset, Some(50.0), "per-channel wins");
         assert_eq!(overrides.style.padding, Some(30.0), "per-channel wins");
-        assert_eq!(overrides.style.title_padding, Some(25.0), "per-channel wins");
+        assert_eq!(
+            overrides.style.title_padding,
+            Some(25.0),
+            "per-channel wins"
+        );
     }
 
     /// When per-channel leaves the 6a fields `None`, `configure_legend` fills
@@ -1389,16 +1652,22 @@ mod chart_config_application_tests {
 
     #[test]
     fn color_config_domain_override_updates_continuous_scale() {
-        use scale_resolve::ColorScale;
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use scale_resolve::ColorScale;
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
         });
-        let cfg = ColorConfigSpec { domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]), ..Default::default() };
+        let cfg = ColorConfigSpec {
+            domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]),
+            ..Default::default()
+        };
         let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
-        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a well-formed override must not warn: {warnings:?}"
+        );
         if let Some(ColorScale::Continuous { domain, .. }) = color_scale {
             assert_eq!(domain, (10.0, 90.0));
         } else {
@@ -1408,8 +1677,8 @@ mod chart_config_application_tests {
 
     #[test]
     fn color_config_range_override_builds_gradient() {
-        use scale_resolve::ColorScale;
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use scale_resolve::ColorScale;
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
@@ -1420,8 +1689,15 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
-        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
-        if let Some(ColorScale::Continuous { scheme: ContinuousScheme::Gradient(stops), .. }) = color_scale {
+        assert!(
+            warnings.is_empty(),
+            "a well-formed override must not warn: {warnings:?}"
+        );
+        if let Some(ColorScale::Continuous {
+            scheme: ContinuousScheme::Gradient(stops),
+            ..
+        }) = color_scale
+        {
             assert_eq!(stops.len(), 2);
             // First stop at t=0, last at t=1.
             assert!((stops[0].0 - 0.0).abs() < 1e-9);
@@ -1441,8 +1717,8 @@ mod chart_config_application_tests {
     /// Discretizing arms.
     #[test]
     fn color_config_continuous_range_parse_failure_refuses() {
-        use scale_resolve::ColorScale;
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use scale_resolve::ColorScale;
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
@@ -1457,11 +1733,19 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         let err = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap_err();
-        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "not-a-color".into() });
+        assert_eq!(
+            err,
+            RenderError::ColorRangeParseFailure {
+                entry: "not-a-color".into()
+            }
+        );
         // The scale must be left untouched — no partial 2-stop gradient built
         // from the survivors.
         match color_scale {
-            Some(ColorScale::Continuous { scheme: ContinuousScheme::Named(NamedContinuous::Viridis), .. }) => {}
+            Some(ColorScale::Continuous {
+                scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+                ..
+            }) => {}
             other => panic!("scale must be untouched on refusal, got {other:?}"),
         }
     }
@@ -1497,19 +1781,31 @@ mod chart_config_application_tests {
         // `color_config_domain_omitting_a_data_category_warns` for the contract.
         assert_eq!(
             warnings,
-            vec![RenderWarning::ColorDomainOmitsCategories { categories: vec!["b".into()] }],
+            vec![RenderWarning::ColorDomainOmitsCategories {
+                categories: vec!["b".into()]
+            }],
         );
 
         let scale = color_scale.expect("scale survives the override");
         match &scale {
             ColorScale::Categorical { domain, .. } => {
-                assert_eq!(domain, &["c", "a"], "listed order wins; unlisted 'b' is dropped");
+                assert_eq!(
+                    domain,
+                    &["c", "a"],
+                    "listed order wins; unlisted 'b' is dropped"
+                );
             }
             other => panic!("expected Categorical, got {other:?}"),
         }
-        assert!(scale.lookup("b").is_none(), "'b' is no longer in the domain");
+        assert!(
+            scale.lookup("b").is_none(),
+            "'b' is no longer in the domain"
+        );
         assert_ne!(
-            (scale.lookup("c").unwrap().red, scale.lookup("c").unwrap().green),
+            (
+                scale.lookup("c").unwrap().red,
+                scale.lookup("c").unwrap().green
+            ),
             (before.red, before.green),
             "'c' moved to palette slot 0, so its color must change"
         );
@@ -1544,7 +1840,9 @@ mod chart_config_application_tests {
         // (1) The warning names the omitted category — and only it.
         assert_eq!(
             warnings,
-            vec![RenderWarning::ColorDomainOmitsCategories { categories: vec!["b".into()] }],
+            vec![RenderWarning::ColorDomainOmitsCategories {
+                categories: vec!["b".into()]
+            }],
         );
         assert_eq!(
             warnings[0].to_string(),
@@ -1586,13 +1884,19 @@ mod chart_config_application_tests {
             &mut full,
             &ColorConfigSpec {
                 domain: Some(
-                    data_categories.iter().map(|c| serde_json::json!(c)).collect(),
+                    data_categories
+                        .iter()
+                        .map(|c| serde_json::json!(c))
+                        .collect(),
                 ),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert!(warnings.is_empty(), "a domain covering every category is silent: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a domain covering every category is silent: {warnings:?}"
+        );
     }
 
     /// A category listed in `configure_color(domain=…)` but absent from the data
@@ -1606,7 +1910,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
-        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a well-formed override must not warn: {warnings:?}"
+        );
         match color_scale.as_ref().unwrap() {
             ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "ghost"]),
             other => panic!("expected Categorical, got {other:?}"),
@@ -1624,7 +1931,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
-        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a well-formed override must not warn: {warnings:?}"
+        );
         match color_scale.as_ref().unwrap() {
             ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "b"]),
             other => panic!("expected Categorical, got {other:?}"),
@@ -1647,13 +1957,19 @@ mod chart_config_application_tests {
 
         let scale = categorical_scale(&["a", "b", "c"]);
         resync_categorical_legend_entries(&mut entries, Some(&scale));
-        assert_eq!(entries, unchanged, "matching domain must leave entries untouched");
+        assert_eq!(
+            entries, unchanged,
+            "matching domain must leave entries untouched"
+        );
 
         let reordered = categorical_scale(&["c", "a"]);
         resync_categorical_legend_entries(&mut entries, Some(&reordered));
         assert_eq!(
             entries,
-            vec![entry("c", SymbolKind::Circle), entry("a", SymbolKind::Square)],
+            vec![
+                entry("c", SymbolKind::Circle),
+                entry("a", SymbolKind::Square)
+            ],
             "entries follow the new domain and each keeps its own symbol"
         );
 
@@ -1711,7 +2027,10 @@ mod chart_config_application_tests {
         assert_eq!(
             entries,
             vec![
-                LegendEntry { shape_name: Some("cross".into()), ..dashed("c", &[]) },
+                LegendEntry {
+                    shape_name: Some("cross".into()),
+                    ..dashed("c", &[])
+                },
                 dashed("a", &[2.0, 3.0]),
             ],
             "each surviving category keeps the pattern and glyph it was folded with"
@@ -1746,13 +2065,22 @@ mod chart_config_application_tests {
         // is warned with both counts.
         let warnings = apply_color_config_to_color_scale(
             &mut color_scale,
-            &ColorConfigSpec { range: Some(vec!["#ffffff".into()]), ..Default::default() },
+            &ColorConfigSpec {
+                range: Some(vec!["#ffffff".into()]),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
+        assert_eq!(
+            color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red,
+            0
+        );
         assert_eq!(
             warnings,
-            vec![RenderWarning::ColorRangeBucketCountMismatch { expected: 2, received: 1 }],
+            vec![RenderWarning::ColorRangeBucketCountMismatch {
+                expected: 2,
+                received: 1
+            }],
         );
         assert_eq!(
             warnings[0].to_string(),
@@ -1768,8 +2096,14 @@ mod chart_config_application_tests {
             },
         )
         .unwrap();
-        assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 255);
-        assert!(warnings.is_empty(), "a matching range must not warn: {warnings:?}");
+        assert_eq!(
+            color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red,
+            255
+        );
+        assert!(
+            warnings.is_empty(),
+            "a matching range must not warn: {warnings:?}"
+        );
     }
 
     /// Batch A Task 8 sweep: all three `configure_color(range=…)` arms —
@@ -1785,8 +2119,8 @@ mod chart_config_application_tests {
     /// re-narrowing of *any* of them visible.
     #[test]
     fn color_config_range_accepts_named_and_rgb_forms_on_every_arm() {
-        use scale_resolve::{ColorScale, DiscretizedColors};
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use scale_resolve::{ColorScale, DiscretizedColors};
 
         // steelblue / tomato, in the three spellings that must agree.
         let spellings: [[&str; 2]; 3] = [
@@ -1814,7 +2148,8 @@ mod chart_config_application_tests {
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             match scale {
                 Some(ColorScale::Continuous {
-                    scheme: ContinuousScheme::Gradient(stops), ..
+                    scheme: ContinuousScheme::Gradient(stops),
+                    ..
                 }) => {
                     assert_eq!(
                         stops.iter().map(|&(_, c)| c).collect::<Vec<_>>(),
@@ -1833,7 +2168,11 @@ mod chart_config_application_tests {
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             match scale {
                 Some(ColorScale::Categorical { palette, .. }) => {
-                    assert_eq!(palette.as_ref(), &expected, "{pair:?} must set the same palette");
+                    assert_eq!(
+                        palette.as_ref(),
+                        &expected,
+                        "{pair:?} must set the same palette"
+                    );
                 }
                 other => panic!("{pair:?}: expected Categorical, got {other:?}"),
             }
@@ -1849,7 +2188,10 @@ mod chart_config_application_tests {
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             let scale = scale.unwrap();
             assert_eq!(
-                [scale.lookup_f64(0.5).unwrap(), scale.lookup_f64(1.5).unwrap()],
+                [
+                    scale.lookup_f64(0.5).unwrap(),
+                    scale.lookup_f64(1.5).unwrap()
+                ],
                 expected,
                 "{pair:?} must repaint both buckets alike"
             );
@@ -1888,7 +2230,12 @@ mod chart_config_application_tests {
             },
         )
         .unwrap_err();
-        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "bogus".into() });
+        assert_eq!(
+            err,
+            RenderError::ColorRangeParseFailure {
+                entry: "bogus".into()
+            }
+        );
         for probe in [0.5, 1.5, 2.5] {
             assert_eq!(
                 scale.as_ref().unwrap().lookup_f64(probe).unwrap().red,
@@ -1908,7 +2255,12 @@ mod chart_config_application_tests {
             },
         )
         .unwrap_err();
-        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "nope".into() });
+        assert_eq!(
+            err,
+            RenderError::ColorRangeParseFailure {
+                entry: "nope".into()
+            }
+        );
         assert_eq!(scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
     }
 
@@ -1942,15 +2294,21 @@ mod chart_config_application_tests {
             },
         )
         .unwrap();
-        assert!(warnings.is_empty(), "a valid range must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "a valid range must not warn: {warnings:?}"
+        );
         let applied = scale.as_ref().unwrap();
         assert_eq!(applied.lookup("a"), Some(red), "a must take the 1st entry");
         assert_eq!(applied.lookup("c"), Some(blue), "c must take the 3rd entry");
 
         // One unparseable entry: the whole range is refused.
         let resolved = categorical_scale(&["a", "b", "c"]);
-        let (before_a, before_b, before_c) =
-            (resolved.lookup("a"), resolved.lookup("b"), resolved.lookup("c"));
+        let (before_a, before_b, before_c) = (
+            resolved.lookup("a"),
+            resolved.lookup("b"),
+            resolved.lookup("c"),
+        );
         let mut scale = Some(resolved);
         let err = apply_color_config_to_color_scale(
             &mut scale,
@@ -1962,7 +2320,9 @@ mod chart_config_application_tests {
         .unwrap_err();
         assert_eq!(
             err,
-            RenderError::ColorRangeParseFailure { entry: "notacolor".into() },
+            RenderError::ColorRangeParseFailure {
+                entry: "notacolor".into()
+            },
             "one bad entry must be refused, not silently dropped"
         );
         let kept = scale.as_ref().unwrap();
@@ -2065,8 +2425,16 @@ mod pipeline_order_tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
                 color: color_enc,
                 size: with_size.then(|| EncodingSpec {
                     field: "mass".into(),
@@ -2098,11 +2466,19 @@ mod pipeline_order_tests {
         spec: &ChartSpec,
         batch: &RecordBatch,
         chart_config: &ChartConfig,
-    ) -> (prepare::PreparedInputs, AppliedChartConfig, Vec<RenderWarning>) {
+    ) -> (
+        prepare::PreparedInputs,
+        AppliedChartConfig,
+        Vec<RenderWarning>,
+    ) {
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let mut prep =
-            prepare::prepare_render_inputs(spec, batch, &theme, viewport, chart_config, None).unwrap();
+            prepare::prepare_render_inputs(spec, batch, &theme, viewport, chart_config, None)
+                .unwrap();
         let mut warnings = prep.warnings.clone();
         let applied =
             apply_chart_config_pipeline(&mut prep, &theme, chart_config, &mut warnings).unwrap();
@@ -2124,26 +2500,39 @@ mod pipeline_order_tests {
         let config = ChartConfig {
             // Least specific: loses on both axes.
             axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { grid_color: Some("#00ff00".into()), ..Default::default() },
+                style: AxisStyleSpec {
+                    grid_color: Some("#00ff00".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             // Most specific: wins on x.
             axis_x: Some(AxisConfigSpec {
-                style: AxisStyleSpec { grid_color: Some("#0000ff".into()), ..Default::default() },
+                style: AxisStyleSpec {
+                    grid_color: Some("#0000ff".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             grid: Some(GridConfigSpec {
                 // Middle layer: loses to `axis_x` on x …
-                x: Some(GridAxisSpec { color: Some("#ff0000".into()), ..Default::default() }),
+                x: Some(GridAxisSpec {
+                    color: Some("#ff0000".into()),
+                    ..Default::default()
+                }),
                 // … and wins over the shared `axis` on y, where no `axis_y` exists.
-                y: Some(GridAxisSpec { color: Some("#ff0000".into()), ..Default::default() }),
+                y: Some(GridAxisSpec {
+                    color: Some("#ff0000".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let mut axes = blank_axes();
         fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
-        let rgb = |a: &crate::layout::AxisInput| a.overrides.grid_color.map(|c| [c.red, c.green, c.blue]);
+        let rgb =
+            |a: &crate::layout::AxisInput| a.overrides.grid.color.map(|c| [c.red, c.green, c.blue]);
         assert_eq!(
             rgb(&axes.x),
             Some([0, 0, 255]),
@@ -2218,7 +2607,11 @@ mod pipeline_order_tests {
             ..Default::default()
         };
         let (prep, _applied, _warnings) = run_pipeline(&spec, &batch, &config);
-        let labels: Vec<&str> = prep.legend_entries.iter().map(|e| e.label.as_str()).collect();
+        let labels: Vec<&str> = prep
+            .legend_entries
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect();
         assert_eq!(
             labels,
             vec!["c", "a"],
@@ -2321,14 +2714,20 @@ mod pipeline_order_tests {
             ..Default::default()
         };
         let axis_y = AxisConfigSpec {
-            style: AxisStyleSpec { tick_count: Some(9), ..Default::default() },
+            style: AxisStyleSpec {
+                tick_count: Some(9),
+                ..Default::default()
+            },
             ..Default::default()
         };
         // Baseline: the same axes with tick_extra OFF, so the assertion below
         // compares against this chart's real tick set rather than a guess.
         let plain = ChartConfig {
             axis_x: Some(AxisConfigSpec {
-                style: AxisStyleSpec { tick_count: Some(4), ..Default::default() },
+                style: AxisStyleSpec {
+                    tick_count: Some(4),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             axis_y: Some(axis_y.clone()),
@@ -2373,20 +2772,41 @@ mod pipeline_order_tests {
         // Guard: without suppression this chart really does carry both, so the
         // assertions below cannot pass vacuously.
         let (baseline, _, _) = run_pipeline(&spec, &batch, &ChartConfig::default());
-        assert!(baseline.colorbar.is_some(), "fixture must build a colorbar to suppress");
-        assert!(!baseline.aux_legends.is_empty(), "fixture must build an aux legend to suppress");
+        assert!(
+            baseline.colorbar.is_some(),
+            "fixture must build a colorbar to suppress"
+        );
+        assert!(
+            !baseline.aux_legends.is_empty(),
+            "fixture must build an aux legend to suppress"
+        );
 
         let config = ChartConfig {
             legend: Some(LegendConfigSpec {
-                style: LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
+                style: LegendStyleSpec {
+                    orient: Some("none".into()),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
         let (prep, applied, _warnings) = run_pipeline(&spec, &batch, &config);
-        assert!(prep.colorbar.is_none(), "the colorbar must be cleared, not just the entries");
-        assert!(prep.aux_legends.is_empty(), "the size/shape aux legends must be cleared too");
-        assert!(prep.legend_entries.is_empty(), "categorical entries must be cleared");
-        assert!(prep.legend_title.is_none(), "the legend title must be cleared");
+        assert!(
+            prep.colorbar.is_none(),
+            "the colorbar must be cleared, not just the entries"
+        );
+        assert!(
+            prep.aux_legends.is_empty(),
+            "the size/shape aux legends must be cleared too"
+        );
+        assert!(
+            prep.legend_entries.is_empty(),
+            "categorical entries must be cleared"
+        );
+        assert!(
+            prep.legend_title.is_none(),
+            "the legend title must be cleared"
+        );
         assert!(
             applied.legend_title.is_none(),
             "and the cleared title must reach the layout bundle, not just `prep`"

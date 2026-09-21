@@ -42,6 +42,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::annotation::{accepted_keys_for_annotation_variant, AnnotationSpec};
+use crate::spec::axis::AlignAxis;
 
 /// Top-level chart configuration passed from Python via the `chart_config` dict.
 ///
@@ -114,7 +115,10 @@ impl ChartConfig {
         axis: ConfigAxis,
         pick: impl Fn(&AxisConfigSpec) -> Option<T>,
     ) -> Option<T> {
-        self.axis_sections(axis).into_iter().flatten().find_map(pick)
+        self.axis_sections(axis)
+            .into_iter()
+            .flatten()
+            .find_map(pick)
     }
 }
 
@@ -142,8 +146,20 @@ pub enum StructuralSpec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BreakAxisSpec {
-    /// Which axis to break (`"x"` or `"y"`).
-    pub axis: String,
+    /// Which axis to break — the wire tokens are `"x"` and `"y"`
+    /// ([`AlignAxis`], shared with `ExtentAlignment`'s own axis, `#229`(2)).
+    ///
+    /// Typed rather than a `String` because a dozen sites downstream asked
+    /// `axis == "y"` and treated every other value as x; the enum makes "the
+    /// other one is x" a fact the compiler keeps. A hand-built wire spec
+    /// naming a third token (Python's `BreakAxis.__post_init__` already
+    /// refuses one) is REFUSED rather than silently rendering as an x break:
+    /// primarily by the array-item value gate
+    /// (`binding.rs::validate_break_axis_axis_value`), which names the item
+    /// and index in the same voice as this item's other refusals, and — for
+    /// anything bypassing that gate — by serde's own unknown-variant error as
+    /// the backstop.
+    pub axis: AlignAxis,
     /// List of `[start, end]` data-value pairs that are excluded from the scale.
     pub gaps: Vec<[f64; 2]>,
     /// Pixel width/height of the break indicator region (default 12).
@@ -254,11 +270,21 @@ impl InsetCoord {
     }
 }
 
-fn default_break_size() -> f64 { 12.0 }
-fn default_break_style() -> String { "slash".to_string() }
-fn default_true() -> bool { true }
-fn default_border_color() -> String { "#999999".to_string() }
-fn default_connect_style() -> String { "lines".to_string() }
+fn default_break_size() -> f64 {
+    12.0
+}
+fn default_break_style() -> String {
+    "slash".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_border_color() -> String {
+    "#999999".to_string()
+}
+fn default_connect_style() -> String {
+    "lines".to_string()
+}
 
 /// Shared axis **styling + positioning** fields, mirroring the snake_case keys
 /// `fm.Axis.to_dict()` emits. This is the single schema used by BOTH the
@@ -313,7 +339,7 @@ pub struct AxisStyleSpec {
     /// BOTH the per-channel (`EncodingSpec.axis`) and chart-level
     /// (`axis`/`axis_x`/`axis_y`/`axis_y2`) positions as of D12 (spec §4.9):
     /// it merges through `prepare::axis_style_fill_from` into
-    /// `AxisStyleOverrides::show_labels`, an `Option<bool>` whose fill-only
+    /// `AxisStyleOverrides`' `labels.show`, an `Option<bool>` whose fill-only
     /// chart-level discipline is what lets both levels write it without the
     /// chart-level one clobbering the per-channel answer. (Before that
     /// widening `AxisInput.show_labels` was a plain `bool` with no way to say
@@ -322,7 +348,7 @@ pub struct AxisStyleSpec {
     pub labels: Option<bool>,
     // ── Ticks ────────────────────────────────────────────────────────────────
     /// Whether to show tick marks. Same two-level disposition as `labels`
-    /// above (`AxisStyleOverrides::show_ticks`).
+    /// above (`AxisStyleOverrides`' `ticks.show`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticks: Option<bool>,
     /// Target number of major ticks. Resolved — per-channel first, then the
@@ -333,7 +359,7 @@ pub struct AxisStyleSpec {
     /// scale GENERATES, not how existing ones are drawn.
     #[serde(alias = "tickCount", skip_serializing_if = "Option::is_none")]
     pub tick_count: Option<u32>,
-    /// Tick-mark length in px. Per-axis via `AxisStyleOverrides::tick_size`
+    /// Tick-mark length in px. Per-axis via `AxisStyleOverrides`' `ticks.size`
     /// (`AxisInput::tick_size`) as of D12; the SHARED `axis` key additionally
     /// writes `theme.sizes.tick_size` as the global fallback for axes the
     /// per-axis fill does not visit.
@@ -353,7 +379,7 @@ pub struct AxisStyleSpec {
     pub values: Option<Vec<f64>>,
     // ── Grid ─────────────────────────────────────────────────────────────────
     /// Whether to show gridlines for this axis. Per-axis at BOTH positions as
-    /// of D4/D12 (spec §4.3): merges into `AxisStyleOverrides::show_grid`
+    /// of D4/D12 (spec §4.3): merges into `AxisStyleOverrides`' `grid.show`
     /// (`Option<bool>`), resolved against `theme.grid.grid` by
     /// `AxesInput::apply_show_defaults` and read by `build_grid`'s per-axis
     /// filter. It no longer writes the single global `theme.grid.grid`, which
@@ -374,7 +400,7 @@ pub struct AxisStyleSpec {
     pub grid_opacity: Option<f64>,
     // ── Domain line ──────────────────────────────────────────────────────────
     /// Whether to show the axis domain line. Same per-axis treatment as
-    /// `grid` above (`AxisStyleOverrides::show_domain`, resolved against
+    /// `grid` above (`AxisStyleOverrides`' `domain.show`, resolved against
     /// `theme.axis.axis_line`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<bool>,
@@ -389,7 +415,7 @@ pub struct AxisStyleSpec {
     /// via `AxisInput::fill_chart_level_title` (D12, spec §4.9).
     ///
     /// The chart-level half needed a tri-state first, and that is what
-    /// `AxisStyleOverrides::title_claimed` is: `AxisInput.title` alone
+    /// `AxisInput::title`'s `Claimed` wrapper is for: `AxisInput.title` alone
     /// conflates "unset" with "per-channel explicitly suppressed" (the
     /// `title=""` -> `None` contract above), so a fill-only-if-`None`
     /// chart-level fill would have resurrected a title the channel
@@ -696,7 +722,10 @@ where
         Full(GridAxisSpec),
     }
     Ok(Option::<Wire>::deserialize(d)?.map(|w| match w {
-        Wire::Enabled(enabled) => GridAxisSpec { enabled: Some(enabled), ..Default::default() },
+        Wire::Enabled(enabled) => GridAxisSpec {
+            enabled: Some(enabled),
+            ..Default::default()
+        },
         Wire::Full(spec) => spec,
     }))
 }
@@ -861,8 +890,13 @@ pub(crate) const AXIS_STYLE_ALIAS_KEYS: &[&str] = &[
 /// doc on `AxisConfigSpec`); this is a small (5-field), stable, hand-verified
 /// set instead. A genuinely new extra field needs this list — and a
 /// `chart_config_manifest.json` entry — updated by whoever adds it.
-pub(crate) const AXIS_CONFIG_EXTRA_KEYS: &[&str] =
-    &["domain_min", "domain_max", "nice", "zero", "label_format_raw"];
+pub(crate) const AXIS_CONFIG_EXTRA_KEYS: &[&str] = &[
+    "domain_min",
+    "domain_max",
+    "nice",
+    "zero",
+    "label_format_raw",
+];
 
 /// Fields whose `axis_y2` position is a separate disposition question from
 /// their `axis`/`axis_x`/`axis_y` one, and which therefore carry their own
@@ -954,8 +988,13 @@ pub(crate) const LEGEND_STYLE_CANONICAL_KEYS: &[&str] = &[
 ];
 
 /// `LegendStyleSpec`'s `#[serde(alias = ...)]` spellings.
-pub(crate) const LEGEND_STYLE_ALIAS_KEYS: &[&str] =
-    &["titleFontSize", "labelFontSize", "tickCount", "gradientLength", "gradientThickness"];
+pub(crate) const LEGEND_STYLE_ALIAS_KEYS: &[&str] = &[
+    "titleFontSize",
+    "labelFontSize",
+    "tickCount",
+    "gradientLength",
+    "gradientThickness",
+];
 
 /// `GridConfigSpec`'s field names (no aliases). Drift-tested against
 /// `GridConfigSpec` (`grid_config_keys_match_serde`).
@@ -977,7 +1016,10 @@ pub(crate) const GRID_AXIS_KEYS: &[&str] = &["enabled", "color", "width", "dash"
 /// consults this to walk one level deeper, so a typo inside a per-axis grid
 /// object refuses with the same pinned text as a typo at any other level
 /// rather than falling into serde's untagged "data did not match any variant".
-pub(crate) fn accepted_keys_for_nested(section: &str, key: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn accepted_keys_for_nested(
+    section: &str,
+    key: &str,
+) -> Option<&'static [&'static str]> {
     match (section, key) {
         ("grid", "x") | ("grid", "y") => Some(GRID_AXIS_KEYS),
         _ => None,
@@ -990,8 +1032,13 @@ pub(crate) const PADDING_CONFIG_KEYS: &[&str] = &["top", "right", "bottom", "lef
 
 /// `ColorConfigSpec`'s field names (no aliases). Drift-tested against
 /// `ColorConfigSpec` (`color_config_keys_match_serde`).
-pub(crate) const COLOR_CONFIG_KEYS: &[&str] =
-    &["scheme", "sequential_scheme", "diverging_scheme", "domain", "range"];
+pub(crate) const COLOR_CONFIG_KEYS: &[&str] = &[
+    "scheme",
+    "sequential_scheme",
+    "diverging_scheme",
+    "domain",
+    "range",
+];
 
 /// `TitleConfigSpec`'s field names (no aliases). Drift-tested against
 /// `TitleConfigSpec` (`title_config_keys_match_serde`).
@@ -1073,7 +1120,9 @@ pub(crate) const STRUCTURAL_INSET_KEYS: &[&str] = &[
 /// tag. `None` for an unrecognized tag — left to serde's own "unknown
 /// variant" error, matching [`accepted_keys_for_annotation_variant`]'s
 /// contract.
-pub(crate) fn accepted_keys_for_structural_variant(type_tag: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn accepted_keys_for_structural_variant(
+    type_tag: &str,
+) -> Option<&'static [&'static str]> {
     match type_tag {
         "break_axis" => Some(STRUCTURAL_BREAK_AXIS_KEYS),
         "inset" => Some(STRUCTURAL_INSET_KEYS),
@@ -1087,7 +1136,10 @@ pub(crate) fn accepted_keys_for_structural_variant(type_tag: &str) -> Option<&'s
 /// dispatch point `binding.rs::validate_chart_config_keys`'s array branch
 /// calls. `None` when `section` names no array section, or when `type_tag`
 /// names no variant of that section's enum (both left to serde's own error).
-pub(crate) fn accepted_keys_for_array_item(section: &str, type_tag: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn accepted_keys_for_array_item(
+    section: &str,
+    type_tag: &str,
+) -> Option<&'static [&'static str]> {
     match section {
         "annotations" => accepted_keys_for_annotation_variant(type_tag),
         "structural" => accepted_keys_for_structural_variant(type_tag),
@@ -1157,7 +1209,9 @@ const CHART_CONFIG_MANIFEST_JSON: &str = include_str!("chart_config_manifest.jso
 /// `serde_accepted_fields_match_manifest` (`binding.rs`) is the pattern this
 /// generalizes, and every `*_match_serde` test below reuses it.
 #[cfg(test)]
-pub(crate) fn accepted_fields_from_deny_unknown_error(msg: &str) -> std::collections::BTreeSet<String> {
+pub(crate) fn accepted_fields_from_deny_unknown_error(
+    msg: &str,
+) -> std::collections::BTreeSet<String> {
     const MARKER: &str = "expected ";
     let after = msg
         .find(MARKER)
@@ -1168,7 +1222,9 @@ pub(crate) fn accepted_fields_from_deny_unknown_error(msg: &str) -> std::collect
     let mut rest = list;
     while let Some(open) = rest.find('`') {
         let tail = &rest[open + 1..];
-        let close = tail.find('`').unwrap_or_else(|| panic!("unbalanced backticks in: {msg}"));
+        let close = tail
+            .find('`')
+            .unwrap_or_else(|| panic!("unbalanced backticks in: {msg}"));
         fields.insert(tail[..close].to_string());
         rest = &tail[close + 1..];
     }
@@ -1211,7 +1267,8 @@ mod tests {
         assert_eq!(cfg.structural.len(), 1);
         match &cfg.structural[0] {
             StructuralSpec::BreakAxis(spec) => {
-                assert_eq!(spec.axis, "y");
+                // The wire token still deserializes; it is now typed.
+                assert_eq!(spec.axis, AlignAxis::Y);
                 assert_eq!(spec.gaps.len(), 1);
                 assert_eq!(spec.gaps[0], [50.0, 200.0]);
                 assert_eq!(spec.break_size, 12.0);
@@ -1219,6 +1276,40 @@ mod tests {
             }
             other => panic!("expected BreakAxis, got {other:?}"),
         }
+    }
+
+    /// `#229`(2), REFUSE MALFORMED: an axis token outside the vocabulary is
+    /// a typed deserialization failure naming what was accepted.
+    ///
+    /// This is the BACKSTOP half. The refusal a wire caller actually receives
+    /// comes from the array-item value gate that runs first
+    /// (`binding.rs::validate_break_axis_axis_value`, pinned from Python by
+    /// `tests/test_config_manifest.py::
+    /// test_wire_gate_refuses_out_of_vocabulary_break_axis_token`, which
+    /// asserts the delivered message verbatim); this test pins what remains
+    /// for a caller that reaches `Deserialize` some other way, and is why the
+    /// field can be typed at all.
+    ///
+    /// Disclosed behavior change either way. Pre-retype `axis` was a
+    /// `String`, so `"z"` parsed and every downstream `axis == "y"` test
+    /// answered "no", rendering a chart whose break silently landed on x.
+    #[test]
+    fn structural_break_axis_refuses_an_out_of_vocabulary_axis_token() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "break_axis",
+                    "axis": "z",
+                    "gaps": [[50.0, 200.0]]
+                }
+            ]
+        }"##;
+        let err = serde_json::from_str::<ChartConfig>(json)
+            .expect_err("a third axis token must refuse, not render as an x break");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown variant `z`"), "{msg}");
+        assert!(msg.contains("`x`"), "the refusal must name the accepted tokens: {msg}");
+        assert!(msg.contains("`y`"), "the refusal must name the accepted tokens: {msg}");
     }
 
     #[test]
@@ -1419,13 +1510,25 @@ mod tests {
         assert_eq!(cfg.axis_x.as_ref().unwrap().domain_min, Some(0.0));
         assert_eq!(cfg.axis_x.as_ref().unwrap().domain_max, Some(100.0));
         assert_eq!(cfg.axis_y.as_ref().unwrap().zero, Some(true));
-        assert_eq!(cfg.legend.as_ref().unwrap().style.orient.as_deref(), Some("bottom"));
+        assert_eq!(
+            cfg.legend.as_ref().unwrap().style.orient.as_deref(),
+            Some("bottom")
+        );
         assert_eq!(cfg.legend.as_ref().unwrap().style.columns, Some(3));
-        assert_eq!(cfg.grid.as_ref().unwrap().x.as_ref().unwrap().enabled, Some(true));
-        assert_eq!(cfg.grid.as_ref().unwrap().y.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(
+            cfg.grid.as_ref().unwrap().x.as_ref().unwrap().enabled,
+            Some(true)
+        );
+        assert_eq!(
+            cfg.grid.as_ref().unwrap().y.as_ref().unwrap().enabled,
+            Some(false)
+        );
         assert_eq!(cfg.grid.as_ref().unwrap().color.as_deref(), Some("#eee"));
         assert_eq!(cfg.padding.as_ref().unwrap().top, Some(20.0));
-        assert_eq!(cfg.color.as_ref().unwrap().scheme.as_deref(), Some("tableau10"));
+        assert_eq!(
+            cfg.color.as_ref().unwrap().scheme.as_deref(),
+            Some("tableau10")
+        );
     }
 
     #[test]
@@ -1520,7 +1623,10 @@ mod tests {
         // Standalone per-channel deserialization (not via the flatten container)
         // must reject an unknown key — the B5 fail-loud guard.
         let bad: Result<AxisStyleSpec, _> = serde_json::from_str(r##"{"grid_colr":"#f00"}"##);
-        assert!(bad.is_err(), "unknown axis style key must fail to deserialize");
+        assert!(
+            bad.is_err(),
+            "unknown axis style key must fail to deserialize"
+        );
         let good: Result<AxisStyleSpec, _> = serde_json::from_str(r##"{"grid_color":"#f00"}"##);
         assert!(good.is_ok());
     }
@@ -1534,9 +1640,11 @@ mod tests {
 
     #[test]
     fn legend_style_deny_unknown_fields_rejects_typo() {
-        let bad: Result<LegendStyleSpec, _> =
-            serde_json::from_str(r##"{"symbol_sze":10}"##);
-        assert!(bad.is_err(), "unknown legend style key must fail to deserialize");
+        let bad: Result<LegendStyleSpec, _> = serde_json::from_str(r##"{"symbol_sze":10}"##);
+        assert!(
+            bad.is_err(),
+            "unknown legend style key must fail to deserialize"
+        );
     }
 
     #[test]
@@ -1580,7 +1688,8 @@ mod tests {
         // refused instead of silently ignored.
         let via_config: Result<crate::render::chart_config::ChartConfig, _> =
             serde_json::from_str(r#"{"axis_x": {"min_extent": 99.0}}"#);
-        let err = via_config.expect_err("stray `min_extent` key must now be refused, not silently ignored");
+        let err = via_config
+            .expect_err("stray `min_extent` key must now be refused, not silently ignored");
         assert!(
             err.to_string().contains("min_extent"),
             "error must name the offending key: {err}"
@@ -1610,7 +1719,10 @@ mod tests {
         }"##;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
         let color = cfg.color.unwrap();
-        assert_eq!(color.domain, Some(vec![Value::from(0.0), Value::from(100.0)]));
+        assert_eq!(
+            color.domain,
+            Some(vec![Value::from(0.0), Value::from(100.0)])
+        );
         assert_eq!(
             color.range.as_deref(),
             Some(["#ffffff".to_string(), "#000000".to_string()].as_slice())
@@ -1625,7 +1737,14 @@ mod tests {
         let strings: ChartConfig =
             serde_json::from_str(r#"{"color": {"domain": ["low", "medium", "high"]}}"#).unwrap();
         let domain = strings.color.unwrap().domain.unwrap();
-        assert_eq!(domain, vec![Value::from("low"), Value::from("medium"), Value::from("high")]);
+        assert_eq!(
+            domain,
+            vec![
+                Value::from("low"),
+                Value::from("medium"),
+                Value::from("high")
+            ]
+        );
 
         let mixed: ChartConfig =
             serde_json::from_str(r#"{"color": {"domain": [0, "mid", 100]}}"#).unwrap();
@@ -1660,9 +1779,9 @@ mod tests {
     // struct without updating the const (or vice versa) fails here rather
     // than silently drifting the wire gate away from the schema.
 
-    fn mined_fields_of<T: serde::de::DeserializeOwned + std::fmt::Debug>() -> std::collections::BTreeSet<String> {
-        let res: Result<T, _> =
-            serde_json::from_str(r#"{"__definitely_not_a_real_field__": 1}"#);
+    fn mined_fields_of<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    ) -> std::collections::BTreeSet<String> {
+        let res: Result<T, _> = serde_json::from_str(r#"{"__definitely_not_a_real_field__": 1}"#);
         let err = res.expect_err("bogus key must be rejected by deny_unknown_fields");
         accepted_fields_from_deny_unknown_error(&err.to_string())
     }
@@ -1670,10 +1789,13 @@ mod tests {
     #[test]
     fn chart_config_top_level_sections_match_serde() {
         let mined = mined_fields_of::<ChartConfig>();
-        let manifest: std::collections::BTreeSet<String> =
-            CHART_CONFIG_SECTIONS.iter().map(|s| s.to_string()).collect();
+        let manifest: std::collections::BTreeSet<String> = CHART_CONFIG_SECTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
-            mined, manifest,
+            mined,
+            manifest,
             "CHART_CONFIG_SECTIONS drifted from ChartConfig's own fields.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&manifest).collect::<Vec<_>>(),
@@ -1690,7 +1812,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            mined, manifest,
+            mined,
+            manifest,
             "AXIS_STYLE_CANONICAL_KEYS/AXIS_STYLE_ALIAS_KEYS drifted from AxisStyleSpec.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&manifest).collect::<Vec<_>>(),
@@ -1707,7 +1830,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            mined, manifest,
+            mined,
+            manifest,
             "LEGEND_STYLE_CANONICAL_KEYS/LEGEND_STYLE_ALIAS_KEYS drifted from LegendStyleSpec.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&manifest).collect::<Vec<_>>(),
@@ -1720,7 +1844,10 @@ mod tests {
         let mined = mined_fields_of::<GridConfigSpec>();
         let manifest: std::collections::BTreeSet<String> =
             GRID_CONFIG_KEYS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(mined, manifest, "GRID_CONFIG_KEYS drifted from GridConfigSpec");
+        assert_eq!(
+            mined, manifest,
+            "GRID_CONFIG_KEYS drifted from GridConfigSpec"
+        );
     }
 
     /// The nested per-axis grid sub-struct gets the same reflective drift
@@ -1784,7 +1911,10 @@ mod tests {
         let mined = mined_fields_of::<PaddingConfigSpec>();
         let manifest: std::collections::BTreeSet<String> =
             PADDING_CONFIG_KEYS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(mined, manifest, "PADDING_CONFIG_KEYS drifted from PaddingConfigSpec");
+        assert_eq!(
+            mined, manifest,
+            "PADDING_CONFIG_KEYS drifted from PaddingConfigSpec"
+        );
     }
 
     #[test]
@@ -1792,7 +1922,10 @@ mod tests {
         let mined = mined_fields_of::<ColorConfigSpec>();
         let manifest: std::collections::BTreeSet<String> =
             COLOR_CONFIG_KEYS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(mined, manifest, "COLOR_CONFIG_KEYS drifted from ColorConfigSpec");
+        assert_eq!(
+            mined, manifest,
+            "COLOR_CONFIG_KEYS drifted from ColorConfigSpec"
+        );
     }
 
     #[test]
@@ -1800,7 +1933,10 @@ mod tests {
         let mined = mined_fields_of::<TitleConfigSpec>();
         let manifest: std::collections::BTreeSet<String> =
             TITLE_CONFIG_KEYS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(mined, manifest, "TITLE_CONFIG_KEYS drifted from TitleConfigSpec");
+        assert_eq!(
+            mined, manifest,
+            "TITLE_CONFIG_KEYS drifted from TitleConfigSpec"
+        );
     }
 
     /// `AxisConfigSpec`'s chart-only extras deserialize correctly through the
@@ -1918,15 +2054,42 @@ mod tests {
         // 87 item-level fields these consts enumerate had none, because
         // closing the array carve-out is what makes them a distinct,
         // gate-checked schema surface for the first time.
-        expected.extend(namespaced("AnnotationSpec.Text", super::super::annotation::ANNOTATION_TEXT_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Arrow", super::super::annotation::ANNOTATION_ARROW_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Rect", super::super::annotation::ANNOTATION_RECT_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Line", super::super::annotation::ANNOTATION_LINE_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Span", super::super::annotation::ANNOTATION_SPAN_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Bracket", super::super::annotation::ANNOTATION_BRACKET_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Callout", super::super::annotation::ANNOTATION_CALLOUT_KEYS));
-        expected.extend(namespaced("AnnotationSpec.Image", super::super::annotation::ANNOTATION_IMAGE_KEYS));
-        expected.extend(namespaced("StructuralSpec.BreakAxis", STRUCTURAL_BREAK_AXIS_KEYS));
+        expected.extend(namespaced(
+            "AnnotationSpec.Text",
+            super::super::annotation::ANNOTATION_TEXT_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Arrow",
+            super::super::annotation::ANNOTATION_ARROW_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Rect",
+            super::super::annotation::ANNOTATION_RECT_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Line",
+            super::super::annotation::ANNOTATION_LINE_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Span",
+            super::super::annotation::ANNOTATION_SPAN_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Bracket",
+            super::super::annotation::ANNOTATION_BRACKET_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Callout",
+            super::super::annotation::ANNOTATION_CALLOUT_KEYS,
+        ));
+        expected.extend(namespaced(
+            "AnnotationSpec.Image",
+            super::super::annotation::ANNOTATION_IMAGE_KEYS,
+        ));
+        expected.extend(namespaced(
+            "StructuralSpec.BreakAxis",
+            STRUCTURAL_BREAK_AXIS_KEYS,
+        ));
         expected.extend(namespaced("StructuralSpec.Inset", STRUCTURAL_INSET_KEYS));
 
         let missing: Vec<&String> = expected.difference(&dispositioned).collect();
@@ -1971,10 +2134,13 @@ mod tests {
             .filter(|(_, entry)| !entry.honored)
             .map(|(field, _)| field.clone())
             .collect();
-        let known: std::collections::BTreeSet<String> =
-            KNOWN_UNHONORED_FIELDS.iter().map(|s| s.to_string()).collect();
+        let known: std::collections::BTreeSet<String> = KNOWN_UNHONORED_FIELDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
-            unhonored, known,
+            unhonored,
+            known,
             "chart_config_manifest.json's `honored: false` field set drifted from \
              KNOWN_UNHONORED_FIELDS — a field's `honored` flag changed without this \
              const being updated (the exact silent-flip class this test exists to catch).\n\
@@ -2021,10 +2187,13 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        let expected: std::collections::BTreeSet<String> =
-            AXIS_CONFIG_EXTRA_KEYS.iter().map(|s| s.to_string()).collect();
+        let expected: std::collections::BTreeSet<String> = AXIS_CONFIG_EXTRA_KEYS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
-            mined, expected,
+            mined,
+            expected,
             "AXIS_CONFIG_EXTRA_KEYS drifted from AxisConfigSpec's own (non-flattened) fields.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&expected).collect::<Vec<_>>(),
@@ -2053,7 +2222,11 @@ mod tests {
                 !is_array_section,
                 "section `{section}`: accepted_keys_for_section must return {} (array sections \
                  are exactly {ARRAY_SECTIONS:?})",
-                if is_array_section { "None" } else { "Some(...)" }
+                if is_array_section {
+                    "None"
+                } else {
+                    "Some(...)"
+                }
             );
         }
         assert!(accepted_keys_for_section("not_a_real_section").is_none());
@@ -2070,7 +2243,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            mined, expected,
+            mined,
+            expected,
             "STRUCTURAL_BREAK_AXIS_KEYS drifted from BreakAxisSpec.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&expected).collect::<Vec<_>>(),
@@ -2087,7 +2261,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            mined, expected,
+            mined,
+            expected,
             "STRUCTURAL_INSET_KEYS drifted from InsetSpec.\n\
              in serde but not const: {:?}\nin const but not serde: {:?}",
             mined.difference(&expected).collect::<Vec<_>>(),
@@ -2102,7 +2277,9 @@ mod tests {
     /// all).
     #[test]
     fn accepted_keys_for_array_item_covers_every_variant_tag() {
-        for tag in ["text", "arrow", "rect", "line", "span", "bracket", "callout", "image"] {
+        for tag in [
+            "text", "arrow", "rect", "line", "span", "bracket", "callout", "image",
+        ] {
             assert!(
                 accepted_keys_for_array_item("annotations", tag).is_some(),
                 "annotations tag `{tag}` must have an accepted-key set"

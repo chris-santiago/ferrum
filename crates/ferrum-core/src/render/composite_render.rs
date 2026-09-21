@@ -94,7 +94,8 @@ use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHRO
 use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
-use crate::spec::composite::{AlignAxis, CompositeLayout, CompositeNode};
+use crate::spec::axis::AlignAxis;
+use crate::spec::composite::{CompositeLayout, CompositeNode};
 
 /// Default pixel gap between adjacent cells, matching the deleted string
 /// compositor's `spacing = 10.0` default (`render/compositor.rs`, removed in
@@ -4705,13 +4706,13 @@ mod tests {
 
         let conflicting_structural = vec![
             StructuralSpec::BreakAxis(BreakAxisSpec {
-                axis: "x".to_string(),
+                axis: AlignAxis::X,
                 gaps: vec![[1.4, 1.6]],
                 break_size: 12.0,
                 break_style: "slash".to_string(),
             }),
             StructuralSpec::BreakAxis(BreakAxisSpec {
-                axis: "x".to_string(),
+                axis: AlignAxis::X,
                 gaps: vec![[1.4, 1.6]],
                 break_size: 12.0,
                 break_style: "zigzag".to_string(),
@@ -4739,7 +4740,7 @@ mod tests {
                 matches!(
                     w,
                     RenderWarning::BreakAxisMergeConflict { axis, field }
-                        if axis == "x" && field == "break_style"
+                        if *axis == AlignAxis::X && field == "break_style"
                 )
             })
             .collect();
