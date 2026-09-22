@@ -834,10 +834,15 @@ impl std::fmt::Display for RenderError {
             ),
             Self::TimeFormatOnNonTemporalScale { channel, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                // The sole constructor (`prepare::refuse_time_format_on_non_temporal`)
+                // resolves under `TimeAutodetect::Denied`, so every refusal is
+                // a DECLARED `"time"` type: naming it names the cause even for
+                // a `%`-free spec like `".2f"`, where the format alone does
+                // not say why a temporal scale is needed (wave 6A T17).
                 write!(
                     f,
-                    "format {format:?} on the '{channel}' axis requires a temporal scale, \
-                     but the resolved scale is not temporal"
+                    "format {format:?} is typed \"time\", which on the '{channel}' axis \
+                     requires a temporal scale, but the resolved scale is not temporal"
                 )
             }
             // `{:?}` over the wire TOKEN, never over `axis` itself: the
@@ -1835,6 +1840,7 @@ mod tests {
         assert!(not_flipped_text.contains("'y' axis"), "{not_flipped_text}");
         assert!(not_flipped_text.contains("%b %Y"), "{not_flipped_text}");
         assert!(not_flipped_text.contains("requires a temporal scale"), "{not_flipped_text}");
+        assert!(not_flipped_text.contains(r#"typed "time""#), "{not_flipped_text}");
         assert!(
             !not_flipped_text.contains("TimeFormatOnNonTemporalScale"),
             "Display leaked Debug: {not_flipped_text}"

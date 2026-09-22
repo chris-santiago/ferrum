@@ -113,13 +113,12 @@ pub fn format_time(epoch_ms: i64, spacing_ms: i64) -> String {
     let Some(dt) = DateTime::<Utc>::from_timestamp_millis(epoch_ms) else {
         return String::new();
     };
-    const DAY: i64 = 86_400_000;
     const HOUR: i64 = 3_600_000;
-    if spacing_ms >= 365 * DAY {
+    if spacing_ms >= 365 * DAY_MS {
         format!("{}", dt.year())
-    } else if spacing_ms >= 28 * DAY {
+    } else if spacing_ms >= 28 * DAY_MS {
         format!("{} {}", month_short(dt.month()), dt.year())
-    } else if spacing_ms >= DAY {
+    } else if spacing_ms >= DAY_MS {
         format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day())
     } else if spacing_ms >= HOUR {
         format!("{:02}:{:02}", dt.hour(), dt.minute())
@@ -410,6 +409,13 @@ pub(crate) enum FormatKind {
     /// The `"ordinal"` preset ([`ORDINAL_SENTINEL`]) — English ordinal
     /// suffixes via [`format_ordinal_number`].
     Ordinal,
+    /// A `"time"`-typed pair that names no strftime pattern: no spec at all,
+    /// or a spec with no `%` escape (a numeric spec declared time, e.g.
+    /// `label_format=".2f", label_format_type="time"`). The site's own
+    /// spacing-keyed temporal default stands. [`FormatKind::format`] applies
+    /// the day-granularity default; an axis holding a temporal scale keeps the
+    /// scale's own default labels instead.
+    TemporalDefault,
 }
 
 impl FormatKind {
@@ -417,41 +423,35 @@ impl FormatKind {
     /// format_type)` pair into the kind of formatter it names, given how much
     /// this site may guess ([`TimeAutodetect`]).
     ///
-    /// Returns `None` when the pair names no applicable format, which is two
-    /// cases the caller already distinguishes by its own `format_type` read:
-    /// no spec at all, and a time-typed spec carrying no `%` escape (a
-    /// numeric spec declared `"time"`, e.g. `label_format=".2f",
-    /// label_format_type="time"`). The second case is malformed input; every
-    /// applier now answers it the same way — the spec names no pattern, so
-    /// the site's own spacing-keyed temporal default stands. Before `#147`
-    /// the axis applier gave that default while the colorbar handed `".2f"`
-    /// to `chrono` and rendered the literal text `.2f` on every tick.
+    /// Returns `None` only when there is no spec and no `"time"` type: the
+    /// site's plain default applies. Every other outcome is a variant, so a
+    /// caller matches the kind and never re-reads `format_type` after this
+    /// returns (`#147` close remediation, wave 6A T17). That is what makes
+    /// the answer the same at every applier:
     ///
-    /// [`ORDINAL_SENTINEL`] is recognized FIRST, so THIS FUNCTION never
-    /// re-reads the ordinal preset as anything else on account of a stray
-    /// `format_type`. That is a statement about the resolution, not about
-    /// every composed outcome: a caller whose own `format_type` branch runs
-    /// AFTER this one can still discard the `Ordinal` it was handed.
-    /// [`format_value_with_spec`] is exactly that case — its
-    /// `_ if format_type == Some("time")` arm fires on the `Ordinal` result,
-    /// so `fm.Legend(format="__ordinal__", format_type="time")` renders the
-    /// spacing-keyed temporal default while the axis path renders ordinals for
-    /// the same pair (both measured). Malformed input either way, and both
-    /// beat the pre-`#147` behavior of echoing the literal text
-    /// `__ordinal__` as every legend label — but the two sites do still
-    /// disagree there, so do not read this paragraph as a crate-wide
-    /// guarantee. Letting `Ordinal` win at that guard is a live option, not a
-    /// decision this task took.
+    /// - [`ORDINAL_SENTINEL`] is recognized FIRST and yields
+    ///   [`FormatKind::Ordinal`] whatever `format_type` says. The declared
+    ///   preset is the caller's clearest statement; a stray type does not
+    ///   un-declare it. Axis, colorbar/legend, text and tooltip all render
+    ///   ordinals for `("__ordinal__", "time")`, and no axis refuses it as a
+    ///   time format on a non-temporal scale.
+    /// - A time-typed pair naming no pattern yields
+    ///   [`FormatKind::TemporalDefault`]: every applier falls back to its own
+    ///   spacing-keyed temporal default rather than applying the spec as d3
+    ///   (the shared axis used to, rendering `2001.00` on year ticks) or
+    ///   handing it to `chrono` (the colorbar used to, echoing `.2f`).
     pub(crate) fn resolve(
         spec: Option<&str>,
         format_type: Option<&str>,
         autodetect: TimeAutodetect,
     ) -> Option<FormatKind> {
-        let spec = spec?;
+        let declared_time = format_type == Some("time");
+        let Some(spec) = spec else {
+            return declared_time.then_some(FormatKind::TemporalDefault);
+        };
         if spec == ORDINAL_SENTINEL {
             return Some(FormatKind::Ordinal);
         }
-        let declared_time = format_type == Some("time");
         let autodetected_time =
             format_type.is_none() && autodetect == TimeAutodetect::Allowed;
         if spec.contains('%') && (declared_time || autodetected_time) {
@@ -460,8 +460,8 @@ impl FormatKind {
         if declared_time {
             // Time-typed, but no `%` escape: not a strftime pattern, and
             // reading it as a d3 spec would format an epoch-millisecond
-            // count as a number. No format applies.
-            return None;
+            // count as a number.
+            return Some(FormatKind::TemporalDefault);
         }
         Some(FormatKind::D3(parse_format_spec(spec)))
     }
@@ -473,9 +473,22 @@ impl FormatKind {
             FormatKind::D3(spec) => format_parsed(v, spec),
             FormatKind::Strftime(pattern) => format_time_spec(v as i64, pattern),
             FormatKind::Ordinal => format_ordinal_number(v),
+            FormatKind::TemporalDefault => format_time(v as i64, DAY_MS),
         }
     }
+
+    /// Whether this kind formats values as TIMESTAMPS, i.e. needs a temporal
+    /// scale under it. The one input to the `#133` refusal
+    /// (`prepare::refuse_time_format_on_non_temporal`), so the refusal and
+    /// the formatting cannot disagree about [`FormatKind::Ordinal`].
+    pub(crate) fn is_temporal(&self) -> bool {
+        matches!(self, FormatKind::Strftime(_) | FormatKind::TemporalDefault)
+    }
 }
+
+/// One day in milliseconds: the spacing [`FormatKind::TemporalDefault`]
+/// formats at when the site holds no scale to derive a spacing from.
+pub(crate) const DAY_MS: i64 = 86_400_000;
 
 /// Parse a d3-format string into a [`D3Spec`], for a caller formatting an
 /// ALREADY-validated spec value-by-value (per-tick, per-legend-entry, …).
@@ -649,8 +662,8 @@ pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
     match FormatKind::resolve(Some(s), None, TimeAutodetect::Denied) {
         Some(kind) => kind.format(v),
         // Unreachable as called: `resolve` returns `None` only for an absent
-        // spec or a time-typed pair, and this call site hard-codes both away
-        // (`Some(s)`, `None`). Kept as the total match rather than an
+        // spec with no `"time"` type, and this call site passes `Some(s)`.
+        // Kept as the total match rather than an
         // `unwrap`, and spelled with the same fallback the two guards above
         // use, so a future signature change degrades to the default instead
         // of panicking. Not a live case — do not read it as one.
@@ -669,15 +682,15 @@ pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
 /// spec stays d3 numeric (which is what keeps the `"percent"` preset's `.1%`
 /// from being handed to `chrono` — NF-B2, spec §4.5). A resolved strftime
 /// pattern is applied to `v` as an epoch-millisecond timestamp; a time-typed
-/// pair that names NO pattern (no spec, or a spec with no `%` escape) falls
-/// back to the default spacing-keyed [`format_time`] (day granularity,
-/// matching `apply_tick_format`'s own no-pattern default). Anything else
-/// formats `v` as a plain number via [`format_with_spec`].
+/// pair that names NO pattern ([`FormatKind::TemporalDefault`]) falls back to
+/// the day-granularity [`format_time`] default; the ordinal preset renders
+/// ordinals whatever `format_type` says. Anything else formats `v` as a plain
+/// number via [`format_with_spec`].
 pub fn format_value_with_spec(v: f64, spec: Option<&str>, format_type: Option<&str>) -> String {
     match FormatKind::resolve(spec, format_type, TimeAutodetect::Denied) {
-        Some(FormatKind::Strftime(pattern)) => format_time_spec(v as i64, &pattern),
-        _ if format_type == Some("time") => format_time(v as i64, 86_400_000),
-        _ => format_with_spec(v, spec),
+        // Via `format_with_spec`, which keeps its empty-spec default.
+        Some(FormatKind::D3(_)) | None => format_with_spec(v, spec),
+        Some(kind) => kind.format(v),
     }
 }
 
@@ -1388,11 +1401,18 @@ mod tests {
     #[test]
     fn resolve_time_typed_spec_without_percent_names_no_pattern() {
         // A numeric spec declared "time" is malformed input. It resolves to
-        // NO format so every applier falls back to its own spacing-keyed
-        // temporal default, instead of one applier doing that while another
-        // hands `.2f` to `chrono` and echoes the literal text.
-        assert_eq!(resolved(".2f", Some("time"), TimeAutodetect::Denied), None);
-        assert_eq!(resolved(".2f", Some("time"), TimeAutodetect::Allowed), None);
+        // `TemporalDefault` so every applier falls back to its own
+        // spacing-keyed temporal default, instead of one applier doing that
+        // while another hands `.2f` to `chrono` and echoes the literal text,
+        // or a third re-seeds it untyped and formats years as `2001.00`.
+        for autodetect in [TimeAutodetect::Denied, TimeAutodetect::Allowed] {
+            for spec in [".2f", ".3e"] {
+                assert_eq!(
+                    resolved(spec, Some("time"), autodetect),
+                    Some(FormatKind::TemporalDefault),
+                );
+            }
+        }
     }
 
     #[test]
@@ -1427,9 +1447,11 @@ mod tests {
 
     #[test]
     fn resolve_absent_spec_names_no_format() {
+        // Absent spec, declared time: the temporal default, the same kind a
+        // `%`-free time-typed spec gets, so no caller re-reads `format_type`.
         assert_eq!(
             FormatKind::resolve(None, Some("time"), TimeAutodetect::Denied),
-            None
+            Some(FormatKind::TemporalDefault)
         );
         assert_eq!(FormatKind::resolve(None, None, TimeAutodetect::Allowed), None);
     }
@@ -1534,6 +1556,22 @@ mod tests {
     #[test]
     fn format_value_with_spec_ordinal() {
         assert_eq!(format_value_with_spec(2.0, Some("__ordinal__"), Some("number")), "2nd");
+    }
+
+    /// `#147` close (wave 6A T17), output-moving: the ordinal preset beside a
+    /// stray `"time"` type renders ordinals here, as it does on the axis.
+    /// Before, this surface's post-resolution `format_type` guard discarded
+    /// the `Ordinal` and rendered `1970-01-01` (the colorbar and text mark).
+    #[test]
+    fn format_value_with_spec_ordinal_wins_over_a_stray_time_type() {
+        for format_type in [None, Some("number"), Some("time")] {
+            assert_eq!(
+                format_value_with_spec(2.0, Some(ORDINAL_SENTINEL), format_type),
+                "2nd",
+                "{format_type:?}"
+            );
+        }
+        assert_eq!(format_value_with_spec(11.0, Some(ORDINAL_SENTINEL), Some("time")), "11th");
     }
 
     /// #147 predicate unification, declared output move: a numeric spec

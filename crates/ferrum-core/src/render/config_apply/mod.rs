@@ -1052,7 +1052,14 @@ fn apply_label_format_to_axis(
     channel: &'static str,
 ) -> Result<(), RenderError> {
     let format_type = axis.overrides.labels.format.get().format_type.clone();
-    let is_time_type = format_type.as_deref() == Some("time");
+    // Time-typed per the one resolution, so the ordinal preset beside a stray
+    // `"time"` takes the ordinal path below, not the temporal one (`#147`).
+    let is_time_type = format::FormatKind::resolve(
+        axis.overrides.labels.format.get().spec.as_deref(),
+        format_type.as_deref(),
+        format::TimeAutodetect::Denied,
+    )
+    .is_some_and(|kind| kind.is_temporal());
     if let Some(tick_vals) = axis.overrides.ticks.values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
@@ -1584,9 +1591,9 @@ pub(in crate::render) fn validate_chart_format_specs(
         let kind = format::FormatKind::resolve(fmt, format_type, format::TimeAutodetect::Allowed);
         let Some(format::FormatKind::Strftime(_)) = kind else {
             // Not a strftime pattern: a d3 spec is checked against the d3
-            // grammar, and `Ordinal`/`None` (the sentinel, or a time-typed
-            // pair naming no pattern) has no grammar to check — nothing will
-            // parse it, so there is nothing to refuse.
+            // grammar, while `Ordinal` (the sentinel) and `TemporalDefault`
+            // (a time-typed pair naming no pattern) have no grammar to
+            // check: nothing will parse them, so there is nothing to refuse.
             return match kind {
                 Some(format::FormatKind::D3(_)) => check_with(f, false),
                 _ => Ok(()),
@@ -1627,7 +1634,7 @@ pub(in crate::render) fn validate_chart_format_specs(
             Some(format::FormatKind::D3(_)) => check_with(f, false),
             // The `"__ordinal__"` sentinel, or a time-typed pair naming no
             // pattern: no grammar applies, so there is nothing to refuse.
-            Some(format::FormatKind::Ordinal) | None => Ok(()),
+            Some(format::FormatKind::Ordinal | format::FormatKind::TemporalDefault) | None => Ok(()),
         }
     }
 

@@ -2499,6 +2499,9 @@ pub(crate) fn resolve_axis_label_format(
 ///   then applies it centrally — lossless because numeric label strings reparse
 ///   to f64. Threading (not pre-applying) also lets chart-level
 ///   `configure_axis` defer to the per-channel override via its `is_none()` gate.
+///   The ordinal preset takes this path whatever `format_type` says.
+/// - **Time-typed, naming no pattern** ([`FormatKind::TemporalDefault`], e.g.
+///   `".2f"` + `"time"`): nothing is threaded and the scale's own labels stand.
 ///
 /// Errors (#133, spec §4.2 amended 2026-09-11) when a time-typed format is
 /// applied to a scale whose `temporal_tick_values` returns `None` — i.e. the
@@ -2563,7 +2566,17 @@ fn apply_axis_format_or_thread(
         refuse_time_format_on_non_temporal(&fmt, format_type, scale, tick_count, channel)?;
         return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
     }
-    // Numeric / non-temporal: thread the spec to the override, apply later.
+    if matches!(kind, Some(FormatKind::TemporalDefault)) {
+        // Time-typed, naming no pattern (`".2f"` + `"time"`): refused on a
+        // non-temporal scale like any time format (#133); on a temporal one
+        // the scale's own spacing-keyed labels stand, the same fallback the
+        // colorbar and text mark give the identical pair. Threading the spec
+        // instead re-seeded it untyped and applied it as d3 (`2001.00` on
+        // year ticks) — the `#147` close finding (wave 6A T17).
+        refuse_time_format_on_non_temporal(&fmt, format_type, scale, tick_count, channel)?;
+        return Ok((labels, None));
+    }
+    // D3 or the ordinal preset: thread the spec to the override, apply later.
     Ok((labels, Some(fmt)))
 }
 
@@ -2573,7 +2586,8 @@ fn apply_axis_format_or_thread(
 /// a non-`Time` [`crate::render::scale_resolve::ScaleKind`], never for a
 /// length-drift on a genuinely temporal scale.
 ///
-/// Keyed on the DECLARED `format_type` alone, deliberately narrower than
+/// Keyed on the DECLARED `format_type` (resolved under `TimeAutodetect::Denied`,
+/// so the ordinal preset is exempt), deliberately narrower than
 /// [`crate::render::format::FormatKind::resolve`] under
 /// [`crate::render::format::TimeAutodetect::Allowed`] (which also tolerates an
 /// unset `format_type`): an ambiguous bare
@@ -2602,7 +2616,13 @@ pub(crate) fn refuse_time_format_on_non_temporal(
     tick_count: usize,
     channel: &'static str,
 ) -> Result<(), RenderError> {
-    if format_type == Some("time") && scale.temporal_tick_values(tick_count).is_none() {
+    use crate::render::format::{FormatKind, TimeAutodetect};
+    // "Declares time" is the resolution's answer, not a raw `format_type`
+    // read, so the ordinal preset beside a stray `"time"` is not refused: it
+    // renders ordinals at every surface (`#147` close, wave 6A T17).
+    let declares_time = FormatKind::resolve(Some(fmt), format_type, TimeAutodetect::Denied)
+        .is_some_and(|kind| kind.is_temporal());
+    if declares_time && scale.temporal_tick_values(tick_count).is_none() {
         return Err(RenderError::TimeFormatOnNonTemporalScale {
             channel,
             format: fmt.to_string(),
@@ -2721,12 +2741,11 @@ pub(crate) fn build_axis_tick_inputs(
             format,
             format_type,
         } => {
-            // The refusal stays keyed on the DECLARED `format_type` (#133),
-            // independent of how the spec resolves, so this arm refuses
-            // exactly what it refused before delegating below.
-            if let Some(fmt) = format {
-                refuse_time_format_on_non_temporal(fmt, format_type, scale, tick_count, channel)?;
-            }
+            // The #133 refusal lives in `apply_axis_format_or_thread` for
+            // every time-declaring kind, so this arm refuses exactly what the
+            // `Thread` arm refuses (it used to refuse up front on the raw
+            // `format_type`, which also refused the ordinal preset).
+            //
             // ONE format discipline, two application TIMINGS (`#147`): resolve
             // through the same function `Thread` uses — which is the only one
             // that can re-derive raw epoch-ms tick values from a temporal
@@ -2792,13 +2811,11 @@ pub(crate) fn apply_tick_format(
     format: Option<&str>,
     format_type: Option<&str>,
 ) -> Vec<String> {
-    use crate::render::format::{format_time, format_time_spec, FormatKind, TimeAutodetect};
-    let is_time = format_type == Some("time");
-    // Non-time with no format string is a pure pass-through (byte-identical).
-    if !is_time && format.is_none() {
+    use crate::render::format::{format_time, format_time_spec, FormatKind, TimeAutodetect, DAY_MS};
+    // No spec and no `"time"` type is a pure pass-through (byte-identical).
+    let Some(kind) = FormatKind::resolve(format, format_type, TimeAutodetect::Denied) else {
         return labels;
-    }
-    let kind = FormatKind::resolve(format, format_type, TimeAutodetect::Denied);
+    };
     let epoch_ms = |raw: &str| -> Option<i64> {
         raw.parse::<i64>()
             .ok()
@@ -2807,22 +2824,22 @@ pub(crate) fn apply_tick_format(
     labels
         .into_iter()
         .map(|raw| match &kind {
-            Some(FormatKind::Strftime(pattern)) => match epoch_ms(&raw) {
+            FormatKind::Strftime(pattern) => match epoch_ms(&raw) {
                 Some(ms) => format_time_spec(ms, pattern),
                 None => raw,
             },
             // Time-typed but naming no pattern: the default spacing-keyed
             // temporal formatter, the same fallback `format_value_with_spec`
             // uses for the identical pair.
-            _ if is_time => match epoch_ms(&raw) {
-                Some(ms) => format_time(ms, 86_400_000),
+            FormatKind::TemporalDefault => match epoch_ms(&raw) {
+                Some(ms) => format_time(ms, DAY_MS),
                 None => raw,
             },
-            Some(kind) => match raw.parse::<f64>() {
+            // D3, or the ordinal preset whatever `format_type` says.
+            FormatKind::D3(_) | FormatKind::Ordinal => match raw.parse::<f64>() {
                 Ok(v) => kind.format(v),
                 Err(_) => raw, // ordinal category name — pass through
             },
-            None => raw,
         })
         .collect()
 }
@@ -7563,6 +7580,130 @@ mod tests {
             threaded, None,
             "the ambiguous time-shaped branch applies immediately"
         );
+    }
+
+    /// `#147` close (wave 6A T17), output-moving: a `%`-free spec declared
+    /// `"time"` names no pattern, so a temporal axis keeps its own
+    /// spacing-keyed default labels in BOTH modes, the fallback the colorbar
+    /// and text mark give the identical pair. Before, `Thread` threaded the
+    /// spec onward, the caller re-seeded it untyped, and it was applied as d3
+    /// (`2018.00` on year ticks); `Immediate` re-parsed the year strings as
+    /// epoch-ms (`1970-01-01`).
+    #[test]
+    fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_keeps_the_temporal_default() {
+        use crate::scale::time::TimeScale;
+        let epoch_lo = 1_514_764_800_000.0; // 2018-01-01
+        let epoch_hi = epoch_lo + 6.0 * 365.0 * 86_400_000.0;
+        let scale = ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let default_labels = scale.tick_labels(6);
+        for spec in [".2f", ".3e"] {
+            let (thread, _p, thread_threaded) = build_axis_tick_inputs(
+                &scale,
+                6,
+                TickFormatMode::Thread {
+                    format: Some(spec.to_string()),
+                    format_type: Some("time"),
+                },
+                false,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(thread, default_labels, "Thread, {spec}");
+            assert_eq!(thread_threaded, None, "Thread must not re-seed {spec} as d3");
+            let (immediate, _p, _t) = build_axis_tick_inputs(
+                &scale,
+                6,
+                TickFormatMode::Immediate {
+                    format: Some(spec),
+                    format_type: Some("time"),
+                },
+                false,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(immediate, default_labels, "Immediate, {spec}");
+        }
+    }
+
+    /// The non-temporal side of the same pair: a time-declared spec on a
+    /// linear scale is refused (#133) by BOTH modes. Before, `Thread` threaded
+    /// it and rendered d3 numbers while `Immediate` refused, so a shared and an
+    /// independent axis answered the identical spelling differently.
+    #[test]
+    fn build_axis_tick_inputs_time_typed_spec_without_a_pattern_refuses_on_non_temporal() {
+        let scale = linear_scale(0.0, 100.0);
+        let expected = RenderError::TimeFormatOnNonTemporalScale {
+            channel: "x",
+            format: ".2f".into(),
+            coord_flipped: false,
+        };
+        let thread = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Thread {
+                format: Some(".2f".to_string()),
+                format_type: Some("time"),
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(thread, expected);
+        let immediate = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate {
+                format: Some(".2f"),
+                format_type: Some("time"),
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(immediate, expected);
+    }
+
+    /// `#147` close (wave 6A T17), output-moving: the ordinal preset beside a
+    /// stray `"time"` type is ordinal in both modes, and is not refused as a
+    /// time format on a non-temporal scale. Before, `Immediate` refused it up
+    /// front on the raw `format_type` while `Thread` rendered ordinals.
+    #[test]
+    fn build_axis_tick_inputs_ordinal_preset_wins_over_a_stray_time_type() {
+        let scale = linear_scale(1.0, 5.0);
+        let (thread, _p, threaded) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Thread {
+                format: Some("__ordinal__".to_string()),
+                format_type: Some("time"),
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(threaded.as_deref(), Some("__ordinal__"));
+        // The threaded spec is applied later by `apply_tick_format`; the
+        // stray type must not un-declare it there either.
+        let applied = apply_tick_format(thread, threaded.as_deref(), Some("time"));
+        let (immediate, _p, _t) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Immediate {
+                format: Some("__ordinal__"),
+                format_type: Some("time"),
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(immediate, applied);
+        assert!(immediate.contains(&"1st".to_string()), "{immediate:?}");
+        assert!(immediate.contains(&"2nd".to_string()), "{immediate:?}");
     }
 
     // ── #52 Task 3: provisional secondary y-axis inputs ──────────────────────

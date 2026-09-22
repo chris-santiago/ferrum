@@ -712,7 +712,7 @@ impl MetadataColumns {
                     col_as_f64(ctx.batch, field).ok().map(|vals| {
                         // For time formatting, compute spacing from actual data range
                         // rather than hardcoding 1 day, so sub-day precision is preserved.
-                        let spacing_ms: i64 = if fmt_type == Some("time") {
+                        let spacing_ms: i64 = if matches!(kind, Some(crate::render::format::FormatKind::TemporalDefault)) {
                             let finite: Vec<f64> = vals.iter()
                                 .filter_map(|v| v.filter(|f| f.is_finite()))
                                 .collect();
@@ -724,10 +724,10 @@ impl MetadataColumns {
                                 // clamped to at least 1 ms.
                                 ((range_ms / (finite.len() - 1) as f64).round() as i64).max(1)
                             } else {
-                                86_400_000 // fallback: 1 day
+                                crate::render::format::DAY_MS // fallback: 1 day
                             }
                         } else {
-                            0 // unused for non-time formatting
+                            0 // unused: only `TemporalDefault` reads the spacing
                         };
                         vals.into_iter()
                             .map(|v| v.map(|f| {
@@ -740,11 +740,16 @@ impl MetadataColumns {
                                     // why this column cannot simply call
                                     // `format_value_with_spec` (that fixes the
                                     // spacing at one day).
-                                    _ if fmt_type == Some("time") => {
+                                    Some(crate::render::format::FormatKind::TemporalDefault) => {
                                         format_time(f as i64, spacing_ms)
                                     }
-                                    _ if fmt.is_some() => format_with_spec(f, fmt),
-                                    _ => format_numeric(f),
+                                    // D3, or the ordinal preset whatever
+                                    // `fmt_type` says (`#147`).
+                                    Some(
+                                        crate::render::format::FormatKind::D3(_)
+                                        | crate::render::format::FormatKind::Ordinal,
+                                    ) => format_with_spec(f, fmt),
+                                    None => format_numeric(f),
                                 }
                             }))
                             .collect()

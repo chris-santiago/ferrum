@@ -7,8 +7,9 @@ whose third argument (`TimeAutodetect`) states whether the calling site can
 RECOVER from a wrong auto-detection — the only axis the six ever disagreed on.
 
 Every assertion here is on rendered tick-label / mark text — never that an SVG
-was produced. The eleven tests split into two kinds, and the split is load
-bearing, so do not read this file as eleven pieces of RED evidence:
+was produced. The tests before ``TestEverySurfaceAnswersAMalformedPairAlike``
+split into two kinds, and the split is load bearing, so do not read them as
+pieces of RED evidence one-for-one:
 
 - **5 regression pins**, which FAIL on the pre-fix tree: the three
   independent-facet-axis shapes, the text-mark pattern, and the control-char
@@ -17,15 +18,20 @@ bearing, so do not read this file as eleven pieces of RED evidence:
 - **6 invariant guards**, which pass on the pre-fix tree too. They exist to
   catch a future change that breaks what this one preserved — the ordinal
   round-trips, the NF-B2 percent cases, the numeric-format-applied-in-place
-  control, and the axis-path sentinel case. They are NOT evidence that this
-  task fixed anything, and the report does not count them as such.
+  control. They are NOT evidence that this task fixed anything, and the
+  report does not count them as such.
+
+``TestEverySurfaceAnswersAMalformedPairAlike`` (wave 6A T17, the ruling that
+the surfaces must actually agree) is a cross-surface matrix: each case says in
+its own docstring which surfaces disagreed pre-fix.
 
 An earlier revision of this docstring claimed all eleven fail pre-fix and that
 each names a pre-fix value; both were false, and the file contradicted one of
 its own docstrings eighty lines below. Corrected at cycle 3 after quality
 review. If you add a test here, say which kind it is.
 
-See `.sdd/task-13-report.md` §12-13 for the probe matrix and the RED proof.
+See `.sdd/task-13-report.md` §12-13 for the probe matrix and the RED proof,
+and `.sdd/task-17-report.md` for the cross-surface matrix's RED proof.
 """
 
 from __future__ import annotations
@@ -206,37 +212,6 @@ class TestOrdinalSentinelHasExactlyOneRepresentation:
         # Discriminating against the real preset, not merely self-consistent.
         assert quirk != rendered_text(self._chart(ordinal_df, "__ordinal__"))
 
-    def test_the_axis_path_renders_ordinals_when_format_type_is_time(self, ordinal_df):
-        """`resolve` recognizes the sentinel before `format_type` — on this path.
-
-        Deliberately scoped to the axis, and renamed from
-        ``test_a_stray_format_type_cannot_re_read_the_sentinel`` because that
-        name overreached (wave-6A T13 spec review, finding 2). The narrow claim
-        holds: ``FormatKind::resolve`` returns ``Ordinal`` for this pair
-        regardless of ``format_type``. The broad one does not — a caller whose
-        own ``format_type`` branch runs after the resolution can still discard
-        the ``Ordinal``, and ``format_value_with_spec`` does exactly that, so
-        ``fm.Legend(format="__ordinal__", format_type="time")`` renders
-        ``1970-01-01`` rather than ordinals (measured). That asymmetry is NOT
-        asserted here on purpose: it is malformed input, and reordering the
-        guard to let ``Ordinal`` win is a live option that a pin would
-        prematurely freeze.
-
-        Invariant guard, not a regression pin — this passes pre-fix too.
-        """
-        chart = (
-            fm.Chart(ordinal_df)
-            .mark_line()
-            .encode(
-                x=fm.X(
-                    "n:Q",
-                    axis=fm.Axis(label_format="__ordinal__", label_format_type="time"),
-                ),
-                y="v:Q",
-            )
-        )
-        assert "1st" in rendered_text(chart)
-
 
 class TestPercentSpecIsNeverMisreadAsStrftime:
     """NF-B2's motivating case, now pinned at the public surface.
@@ -268,3 +243,118 @@ class TestPercentSpecIsNeverMisreadAsStrftime:
             .encode(x=fm.X("q:Q", axis=fm.Axis(label_format="percent")), y="v:Q")
         )
         assert any(t.endswith("%") for t in rendered_text(chart))
+
+
+# ---- one outcome per malformed pair, at every surface (wave 6A T17) ----
+
+YEARLY = pl.DataFrame(
+    {
+        "d": [dt.datetime(2000 + i, 6, 1) for i in range(8)],
+        "n": [float(i) for i in range(1, 9)],
+        "g": ["a", "b"] * 4,
+    }
+)
+
+
+def _axis(field: str, fmt: str | None, fmt_type: str | None):
+    kwargs = {}
+    if fmt is not None:
+        kwargs["label_format"] = fmt
+    if fmt_type is not None:
+        kwargs["label_format_type"] = fmt_type
+    return fm.Chart(YEARLY).mark_point().encode(x=fm.X(field, axis=fm.Axis(**kwargs)), y="n:Q")
+
+
+def _format_kwargs(fmt: str | None, fmt_type: str | None) -> dict:
+    kwargs = {}
+    if fmt is not None:
+        kwargs["format"] = fmt
+    if fmt_type is not None:
+        kwargs["format_type"] = fmt_type
+    return kwargs
+
+
+#: Each surface, as ``(field, spec, format_type) -> chart``. The field is the
+#: column the format applies to: ``d`` (temporal) or ``n`` (quantitative).
+SURFACES = {
+    "axis": lambda field, fmt, ft: _axis(field, fmt, ft),
+    "independent_facet_axis": lambda field, fmt, ft: (
+        _axis(field, fmt, ft).facet(col="g").share_scale(x="independent")
+    ),
+    "colorbar": lambda field, fmt, ft: (
+        fm.Chart(YEARLY)
+        .mark_point()
+        .encode(
+            x="n:Q", y="n:Q", color=fm.Color(field, legend=fm.Legend(**_format_kwargs(fmt, ft)))
+        )
+    ),
+    "text": lambda field, fmt, ft: (
+        fm.Chart(YEARLY)
+        .mark_text()
+        .encode(x="n:Q", y="n:Q", text=fm.Text(field, **_format_kwargs(fmt, ft)))
+    ),
+}
+
+
+class TestEverySurfaceAnswersAMalformedPairAlike:
+    """One outcome per ``(spec, format_type)`` pair, whichever surface renders it.
+
+    User ruling on ``#147``: the surfaces must actually agree on identical
+    input, not document where they differ. Each case compares a surface
+    against ITSELF on the well-formed spelling the malformed pair must mean,
+    so a surface that answers differently from the others fails on its own row.
+    """
+
+    @pytest.mark.parametrize("surface", sorted(SURFACES))
+    def test_the_ordinal_preset_wins_over_a_stray_time_type(self, surface):
+        """Regression pin for colorbar, text and the independent facet axis.
+
+        Pre-fix: the axis rendered ``1st 2nd …`` while the colorbar and the
+        text mark rendered ``1970-01-01`` (their post-resolution
+        ``format_type`` guard discarded the ``Ordinal``), and the independent
+        facet axis refused the pair as a time format on a non-temporal scale.
+        The shared-axis row is the control that passed pre-fix too.
+        """
+        build = SURFACES[surface]
+        stray = rendered_text(build("n:Q", "__ordinal__", "time"))
+        declared = rendered_text(build("n:Q", "__ordinal__", None))
+        assert stray == declared
+        assert "1st" in stray or "2nd" in stray, stray
+        assert not any(t.startswith("1970") for t in stray), stray
+
+    @pytest.mark.parametrize("spec", [".2f", ".3e"])
+    @pytest.mark.parametrize("surface", sorted(SURFACES))
+    def test_a_pattern_free_time_typed_spec_falls_back_to_the_temporal_default(self, surface, spec):
+        """Regression pin for both axis rows.
+
+        Pre-fix: on a temporal axis the spec was threaded on, re-seeded
+        untyped and applied as d3 to the year labels (``2001.00``,
+        ``2.001e+3``), while the colorbar and text mark rendered their
+        temporal default for the identical pair. The colorbar and text rows
+        are controls that passed pre-fix too.
+        """
+        build = SURFACES[surface]
+        malformed = rendered_text(build("d:T", spec, "time"))
+        default = rendered_text(build("d:T", None, "time"))
+        assert malformed == default
+        assert any(re.match(r"200\d", t) for t in malformed), malformed
+        assert not any(t.startswith("1970") for t in malformed), malformed
+        assert not any(re.fullmatch(r"\d{4}\.\d{2}|\d\.\d{3}e\+\d", t) for t in malformed)
+
+    @pytest.mark.parametrize("surface", ["axis", "independent_facet_axis"])
+    def test_a_pattern_free_time_typed_spec_on_a_quantitative_axis_refuses(self, surface):
+        """Regression pin for the shared axis; the independent facet axis is
+        its parity partner and refused pre-fix too.
+
+        Pre-fix: the shared axis applied ``.2f`` as d3 and rendered, while
+        the independent facet axis refused the identical pair. Both now
+        raise the ``#133`` refusal, and the message names the declared
+        ``"time"`` type as the cause, since ``.2f`` alone does not say why a
+        temporal scale is needed.
+        """
+        chart = SURFACES[surface]("n:Q", ".2f", "time")
+        with pytest.raises(
+            ValueError,
+            match=r"""format "\.2f" is typed "time", which on the 'x' axis requires a temporal scale""",
+        ):
+            chart.to_svg()
