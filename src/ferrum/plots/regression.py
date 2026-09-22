@@ -17,6 +17,8 @@ _prediction_error_chart_from_source.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -606,6 +608,216 @@ def _fit_chart_from_named_transform(
     return chart
 
 
+@dataclass(frozen=True)
+class _FitRequest:
+    """Everything ``lmplot`` resolved before building its fit, in one value.
+
+    Each ``_build_*_fit`` below reads the fields its method uses and ignores
+    the rest, so the dispatch hands every builder the same argument instead
+    of each call site picking a per-method subset. All fields are resolved
+    once in ``lmplot``; none is re-derived here.
+
+    ``x``/``y`` are the caller's channels (``x`` already carries ``logx``'s
+    log scale); ``x_field``/``y_field`` are their resolved column names.
+    ``has_scatter`` says whether a scatter layer will be composed beside the
+    fit, which decides the smooth path's layer shape.
+    """
+
+    data: Any
+    x: Any
+    y: Any
+    x_field: str
+    y_field: str
+    hue: Any
+    ci: float | None
+    line_kwargs: dict
+    x_bins: Any
+    x_estimator: Any
+    order: int | None
+    x_range: list[float] | None
+    metrics: bool
+    color_active: bool
+    has_scatter: bool
+
+
+def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
+    """Every ``_SMOOTH_ROUTED_METHODS`` member: ONE ``mark_smooth`` call.
+
+    The parameters that vary do so with the *arguments*, not with the method.
+
+    - ``x_bins``/``x_estimator`` forward for every method. The engine bins
+      method-agnostically -- ``smooth.rs``'s ``apply_one_group`` aggregates
+      the x bins BEFORE it dispatches on method -- so the pre-R2 "only lm
+      forwards binning" carve-out dropped both parameters silently for nine
+      of lmplot's ten methods, which is the shape ``lmplot`` refuses
+      everywhere else (``truncate=False`` and an inapplicable ``order`` both
+      raise). Same rule as ``order``: forward what the caller passed and let
+      the engine decide.
+    - ``order`` forwards as ``degree=`` via ``_smooth_degree_kwargs``, whose
+      docstring holds the per-method acceptance matrix.
+    - ``groupby=hue`` fits per hue level and colors each fit by it.
+    - ``show_metrics`` needs no gate here: ``req.metrics`` is already False
+      whenever ``hue`` is set (and for logistic/glm), computed in ``lmplot``.
+    """
+    lkw = req.line_kwargs
+    smooth_kwargs: dict = dict(
+        method=method,
+        ci=req.ci,
+        x_bins=req.x_bins,
+        x_estimator=req.x_estimator,
+        show_metrics=req.metrics,
+        **({"groupby": _field_name(req.hue)} if req.hue is not None else {}),
+        **_smooth_degree_kwargs(method, req.order, "lmplot"),
+        **({"x_range": req.x_range} if req.x_range is not None else {}),
+    )
+    if not req.has_scatter:
+        # No sibling layer: the fit IS the chart, so `mark_smooth`'s own
+        # shape is the right one -- including the single-line shortcut it
+        # takes for `ci=None, show_metrics=False`, whose chain-advancing
+        # (unnamed) `Smooth` correctly becomes the chart's data.
+        #
+        # `line_kws` is handed to `mark_smooth` through its per-layer
+        # door, aimed at the `line` layer, rather than spread as mark
+        # kwargs (which would repaint the CI band too) or rewritten onto
+        # `out._layers` after the fact. The post-hoc rewrite is what
+        # dropped it here: on this branch the chart still carries a
+        # pending stat mark, so `out._layers` is empty until the desugar
+        # runs at render time (#199). Forwarding at construction reaches
+        # both shapes `desugar_smooth` can return without forcing that
+        # desugar early, which would cost the single-line shortcut.
+        fit = Chart(req.data).mark_smooth(
+            **smooth_kwargs, layer_kwargs={"line": lkw} if lkw else None
+        )
+        if req.hue is not None:
+            # Same Nominal typing as `lmplot`'s scatter (`nominal_color_channel`
+            # is pure, so re-typing here binds an equal channel).
+            return fit.encode(x=req.x, y=req.y, color=nominal_color_channel(req.hue))
+        return fit.encode(x=req.x, y=req.y)
+    # A scatter layer will be composed beside this fit, so the fit's
+    # transform must be a NAMED fan-out its own layers read through
+    # `data_source=` -- never a chain-advancing transform, which
+    # `_merge_layers` would apply to the scatter layer too. That is
+    # exactly what `mark_smooth`'s single-line shortcut produces for
+    # `ci=None, show_metrics=False`, and it corrupted the scatter:
+    # measured on the pre-fix tree, `lmplot(df, x=, y=, ci=None,
+    # show_metrics=False)` drew all 200 "observations" on the fit
+    # grid's own vertices (0.000 px spread about a perfect line) for
+    # lm/loess/quadratic/gam/log/sqrt in both lmplot and regplot --
+    # or raised "unknown column" outright when the raw columns were
+    # not themselves named x/y. Batch D's fix reached the CI path
+    # only, because only that path was already layered.
+    #
+    # The transform still comes from `desugar_smooth`, not a second
+    # construction here: it owns the per-method kwarg matrix (which
+    # knobs forward, which are omitted so Rust's own defaults apply)
+    # and the fit grid's `n`/`seed`. Only its LAYER shape is replaced,
+    # by the same `build_fit_layers` triple the CI path and the
+    # dedicated fit methods below already emit.
+    # One transform, unpacked rather than indexed so a desugar that
+    # ever emits a second one fails here instead of silently losing it.
+    (smooth_transform,) = desugar_smooth(
+        req.x_field, req.y_field, name="smooth", **smooth_kwargs
+    ).transforms
+    # `kind` doubles as the transform's `name=` here exactly as it does for
+    # the three dedicated methods below.
+    return _fit_chart_from_named_transform(
+        req.data,
+        smooth_transform,
+        kind="smooth",
+        ci=req.ci,
+        line_kwargs=lkw,
+        chart_x=req.x,
+        x_title=req.x_field,
+        y_title=req.y_field,
+        metrics=req.metrics,
+    )
+
+
+def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
+    """Build the chart around one of the three dedicated fit-family transforms.
+
+    ``Logistic``/``Glm``/``Robust`` are all called WITHOUT a ``groupby``, so
+    exactly one pooled fit is produced regardless of whether a color encoding
+    is active. ``neutral_stroke=color_active`` is what stops that pooled fit
+    from rendering in a color level's palette color beside a full legend -- a
+    materially wrong statistical chart, drawn silently, and the same failure
+    class ``nominal_color_channel`` names for a mistyped hue column. ``Robust``
+    did gain a Rust-side ``groupby`` in batch F (``residplot(color=)``
+    consumes it), so wiring ``hue=`` through to per-group robust fits is a
+    Python-side change; ``Logistic``/``Glm`` still need the Rust capability
+    first. Both tracked as batch-close follow-ups.
+    """
+    return _fit_chart_from_named_transform(
+        req.data,
+        transform,
+        kind=kind,
+        ci=req.ci,
+        line_kwargs=req.line_kwargs,
+        chart_x=req.x,
+        x_title=req.x_field,
+        y_title=req.y_field,
+        neutral_stroke=req.color_active,
+        # False for logistic/glm: `lmplot` never sets `metrics` for them.
+        metrics=req.metrics,
+    )
+
+
+def _build_logistic_fit(method: str, req: _FitRequest) -> Chart:
+    transform = Logistic(x=req.x_field, y=req.y_field, n_grid=200, ci=req.ci, name="logistic")
+    return _dedicated_fit_chart("logistic", transform, req)
+
+
+def _build_glm_fit(method: str, req: _FitRequest) -> Chart:
+    transform = Glm(
+        x=req.x_field, y=req.y_field, family="gaussian", n_grid=200, ci=req.ci, name="glm"
+    )
+    return _dedicated_fit_chart("glm", transform, req)
+
+
+def _build_robust_fit(method: str, req: _FitRequest) -> Chart:
+    # The one dedicated transform that takes `inject_metrics=` and `x_range=`.
+    transform = Robust(
+        x=req.x_field,
+        y=req.y_field,
+        n_grid=200,
+        ci=req.ci,
+        name="robust",
+        inject_metrics=req.metrics,
+        **({"x_range": req.x_range} if req.x_range is not None else {}),
+    )
+    return _dedicated_fit_chart("robust", transform, req)
+
+
+# `lmplot`'s method -> fit builder table. Keyed over `_VALID_METHODS` exactly:
+# the smooth-routed half is derived from the same registry read, so a new
+# registry smooth method routes through `mark_smooth` with no edit here.
+_FIT_BUILDERS: dict[str, Callable[[str, _FitRequest], Chart]] = {
+    **dict.fromkeys(_SMOOTH_ROUTED_METHODS, _build_smooth_fit),
+    "logistic": _build_logistic_fit,
+    "glm": _build_glm_fit,
+    "robust": _build_robust_fit,
+}
+
+
+def _build_fit(method: str, req: _FitRequest) -> Chart:
+    """``lmplot``'s fit chart for ``method``: ONE dispatch over ``_FIT_BUILDERS``.
+
+    An unknown ``method`` raises the same ``validate_choice`` ``ValueError``
+    ``lmplot`` raises at entry. An ACCEPTED method with no builder (a
+    ``_VALID_METHODS`` member someone added without a ``_FIT_BUILDERS``
+    entry) raises ``LookupError`` naming it, rather than falling through to
+    an unreachable branch.
+    """
+    builder = _FIT_BUILDERS.get(method)
+    if builder is None:
+        validate_choice("lmplot", "method", method, _VALID_METHODS)
+        raise LookupError(
+            f"lmplot: method={method!r} is accepted but has no fit builder in "
+            "ferrum.plots.regression._FIT_BUILDERS"
+        )
+    return builder(method, req)
+
+
 # ---------------------------------------------------------------------------
 # Public figure functions
 # ---------------------------------------------------------------------------
@@ -1012,7 +1224,7 @@ def lmplot(
         scatter_layer = s
 
     # ---- Fit layer (per method) ----------------------------------------
-    # Every branch below forwards `lkw` at CONSTRUCTION, to the fit line
+    # Every `_FIT_BUILDERS` entry forwards `lkw` at CONSTRUCTION, to the fit line
     # alone. It used to be rewritten onto the finished chart's `_layers` for
     # the `mark_smooth`-routed methods instead, which dropped it silently
     # whenever those layers were not materialized yet -- the `scatter=False`
@@ -1020,153 +1232,26 @@ def lmplot(
     # (#199).
     lkw = dict(line_kws) if line_kws else {}
 
-    # Every `_SMOOTH_ROUTED_METHODS` member takes ONE call: the parameters
-    # that vary do so with the *arguments*, not with the method.
-    #
-    # - `x_bins`/`x_estimator` forward for every method. The engine bins
-    #   method-agnostically -- `smooth.rs`'s `apply_one_group` aggregates the
-    #   x bins BEFORE it dispatches on method -- so the pre-R2 "only lm
-    #   forwards binning" carve-out dropped both parameters silently for nine
-    #   of lmplot's ten methods, which is the shape this function refuses
-    #   everywhere else (`truncate=False` and an inapplicable `order` both
-    #   raise). Same rule as `order`: forward what the caller passed and let
-    #   the engine decide.
-    # - `order` forwards as `degree=` via `_smooth_degree_kwargs`, whose
-    #   docstring holds the per-method acceptance matrix.
-    # - `groupby=hue` fits per hue level and colors each fit by it.
-    # - `show_metrics` needs no gate here: `metrics_applied` is already False
-    #   whenever `hue` is set (and for logistic/glm), computed above.
-    if method in _SMOOTH_ROUTED_METHODS:
-        smooth_kwargs: dict = dict(
-            method=method,
+    fit = _build_fit(
+        method,
+        _FitRequest(
+            data=data,
+            x=x_enc,
+            y=y,
+            x_field=x_field,
+            y_field=y_field,
+            hue=hue,
             ci=ci_frac,
+            line_kwargs=lkw,
             x_bins=x_bins,
             x_estimator=x_estimator,
-            show_metrics=metrics_applied,
-            **({"groupby": _field_name(hue)} if hue is not None else {}),
-            **_smooth_degree_kwargs(method, order, "lmplot"),
-            **({"x_range": x_range} if x_range is not None else {}),
-        )
-        if scatter_layer is None:
-            # No sibling layer: the fit IS the chart, so `mark_smooth`'s own
-            # shape is the right one -- including the single-line shortcut it
-            # takes for `ci=None, show_metrics=False`, whose chain-advancing
-            # (unnamed) `Smooth` correctly becomes the chart's data.
-            #
-            # `line_kws` is handed to `mark_smooth` through its per-layer
-            # door, aimed at the `line` layer, rather than spread as mark
-            # kwargs (which would repaint the CI band too) or rewritten onto
-            # `out._layers` after the fact. The post-hoc rewrite is what
-            # dropped it here: on this branch the chart still carries a
-            # pending stat mark, so `out._layers` is empty until the desugar
-            # runs at render time (#199). Forwarding at construction reaches
-            # both shapes `desugar_smooth` can return without forcing that
-            # desugar early, which would cost the single-line shortcut.
-            fit = Chart(data).mark_smooth(
-                **smooth_kwargs, layer_kwargs={"line": lkw} if lkw else None
-            )
-            fit = (
-                fit.encode(x=x_enc, y=y, color=hue_ch)
-                if hue is not None
-                else fit.encode(x=x_enc, y=y)
-            )
-        else:
-            # A scatter layer will be composed beside this fit, so the fit's
-            # transform must be a NAMED fan-out its own layers read through
-            # `data_source=` -- never a chain-advancing transform, which
-            # `_merge_layers` would apply to the scatter layer too. That is
-            # exactly what `mark_smooth`'s single-line shortcut produces for
-            # `ci=None, show_metrics=False`, and it corrupted the scatter:
-            # measured on the pre-fix tree, `lmplot(df, x=, y=, ci=None,
-            # show_metrics=False)` drew all 200 "observations" on the fit
-            # grid's own vertices (0.000 px spread about a perfect line) for
-            # lm/loess/quadratic/gam/log/sqrt in both lmplot and regplot --
-            # or raised "unknown column" outright when the raw columns were
-            # not themselves named x/y. Batch D's fix reached the CI path
-            # only, because only that path was already layered.
-            #
-            # The transform still comes from `desugar_smooth`, not a second
-            # construction here: it owns the per-method kwarg matrix (which
-            # knobs forward, which are omitted so Rust's own defaults apply)
-            # and the fit grid's `n`/`seed`. Only its LAYER shape is replaced,
-            # by the same `build_fit_layers` triple the CI path and the
-            # dedicated fit methods below already emit.
-            # One transform, unpacked rather than indexed so a desugar that
-            # ever emits a second one fails here instead of silently losing it.
-            (smooth_transform,) = desugar_smooth(
-                x_field, y_field, name="smooth", **smooth_kwargs
-            ).transforms
-            fit = _fit_chart_from_named_transform(
-                data,
-                smooth_transform,
-                # `kind` doubles as the transform's `name=` here exactly as it
-                # does for the three dedicated methods below.
-                kind="smooth",
-                ci=ci_frac,
-                line_kwargs=lkw,
-                chart_x=x_enc,
-                x_title=x_field,
-                y_title=y_field,
-                metrics=metrics_applied,
-            )
-    elif method == "logistic":
-        fit = _fit_chart_from_named_transform(
-            data,
-            Logistic(x=x_field, y=y_field, n_grid=200, ci=ci_frac, name="logistic"),
-            kind="logistic",
-            ci=ci_frac,
-            line_kwargs=lkw,
-            chart_x=x_enc,
-            x_title=x_field,
-            y_title=y_field,
-            neutral_stroke=color_active,
-        )
-    elif method == "glm":
-        fit = _fit_chart_from_named_transform(
-            data,
-            Glm(x=x_field, y=y_field, family="gaussian", n_grid=200, ci=ci_frac, name="glm"),
-            kind="glm",
-            ci=ci_frac,
-            line_kwargs=lkw,
-            chart_x=x_enc,
-            x_title=x_field,
-            y_title=y_field,
-            neutral_stroke=color_active,
-        )
-    elif method == "robust":
-        fit = _fit_chart_from_named_transform(
-            data,
-            Robust(
-                x=x_field,
-                y=y_field,
-                n_grid=200,
-                ci=ci_frac,
-                name="robust",
-                inject_metrics=metrics_applied,
-                **({"x_range": x_range} if x_range is not None else {}),
-            ),
-            kind="robust",
-            ci=ci_frac,
-            line_kwargs=lkw,
-            chart_x=x_enc,
-            x_title=x_field,
-            y_title=y_field,
-            neutral_stroke=color_active,
+            order=order,
+            x_range=x_range,
             metrics=metrics_applied,
-        )
-    else:  # pragma: no cover — guarded above
-        raise ValueError(f"unreachable: method={method!r}")
-
-    # `_DEDICATED_FIT_METHODS` (logistic/glm/robust) are called here WITHOUT a
-    # `groupby`, so exactly one pooled fit is produced regardless of whether a
-    # color encoding is active. `neutral_stroke=color_active` above is what
-    # stops that pooled fit from rendering in a color level's palette color
-    # beside a full legend -- a materially wrong statistical chart, drawn
-    # silently, and the same failure class `nominal_color_channel` names for a
-    # mistyped hue column. `Robust` did gain a Rust-side `groupby` in batch F
-    # (`residplot(color=)` consumes it), so wiring `hue=` through to per-group
-    # robust fits is now a Python-side change here; `Logistic`/`Glm` still need
-    # the Rust capability first. Both tracked as batch-close follow-ups.
+            color_active=color_active,
+            has_scatter=scatter_layer is not None,
+        ),
+    )
 
     # Compose scatter + fit. (When ``metrics_applied``, the fit chart
     # already carries the metrics-text layer reading the Smooth output.)
