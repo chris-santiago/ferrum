@@ -26,7 +26,7 @@ use crate::render::draw::{
     col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
     ClearablePaint, DrawCtx,
 };
-use crate::render::format::{format_numeric, format_time, format_with_spec};
+use crate::render::format::{format_numeric, format_value_with_spec};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
@@ -98,11 +98,14 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                             if !v.is_finite() {
                                 return None;
                             }
-                            if text_format_type == Some("time") {
-                                Some(format_time(v as i64, 86_400_000))
-                            } else {
-                                Some(format_with_spec(v, text_format))
-                            }
+                            // ONE resolution (`#147`): the same
+                            // `TimeAutodetect::Denied` classification the
+                            // colorbar uses for the identical pair, so a
+                            // `text=fm.Text(field, format="%Y/%m/%d",
+                            // format_type="time")` channel APPLIES its
+                            // pattern instead of silently falling back to the
+                            // default day-granularity formatter.
+                            Some(format_value_with_spec(v, text_format, text_format_type))
                         })
                     })
                     .collect()

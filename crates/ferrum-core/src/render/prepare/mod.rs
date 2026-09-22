@@ -2414,13 +2414,24 @@ pub(crate) fn adjust_axis_ticks(
             // afterward safely no-ops on these now-thinned labels via its
             // existing length guard.
             let fmt_slot = axis.overrides.labels.format.get();
-            let temporal_spec = (is_temporal && fmt_slot.format_type.as_deref() == Some("time"))
-                .then(|| fmt_slot.spec.clone())
+            // `TimeAutodetect::Denied`: the chart-level slot's own declared
+            // `format_type` is the gate (see the comment above), not a guess
+            // from the spec's content — an untyped `%`-bearing per-channel
+            // spec was already applied by `apply_axis_format_or_thread` and
+            // must not be applied a second time here.
+            let temporal_spec = is_temporal
+                .then(|| {
+                    crate::render::format::FormatKind::resolve(
+                        fmt_slot.spec.as_deref(),
+                        fmt_slot.format_type.as_deref(),
+                        crate::render::format::TimeAutodetect::Denied,
+                    )
+                })
                 .flatten();
-            if let Some(fmt) = temporal_spec {
+            if let Some(crate::render::format::FormatKind::Strftime(pattern)) = temporal_spec {
                 axis.tick_labels = raw
                     .iter()
-                    .map(|&ms| crate::render::format::format_time_spec(ms as i64, &fmt))
+                    .map(|&ms| crate::render::format::format_time_spec(ms as i64, &pattern))
                     .collect();
             }
         }
@@ -2507,11 +2518,16 @@ fn apply_axis_format_or_thread(
     reversed: bool,
     channel: &'static str,
 ) -> Result<(Vec<String>, Option<String>), RenderError> {
-    use crate::render::format::{format_time_spec, is_time_format_spec};
+    use crate::render::format::{format_time_spec, FormatKind, TimeAutodetect};
     let Some(fmt) = format else {
         return Ok((labels, None));
     };
-    if is_time_format_spec(&fmt, format_type) {
+    // `TimeAutodetect::Allowed`: this is the one formatting surface that can
+    // RECOVER from a wrong guess — it commits to `chrono` only when the
+    // resolved scale turns out temporal, and falls through to the d3 grammar
+    // below when it does not. See `TimeAutodetect`'s doc.
+    let kind = FormatKind::resolve(Some(&fmt), format_type, TimeAutodetect::Allowed);
+    if let Some(FormatKind::Strftime(pattern)) = &kind {
         if let Some(mut values) = scale.temporal_tick_values(tick_count) {
             if reversed {
                 values.reverse();
@@ -2521,7 +2537,7 @@ fn apply_axis_format_or_thread(
             if values.len() == labels.len() {
                 let out = values
                     .into_iter()
-                    .map(|ms| format_time_spec(ms, &fmt))
+                    .map(|ms| format_time_spec(ms, pattern))
                     .collect();
                 return Ok((out, None));
             }
@@ -2532,12 +2548,13 @@ fn apply_axis_format_or_thread(
         // Non-Time scale (`temporal_tick_values` returned `None`): refuse
         // (#133) ONLY when `format_type` unambiguously declared `"time"` —
         // an ambiguous bare `%`-containing spec with no declared type (e.g.
-        // a plain d3 percent format like `".1%"`) is tolerated by
-        // `is_time_format_spec`'s own "valid under either grammar" rule and
-        // must keep falling through to the numeric/d3 grammar exactly as
-        // `apply_tick_format`'s narrower `format_type == Some("time")` check
-        // already routes it — refusing here would reject ordinary percent
-        // specs on every non-temporal axis.
+        // a plain d3 percent format like `".1%"`) is exactly what
+        // `TimeAutodetect::Allowed` above tolerated on the chance the scale
+        // was temporal, and must keep falling through to the numeric/d3
+        // grammar as `apply_tick_format`'s `TimeAutodetect::Denied` routes it
+        // — refusing here would reject ordinary percent specs on every
+        // non-temporal axis. This is the recovery the `Allowed` setting
+        // promises.
         // #133 wave-1 close remediation: route through the same
         // `refuse_time_format_on_non_temporal` helper the `Immediate` mode
         // arm calls, instead of restating the `format_type == Some("time")`
@@ -2556,14 +2573,17 @@ fn apply_axis_format_or_thread(
 /// a non-`Time` [`crate::render::scale_resolve::ScaleKind`], never for a
 /// length-drift on a genuinely temporal scale.
 ///
-/// Deliberately narrower than [`crate::render::format::is_time_format_spec`]
-/// (which also tolerates an unset `format_type`): an ambiguous bare
+/// Keyed on the DECLARED `format_type` alone, deliberately narrower than
+/// [`crate::render::format::FormatKind::resolve`] under
+/// [`crate::render::format::TimeAutodetect::Allowed`] (which also tolerates an
+/// unset `format_type`): an ambiguous bare
 /// `%`-containing spec with no declared type (a plain d3 percent format like
 /// `".1%"`) must keep falling through to the numeric grammar, matching
-/// [`apply_tick_format`]'s own narrower `format_type == Some("time")` check —
-/// see [`apply_axis_format_or_thread`]'s matching non-Time arm, which this fn
-/// mirrors for `build_axis_tick_inputs`'s `Immediate`-mode arm (the per-panel
-/// independent-facet-axis surface), so the two format-application
+/// [`apply_tick_format`]'s own `TimeAutodetect::Denied` resolution —
+/// see [`apply_axis_format_or_thread`]'s matching non-Time arm, which
+/// `build_axis_tick_inputs`'s `Immediate`-mode arm (the per-panel
+/// independent-facet-axis surface) now reaches by delegating to that same fn,
+/// so the two format-application
 /// disciplines cannot drift on which scale kinds refuse. `channel` is the
 /// RESOLVED token; `coord_flipped` is always constructed `false` — corrected
 /// by the caller boundary (R3, same discipline as `InvalidAxisOrient`).
@@ -2607,9 +2627,24 @@ pub(crate) enum TickFormatMode<'a> {
         format: Option<String>,
         format_type: Option<&'a str>,
     },
-    /// Independent per-panel axes: apply the format IMMEDIATELY via
-    /// [`apply_tick_format`] and thread nothing (the per-panel layout is built
-    /// directly in `scene_build`, bypassing `apply_label_format_to_axis`).
+    /// Independent per-panel axes: resolve the format exactly as [`Thread`]
+    /// does, then apply it IMMEDIATELY and thread nothing (the per-panel
+    /// layout is built directly in `scene_build`, bypassing
+    /// `apply_label_format_to_axis`, so there is no later applier to defer to).
+    ///
+    /// The two modes differ in TIMING, not in discipline: this arm calls
+    /// [`apply_axis_format_or_thread`] — the only function that can re-derive
+    /// raw epoch-ms tick values from the scale — and then runs
+    /// [`apply_tick_format`] on whatever that returned as threaded, which is
+    /// the numeric case only.
+    ///
+    /// It used to call [`apply_tick_format`] directly, and that WAS the `#147`
+    /// defect: `apply_tick_format`'s only input is the already-formatted label
+    /// strings, which on a temporal scale cannot be re-parsed as timestamps,
+    /// so an independent-x/y facet panel silently dropped every temporal tick
+    /// format while the shared axis honored the identical spelling.
+    ///
+    /// [`Thread`]: TickFormatMode::Thread
     Immediate {
         format: Option<&'a str>,
         format_type: Option<&'a str>,
@@ -2686,10 +2721,38 @@ pub(crate) fn build_axis_tick_inputs(
             format,
             format_type,
         } => {
+            // The refusal stays keyed on the DECLARED `format_type` (#133),
+            // independent of how the spec resolves, so this arm refuses
+            // exactly what it refused before delegating below.
             if let Some(fmt) = format {
                 refuse_time_format_on_non_temporal(fmt, format_type, scale, tick_count, channel)?;
             }
-            (apply_tick_format(labels, format, format_type), None)
+            // ONE format discipline, two application TIMINGS (`#147`): resolve
+            // through the same function `Thread` uses — which is the only one
+            // that can re-derive raw epoch-ms tick values from a temporal
+            // scale — then immediately apply whatever `Thread` would have
+            // threaded forward for its caller to apply later.
+            //
+            // Before this, `Immediate` went straight to `apply_tick_format`,
+            // whose only input is the already-formatted label STRINGS. On a
+            // temporal axis those strings cannot be re-parsed as timestamps,
+            // so an independent-x/y facet panel silently DROPPED every
+            // temporal tick format — `fm.Axis(label_format="%Y/%m/%d")`
+            // rendered dates on a shared axis and the scale's own default
+            // spacing-keyed strings on an independent one, for the same chart.
+            let (labels, threaded) = apply_axis_format_or_thread(
+                labels,
+                format.map(str::to_string),
+                format_type,
+                scale,
+                tick_count,
+                reverse,
+                channel,
+            )?;
+            match threaded {
+                Some(fmt) => (apply_tick_format(labels, Some(&fmt), format_type), None),
+                None => (labels, None),
+            }
         }
     };
 
@@ -2712,42 +2775,54 @@ pub(crate) fn build_axis_tick_inputs(
 /// (e.g. `.2f`, `~s`, `,`), we re-parse each label back to f64 and re-format it
 /// via the canonical d3-format grammar in `crate::render::format`.
 ///
+/// Resolution is [`format::FormatKind::resolve`] with
+/// [`format::TimeAutodetect::Denied`]: this fn's only input is the
+/// already-stringified labels, so it holds no scale to fall back on and must
+/// not guess that an untyped `%`-bearing spec is a date pattern. Callers that
+/// DO hold the scale (`apply_axis_format_or_thread`, which every axis path now
+/// routes through first) resolve the temporal case before reaching here.
+///
 /// When `format_type == "time"`, labels are treated as epoch-ms integers. A
-/// format string containing `%` is interpreted as a `chrono` strftime pattern
-/// (e.g. `"%b %Y"`); otherwise the default spacing-keyed temporal formatter is
-/// used, preserving the prior byte output. Labels that fail to parse are left
+/// format string containing `%` resolves to a `chrono` strftime pattern (e.g.
+/// `"%b %Y"`); a time-typed pair naming no pattern falls back to the default
+/// spacing-keyed temporal formatter. Labels that fail to parse are left
 /// unchanged (ordinal labels, already-formatted strings, etc.).
 pub(crate) fn apply_tick_format(
     labels: Vec<String>,
     format: Option<&str>,
     format_type: Option<&str>,
 ) -> Vec<String> {
-    use crate::render::format::{format_parsed, format_time, format_time_spec, parse_format_spec};
+    use crate::render::format::{format_time, format_time_spec, FormatKind, TimeAutodetect};
     let is_time = format_type == Some("time");
     // Non-time with no format string is a pure pass-through (byte-identical).
     if !is_time && format.is_none() {
         return labels;
     }
-    let time_pattern = format.filter(|f| f.contains('%'));
-    let num_spec = format.map(parse_format_spec);
+    let kind = FormatKind::resolve(format, format_type, TimeAutodetect::Denied);
+    let epoch_ms = |raw: &str| -> Option<i64> {
+        raw.parse::<i64>()
+            .ok()
+            .or_else(|| raw.parse::<f64>().ok().map(|f| f as i64))
+    };
     labels
         .into_iter()
-        .map(|raw| {
-            if is_time {
-                let epoch_ms = raw
-                    .parse::<i64>()
-                    .ok()
-                    .or_else(|| raw.parse::<f64>().ok().map(|f| f as i64));
-                match (epoch_ms, time_pattern) {
-                    (Some(ms), Some(pat)) => format_time_spec(ms, pat),
-                    (Some(ms), None) => format_time(ms, 86_400_000),
-                    (None, _) => raw,
-                }
-            } else if let (Ok(v), Some(spec)) = (raw.parse::<f64>(), num_spec.as_ref()) {
-                format_parsed(v, spec)
-            } else {
-                raw // ordinal — pass through
-            }
+        .map(|raw| match &kind {
+            Some(FormatKind::Strftime(pattern)) => match epoch_ms(&raw) {
+                Some(ms) => format_time_spec(ms, pattern),
+                None => raw,
+            },
+            // Time-typed but naming no pattern: the default spacing-keyed
+            // temporal formatter, the same fallback `format_value_with_spec`
+            // uses for the identical pair.
+            _ if is_time => match epoch_ms(&raw) {
+                Some(ms) => format_time(ms, 86_400_000),
+                None => raw,
+            },
+            Some(kind) => match raw.parse::<f64>() {
+                Ok(v) => kind.format(v),
+                Err(_) => raw, // ordinal category name — pass through
+            },
+            None => raw,
         })
         .collect()
 }
@@ -7303,6 +7378,108 @@ mod tests {
         assert_eq!(indep_threaded, None);
     }
 
+    /// `#147`: the two modes resolve a temporal tick format through ONE
+    /// discipline, so an independent per-panel axis renders the caller's
+    /// pattern instead of the scale's own default labels.
+    ///
+    /// This is the probe matrix's one observable predicate disagreement. Only
+    /// `apply_axis_format_or_thread` can re-derive raw epoch-ms values from the
+    /// scale; `apply_tick_format`'s only input is the already-formatted label
+    /// STRINGS, which on a temporal scale cannot be re-parsed as timestamps.
+    /// `Immediate` used to go straight there, so every temporal format was
+    /// silently DROPPED on an independent-x/y facet panel while the shared
+    /// axis honored it — for the same chart, both spellings.
+    ///
+    /// Discriminating in both directions: the `%Y/%m/%d` pattern differs from
+    /// the default spacing-keyed labels at every spacing (the earlier `%b %Y`
+    /// probe was not discriminating at 90-day spacing, where the default
+    /// formatter happens to emit exactly that), and the assertion pins BOTH
+    /// that the labels changed and that they equal `Thread`'s.
+    #[test]
+    fn build_axis_tick_inputs_immediate_applies_a_temporal_format_like_thread_does() {
+        use crate::render::scale_resolve::ScaleKind;
+        use crate::scale::time::TimeScale;
+
+        let epoch_lo = 1_514_764_800_000.0; // 2018-01-01
+        let epoch_hi = epoch_lo + 4.0 * 365.0 * 86_400_000.0; // ~2022-01-01
+        let scale = ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let pattern = "%Y/%m/%d";
+        let default_labels = scale.tick_labels(6);
+
+        for format_type in [None, Some("time")] {
+            let (immediate, _proj, threaded) = build_axis_tick_inputs(
+                &scale,
+                6,
+                TickFormatMode::Immediate {
+                    format: Some(pattern),
+                    format_type,
+                },
+                false,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(threaded, None, "Immediate mode threads nothing");
+            assert_ne!(
+                immediate, default_labels,
+                "the pattern must actually be applied, not dropped ({format_type:?})"
+            );
+            assert!(
+                immediate.iter().all(|l| l.matches('/').count() == 2),
+                "every label must be rendered through {pattern}, got {immediate:?}"
+            );
+
+            let (thread, _proj, _t) = build_axis_tick_inputs(
+                &scale,
+                6,
+                TickFormatMode::Thread {
+                    format: Some(pattern.to_string()),
+                    format_type,
+                },
+                false,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                immediate, thread,
+                "one format discipline: Immediate must agree with Thread ({format_type:?})"
+            );
+        }
+    }
+
+    /// The other side of `#147`'s `Immediate` delegation: a NUMERIC format is
+    /// still applied immediately and still threads nothing, so routing through
+    /// `apply_axis_format_or_thread` did not turn the per-panel surface into
+    /// the deferred one (whose `label_format_override` `scene_build` never
+    /// applies).
+    #[test]
+    fn build_axis_tick_inputs_immediate_still_applies_a_numeric_format_itself() {
+        let scale = linear_scale(0.0, 1.0);
+        let (labels, _proj, threaded) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Immediate {
+                format: Some(".0%"),
+                format_type: None,
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            threaded, None,
+            "Immediate must apply the numeric format, never defer it"
+        );
+        assert!(
+            labels.iter().all(|l| l.ends_with('%')),
+            "numeric format applied in place, got {labels:?}"
+        );
+    }
+
     /// #133, per-channel `Thread` surface: a time-typed format
     /// (`format_type="time"`) on a non-temporal resolved scale must refuse,
     /// naming the channel and the offending format — not silently reparse
@@ -7361,7 +7538,7 @@ mod tests {
     /// #133 control: an ambiguous bare `%`-containing spec with NO declared
     /// `format_type` (a plain d3 percent format like `".1%"`) must NOT
     /// refuse on a non-temporal scale — it is "valid under either grammar"
-    /// per `is_time_format_spec`'s own tolerance, and must keep resolving as
+    /// per `TimeAutodetect::Allowed`'s own tolerance, and must keep resolving as
     /// the numeric percent format it actually is. Guards against a fix that
     /// over-refuses every bare-`%` spec regardless of declared type.
     #[test]

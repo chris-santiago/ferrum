@@ -1026,10 +1026,11 @@ pub(in crate::render) fn apply_axis_style_to_axis_input(
 ///
 /// Errors (#133, spec §4.2 amended 2026-09-11) when `format_type == "time"`
 /// names an explicit `label_format` and the resolved `scale` is not temporal
-/// at all (`scale.temporal_tick_values` returns `None`) — this surface's own
-/// pre-existing time-detection predicate (`format_type == "time"`, unlike
-/// `prepare::apply_axis_format_or_thread`'s `is_time_format_spec`, which also
-/// tolerates an unset `format_type`) is kept as-is; the resolved-scale
+/// at all (`scale.temporal_tick_values` returns `None`) — the REFUSAL is
+/// keyed on the DECLARED `format_type == "time"` alone, deliberately, not on
+/// how the spec resolves (unlike `prepare::apply_axis_format_or_thread`,
+/// which resolves under [`format::TimeAutodetect::Allowed`] and so also
+/// tolerates an unset `format_type`); the resolved-scale
 /// refusal itself is built by `prepare::refuse_time_format_on_non_temporal`,
 /// the same function `build_axis_tick_inputs`'s two mode arms call, at both
 /// of this function's own call sites (wave-1 close remediation, #133
@@ -1103,9 +1104,23 @@ fn apply_label_format_to_axis(
             values.reverse();
         }
         if values.len() == axis.tick_labels.len() {
+            // `TimeAutodetect::Denied`: reached only under `is_time_type`, so
+            // the declared type already carries the decision — the resolution
+            // is here to answer whether the spec is a usable PATTERN. A
+            // time-typed spec with no `%` escape (e.g. `label_format=".2f",
+            // label_format_type="time"`) names no pattern, so the default
+            // spacing-keyed labels already in `tick_labels` stand rather than
+            // handing `chrono` a numeric spec to echo as literal text.
+            let Some(format::FormatKind::Strftime(pattern)) = format::FormatKind::resolve(
+                Some(&fmt_str),
+                format_type.as_deref(),
+                format::TimeAutodetect::Denied,
+            ) else {
+                return Ok(());
+            };
             axis.tick_labels = values
                 .into_iter()
-                .map(|ms| format::format_time_spec(ms, &fmt_str))
+                .map(|ms| format::format_time_spec(ms, &pattern))
                 .collect();
             return Ok(());
         }
@@ -1491,24 +1506,35 @@ fn apply_legend_values_to_entries(
 /// panics on a malformed pattern (`chrono`'s `DelayedFormat` `Display`
 /// returns `Err`, and the blanket `ToString` impl `.expect()`s it never
 /// does), so every raw-accepting surface's default `format_type: None` case
-/// — which `is_time_format_spec` treats as time whenever the spec contains
+/// — which the LOOSE rule treats as time whenever the spec contains
 /// `%` — was one typo away from a `PanicException` crossing the PyO3
 /// boundary instead of the typed refusal this fn exists to give.)
 ///
-/// **Two time-classification rules, matched to the two real runtime rules**
-/// (correction — a single shared LOOSE rule here
+/// **One classification rule at two settings, matched to each surface's real
+/// consumer** (correction — a single shared LOOSE rule here
 /// falsely refused a valid raw d3 percent spec on the chart-level axis
-/// surface): `check_loose` uses [`format::is_time_format_spec`] (the `%`
-/// -containment heuristic) for the ONE surface that actually auto-detects
-/// time that way at runtime — per-channel `x`/`y`'s `.format`/`.axis
-/// .label_format`, consumed by `prepare::apply_axis_format_or_thread`,
-/// which uses the identical heuristic. Every other surface's real consumer
-/// (`render::apply_label_format_to_axis` for chart-level `AxisConfigSpec`;
-/// `prepare::legend`'s `format_value_with_spec` for every `.legend.format`;
-/// `draw.rs`/`marks/text.rs` for `text`/`tooltip`/`tooltip_fields`) checks
-/// `format_type == Some("time")` STRICTLY, with no `%`-based auto-detection
-/// — `check_strict` matches that, so this pre-pass never refuses a spec its
-/// own real consumer would have accepted as numeric.
+/// surface). Both checks below call [`format::FormatKind::resolve`]; they
+/// differ only in the [`format::TimeAutodetect`] they pass, which is the same
+/// argument their consumers pass (`#147` — before that type, this was two
+/// hand-maintained predicates and the paragraph you are reading was the only
+/// thing keeping them matched to their consumers):
+///
+/// - `check_loose` passes `Allowed`, for the surfaces whose consumer can
+///   RECOVER from a wrong guess — per-channel `x`/`y`'s `.format`/`.axis
+///   .label_format`, consumed by `prepare::apply_axis_format_or_thread`,
+///   which commits to `chrono` only once the resolved scale turns out
+///   temporal. This fn adds its own recovery for the same reason: it
+///   disambiguates by the channel's declared `DataType` (see below).
+/// - `check_strict` passes `Denied`, for every other surface's real consumer
+///   (`render::apply_label_format_to_axis` for chart-level `AxisConfigSpec`;
+///   `prepare::legend`'s `format_value_with_spec` for every `.legend.format`;
+///   `draw.rs`/`marks/text.rs` for `text`/`tooltip`/`tooltip_fields`), none of
+///   which holds a scale to fall back on. So this pre-pass never refuses a
+///   spec its own real consumer would have accepted as numeric — and,
+///   conversely, it refuses at those surfaces exactly the inputs on which
+///   `Denied` would have misformatted, which is what makes `Denied` safe
+///   there. (No `%`-bearing spec is valid under both grammars: a d3-valid one
+///   must END in `%`, which `chrono` rejects as a dangling escape.)
 ///
 /// `check_loose`'s auto-detected case (no explicit `format_type`, spec
 /// contains `%`) is genuinely ambiguous at validation time on its own: at
@@ -1555,11 +1581,19 @@ pub(in crate::render) fn validate_chart_format_specs(
         encoding_type: Option<DataType>,
     ) -> Result<(), RenderError> {
         let Some(f) = fmt else { return Ok(()) };
+        let kind = format::FormatKind::resolve(fmt, format_type, format::TimeAutodetect::Allowed);
+        let Some(format::FormatKind::Strftime(_)) = kind else {
+            // Not a strftime pattern: a d3 spec is checked against the d3
+            // grammar, and `Ordinal`/`None` (the sentinel, or a time-typed
+            // pair naming no pattern) has no grammar to check — nothing will
+            // parse it, so there is nothing to refuse.
+            return match kind {
+                Some(format::FormatKind::D3(_)) => check_with(f, false),
+                _ => Ok(()),
+            };
+        };
         if format_type == Some("time") {
             return check_with(f, true);
-        }
-        if !format::is_time_format_spec(f, format_type) {
-            return check_with(f, false);
         }
         // Auto-detected via '%'-containment with no explicit format_type.
         match encoding_type {
@@ -1583,11 +1617,18 @@ pub(in crate::render) fn validate_chart_format_specs(
         }
     }
 
-    /// Matches every OTHER real consumer's rule: `format_type == Some("time")`
-    /// exactly, never auto-detected from the spec's own content.
+    /// Matches every OTHER real consumer's rule — [`format::TimeAutodetect`]
+    /// `Denied`: a spec is only a strftime pattern when `format_type` declared
+    /// `"time"`, never auto-detected from the spec's own content.
     fn check_strict(fmt: Option<&str>, format_type: Option<&str>) -> Result<(), RenderError> {
         let Some(f) = fmt else { return Ok(()) };
-        check_with(f, format_type == Some("time"))
+        match format::FormatKind::resolve(fmt, format_type, format::TimeAutodetect::Denied) {
+            Some(format::FormatKind::Strftime(_)) => check_with(f, true),
+            Some(format::FormatKind::D3(_)) => check_with(f, false),
+            // The `"__ordinal__"` sentinel, or a time-typed pair naming no
+            // pattern: no grammar applies, so there is nothing to refuse.
+            Some(format::FormatKind::Ordinal) | None => Ok(()),
+        }
     }
 
     fn check_axis_cfg(cfg: Option<&AxisConfigSpec>) -> Result<(), RenderError> {
@@ -1595,7 +1636,10 @@ pub(in crate::render) fn validate_chart_format_specs(
         let fmt = cfg.effective_label_format();
         let format_type = cfg.effective_label_format_type();
         let Some(f) = fmt else { return Ok(()) };
-        check_with(f, format_type == Some("time")).map_err(|err| {
+        // Same STRICT resolution as `check_strict` (this surface's consumer is
+        // `apply_label_format_to_axis`, a `TimeAutodetect::Denied` site), with
+        // this surface's own re-diagnosed message layered on the failure.
+        check_strict(fmt, format_type).map_err(|err| {
             // When the STRICT check above failed
             // as d3 (format_type wasn't explicitly "time") but the SAME
             // string IS a valid strftime pattern, the true problem is NOT

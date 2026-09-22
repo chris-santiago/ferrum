@@ -696,6 +696,17 @@ impl MetadataColumns {
 
         // Read a single tooltip column, applying format/format_type from the spec.
         let read_col_with_spec = |field: &str, fmt: Option<&str>, fmt_type: Option<&str>| -> Option<Vec<Option<String>>> {
+            // ONE resolution per column (`#147`), `TimeAutodetect::Denied`:
+            // a tooltip column holds no scale to fall back on, so an untyped
+            // `%`-bearing spec stays a d3 numeric spec. A resolved strftime
+            // PATTERN is applied rather than dropped in favor of the
+            // spacing-keyed default, matching the colorbar and text-mark
+            // surfaces for the identical pair.
+            let kind = crate::render::format::FormatKind::resolve(
+                fmt,
+                fmt_type,
+                crate::render::format::TimeAutodetect::Denied,
+            );
             col_as_str(ctx.batch, field)
                 .ok()
                 .or_else(|| {
@@ -721,12 +732,20 @@ impl MetadataColumns {
                         };
                         vals.into_iter()
                             .map(|v| v.map(|f| {
-                                if fmt_type == Some("time") {
-                                    format_time(f as i64, spacing_ms)
-                                } else if fmt.is_some() {
-                                    format_with_spec(f, fmt)
-                                } else {
-                                    format_numeric(f)
+                                match &kind {
+                                    Some(crate::render::format::FormatKind::Strftime(pattern)) => {
+                                        crate::render::format::format_time_spec(f as i64, pattern)
+                                    }
+                                    // Time-typed but naming no pattern: the
+                                    // data-derived spacing default, which is
+                                    // why this column cannot simply call
+                                    // `format_value_with_spec` (that fixes the
+                                    // spacing at one day).
+                                    _ if fmt_type == Some("time") => {
+                                        format_time(f as i64, spacing_ms)
+                                    }
+                                    _ if fmt.is_some() => format_with_spec(f, fmt),
+                                    _ => format_numeric(f),
                                 }
                             }))
                             .collect()

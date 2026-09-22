@@ -20,9 +20,16 @@
 //!
 //! **`"__ordinal__"`** is a reserved sentinel (not real d3 grammar) that
 //! [`format_presets::NUMERIC_PRESETS`](../../../../src/ferrum/format_presets.py)'s
-//! `"ordinal"` preset resolves to; [`parse_format_spec`]/[`format_parsed`]
-//! recognize it up front and dispatch to [`format_ordinal_number`] (1st, 2nd,
-//! 3rd, …) instead of the d3 tokenizer (D8, spec §4.5).
+//! `"ordinal"` preset resolves to; [`FormatKind::resolve`] recognizes it up
+//! front and yields [`FormatKind::Ordinal`], which dispatches to
+//! [`format_ordinal_number`] (1st, 2nd, 3rd, …) instead of the d3 tokenizer
+//! (D8, spec §4.5).
+//!
+//! **One re-derivation predicate** (`#147`): [`FormatKind::resolve`] is the
+//! only place in the crate that answers "is this pair a d3 spec, a strftime
+//! pattern, or the ordinal preset?". Its third argument, [`TimeAutodetect`],
+//! is the one axis the crate's six former copies of this decision disagreed
+//! on; see that type's doc for which site passes which setting and why.
 //!
 //! **Malformed-spec refusal** ([`validate_d3_format_spec`], NF-B1 residual,
 //! 2026-09-02): a raw spec that is not a recognized preset passes through
@@ -194,7 +201,9 @@ fn try_format_time_spec(dt: DateTime<Utc>, pattern: &str) -> Option<String> {
 /// class `"curency%"`, or a genuinely dangling `"%"`/unknown specifier like
 /// `"%J"`) — the strftime-grammar sibling of [`validate_d3_format_spec`],
 /// closing the panic class quality-review found in cycle-2's
-/// `is_time_format_spec`-gated exemption: a `%`-bearing spec with no
+/// auto-detection-gated exemption (the `is_time_format_spec` predicate of the
+/// time, now [`FormatKind::resolve`] under [`TimeAutodetect::Allowed`]): a
+/// `%`-bearing spec with no
 /// explicit `format_type` (every raw-accepting surface's default) was
 /// skipped from d3-grammar validation on the premise `chrono` handles it
 /// "leniently" — it does not; `format_time_spec` panics on exactly this
@@ -219,16 +228,15 @@ pub fn format_ordinal(value: &str) -> String {
 }
 
 /// The `"ordinal"` format preset's sentinel spec string
-/// (`format_presets.NUMERIC_PRESETS["ordinal"]`). [`parse_format_spec`]
-/// recognizes it before running the d3 tokenizer.
+/// (`format_presets.NUMERIC_PRESETS["ordinal"]`). It is the WIRE token —
+/// reachable through `ChartSpec.to_json()` at `encoding.x.axis.label_format`
+/// and documented in `docs/site/guide/concepts/format-presets.md` — and
+/// [`FormatKind::resolve`] is the one place that recognizes it. There is no
+/// second, internal representation: `#147`'s `'\u{1}'` re-encoding into
+/// [`D3Spec::ty`] is retired, which is also what makes a literal
+/// one-character `'\u{1}'` `label_format` stop rendering ordinals (it is now
+/// a d3 type char like any other unrecognized one).
 const ORDINAL_SENTINEL: &str = "__ordinal__";
-
-/// Marks a parsed [`D3Spec`] as the ordinal-suffix formatter. `'\u{1}'` (a
-/// C0 control char) can never appear as a real d3 type char — d3 type chars
-/// are always ASCII printable — so it is a safe sentinel value for
-/// [`D3Spec::ty`] that [`format_parsed`] dispatches on before its normal
-/// per-type match.
-const ORDINAL_TYPE_MARKER: char = '\u{1}';
 
 /// Format `v` as an integer with its English ordinal suffix: `1st`, `2nd`,
 /// `3rd`, `4th`, …, `11th`, `12th`, `13th`, `21st`, … (D8, spec §4.5,
@@ -331,6 +339,144 @@ impl Default for D3Spec {
     }
 }
 
+/// Whether a site may AUTO-DETECT a `%`-bearing spec with NO explicit
+/// `format_type` as a `chrono` strftime pattern, instead of reading it as a
+/// d3 numeric spec.
+///
+/// This is the ONE input the crate's format re-derivation used to disagree on
+/// (`#147`). Before this type there were two hand-maintained rules — a loose
+/// `fmt.contains('%') && (format_type == Some("time") || format_type.is_none())`
+/// and a strict `format_type == Some("time")` — restated at six sites and
+/// kept in sync by prose. They are the same rule at two settings of this one
+/// argument.
+///
+/// **The rule for picking a setting: pass [`TimeAutodetect::Allowed`] only
+/// where recovery exists AND the declared type has not already decided; pass
+/// [`TimeAutodetect::Denied`] everywhere else.** Both halves matter, and a
+/// site can fail the second half while passing the first — see the inert case
+/// below.
+///
+/// - **`Allowed`** — the site guesses and can then UN-guess. Two sites:
+///   `prepare::apply_axis_format_or_thread`, which resolves `Strftime`, calls
+///   `ScaleKind::temporal_tick_values`, and falls through to the d3 grammar on
+///   `None`; and `config_apply::validate_chart_format_specs`' `check_loose`,
+///   which disambiguates by `EncodingSpec.type_` and tolerates either grammar
+///   when the type is fully auto-inferred. Both are reached with the declared
+///   type still open, which is what leaves anything for the guess to decide.
+/// - **`Denied`, load-bearing** — the site formats one value and is done, so a
+///   wrong guess ships garbage (a percent-formatted epoch-millisecond count,
+///   or `chrono` literal text) with nothing downstream to catch it:
+///   `prepare::apply_tick_format`, [`format_value_with_spec`], `draw.rs`'s
+///   tooltip columns, `marks/text.rs`, and `check_strict`.
+/// - **`Denied`, inert** — `config_apply::apply_label_format_to_axis` DOES
+///   hold the scale and DOES call `temporal_tick_values` itself, so it has the
+///   same recovery machinery as the first `Allowed` site. Its `Denied` is
+///   nonetheless correct, for the second half of the rule rather than the
+///   first: that call site is reached only under `is_time_type`, where
+///   `declared_time` is already true and both settings resolve identically.
+///   Passing `Allowed` there would not be a bug; it would be a claim about
+///   recovery that the surrounding branch has already made moot. (Recorded
+///   because an earlier revision of this doc said `Denied` means "holds no
+///   temporality evidence", which is simply false of this site and would
+///   mislead a maintainer reading the enum rather than the call.)
+///
+/// The probe matrix behind the split is recorded in the wave-6A T13 report:
+/// the two rules are only distinguishable on an untyped `%`-bearing spec, and
+/// no such spec is valid under both grammars — a d3-valid `%` is either the
+/// final `[type]` char (`chrono`: dangling escape) or a `[fill]` char followed
+/// by one of `<>^=` (`chrono`: no such specifier) — so the validation pre-pass
+/// refuses at every `Denied` surface exactly the inputs on which `Denied`
+/// would be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimeAutodetect {
+    Allowed,
+    Denied,
+}
+
+/// What a resolved `(format, format_type)` pair MEANS — the product of the
+/// crate's one format re-derivation predicate ([`FormatKind::resolve`]).
+///
+/// `format_type` stays the wire field (`"number"` / `"time"` / absent);
+/// this is the resolved kind downstream code holds, so no consumer re-derives
+/// the three-way d3/strftime/ordinal decision for itself.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FormatKind {
+    /// A d3 numeric spec, already tokenized.
+    D3(D3Spec),
+    /// A `chrono` strftime pattern. Only ever carries a spec containing a `%`
+    /// escape — the one character every real specifier requires and no
+    /// literal-only string has.
+    Strftime(String),
+    /// The `"ordinal"` preset ([`ORDINAL_SENTINEL`]) — English ordinal
+    /// suffixes via [`format_ordinal_number`].
+    Ordinal,
+}
+
+impl FormatKind {
+    /// THE format re-derivation predicate: resolve a wire `(spec,
+    /// format_type)` pair into the kind of formatter it names, given how much
+    /// this site may guess ([`TimeAutodetect`]).
+    ///
+    /// Returns `None` when the pair names no applicable format, which is two
+    /// cases the caller already distinguishes by its own `format_type` read:
+    /// no spec at all, and a time-typed spec carrying no `%` escape (a
+    /// numeric spec declared `"time"`, e.g. `label_format=".2f",
+    /// label_format_type="time"`). The second case is malformed input; every
+    /// applier now answers it the same way — the spec names no pattern, so
+    /// the site's own spacing-keyed temporal default stands. Before `#147`
+    /// the axis applier gave that default while the colorbar handed `".2f"`
+    /// to `chrono` and rendered the literal text `.2f` on every tick.
+    ///
+    /// [`ORDINAL_SENTINEL`] is recognized FIRST, so THIS FUNCTION never
+    /// re-reads the ordinal preset as anything else on account of a stray
+    /// `format_type`. That is a statement about the resolution, not about
+    /// every composed outcome: a caller whose own `format_type` branch runs
+    /// AFTER this one can still discard the `Ordinal` it was handed.
+    /// [`format_value_with_spec`] is exactly that case — its
+    /// `_ if format_type == Some("time")` arm fires on the `Ordinal` result,
+    /// so `fm.Legend(format="__ordinal__", format_type="time")` renders the
+    /// spacing-keyed temporal default while the axis path renders ordinals for
+    /// the same pair (both measured). Malformed input either way, and both
+    /// beat the pre-`#147` behavior of echoing the literal text
+    /// `__ordinal__` as every legend label — but the two sites do still
+    /// disagree there, so do not read this paragraph as a crate-wide
+    /// guarantee. Letting `Ordinal` win at that guard is a live option, not a
+    /// decision this task took.
+    pub(crate) fn resolve(
+        spec: Option<&str>,
+        format_type: Option<&str>,
+        autodetect: TimeAutodetect,
+    ) -> Option<FormatKind> {
+        let spec = spec?;
+        if spec == ORDINAL_SENTINEL {
+            return Some(FormatKind::Ordinal);
+        }
+        let declared_time = format_type == Some("time");
+        let autodetected_time =
+            format_type.is_none() && autodetect == TimeAutodetect::Allowed;
+        if spec.contains('%') && (declared_time || autodetected_time) {
+            return Some(FormatKind::Strftime(spec.to_string()));
+        }
+        if declared_time {
+            // Time-typed, but no `%` escape: not a strftime pattern, and
+            // reading it as a d3 spec would format an epoch-millisecond
+            // count as a number. No format applies.
+            return None;
+        }
+        Some(FormatKind::D3(parse_format_spec(spec)))
+    }
+
+    /// Apply this kind to one value. Strftime treats `v` as epoch
+    /// milliseconds, matching every temporal surface in the crate.
+    pub(crate) fn format(&self, v: f64) -> String {
+        match self {
+            FormatKind::D3(spec) => format_parsed(v, spec),
+            FormatKind::Strftime(pattern) => format_time_spec(v as i64, pattern),
+            FormatKind::Ordinal => format_ordinal_number(v),
+        }
+    }
+}
+
 /// Parse a d3-format string into a [`D3Spec`], for a caller formatting an
 /// ALREADY-validated spec value-by-value (per-tick, per-legend-entry, …).
 /// Lenient: unrecognized trailing bytes are silently ignored (see
@@ -350,13 +496,12 @@ pub(crate) fn parse_format_spec(spec: &str) -> D3Spec {
 /// malformed-spec guard this module's doc comment describes.
 ///
 /// Grammar: `[[fill]align][sign][symbol][0][width][,][.precision][~][type]`.
-/// The `"__ordinal__"` sentinel (see [`ORDINAL_SENTINEL`]) is recognized up
-/// front and treated as fully consumed, dispatching [`format_parsed`] to
-/// [`format_ordinal_number`] instead of the type-char match below.
+/// Pure d3: the `"__ordinal__"` sentinel is [`FormatKind::resolve`]'s business
+/// and never reaches this tokenizer as a format kind (`#147` — it used to be
+/// re-encoded here as a `'\u{1}'` type char, giving one concept two
+/// representations). [`validate_d3_format_spec`] still short-circuits the
+/// sentinel, since it is a valid spec value on the wire.
 fn parse_format_spec_impl(spec: &str) -> (D3Spec, usize) {
-    if spec == ORDINAL_SENTINEL {
-        return (D3Spec { ty: ORDINAL_TYPE_MARKER, ..D3Spec::default() }, spec.chars().count());
-    }
     let mut out = D3Spec::default();
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
@@ -461,7 +606,7 @@ fn parse_format_spec_impl(spec: &str) -> (D3Spec, usize) {
 /// consumes its whole string and passes. The empty string and the
 /// `"__ordinal__"` sentinel are always valid.
 pub(crate) fn validate_d3_format_spec(spec: &str) -> Result<(), String> {
-    if spec.is_empty() {
+    if spec.is_empty() || spec == ORDINAL_SENTINEL {
         return Ok(());
     }
     let (_, consumed) = parse_format_spec_impl(spec);
@@ -474,18 +619,6 @@ pub(crate) fn validate_d3_format_spec(spec: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Whether `fmt` should be treated as a `chrono` strftime TIME pattern rather
-/// than a d3 numeric spec: an explicit `format_type == "time"`, or an
-/// unset `format_type` paired with a `%`-bearing spec (the pre-existing
-/// per-channel heuristic — a caller with no format_type at all still gets
-/// `%b %Y`-style raw specs auto-detected as time). An explicit non-`"time"`
-/// `format_type` (e.g. `"number"`, set by every preset resolution) always
-/// wins — this is what keeps a `%`-bearing NUMERIC spec like the `"percent"`
-/// preset's `.1%` from being misclassified as strftime (NF-B2, spec §4.5).
-pub(crate) fn is_time_format_spec(fmt: &str, format_type: Option<&str>) -> bool {
-    fmt.contains('%') && (format_type == Some("time") || format_type.is_none())
 }
 
 fn align_from(c: char) -> Align {
@@ -510,46 +643,50 @@ pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
     if s.is_empty() {
         return format_numeric(v);
     }
-    let parsed = parse_format_spec(s);
-    format_parsed(v, &parsed)
+    // NUMBER-only entry point: no `format_type` channel, so strftime is not a
+    // reachable resolution — `TimeAutodetect::Denied` states that in the type
+    // system instead of by omission.
+    match FormatKind::resolve(Some(s), None, TimeAutodetect::Denied) {
+        Some(kind) => kind.format(v),
+        // Unreachable as called: `resolve` returns `None` only for an absent
+        // spec or a time-typed pair, and this call site hard-codes both away
+        // (`Some(s)`, `None`). Kept as the total match rather than an
+        // `unwrap`, and spelled with the same fallback the two guards above
+        // use, so a future signature change degrades to the default instead
+        // of panicking. Not a live case — do not read it as one.
+        None => format_numeric(v),
+    }
 }
 
 /// The value-level (not pre-formatted-string) sibling of
 /// `prepare::apply_tick_format` — used where the caller already holds the
 /// raw domain value `v` directly (colorbar/legend tick labels: D8's
 /// `LegendStyleSpec.format_type` threading) rather than an
-/// already-string-formatted axis label. `format_type == Some("time")` treats
-/// `v` as an epoch-millisecond timestamp: an explicit `spec` is applied as a
-/// `chrono` strftime pattern via [`format_time_spec`]; no spec falls back to
-/// the default spacing-keyed [`format_time`] (day granularity, matching
-/// `apply_tick_format`'s own no-pattern default). Any other `format_type`
-/// (including `None`) formats `v` as a plain number via [`format_with_spec`]
-/// (which also handles the `"__ordinal__"` sentinel).
+/// already-string-formatted axis label.
+///
+/// Classification is [`FormatKind::resolve`] with [`TimeAutodetect::Denied`]:
+/// this surface holds no scale to fall back on, so an untyped `%`-bearing
+/// spec stays d3 numeric (which is what keeps the `"percent"` preset's `.1%`
+/// from being handed to `chrono` — NF-B2, spec §4.5). A resolved strftime
+/// pattern is applied to `v` as an epoch-millisecond timestamp; a time-typed
+/// pair that names NO pattern (no spec, or a spec with no `%` escape) falls
+/// back to the default spacing-keyed [`format_time`] (day granularity,
+/// matching `apply_tick_format`'s own no-pattern default). Anything else
+/// formats `v` as a plain number via [`format_with_spec`].
 pub fn format_value_with_spec(v: f64, spec: Option<&str>, format_type: Option<&str>) -> String {
-    if format_type == Some("time") {
-        let epoch_ms = v as i64;
-        return match spec {
-            Some(pattern) => format_time_spec(epoch_ms, pattern),
-            None => format_time(epoch_ms, 86_400_000),
-        };
+    match FormatKind::resolve(spec, format_type, TimeAutodetect::Denied) {
+        Some(FormatKind::Strftime(pattern)) => format_time_spec(v as i64, &pattern),
+        _ if format_type == Some("time") => format_time(v as i64, 86_400_000),
+        _ => format_with_spec(v, spec),
     }
-    format_with_spec(v, spec)
 }
 
-/// Apply an already-parsed [`D3Spec`] to a value. Shared entry point so
-/// `apply_tick_format` can parse once and reuse across a column of labels.
+/// Apply an already-parsed [`D3Spec`] to a value — the d3 arm of
+/// [`FormatKind::format`], kept separate so `apply_tick_format` can resolve
+/// once and reuse across a column of labels.
 pub(crate) fn format_parsed(v: f64, spec: &D3Spec) -> String {
     if v.is_nan() || v.is_infinite() {
         return String::new();
-    }
-
-    // The `"__ordinal__"` sentinel (see `ORDINAL_TYPE_MARKER`'s doc):
-    // dispatch to the ordinal-suffix formatter, bypassing the rest of the
-    // d3-grammar match entirely (width/fill/precision/etc. are meaningless
-    // for it, matching how the `c`/type-char formatters below also skip the
-    // general numeric pipeline).
-    if spec.ty == ORDINAL_TYPE_MARKER {
-        return format_ordinal_number(v);
     }
 
     // The `%`/`p` types scale by 100 and append a literal percent sign.
@@ -1191,25 +1328,110 @@ mod tests {
         assert!(validate_d3_format_spec(",.2fxyz").is_err());
     }
 
-    // ---- is_time_format_spec (NF-B2: %-bearing numeric spec vs strftime) ----
-    #[test]
-    fn is_time_format_spec_explicit_time_wins() {
-        assert!(is_time_format_spec("%Y-%m-%d", Some("time")));
+    // ---- FormatKind::resolve — the ONE format re-derivation predicate
+    // (#147). These carry NF-B2's original `is_time_format_spec` cases plus
+    // the `TimeAutodetect` axis the six former copies disagreed on. ----
+    fn resolved(
+        spec: &str,
+        format_type: Option<&str>,
+        autodetect: TimeAutodetect,
+    ) -> Option<FormatKind> {
+        FormatKind::resolve(Some(spec), format_type, autodetect)
     }
+
     #[test]
-    fn is_time_format_spec_unset_type_with_percent_defaults_time() {
-        assert!(is_time_format_spec("%b %Y", None));
+    fn resolve_explicit_time_wins_under_either_autodetect_setting() {
+        for autodetect in [TimeAutodetect::Allowed, TimeAutodetect::Denied] {
+            assert_eq!(
+                resolved("%Y-%m-%d", Some("time"), autodetect),
+                Some(FormatKind::Strftime("%Y-%m-%d".into())),
+            );
+        }
     }
+
     #[test]
-    fn is_time_format_spec_explicit_number_never_misclassified() {
+    fn resolve_unset_type_with_percent_is_time_only_when_autodetect_allowed() {
+        // THE discriminating input of the whole #147 probe matrix: the two
+        // former predicates differ on exactly this pair and nothing else.
+        assert_eq!(
+            resolved("%b %Y", None, TimeAutodetect::Allowed),
+            Some(FormatKind::Strftime("%b %Y".into())),
+        );
+        assert!(matches!(
+            resolved("%b %Y", None, TimeAutodetect::Denied),
+            Some(FormatKind::D3(_)),
+        ));
+    }
+
+    #[test]
+    fn resolve_explicit_number_never_misclassified() {
         // NF-B2's exact motivating case: the "percent" preset (".1%") always
         // carries an explicit format_type="number" — it must never be
-        // treated as strftime just because it contains '%'.
-        assert!(!is_time_format_spec(".1%", Some("number")));
+        // treated as strftime just because it contains '%', under EITHER
+        // autodetect setting.
+        for autodetect in [TimeAutodetect::Allowed, TimeAutodetect::Denied] {
+            assert!(matches!(
+                resolved(".1%", Some("number"), autodetect),
+                Some(FormatKind::D3(_)),
+            ));
+        }
     }
+
     #[test]
-    fn is_time_format_spec_no_percent_never_time() {
-        assert!(!is_time_format_spec(",.0f", None));
+    fn resolve_no_percent_never_strftime() {
+        assert!(matches!(
+            resolved(",.0f", None, TimeAutodetect::Allowed),
+            Some(FormatKind::D3(_)),
+        ));
+    }
+
+    #[test]
+    fn resolve_time_typed_spec_without_percent_names_no_pattern() {
+        // A numeric spec declared "time" is malformed input. It resolves to
+        // NO format so every applier falls back to its own spacing-keyed
+        // temporal default, instead of one applier doing that while another
+        // hands `.2f` to `chrono` and echoes the literal text.
+        assert_eq!(resolved(".2f", Some("time"), TimeAutodetect::Denied), None);
+        assert_eq!(resolved(".2f", Some("time"), TimeAutodetect::Allowed), None);
+    }
+
+    #[test]
+    fn resolve_ordinal_sentinel_wins_over_every_format_type() {
+        // `__ordinal__` means ordinal, full stop: a stray `format_type`
+        // cannot re-read the sentinel as anything else. This is the
+        // "one concept, one representation" half of #147.
+        for format_type in [None, Some("number"), Some("time")] {
+            assert_eq!(
+                resolved(ORDINAL_SENTINEL, format_type, TimeAutodetect::Denied),
+                Some(FormatKind::Ordinal),
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_control_char_is_not_a_representation_of_ordinal() {
+        // #147's probe-confirmed quirk, closed: a literal one-character
+        // `'\u{1}'` used to be re-encoded as `D3Spec::ty` and dispatched to
+        // the ordinal formatter, so a nonsense input rendered `1st…11th`.
+        // It is now an ordinary (unrecognized) d3 type char.
+        assert!(matches!(
+            resolved("\u{1}", None, TimeAutodetect::Denied),
+            Some(FormatKind::D3(_)),
+        ));
+        assert_ne!(
+            format_with_spec(1.0, Some("\u{1}")),
+            format_with_spec(1.0, Some(ORDINAL_SENTINEL)),
+        );
+        assert_eq!(format_with_spec(1.0, Some(ORDINAL_SENTINEL)), "1st");
+    }
+
+    #[test]
+    fn resolve_absent_spec_names_no_format() {
+        assert_eq!(
+            FormatKind::resolve(None, Some("time"), TimeAutodetect::Denied),
+            None
+        );
+        assert_eq!(FormatKind::resolve(None, None, TimeAutodetect::Allowed), None);
     }
 
     // ---- validate_strftime_spec (quality-review S4, 2026-09-03: the
@@ -1312,5 +1534,28 @@ mod tests {
     #[test]
     fn format_value_with_spec_ordinal() {
         assert_eq!(format_value_with_spec(2.0, Some("__ordinal__"), Some("number")), "2nd");
+    }
+
+    /// #147 predicate unification, declared output move: a numeric spec
+    /// declared `"time"` names no strftime pattern, so this surface now falls
+    /// back to the spacing-keyed temporal default — the same answer
+    /// `prepare::apply_tick_format` has always given for the identical pair.
+    /// Before, this surface handed `".2f"` to `chrono` and echoed the literal
+    /// text `.2f` on every colorbar tick.
+    #[test]
+    fn format_value_with_spec_time_typed_numeric_spec_uses_the_temporal_default() {
+        let out = format_value_with_spec(0.0, Some(".2f"), Some("time"));
+        assert_ne!(out, ".2f");
+        assert_eq!(out, format_value_with_spec(0.0, None, Some("time")));
+    }
+
+    /// The other side of the same rule: a REAL pattern is still applied here,
+    /// so the fallback above cannot swallow a working format.
+    #[test]
+    fn format_value_with_spec_time_typed_pattern_is_applied() {
+        assert_eq!(
+            format_value_with_spec(0.0, Some("%Y-%m-%d"), Some("time")),
+            "1970-01-01"
+        );
     }
 }
