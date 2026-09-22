@@ -3,8 +3,8 @@ use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
 use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str};
 use crate::render::color::with_opacity;
 use crate::render::draw::{
-    resolve_fill_color, to_scene_fill_stroke, ClearablePaint, DrawCtx, MarkBuildResult,
-    MetadataColumns,
+    resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult, MetadataColumns,
+    PaintChannels,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
@@ -96,6 +96,36 @@ pub(crate) fn radius_to_pixel(
     }
     let t = (value / dmax).clamp(0.0, 1.0);
     inner_radius + t * (outer_radius - inner_radius)
+}
+
+/// One slice's paint: the per-row fill resolved from the color scale over the
+/// constant fill slot's own provenance, composed with the row's opacity, plus the
+/// constant stroke slot.
+///
+/// All three of this module's emit loops (pie/donut, nominal-theta, annular)
+/// built this identical block; it is one function so a paint fix lands on every
+/// arc mode at once — which is how `#110`'s clear-outranks-the-scale precedence
+/// reached all three.
+fn slice_paint(
+    ctx: &DrawCtx<'_>,
+    color_str: &Option<Vec<Option<String>>>,
+    color_f64: &Option<Vec<Option<f64>>>,
+    opacity_values: &Option<Vec<Option<f64>>>,
+    i: usize,
+) -> ferrum_scene::FillStroke {
+    let paint = &ctx.mark_style.paint;
+    let fill_base = resolve_fill_color(
+        ctx.scales.color.as_ref(),
+        color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+        color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+        paint.fill_paint(),
+    );
+    let row_opacity = resolve_scaled_opacity(opacity_values, &ctx.scales.opacity, i, paint.opacity);
+    to_scene_fill_stroke(
+        fill_base.map(|c| with_opacity(c, row_opacity)),
+        paint.stroke_paint(),
+        PaintChannels::new(paint.stroke_width, row_opacity, paint.stroke_dash.as_deref()),
+    )
 }
 
 /// Build arc (wedge) nodes for pie/donut/annular charts.
@@ -226,21 +256,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         // Skip degenerate slices that collapse to zero or negative sweep after padding.
         if angle_end <= angle_start { continue; }
 
-        // Resolve per-slice fill from color scale, fall back to mark_style.paint.fill.
-        // Arc slices are not yet threaded for provenance-gated paint clearing
-        // (out of this fix round's scope — see the FillStroke clearing
-        // follow-up in the task report); a cleared constant fill/stroke here
-        // still serializes as `rgba(0,0,0,0.000)`, matching pre-c2 behavior.
-        let fill_base = resolve_fill_color(
-            ctx.scales.color.as_ref(),
-            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
-            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ClearablePaint::Paint(ctx.mark_style.paint.fill),
-        );
-        // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
-        let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-        let fill_color = fill_base.map(|c| with_opacity(c, row_opacity));
+        let style = slice_paint(ctx, &color_str, &color_f64, &opacity_values, i);
 
         let commands = wedge_path(
             cx, cy, inner_radius, outer_radius, angle_start, angle_end,
@@ -248,13 +264,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         );
         acc.push(SceneNode::Path {
             commands,
-            style: to_scene_fill_stroke(
-                fill_color,
-                ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
-                ctx.mark_style.paint.stroke_width,
-                row_opacity,
-                ctx.mark_style.paint.stroke_dash.as_deref(),
-            ),
+            style,
             closed: true,
         }, i);
         spans.push((angle_start, angle_end));
@@ -369,15 +379,7 @@ fn build_nominal_theta(
             _ => geom.outer_radius,
         };
 
-        let fill_base = resolve_fill_color(
-            ctx.scales.color.as_ref(),
-            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
-            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ClearablePaint::Paint(ctx.mark_style.paint.fill),
-        );
-        let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-        let fill_color = fill_base.map(|c| with_opacity(c, row_opacity));
+        let style = slice_paint(ctx, &color_str, &color_f64, &opacity_values, i);
 
         let commands = wedge_path(
             geom.cx, geom.cy, geom.inner_radius, outer_r, angle_start, angle_end,
@@ -385,13 +387,7 @@ fn build_nominal_theta(
         );
         acc.push(SceneNode::Path {
             commands,
-            style: to_scene_fill_stroke(
-                fill_color,
-                ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
-                ctx.mark_style.paint.stroke_width,
-                row_opacity,
-                ctx.mark_style.paint.stroke_dash.as_deref(),
-            ),
+            style,
             closed: true,
         }, i);
         spans.push((angle_start, angle_end));
@@ -489,15 +485,7 @@ fn build_annular(
             _ => geom.outer_radius,
         };
 
-        let fill_base = resolve_fill_color(
-            ctx.scales.color.as_ref(),
-            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
-            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ClearablePaint::Paint(ctx.mark_style.paint.fill),
-        );
-        let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
-        let fill_color = fill_base.map(|c| with_opacity(c, row_opacity));
+        let style = slice_paint(ctx, &color_str, &color_f64, &opacity_values, i);
 
         let commands = wedge_path(
             geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end,
@@ -505,13 +493,7 @@ fn build_annular(
         );
         acc.push(SceneNode::Path {
             commands,
-            style: to_scene_fill_stroke(
-                fill_color,
-                ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
-                ctx.mark_style.paint.stroke_width,
-                row_opacity,
-                ctx.mark_style.paint.stroke_dash.as_deref(),
-            ),
+            style,
             closed: true,
         }, i);
         spans.push((angle_start, angle_end));

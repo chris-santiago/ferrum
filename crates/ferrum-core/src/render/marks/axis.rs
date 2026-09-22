@@ -1,7 +1,7 @@
 //! Internal: build axis and grid scene nodes from an AxisLayout.
 
 use crate::layout::{AxisLayout, AxisOrient, Rect, TextAnchor, ThemeInputs};
-use crate::render::draw::{to_scene_stroke, to_scene_text_style};
+use crate::render::draw::{to_scene_stroke, to_scene_text_style, ClearablePaint};
 use ferrum_scene::SceneNode;
 
 /// An axis's scene nodes, split by what positions them.
@@ -130,10 +130,24 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         y1: r.y,
         x2: r.x + r.w,
         y2: r.y + r.h,
-        style: to_scene_stroke(axis_line_color, axis_line_width, 1.0, None, None, None),
+        style: to_scene_stroke(
+            ClearablePaint::Paint(axis_line_color),
+            axis_line_width,
+            1.0,
+            None,
+            None,
+            None,
+        ),
     });
 
-    let tick_stroke = to_scene_stroke(theme.colors.tick_color, theme.sizes.tick_width, 1.0, None, None, None);
+    let tick_stroke = to_scene_stroke(
+        ClearablePaint::Paint(theme.colors.tick_color),
+        theme.sizes.tick_width,
+        1.0,
+        None,
+        None,
+        None,
+    );
 
     let label_fw: Option<&str> = if theme.typography.font_weight == "normal" {
         None
@@ -563,7 +577,7 @@ pub fn build_grid(
                     continue;
                 }
                 if let Ok(fill) = crate::render::color::parse_color(band_color_str) {
-                    use crate::render::draw::{to_scene_fill_stroke, ClearablePaint};
+                    use crate::render::draw::{to_scene_fill_stroke, PaintChannels};
                     nodes.push(GridNode {
                         node: SceneNode::Rect {
                             x: plot_area.x,
@@ -573,9 +587,7 @@ pub fn build_grid(
                             style: to_scene_fill_stroke(
                                 ClearablePaint::Paint(fill),
                                 ClearablePaint::Absent,
-                                0.0,
-                                1.0,
-                                None,
+                                PaintChannels::new(0.0, 1.0, None),
                             ),
                             corner_radius: 0.0,
                         },
@@ -599,11 +611,15 @@ pub fn build_grid(
     // nothing and the output below is byte-identical to the pre-minor renderer.
     if minor_enabled {
         if let Some(ax) = x_axis.filter(|a| a.show_grid) {
-            let style = to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None);
+            let style = to_scene_stroke(
+                ClearablePaint::Paint(minor_color), minor_width, minor_opacity, minor_dash, None, None,
+            );
             emit_gridlines(&mut nodes, &ax.minor_ticks, true, plot_area, y_baseline_x, &style);
         }
         if let Some(ay) = y_axis.filter(|a| a.show_grid) {
-            let style = to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None);
+            let style = to_scene_stroke(
+                ClearablePaint::Paint(minor_color), minor_width, minor_opacity, minor_dash, None, None,
+            );
             emit_gridlines(&mut nodes, &ay.minor_ticks, false, plot_area, x_baseline_y, &style);
         }
     }
@@ -642,7 +658,7 @@ fn major_grid_style(
     let width = axis.grid_width.unwrap_or(theme_width);
     let dash: Option<&[f64]> = axis.grid_dash.as_deref().or(theme_dash);
     let opacity = axis.grid_opacity.unwrap_or(theme_opacity);
-    to_scene_stroke(color, width, opacity, dash, None, None)
+    to_scene_stroke(ClearablePaint::Paint(color), width, opacity, dash, None, None)
 }
 
 /// Emit one `SceneNode::Line` per tick spanning the plot area, skipping any
@@ -854,7 +870,7 @@ mod tests {
         for n in &lines {
             if let SceneNode::Line { style, .. } = n {
                 assert_eq!(style.width, theme.sizes.grid_width, "major width");
-                assert_eq!(style.color.r, theme.colors.grid_color.red);
+                assert_eq!(style.color.map(|c| c.r), Some(theme.colors.grid_color.red));
             }
         }
     }
@@ -877,14 +893,14 @@ mod tests {
             if let SceneNode::Line { style, .. } = n {
                 assert_eq!(style.width, theme.sizes.minor_grid_width, "minor width");
                 assert!(style.width < theme.sizes.grid_width, "minor thinner than major");
-                assert_eq!(style.color.r, theme.colors.minor_grid_color.red, "minor color");
+                assert_eq!(style.color.map(|c| c.r), Some(theme.colors.minor_grid_color.red), "minor color");
             }
         }
         // Last three lines are majors.
         for n in &lines[2..5] {
             if let SceneNode::Line { style, .. } = n {
                 assert_eq!(style.width, theme.sizes.grid_width, "major width");
-                assert_eq!(style.color.r, theme.colors.grid_color.red, "major color");
+                assert_eq!(style.color.map(|c| c.r), Some(theme.colors.grid_color.red), "major color");
             }
         }
 

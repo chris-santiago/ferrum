@@ -223,7 +223,7 @@ fn extract_viewbox(svg: &str) -> String {
 
 fn build_connector_stroke() -> ferrum_scene::StrokeStyle {
     StrokeStyle {
-        color: ferrum_scene::Color::rgba(150, 150, 150, 200),
+        color: Some(ferrum_scene::Color::rgba(150, 150, 150, 200)),
         width: 0.75,
         opacity: 0.8,
         dash: Some(vec![3.0, 3.0]),

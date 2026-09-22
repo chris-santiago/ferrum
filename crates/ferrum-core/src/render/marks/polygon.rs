@@ -24,7 +24,10 @@ use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns};
+    use crate::render::draw::{
+        resolve_group_fill_color, to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+        PaintChannels,
+    };
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let empty = || MarkBuildResult::empty(MarkBatchKind::Polygon);
@@ -190,28 +193,43 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let first_row = group_indices[0];
 
-        // Resolve fill for this group.
+        // Resolve fill for this group, carrying the constant fill slot's own
+        // provenance so a `fill="none"` clear outranks whichever branch resolves
+        // a color (`#110`).
+        //
+        // The quantitative branch samples polygon's OWN `cmap`/theme scheme
+        // rather than `ctx.scales.color`, so unlike `area`'s it cannot fold onto
+        // `resolve_fill_color`: doing so would change which colors a
+        // scale-carrying polygon chart renders. That divergence is a separate
+        // live defect (a `SequentialScale(scheme=…)` on the color channel is
+        // silently dropped by the marks while the legend honors it) and is
+        // reported as its own follow-up rather than closed here.
+        let base = ctx.mark_style.paint.fill_paint();
         let fill = if color_is_quantitative {
             if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
                 if a.is_null(first_row) {
-                    ctx.mark_style.paint.fill
+                    base
                 } else {
                     let v = a.value(first_row);
                     let t = ((v - vmin) / denom).clamp(0.0, 1.0);
-                    scheme.as_ref().map(|s| s.sample(t)).unwrap_or(ctx.mark_style.paint.fill)
+                    match scheme.as_ref() {
+                        Some(s) => base.cleared_or(s.sample(t)),
+                        None => base,
+                    }
                 }
             } else {
-                ctx.mark_style.paint.fill
-            }
-        } else if let (Some(values), Some(scale)) =
-            (color_str_values.as_ref(), &ctx.scales.color)
-        {
-            match values.get(first_row).and_then(|v| v.as_deref()) {
-                Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
-                None => ctx.mark_style.paint.fill,
+                base
             }
         } else {
-            ctx.mark_style.paint.fill
+            // Group-keyed: the representative row's category string, resolved the
+            // way `ColorScale::lookup(&str)` resolved it when this branch was a
+            // hand-rolled `scale.lookup(v).unwrap_or(paint.fill)` — including the
+            // parse a numeric-input scale needs for a non-`Float64` column.
+            resolve_group_fill_color(
+                ctx.scales.color.as_ref(),
+                color_str_values.as_ref().and_then(|v| v.get(first_row)).and_then(|o| o.as_deref()),
+                base,
+            )
         };
 
         // Resolve per-group opacity through the scale if present (sampled at the
@@ -223,23 +241,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.mark_style.paint.opacity,
         );
 
-        let fill = with_opacity(fill, group_opacity);
+        let fill = fill.map(|c| with_opacity(c, group_opacity));
 
         let exterior: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
         acc.push(
             SceneNode::Polygon {
                 rings: vec![exterior],
-                // Polygon fill/stroke are not yet threaded for provenance-gated
-                // paint clearing (out of this fix round's scope, mirrors
-                // arc.rs) — hence the `uncleared` constructor; a cleared
-                // constant fill/stroke here still serializes as
-                // `rgba(0,0,0,0.000)`.
                 style: to_scene_fill_stroke(
-                    ClearablePaint::Paint(fill),
-                    ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
-                    ctx.mark_style.paint.stroke_width,
-                    group_opacity,
-                    None,
+                    fill,
+                    ctx.mark_style.paint.stroke_paint(),
+                    PaintChannels::new(ctx.mark_style.paint.stroke_width, group_opacity, None),
                 ),
             },
             first_row,

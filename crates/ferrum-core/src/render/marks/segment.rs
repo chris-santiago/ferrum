@@ -1,7 +1,7 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{col_as_f64, resolve_stroke_color, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, resolve_stroke_paint, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::arrowhead::{arrowhead_path_with_opacity, arrowhead_triangle};
 use crate::render::marks::channels::row_colors_from_scale;
@@ -109,13 +109,15 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .unwrap_or(ctx.mark_style.paint.stroke_width);
 
         // Precedence (explicit constant stroke > per-row color > theme > fill)
-        // lives in `resolve_stroke_color`.
+        // lives in `resolve_stroke_paint`, which also carries a `stroke="none"`
+        // clear through as a clear (`#110`) rather than as a zero-alpha color —
+        // for the arrowhead as well as the shaft, since both read this one paint.
         let row_color_opt = color_values
             .as_ref()
             .and_then(|v| v.get(i).copied().flatten());
-        let row_color = resolve_stroke_color(ctx.mark_style, row_color_opt);
+        let row_paint = resolve_stroke_paint(ctx.mark_style, row_color_opt);
         let mut row_style = to_scene_stroke(
-            row_color,
+            row_paint,
             row_stroke_width,
             row_opacity,
             ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -131,7 +133,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         row_style.stroke_opacity *= row_stroke_opacity;
 
         let (line_x1, line_y1, line_x2, line_y2) = (p1x + xo, p1y + yo, p2x + xo, p2y + yo);
-        let line_color = row_style.color;
+        let line_paint = row_style.color;
         // Captured before `row_style` moves into the `Line` node below, so
         // the arrowhead can inherit the SAME resolved opacity/stroke_opacity
         // the shaft carries — not the annotation path's fixed 1.0 (batch H
@@ -166,7 +168,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                     [
                         line_node,
                         arrowhead_path_with_opacity(
-                            points, line_color, line_opacity, line_stroke_opacity, row_fill_opacity,
+                            points, line_paint, line_opacity, line_stroke_opacity, row_fill_opacity,
                         ),
                     ],
                     i,
@@ -337,9 +339,10 @@ mod tests {
         // Check that the segment line has the correct stroke color
         assert_eq!(result.nodes.len(), 1);
         if let ferrum_scene::SceneNode::Line { style, .. } = &result.nodes[0] {
-            assert_eq!(style.color.r, 0xe4, "stroke red component should match explicit color");
-            assert_eq!(style.color.g, 0x57, "stroke green component should match explicit color");
-            assert_eq!(style.color.b, 0x2e, "stroke blue component should match explicit color");
+            let c = style.color.expect("an explicit stroke= must paint a color");
+            assert_eq!(c.r, 0xe4, "stroke red component should match explicit color");
+            assert_eq!(c.g, 0x57, "stroke green component should match explicit color");
+            assert_eq!(c.b, 0x2e, "stroke blue component should match explicit color");
         } else {
             panic!("Expected Line node");
         }
@@ -384,7 +387,9 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            ferrum_scene::SceneNode::Line { style, .. } => {
+                Some(style.color.expect("a color-encoded segment must paint a color"))
+            }
             _ => None,
         }).collect();
         assert_eq!(colors.len(), 2);

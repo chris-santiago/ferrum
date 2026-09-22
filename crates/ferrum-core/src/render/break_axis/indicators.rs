@@ -11,7 +11,7 @@
 use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
 use crate::layout::{Rect, ThemeInputs};
-use crate::render::draw::to_scene_stroke;
+use crate::render::draw::{to_scene_stroke, ClearablePaint};
 use crate::spec::axis::AlignAxis;
 
 use super::BreakResult;
@@ -30,7 +30,14 @@ pub fn build_break_indicators(
 ) -> Vec<SceneNode> {
     let mut nodes = Vec::new();
 
-    let stroke = to_scene_stroke(theme.colors.axis_line_color, theme.sizes.axis_line_width, 1.0, None, None, None);
+    let stroke = to_scene_stroke(
+        ClearablePaint::Paint(theme.colors.axis_line_color),
+        theme.sizes.axis_line_width,
+        1.0,
+        None,
+        None,
+        None,
+    );
 
     for &indicator_px in &result.indicator_pixels {
         let new_nodes = match break_style {
@@ -152,7 +159,7 @@ fn build_zigzag_indicator(
         commands,
         style: FillStroke {
             fill: None,
-            stroke: Some(stroke.color),
+            stroke: stroke.color,
             stroke_width: stroke.width,
             opacity: stroke.opacity,
             stroke_dash: None,
@@ -210,7 +217,7 @@ fn build_wave_indicator(
         commands,
         style: FillStroke {
             fill: None,
-            stroke: Some(stroke.color),
+            stroke: stroke.color,
             stroke_width: stroke.width,
             opacity: stroke.opacity,
             stroke_dash: None,

@@ -48,23 +48,27 @@ pub(crate) fn arrowhead_triangle(
 }
 
 /// Build the filled-triangle [`ferrum_scene::SceneNode::Path`] for an
-/// arrowhead from [`arrowhead_triangle`]'s three vertices, a fill color, and
+/// arrowhead from [`arrowhead_triangle`]'s three vertices, a fill paint, and
 /// full paint-opacity fields (`opacity`, `stroke_opacity`, `fill_opacity`).
 /// No stroke.
+///
+/// `fill` is `Option` so a head inherits its shaft's *cleared* paint: a
+/// `mark_segment(stroke="none", arrow=True)` paints neither shaft nor head
+/// (`#110`).
 ///
 /// This is the general entry point — [`arrowhead_path`] is the convenience
 /// wrapper for callers with no per-row opacity to thread (`annotation.rs`'s
 /// `emit_arrow`, which never resolves a per-row opacity). `marks::segment`'s
 /// `arrow=true` path calls this one directly so the arrowhead inherits the
 /// SAME resolved `opacity`/`stroke_opacity`/`fill_opacity` the row's shaft
-/// `Line` carries — mirroring the `to_scene_fill_stroke`/
-/// `to_scene_fill_stroke_full` convenience/full split in `draw.rs` (batch H
+/// `Line` carries — mirroring the `PaintChannels::new`/struct-literal split at
+/// `draw.rs`'s `to_scene_fill_stroke` (batch H
 /// Task 1 quality-review fix: the arrowhead previously always rendered
 /// fully opaque regardless of the segment's own resolved opacity, a visible
 /// mismatch under `opacity=`/`stroke_opacity=`).
 pub(crate) fn arrowhead_path_with_opacity(
     points: [(f64, f64); 3],
-    color: ferrum_scene::Color,
+    fill: Option<ferrum_scene::Color>,
     opacity: f64,
     stroke_opacity: f64,
     fill_opacity: f64,
@@ -78,7 +82,7 @@ pub(crate) fn arrowhead_path_with_opacity(
             ferrum_scene::PathCmd::Close,
         ],
         style: ferrum_scene::FillStroke {
-            fill: Some(color),
+            fill,
             stroke: None,
             stroke_width: 0.0,
             opacity,
@@ -99,7 +103,7 @@ pub(crate) fn arrowhead_path(
     points: [(f64, f64); 3],
     color: ferrum_scene::Color,
 ) -> ferrum_scene::SceneNode {
-    arrowhead_path_with_opacity(points, color, 1.0, 1.0, 1.0)
+    arrowhead_path_with_opacity(points, Some(color), 1.0, 1.0, 1.0)
 }
 
 #[cfg(test)]

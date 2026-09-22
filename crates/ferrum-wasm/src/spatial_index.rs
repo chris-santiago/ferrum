@@ -1179,12 +1179,12 @@ mod tests {
     fn line_batch_nodes_not_indexed() {
         use ferrum_scene::StrokeStyle;
         let line_style = StrokeStyle {
-            color: ferrum_scene::Color {
+            color: Some(ferrum_scene::Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 1.0,
             opacity: 1.0,
             stroke_opacity: 1.0,

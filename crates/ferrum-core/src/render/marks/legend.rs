@@ -1,7 +1,9 @@
 //! Internal: build legend scene nodes from a LegendLayout.
 
 use crate::layout::{LegendDirection, LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
-use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style, ClearablePaint};
+use crate::render::draw::{
+    to_scene_fill_stroke, to_scene_stroke, to_scene_text_style, ClearablePaint, PaintChannels,
+};
 use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::render::svg::fmt_f;
 use ferrum_scene::{RawAnchor, SceneNode};
@@ -158,7 +160,7 @@ pub fn build_legend(
                 x2,
                 y2,
                 style: to_scene_stroke(
-                    theme.colors.axis_line_color,
+                    ClearablePaint::Paint(theme.colors.axis_line_color),
                     theme.sizes.axis_line_width,
                     1.0,
                     None,
@@ -241,9 +243,7 @@ pub fn build_legend(
                 style: to_scene_fill_stroke(
                     ClearablePaint::Paint(color),
                     ClearablePaint::Absent,
-                    0.0,
-                    1.0,
-                    None,
+                    PaintChannels::new(0.0, 1.0, None),
                 ),
             });
         } else {
@@ -265,9 +265,7 @@ pub fn build_legend(
                         style: to_scene_fill_stroke(
                             ClearablePaint::Paint(color),
                             swatch_stroke,
-                            swatch_stroke_w,
-                            1.0,
-                            None,
+                            PaintChannels::new(swatch_stroke_w, 1.0, None),
                         ),
                     });
                 }
@@ -281,9 +279,7 @@ pub fn build_legend(
                         style: to_scene_fill_stroke(
                             ClearablePaint::Paint(color),
                             swatch_stroke,
-                            swatch_stroke_w,
-                            1.0,
-                            None,
+                            PaintChannels::new(swatch_stroke_w, 1.0, None),
                         ),
                         corner_radius: 0.0,
                     });
@@ -306,7 +302,14 @@ pub fn build_legend(
                         y1: sy,
                         x2: sx + half_len,
                         y2: sy,
-                        style: to_scene_stroke(color, line_w, 1.0, entry.dash_pattern.as_deref(), None, None),
+                        style: to_scene_stroke(
+                            ClearablePaint::Paint(color),
+                            line_w,
+                            1.0,
+                            entry.dash_pattern.as_deref(),
+                            None,
+                            None,
+                        ),
                     });
                 }
             }

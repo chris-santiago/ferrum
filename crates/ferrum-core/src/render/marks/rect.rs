@@ -52,7 +52,7 @@ fn empty_result() -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full};
+    use crate::render::draw::{MarkBuildResult, PaintChannels, to_scene_fill_stroke};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -142,15 +142,17 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
             ctx.mark_style.paint.stroke_dash.as_deref(),
         );
 
-        let style = to_scene_fill_stroke_full(
+        let style = to_scene_fill_stroke(
             fill,
             effective_stroke,
-            row_stroke_width,
-            row_opacity,
-            row_dash.as_deref(),
-            row_fill_opacity,
-            1.0,
-            0.0,
+            PaintChannels {
+                stroke_width: row_stroke_width,
+                opacity: row_opacity,
+                stroke_dash: row_dash.as_deref(),
+                fill_opacity: row_fill_opacity,
+                stroke_opacity: 1.0,
+                angle: 0.0,
+            },
         );
 
         acc.push(SceneNode::Rect {
@@ -180,7 +182,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
 }
 
 fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full};
+    use crate::render::draw::{MarkBuildResult, PaintChannels, to_scene_fill_stroke};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -294,15 +296,17 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 ctx.mark_style.paint.stroke_dash.as_deref(),
             );
 
-            let style = to_scene_fill_stroke_full(
+            let style = to_scene_fill_stroke(
                 fill,
                 effective_stroke,
-                row_stroke_width,
-                row_opacity,
-                row_dash.as_deref(),
-                row_fill_opacity,
-                1.0,
-                0.0,
+                PaintChannels {
+                    stroke_width: row_stroke_width,
+                    opacity: row_opacity,
+                    stroke_dash: row_dash.as_deref(),
+                    fill_opacity: row_fill_opacity,
+                    stroke_opacity: 1.0,
+                    angle: 0.0,
+                },
             );
 
             acc.push(SceneNode::Rect {
@@ -388,15 +392,17 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
                 ctx.mark_style.paint.stroke_dash.as_deref(),
             );
 
-            let style = to_scene_fill_stroke_full(
+            let style = to_scene_fill_stroke(
                 fill,
                 effective_stroke,
-                row_stroke_width,
-                row_opacity,
-                row_dash.as_deref(),
-                row_fill_opacity,
-                1.0,
-                0.0,
+                PaintChannels {
+                    stroke_width: row_stroke_width,
+                    opacity: row_opacity,
+                    stroke_dash: row_dash.as_deref(),
+                    fill_opacity: row_fill_opacity,
+                    stroke_opacity: 1.0,
+                    angle: 0.0,
+                },
             );
 
             acc.push(SceneNode::Rect {
@@ -444,7 +450,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
 }
 
 fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full, to_scene_text_style};
+    use crate::render::draw::{MarkBuildResult, PaintChannels, to_scene_fill_stroke, to_scene_text_style};
     use crate::render::format::format_numeric;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
@@ -585,15 +591,17 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
             ctx.mark_style.paint.stroke_dash.as_deref(),
         );
 
-        let style = to_scene_fill_stroke_full(
+        let style = to_scene_fill_stroke(
             fill,
             effective_stroke,
-            row_stroke_width,
-            row_opacity,
-            row_dash.as_deref(),
-            row_fill_opacity,
-            1.0,
-            0.0,
+            PaintChannels {
+                stroke_width: row_stroke_width,
+                opacity: row_opacity,
+                stroke_dash: row_dash.as_deref(),
+                fill_opacity: row_fill_opacity,
+                stroke_opacity: 1.0,
+                angle: 0.0,
+            },
         );
 
         acc.push(SceneNode::Rect {

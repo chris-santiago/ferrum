@@ -440,7 +440,7 @@ mod tests {
             x2: 100.0,
             y2: 0.0,
             style: StrokeStyle {
-                color: Color::rgb(0, 0, 0),
+                color: Some(Color::rgb(0, 0, 0)),
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,
@@ -558,5 +558,60 @@ mod tests {
         }"#;
         let batch: MarkBatch = serde_json::from_str(json).expect("deserialize");
         assert!(batch.clip, "missing clip field must default to true");
+    }
+
+    /// `StrokeStyle.color` became `Option<Color>` (`#110`) so a cleared paint can
+    /// reach the walkers as absence rather than as a zero-alpha color. The wire
+    /// contract that makes that safe: a PRESENT color serializes exactly as the
+    /// bare `Color` did, so every interactive scene JSON is byte-identical.
+    #[test]
+    fn stroke_style_present_color_serializes_exactly_as_the_bare_color_did() {
+        let style = StrokeStyle {
+            color: Some(Color::rgb(1, 2, 3)),
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+        let json = serde_json::to_string(&style).expect("serialize");
+        assert!(
+            json.contains(r#""color":{"r":1,"g":2,"b":3,"a":255}"#),
+            "a present color must serialize inline, with no Option wrapper, got: {json}"
+        );
+        let back: StrokeStyle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, style);
+    }
+
+    /// The other half: a cleared paint OMITS the key rather than writing
+    /// `"color":null`, and scene JSON written before the field was optional
+    /// (which always carried a color) still loads.
+    #[test]
+    fn stroke_style_cleared_color_is_omitted_and_a_missing_key_loads_as_none() {
+        let cleared = StrokeStyle {
+            color: None,
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+        let json = serde_json::to_string(&cleared).expect("serialize");
+        assert!(
+            !json.contains("\"color\""),
+            "a cleared stroke must omit the color key, not write null, got: {json}"
+        );
+        let back: StrokeStyle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, cleared);
+        // An explicit null loads as a clear too, so a payload written by any
+        // serializer that does not skip `None` still means the same thing.
+        let with_null: StrokeStyle = serde_json::from_str(
+            r#"{"color":null,"width":1.0,"opacity":1.0,"dash":null,
+                "stroke_cap":null,"stroke_join":null}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(with_null.color, None);
     }
 }

@@ -1168,11 +1168,22 @@ All positional and appearance channels accept:
 >   matched case-insensitively after trimming. (Selection styling diverges —
 >   see §3.10.) A paint the user actually cleared (never a paint that merely
 >   evaluates to transparent, e.g. an explicit `fill="#00000000"`) serializes
->   as no attribute at all on `mark_point`, `mark_rect`, `mark_bar`, and
->   `mark_ribbon` (which covers `mark_errorband`). Other marks (line/rule/
->   tick/segment stroke, and arc/area/geoshape/polygon) still serialize a
->   cleared paint as a zero-alpha value — visually identical, byte-different;
->   unifying this onto the shared clearing path is a logged follow-up.
+>   as no attribute at all. **(2026-09-21, GH #110.)** That rule is now
+>   universal across marks: the former exception list (line/rule/tick/segment
+>   stroke, and arc/area/geoshape/polygon, which serialized a cleared paint as
+>   a zero-alpha value — visually identical, byte-different) is closed, and
+>   `StrokeStyle.color` in the scene graph is optional so a stroke-only node
+>   omits the attribute rather than carrying `rgba(0,0,0,0.000)`. A cleared
+>   *fill* still emits SVG's own `fill="none"` keyword, because SVG's default
+>   fill is black and omitting the attribute would paint it; a cleared
+>   *stroke* omits the attribute, whose SVG default is already `none`.
+>   The same release makes an explicit clear outrank a **color channel**:
+>   `mark_line(stroke="none").encode(x=…, y=…, color=…)` previously rendered
+>   byte-identically to the same chart without the clear, painting the
+>   categorical palette over it, and the same was true of a cleared `fill=`
+>   under a color channel on `area`/`arc`/`bar`/`rect`/`point`/`polygon`. A
+>   clear is a decision to paint nothing, and it now wins over any color the
+>   channel resolves.
 > - **`FillOpacity`/`StrokeOpacity`/`Opacity`/`StrokeDash` `scale=` is now
 >   honored end to end** (previously silently dropped for the first three;
 >   `StrokeDash` gained a real `scale=` implementation the same batch).

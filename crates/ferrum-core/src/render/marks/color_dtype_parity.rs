@@ -193,8 +193,10 @@ fn element_colors(nodes: &[SceneNode], out: &mut Vec<String>) {
             | SceneNode::Circle { style, .. }
             | SceneNode::Path { style, .. }
             | SceneNode::Polygon { style, .. } => out.extend(style.fill.map(hex)),
+            // A cleared stroke contributes no color, exactly as a cleared fill
+            // does not (`extend` over the `Option` above).
             SceneNode::Line { style, .. } | SceneNode::Polyline { style, .. } => {
-                out.push(hex(style.color))
+                out.extend(style.color.map(hex))
             }
             SceneNode::Text { style, .. } => out.push(hex(style.color)),
             SceneNode::Group { children, .. } => element_colors(children, out),

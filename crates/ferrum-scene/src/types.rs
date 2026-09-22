@@ -520,7 +520,20 @@ fn is_zero_angle(v: &f64) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrokeStyle {
-    pub color: Color,
+    /// The stroke paint, or `None` for a paint the caller cleared.
+    ///
+    /// `None` means *no stroke is painted*: the SVG walker omits the `stroke`
+    /// attribute entirely and the WASM tessellators emit no geometry, rather
+    /// than serializing a zero-alpha `rgba(0,0,0,0.000)` (`#110`, spec §4.1).
+    /// A paint that merely *resolves to* a transparent color without having
+    /// been cleared stays `Some` and keeps serializing byte-identically.
+    ///
+    /// Skipped when absent so a present color serializes exactly as the bare
+    /// `Color` did, and `default` so scene JSON written before this field
+    /// became optional still deserializes. Matches the
+    /// [`FillStroke`] sibling, whose `fill`/`stroke` are already `Option`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
     pub width: f64,
     pub opacity: f64,
     pub dash: Option<Vec<f64>>,

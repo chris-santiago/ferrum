@@ -65,10 +65,10 @@ pub(crate) struct ShapeStyle {
     /// from a user `"none"`/`"transparent"` clear, never merely because it
     /// equals `color::TRANSPARENT` by value. The
     /// Circle/Square/Diamond/TriangleUp/TriangleDown arms omit the attribute
-    /// for a clear; the StrokeStyle-shaped Cross/VLine/HLine arms paint their
-    /// glyph lines in this slot's *color*, which for a clear is transparent
-    /// (`StrokeStyle.color` has no absent representation yet — `#110`'s
-    /// migration half).
+    /// for a clear, and since `#110` the StrokeStyle-shaped Cross/VLine/HLine
+    /// arms do too: they paint their glyph lines in this slot, so a cleared fill
+    /// paints no line rather than the zero-alpha one it emitted while
+    /// `StrokeStyle.color` had no absent representation.
     pub fill: ClearablePaint,
     pub stroke: ClearablePaint,
     pub stroke_width: f64,
@@ -94,25 +94,54 @@ pub(crate) fn emit_shape_nodes(
     let ShapeStyle {
         fill, stroke, stroke_width, opacity, stroke_opacity, fill_opacity, stroke_dash, angle,
     } = style;
-    use crate::render::draw::{to_scene_fill_stroke_full, to_scene_stroke};
+    use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, PaintChannels};
     use ferrum_scene::{PathCmd, SceneNode};
 
     let dash_ref: Option<&[f64]> = stroke_dash.as_deref();
 
+    // The five filled glyphs (circle/square/diamond/triangle-up/-down) build the
+    // identical `FillStroke`; only their geometry differs. One value, built once,
+    // instead of the same six-field literal five times.
+    let filled = || {
+        to_scene_fill_stroke(
+            fill,
+            stroke,
+            PaintChannels {
+                stroke_width,
+                opacity,
+                stroke_dash: dash_ref,
+                fill_opacity,
+                stroke_opacity,
+                angle,
+            },
+        )
+    };
+
+    // The three `StrokeStyle`-shaped glyphs (cross/vline/hline) have no fill
+    // channel: they paint their LINES in the fill slot, defaulting to black for a
+    // mark that resolves no fill. A fill the user *cleared* stays cleared, so the
+    // glyph paints nothing at all — before `#110` it took the clear's transparent
+    // value and serialized `stroke="rgba(0,0,0,0.000)"`.
+    let glyph_stroke = |line_width: f64| {
+        let mut s = to_scene_stroke(
+            fill.or_paint(crate::render::color::from_rgb(0, 0, 0)),
+            line_width,
+            opacity,
+            None,
+            None,
+            None,
+        );
+        s.stroke_opacity = stroke_opacity;
+        s
+    };
+
     match kind {
         ShapeKind::Circle => {
-            let style = to_scene_fill_stroke_full(
-                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity,
-                angle,
-            );
-            vec![SceneNode::Circle { cx, cy, r, style }]
+            vec![SceneNode::Circle { cx, cy, r, style: filled() }]
         }
         ShapeKind::Square => {
             let s = r * 1.6;
-            let style = to_scene_fill_stroke_full(
-                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity,
-                angle,
-            );
+            let style = filled();
             vec![SceneNode::Rect {
                 x: cx - s / 2.0,
                 y: cy - s / 2.0,
@@ -123,13 +152,9 @@ pub(crate) fn emit_shape_nodes(
             }]
         }
         ShapeKind::Cross => {
-            let stroke_color = fill.color_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.5;
             let sw = r * 0.4;
-            let mut s1 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
-            s1.stroke_opacity = stroke_opacity;
-            let mut s2 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
-            s2.stroke_opacity = stroke_opacity;
+            let (s1, s2) = (glyph_stroke(sw), glyph_stroke(sw));
             vec![
                 SceneNode::Line {
                     x1: cx - arm,
@@ -149,10 +174,7 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::Diamond => {
             let d = r * 1.4;
-            let style = to_scene_fill_stroke_full(
-                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity,
-                angle,
-            );
+            let style = filled();
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - d },
@@ -167,10 +189,7 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleUp => {
             let h = r * 1.4;
-            let style = to_scene_fill_stroke_full(
-                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity,
-                angle,
-            );
+            let style = filled();
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - h },
@@ -184,10 +203,7 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleDown => {
             let h = r * 1.4;
-            let style = to_scene_fill_stroke_full(
-                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity,
-                angle,
-            );
+            let style = filled();
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy + h },
@@ -200,11 +216,8 @@ pub(crate) fn emit_shape_nodes(
             }]
         }
         ShapeKind::VLine => {
-            let stroke_color = fill.color_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
-            let sw = r * 0.35;
-            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
-            s.stroke_opacity = stroke_opacity;
+            let s = glyph_stroke(r * 0.35);
             vec![SceneNode::Line {
                 x1: cx,
                 y1: cy - arm,
@@ -214,11 +227,8 @@ pub(crate) fn emit_shape_nodes(
             }]
         }
         ShapeKind::HLine => {
-            let stroke_color = fill.color_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
-            let sw = r * 0.35;
-            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
-            s.stroke_opacity = stroke_opacity;
+            let s = glyph_stroke(r * 0.35);
             vec![SceneNode::Line {
                 x1: cx - arm,
                 y1: cy,
@@ -366,7 +376,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // resolved paint carries its own provenance (T8 quality-review c2):
         // `Cleared` only when the constant `mark_style.paint.fill` was cleared
         // by a literal "none"/"transparent", never merely because the resolved
-        // color is zero-alpha by value; a color-scale hit is never cleared.
+        // color is zero-alpha by value. A cleared fill outranks a color-scale
+        // hit (`#110`): the clear wins, the hit's palette color is dropped.
         let fill_base = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
@@ -1007,20 +1018,31 @@ mod tests {
     ///
     /// `Absent` is the negative control: it must stay black, so the test cannot
     /// be satisfied by a blanket "glyph lines are always transparent".
+    /// The three `StrokeStyle`-shaped glyphs paint their lines in the FILL slot,
+    /// so a `mark_point(fill="none")` must paint no line at all.
+    ///
+    /// Wave 6A T12 (`#110`) tightened this from T7's contract: with
+    /// `StrokeStyle.color` non-optional, the best a cleared fill could do was
+    /// resolve to `TRANSPARENT` and serialize `stroke="rgba(0,0,0,0.000)"`. It is
+    /// now `None`, and the attribute is omitted. Both negative controls — an
+    /// ABSENT fill still defaulting to black, and an ordinary paint reaching the
+    /// glyph unchanged — are what keeps this from passing by simply never
+    /// painting.
     #[test]
-    fn stroke_shaped_glyphs_paint_a_cleared_fill_transparently_not_black() {
+    fn stroke_shaped_glyphs_omit_a_cleared_fills_paint_entirely() {
         use ferrum_scene::SceneNode;
 
-        let line_colors = |kind: ShapeKind, fill: ClearablePaint| -> Vec<ferrum_scene::Color> {
-            let style = ShapeStyle { fill, ..default_shape_style() };
-            emit_shape_nodes(kind, 50.0, 50.0, 5.0, style)
-                .iter()
-                .map(|n| match n {
-                    SceneNode::Line { style, .. } => style.color,
-                    other => panic!("{kind:?} must emit only Line nodes, got: {other:?}"),
-                })
-                .collect()
-        };
+        let line_colors =
+            |kind: ShapeKind, fill: ClearablePaint| -> Vec<Option<ferrum_scene::Color>> {
+                let style = ShapeStyle { fill, ..default_shape_style() };
+                emit_shape_nodes(kind, 50.0, 50.0, 5.0, style)
+                    .iter()
+                    .map(|n| match n {
+                        SceneNode::Line { style, .. } => style.color,
+                        other => panic!("{kind:?} must emit only Line nodes, got: {other:?}"),
+                    })
+                    .collect()
+            };
 
         let blue = crate::render::color::from_rgb(0x11, 0x77, 0xEE);
         for kind in [ShapeKind::Cross, ShapeKind::VLine, ShapeKind::HLine] {
@@ -1030,11 +1052,9 @@ mod tests {
             assert_eq!(cleared.len(), expected_nodes);
             for c in &cleared {
                 assert_eq!(
-                    c.a, 0,
-                    "{kind:?} with a CLEARED fill must paint its glyph line transparently, \
-                     got rgba({},{},{},{}) — a cleared fill resolving to anything opaque \
-                     renders `mark_point(fill=\"none\")` as a visible glyph",
-                    c.r, c.g, c.b, c.a
+                    *c, None,
+                    "{kind:?} with a CLEARED fill must paint NO glyph line — any color here \
+                     serializes a stroke attribute for a `mark_point(fill=\"none\")`"
                 );
             }
 
@@ -1042,6 +1062,7 @@ mod tests {
             let absent = line_colors(kind, ClearablePaint::Absent);
             assert_eq!(absent.len(), expected_nodes);
             for c in &absent {
+                let c = c.expect("{kind:?} with an ABSENT fill must still paint its glyph");
                 assert_eq!(
                     (c.r, c.g, c.b, c.a),
                     (0, 0, 0, 255),
@@ -1051,6 +1072,7 @@ mod tests {
 
             // And an ordinary paint still reaches the glyph unchanged.
             for c in line_colors(kind, ClearablePaint::Paint(blue)) {
+                let c = c.expect("an ordinary paint must reach the glyph");
                 assert_eq!((c.r, c.g, c.b, c.a), (0x11, 0x77, 0xEE, 255), "{kind:?}");
             }
         }

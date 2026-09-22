@@ -16,7 +16,10 @@ use geojson::{Geometry, Value as GeoValue};
 
 use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, ClearablePaint, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::draw::{
+    to_scene_fill_stroke, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns,
+    PaintChannels,
+};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::RenderError;
 use crate::spec::coord::CoordKind as SpecCoord;
@@ -93,8 +96,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         return Ok(MarkBuildResult::empty(MarkBatchKind::Polygon));
     };
 
-    let fill = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
-    let stroke = ctx.mark_style.paint.stroke.map(|s| with_opacity(s, ctx.mark_style.paint.opacity));
+    // Geoshape paints from the constant mark style only — it never consults
+    // `ctx.scales.color`, so unlike `area`/`polygon` it has no color-scale
+    // fallback to unify onto `resolve_fill_color`; routing it there would ADD
+    // color-encoding support, a behavior change rather than a unification
+    // (`#110`, reported as a follow-up). What it DOES share is paint-clear
+    // provenance: both slots travel as `ClearablePaint` so a `fill="none"` /
+    // `stroke="none"` paints nothing instead of a zero-alpha color.
+    let opacity = ctx.mark_style.paint.opacity;
+    let fill = ctx.mark_style.paint.fill_paint().map(|c| with_opacity(c, opacity));
+    let stroke = ctx.mark_style.paint.stroke_paint().map(|c| with_opacity(c, opacity));
 
     let pa = &ctx.panel.plot_area;
 
@@ -180,24 +191,20 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
 
     // ── Style setup ───────────────────────────────────────────────────
 
-    // Geoshape fill/stroke are not yet threaded for provenance-gated paint
-    // clearing (out of this fix round's scope, mirrors arc.rs) — hence the
-    // `uncleared` constructor; a cleared constant fill/stroke here still
-    // serializes as `rgba(0,0,0,0.000)`.
     let fill_style = to_scene_fill_stroke(
-        ClearablePaint::Paint(fill),
-        ClearablePaint::uncleared(stroke),
-        ctx.mark_style.paint.stroke_width,
-        ctx.mark_style.paint.opacity,
-        None,
+        fill,
+        stroke,
+        PaintChannels::new(ctx.mark_style.paint.stroke_width, opacity, None),
     );
 
-    // Stroke color for lines: prefer explicit stroke, fall back to fill.
-    let stroke_color = stroke.unwrap_or(fill);
+    // Stroke paint for LineString geometries: prefer the explicit stroke, fall
+    // back to the fill — and if the slot the fallback lands on was cleared, the
+    // line paints nothing.
+    let line_paint = stroke.or(fill);
     let stroke_style = to_scene_stroke(
-        stroke_color,
+        line_paint,
         ctx.mark_style.paint.stroke_width.max(1.0),
-        ctx.mark_style.paint.opacity,
+        opacity,
         None,
         None,
         None,

@@ -122,7 +122,7 @@ fn resolve_shared_pixels(
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke, ClearablePaint, MarkBuildResult, MetadataColumns, PaintChannels,
     };
     use ferrum_scene::{MarkBatchKind, PathCmd};
 
@@ -337,9 +337,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let style = to_scene_fill_stroke(
             fill,
             stroke,
-            ctx.mark_style.paint.stroke_width,
-            1.0,
-            dash_vec.as_deref(),
+            PaintChannels::new(ctx.mark_style.paint.stroke_width, 1.0, dash_vec.as_deref()),
         );
         acc.push(
             ferrum_scene::SceneNode::Path {

@@ -1,7 +1,9 @@
 //! Internal: build strip-title scene nodes (background rect + centered text).
 
 use crate::layout::{Rect, StripTitleLayout, ThemeInputs};
-use crate::render::draw::{to_scene_fill_stroke, to_scene_text_style, ClearablePaint};
+use crate::render::draw::{
+    to_scene_fill_stroke, to_scene_text_style, ClearablePaint, PaintChannels,
+};
 use ferrum_scene::SceneNode;
 
 /// Build the row-header strip title nodes for grid-mode two-way faceting.
@@ -31,9 +33,7 @@ pub fn build_row_strip_title(
         style: crate::render::draw::to_scene_fill_stroke(
             ClearablePaint::Paint(theme.colors.strip_background_color),
             ClearablePaint::Absent,
-            0.0,
-            1.0,
-            None,
+            PaintChannels::new(0.0, 1.0, None),
         ),
         corner_radius: 0.0,
     };
@@ -81,9 +81,7 @@ pub fn build_strip_title(
         style: to_scene_fill_stroke(
             ClearablePaint::Paint(theme.colors.strip_background_color),
             ClearablePaint::Absent,
-            0.0,
-            1.0,
-            None,
+            PaintChannels::new(0.0, 1.0, None),
         ),
         corner_radius: 0.0,
     };

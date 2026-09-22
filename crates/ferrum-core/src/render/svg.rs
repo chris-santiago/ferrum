@@ -49,7 +49,9 @@ impl Default for FillStroke {
 
 #[derive(Debug, Clone)]
 pub struct Stroke {
-    pub stroke: Color,
+    /// The stroke paint, or `None` for a cleared paint — see
+    /// [`push_stroke`]'s omit-everything rule.
+    pub stroke: Option<Color>,
     pub stroke_width: f64,
     pub stroke_dash: Option<Vec<f64>>,
     /// Per-element stroke opacity in [0, 1]. Omit attribute when == 1.0.
@@ -394,8 +396,18 @@ fn push_fill_stroke(buf: &mut String, s: &FillStroke) {
     }
 }
 
+/// A cleared paint (`stroke: None`) emits **no** stroke attributes at all —
+/// not `stroke`, and not the width/dash/opacity that only describe how a stroke
+/// would be painted. The element still renders (its geometry carries hit-testing
+/// and node indices); it simply paints nothing (`#110`, spec §4.1).
+///
+/// This is the opposite of the fill rule in [`push_fill_stroke`], which emits an
+/// explicit `fill="none"`, because SVG's default `fill` is black — omitting that
+/// attribute would paint the shape — while the default `stroke` is already
+/// `none`.
 fn push_stroke(buf: &mut String, s: &Stroke) {
-    push_attr(buf, "stroke", &fmt_svg(s.stroke));
+    let Some(color) = s.stroke else { return };
+    push_attr(buf, "stroke", &fmt_svg(color));
     push_attr(buf, "stroke-width", &fmt_f(s.stroke_width));
     if let Some(dash) = &s.stroke_dash {
         let v: Vec<String> = dash.iter().map(|x| fmt_f(*x)).collect();

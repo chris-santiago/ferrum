@@ -429,7 +429,12 @@ fn emit_gridline_node(svg: &mut SvgBuffer, node: &SceneNode) {
         style,
     } = node
     {
-        let color = from_rgba(style.color.r, style.color.g, style.color.b, style.color.a);
+        // A cleared paint paints no gridline: `gridline` writes `stroke`
+        // unconditionally (its whole purpose is the inline dash/opacity the
+        // shared `Stroke` struct does not carry), so the omission happens here
+        // rather than inside it.
+        let Some(c) = style.color else { return };
+        let color = from_rgba(c.r, c.g, c.b, c.a);
         svg.gridline(
             *x1,
             *y1,
@@ -461,7 +466,7 @@ fn to_svg_fill_stroke_with_anchor(s: &FsFillStroke, anchor_x: f64, anchor_y: f64
 
 fn to_svg_stroke(s: &FsStroke) -> Stroke {
     Stroke {
-        stroke: from_rgba(s.color.r, s.color.g, s.color.b, s.color.a),
+        stroke: s.color.map(|c| from_rgba(c.r, c.g, c.b, c.a)),
         stroke_width: s.width,
         stroke_dash: s.dash.clone(),
         stroke_opacity: s.stroke_opacity,
@@ -593,7 +598,7 @@ mod tests {
             x2: 350.0,
             y2: 50.0,
             style: StrokeStyle {
-                color: Color::rgb(255, 0, 0),
+                color: Some(Color::rgb(255, 0, 0)),
                 width: 2.0,
                 opacity: 1.0,
                 dash: None,
@@ -710,7 +715,7 @@ mod tests {
             x2: 100.0,
             y2: 0.0,
             style: StrokeStyle {
-                color: Color::rgb(0, 255, 0),
+                color: Some(Color::rgb(0, 255, 0)),
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,
@@ -818,7 +823,7 @@ mod tests {
             x2: 10.0,
             y2: 0.0,
             style: StrokeStyle {
-                color: Color::rgb(0, 255, 0),
+                color: Some(Color::rgb(0, 255, 0)),
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,

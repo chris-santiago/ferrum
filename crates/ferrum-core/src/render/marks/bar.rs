@@ -8,7 +8,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns, PaintChannels};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
@@ -161,15 +161,17 @@ impl<'a> StrokeChannels<'a> {
         let effective_stroke =
             resolve_effective_stroke(stroke_width, stroke, fill, self.width.is_some());
 
-        let fs = crate::render::draw::to_scene_fill_stroke_full(
+        let fs = crate::render::draw::to_scene_fill_stroke(
             fill,
             effective_stroke,
-            stroke_width,
-            opacity,
-            effective_dash.as_deref(),
-            fill_opacity,
-            stroke_opacity,
-            angle,
+            PaintChannels {
+                stroke_width,
+                opacity,
+                stroke_dash: effective_dash.as_deref(),
+                fill_opacity,
+                stroke_opacity,
+                angle,
+            },
         );
         (fs, corner_radius)
     }
@@ -1409,7 +1411,7 @@ mod tests {
 
     /// T8 quality-review finding 2 extended to bar's own `FillStroke`
     /// construction: `row_fill_stroke` builds `ferrum_scene::FillStroke`
-    /// directly (bypassing `to_scene_fill_stroke_full`), so a cleared
+    /// directly (bypassing `to_scene_fill_stroke`), so a cleared
     /// `stroke=` must be normalized there too, after the stroke-width rescue
     /// decision — otherwise the same `rgba(0,0,0,0.000)` leak the ribbon fix
     /// closed would reopen for `mark_bar(stroke="none")`.

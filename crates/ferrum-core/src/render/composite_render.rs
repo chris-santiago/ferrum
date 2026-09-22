@@ -3215,7 +3215,7 @@ mod tests {
             angle: 0.0,
         };
         let stroke = StrokeStyle {
-            color: ferrum_scene::Color::rgb(0, 0, 0),
+            color: Some(ferrum_scene::Color::rgb(0, 0, 0)),
             width: 1.0,
             opacity: 1.0,
             dash: None,

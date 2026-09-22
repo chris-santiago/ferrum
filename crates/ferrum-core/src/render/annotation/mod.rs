@@ -714,7 +714,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 x2: ctx.resolve_x(x2),
                 y2: ctx.resolve_y(y2),
                 style: StrokeStyle {
-                    color: resolve_color(stroke),
+                    color: Some(resolve_color(stroke)),
                     width: *stroke_width,
                     opacity: 1.0,
                     dash: dash.as_deref().map(|d| d.to_vec()),
@@ -857,7 +857,7 @@ fn emit_arrow(
         x2,
         y2,
         style: StrokeStyle {
-            color,
+            color: Some(color),
             width: stroke_width,
             opacity: 1.0,
             dash: None,
@@ -1003,7 +1003,7 @@ fn emit_bracket(
 ) {
     let color = resolve_color(stroke);
     let stroke_style = StrokeStyle {
-        color,
+        color: Some(color),
         width: 1.5,
         opacity: 1.0,
         dash: None,
@@ -1139,7 +1139,7 @@ fn emit_callout(
             x2: tx,
             y2: ty,
             style: StrokeStyle {
-                color: resolve_color(border_color),
+                color: Some(resolve_color(border_color)),
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,

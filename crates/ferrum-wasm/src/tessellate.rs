@@ -46,7 +46,11 @@ pub fn tessellate_line(
     style: &StrokeStyle,
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) {
-    let color = color_to_f32(&style.color, style.opacity * style.stroke_opacity);
+    // A cleared paint paints nothing: no geometry at all, mirroring
+    // `tessellate_path`'s `if let Some(stroke)` branch and the SVG walker's
+    // omitted `stroke` attribute (`#110`).
+    let Some(c) = &style.color else { return };
+    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(x1 as f32, y1 as f32));
     builder.line_to(point(x2 as f32, y2 as f32));
@@ -102,7 +106,8 @@ pub fn tessellate_polyline(
     if points.len() < 2 {
         return;
     }
-    let color = color_to_f32(&style.color, style.opacity * style.stroke_opacity);
+    let Some(c) = &style.color else { return };
+    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(points[0].0 as f32, points[0].1 as f32));
     for p in &points[1..] {
@@ -438,12 +443,12 @@ mod tests {
 
     fn make_stroke_style(opacity: f64, stroke_opacity: f64) -> StrokeStyle {
         StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 255,
                 g: 255,
                 b: 255,
                 a: 255,
-            },
+            }),
             width: 2.0,
             opacity,
             dash: None,
@@ -474,6 +479,38 @@ mod tests {
                 v.color[3]
             );
         }
+    }
+
+    /// `#110`: a cleared stroke paint (`color: None`) tessellates to NO geometry,
+    /// the interactive-render counterpart of the SVG walker omitting the `stroke`
+    /// attribute. Both stroke-only tessellators are covered; the paired
+    /// non-cleared assertions above and below are what keep this from passing by
+    /// simply never tessellating anything.
+    #[test]
+    fn cleared_stroke_paint_tessellates_no_geometry() {
+        let cleared = StrokeStyle { color: None, ..make_stroke_style(1.0, 1.0) };
+
+        let mut line: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &cleared, &mut line);
+        assert!(
+            line.vertices.is_empty() && line.indices.is_empty(),
+            "a cleared stroke must tessellate no line geometry, got {} vertices",
+            line.vertices.len()
+        );
+
+        let mut poly: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_polyline(&[(0.0, 0.0), (10.0, 10.0), (20.0, 0.0)], &cleared, &mut poly);
+        assert!(
+            poly.vertices.is_empty() && poly.indices.is_empty(),
+            "a cleared stroke must tessellate no polyline geometry, got {} vertices",
+            poly.vertices.len()
+        );
+
+        // Control: the same geometry with a paint DOES tessellate.
+        let painted = make_stroke_style(1.0, 1.0);
+        let mut ctrl: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_polyline(&[(0.0, 0.0), (10.0, 10.0), (20.0, 0.0)], &painted, &mut ctrl);
+        assert!(!ctrl.vertices.is_empty(), "a painted polyline must tessellate geometry");
     }
 
     /// When both opacity=0.8 and stroke_opacity=0.5 are set, the effective

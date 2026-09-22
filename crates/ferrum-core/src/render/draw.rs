@@ -952,16 +952,15 @@ impl ClearablePaint {
     /// A never-cleared paint from an `Option<Color>`: `Some` paints, `None` is
     /// [`Absent`](Self::Absent).
     ///
-    /// Passing a [`MarkPaint`] slot through this constructor marks a site that
-    /// has NOT yet threaded paint-clear provenance
-    /// (`area`/`arc`/`geoshape`/`polygon`/`line`, `#110`'s migration half): for
-    /// those a cleared constant still serializes as `rgba(0,0,0,0.000)`, and
-    /// their fill analog spells the same debt as `Paint(paint.fill)`. Prefer
-    /// [`MarkPaint::stroke_paint`] wherever the clear should be honored.
-    ///
-    /// So `grep uncleared(` is T12's worklist, with **one** exception to skip:
-    /// [`MarkPaint::stroke_paint`]'s own call, which is the clear-honoring path
-    /// itself and reaches this constructor only after the clear is handled.
+    /// This is the projection for a slot that carries no provenance of its own,
+    /// and it has exactly **one** caller: [`MarkPaint::stroke_paint`], which
+    /// reaches it only after answering the clear. T7 left it as the marker for
+    /// the five mark builders (`area`/`arc`/`geoshape`/`polygon`/`line`) that had
+    /// not yet threaded provenance — a cleared constant still serialized as
+    /// `rgba(0,0,0,0.000)` there; T12 migrated all five, so a NEW call here is a
+    /// site dropping a clear on the floor rather than a known-pending one. Prefer
+    /// [`MarkPaint::stroke_paint`] / [`MarkPaint::fill_paint`], which pair a slot
+    /// with its own provenance.
     pub fn uncleared(c: Option<Color>) -> Self {
         match c {
             Some(c) => Self::Paint(c),
@@ -1017,6 +1016,51 @@ impl ClearablePaint {
         self.color().unwrap_or(fallback)
     }
 
+    /// Substitute `fallback` for [`Absent`](Self::Absent), leaving both
+    /// [`Paint`](Self::Paint) and [`Cleared`](Self::Cleared) as they are.
+    ///
+    /// This is [`color_or`](Self::color_or)'s paint-preserving form, for a slot
+    /// whose fallback is another slot: `geoshape`'s line stroke falls back to its
+    /// fill, and if *that* slot was cleared the line paints nothing (`#110`,
+    /// spec §4.1).
+    pub fn or(self, fallback: Self) -> Self {
+        match self {
+            Self::Absent => fallback,
+            other => other,
+        }
+    }
+
+    /// [`or`](Self::or) with a plain color as the fallback.
+    ///
+    /// For a caller whose slot has a hardcoded default but must still honor a
+    /// clear: point's `cross`/`vline`/`hline` glyphs paint their lines in the
+    /// *fill* slot and default to black when a mark resolves no fill, but a fill
+    /// the user cleared must paint nothing at all rather than black or a
+    /// zero-alpha stroke.
+    pub fn or_paint(self, fallback: Color) -> Self {
+        self.or(Self::Paint(fallback))
+    }
+
+    /// `resolved` as this slot's paint — unless the slot was **cleared**, which
+    /// outranks it.
+    ///
+    /// This is the one precedence rule `#110` turns on (spec §4.1): a color
+    /// resolved from somewhere other than the constant mark style — a color
+    /// channel's scale lookup, a per-row column, a group key — paints, but a
+    /// paint the user explicitly cleared with `"none"` paints nothing, however
+    /// the other source resolved. Before this, every such site rebuilt the
+    /// resolved color as a bare `Color` and the clear was simply lost.
+    ///
+    /// [`Absent`](Self::Absent) paints `resolved` like [`Paint`](Self::Paint)
+    /// does: an absent slot is not a decision against painting, and each
+    /// caller's own fallback chain has already accounted for it.
+    pub fn cleared_or(self, resolved: Color) -> Self {
+        match self {
+            Self::Cleared => Self::Cleared,
+            Self::Paint(_) | Self::Absent => Self::Paint(resolved),
+        }
+    }
+
     /// Apply `f` to a [`Paint`](Self::Paint)'s color — composing per-row opacity,
     /// typically. [`Cleared`](Self::Cleared) and [`Absent`](Self::Absent) pass
     /// through: neither has a color to compose onto, and both serialize to
@@ -1029,71 +1073,103 @@ impl ClearablePaint {
     }
 }
 
-/// Build a [`FillStroke`](ferrum_scene::FillStroke) with `fill_opacity`,
-/// `stroke_opacity`, and `angle` left at their neutral defaults (`1.0`, `1.0`,
-/// `0.0`).
+/// The scalar paint channels of a [`FillStroke`](ferrum_scene::FillStroke),
+/// as one named value.
 ///
-/// This is the common case for marks that do not bind those channels (legend
-/// swatches, axis fills, strip backgrounds, area/line group styles). Marks that
-/// *do* resolve per-row `fill_opacity`/`stroke_opacity`/`angle` should call
-/// [`to_scene_fill_stroke_full`] instead of patching the returned struct
-/// afterward — that variant takes every field so the caller receives a
-/// finished `FillStroke` in one call.
+/// These six travelled as bare positionals through
+/// [`to_scene_fill_stroke`] — five of them `f64`, four of them adjacent — where
+/// nothing but argument order distinguished `opacity` from `fill_opacity` from
+/// `angle`. Naming them at the call site is the point (wave 6A T12, carried from
+/// T7's quality review); it is also what let the constructor drop from 8
+/// arguments to 3 and shed its `clippy::too_many_arguments` suppression.
+///
+/// Build with [`new`](Self::new) for the common case — a mark that binds none of
+/// the per-row opacity/angle channels — or a struct literal to set them.
+#[derive(Debug, Clone, Copy)]
+pub struct PaintChannels<'d> {
+    pub stroke_width: f64,
+    /// Element opacity, composed over both paints by the output walkers.
+    pub opacity: f64,
+    pub stroke_dash: Option<&'d [f64]>,
+    /// Per-element `fill-opacity`, distinct from `opacity`. Neutral: `1.0`.
+    pub fill_opacity: f64,
+    /// Per-element `stroke-opacity`, distinct from `opacity`. Neutral: `1.0`.
+    pub stroke_opacity: f64,
+    /// Rotation in degrees about the element's anchor. Neutral: `0.0`.
+    pub angle: f64,
+}
+
+impl<'d> PaintChannels<'d> {
+    /// The width/opacity/dash a mark always has, with `fill_opacity`,
+    /// `stroke_opacity` and `angle` at their neutral values (`1.0`, `1.0`,
+    /// `0.0`).
+    ///
+    /// This is the shape of every mark that does not bind those three channels
+    /// (legend swatches, axis fills, strip backgrounds, area borders,
+    /// arc/geoshape/polygon fills), and replaces the former
+    /// `to_scene_fill_stroke` / `to_scene_fill_stroke_full` pair: the
+    /// convenience wrapper's whole job was defaulting those three fields, which
+    /// is now this constructor's job, so one constructor serves both call
+    /// shapes.
+    pub fn new(stroke_width: f64, opacity: f64, stroke_dash: Option<&'d [f64]>) -> Self {
+        Self {
+            stroke_width,
+            opacity,
+            stroke_dash,
+            fill_opacity: 1.0,
+            stroke_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+}
+
+/// Build a [`FillStroke`](ferrum_scene::FillStroke) from two paints and their
+/// scalar channels.
 ///
 /// Each paint arrives as one [`ClearablePaint`] rather than as a color plus an
-/// unlabeled trailing boolean. Most callers of this arity never resolve a user
-/// paint-clear at the call site (legend swatches, axis bands, strip backgrounds,
-/// area borders, arc/geoshape/polygon fills derived from a color scale) and pass
-/// [`ClearablePaint::Paint`]/[`Absent`](ClearablePaint::Absent) directly.
+/// unlabeled trailing boolean, and the channels arrive as one
+/// [`PaintChannels`] rather than as five bare `f64` positionals.
+///
+/// A [`ClearablePaint::Cleared`] paint (provenance from [`MarkPaint`], never a
+/// value test) serializes as nothing via [`ClearablePaint::scene_paint`], so it
+/// never emits an explicit `rgba(0,0,0,0.000)`. A paint that merely *resolves
+/// to* `color::TRANSPARENT` without having been cleared (`fill="#00000000"`, or
+/// `opacity=0` composed onto black) keeps serializing byte-identically, per
+/// spec §7.
+///
+/// Note the fill and stroke asymmetry in the *emitted* SVG, which lives in
+/// `svg.rs::push_fill_stroke` rather than here: an absent stroke omits the
+/// attribute, while an absent fill emits an explicit `fill="none"`, because
+/// SVG's default fill is black and omitting the attribute would paint it.
 pub fn to_scene_fill_stroke(
     fill: ClearablePaint,
     stroke: ClearablePaint,
-    stroke_width: f64,
-    opacity: f64,
-    stroke_dash: Option<&[f64]>,
-) -> ferrum_scene::FillStroke {
-    to_scene_fill_stroke_full(fill, stroke, stroke_width, opacity, stroke_dash, 1.0, 1.0, 0.0)
-}
-
-/// Build a complete [`FillStroke`](ferrum_scene::FillStroke), including the
-/// `fill_opacity` / `stroke_opacity` / `angle` channels.
-///
-/// [`to_scene_fill_stroke`] is the convenience wrapper that defaults the last
-/// three fields to their neutral values. Marks that resolve those channels
-/// per-row (point, rect, area, line) call this directly so they no longer build
-/// a partial `FillStroke` and patch the three fields by hand at the call site.
-///
-/// A [`ClearablePaint::Cleared`] paint (provenance from [`MarkPaint`], never a
-/// value test) serializes as nothing via
-/// [`ClearablePaint::scene_paint`], so it never emits an explicit
-/// `rgba(0,0,0,0.000)`. A paint that merely *resolves to* `color::TRANSPARENT`
-/// without having been cleared (`fill="#00000000"`, or `opacity=0` composed
-/// onto black) keeps serializing byte-identically, per spec §7.
-#[allow(clippy::too_many_arguments)]
-pub fn to_scene_fill_stroke_full(
-    fill: ClearablePaint,
-    stroke: ClearablePaint,
-    stroke_width: f64,
-    opacity: f64,
-    stroke_dash: Option<&[f64]>,
-    fill_opacity: f64,
-    stroke_opacity: f64,
-    angle: f64,
+    channels: PaintChannels<'_>,
 ) -> ferrum_scene::FillStroke {
     ferrum_scene::FillStroke {
         fill: fill.scene_paint(),
         stroke: stroke.scene_paint(),
-        stroke_width,
-        opacity,
-        stroke_dash: stroke_dash.map(|d| d.to_vec()),
-        stroke_opacity,
-        fill_opacity,
-        angle,
+        stroke_width: channels.stroke_width,
+        opacity: channels.opacity,
+        stroke_dash: channels.stroke_dash.map(|d| d.to_vec()),
+        stroke_opacity: channels.stroke_opacity,
+        fill_opacity: channels.fill_opacity,
+        angle: channels.angle,
     }
 }
 
+/// Build a [`StrokeStyle`](ferrum_scene::StrokeStyle) for a stroke-only node
+/// (`Line`, `Polyline`, gridlines, axis rules).
+///
+/// `paint` is a [`ClearablePaint`] for the same reason
+/// [`to_scene_fill_stroke`]'s two paints are: a user-cleared stroke must reach
+/// the scene as *no* color, not as a zero-alpha one. Before `#110` this
+/// constructor took a bare `Color` and `StrokeStyle.color` was non-optional, so
+/// every stroke-only mark (line/rule/tick/segment, point's cross/vline/hline
+/// glyphs) serialized a cleared paint as `rgba(0,0,0,0.000)`; chrome callers
+/// that always have a color pass [`ClearablePaint::Paint`] explicitly.
 pub fn to_scene_stroke(
-    color: Color,
+    paint: ClearablePaint,
     width: f64,
     opacity: f64,
     dash: Option<&[f64]>,
@@ -1101,7 +1177,7 @@ pub fn to_scene_stroke(
     join: Option<&str>,
 ) -> ferrum_scene::StrokeStyle {
     ferrum_scene::StrokeStyle {
-        color: to_scene_color(color),
+        color: paint.scene_paint(),
         width,
         opacity,
         dash: dash.map(|d| d.to_vec()),
@@ -1120,8 +1196,10 @@ pub fn to_scene_stroke(
 ///   to fill when `stroke` is somehow `None`.
 /// - otherwise → per-row color encoding wins, then the theme stroke, then fill.
 ///
-/// Used by rule/segment (and any axis-aligned/diagonal line mark) so the
-/// precedence lives in one place instead of being copy-pasted per renderer.
+/// This resolves the stroke's *value* only. Mark renderers call
+/// [`resolve_stroke_paint`], which pairs that value with the slot's provenance
+/// so a cleared stroke reaches the scene as a clear rather than as a present,
+/// invisible color.
 ///
 /// The `unwrap_or(fill)` rescue is for a user-set stroke that is somehow
 /// `None`; it does NOT fire for an explicit `stroke="none"`, which
@@ -1137,6 +1215,18 @@ pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> 
     }
 }
 
+/// One row's stroke **paint** for a stroke-only mark: [`resolve_stroke_color`]'s
+/// value under the slot's own provenance.
+///
+/// Used by rule/tick/segment (and any axis-aligned/diagonal line mark) so the
+/// precedence lives in one place instead of being copy-pasted per renderer. A
+/// `stroke="none"` returns [`ClearablePaint::Cleared`], which serializes as no
+/// `stroke` attribute at all — where before `#110` the same clear travelled as
+/// `Some(TRANSPARENT)` and serialized as `rgba(0,0,0,0.000)`.
+pub(crate) fn resolve_stroke_paint(ms: &MarkStyle, row_color: Option<Color>) -> ClearablePaint {
+    ms.paint.stroke_paint().cleared_or(resolve_stroke_color(ms, row_color))
+}
+
 /// Resolve a single row's fill color from the color scale + that row's encoded
 /// value, falling back to the constant mark-style `fill` when no color encoding
 /// applies.
@@ -1147,10 +1237,13 @@ pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> 
 /// renderer. The [`ColorInput::Category`] branch maps the row's category string
 /// via `lookup`. `scale` is `None` when the chart has no color scale.
 ///
-/// A scale lookup that hits returns [`ClearablePaint::Paint`] — a color-scale
-/// value is never a user paint-clear, however it happens to render (T8
-/// quality-review c2). A miss, or an absent scale, returns `fallback` unchanged,
-/// clear and all, so the constant paint's provenance survives the lookup.
+/// A scale lookup that hits paints the looked-up color, which is never itself a
+/// user paint-clear however it happens to render (T8 quality-review c2) — but a
+/// **cleared** fallback outranks the lookup and stays cleared
+/// ([`ClearablePaint::cleared_or`], spec §4.1): `fill="none"` under a color
+/// channel paints nothing rather than the channel's palette color. A miss, or an
+/// absent scale, returns `fallback` unchanged, clear and all, so the constant
+/// paint's provenance survives the lookup either way.
 pub(crate) fn resolve_fill_color(
     scale: Option<&ColorScale>,
     cat_value: Option<&str>,
@@ -1163,9 +1256,40 @@ pub(crate) fn resolve_fill_color(
         ColorInput::Category => cat_value.and_then(|v| s.lookup(v)),
     };
     match looked_up {
-        Some(c) => ClearablePaint::Paint(c),
+        Some(c) => fallback.cleared_or(c),
         None => fallback,
     }
+}
+
+/// [`resolve_fill_color`] for a mark that resolves one paint per **group**
+/// rather than per row: the group key is a single string, so the numeric branch
+/// reads that same string through `str::parse`.
+///
+/// **Callers: `area`, and `polygon`'s categorical branch.** `line` is
+/// group-keyed too and rolled the same chain, but deliberately stayed OFF this
+/// helper: its fallback differs on a scale *miss* (it falls back to `fill`, not
+/// to the theme stroke), so moving it would change output for charts carrying no
+/// clear at all. `polygon`'s *quantitative* branch is likewise still off it, for
+/// a different reason — it never consults `ctx.scales.color` at all, which is a
+/// separate live defect logged at that branch.
+///
+/// The chain this replaces is exactly what `ColorScale::lookup(&str)` does
+/// internally, which is what those marks called when they each rolled their own
+/// `scale.lookup(key).unwrap_or(paint.fill)` fallback — so this is the
+/// group-keyed *spelling* of the one resolution, not a second implementation of
+/// it, and a group-keyed mark's numeric-scale handling is unchanged by the move.
+///
+/// Two things do change for a caller that moves onto this helper: it gains the
+/// cleared-fallback precedence (`#110` — a `fill="none"` outranks the scale), and
+/// it inherits [`resolve_fill_color`]'s `is_finite` filter, so a group key that
+/// parses to `inf`/`NaN` falls back to the constant paint instead of sampling the
+/// scheme at a non-finite position.
+pub(crate) fn resolve_group_fill_color(
+    scale: Option<&ColorScale>,
+    group_key: Option<&str>,
+    fallback: ClearablePaint,
+) -> ClearablePaint {
+    resolve_fill_color(scale, group_key, group_key.and_then(|k| k.parse().ok()), fallback)
 }
 
 /// Resolve the effective per-row stroke color for a *filled* mark
@@ -2062,12 +2186,16 @@ mod tests {
         };
         let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
         let paint = ClearablePaint::Paint(fallback);
-        // "a" → palette[0] = red; num_value is ignored for categorical. A hit is
-        // always a plain `Paint`, never the fallback's provenance.
+        // "a" → palette[0] = red; num_value is ignored for categorical.
+        assert_eq!(resolve_fill_color(Some(&scale), Some("a"), Some(99.0), paint), ClearablePaint::Paint(red));
+        // A hit over a CLEARED fallback stays cleared: an explicit `fill="none"`
+        // outranks the color channel (`#110`, spec §4.1). Before wave 6A T12 this
+        // arm answered `Paint(red)`, which is how a cleared paint under a color
+        // scale rendered the palette color anyway.
         assert_eq!(
             resolve_fill_color(Some(&scale), Some("a"), Some(99.0), ClearablePaint::Cleared),
-            ClearablePaint::Paint(red),
-            "a scale lookup hit is never cleared",
+            ClearablePaint::Cleared,
+            "a user paint-clear outranks a scale-lookup hit",
         );
         // "b" → palette[1] = blue.
         assert_eq!(
@@ -2096,9 +2224,13 @@ mod tests {
         // the resolved color equals scale.lookup_f64(value).
         let v = 3.0;
         assert_eq!(
-            resolve_fill_color(Some(&scale), Some("ignored"), Some(v), ClearablePaint::Cleared),
+            resolve_fill_color(Some(&scale), Some("ignored"), Some(v), paint),
             ClearablePaint::Paint(scale.lookup_f64(v).unwrap()),
-            "a scale lookup hit is never cleared",
+        );
+        assert_eq!(
+            resolve_fill_color(Some(&scale), Some("ignored"), Some(v), ClearablePaint::Cleared),
+            ClearablePaint::Cleared,
+            "a user paint-clear outranks a continuous-scale hit too",
         );
         // Non-finite / absent numeric → fallback.
         assert_eq!(resolve_fill_color(Some(&scale), None, Some(f64::NAN), paint), paint);

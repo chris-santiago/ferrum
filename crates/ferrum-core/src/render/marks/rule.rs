@@ -67,7 +67,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, resolve_stroke_color, DrawCtx,
+    col_as_f64, col_as_positional_category_str, resolve_stroke_paint, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{
@@ -252,9 +252,13 @@ fn rule_stroke_style(
     let row_color = color_vals
         .as_ref()
         .and_then(|v| v.get(i).copied().flatten());
-    let base_color = resolve_stroke_color(ctx.mark_style, row_color);
-    let stroke_color = with_opacity(base_color, opacity);
-    let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);
+    // `resolve_stroke_paint` carries the slot's provenance with its value, so an
+    // explicit `stroke="none"` reaches the scene as a clear and emits no `stroke`
+    // attribute — before `#110` the same clear travelled as a present transparent
+    // color and serialized `rgba(0,0,0,0.000)`.
+    let stroke_paint =
+        resolve_stroke_paint(ctx.mark_style, row_color).map(|c| with_opacity(c, opacity));
+    let mut style = to_scene_stroke(stroke_paint, stroke_width, 1.0, effective_dash, None, None);
     style.stroke_opacity = stroke_opacity;
     style
 }
@@ -650,7 +654,10 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            SceneNode::Line { style, .. } => Some((style.color.r, style.color.g, style.color.b)),
+            SceneNode::Line { style, .. } => {
+                let c = style.color.expect("rule line must carry a stroke color");
+                Some((c.r, c.g, c.b))
+            }
             _ => None,
         }).collect();
         assert_eq!(strokes.len(), 2, "expected 2 ranged rule lines");
@@ -707,7 +714,10 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            SceneNode::Line { style, .. } => Some((style.color.r, style.color.g, style.color.b)),
+            SceneNode::Line { style, .. } => {
+                let c = style.color.expect("rule line must carry a stroke color");
+                Some((c.r, c.g, c.b))
+            }
             _ => None,
         }).collect();
         assert_eq!(strokes.len(), 2, "expected 2 ranged rule lines");
@@ -753,7 +763,10 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            SceneNode::Line { style, .. } => Some((style.color.r, style.color.g, style.color.b)),
+            SceneNode::Line { style, .. } => {
+                let c = style.color.expect("rule line must carry a stroke color");
+                Some((c.r, c.g, c.b))
+            }
             _ => None,
         }).collect();
         assert_eq!(strokes.len(), 2);
@@ -2008,7 +2021,13 @@ mod tests {
         }).collect();
         assert_eq!(strokes.len(), 2, "both rules must still draw");
         let distinct: std::collections::BTreeSet<(u8, u8, u8)> =
-            strokes.iter().map(|c| (c.r, c.g, c.b)).collect();
+            strokes
+                .iter()
+                .map(|c| {
+                    let c = c.expect("rule line must carry a stroke color");
+                    (c.r, c.g, c.b)
+                })
+                .collect();
         assert_eq!(
             distinct.len(),
             1,

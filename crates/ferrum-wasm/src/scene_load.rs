@@ -3143,12 +3143,12 @@ mod tests {
 
     fn default_stroke_style() -> ferrum_scene::StrokeStyle {
         ferrum_scene::StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 1.5,
             opacity: 1.0,
             dash: None,
@@ -5870,12 +5870,12 @@ mod tests {
         };
 
         let stroke = StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 255,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 2.0,
             opacity: 1.0,
             dash: None,
@@ -6893,12 +6893,12 @@ mod tests {
         };
 
         let line_style = StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 1.0,
             opacity: 1.0,
             dash: None,
@@ -7063,12 +7063,12 @@ mod tests {
 
     fn gap_fix_stroke_style(width: f64) -> ferrum_scene::StrokeStyle {
         ferrum_scene::StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width,
             opacity: 1.0,
             dash: None,
@@ -8487,12 +8487,12 @@ mod bug_hunt_tests {
     fn bug_hunt_collect_annotation_line_goes_to_annotation_mesh() {
         // A Line annotation node must go to annotation_mesh, not static_mesh.
         let style = ferrum_scene::StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 2.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -8527,12 +8527,12 @@ mod bug_hunt_tests {
     fn bug_hunt_collect_static_line_goes_to_static_mesh() {
         // A Line node via collect_static must go to static_mesh.
         let style = ferrum_scene::StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 1.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -9217,12 +9217,12 @@ mod bug_hunt_interactive_slots {
 
     fn stroke() -> StrokeStyle {
         StrokeStyle {
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             width: 1.0,
             opacity: 1.0,
             dash: None,

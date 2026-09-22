@@ -3624,6 +3624,317 @@ mod orchestration_tests {
         );
     }
 
+    // ── `#110` / spec §4.1: an explicit paint clear outranks the color channel ──
+    //
+    // The defect these pin: `mark_line(stroke="none").encode(x=…, y=…, color=…)`
+    // rendered BYTE-IDENTICALLY to the same chart without the clear, painting the
+    // categorical palette over it; and with no color channel the same clear
+    // serialized as `stroke="rgba(0,0,0,0.000)"` instead of omitting the
+    // attribute. Both halves are asserted at the SVG-attribute level, on the
+    // marks only, for every mark that carries a stroke-only paint.
+    //
+    // The negative control lives in `render_svg_line_explicit_zero_alpha_stroke_*`
+    // below: a paint the caller set to a transparent COLOR is not a cleared paint
+    // and must still serialize, which is what stops any of these from being
+    // satisfiable by a value test on the resolved color.
+
+    use crate::spec::mark_style::MarkKwargsSpec;
+
+    /// Build a spec for `mark`, optionally with a `color` channel, carrying the
+    /// given `mark_kwargs` — the wire shape of
+    /// `ferrum.mark_<m>(**kwargs).encode(x=…, y=…[, x2=…, y2=…][, color="g"])`.
+    fn paint_clear_spec(
+        mark: Mark,
+        style: MarkKwargsSpec,
+        with_color: bool,
+    ) -> (ChartSpec, RecordBatch) {
+        let ranged = matches!(mark, Mark::Segment);
+        let mut encoding = Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        if ranged {
+            encoding.x2 = Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() });
+            encoding.y2 = Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() });
+        }
+        if with_color {
+            encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        }
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark,
+            encoding,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(style),
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 4.0, 2.0, 5.0])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0])),
+                Arc::new(Float64Array::from(vec![2.0, 5.0, 3.0, 6.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    fn render_to_svg(spec: &ChartSpec, batch: &RecordBatch) -> String {
+        render_svg(
+            spec,
+            batch,
+            &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .expect("render must succeed")
+        .bytes
+    }
+
+    /// The marks-only slice of an SVG: everything inside the panel's clip group.
+    ///
+    /// Gridlines, axis lines and strip titles are emitted BEFORE `use_clip_open`
+    /// and annotations/text batches AFTER `use_clip_close` (see `svg_walk::walk_svg`'s
+    /// order), so this is exactly the mark batches — which is what lets a stroke
+    /// assertion below be about the mark rather than about chrome that paints
+    /// `<line>` elements of its own. The fixtures here emit no nested `<g>` inside
+    /// the clip group; each caller asserts on a tag it expects to find, so a
+    /// truncated slice fails rather than passing vacuously.
+    fn mark_group(svg: &str) -> &str {
+        let open = svg.find("<g clip-path=").expect("a panel must open a clip group");
+        let rest = &svg[open..];
+        let close = rest.find("</g>").expect("the clip group must close");
+        &rest[..close]
+    }
+
+    /// Every stroke-only mark: a `stroke="none"` under a color channel paints no
+    /// stroke, and the same chart without the clear does paint one.
+    #[test]
+    fn render_svg_stroke_clear_beats_a_color_channel_on_every_stroke_only_mark() {
+        // (label, mark, the element tag that mark emits, `interpolate=` kwarg)
+        //
+        // `line` appears twice because it emits two different NODE SHAPES: the
+        // default linear spelling is a `StrokeStyle`-shaped `Polyline`, and a
+        // non-linear `interpolate=` is a `FillStroke`-shaped `Path`. At HEAD those
+        // branches built their strokes SEPARATELY, which is how they could both
+        // leak; they now read one `stroke_paint` value, but that coupling is by
+        // construction rather than by type — a future re-split would be exactly
+        // this defect's original shape — so both shapes are pinned rather than one
+        // standing in for the other.
+        let cases: [(&str, Mark, &str, Option<&str>); 5] = [
+            ("line", Mark::Line, "<polyline ", None),
+            ("line(interpolate=monotone)", Mark::Line, "<path ", Some("monotone")),
+            ("rule", Mark::Rule, "<line ", None),
+            ("tick", Mark::Tick, "<line ", None),
+            ("segment", Mark::Segment, "<line ", None),
+        ];
+        for (label, mark, tag, interpolate) in cases {
+            let painted_kwargs = MarkKwargsSpec {
+                interpolate: interpolate.map(String::from),
+                ..Default::default()
+            };
+            let cleared_kwargs = MarkKwargsSpec {
+                stroke: Some("none".into()),
+                interpolate: interpolate.map(String::from),
+                ..Default::default()
+            };
+            let (spec_p, batch) = paint_clear_spec(mark.clone(), painted_kwargs, true);
+            let (spec_c, _) = paint_clear_spec(mark.clone(), cleared_kwargs, true);
+            let painted_svg = render_to_svg(&spec_p, &batch);
+            let cleared_svg = render_to_svg(&spec_c, &batch);
+            let painted = mark_group(&painted_svg);
+            let cleared = mark_group(&cleared_svg);
+
+            // Positive control: without the clear, the color channel paints.
+            assert!(
+                painted.contains(tag) && painted.contains("stroke=\""),
+                "{label} with a color channel and no clear must paint a stroke; marks={painted:?}"
+            );
+            // The clear wins — the geometry is still emitted, unpainted.
+            assert!(
+                cleared.contains(tag),
+                "{label} must still emit its {tag:?} element for a cleared stroke; marks={cleared:?}"
+            );
+            assert!(
+                !cleared.contains("stroke=\""),
+                "{label}: an explicit stroke=\"none\" must beat the color channel and emit NO \
+                 stroke attribute; marks={cleared:?}"
+            );
+            assert_ne!(
+                painted, cleared,
+                "{label}: the cleared render must differ from the uncleared one — the \
+                 pre-`#110` bug was that they were byte-identical"
+            );
+            assert!(
+                !cleared_svg.contains("rgba(0,0,0,0.000)"),
+                "{label}: a cleared stroke must never serialize a zero-alpha color; svg={cleared_svg:?}"
+            );
+        }
+    }
+
+    /// `mark_area(fill="none")` under a color channel: the area path paints no
+    /// fill, where before `#110` the channel's palette color overwrote the clear.
+    ///
+    /// Area's cleared *stroke* is deliberately not pinned here. It is not a
+    /// stroke-only mark: both of its paints travel through the one
+    /// `to_scene_fill_stroke` → `push_fill_stroke` path that point/rect/bar/ribbon
+    /// already pin for a cleared stroke (`bar_cleared_stroke_normalizes_to_none_not_zero_alpha`,
+    /// `render_svg_ribbon_cleared_stroke_emits_no_stroke_attribute`), so area's
+    /// stroke cannot serialize differently from theirs without those failing.
+    /// What is area-specific is the *fill* resolution — the group-keyed chain this
+    /// task rewrote — which is what this pins.
+    #[test]
+    fn render_svg_area_fill_clear_beats_a_color_channel() {
+        let (spec_p, batch) = paint_clear_spec(Mark::Area, MarkKwargsSpec::default(), true);
+        let (spec_c, _) = paint_clear_spec(
+            Mark::Area,
+            MarkKwargsSpec { fill: Some("none".into()), ..Default::default() },
+            true,
+        );
+        let painted_svg = render_to_svg(&spec_p, &batch);
+        let cleared_svg = render_to_svg(&spec_c, &batch);
+        let painted = mark_group(&painted_svg);
+        let cleared = mark_group(&cleared_svg);
+
+        assert!(
+            painted.contains("<path ") && painted.contains("fill=\"rgba("),
+            "an area with a color channel and no clear must paint a palette fill; marks={painted:?}"
+        );
+        assert!(
+            cleared.contains("<path "),
+            "the area path must still be emitted for a cleared fill; marks={cleared:?}"
+        );
+        assert!(
+            !cleared.contains("fill=\"rgba(") && cleared.contains("fill=\"none\""),
+            "an explicit fill=\"none\" must beat the color channel: the path takes SVG's own \
+             `none` keyword, never a palette rgba(); marks={cleared:?}"
+        );
+        assert!(
+            !cleared_svg.contains("rgba(0,0,0,0.000)"),
+            "a cleared area fill must never serialize a zero-alpha color; svg={cleared_svg:?}"
+        );
+    }
+
+    /// The fill clear stops at the fill: `mark_area(fill="none")` with `borders=`
+    /// or `line=` under a color channel is an outline-only area colored by group.
+    /// The border paths take the channel's palette stroke while the fill path
+    /// keeps `fill="none"` (T12 quality-review c3: the borders once reused the
+    /// fill's resolved paint, so the clear blanked them and the chart rendered
+    /// no mark ink at all).
+    #[test]
+    fn render_svg_area_fill_clear_keeps_palette_borders_under_a_color_channel() {
+        let modes = [
+            ("borders=True", MarkKwargsSpec { borders: Some(true), ..Default::default() }),
+            ("line=True", MarkKwargsSpec { line: Some(true), ..Default::default() }),
+        ];
+        for (label, border_kwargs) in modes {
+            let (spec, batch) = paint_clear_spec(
+                Mark::Area,
+                MarkKwargsSpec { fill: Some("none".into()), ..border_kwargs },
+                true,
+            );
+            let svg = render_to_svg(&spec, &batch);
+            let marks = mark_group(&svg);
+            assert!(
+                marks.contains("fill=\"none\"") && !marks.contains("fill=\"rgba("),
+                "{label}: the cleared area fill must stay `none`; marks={marks:?}"
+            );
+            for palette in ["#2563eb", "#dc2626"] {
+                assert!(
+                    marks.contains(&format!("stroke=\"{palette}\"")),
+                    "{label}: each group's border must paint its palette stroke {palette} \
+                     over the fill clear; marks={marks:?}"
+                );
+            }
+        }
+    }
+
+    /// Point's `cross`/`vline`/`hline` glyphs paint their lines in the FILL slot
+    /// (`point.rs::emit_shape_nodes`), so `mark_point(shape="cross", fill="none")`
+    /// is a cleared *fill* reaching a `StrokeStyle`. It must paint nothing.
+    #[test]
+    fn render_svg_point_stroke_shaped_glyph_honors_a_cleared_fill() {
+        for shape in ["cross", "vline", "hline"] {
+            let (spec_p, batch) = paint_clear_spec(
+                Mark::Point,
+                MarkKwargsSpec { shape: Some(shape.into()), ..Default::default() },
+                false,
+            );
+            let (spec_c, _) = paint_clear_spec(
+                Mark::Point,
+                MarkKwargsSpec {
+                    shape: Some(shape.into()),
+                    fill: Some("none".into()),
+                    ..Default::default()
+                },
+                false,
+            );
+            let painted_svg = render_to_svg(&spec_p, &batch);
+            let cleared_svg = render_to_svg(&spec_c, &batch);
+            let painted = mark_group(&painted_svg);
+            let cleared = mark_group(&cleared_svg);
+
+            assert!(
+                painted.contains("<line ") && painted.contains("stroke=\""),
+                "{shape}: an uncleared glyph must paint its lines; marks={painted:?}"
+            );
+            assert!(
+                cleared.contains("<line "),
+                "{shape}: the glyph lines must still be emitted; marks={cleared:?}"
+            );
+            assert!(
+                !cleared.contains("stroke=\""),
+                "{shape}: a cleared FILL must leave the glyph lines unpainted; marks={cleared:?}"
+            );
+            assert!(
+                !cleared_svg.contains("rgba(0,0,0,0.000)"),
+                "{shape}: must not serialize a zero-alpha stroke; svg={cleared_svg:?}"
+            );
+        }
+    }
+
+    /// The stroke-side negative control, mirroring
+    /// `render_svg_point_explicit_zero_alpha_hex_serializes_by_value_not_no_attribute`
+    /// on the fill side: `stroke="#00000000"` resolves the same `Color` bytes as a
+    /// clear but was never cleared, so it must keep serializing
+    /// `rgba(0,0,0,0.000)`. This is what makes the pins above provenance tests
+    /// rather than value tests.
+    #[test]
+    fn render_svg_line_explicit_zero_alpha_stroke_serializes_by_value_not_no_attribute() {
+        let (spec, batch) = paint_clear_spec(
+            Mark::Line,
+            MarkKwargsSpec { stroke: Some("#00000000".into()), ..Default::default() },
+            false,
+        );
+        let svg = render_to_svg(&spec, &batch);
+        let marks = mark_group(&svg);
+        assert!(
+            marks.contains("stroke=\"rgba(0,0,0,0.000)\""),
+            "an explicit #00000000 stroke must serialize by value, not omit the attribute; \
+             marks={marks:?}"
+        );
+    }
+
     #[test]
     fn render_svg_unknown_column_errors() {
         let (mut spec, batch) = scatter_3();

@@ -2727,7 +2727,7 @@ fn build_polar_axes(
 
     let axis_color = draw::to_scene_color(theme.colors.axis_line_color);
     let stroke = ferrum_scene::StrokeStyle {
-        color: axis_color,
+        color: Some(axis_color),
         width: theme.sizes.axis_line_width,
         dash: None,
         opacity: 1.0,
@@ -5286,7 +5286,7 @@ mod tests {
             .iter()
             .filter_map(|n| {
                 if let SceneNode::Polyline { style, .. } = n {
-                    Some(style.color)
+                    Some(style.color.expect("a polyline batch must paint a stroke color"))
                 } else {
                     None
                 }

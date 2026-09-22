@@ -211,7 +211,7 @@ mod tests {
         let node = SceneNode::Polyline {
             points: points.clone(),
             style: StrokeStyle {
-                color: Color::rgb(0, 128, 255),
+                color: Some(Color::rgb(0, 128, 255)),
                 width: 2.0,
                 opacity: 1.0,
                 dash: None,

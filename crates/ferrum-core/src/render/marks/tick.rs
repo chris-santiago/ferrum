@@ -33,7 +33,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, resolve_stroke_color, x_field, y_field, DrawCtx,
+    col_as_f64, col_as_positional_category_str, resolve_stroke_paint, x_field, y_field, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::row_colors_from_scale;
@@ -105,12 +105,13 @@ fn build_geometry(
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    // Per-row stroke color (batch-E T13 cycle 3): `color_vals` is the shared
+    // Per-row stroke paint (batch-E T13 cycle 3): `color_vals` is the shared
     // NF-A3 reader's output (`row_colors_from_scale`, resolved once in
-    // `build`); `resolve_stroke_color` applies the crate-standard precedence
+    // `build`); `resolve_stroke_paint` applies the crate-standard precedence
     // (explicit constant `stroke=` > per-row color encoding > theme stroke >
-    // fill), identically to `rule.rs`/`segment.rs`. With no color scale
-    // bound, `row_color` is `None` at every row and `resolve_stroke_color`
+    // fill), identically to `rule.rs`/`segment.rs`, and carries a `stroke="none"`
+    // clear through as a clear (`#110`) instead of as a zero-alpha color. With no
+    // color scale bound, `row_color` is `None` at every row and the resolution
     // reduces to exactly `stroke.unwrap_or(fill)` — the same expression this
     // function used to compute once, outside the loop — so every unencoded
     // tick (the overwhelming default) is byte-identical to before this fix.
@@ -129,9 +130,9 @@ fn build_geometry(
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(default_stroke_width);
         let row_color = color_vals.as_ref().and_then(|v| v.get(i).copied().flatten());
-        let color = resolve_stroke_color(ctx.mark_style, row_color);
+        let paint = resolve_stroke_paint(ctx.mark_style, row_color);
         let mut style = to_scene_stroke(
-            color, width, opacity, ctx.mark_style.paint.stroke_dash.as_deref(), None, None,
+            paint, width, opacity, ctx.mark_style.paint.stroke_dash.as_deref(), None, None,
         );
         // Multiplied in (not overwritten) so a chart with no `stroke_opacity`
         // encoding — where `OpacityResolver` defaults this slot to `1.0` —
@@ -702,9 +703,10 @@ mod tests {
         let line = result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.clone()) } else { None }
         }).expect("expected at least one Line node");
-        assert_eq!(line.color.r, 0xAA, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
-        assert_eq!(line.color.g, 0xBB, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
-        assert_eq!(line.color.b, 0xCC, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
+        let line_color = line.color.expect("an unencoded tick must carry a stroke color");
+        assert_eq!(line_color.r, 0xAA, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
+        assert_eq!(line_color.g, 0xBB, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
+        assert_eq!(line_color.b, 0xCC, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
     }
 
     #[test]
@@ -1765,7 +1767,9 @@ mod tests {
         let result = super::build(&ctx).unwrap();
 
         let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            ferrum_scene::SceneNode::Line { style, .. } => {
+                Some(style.color.expect("a color-encoded tick must carry a stroke color"))
+            }
             _ => None,
         }).collect();
         assert_eq!(colors.len(), 2, "expected 2 tick nodes, one per hue category");
@@ -1817,7 +1821,9 @@ mod tests {
         let result = super::build(&ctx).unwrap();
 
         let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
-            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            ferrum_scene::SceneNode::Line { style, .. } => {
+                Some(style.color.expect("an explicit constant stroke= must paint a color"))
+            }
             _ => None,
         }).collect();
         assert_eq!(colors.len(), 2);
@@ -1864,7 +1870,8 @@ mod tests {
 
         for n in &result.nodes {
             if let ferrum_scene::SceneNode::Line { style, .. } = n {
-                assert_eq!((style.color.r, style.color.g, style.color.b),
+                let c = style.color.expect("an unencoded tick must carry a stroke color");
+                assert_eq!((c.r, c.g, c.b),
                     (expected.red, expected.green, expected.blue),
                     "no color encoding must keep resolving stroke.unwrap_or(fill) unchanged");
             }

@@ -187,8 +187,8 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Tra
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, to_scene_fill_stroke_full, ClearablePaint, MarkBuildResult,
-        MetadataColumns,
+        resolve_group_fill_color, to_scene_fill_stroke, ClearablePaint, MarkBuildResult,
+        MetadataColumns, PaintChannels,
     };
     use ferrum_scene::MarkBatchKind;
 
@@ -356,30 +356,32 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else {
             build_area_cmds(&top, baseline, trace)
         };
-        let fill = match (key.as_deref(), &ctx.scales.color) {
-            (Some(v), Some(scale)) => {
-                let base = scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill);
-                with_opacity(base, effective_opacity)
-            }
-            _ => with_opacity(ctx.mark_style.paint.fill, effective_opacity),
-        };
-        let stroke_color = match (key.as_deref(), &ctx.scales.color) {
-            (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
-            _ => ctx.mark_style.paint.fill,
-        };
-        // Area fill/border are not yet threaded for provenance-gated paint
-        // clearing (out of this fix round's scope, mirrors arc.rs) — hence the
-        // `uncleared` constructors; a cleared constant fill/stroke here still
-        // serializes as `rgba(0,0,0,0.000)`.
-        let style = to_scene_fill_stroke_full(
-            ClearablePaint::Paint(fill),
-            ClearablePaint::uncleared(ctx.mark_style.paint.stroke),
-            ctx.mark_style.paint.stroke_width,
-            1.0,
-            None,
-            group_fill_opacity,
-            1.0,
-            0.0,
+        // This group's fill, and the color its border lines take. Both resolve
+        // through the shared group-keyed resolver (`#110`), which replaced two
+        // hand-rolled `scale.lookup(key).unwrap_or(paint.fill)` chains. Numeric
+        // scales resolved before and resolve now — `ColorScale::lookup(&str)`
+        // already parsed the key through to `lookup_f64`, which is what the
+        // helper spells. What changes: a `fill="none"` clear now outranks the
+        // color channel instead of being overwritten by its palette color, and a
+        // key parsing to a non-finite value now falls back to the constant paint
+        // (the shared resolver's `is_finite` filter).
+        let fill_base = resolve_group_fill_color(
+            ctx.scales.color.as_ref(),
+            key.as_deref(),
+            ctx.mark_style.paint.fill_paint(),
+        );
+        let fill = fill_base.map(|c| with_opacity(c, effective_opacity));
+        let style = to_scene_fill_stroke(
+            fill,
+            ctx.mark_style.paint.stroke_paint(),
+            PaintChannels {
+                stroke_width: ctx.mark_style.paint.stroke_width,
+                opacity: 1.0,
+                stroke_dash: None,
+                fill_opacity: group_fill_opacity,
+                stroke_opacity: 1.0,
+                angle: 0.0,
+            },
         );
 
         // Collect this group's nodes (fill + optional borders) so they can all
@@ -391,19 +393,34 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             closed: true,
         });
 
+        // The one style both border modes paint with: same minimum-1px width
+        // rule, and the group's color-channel paint. A scale hit paints the
+        // borders whatever the fill clear says, so `fill="none"` plus borders
+        // is an outline-only area colored by group (HEAD's precedence). Only
+        // the no-scale / scale-miss fallback reads the *fill* (not the theme
+        // stroke), and there a cleared fill leaves the borders cleared too.
+        // Resolved against `Absent` rather than reusing `fill_base`, which
+        // carries the fill's clear over a hit.
+        let border_paint = resolve_group_fill_color(
+            ctx.scales.color.as_ref(),
+            key.as_deref(),
+            ClearablePaint::Absent,
+        )
+        .or(ctx.mark_style.paint.fill_paint());
+        let border_style = || {
+            to_scene_fill_stroke(
+                ClearablePaint::Absent,
+                border_paint,
+                PaintChannels::new(ctx.mark_style.paint.stroke_width.max(1.0), 1.0, None),
+            )
+        };
+
         // S9: line border on top of the area fill.
         if ctx.mark_style.area.line_border == Some(true) {
             let line_cmds = build_top_line_cmds(&top, trace);
-            let border_style = to_scene_fill_stroke(
-                ClearablePaint::Absent,
-                ClearablePaint::Paint(stroke_color),
-                ctx.mark_style.paint.stroke_width.max(1.0),
-                1.0,
-                None,
-            );
             group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: line_cmds,
-                style: border_style,
+                style: border_style(),
                 closed: false,
             });
         }
@@ -411,17 +428,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // S10: border lines on both top and bottom edges.
         if ctx.mark_style.area.borders == Some(true) {
             let top_cmds = build_top_line_cmds(&top, trace);
-            let sw = ctx.mark_style.paint.stroke_width.max(1.0);
-            let border_style = to_scene_fill_stroke(
-                ClearablePaint::Absent,
-                ClearablePaint::Paint(stroke_color),
-                sw,
-                1.0,
-                None,
-            );
             group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: top_cmds,
-                style: border_style.clone(),
+                style: border_style(),
                 closed: false,
             });
 
@@ -434,7 +443,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
             group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: bottom_cmds,
-                style: border_style,
+                style: border_style(),
                 closed: false,
             });
         }

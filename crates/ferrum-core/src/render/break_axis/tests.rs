@@ -1284,7 +1284,7 @@ fn polygon_wholly_inside_a_gap_keeps_its_node_and_loses_its_rings() {
 
 fn thin_stroke() -> ferrum_scene::StrokeStyle {
     ferrum_scene::StrokeStyle {
-        color: ferrum_scene::Color::rgb(0, 0, 0),
+        color: Some(ferrum_scene::Color::rgb(0, 0, 0)),
         width: 0.75,
         opacity: 1.0,
         dash: None,
@@ -1587,7 +1587,7 @@ fn polyline_vertices_are_placed_on_the_broken_scale() {
     let mut line = SceneNode::Polyline {
         points: vec![(0.0, 400.0), (10.0, 200.0), (20.0, 40.0)],
         style: ferrum_scene::StrokeStyle {
-            color: ferrum_scene::Color::rgb(0, 0, 0),
+            color: Some(ferrum_scene::Color::rgb(0, 0, 0)),
             width: 1.0,
             opacity: 1.0,
             dash: None,
@@ -2189,7 +2189,7 @@ fn axis_chrome_handed_a_foreign_anchor_is_placed_without_axis_validation() {
             x2: 50.0,
             y2: 404.0,
             style: crate::render::draw::to_scene_stroke(
-                palette::Srgba::new(0, 0, 0, 255),
+                crate::render::draw::ClearablePaint::Paint(palette::Srgba::new(0, 0, 0, 255)),
                 1.0,
                 1.0,
                 None,
@@ -2294,7 +2294,7 @@ fn gap_spanned_by_finds_the_gap_an_interval_reaches_across() {
 
 fn stroke() -> ferrum_scene::StrokeStyle {
     crate::render::draw::to_scene_stroke(
-        palette::Srgba::new(0, 0, 0, 255),
+        crate::render::draw::ClearablePaint::Paint(palette::Srgba::new(0, 0, 0, 255)),
         1.0,
         1.0,
         None,

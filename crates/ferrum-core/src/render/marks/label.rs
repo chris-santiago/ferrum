@@ -215,7 +215,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
                 x2: px + dx * 0.8,
                 y2: py + dy * 0.8,
                 style: StrokeStyle {
-                    color: to_scene_color(lc),
+                    color: Some(to_scene_color(lc)),
                     width: 0.75,
                     opacity: ctx.mark_style.paint.opacity * 0.5,
                     stroke_opacity: 1.0,

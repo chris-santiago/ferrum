@@ -34,8 +34,8 @@ const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke_full, to_scene_stroke, ClearablePaint, MarkBuildResult,
-        MetadataColumns,
+        to_scene_fill_stroke, to_scene_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
+        PaintChannels,
     };
     use ferrum_scene::MarkBatchKind;
 
@@ -194,33 +194,48 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         );
         let effective_dash = dash_vec.as_deref();
 
+        // One series' stroke color: the color channel paints each group its own
+        // palette color, and a series with no color channel takes the constant
+        // stroke, then the fill. The color-scale arm falls back to `fill` rather
+        // than to the theme stroke, which is why this is not
+        // `resolve_stroke_paint`'s row-wise chain.
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
                 scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
             _ => ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill),
         };
-        let stroke_color = with_opacity(stroke_color, group_opacity);
+        // The slot's own provenance outranks whatever the chain resolved: an
+        // explicit `stroke="none"` paints no line at all. Before `#110` the
+        // color-scale arm above overwrote the clear with the palette color, so
+        // `mark_line(stroke="none").encode(color=…)` rendered byte-identically
+        // to the same chart without the clear (`#120`'s last comment); the arm
+        // with no color scale kept the clear's value but serialized it as
+        // `stroke="rgba(0,0,0,0.000)"`. Both spellings now emit no stroke.
+        let stroke_paint = ctx
+            .mark_style
+            .paint
+            .stroke_paint()
+            .cleared_or(with_opacity(stroke_color, group_opacity));
 
         let node = if use_path {
             let cmds = trace.subpath(&points);
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
-            // The Path variant's stroke is not yet threaded for provenance-gated
-            // paint clearing (out of this fix round's scope, mirrors arc.rs) —
-            // hence the non-cleared `Paint`; a cleared constant stroke here
-            // still serializes as `rgba(0,0,0,0.000)`. The linear (non-Path)
-            // Polyline variant below is `StrokeStyle`-shaped and excluded from
-            // clearing entirely per spec (`StrokeStyle.color` has no absent
-            // representation).
-            let style = to_scene_fill_stroke_full(
+            // Both node shapes carry the SAME `stroke_paint`, so a cleared stroke
+            // renders identically under every `interpolate` spelling: this
+            // `Path` branch (non-linear interpolation) and the `Polyline` branch
+            // below (linear) each serialize no stroke attribute for a clear.
+            let style = to_scene_fill_stroke(
                 ClearablePaint::Absent,
-                ClearablePaint::Paint(stroke_color),
-                group_stroke_width,
-                1.0,
-                effective_dash,
-                group_fill_opacity,
-                group_stroke_opacity,
-                0.0,
+                stroke_paint,
+                PaintChannels {
+                    stroke_width: group_stroke_width,
+                    opacity: 1.0,
+                    stroke_dash: effective_dash,
+                    fill_opacity: group_fill_opacity,
+                    stroke_opacity: group_stroke_opacity,
+                    angle: 0.0,
+                },
             );
             ferrum_scene::SceneNode::Path {
                 commands: cmds,
@@ -229,7 +244,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
         } else {
             let mut stroke_style = to_scene_stroke(
-                stroke_color,
+                stroke_paint,
                 group_stroke_width,
                 1.0,
                 effective_dash,
@@ -823,12 +838,14 @@ mod tests {
             .map(|k| crate::render::draw::to_scene_color(color_scale.lookup(k).expect("domain key must resolve via lookup")))
             .collect();
         for style in &polylines {
-            assert!(expected_colors.contains(&style.color),
-                "polyline stroke {:?} is not a legend-resolved color for any of {domain:?}", style.color);
+            let color = style.color.expect("a color-encoded polyline must paint a stroke");
+            assert!(expected_colors.contains(&color),
+                "polyline stroke {color:?} is not a legend-resolved color for any of {domain:?}");
         }
         let mut distinct_strokes: Vec<ferrum_scene::Color> = Vec::new();
         for style in &polylines {
-            if !distinct_strokes.contains(&style.color) { distinct_strokes.push(style.color); }
+            let color = style.color.expect("a color-encoded polyline must paint a stroke");
+            if !distinct_strokes.contains(&color) { distinct_strokes.push(color); }
         }
         assert_eq!(distinct_strokes.len(), 3,
             "3 color groups must paint 3 distinct stroke colors, matching the legend; got {distinct_strokes:?}");
@@ -864,7 +881,8 @@ mod tests {
 
         let mut distinct_strokes: Vec<ferrum_scene::Color> = Vec::new();
         for style in &polylines {
-            if !distinct_strokes.contains(&style.color) { distinct_strokes.push(style.color); }
+            let color = style.color.expect("a color-encoded polyline must paint a stroke");
+            if !distinct_strokes.contains(&color) { distinct_strokes.push(color); }
         }
         assert_eq!(distinct_strokes.len(), 3,
             "Utf8 grouping must remain unaffected: 3 distinct stroke colors matching the legend");
