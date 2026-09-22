@@ -31,7 +31,8 @@ its own docstrings eighty lines below. Corrected at cycle 3 after quality
 review. If you add a test here, say which kind it is.
 
 See `.sdd/task-13-report.md` §12-13 for the probe matrix and the RED proof,
-and `.sdd/task-17-report.md` for the cross-surface matrix's RED proof.
+`.sdd/task-17-report.md` for the cross-surface matrix's RED proof, and
+`.sdd/task-21-report.md` for the legend/text refusal rows' RED proof.
 """
 
 from __future__ import annotations
@@ -296,6 +297,33 @@ SURFACES = {
 }
 
 
+def _size_legend(field: str, fmt: str | None, fmt_type: str | None):
+    return (
+        fm.Chart(YEARLY)
+        .mark_point()
+        .encode(
+            x="n:Q", y="n:Q", size=fm.Size(field, legend=fm.Legend(**_format_kwargs(fmt, fmt_type)))
+        )
+    )
+
+
+#: Every surface that can refuse a time-typed format: ``SURFACES`` plus the
+#: size legend, which formats its own field's values but renders no ordinal
+#: or temporal-default rows to compare in the matrices above.
+REFUSABLE = {**SURFACES, "size_legend": _size_legend}
+
+#: The surface each refusal names: an axis is checked against its resolved
+#: scale, a legend or mark channel against its own field.
+_AXIS_REFUSAL = r"'x' axis requires a temporal scale, but the resolved scale is not temporal"
+REFUSED_ON = {
+    "axis": _AXIS_REFUSAL,
+    "independent_facet_axis": _AXIS_REFUSAL,
+    "colorbar": r"'color' legend requires a temporal field, but the field is not temporal",
+    "size_legend": r"'size' legend requires a temporal field, but the field is not temporal",
+    "text": r"'text' channel requires a temporal field, but the field is not temporal",
+}
+
+
 class TestEverySurfaceAnswersAMalformedPairAlike:
     """One outcome per ``(spec, format_type)`` pair, whichever surface renders it.
 
@@ -341,20 +369,196 @@ class TestEverySurfaceAnswersAMalformedPairAlike:
         assert not any(t.startswith("1970") for t in malformed), malformed
         assert not any(re.fullmatch(r"\d{4}\.\d{2}|\d\.\d{3}e\+\d", t) for t in malformed)
 
-    @pytest.mark.parametrize("surface", ["axis", "independent_facet_axis"])
+    @pytest.mark.parametrize("surface", sorted(REFUSABLE))
     def test_a_pattern_free_time_typed_spec_on_a_quantitative_axis_refuses(self, surface):
-        """Regression pin for the shared axis; the independent facet axis is
-        its parity partner and refused pre-fix too.
+        """Regression pin for the shared axis, the colorbar, the size legend
+        and the text mark; the independent facet axis is the parity partner
+        that refused pre-fix.
 
-        Pre-fix: the shared axis applied ``.2f`` as d3 and rendered, while
-        the independent facet axis refused the identical pair. Both now
-        raise the ``#133`` refusal, and the message names the declared
-        ``"time"`` type as the cause, since ``.2f`` alone does not say why a
-        temporal scale is needed.
+        Pre-fix (T17): the shared axis applied ``.2f`` as d3 and rendered,
+        while the independent facet axis refused the identical pair. Pre-fix
+        (T21): the colorbar, the size legend and the text mark rendered every
+        label ``1970-01-01``, the epoch read of a small number. All now raise
+        the ``#133`` refusal. The message names the declared ``"time"`` type
+        as the cause (``.2f`` alone does not say why a temporal value is
+        needed) and the surface the caller set the format on.
         """
-        chart = SURFACES[surface]("n:Q", ".2f", "time")
+        chart = REFUSABLE[surface]("n:Q", ".2f", "time")
         with pytest.raises(
             ValueError,
-            match=r"""format "\.2f" is typed "time", which on the 'x' axis requires a temporal scale""",
+            match=r'format "\.2f" is typed "time", which on the ' + REFUSED_ON[surface],
         ):
             chart.to_svg()
+
+    @pytest.mark.parametrize("surface", sorted(REFUSABLE))
+    def test_a_bare_time_type_on_a_quantitative_field_refuses(self, surface):
+        """Regression pin (T21) for every surface: one answer to the bare pair.
+
+        Pre-fix, ``format_type="time"`` with no spec rendered ``1970-01-01``
+        for every colorbar, size-legend and text label (the epoch read of a
+        small number), while both axes dropped the declared type silently and
+        rendered the scale's numbers. Every surface now refuses it, naming the
+        type since there is no spec.
+        """
+        with pytest.raises(ValueError, match=r'format type "time" on the ' + REFUSED_ON[surface]):
+            REFUSABLE[surface]("n:Q", None, "time").to_svg()
+
+    def test_a_time_typed_legend_on_a_temporal_size_field_still_renders(self):
+        """Control for the size-legend row: the refusal keys on the field,
+        so a temporal size field keeps its date labels."""
+        labels = rendered_text(_size_legend("d:T", "%Y", "time"))
+        assert any(re.fullmatch(r"200\d", t) for t in labels), labels
+        assert not any(t.startswith("1970") for t in labels), labels
+
+    def test_a_time_format_on_a_string_text_field_refuses(self):
+        """Regression pin (T21). A string column is not temporal either: pre-fix
+        ``Text("g", format="%Y", format_type="time")`` over a Utf8 column
+        rendered the strings verbatim and dropped the declared format."""
+        chart = (
+            fm.Chart(YEARLY)
+            .mark_text()
+            .encode(x="n:Q", y="n:Q", text=fm.Text("g", format="%Y", format_type="time"))
+        )
+        with pytest.raises(
+            ValueError, match=r'format "%Y" is typed "time", which on the ' + REFUSED_ON["text"]
+        ):
+            chart.to_svg()
+
+
+def _colorbar_chart(mark: str = "point", **color_kwargs):
+    chart = fm.Chart(YEARLY)
+    return getattr(chart, f"mark_{mark}")().encode(
+        x="n:Q", y="n:Q", color=fm.Color("n", **color_kwargs)
+    )
+
+
+TIME_LEGEND = fm.Legend(format=".2f", format_type="time")
+
+
+class TestTheLegendRefusalValidatesTheSpecTheCallerWrote:
+    """A time format on a non-temporal legend field is refused unless the caller
+    disabled that legend (T21 cycle 2). Both spellings of "disabled" are
+    exempt alike; a colorbar the renderer suppresses on its own is not."""
+
+    def _renders_without_epoch_labels(self, chart):
+        labels = rendered_text(chart)
+        assert labels, "the chart must render"
+        assert not any(t.startswith("1970") for t in labels), labels
+
+    def test_disabled_by_legend_none_is_exempt(self):
+        """``Color(legend=None)`` disables the color legend; the time format
+        reaching it through the ``X`` legend cascade is then never validated.
+        The control below is the same chart with the legend enabled."""
+        x = fm.X("n:Q", legend=TIME_LEGEND)
+        chart = fm.Chart(YEARLY).mark_point().encode(x=x, y="n:Q", color=fm.Color("n", legend=None))
+        self._renders_without_epoch_labels(chart)
+        enabled = fm.Chart(YEARLY).mark_point().encode(x=x, y="n:Q", color=fm.Color("n"))
+        with pytest.raises(ValueError, match=REFUSED_ON["colorbar"]):
+            enabled.to_svg()
+
+    def test_disabled_by_configure_legend_orient_none_is_exempt(self):
+        """Regression pin. Pre-fix (T21 cycle 1) the chart-level spelling of
+        the same disable still refused, so the two spellings disagreed."""
+        chart = _colorbar_chart(legend=TIME_LEGEND)
+        self._renders_without_epoch_labels(chart.configure_legend(orient="none"))
+        with pytest.raises(ValueError, match=REFUSED_ON["colorbar"]):
+            chart.to_svg()
+
+    @pytest.mark.parametrize("mark", ["line", "point"])
+    def test_a_colorbar_the_renderer_suppresses_still_refuses(self, mark):
+        """A line cannot draw continuous color, so its colorbar is suppressed
+        with a warning; the caller still wrote a malformed legend format, and
+        it is refused exactly as on a point chart that draws the colorbar."""
+        with pytest.raises(ValueError, match=REFUSED_ON["colorbar"]):
+            _colorbar_chart(mark, legend=TIME_LEGEND).to_svg()
+
+    def test_a_categorical_color_legend_refuses_too(self):
+        """Regression pin. The rule does not depend on the scale kind: pre-fix
+        (and at T21 cycle 1) a categorical legend over the string field ``g``
+        ignored the time format silently."""
+        chart = (
+            fm.Chart(YEARLY)
+            .mark_point()
+            .encode(x="n:Q", y="n:Q", color=fm.Color("g", legend=TIME_LEGEND))
+        )
+        with pytest.raises(ValueError, match=REFUSED_ON["colorbar"]):
+            chart.to_svg()
+
+
+def _x_chart(x: fm.X, surface: str):
+    chart = fm.Chart(YEARLY).mark_point().encode(x=x, y="n:Q")
+    if surface == "independent_facet_axis":
+        chart = chart.facet(col="g").share_scale(x="independent")
+    return chart
+
+
+def _refusal(chart) -> str:
+    with pytest.raises(ValueError) as info:
+        chart.to_svg()
+    return str(info.value)
+
+
+AXIS_SURFACES = ["axis", "independent_facet_axis"]
+
+
+class TestTheMergedCrossSpellingPairMeetsTheSameGates:
+    """``Axis(label_format_type=)`` with no ``label_format`` fills the type over
+    the shorthand ``X(format=, format_type=)`` field by field (T21 cycle 2).
+    The pair the axis then reads, and the shorthand pair the Axis type
+    overrode, each refuse exactly as their one-place spellings do (T21 cycle
+    3), so writing a pair across two places is never a way around a gate."""
+
+    @pytest.mark.parametrize("surface", AXIS_SURFACES)
+    def test_a_strftime_spec_typed_number_by_the_axis_refuses(self, surface):
+        """Regression pin. At T21 cycle 2 ``X("d:T", format="%Y",
+        axis=Axis(label_format_type="number"))`` rendered ``200100.000000%``
+        on the independent facet axis (the shared axis dropped the ``%Y``
+        and showed the ``n`` field's numbers), while both one-place spellings
+        of the same pair refused."""
+        merged = _refusal(
+            _x_chart(fm.X("d:T", format="%Y", axis=fm.Axis(label_format_type="number")), surface)
+        )
+        assert merged.startswith('invalid format spec "%Y": unrecognized token "Y"'), merged
+        assert merged == _refusal(
+            _x_chart(
+                fm.X("d:T", axis=fm.Axis(label_format="%Y", label_format_type="number")), surface
+            )
+        )
+        assert merged == _refusal(_x_chart(fm.X("d:T", format="%Y", format_type="number"), surface))
+
+    @pytest.mark.parametrize("surface", AXIS_SURFACES)
+    def test_a_time_typed_shorthand_the_axis_retypes_as_number_still_refuses(self, surface):
+        """Regression pin. At T21 cycle 2 the Axis ``"number"`` overrode the
+        shorthand's ``"time"`` and ``.1f`` rendered, where before cycle 2 (and
+        in the shorthand spelling alone) the time-typed pair on a
+        quantitative axis refused."""
+        merged = _refusal(
+            _x_chart(
+                fm.X(
+                    "n:Q",
+                    format=".1f",
+                    format_type="time",
+                    axis=fm.Axis(label_format_type="number"),
+                ),
+                surface,
+            )
+        )
+        assert merged == 'format ".1f" is typed "time", which on the ' + (
+            "'x' axis requires a temporal scale, but the resolved scale is not temporal"
+        )
+        assert merged == _refusal(_x_chart(fm.X("n:Q", format=".1f", format_type="time"), surface))
+
+    @pytest.mark.parametrize("surface", AXIS_SURFACES)
+    def test_the_bare_time_type_in_the_shorthand_spelling_refuses(self, surface):
+        """Regression pin (T21 cycle 2 behavior, unpinned until cycle 3): the
+        bare ``X(format_type="time")`` on a quantitative field used to drop the
+        type and render the scale's numbers; it refuses as the ``Axis``
+        spelling does."""
+        shorthand = _refusal(_x_chart(fm.X("n:Q", format_type="time"), surface))
+        assert shorthand == (
+            "format type \"time\" on the 'x' axis requires a temporal scale, "
+            "but the resolved scale is not temporal"
+        )
+        assert shorthand == _refusal(
+            _x_chart(fm.X("n:Q", axis=fm.Axis(label_format_type="time")), surface)
+        )

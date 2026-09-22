@@ -88,6 +88,19 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let text_field = text_enc.map(|e| e.field.as_str());
     let text_format = text_enc.and_then(|e| e.format.as_deref());
     let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
+    // `#147` close (wave 6A T21): a time-typed format on a non-temporal text
+    // field refuses with the axes' own error, instead of rendering every
+    // label as a 1970 epoch date.
+    if let Some(enc) = text_enc {
+        crate::render::prepare::refuse_time_format_on_non_temporal_field(
+            enc,
+            ctx.batch,
+            text_format,
+            text_format_type,
+            "text",
+            crate::render::FormatSurface::Channel,
+        )?;
+    }
     let texts: Option<Vec<Option<String>>> = match text_field {
         None => None,
         Some(f) => Some(col_as_str(ctx.batch, f).or_else(|_| {

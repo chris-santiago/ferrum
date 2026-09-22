@@ -1408,7 +1408,8 @@ mod chart_config_application_tests {
             err,
             RenderError::TimeFormatOnNonTemporalScale {
                 channel: "x",
-                format: "%Y-%m-%d".into(),
+                surface: crate::render::FormatSurface::Axis,
+                format: Some("%Y-%m-%d".into()),
                 coord_flipped: false,
             }
         );
@@ -1443,7 +1444,8 @@ mod chart_config_application_tests {
             err,
             RenderError::TimeFormatOnNonTemporalScale {
                 channel: "y",
-                format: "%Y-%m-%d".into(),
+                surface: crate::render::FormatSurface::Axis,
+                format: Some("%Y-%m-%d".into()),
                 coord_flipped: false,
             }
         );

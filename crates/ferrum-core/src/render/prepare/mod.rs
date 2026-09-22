@@ -719,6 +719,24 @@ fn build_axis_input(
     // `configure_axis(label_format_raw=...)` is applied later in `render/mod.rs`
     // only when no per-encoding override exists.
     let (tick_format, tick_format_type) = resolve_axis_label_format(rendering_enc);
+    // When no `Axis(label_format=)` replaces it, the shorthand pair is in use,
+    // but an `Axis(label_format_type=)` may have overridden its type above.
+    // The shorthand pair as written still meets the one refusal rule, so
+    // `X("n:Q", format=".1f", format_type="time", axis=Axis(label_format_type=
+    // "number"))` refuses as `X("n:Q", format=".1f", format_type="time")` does
+    // (`#147`, wave 6A T21 cycle 3). Independent facet axes are covered too:
+    // this global axis is built before any per-panel one.
+    if let Some(e) =
+        rendering_enc.filter(|e| e.axis.as_ref().is_none_or(|a| a.label_format.is_none()))
+    {
+        refuse_time_format_on_non_temporal(
+            e.format.as_deref(),
+            e.format_type.as_deref(),
+            scale,
+            channel.token(),
+        )
+        .map_err(crate::render::UnflippedRenderError::new)?;
+    }
     // D8 cascade-inversion fix (spec review cycle 2): capture "did per-channel
     // claim a format for this axis at all" BEFORE `tick_format` is moved into
     // `TickFormatMode::Thread` below — this survives even when the eventual
@@ -1098,6 +1116,7 @@ pub fn prepare_render_inputs(
     let composite_color_has_non_line_ribbon_sibling = leaf_scales
         .map(|c| c.color_scale_has_non_line_ribbon_sibling)
         .unwrap_or(false);
+    legend::refuse_time_format_on_non_temporal_legend_fields(spec, &transformed, chart_config)?;
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
@@ -2468,6 +2487,15 @@ pub(crate) fn adjust_axis_ticks(
 /// `encoding.axis` map) wins over the shorthand `encoding.format`/`format_type`.
 /// Returns `(None, None)` when neither is set so default formatting is preserved.
 ///
+/// An `Axis(label_format_type=)` with no `label_format` still declares the
+/// type: it fills the type over the shorthand's, field by field, so a bare
+/// `"time"` reaches the one refusal rule instead of being dropped here
+/// (`#147` close, wave 6A T21 cycle 2). The merged pair is what
+/// `config_apply::validate_chart_format_specs` gates, and `build_axis_input`
+/// still refuses the shorthand pair the Axis type overrode (cycle 3), so a
+/// pair split across the two spellings meets the checks its one-place
+/// spellings meet.
+///
 /// `pub(crate)` so `scene_build.rs` can re-derive the format spec for
 /// independent-axis per-panel label formatting without duplicating the
 /// precedence logic.
@@ -2480,7 +2508,8 @@ pub(crate) fn resolve_axis_label_format(
         let ty = axis.and_then(|a| a.label_format_type.clone());
         return (Some(fmt), ty);
     }
-    (e.format.clone(), e.format_type.clone())
+    let ty = axis.and_then(|a| a.label_format_type.clone()).or_else(|| e.format_type.clone());
+    (e.format.clone(), ty)
 }
 
 /// Apply a resolved tick-label format to one axis, returning the (possibly
@@ -2523,6 +2552,11 @@ fn apply_axis_format_or_thread(
 ) -> Result<(Vec<String>, Option<String>), RenderError> {
     use crate::render::format::{format_time_spec, FormatKind, TimeAutodetect};
     let Some(fmt) = format else {
+        // A bare `format_type="time"` names no pattern, so the scale's own
+        // labels stand; on a non-temporal scale it is refused by the same
+        // rule every other surface applies to the identical pair (`#147`
+        // close, wave 6A T21 cycle 2 — it used to be dropped silently here).
+        refuse_time_format_on_non_temporal(None, format_type, scale, channel)?;
         return Ok((labels, None));
     };
     // `TimeAutodetect::Allowed`: this is the one formatting surface that can
@@ -2563,7 +2597,7 @@ fn apply_axis_format_or_thread(
         // arm calls, instead of restating the `format_type == Some("time")`
         // check here — this is the predicate `build_axis_tick_inputs`'s own
         // doc already claims "both mode arms share".
-        refuse_time_format_on_non_temporal(&fmt, format_type, scale, tick_count, channel)?;
+        refuse_time_format_on_non_temporal(Some(&fmt), format_type, scale, channel)?;
         return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
     }
     if matches!(kind, Some(FormatKind::TemporalDefault)) {
@@ -2573,7 +2607,7 @@ fn apply_axis_format_or_thread(
         // colorbar and text mark give the identical pair. Threading the spec
         // instead re-seeded it untyped and applied it as d3 (`2001.00` on
         // year ticks) — the `#147` close finding (wave 6A T17).
-        refuse_time_format_on_non_temporal(&fmt, format_type, scale, tick_count, channel)?;
+        refuse_time_format_on_non_temporal(Some(&fmt), format_type, scale, channel)?;
         return Ok((labels, None));
     }
     // D3 or the ordinal preset: thread the spec to the override, apply later.
@@ -2582,9 +2616,10 @@ fn apply_axis_format_or_thread(
 
 /// #133 (spec §4.2 amended 2026-09-11): refuse when `format_type`
 /// unambiguously declares `"time"` but the resolved `scale` is not temporal
-/// at all — `scale.temporal_tick_values(tick_count)` returns `None` only for
-/// a non-`Time` [`crate::render::scale_resolve::ScaleKind`], never for a
-/// length-drift on a genuinely temporal scale.
+/// at all — a non-`Time` [`crate::render::scale_resolve::ScaleKind`] (the
+/// case `scale.temporal_tick_values` answers `None`), never a length-drift on
+/// a genuinely temporal scale. The axis wrapper of
+/// [`refuse_time_format_on_non_temporal_target`], which owns the rule.
 ///
 /// Keyed on the DECLARED `format_type` (resolved under `TimeAutodetect::Denied`,
 /// so the ordinal preset is exempt), deliberately narrower than
@@ -2608,24 +2643,88 @@ fn apply_axis_format_or_thread(
 /// `format_type == "time"` + `scale.temporal_tick_values(...).is_none()`
 /// check a third and fourth time — all four sites that can refuse a
 /// time-typed format on a non-temporal scale now build the SAME error
-/// through this one function.
+/// through this one function. `fmt` is `None` for a bare
+/// `format_type="time"`, refused like any other time-typed pair.
 pub(crate) fn refuse_time_format_on_non_temporal(
-    fmt: &str,
+    fmt: Option<&str>,
     format_type: Option<&str>,
     scale: &crate::render::scale_resolve::ScaleKind,
-    tick_count: usize,
     channel: &'static str,
+) -> Result<(), RenderError> {
+    // `ScaleKind::Time` is exactly when `temporal_tick_values` answers `Some`.
+    let scale_is_temporal = matches!(scale, crate::render::scale_resolve::ScaleKind::Time(_));
+    refuse_time_format_on_non_temporal_target(
+        fmt,
+        format_type,
+        scale_is_temporal,
+        channel,
+        crate::render::FormatSurface::Axis,
+    )
+}
+
+/// The field-checked sibling of [`refuse_time_format_on_non_temporal`], for
+/// the surfaces that format a channel's own values rather than an axis's
+/// ticks: the colorbar/size legend (`Legend(format=, format_type=)`) and the
+/// text channel (`Text(format=, format_type=)`). Before `#147`'s close (wave
+/// 6A T21) those rendered a time-typed format on a quantitative field as a
+/// column of `1970-01-01` labels (the epoch read of small numbers) while the
+/// axes refused the identical pair.
+///
+/// "Temporal field" is the scale resolver's own rule
+/// ([`crate::render::scale_resolve::infer_spec_type`]: a declared type wins,
+/// else the column's dtype), so `"n:T"` over epoch-ms numbers stays
+/// temporal exactly as it does on an axis. A field with no declared type
+/// that `batch` does not carry has no answer here and is not refused: the
+/// read that follows raises its own `UnknownColumn`.
+pub(crate) fn refuse_time_format_on_non_temporal_field(
+    enc: &crate::spec::encoding::EncodingSpec,
+    batch: &RecordBatch,
+    fmt: Option<&str>,
+    format_type: Option<&str>,
+    channel: &'static str,
+    surface: crate::render::FormatSurface,
+) -> Result<(), RenderError> {
+    use crate::spec::encoding::DataType as SpecDataType;
+    let field_type = batch
+        .column_by_name(&enc.field)
+        .map(|col| crate::render::scale_resolve::infer_spec_type(enc, col.data_type()))
+        .or(enc.type_);
+    let Some(field_type) = field_type else {
+        return Ok(());
+    };
+    refuse_time_format_on_non_temporal_target(
+        fmt,
+        format_type,
+        field_type == SpecDataType::Temporal,
+        channel,
+        surface,
+    )
+}
+
+/// The one rule behind every `TimeFormatOnNonTemporalScale`: a `(fmt,
+/// format_type)` pair that resolves time-typed (`Strftime` or
+/// `TemporalDefault`, under `TimeAutodetect::Denied` so only a DECLARED
+/// `"time"` counts and the ordinal preset is exempt) refuses when the value
+/// it would format is not temporal. The two wrappers above answer "is it
+/// temporal" for their surface; this answers everything else.
+fn refuse_time_format_on_non_temporal_target(
+    fmt: Option<&str>,
+    format_type: Option<&str>,
+    target_is_temporal: bool,
+    channel: &'static str,
+    surface: crate::render::FormatSurface,
 ) -> Result<(), RenderError> {
     use crate::render::format::{FormatKind, TimeAutodetect};
     // "Declares time" is the resolution's answer, not a raw `format_type`
     // read, so the ordinal preset beside a stray `"time"` is not refused: it
     // renders ordinals at every surface (`#147` close, wave 6A T17).
-    let declares_time = FormatKind::resolve(Some(fmt), format_type, TimeAutodetect::Denied)
+    let declares_time = FormatKind::resolve(fmt, format_type, TimeAutodetect::Denied)
         .is_some_and(|kind| kind.is_temporal());
-    if declares_time && scale.temporal_tick_values(tick_count).is_none() {
+    if declares_time && !target_is_temporal {
         return Err(RenderError::TimeFormatOnNonTemporalScale {
             channel,
-            format: fmt.to_string(),
+            surface,
+            format: fmt.map(str::to_string),
             coord_flipped: false,
         });
     }
@@ -7519,7 +7618,8 @@ mod tests {
             err,
             RenderError::TimeFormatOnNonTemporalScale {
                 channel: "x",
-                format: "%Y-%m-%d".into(),
+                surface: crate::render::FormatSurface::Axis,
+                format: Some("%Y-%m-%d".into()),
                 coord_flipped: false,
             }
         );
@@ -7546,7 +7646,8 @@ mod tests {
             err,
             RenderError::TimeFormatOnNonTemporalScale {
                 channel: "y",
-                format: "%Y-%m-%d".into(),
+                surface: crate::render::FormatSurface::Axis,
+                format: Some("%Y-%m-%d".into()),
                 coord_flipped: false,
             }
         );
@@ -7639,7 +7740,8 @@ mod tests {
         let scale = linear_scale(0.0, 100.0);
         let expected = RenderError::TimeFormatOnNonTemporalScale {
             channel: "x",
-            format: ".2f".into(),
+            surface: crate::render::FormatSurface::Axis,
+            format: Some(".2f".into()),
             coord_flipped: false,
         };
         let thread = build_axis_tick_inputs(
@@ -7666,6 +7768,85 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(immediate, expected);
+    }
+
+    /// `#147` close (wave 6A T21): the field-checked surfaces (legend, text
+    /// channel) take "temporal" from the scale resolver's own rule — a
+    /// declared type wins, else the column dtype — and refuse through the
+    /// one constructor the axes use, carrying their own surface and a `None`
+    /// format for a bare `format_type="time"`.
+    #[test]
+    fn refuse_time_format_on_non_temporal_field_keys_on_the_resolved_field_type() {
+        use crate::render::FormatSurface;
+        use crate::spec::encoding::{DataType as SpecDataType, EncodingSpec};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("n", DataType::Float64, false),
+                Field::new(
+                    "d",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000])),
+            ],
+        )
+        .unwrap();
+        let enc = |field: &str, type_: Option<SpecDataType>| EncodingSpec {
+            field: field.into(),
+            type_,
+            ..Default::default()
+        };
+        let refuse = |e: &EncodingSpec, fmt: Option<&str>| {
+            refuse_time_format_on_non_temporal_field(
+                e,
+                &batch,
+                fmt,
+                Some("time"),
+                "color",
+                FormatSurface::Legend,
+            )
+        };
+        // Quantitative by dtype: both time-typed kinds refuse, naming the surface.
+        assert_eq!(
+            refuse(&enc("n", None), Some(".2f")),
+            Err(RenderError::TimeFormatOnNonTemporalScale {
+                channel: "color",
+                surface: FormatSurface::Legend,
+                format: Some(".2f".into()),
+                coord_flipped: false,
+            })
+        );
+        assert_eq!(
+            refuse(&enc("n", None), None),
+            Err(RenderError::TimeFormatOnNonTemporalScale {
+                channel: "color",
+                surface: FormatSurface::Legend,
+                format: None,
+                coord_flipped: false,
+            })
+        );
+        // Temporal by dtype, or declared `:T` over epoch-ms numbers: accepted.
+        assert_eq!(refuse(&enc("d", None), Some("%Y")), Ok(()));
+        assert_eq!(refuse(&enc("n", Some(SpecDataType::Temporal)), None), Ok(()));
+        // The ordinal preset and a d3 spec are not time formats.
+        assert_eq!(refuse(&enc("n", None), Some("__ordinal__")), Ok(()));
+        assert_eq!(
+            refuse_time_format_on_non_temporal_field(
+                &enc("n", None),
+                &batch,
+                Some(".2f"),
+                None,
+                "text",
+                FormatSurface::Channel,
+            ),
+            Ok(())
+        );
+        // An undeclared field the batch does not carry has no answer here.
+        assert_eq!(refuse(&enc("missing", None), Some(".2f")), Ok(()));
     }
 
     /// `#147` close (wave 6A T17), output-moving: the ordinal preset beside a

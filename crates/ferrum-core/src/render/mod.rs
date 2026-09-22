@@ -136,6 +136,23 @@ pub(crate) enum LayerCoordUnplaceableReason {
     },
 }
 
+/// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`] refusal
+/// names — where the caller set the time-typed format, and so what "not
+/// temporal" was checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatSurface {
+    /// A tick-label format (`Axis(label_format=)`, `encoding.format` on a
+    /// positional channel, `configure_axis(label_format=)`): checked against
+    /// the resolved scale.
+    Axis,
+    /// `Legend(format=, format_type=)` on the color or size channel: checked
+    /// against that channel's field.
+    Legend,
+    /// A mark channel's own `format=`/`format_type=` (`Text(...)`): checked
+    /// against that channel's field.
+    Channel,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
@@ -458,12 +475,18 @@ pub enum RenderError {
     /// which used to `filter_map(...ok())` bad stops out with no warning at
     /// all — is folded in here as a sibling defect of the same root cause.
     ColorRangeParseFailure { entry: String },
-    /// A time-typed tick-label format (`label_format="%b %Y"`, or a preset
-    /// like `"date_iso"` that resolves to one) was applied to an axis whose
-    /// RESOLVED scale is not [`scale_resolve::ScaleKind::Time`] (#133, spec
-    /// §4.2 amended 2026-09-11). `channel` is the RESOLVED (post-`CoordFlip`)
-    /// positional token the formatting pass acted on; `format` is the
-    /// offending format string.
+    /// A time-typed format (`label_format="%b %Y"`, a preset like
+    /// `"date_iso"` that resolves to one, or a `%`-free spec declared
+    /// `format_type="time"`) was applied where the value it formats is not
+    /// temporal (#133, spec §4.2 amended 2026-09-11). `surface` names the
+    /// public entry the format was set on: on an [`FormatSurface::Axis`] the
+    /// check is the RESOLVED scale (not [`scale_resolve::ScaleKind::Time`]);
+    /// on a [`FormatSurface::Legend`] or [`FormatSurface::Channel`] it is the
+    /// channel's field (`#147` close, wave 6A T21 — those surfaces used to
+    /// render every value as a 1970 epoch date instead). `channel` is the
+    /// RESOLVED (post-`CoordFlip`) token the formatting pass acted on;
+    /// `format` is the offending spec, `None` when `format_type="time"` was
+    /// given with no spec (refused on every surface, an axis included).
     ///
     /// The declaration-time grammar gate ([`config_apply::validate_chart_format_specs`])
     /// cannot catch this: it runs before scale resolution, so it only knows
@@ -485,7 +508,12 @@ pub enum RenderError {
     /// `axis_x`/`axis_y`/`axis_y2` path (`config_apply::apply_label_format_to_axis`),
     /// and the per-panel independent-facet-axis path
     /// (`scene_build::resolve_panel_axes`, `TickFormatMode::Immediate`) the
-    /// issue's "both paths" phrasing did not name.
+    /// issue's "both paths" phrasing did not name. Two field-checked surfaces
+    /// reach it too, through the same constructor: the colorbar/size legend
+    /// (`prepare::legend::refuse_time_format_on_non_temporal_legend_fields`) and the text channel
+    /// (`marks::text::build`). The tooltip column would be a third, but no
+    /// Python spelling puts a `format_type` on its wire today (`#147`
+    /// follow-up 15c), so it does not call the constructor yet.
     ///
     /// `coord_flipped` follows the same R3 discipline as
     /// [`Self::InvalidAxisOrient`]: the per-channel and per-panel surfaces
@@ -496,7 +524,8 @@ pub enum RenderError {
     /// flip, so the resolved token already IS what the user wrote.
     TimeFormatOnNonTemporalScale {
         channel: &'static str,
-        format: String,
+        surface: FormatSurface,
+        format: Option<String>,
         coord_flipped: bool,
     },
     /// A chart combines a projected coordinate system — `Polar` or, since
@@ -575,8 +604,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // site. The chart-level surface resolves `false` directly at its own
         // (EXEMPT) construction site instead of routing through here — see
         // the field doc on `RenderError::TimeFormatOnNonTemporalScale`.
-        RenderError::TimeFormatOnNonTemporalScale { channel, format, .. } => {
-            RenderError::TimeFormatOnNonTemporalScale { channel, format, coord_flipped }
+        RenderError::TimeFormatOnNonTemporalScale { channel, surface, format, .. } => {
+            RenderError::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped }
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
@@ -832,17 +861,26 @@ impl std::fmt::Display for RenderError {
                 f,
                 "could not parse color '{entry}' in an explicit color range"
             ),
-            Self::TimeFormatOnNonTemporalScale { channel, format, coord_flipped } => {
+            Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                // The sole constructor (`prepare::refuse_time_format_on_non_temporal`)
+                // The sole constructor (`prepare::refuse_time_format_on_non_temporal_target`)
                 // resolves under `TimeAutodetect::Denied`, so every refusal is
                 // a DECLARED `"time"` type: naming it names the cause even for
                 // a `%`-free spec like `".2f"`, where the format alone does
-                // not say why a temporal scale is needed (wave 6A T17).
+                // not say why a temporal value is needed (wave 6A T17).
+                let cause = match format {
+                    Some(format) => format!("format {format:?} is typed \"time\", which"),
+                    None => "format type \"time\"".to_string(),
+                };
+                let (noun, needs, subject) = match surface {
+                    FormatSurface::Axis => ("axis", "scale", "the resolved scale"),
+                    FormatSurface::Legend => ("legend", "field", "the field"),
+                    FormatSurface::Channel => ("channel", "field", "the field"),
+                };
                 write!(
                     f,
-                    "format {format:?} is typed \"time\", which on the '{channel}' axis \
-                     requires a temporal scale, but the resolved scale is not temporal"
+                    "{cause} on the '{channel}' {noun} requires a temporal {needs}, \
+                     but {subject} is not temporal"
                 )
             }
             // `{:?}` over the wire TOKEN, never over `axis` itself: the
@@ -1833,7 +1871,8 @@ mod tests {
 
         let not_flipped = RenderError::TimeFormatOnNonTemporalScale {
             channel: "y",
-            format: "%b %Y".into(),
+            surface: FormatSurface::Axis,
+            format: Some("%b %Y".into()),
             coord_flipped: false,
         };
         let not_flipped_text = format!("{not_flipped}");
@@ -1850,10 +1889,35 @@ mod tests {
         // axis the user actually wrote.
         let flipped = RenderError::TimeFormatOnNonTemporalScale {
             channel: "y",
-            format: "%b %Y".into(),
+            surface: FormatSurface::Axis,
+            format: Some("%b %Y".into()),
             coord_flipped: true,
         };
         assert!(format!("{flipped}").contains("'x' axis"));
+
+        // `#147` close (wave 6A T21): the field-checked surfaces name
+        // themselves and what was checked; a bare `format_type="time"` has
+        // no spec to quote, so the message names the type instead.
+        let legend = RenderError::TimeFormatOnNonTemporalScale {
+            channel: "color",
+            surface: FormatSurface::Legend,
+            format: Some(".2f".into()),
+            coord_flipped: false,
+        };
+        assert_eq!(
+            format!("{legend}"),
+            r#"format ".2f" is typed "time", which on the 'color' legend requires a temporal field, but the field is not temporal"#
+        );
+        let text = RenderError::TimeFormatOnNonTemporalScale {
+            channel: "text",
+            surface: FormatSurface::Channel,
+            format: None,
+            coord_flipped: false,
+        };
+        assert_eq!(
+            format!("{text}"),
+            r#"format type "time" on the 'text' channel requires a temporal field, but the field is not temporal"#
+        );
     }
 
     /// `UnsupportedColorScaleOnMark`'s Display must not claim a legend was
@@ -4407,7 +4471,8 @@ mod orchestration_tests {
             err,
             RenderError::TimeFormatOnNonTemporalScale {
                 channel: "x",
-                format: "%Y-%m-%d".into(),
+                surface: FormatSurface::Axis,
+                format: Some("%Y-%m-%d".into()),
                 coord_flipped: false,
             }
         );

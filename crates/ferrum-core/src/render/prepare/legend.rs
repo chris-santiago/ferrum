@@ -559,6 +559,64 @@ pub(crate) fn build_color_legend(
     }
 }
 
+/// `#147` close (wave 6A T21): a time-typed legend format on a non-temporal
+/// field is refused unless the caller disabled that legend.
+///
+/// This validates the spec the caller wrote, not what happens to be drawn:
+/// the color legend (the colorbar, or a categorical legend) and the size
+/// legend each check their own field through the rule the axes use
+/// ([`super::refuse_time_format_on_non_temporal_field`]), so the refusal
+/// fires whatever the scale kind, and also where the renderer itself later
+/// suppresses the colorbar with a warning (a line or ribbon layer that cannot
+/// draw continuous color) or folds it into the size legend. The only
+/// exemption is a legend the caller disabled, and both spellings of that
+/// count alike: per channel (`Color(legend=None)`, `Legend(orient="none")`,
+/// read over the same color > x > y cascade the color legend's format is
+/// read from) and chart-level (`configure_legend(orient="none")`). Before,
+/// these surfaces rendered every label as a `1970-01-01` epoch date.
+///
+/// The refusal names the `'color'` legend even when the format reached it
+/// through the cascade from an `X`/`Y` `Legend(...)`: the value checked is
+/// the color field, and naming `'x'` would pin the "not temporal" verdict on
+/// a field that was never checked.
+pub(crate) fn refuse_time_format_on_non_temporal_legend_fields(
+    spec: &ChartSpec,
+    transformed: &RecordBatch,
+    chart_config: &crate::render::chart_config::ChartConfig,
+) -> Result<(), crate::render::RenderError> {
+    use crate::render::FormatSurface;
+    if crate::render::config_apply::chart_config_legend_disabled(chart_config) {
+        return Ok(());
+    }
+    let legend_specs = per_channel_legend_specs(spec);
+    if let Some(color_enc) = spec.encoding.color.as_ref() {
+        if !LegendStyleSpec::suppressed_by(&legend_specs) {
+            super::refuse_time_format_on_non_temporal_field(
+                color_enc,
+                transformed,
+                pick(&legend_specs, |l| l.format.as_deref()),
+                pick(&legend_specs, |l| l.format_type.as_deref()),
+                "color",
+                FormatSurface::Legend,
+            )?;
+        }
+    }
+    if let Some(size_enc) = spec.encoding.size.as_ref() {
+        if !legend_channel_disabled(Some(size_enc)) {
+            let size_legend = size_enc.legend.as_deref();
+            super::refuse_time_format_on_non_temporal_field(
+                size_enc,
+                transformed,
+                size_legend.and_then(|l| l.format.as_deref()),
+                size_legend.and_then(|l| l.format_type.as_deref()),
+                "size",
+                FormatSurface::Legend,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Read whether a channel's typed `legend` spec suppresses that channel's aux
 /// legend block — `legend=None` / `legend=False` from the Python `Size`/`Shape`
 /// classes, or `orient="none"`. An aux block answers for ONE channel, so this
@@ -1541,11 +1599,21 @@ mod tests {
     /// Control for the fix above: `format_type == "time"` alone DOES need
     /// the new path — it must not fall back to `format_colorbar_tick`'s
     /// range-aware DECIMAL formatting of a raw epoch-ms domain value.
+    ///
+    /// The field is a real epoch-ms timestamp column, so the fixture crosses
+    /// the `#147` legend refusal and is accepted by it (a temporal field)
+    /// rather than slipping past it on a column the batch does not carry;
+    /// the same spec over a Float64 column is the refused shape.
     #[test]
     fn continuous_color_format_type_time_alone_uses_epoch_formatting() {
+        use crate::render::chart_config::ChartConfig;
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+        let (lo, hi) = (1_577_836_800_000_i64, 1_580_515_200_000_i64); // 2020-01-01 .. 2020-02-01
         let scales = scales_with_color(ColorScale::Continuous {
-            domain: (1_577_836_800_000.0, 1_580_515_200_000.0), // 2020-01-01 .. 2020-02-01
+            domain: (lo as f64, hi as f64),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
         });
@@ -1556,9 +1624,24 @@ mod tests {
                 ..Default::default()
             },
         ));
+        let batch_of = |data_type: DataType, column: arrow::array::ArrayRef| {
+            RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("v", data_type, false)])), vec![column])
+                .unwrap()
+        };
+        let temporal = batch_of(
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            Arc::new(TimestampMillisecondArray::from(vec![lo, hi])),
+        );
+        let numeric = batch_of(DataType::Float64, Arc::new(Float64Array::from(vec![lo as f64, hi as f64])));
+        let config = ChartConfig::default();
+        assert_eq!(refuse_time_format_on_non_temporal_legend_fields(&spec, &temporal, &config), Ok(()));
+        assert!(
+            refuse_time_format_on_non_temporal_legend_fields(&spec, &numeric, &config).is_err(),
+            "negative control: the same spec over a numeric column is refused"
+        );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &temporal, &scales, &layers, false, &mut warnings);
         let labels = bundle.colorbar.expect("must build a colorbar").tick_labels;
         assert!(
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),

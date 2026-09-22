@@ -792,7 +792,7 @@ fn effective_legend_title(prep: &prepare::PreparedInputs) -> Option<String> {
 /// `disabled` field, so the second spelling parsed to no placement
 /// (`LegendOrient::parse` rejects `"none"`) and the theme orient stood — a
 /// legend drawn where the caller asked for none.
-fn chart_config_legend_disabled(chart_config: &ChartConfig) -> bool {
+pub(in crate::render) fn chart_config_legend_disabled(chart_config: &ChartConfig) -> bool {
     chart_config
         .legend
         .as_ref()
@@ -1065,22 +1065,17 @@ fn apply_label_format_to_axis(
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
         let fmt = axis.overrides.labels.format.get().spec.clone();
         let fmt = fmt.as_deref();
-        if let Some(f) = fmt {
-            // #133 predicate sharing (wave-1 close remediation): the same
-            // refusal `prepare::build_axis_tick_inputs`'s two mode arms share.
-            prepare::refuse_time_format_on_non_temporal(
-                f,
-                format_type.as_deref(),
-                scale,
-                tick_count,
-                channel,
-            )?;
-        }
+        // #133 predicate sharing (wave-1 close remediation): the same
+        // refusal `prepare::build_axis_tick_inputs`'s two mode arms share,
+        // a bare `format_type="time"` (`fmt` = `None`) included (`#147`).
+        prepare::refuse_time_format_on_non_temporal(fmt, format_type.as_deref(), scale, channel)?;
         axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
         return Ok(());
     }
     let Some(fmt_str) = axis.overrides.labels.format.get().spec.clone() else {
-        return Ok(());
+        // A bare `format_type="time"`: the labels stand, but on a
+        // non-temporal scale it refuses like every other surface (`#147`).
+        return prepare::refuse_time_format_on_non_temporal(None, format_type.as_deref(), scale, channel);
     };
     if is_time_type {
         // #133 predicate sharing (wave-1 close remediation), cycle-2 N2 fix:
@@ -1100,10 +1095,9 @@ fn apply_label_format_to_axis(
         // a panic.
         let Some(mut values) = scale.temporal_tick_values(tick_count) else {
             return prepare::refuse_time_format_on_non_temporal(
-                &fmt_str,
+                Some(&fmt_str),
                 format_type.as_deref(),
                 scale,
-                tick_count,
                 channel,
             );
         };
@@ -1719,6 +1713,16 @@ pub(in crate::render) fn validate_chart_format_specs(
                 axis.label_format_type.as_deref(),
                 e.type_,
             )?;
+        }
+        if !format_is_strict {
+            // The axis consumer reads the pair `resolve_axis_label_format`
+            // merges (the `Axis` type over the shorthand's, field by field),
+            // which neither check above sees whole. Gate it as it is read, so
+            // `X(format="%Y", axis=Axis(label_format_type="number"))` refuses
+            // exactly as its one-place spellings do (`#147`, wave 6A T21
+            // cycle 3).
+            let (fmt, format_type) = prepare::resolve_axis_label_format(Some(e));
+            check_loose(fmt.as_deref(), format_type.as_deref(), e.type_)?;
         }
         if let Some(legend) = e.legend.as_deref() {
             check_legend_style(legend)?;
