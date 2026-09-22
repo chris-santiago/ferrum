@@ -494,10 +494,15 @@ fn emit_text(svg: &mut SvgBuffer, x: f64, y: f64, content: &str, s: &FsText) {
     // Guard NaN opacity: NaN.clamp(0,1) is NaN in Rust, and NaN*255 as u8 = 0,
     // which makes text invisible. Default to 1.0 (fully opaque) when NaN.
     let opacity = if s.opacity.is_nan() { 1.0 } else { s.opacity };
-    let effective_alpha = ((s.color.a as f64 / 255.0) * opacity).clamp(0.0, 1.0);
-    let alpha_byte = (effective_alpha * 255.0).round() as u8;
+    // A cleared paint (`color: None`) paints no glyphs: `svg.text` writes
+    // `fill="none"`, the fill rule, since SVG's default text fill is black.
+    let fill = s.color.map(|c| {
+        let effective_alpha = ((c.a as f64 / 255.0) * opacity).clamp(0.0, 1.0);
+        let alpha_byte = (effective_alpha * 255.0).round() as u8;
+        from_rgba(c.r, c.g, c.b, alpha_byte)
+    });
     let ts = TextStyle {
-        fill: from_rgba(s.color.r, s.color.g, s.color.b, alpha_byte),
+        fill,
         font_size: s.font_size,
         anchor,
         angle: s.angle,
@@ -662,7 +667,7 @@ mod tests {
                 anchor: ferrum_scene::TextAnchor::Middle,
                 baseline: ferrum_scene::TextBaseline::Alphabetic,
                 angle: 0.0,
-                color: Color::rgb(80, 80, 80),
+                color: Some(Color::rgb(80, 80, 80)),
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -735,7 +740,7 @@ mod tests {
                 anchor: ferrum_scene::TextAnchor::Middle,
                 baseline: ferrum_scene::TextBaseline::Alphabetic,
                 angle: 0.0,
-                color: Color::rgb(80, 80, 80),
+                color: Some(Color::rgb(80, 80, 80)),
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -778,7 +783,7 @@ mod tests {
                 anchor: ferrum_scene::TextAnchor::Middle,
                 baseline: ferrum_scene::TextBaseline::Alphabetic,
                 angle: 0.0,
-                color: Color::rgb(80, 80, 80),
+                color: Some(Color::rgb(80, 80, 80)),
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -881,7 +886,7 @@ mod tests {
                     anchor: ferrum_scene::TextAnchor::Middle,
                     baseline: ferrum_scene::TextBaseline::Alphabetic,
                     angle: 0.0,
-                    color: Color::rgb(80, 80, 80),
+                    color: Some(Color::rgb(80, 80, 80)),
                     opacity: 1.0,
                     font_family: "sans-serif".to_string(),
                 },
@@ -1040,7 +1045,7 @@ mod tests {
             anchor: ferrum_scene::TextAnchor::Start,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color::rgb(0, 0, 0),
+            color: Some(Color::rgb(0, 0, 0)),
             opacity: f64::NAN,
             font_family: "Inter".to_string(),
         };
@@ -1071,7 +1076,7 @@ mod tests {
             anchor: ferrum_scene::TextAnchor::Start,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color,
+            color: Some(color),
             opacity,
             font_family: "Inter".to_string(),
         }

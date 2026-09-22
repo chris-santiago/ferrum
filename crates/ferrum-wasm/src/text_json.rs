@@ -35,11 +35,14 @@ fn text_baseline_string(b: &ferrum_scene::TextBaseline) -> String {
     }
 }
 
+/// The overlay `fill` for a text style. A cleared paint (`color: None`) is
+/// `"none"`, the SVG walker's spelling; `scene_load::collect_nodes` already drops
+/// cleared mark text, so this only keeps the function total.
 fn color_string(style: &ferrum_scene::TextStyle) -> String {
-    format!(
-        "rgba({},{},{},{})",
-        style.color.r, style.color.g, style.color.b, style.opacity
-    )
+    match style.color {
+        Some(c) => format!("rgba({},{},{},{})", c.r, c.g, c.b, style.opacity),
+        None => "none".to_string(),
+    }
 }
 
 // ── Public serialization functions ──────────────────────────────────────────
@@ -386,12 +389,12 @@ mod bug_hunt_interactive_slots {
             font_size: 11.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color {
+            color: Some(Color {
                 r: 51,
                 g: 51,
                 b: 51,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             anchor: TextAnchor::Start,
             baseline: TextBaseline::Alphabetic,
@@ -780,12 +783,12 @@ mod tests {
             font_size: 11.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color {
+            color: Some(Color {
                 r: 51,
                 g: 51,
                 b: 51,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -1717,12 +1720,12 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color {
+            color: Some(Color {
                 r: 100,
                 g: 200,
                 b: 50,
                 a: 255,
-            },
+            }),
             opacity: 0.5,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -1731,6 +1734,8 @@ mod tests {
         let result = color_string(&style);
         assert!(result.starts_with("rgba("), "must start with rgba(");
         assert!(result.contains("0.5"), "must contain opacity 0.5");
+        // `#110`: a cleared paint is SVG's `none`, never a zero-alpha rgba.
+        assert_eq!(color_string(&TextStyle { color: None, ..style }), "none");
     }
 
     #[test]

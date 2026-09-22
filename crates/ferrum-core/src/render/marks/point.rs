@@ -996,28 +996,6 @@ mod tests {
         }
     }
 
-    /// The three `StrokeStyle`-shaped glyphs paint their lines in the **fill
-    /// slot's color**, so what `ClearablePaint::color` resolves each variant to
-    /// is this mark's rendered paint, not an internal detail:
-    ///
-    /// | fill slot | glyph line color | why |
-    /// |---|---|---|
-    /// | `Paint(c)` | `c` | the ordinary case |
-    /// | `Cleared` | transparent (`alpha == 0`) | a `fill="none"` point must draw nothing visible |
-    /// | `Absent` | opaque black | the historical default for a mark with no fill at all |
-    ///
-    /// The `Cleared` row is the one with no other guard in the crate. It is why
-    /// `ClearablePaint::color` resolves a clear to
-    /// [`color::TRANSPARENT`](crate::render::color::TRANSPARENT) rather than to
-    /// `None` — "the color of a cleared paint" reads like a contradiction, and a
-    /// contributor who resolves it to `None` turns every `mark_point(shape=
-    /// "cross"|"vline"|"hline", fill="none")` into a **visible black** glyph.
-    /// Before this test, that mutation failed exactly one test, in a different
-    /// helper, about the stroke-width rescue — nothing named the invariant it
-    /// broke (wave 6A T7 quality review, finding 1).
-    ///
-    /// `Absent` is the negative control: it must stay black, so the test cannot
-    /// be satisfied by a blanket "glyph lines are always transparent".
     /// The three `StrokeStyle`-shaped glyphs paint their lines in the FILL slot,
     /// so a `mark_point(fill="none")` must paint no line at all.
     ///

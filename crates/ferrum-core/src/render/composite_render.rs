@@ -6427,7 +6427,7 @@ mod tests {
     fn find_label_style(scene: &SceneGraph, want: &str) -> Option<(f64, ferrum_scene::Color)> {
         scene.title.iter().find_map(|n| match n {
             SceneNode::Text { content, style, .. } if content == want => {
-                Some((style.font_size, style.color))
+                style.color.map(|c| (style.font_size, c))
             }
             _ => None,
         })

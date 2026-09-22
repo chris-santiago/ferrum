@@ -279,8 +279,7 @@ impl MarkPaint {
     /// bare `None` would have opened. That is the deliberate reading, not an
     /// oversight: a clear is a *decision about this slot*, and it outranks the
     /// absence of a value under it. It is also lossless, because a cleared
-    /// paint's color is `TRANSPARENT` by definition rather than by storage
-    /// ([`ClearablePaint::color`]) — the `None` the projection discards would
+    /// paint carries no color at all — the `None` the projection discards would
     /// have resolved to exactly nothing a reader could have used.
     ///
     /// [`resolve_mark_style`] never produces that pairing: it writes
@@ -939,9 +938,8 @@ pub enum ClearablePaint {
     /// Paint this color.
     Paint(Color),
     /// The user cleared this slot with the `"none"`/`"transparent"` sentinel
-    /// ([`PaintSource::UserClear`]). Its *value* is
-    /// [`color::TRANSPARENT`](super::color::TRANSPARENT) — see
-    /// [`color`](Self::color) — but it serializes as nothing.
+    /// ([`PaintSource::UserClear`]). It carries no color and serializes as
+    /// nothing; see [`scene_paint`](Self::scene_paint).
     Cleared,
     /// This slot has no paint at all: a mark style that resolves no stroke, a
     /// hollow point's fill, a line's absent fill.
@@ -994,35 +992,12 @@ impl ClearablePaint {
         }
     }
 
-    /// The color this slot *resolved to*, for callers that paint something else
-    /// in it rather than emitting it as this node's own paint attribute.
-    ///
-    /// A clear resolves to [`color::TRANSPARENT`](super::color::TRANSPARENT),
-    /// exactly as [`resolve_paint_color`] resolves the sentinel, so a glyph drawn
-    /// in a cleared fill's color (point's `cross`/`vline`/`hline` arms) stays
-    /// invisible instead of falling back to a visible default. Use
-    /// [`scene_paint`](Self::scene_paint) for the attribute itself: that is the
-    /// one reader for which a clear is *absence*, not transparency.
-    pub fn color(self) -> Option<Color> {
-        match self {
-            Self::Paint(c) => Some(c),
-            Self::Cleared => Some(super::color::TRANSPARENT),
-            Self::Absent => None,
-        }
-    }
-
-    /// [`color`](Self::color) with a fallback for [`Absent`](Self::Absent).
-    pub fn color_or(self, fallback: Color) -> Color {
-        self.color().unwrap_or(fallback)
-    }
-
     /// Substitute `fallback` for [`Absent`](Self::Absent), leaving both
     /// [`Paint`](Self::Paint) and [`Cleared`](Self::Cleared) as they are.
     ///
-    /// This is [`color_or`](Self::color_or)'s paint-preserving form, for a slot
-    /// whose fallback is another slot: `geoshape`'s line stroke falls back to its
-    /// fill, and if *that* slot was cleared the line paints nothing (`#110`,
-    /// spec §4.1).
+    /// For a slot whose fallback is another slot: `geoshape`'s line stroke
+    /// falls back to its fill, and if *that* slot was cleared the line paints
+    /// nothing (`#110`, spec §4.1).
     pub fn or(self, fallback: Self) -> Self {
         match self {
             Self::Absent => fallback,
@@ -1362,8 +1337,15 @@ pub(crate) fn parse_text_baseline(s: &str) -> Option<ferrum_scene::TextBaseline>
     }
 }
 
+/// Build a scene [`TextStyle`](ferrum_scene::TextStyle).
+///
+/// `paint` carries the text fill's provenance, exactly as
+/// [`to_scene_stroke`]'s does: a [`ClearablePaint::Cleared`] fill reaches the
+/// scene as `color: None` (no glyphs painted) rather than as a zero-alpha
+/// color. Chrome text (axis, legend, title, strip) has no clear spelling and
+/// passes [`ClearablePaint::Paint`].
 pub fn to_scene_text_style(
-    color: Color,
+    paint: ClearablePaint,
     font_size: f64,
     anchor: crate::layout::TextAnchor,
     angle: f64,
@@ -1390,7 +1372,7 @@ pub fn to_scene_text_style(
             None => ferrum_scene::TextBaseline::Alphabetic,
         },
         angle,
-        color: to_scene_color(color),
+        color: paint.scene_paint(),
         opacity,
         font_family: font_family.to_string(),
     }
@@ -2071,11 +2053,6 @@ mod tests {
             ClearablePaint::Cleared,
             "the rescue did not fire, so the cleared stroke carries through",
         );
-        assert_eq!(
-            effective.color().expect("a cleared paint still resolves to a color").alpha,
-            0,
-            "the cleared stroke must stay invisible",
-        );
         assert_eq!(effective.scene_paint(), None, "and it must not serialize at all");
     }
 
@@ -2456,7 +2433,7 @@ mod tests {
         use crate::layout::TextAnchor;
         use crate::render::color::from_rgb;
         let style = to_scene_text_style(
-            from_rgb(0, 0, 0),
+            ClearablePaint::Paint(from_rgb(0, 0, 0)),
             12.0,
             TextAnchor::Middle,
             0.0,
@@ -2475,7 +2452,7 @@ mod tests {
         use crate::layout::TextAnchor;
         use crate::render::color::from_rgb;
         let style = to_scene_text_style(
-            from_rgb(0, 0, 0),
+            ClearablePaint::Paint(from_rgb(0, 0, 0)),
             12.0,
             TextAnchor::Middle,
             0.0,

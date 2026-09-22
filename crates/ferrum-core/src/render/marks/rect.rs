@@ -450,7 +450,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
 }
 
 fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    use crate::render::draw::{MarkBuildResult, PaintChannels, to_scene_fill_stroke, to_scene_text_style};
+    use crate::render::draw::{ClearablePaint, MarkBuildResult, PaintChannels, to_scene_fill_stroke, to_scene_text_style};
     use crate::render::format::format_numeric;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
@@ -627,7 +627,7 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
                         content: content.clone(),
                         slot: None,
                         style: to_scene_text_style(
-                            text_color,
+                            ClearablePaint::Paint(text_color),
                             font_size,
                             crate::layout::TextAnchor::Middle,
                             0.0,

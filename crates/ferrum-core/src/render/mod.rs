@@ -3935,6 +3935,121 @@ mod orchestration_tests {
         );
     }
 
+    // ── `#110` on the text family: `mark_text` / `mark_label` ──
+    //
+    // Text nodes paint through `TextStyle.color`, not a `FillStroke`, so the
+    // rule above did not reach them until `TextStyle.color` became
+    // `Option<Color>`: `mark_text(fill="none").encode(color=…)` rendered
+    // byte-identically to the same chart without the clear, and a clear with no
+    // channel serialized `fill="rgba(0,0,0,0.000)"` on both marks. Text batches
+    // paint OUTSIDE the clip group, so these read the mark's own `<text>`
+    // elements by a content marker instead of `mark_group`.
+
+    /// [`paint_clear_spec`] plus a `text` channel whose values (`m0`…`m3`)
+    /// no axis tick or legend label can collide with.
+    fn text_clear_spec(mark: Mark, style: MarkKwargsSpec, with_color: bool) -> (ChartSpec, RecordBatch) {
+        let (mut spec, batch) = paint_clear_spec(mark, style, with_color);
+        spec.encoding.text = Some(EncodingSpec { field: "t".into(), type_: None, ..Default::default() });
+        let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new("t", DataType::Utf8, false));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(StringArray::from(vec!["m0", "m1", "m2", "m3"])));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        (spec, batch)
+    }
+
+    /// The `fill` attribute of every mark `<text>` element (content `m0`…`m3`),
+    /// in document order. Asserts all four were found, so a slice that missed
+    /// the mark text fails instead of passing vacuously.
+    fn mark_text_fills(svg: &str) -> Vec<&str> {
+        let fills: Vec<&str> = svg
+            .split("<text")
+            .skip(1)
+            .filter(|el| {
+                let body = &el[..el.find("</text>").expect("a text element must close")];
+                body.split_once('>').is_some_and(|(_, content)| {
+                    content.len() == 2 && content.starts_with('m')
+                })
+            })
+            .map(|el| {
+                let start = el.find("fill=\"").expect("a text element must carry fill") + 6;
+                &el[start..start + el[start..].find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(fills.len(), 4, "expected the four mark text elements; svg={svg:?}");
+        fills
+    }
+
+    /// `fill="none"` on `mark_text` / `mark_label` paints no glyphs, with or
+    /// without a color channel, and never serializes a zero-alpha color.
+    #[test]
+    fn render_svg_text_fill_clear_beats_a_color_channel_on_text_and_label() {
+        for mark in [Mark::Text, Mark::Label] {
+            let label = format!("{mark:?}");
+            // `leader_line` only exists on label; it rides along so the leader
+            // stroke (painted in the fill) is covered by the zero-alpha check.
+            let cleared_kwargs = || MarkKwargsSpec {
+                fill: Some("none".into()),
+                leader_line: Some(true),
+                ..Default::default()
+            };
+            let (spec_p, batch) = text_clear_spec(mark.clone(), MarkKwargsSpec::default(), true);
+            let painted_svg = render_to_svg(&spec_p, &batch);
+            let painted = mark_text_fills(&painted_svg);
+            assert!(
+                painted.iter().all(|f| *f != "none" && !f.starts_with("rgba(0,0,0,0")),
+                "{label}: without a clear the mark text must paint; fills={painted:?}"
+            );
+            if matches!(mark, Mark::Text) {
+                // Positive control for the channel: text paints the palette,
+                // so the rows of the two groups differ.
+                assert_ne!(painted[0], painted[1], "text must paint the color channel; fills={painted:?}");
+            }
+
+            for with_color in [true, false] {
+                let (spec_c, batch) = text_clear_spec(mark.clone(), cleared_kwargs(), with_color);
+                let cleared_svg = render_to_svg(&spec_c, &batch);
+                let cleared = mark_text_fills(&cleared_svg);
+                assert!(
+                    cleared.iter().all(|f| *f == "none"),
+                    "{label} (color channel: {with_color}): fill=\"none\" must paint no glyphs, \
+                     beating any color channel; fills={cleared:?}"
+                );
+                assert!(
+                    !cleared_svg.contains("rgba(0,0,0,0.000)"),
+                    "{label} (color channel: {with_color}): a cleared text paint must never \
+                     serialize a zero-alpha color; svg={cleared_svg:?}"
+                );
+                if with_color {
+                    assert_ne!(
+                        painted_svg, cleared_svg,
+                        "{label}: the cleared render must differ from the uncleared one"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The negative control for the text family: `fill="#00000000"` resolves
+    /// the same bytes as a clear but was never cleared, so both marks keep
+    /// serializing `rgba(0,0,0,0.000)` on their text.
+    #[test]
+    fn render_svg_text_explicit_zero_alpha_fill_serializes_by_value() {
+        for mark in [Mark::Text, Mark::Label] {
+            let (spec, batch) = text_clear_spec(
+                mark.clone(),
+                MarkKwargsSpec { fill: Some("#00000000".into()), ..Default::default() },
+                false,
+            );
+            let svg = render_to_svg(&spec, &batch);
+            let fills = mark_text_fills(&svg);
+            assert!(
+                fills.iter().all(|f| *f == "rgba(0,0,0,0.000)"),
+                "{mark:?}: an explicit #00000000 fill must serialize by value; fills={fills:?}"
+            );
+        }
+    }
+
     #[test]
     fn render_svg_unknown_column_errors() {
         let (mut spec, batch) = scatter_3();

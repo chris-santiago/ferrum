@@ -429,7 +429,7 @@ mod tests {
                 anchor: TextAnchor::Middle,
                 baseline: TextBaseline::Alphabetic,
                 angle: 0.0,
-                color: Color::rgb(50, 50, 50),
+                color: Some(Color::rgb(50, 50, 50)),
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -610,6 +610,55 @@ mod tests {
         let with_null: StrokeStyle = serde_json::from_str(
             r#"{"color":null,"width":1.0,"opacity":1.0,"dash":null,
                 "stroke_cap":null,"stroke_join":null}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(with_null.color, None);
+    }
+
+    fn text_style(color: Option<Color>) -> TextStyle {
+        TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color,
+            opacity: 1.0,
+            font_family: "Inter".into(),
+        }
+    }
+
+    /// `TextStyle.color` became `Option<Color>` (`#110`, the text sibling of
+    /// the `StrokeStyle` change): a PRESENT color serializes exactly as the bare
+    /// `Color` did, so every painted text node's scene JSON is byte-identical.
+    #[test]
+    fn text_style_present_color_serializes_exactly_as_the_bare_color_did() {
+        let style = text_style(Some(Color::rgb(1, 2, 3)));
+        let json = serde_json::to_string(&style).expect("serialize");
+        assert!(
+            json.contains(r#""color":{"r":1,"g":2,"b":3,"a":255}"#),
+            "a present text color must serialize inline, with no Option wrapper, got: {json}"
+        );
+        let back: TextStyle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, style);
+    }
+
+    /// A cleared text paint OMITS the key rather than writing `"color":null`,
+    /// and a payload with the key missing or null loads as a clear.
+    #[test]
+    fn text_style_cleared_color_is_omitted_and_a_missing_key_loads_as_none() {
+        let cleared = text_style(None);
+        let json = serde_json::to_string(&cleared).expect("serialize");
+        assert!(
+            !json.contains("\"color\""),
+            "a cleared text paint must omit the color key, not write null, got: {json}"
+        );
+        let back: TextStyle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, cleared);
+        let with_null: TextStyle = serde_json::from_str(
+            r#"{"font_size":11.0,"font_weight":"normal","anchor":"middle",
+                "baseline":"alphabetic","angle":0.0,"color":null,"opacity":1.0,
+                "font_family":"Inter"}"#,
         )
         .expect("deserialize");
         assert_eq!(with_null.color, None);

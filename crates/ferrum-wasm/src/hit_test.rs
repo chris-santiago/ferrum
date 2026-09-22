@@ -1634,12 +1634,12 @@ mod bug_hunt_tests {
             anchor: ferrum_scene::TextAnchor::Middle,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color: ferrum_scene::Color {
+            color: Some(ferrum_scene::Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".into(),
         }
@@ -2533,12 +2533,12 @@ mod tests {
             anchor: ferrum_scene::TextAnchor::Middle,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color: ferrum_scene::Color {
+            color: Some(ferrum_scene::Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".into(),
         }

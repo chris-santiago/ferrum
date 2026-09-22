@@ -350,7 +350,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                         content: tick.label.clone(),
                         slot: tick_slot,
                         style: to_scene_text_style(
-                            label_color,
+                            ClearablePaint::Paint(label_color),
                             effective_font_size,
                             anchor,
                             angle,
@@ -376,7 +376,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                             content: line.to_string(),
                             slot: tick_slot,
                             style: to_scene_text_style(
-                                label_color,
+                                ClearablePaint::Paint(label_color),
                                 effective_font_size,
                                 anchor,
                                 angle,
@@ -410,7 +410,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             content: t.text.clone(),
             slot: None,
             style: to_scene_text_style(
-                effective_title_color,
+                ClearablePaint::Paint(effective_title_color),
                 effective_title_font_size,
                 TextAnchor::Middle,
                 t.angle,
@@ -1734,9 +1734,10 @@ mod tests {
         assert!(title_node.is_some(), "expected a title text node");
         if let Some(SceneNode::Text { style, .. }) = title_node {
             assert_eq!(style.font_size, 20.0, "title should use overridden font size");
-            assert_eq!(style.color.r, 0xff, "title should use overridden red color");
-            assert_eq!(style.color.g, 0x00);
-            assert_eq!(style.color.b, 0x00);
+            let color = style.color.expect("title text is painted");
+            assert_eq!(color.r, 0xff, "title should use overridden red color");
+            assert_eq!(color.g, 0x00);
+            assert_eq!(color.b, 0x00);
         }
     }
 

@@ -206,7 +206,7 @@ fn build_text_annotation() {
             assert!((y - 170.0).abs() < f64::EPSILON);
             assert_eq!(content, "hello");
             assert_eq!(style.font_size, 14.0);
-            assert_eq!(style.color, Color::rgb(255, 0, 0));
+            assert_eq!(style.color, Some(Color::rgb(255, 0, 0)));
         }
         _ => panic!("expected Text node"),
     }

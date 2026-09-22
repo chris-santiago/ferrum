@@ -1177,11 +1177,16 @@ All positional and appearance channels accept:
 >   *fill* still emits SVG's own `fill="none"` keyword, because SVG's default
 >   fill is black and omitting the attribute would paint it; a cleared
 >   *stroke* omits the attribute, whose SVG default is already `none`.
+>   Text marks follow the fill rule: `TextStyle.color` is optional too, so
+>   `mark_text(fill="none")` and `mark_label(fill="none")` write
+>   `fill="none"` on each `<text>` element instead of `rgba(0,0,0,0.000)`,
+>   `mark_label`'s leader lines (painted in its fill) emit no stroke, and
+>   the interactive runtime draws no glyphs for them.
 >   The same release makes an explicit clear outrank a **color channel**:
 >   `mark_line(stroke="none").encode(x=…, y=…, color=…)` previously rendered
 >   byte-identically to the same chart without the clear, painting the
 >   categorical palette over it, and the same was true of a cleared `fill=`
->   under a color channel on `area`/`arc`/`bar`/`rect`/`point`/`polygon`. A
+>   under a color channel on `area`/`arc`/`bar`/`rect`/`point`/`polygon`/`text`. A
 >   clear is a decision to paint nothing, and it now wins over any color the
 >   channel resolves.
 > - **`FillOpacity`/`StrokeOpacity`/`Opacity`/`StrokeDash` `scale=` is now

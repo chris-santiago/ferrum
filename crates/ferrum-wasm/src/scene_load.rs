@@ -1765,6 +1765,12 @@ fn collect_nodes(
             SceneNode::Polygon { rings, style } => {
                 tessellate::tessellate_polygon(rings, style, mesh);
             }
+            // A cleared text paint (`color: None`) paints no glyphs, so it
+            // emits no overlay element: the counterpart of the tessellators'
+            // early return for a cleared stroke and of the SVG walker's
+            // `fill="none"` (`#110`). Hit-testing reads the scene, not this
+            // list, so the node stays addressable like any cleared mark.
+            SceneNode::Text { style, .. } if style.color.is_none() => {}
             SceneNode::Text {
                 x,
                 y,
@@ -3553,6 +3559,34 @@ mod tests {
 
     // ── Text ──────────────────────────────────────────────────────────
 
+    /// `#110`: a cleared text paint (`color: None`) emits NO overlay text
+    /// element, the interactive counterpart of the SVG walker's `fill="none"`
+    /// and of the tessellators' early return for a cleared stroke. The painted
+    /// sibling in the same batch is what keeps this from passing by dropping
+    /// every text node.
+    #[test]
+    fn cleared_text_paint_produces_no_text_element() {
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
+        let painted = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let cleared = TextStyle { color: None, ..painted.clone() };
+        let nodes = vec![
+            SceneNode::Text { x: 1.0, y: 1.0, content: "cleared".into(), style: cleared, slot: None },
+            SceneNode::Text { x: 2.0, y: 2.0, content: "painted".into(), style: painted, slot: None },
+        ];
+        let data = load_scene(&make_scene_with_nodes(MarkBatchKind::Text, nodes));
+        let contents: Vec<&str> = data.text_elements.iter().map(|t| t.content.as_str()).collect();
+        assert_eq!(contents, ["painted"], "a cleared text node must emit no overlay element");
+    }
+
     #[test]
     fn text_node_produces_text_element() {
         use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
@@ -3562,12 +3596,12 @@ mod tests {
             anchor: TextAnchor::Start,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -3608,12 +3642,12 @@ mod tests {
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Middle,
             angle: 0.0,
-            color: Color {
+            color: Some(Color {
                 r: 50,
                 g: 50,
                 b: 50,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "serif".to_string(),
         };
@@ -3655,12 +3689,12 @@ mod tests {
             anchor: TextAnchor::End,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -3702,12 +3736,12 @@ mod tests {
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -3831,12 +3865,12 @@ mod tests {
                 anchor: TextAnchor::Middle,
                 baseline: TextBaseline::Top,
                 angle: 0.0,
-                color: Color {
+                color: Some(Color {
                     r: 0,
                     g: 0,
                     b: 0,
                     a: 255,
-                },
+                }),
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -5678,12 +5712,12 @@ mod tests {
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -7085,12 +7119,12 @@ mod tests {
             anchor: ferrum_scene::TextAnchor::Start,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle,
-            color: Color {
+            color: Some(Color {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         }

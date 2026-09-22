@@ -580,7 +580,7 @@ fn chrome_text_style(line: &ChromeLine<'_>) -> TextStyle {
         },
         baseline: TextBaseline::Alphabetic,
         angle: 0.0,
-        color: line.color_override.unwrap_or(style.color),
+        color: Some(line.color_override.unwrap_or(style.color)),
         opacity: 1.0,
         font_family: FIGURE_FONT_FAMILY.to_string(),
     }
@@ -1042,7 +1042,7 @@ mod tests {
         };
         let ts = chrome_text_style(&line);
         assert_eq!(ts.font_weight, FontWeight::Custom("600".to_string()));
-        assert_eq!(ts.color, FIGURE_TITLE_COLOR);
+        assert_eq!(ts.color, Some(FIGURE_TITLE_COLOR));
     }
 
     #[test]
@@ -1058,7 +1058,7 @@ mod tests {
         match &nodes[0] {
             SceneNode::Text { style, .. } => {
                 assert_eq!(style.font_weight, FontWeight::Custom("600".to_string()));
-                assert_eq!(style.color, FIGURE_TITLE_COLOR);
+                assert_eq!(style.color, Some(FIGURE_TITLE_COLOR));
                 assert_eq!(style.font_size, FIGURE_TITLE_FONT_SIZE);
             }
             other => panic!("expected Text, got {other:?}"),
@@ -1067,7 +1067,7 @@ mod tests {
             match node {
                 SceneNode::Text { style, .. } => {
                     assert_eq!(style.font_weight, FontWeight::Normal);
-                    assert_eq!(style.color, FIGURE_MUTED_COLOR);
+                    assert_eq!(style.color, Some(FIGURE_MUTED_COLOR));
                 }
                 other => panic!("expected Text, got {other:?}"),
             }
@@ -1098,7 +1098,7 @@ mod tests {
         match &nodes[0] {
             SceneNode::Text { style, .. } => {
                 assert_eq!(style.font_size, 30.0);
-                assert_eq!(style.color, custom_color);
+                assert_eq!(style.color, Some(custom_color));
                 // Weight/family are not part of this override (matches the
                 // brief's two-field mirror of scene_build's title styling).
                 assert_eq!(style.font_weight, FontWeight::Custom("600".to_string()));

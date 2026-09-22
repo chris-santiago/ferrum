@@ -12,7 +12,7 @@ use crate::spec::chart::ChartSpec;
 use super::arrow_cast::col_as_identity_key_str;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
-use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
+use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
 use super::marks;
 use super::prepare::PreparedInputs;
 use super::scale_resolve::LeafScaleContext;
@@ -2152,7 +2152,7 @@ fn build_title(
         content: title.text.clone(),
         slot: None,
         style: to_scene_text_style(
-            resolved_color,
+            ClearablePaint::Paint(resolved_color),
             resolved_font_size,
             title.anchor,
             0.0,
@@ -2178,7 +2178,7 @@ fn build_title(
             content: subtitle.clone(),
             slot: None,
             style: to_scene_text_style(
-                resolved_sub_color,
+                ClearablePaint::Paint(resolved_sub_color),
                 resolved_sub_font_size,
                 title.anchor,
                 0.0,
@@ -2810,7 +2810,7 @@ fn build_polar_axes(
                 content: tick.label.clone(),
                 slot: None,
                 style: draw::to_scene_text_style(
-                    theme.colors.label_color,
+                    ClearablePaint::Paint(theme.colors.label_color),
                     theme.typography.label_font_size,
                     crate::layout::TextAnchor::Middle,
                     0.0,
@@ -4276,7 +4276,7 @@ mod tests {
         assert_eq!(subtitle_node.font_size, 22.0);
         assert_eq!(
             subtitle_node.color,
-            to_scene_color(super::super::color::parse_color("#ff0000").unwrap()),
+            Some(to_scene_color(super::super::color::parse_color("#ff0000").unwrap())),
         );
     }
 
@@ -4306,7 +4306,7 @@ mod tests {
                     .iter()
                     .find_map(|n| match n {
                         SceneNode::Text { content, style, .. } if content == want => {
-                            Some(style.color)
+                            Some(style.color.expect("title text is painted"))
                         }
                         _ => None,
                     })
@@ -4347,7 +4347,7 @@ mod tests {
             subtitle_node.font_size,
             theme.typography.title_font_size * 0.85
         );
-        assert_eq!(subtitle_node.color, to_scene_color(theme.colors.font_color));
+        assert_eq!(subtitle_node.color, Some(to_scene_color(theme.colors.font_color)));
     }
 
     // ── SPINE-04: resolve_panel_scales per-panel seam ────────────────────────
@@ -4986,7 +4986,7 @@ mod tests {
             .flat_map(|m| m.nodes.iter())
             .filter_map(|n| {
                 if let SceneNode::Text { style, .. } = n {
-                    Some(style.color)
+                    style.color
                 } else {
                     None
                 }

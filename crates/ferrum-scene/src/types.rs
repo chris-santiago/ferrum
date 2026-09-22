@@ -577,7 +577,22 @@ pub struct TextStyle {
     pub anchor: TextAnchor,
     pub baseline: TextBaseline,
     pub angle: f64,
-    pub color: Color,
+    /// The text fill, or `None` for a paint the caller cleared
+    /// (`mark_text(fill="none")`, `mark_label(fill="none")`).
+    ///
+    /// `None` means *no glyphs are painted*: the SVG walker writes
+    /// `fill="none"` on the `<text>` element (the fill rule — SVG's default
+    /// text fill is black, so omitting the attribute would paint it), and the
+    /// WASM runtime emits no overlay text element at all, the counterpart of
+    /// the tessellators' early return for a cleared stroke (`#110`, spec
+    /// §4.1). A fill that merely *resolves to* a transparent color without
+    /// having been cleared stays `Some` and keeps serializing byte-identically.
+    ///
+    /// Skipped when absent and `default` on load, exactly as
+    /// [`StrokeStyle::color`], so a present color serializes as the bare
+    /// `Color` did and older scene JSON still deserializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
     pub opacity: f64,
     pub font_family: String,
 }

@@ -44,7 +44,7 @@ pub fn build_row_strip_title(
         content: strip.text.clone(),
         slot: None,
         style: crate::render::draw::to_scene_text_style(
-            theme.colors.font_color,
+            ClearablePaint::Paint(theme.colors.font_color),
             strip.font_size,
             strip.align,
             90.0, // rotated 90°: reads bottom-to-top along the right edge
@@ -92,7 +92,7 @@ pub fn build_strip_title(
         content: strip.text.clone(),
         slot: None,
         style: to_scene_text_style(
-            theme.colors.font_color,
+            ClearablePaint::Paint(theme.colors.font_color),
             strip.font_size,
             strip.align,
             0.0,

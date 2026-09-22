@@ -198,7 +198,7 @@ fn element_colors(nodes: &[SceneNode], out: &mut Vec<String>) {
             SceneNode::Line { style, .. } | SceneNode::Polyline { style, .. } => {
                 out.extend(style.color.map(hex))
             }
-            SceneNode::Text { style, .. } => out.push(hex(style.color)),
+            SceneNode::Text { style, .. } => out.extend(style.color.map(hex)),
             SceneNode::Group { children, .. } => element_colors(children, out),
             SceneNode::Image { .. } | SceneNode::Raw { .. } => {}
         }

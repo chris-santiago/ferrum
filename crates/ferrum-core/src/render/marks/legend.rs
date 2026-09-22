@@ -41,7 +41,7 @@ pub fn build_legend(
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
     let label_text_style = to_scene_text_style(
-        label_fill,
+        ClearablePaint::Paint(label_fill),
         label_font_size,
         TextAnchor::Start,
         0.0,
@@ -64,7 +64,7 @@ pub fn build_legend(
             content: title.text.clone(),
             slot: None,
             style: to_scene_text_style(
-                theme.colors.title_color,
+                ClearablePaint::Paint(theme.colors.title_color),
                 theme.typography.legend_title_font_size,
                 TextAnchor::Start,
                 0.0,
@@ -123,7 +123,7 @@ pub fn build_legend(
         // position and `y` the shared bottom edge).
         let tick_label_style = if horizontal {
             to_scene_text_style(
-                label_fill,
+                ClearablePaint::Paint(label_fill),
                 label_font_size,
                 TextAnchor::Middle,
                 0.0,
@@ -788,7 +788,7 @@ mod tests {
             .collect();
         assert!(!label_colors.is_empty(), "legend must emit label text nodes");
         for color in label_colors {
-            assert_eq!(color, red, "entry label fill must be the label_color override");
+            assert_eq!(color, Some(red), "entry label fill must be the label_color override");
         }
     }
 
@@ -814,12 +814,12 @@ mod tests {
             let fills = label_fills(spelling);
             assert!(!fills.is_empty(), "legend must emit label text nodes");
             for fill in fills {
-                assert_eq!(fill, expected, "{spelling:?} must resolve to the same label fill");
+                assert_eq!(fill, Some(expected), "{spelling:?} must resolve to the same label fill");
             }
         }
         // Unparseable input keeps the theme font color, as before the sweep.
         for fill in label_fills("not-a-color") {
-            assert_eq!(fill, to_scene_color(theme.colors.font_color));
+            assert_eq!(fill, Some(to_scene_color(theme.colors.font_color)));
         }
     }
 
@@ -832,7 +832,7 @@ mod tests {
         let nodes = build_legend(&two_circle_legend_styled(None, None, None, None, None), None, &theme);
         for n in &nodes {
             if let SceneNode::Text { style, .. } = n {
-                assert_eq!(style.color, expected);
+                assert_eq!(style.color, Some(expected));
             }
         }
     }

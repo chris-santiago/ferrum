@@ -162,10 +162,15 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // is always built via `resolve_mark_style(layer.mark_style.as_ref(), ...)`
     // for THIS layer, so its `fill_source` is correct in both flat and
     // layered charts.
-    let base_text_color = if ctx.mark_style.paint.fill_source.is_user_set() {
-        ctx.mark_style.paint.fill
+    //
+    // A user-set fill goes in through `fill_paint()` so it keeps its
+    // provenance: `fill="none"` is `Cleared`, which `resolve_fill_color` keeps
+    // cleared over a color-channel hit and which reaches the scene as
+    // `TextStyle.color: None` — the same `#110` rule every filled mark follows.
+    let base_text_paint = if ctx.mark_style.paint.fill_source.is_user_set() {
+        ctx.mark_style.paint.fill_paint()
     } else {
-        ctx.theme.colors.font_color
+        ClearablePaint::Paint(ctx.theme.colors.font_color)
     };
     let (color_values_str, color_values_f64) = color_column_loader(ctx);
 
@@ -265,21 +270,15 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .filter(|v| v.is_finite())
             .unwrap_or(base_angle);
 
-        // Resolve per-row fill color: color channel wins when bound, else the
-        // resolved constant (`base_text_color`, see above).
-        // Text color has no cleared-paint concept (it is not a `FillStroke`
-        // paint slot; a `"none"` fill on a text mark is not a supported
-        // clear), so the fallback goes in as a plain `Paint` and the resolved
-        // paint comes back out as a plain color — a `Paint` fallback can only
-        // resolve to `Paint`, so `color_or`'s argument is unreachable here and
-        // repeats the same fallback rather than inventing a second one.
-        let row_color = resolve_fill_color(
+        // Resolve per-row fill paint: color channel wins when bound, else the
+        // resolved constant (`base_text_paint`, see above) — unless that
+        // constant is a clear, which outranks the channel.
+        let row_paint = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ClearablePaint::Paint(base_text_color),
-        )
-        .color_or(base_text_color);
+            base_text_paint,
+        );
 
         acc.push(SceneNode::Text {
             x: px + dx,
@@ -287,7 +286,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             content: label,
             slot: None,
             style: to_scene_text_style(
-                row_color,
+                row_paint,
                 row_font_size,
                 anchor,
                 row_angle,
@@ -914,7 +913,7 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx).unwrap();
         result.nodes.iter().filter_map(|n| {
-            if let ferrum_scene::SceneNode::Text { style, .. } = n { Some(style.color) } else { None }
+            if let ferrum_scene::SceneNode::Text { style, .. } = n { style.color } else { None }
         }).collect()
     }
 

@@ -60,7 +60,8 @@ pub struct Stroke {
 
 #[derive(Debug, Clone)]
 pub struct TextStyle<'a> {
-    pub fill: Color,
+    /// The text fill, or `None` for a cleared paint — see [`SvgBuffer::text`].
+    pub fill: Option<Color>,
     pub font_size: f64,
     pub anchor: TextAnchor,
     pub angle: f64,
@@ -227,7 +228,13 @@ impl SvgBuffer {
         self.buf.push_str("<text");
         push_attr(&mut self.buf, "x", &fmt_f(x));
         push_attr(&mut self.buf, "y", &fmt_f(y));
-        push_attr(&mut self.buf, "fill", &fmt_svg(style.fill));
+        // A cleared paint writes `fill="none"`, never an omitted attribute:
+        // SVG's default text fill is black, so omission would paint the glyphs
+        // (the same rule as `push_fill_stroke`, `#110`).
+        match style.fill {
+            Some(c) => push_attr(&mut self.buf, "fill", &fmt_svg(c)),
+            None => push_attr(&mut self.buf, "fill", "none"),
+        }
         push_attr(&mut self.buf, "font-family", style.font_family);
         push_attr(&mut self.buf, "font-size", &fmt_f(style.font_size));
         if let Some(fw) = style.font_weight {
@@ -738,7 +745,7 @@ mod tests {
     #[test]
     fn text_escapes_lt_gt_amp() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        let style = TextStyle { fill: Some(from_rgb(0,0,0)), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(0.0, 0.0, "Price > 0 & < 1", &style);
         let out = buf.finish();
         assert!(out.contains("Price &gt; 0 &amp; &lt; 1"), "got: {out}");
@@ -747,7 +754,7 @@ mod tests {
     #[test]
     fn text_single_line_no_tspan() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        let style = TextStyle { fill: Some(from_rgb(0,0,0)), font_size: 11.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(50.0, 30.0, "hello", &style);
         let out = buf.finish();
         assert!(!out.contains("<tspan"), "single-line text must not emit <tspan>; got: {out}");
@@ -757,7 +764,7 @@ mod tests {
     #[test]
     fn text_multiline_emits_tspan_per_line() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        let style = TextStyle { fill: Some(from_rgb(0,0,0)), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(50.0, 30.0, "line1\nline2\nline3", &style);
         let out = buf.finish();
         assert_eq!(out.matches("<tspan").count(), 3, "expected 3 tspans; got: {out}");
@@ -769,7 +776,7 @@ mod tests {
     #[test]
     fn text_multiline_dy_sequence_is_correct() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        let style = TextStyle { fill: Some(from_rgb(0,0,0)), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(50.0, 30.0, "a\nb", &style);
         let out = buf.finish();
         // First tspan: dy="0"; second tspan: dy="1.2em"
@@ -784,7 +791,7 @@ mod tests {
     #[test]
     fn text_multiline_x_attribute_repeated_on_each_tspan() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        let style = TextStyle { fill: Some(from_rgb(0,0,0)), font_size: 12.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(42.5, 20.0, "foo\nbar", &style);
         let out = buf.finish();
         // Both tspan elements must carry x="42.5"

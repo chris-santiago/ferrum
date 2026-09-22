@@ -3,7 +3,7 @@ use ferrum_scene::{MarkBatchKind, SceneNode, StrokeStyle};
 use crate::layout::TextAnchor;
 use crate::render::arrow_cast::{col_as_f64, col_as_str};
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_color, to_scene_text_style, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::draw::{to_scene_text_style, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::RenderError;
 
@@ -111,7 +111,12 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let fallback_dy = fixed_dy.unwrap_or(-8.0);
 
     let font_size = ctx.mark_style.text.font_size.unwrap_or(11.0);
-    let color = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
+    // `fill_paint()` keeps the fill's provenance, so `fill="none"` reaches the
+    // scene as a clear (`TextStyle.color: None`) rather than as a zero-alpha
+    // color (`#110`). The leader line is painted in the fill, so it clears too.
+    let paint = ctx.mark_style.paint.fill_paint();
+    let text_paint = paint.map(|c| with_opacity(c, ctx.mark_style.paint.opacity));
+    let leader_paint = paint.map(|c| with_opacity(c, ctx.mark_style.paint.opacity * 0.5));
     let draw_leader = ctx.mark_style.text.leader_line.unwrap_or(false);
 
     let n = ctx.batch.num_rows();
@@ -198,7 +203,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
             content,
             slot: None,
             style: to_scene_text_style(
-                color, font_size, TextAnchor::Middle, 0.0,
+                text_paint, font_size, TextAnchor::Middle, 0.0,
                 ctx.theme.typography.font_family.as_str(),
                 ctx.mark_style.text.font_weight.as_deref(), None, ctx.mark_style.paint.opacity,
             ),
@@ -208,14 +213,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
             // Emit text + leader-line as a two-node group both mapped to row i.
             // push_many gives data_indices one entry per emitted node, so
             // nodes.len() == data_indices.len() is maintained (R1 guard enforces).
-            let lc = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity * 0.5);
             let line_node = SceneNode::Line {
                 x1: px,
                 y1: py,
                 x2: px + dx * 0.8,
                 y2: py + dy * 0.8,
                 style: StrokeStyle {
-                    color: Some(to_scene_color(lc)),
+                    color: leader_paint.scene_paint(),
                     width: 0.75,
                     opacity: ctx.mark_style.paint.opacity * 0.5,
                     stroke_opacity: 1.0,

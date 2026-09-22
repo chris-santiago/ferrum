@@ -425,7 +425,7 @@ mod tests {
             content: "\u{2026} \u{03B1}\u{03B2}\u{03B3}".to_string(), // ellipsis + greek
             slot: None,
             style: TextStyle {
-                color: Color::rgb(0, 0, 0),
+                color: Some(Color::rgb(0, 0, 0)),
                 font_size: 12.0,
                 anchor: TextAnchor::Middle,
                 angle: 0.0,

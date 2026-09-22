@@ -1037,12 +1037,12 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color {
+            color: Some(Color {
                 r: 51,
                 g: 51,
                 b: 51,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -1077,12 +1077,12 @@ mod tests {
             font_size: 11.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color {
+            color: Some(Color {
                 r: 51,
                 g: 51,
                 b: 51,
                 a: 255,
-            },
+            }),
             opacity: 1.0,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,

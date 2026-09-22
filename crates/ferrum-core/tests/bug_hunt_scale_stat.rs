@@ -21,7 +21,7 @@ fn default_text_style() -> TextStyle {
         anchor: TextAnchor::Start,
         baseline: TextBaseline::Alphabetic,
         angle: 0.0,
-        color: Color::rgb(0, 0, 0),
+        color: Some(Color::rgb(0, 0, 0)),
         opacity: 1.0,
         font_family: "sans-serif".to_string(),
     }
