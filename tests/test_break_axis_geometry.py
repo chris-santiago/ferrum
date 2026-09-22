@@ -56,7 +56,7 @@ import pytest
 
 import ferrum as fm
 import ferrum.annotation as ann
-from _svg_extents import axis_tick_dash_label_pairs, label_along, tick_along
+from _svg_extents import axis_tick_dash_label_pairs, label_along, tick_along, value_axis_ladders
 from _svg_rects import fill_rects
 
 
@@ -1203,7 +1203,8 @@ def test_secondary_y_layer_is_exempt_from_the_primary_axis_break():
     secondary = lambda svg: re.findall(  # noqa: E731 - local extractor
         r'<circle cx="([-\d.]+)" cy="([-\d.]+)"[^>]*fill="#e45756"', svg
     )
-    plain = secondary(base.to_svg())
+    plain_svg = base.to_svg()
+    plain = secondary(plain_svg)
     broken_svg = (base + fm.BreakAxis(axis="y", gap=(14, 22))).to_svg()
     assert secondary(broken_svg) == plain, (
         "secondary-axis marks must be untouched by a primary-axis break"
@@ -1212,6 +1213,72 @@ def test_secondary_y_layer_is_exempt_from_the_primary_axis_break():
     primary = re.findall(r'<circle cx="[-\d.]+" cy="([-\d.]+)"[^>]*fill="#2563eb"', broken_svg)
     assert any(float(cy) < -1000 for cy in primary), (
         f"the primary layer's in-gap mark should be hidden; got {primary}"
+    )
+
+    # The secondary axis's own tick chrome must also be untouched by the
+    # primary break: its ticks label the secondary marks asserted above, and
+    # if the axis-chrome remap loop applies the primary break to BOTH y
+    # axes (rather than skipping the secondary one), the secondary axis's
+    # ticks slide out from under its own unmoved marks even though the
+    # marks stay put. Two y ladders are drawn (primary left, secondary
+    # right); the secondary one sits at the larger across-axis (x) position.
+    plain_ladders = value_axis_ladders(plain_svg, axis="y")
+    broken_ladders = value_axis_ladders(broken_svg, axis="y")
+    assert len(plain_ladders) == 2 and len(broken_ladders) == 2, (
+        f"expected primary + secondary y ladders; got {plain_ladders} / {broken_ladders}"
+    )
+    _, plain_secondary_ladder = max(plain_ladders, key=lambda item: item[0])
+    _, broken_secondary_ladder = max(broken_ladders, key=lambda item: item[0])
+    assert broken_secondary_ladder == plain_secondary_ladder, (
+        "the secondary axis's own ticks must be unchanged by the primary break; "
+        f"plain={plain_secondary_ladder} broken={broken_secondary_ladder}"
+    )
+    # ... while the primary axis's ladder *does* move under the break.
+    _, plain_primary_ladder = min(plain_ladders, key=lambda item: item[0])
+    _, broken_primary_ladder = min(broken_ladders, key=lambda item: item[0])
+    assert broken_primary_ladder != plain_primary_ladder, (
+        "the primary axis's own ticks should be remapped by its own break; "
+        f"plain={plain_primary_ladder} broken={broken_primary_ladder}"
+    )
+
+
+def test_secondary_y_layer_is_remapped_by_an_x_axis_break():
+    """A SecondaryY layer shares the chart's x scale, so an x break IS its break.
+
+    The previous test proves a SecondaryY layer is exempt from a *y*-axis
+    break (its own y scale is independent). The x scale is not independent:
+    both layers plot against the same x encoding, so a BreakAxis on x must
+    remap the secondary marks exactly like the primary ones. The mark-batch
+    guard that skips a break for secondary-y batches (keyed on ``y_slot``)
+    must key off the break's own axis, not the batch's y-slot, or it would
+    wrongly exempt secondary marks from an x break too.
+    """
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 4.0, 5.0],
+            "y": [10.0, 25.0, 15.0, 30.0],
+            "revenue": [100.0, 200.0, 150.0, 250.0],
+        }
+    )
+    base = fm.Chart(df).mark_point().encode(x="x", y="y") + fm.SecondaryY(
+        "revenue", mark="point", color="#e45756"
+    )
+    secondary = lambda svg: re.findall(  # noqa: E731 - local extractor
+        r'<circle cx="([-\d.]+)" cy="([-\d.]+)"[^>]*fill="#e45756"', svg
+    )
+    plain = secondary(base.to_svg())
+    x_broken = secondary((base + fm.BreakAxis(axis="x", gap=(2.5, 3.5))).to_svg())
+    y_broken = secondary((base + fm.BreakAxis(axis="y", gap=(14, 22))).to_svg())
+
+    plain_cx = [cx for cx, _ in plain]
+    x_broken_cx = [cx for cx, _ in x_broken]
+    assert x_broken_cx != plain_cx, (
+        "secondary marks share the x scale with the primary layer, so an x-axis "
+        f"break should remap them; plain={plain_cx} x_broken={x_broken_cx}"
+    )
+    assert y_broken == plain, (
+        "a primary y-axis break must still leave secondary marks (x AND y) untouched; "
+        f"plain={plain} y_broken={y_broken}"
     )
 
 
