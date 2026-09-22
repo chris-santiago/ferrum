@@ -92,7 +92,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // field refuses with the axes' own error, instead of rendering every
     // label as a 1970 epoch date.
     if let Some(enc) = text_enc {
-        crate::render::prepare::refuse_time_format_on_non_temporal_field(
+        crate::render::prepare::refuse_format_temporality_mismatch_field(
             enc,
             ctx.batch,
             text_format,

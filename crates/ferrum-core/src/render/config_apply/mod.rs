@@ -1031,12 +1031,13 @@ pub(in crate::render) fn apply_axis_style_to_axis_input(
 /// how the spec resolves (unlike `prepare::apply_axis_format_or_thread`,
 /// which resolves under [`format::TimeAutodetect::Allowed`] and so also
 /// tolerates an unset `format_type`); the resolved-scale
-/// refusal itself is built by `prepare::refuse_time_format_on_non_temporal`,
-/// the same function `build_axis_tick_inputs`'s two mode arms call, at both
-/// of this function's own call sites (wave-1 close remediation, #133
-/// predicate-sharing finding) — so all four sites in the crate that can
-/// refuse a time-typed format on a non-temporal scale build the identical
-/// error, including `coord_flipped: false`, from one place. A length-drift
+/// refusal itself is built by `prepare::refuse_format_temporality_mismatch_scale`,
+/// the same function `build_axis_tick_inputs`'s two mode arms call, once at
+/// the top of this function for every branch (wave-1 close remediation, #133
+/// predicate-sharing finding; hoisted in wave 6A T22) — so every axis site
+/// that can refuse a time-typed format on a non-temporal scale, or the
+/// ordinal preset on a temporal one, builds the identical error, including
+/// `coord_flipped: false`, from one place. A length-drift
 /// on a genuinely temporal scale (`Some` at a different length) keeps its
 /// pre-existing string-reparse fallback, unrefused. `channel` is `"x"`/`"y"`
 /// — this surface is EXEMPT
@@ -1060,46 +1061,36 @@ fn apply_label_format_to_axis(
         format::TimeAutodetect::Denied,
     )
     .is_some_and(|kind| kind.is_temporal());
+    // #133 predicate sharing (wave-1 close remediation): the same refusal
+    // `prepare::build_axis_tick_inputs`'s two mode arms share, decided once
+    // here for every branch below: a declared time type on a non-temporal
+    // scale (a bare `format_type="time"` included, `#147`) and the ordinal
+    // preset on a temporal one (`#147` T22).
+    prepare::refuse_format_temporality_mismatch_scale(
+        axis.overrides.labels.format.get().spec.as_deref(),
+        format_type.as_deref(),
+        scale,
+        channel,
+    )?;
     if let Some(tick_vals) = axis.overrides.ticks.values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
         let fmt = axis.overrides.labels.format.get().spec.clone();
-        let fmt = fmt.as_deref();
-        // #133 predicate sharing (wave-1 close remediation): the same
-        // refusal `prepare::build_axis_tick_inputs`'s two mode arms share,
-        // a bare `format_type="time"` (`fmt` = `None`) included (`#147`).
-        prepare::refuse_time_format_on_non_temporal(fmt, format_type.as_deref(), scale, channel)?;
-        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
+        axis.tick_labels =
+            prepare::apply_tick_format(numeric_strings, fmt.as_deref(), format_type.as_deref());
         return Ok(());
     }
     let Some(fmt_str) = axis.overrides.labels.format.get().spec.clone() else {
-        // A bare `format_type="time"`: the labels stand, but on a
-        // non-temporal scale it refuses like every other surface (`#147`).
-        return prepare::refuse_time_format_on_non_temporal(None, format_type.as_deref(), scale, channel);
+        // A bare `format_type="time"`: the labels stand.
+        return Ok(());
     };
     if is_time_type {
-        // #133 predicate sharing (wave-1 close remediation), cycle-2 N2 fix:
-        // check `temporal_tick_values` directly rather than routing through
-        // the shared refusal first and then re-deriving it via `.expect()`
-        // — that coupling held today (the helper's own condition is
-        // `format_type == Some("time") && temporal_tick_values(..).is_none()`,
-        // the exact branch below) but turned a typed `RenderError` into a
-        // panic across the PyO3 boundary the moment the two checks could
-        // ever drift. `refuse_time_format_on_non_temporal` is now called
-        // ONLY in the `None` arm, to build the identical shared error (same
-        // predicate, same `coord_flipped: false` discipline as the
-        // `tick_values` branch above and `build_axis_tick_inputs`'s two
-        // mode arms) — its `Result` is returned directly, so a future
-        // narrowing of the helper's predicate that ever let this arm pass
-        // without refusing degrades to a no-op tick-label update instead of
-        // a panic.
+        // The hoisted refusal above already rejected a time type on a
+        // non-`Time` scale, and `temporal_tick_values` answers `Some` for
+        // every `Time` scale, so this arm is unreachable; it returns `Ok`
+        // rather than panicking across the PyO3 boundary.
         let Some(mut values) = scale.temporal_tick_values(tick_count) else {
-            return prepare::refuse_time_format_on_non_temporal(
-                Some(&fmt_str),
-                format_type.as_deref(),
-                scale,
-                channel,
-            );
+            return Ok(());
         };
         if reversed {
             values.reverse();
@@ -1736,6 +1727,11 @@ pub(in crate::render) fn validate_chart_format_specs(
         check_encoding(enc.color.as_ref(), false)?;
         check_encoding(enc.size.as_ref(), false)?;
         check_encoding(enc.shape.as_ref(), false)?;
+        // A legend-bearing channel (`prepare::legend::build_aux_legends`)
+        // whose `Legend(format=)` this sweep used to miss, so a malformed
+        // spec there rendered where the shape legend's refused (`#147` close,
+        // wave 6A T22).
+        check_encoding(enc.stroke_dash.as_ref(), false)?;
         check_encoding(enc.opacity.as_ref(), false)?;
         check_encoding(enc.x2.as_ref(), false)?;
         check_encoding(enc.y2.as_ref(), false)?;

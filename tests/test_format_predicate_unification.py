@@ -31,8 +31,10 @@ its own docstrings eighty lines below. Corrected at cycle 3 after quality
 review. If you add a test here, say which kind it is.
 
 See `.sdd/task-13-report.md` §12-13 for the probe matrix and the RED proof,
-`.sdd/task-17-report.md` for the cross-surface matrix's RED proof, and
-`.sdd/task-21-report.md` for the legend/text refusal rows' RED proof.
+`.sdd/task-17-report.md` for the cross-surface matrix's RED proof,
+`.sdd/task-21-report.md` for the legend/text refusal rows' RED proof, and
+`.sdd/task-22-report.md` for the shape/stroke-dash rows and the two last
+cells' RED proof.
 """
 
 from __future__ import annotations
@@ -307,10 +309,34 @@ def _size_legend(field: str, fmt: str | None, fmt_type: str | None):
     )
 
 
+def _shape_legend(field: str, fmt: str | None, fmt_type: str | None):
+    legend = fm.Legend(**_format_kwargs(fmt, fmt_type))
+    return (
+        fm.Chart(YEARLY).mark_point().encode(x="n:Q", y="n:Q", shape=fm.Shape(field, legend=legend))
+    )
+
+
+def _stroke_dash_legend(field: str, fmt: str | None, fmt_type: str | None):
+    legend = fm.Legend(**_format_kwargs(fmt, fmt_type))
+    return (
+        fm.Chart(YEARLY)
+        .mark_line()
+        .encode(x="n:Q", y="n:Q", stroke_dash=fm.StrokeDash(field, legend=legend))
+    )
+
+
 #: Every surface that can refuse a time-typed format: ``SURFACES`` plus the
-#: size legend, which formats its own field's values but renders no ordinal
-#: or temporal-default rows to compare in the matrices above.
-REFUSABLE = {**SURFACES, "size_legend": _size_legend}
+#: size, shape and stroke-dash legends, which render no ordinal or
+#: temporal-default rows to compare in the matrices above. The shape and
+#: stroke-dash legends enumerate their field as categories and never format
+#: a label, so before T22 they dropped a malformed pair silently where the
+#: color legend refused it.
+REFUSABLE = {
+    **SURFACES,
+    "size_legend": _size_legend,
+    "shape_legend": _shape_legend,
+    "stroke_dash_legend": _stroke_dash_legend,
+}
 
 #: The surface each refusal names: an axis is checked against its resolved
 #: scale, a legend or mark channel against its own field.
@@ -320,6 +346,10 @@ REFUSED_ON = {
     "independent_facet_axis": _AXIS_REFUSAL,
     "colorbar": r"'color' legend requires a temporal field, but the field is not temporal",
     "size_legend": r"'size' legend requires a temporal field, but the field is not temporal",
+    "shape_legend": r"'shape' legend requires a temporal field, but the field is not temporal",
+    "stroke_dash_legend": (
+        r"'stroke_dash' legend requires a temporal field, but the field is not temporal"
+    ),
     "text": r"'text' channel requires a temporal field, but the field is not temporal",
 }
 
@@ -378,7 +408,9 @@ class TestEverySurfaceAnswersAMalformedPairAlike:
         Pre-fix (T17): the shared axis applied ``.2f`` as d3 and rendered,
         while the independent facet axis refused the identical pair. Pre-fix
         (T21): the colorbar, the size legend and the text mark rendered every
-        label ``1970-01-01``, the epoch read of a small number. All now raise
+        label ``1970-01-01``, the epoch read of a small number. Pre-fix (T22):
+        the shape and stroke-dash legends rendered and dropped the format,
+        because the validator named color and size by hand. All now raise
         the ``#133`` refusal. The message names the declared ``"time"`` type
         as the cause (``.2f`` alone does not say why a temporal value is
         needed) and the surface the caller set the format on.
@@ -397,8 +429,9 @@ class TestEverySurfaceAnswersAMalformedPairAlike:
         Pre-fix, ``format_type="time"`` with no spec rendered ``1970-01-01``
         for every colorbar, size-legend and text label (the epoch read of a
         small number), while both axes dropped the declared type silently and
-        rendered the scale's numbers. Every surface now refuses it, naming the
-        type since there is no spec.
+        rendered the scale's numbers; the shape and stroke-dash legends
+        dropped it until T22. Every surface now refuses it, naming the type
+        since there is no spec.
         """
         with pytest.raises(ValueError, match=r'format type "time" on the ' + REFUSED_ON[surface]):
             REFUSABLE[surface]("n:Q", None, "time").to_svg()
@@ -423,6 +456,108 @@ class TestEverySurfaceAnswersAMalformedPairAlike:
             ValueError, match=r'format "%Y" is typed "time", which on the ' + REFUSED_ON["text"]
         ):
             chart.to_svg()
+
+
+#: The surfaces whose field can be temporal. A shape or stroke-dash legend
+#: cannot be built over a temporal field at all: scale resolution refuses the
+#: dtype ("cannot enumerate distinct values") before any legend format is read.
+TEMPORAL_CAPABLE = sorted(set(REFUSABLE) - {"shape_legend", "stroke_dash_legend"})
+
+#: The ordinal-on-temporal refusal, per surface: the mirror of ``REFUSED_ON``.
+ORDINAL_REFUSED_ON = {
+    "axis": r"'x' axis formats numbers and requires a non-temporal scale, "
+    r"but the resolved scale is temporal",
+    "independent_facet_axis": r"'x' axis formats numbers and requires a non-temporal scale, "
+    r"but the resolved scale is temporal",
+    "colorbar": r"'color' legend formats numbers and requires a non-temporal field, "
+    r"but the field is temporal",
+    "size_legend": r"'size' legend formats numbers and requires a non-temporal field, "
+    r"but the field is temporal",
+    "text": r"'text' channel formats numbers and requires a non-temporal field, "
+    r"but the field is temporal",
+}
+
+
+class TestTheLastTwoCellsGiveOneAnswer:
+    """The two identical-input disagreements the second intent re-check found
+    (wave 6A T22), each settled to one outcome on every surface."""
+
+    @pytest.mark.parametrize("surface", sorted(REFUSABLE))
+    def test_an_untyped_strftime_on_a_non_temporal_field_refuses_as_d3(self, surface):
+        """Regression pin for both axis rows and the stroke-dash legend.
+
+        The field is untyped (``"n"``, not ``"n:Q"``): a declared
+        quantitative type already refused ``"%Y"`` at the validation pre-pass,
+        so only the auto-inferred field reached the axis guess.
+
+        Pre-fix: the axes guessed ``"%Y"`` as strftime, found no temporal
+        ticks, and fell through to the lenient d3 tokenizer, rendering
+        ``250.000000%``; the stroke-dash legend's format was never
+        grammar-checked and rendered. The colorbar, size legend, shape legend
+        and text refused with the d3 grammar error pre-fix too (controls).
+        Every surface now gives that one error. A real d3 percent spec is
+        unaffected (``TestPercentSpecIsNeverMisreadAsStrftime``).
+        """
+        with pytest.raises(ValueError, match=r'invalid format spec "%Y": unrecognized token "Y"'):
+            REFUSABLE[surface]("n", "%Y", None).to_svg()
+
+    @pytest.mark.parametrize("format_type", [None, "time"])
+    @pytest.mark.parametrize("surface", TEMPORAL_CAPABLE)
+    def test_the_ordinal_preset_on_a_temporal_field_refuses(self, surface, format_type):
+        """Regression pin for every row.
+
+        Pre-fix, three answers: the shared axis rendered ``2001st 2002nd …``,
+        the independent facet axis dropped the format, and the colorbar, size
+        legend and text rendered the ordinal of the epoch-ms count
+        (``959817600000th``). The preset formats numbers; every surface now
+        refuses it on a temporal field, naming the surface.
+        """
+        with pytest.raises(
+            ValueError, match=r'the "ordinal" format on the ' + ORDINAL_REFUSED_ON[surface]
+        ):
+            REFUSABLE[surface]("d:T", "__ordinal__", format_type).to_svg()
+
+    @pytest.mark.parametrize(
+        "tick_values", [None, [dt.datetime(2001, 6, 1).timestamp() * 1000]], ids=["plain", "values"]
+    )
+    def test_the_chart_level_ordinal_preset_on_a_temporal_axis_refuses(self, tick_values):
+        """Regression pin for the chart-level surface, on both of its paths.
+
+        Pre-fix ``configure_axis(label_format="ordinal")`` over a temporal
+        axis rendered ordinal suffixes (``2001st``), while the per-channel
+        spelling of the same preset refused. It now refuses with the same
+        message.
+        """
+        chart = (
+            fm.Chart(YEARLY)
+            .mark_point()
+            .encode(x="d:T", y="n:Q")
+            .configure_axis(label_format="ordinal", tick_values=tick_values)
+        )
+        assert _refusal(chart) == (
+            "the \"ordinal\" format on the 'x' axis formats numbers and requires a "
+            "non-temporal scale, but the resolved scale is temporal"
+        )
+
+    def test_an_untyped_strftime_on_a_band_axis_refuses_as_d3(self):
+        """Invariant guard — passes pre-fix too (probed on HEAD and on the
+        released 0.23.0). An untyped ``"%b"`` on a band (string) axis names no
+        time type, so it is read as d3 and refused by the grammar, the same
+        answer the quantitative axis now gives (above). Fails if the band axis
+        ever starts dropping the spec silently."""
+        chart = (
+            fm.Chart(YEARLY)
+            .mark_bar()
+            .encode(x=fm.X("g:N", axis=fm.Axis(label_format="%b")), y="n:Q")
+        )
+        assert _refusal(chart).startswith('invalid format spec "%b": unrecognized token "b"')
+
+    @pytest.mark.parametrize("surface", ["shape_legend", "stroke_dash_legend"])
+    def test_a_shape_or_stroke_dash_legend_over_a_temporal_field_refuses_earlier(self, surface):
+        """Invariant guard for the exclusion above: these legends never reach
+        a temporal field's format, since the field itself is refused first."""
+        with pytest.raises(ValueError, match=r"cannot enumerate distinct values"):
+            REFUSABLE[surface]("d:T", "__ordinal__", None).to_svg()
 
 
 def _colorbar_chart(mark: str = "point", **color_kwargs):

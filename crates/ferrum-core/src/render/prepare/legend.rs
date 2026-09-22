@@ -559,27 +559,39 @@ pub(crate) fn build_color_legend(
     }
 }
 
-/// `#147` close (wave 6A T21): a time-typed legend format on a non-temporal
-/// field is refused unless the caller disabled that legend.
+/// `#147` close (wave 6A T21/T22): a time-typed legend format on a
+/// non-temporal field, or the ordinal preset on a temporal one, is refused
+/// unless the caller disabled that legend.
 ///
 /// This validates the spec the caller wrote, not what happens to be drawn:
-/// the color legend (the colorbar, or a categorical legend) and the size
-/// legend each check their own field through the rule the axes use
-/// ([`super::refuse_time_format_on_non_temporal_field`]), so the refusal
+/// the color legend (the colorbar, or a categorical legend) and every aux
+/// legend channel [`build_aux_legends`] builds (size, shape, stroke-dash,
+/// read from the one [`aux_legend_channels`] list both sides walk) each
+/// check their own field through the rule the axes use
+/// ([`super::refuse_format_temporality_mismatch_field`]), so the refusal
 /// fires whatever the scale kind, and also where the renderer itself later
 /// suppresses the colorbar with a warning (a line or ribbon layer that cannot
-/// draw continuous color) or folds it into the size legend. The only
+/// draw continuous color), folds it into the size legend, or folds a shape or
+/// dash block into the color legend. Shape and stroke-dash legends never
+/// format their labels, so before this they dropped the pair silently where
+/// the color legend refused it. The only
 /// exemption is a legend the caller disabled, and both spellings of that
 /// count alike: per channel (`Color(legend=None)`, `Legend(orient="none")`,
 /// read over the same color > x > y cascade the color legend's format is
 /// read from) and chart-level (`configure_legend(orient="none")`). Before,
 /// these surfaces rendered every label as a `1970-01-01` epoch date.
 ///
+/// Axes have no such exemption (`X(axis=None, format=..., format_type=
+/// "time")` refuses) on purpose: an `X`/`Y` `Legend(...)` format cascades
+/// onto the color field, so validating a legend nobody draws would judge a
+/// field the caller never formatted, while an axis format is written on the
+/// channel it formats.
+///
 /// The refusal names the `'color'` legend even when the format reached it
 /// through the cascade from an `X`/`Y` `Legend(...)`: the value checked is
 /// the color field, and naming `'x'` would pin the "not temporal" verdict on
 /// a field that was never checked.
-pub(crate) fn refuse_time_format_on_non_temporal_legend_fields(
+pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
     spec: &ChartSpec,
     transformed: &RecordBatch,
     chart_config: &crate::render::chart_config::ChartConfig,
@@ -591,7 +603,7 @@ pub(crate) fn refuse_time_format_on_non_temporal_legend_fields(
     let legend_specs = per_channel_legend_specs(spec);
     if let Some(color_enc) = spec.encoding.color.as_ref() {
         if !LegendStyleSpec::suppressed_by(&legend_specs) {
-            super::refuse_time_format_on_non_temporal_field(
+            super::refuse_format_temporality_mismatch_field(
                 color_enc,
                 transformed,
                 pick(&legend_specs, |l| l.format.as_deref()),
@@ -601,20 +613,39 @@ pub(crate) fn refuse_time_format_on_non_temporal_legend_fields(
             )?;
         }
     }
-    if let Some(size_enc) = spec.encoding.size.as_ref() {
-        if !legend_channel_disabled(Some(size_enc)) {
-            let size_legend = size_enc.legend.as_deref();
-            super::refuse_time_format_on_non_temporal_field(
-                size_enc,
-                transformed,
-                size_legend.and_then(|l| l.format.as_deref()),
-                size_legend.and_then(|l| l.format_type.as_deref()),
-                "size",
-                FormatSurface::Legend,
-            )?;
+    for (channel, enc) in aux_legend_channels(spec) {
+        let Some(enc) = enc else { continue };
+        if legend_channel_disabled(Some(enc)) {
+            continue;
         }
+        let legend = enc.legend.as_deref();
+        super::refuse_format_temporality_mismatch_field(
+            enc,
+            transformed,
+            legend.and_then(|l| l.format.as_deref()),
+            legend.and_then(|l| l.format_type.as_deref()),
+            channel,
+            FormatSurface::Legend,
+        )?;
     }
     Ok(())
+}
+
+/// The aux legend channels, in block order: the one list
+/// [`build_aux_legends`] destructures and
+/// [`refuse_format_temporality_mismatch_legend_fields`] walks. The guarantee
+/// runs one way: a fourth entry here fails to compile at the destructure until
+/// the builder handles it, but an aux block the builder reads straight from
+/// `spec.encoding` (bypassing this list) would compile without meeting the
+/// `#147` rule, so a new aux legend channel belongs in this list.
+fn aux_legend_channels(
+    spec: &ChartSpec,
+) -> [(&'static str, Option<&crate::spec::encoding::EncodingSpec>); 3] {
+    [
+        ("size", spec.encoding.size.as_ref()),
+        ("shape", spec.encoding.shape.as_ref()),
+        ("stroke_dash", spec.encoding.stroke_dash.as_ref()),
+    ]
 }
 
 /// Read whether a channel's typed `legend` spec suppresses that channel's aux
@@ -936,10 +967,11 @@ fn build_aux_legends(
 
     let mut out = Vec::new();
     let mut folded = FoldedChannels::default();
+    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channels(spec);
 
     // ── Size legend ──────────────────────────────────────────────────────
-    if let (Some(size_scale), Some(size_enc)) = (&scales.size, &spec.encoding.size) {
-        let disabled = legend_channel_disabled(spec.encoding.size.as_ref());
+    if let (Some(size_scale), Some(size_enc)) = (&scales.size, size_enc) {
+        let disabled = legend_channel_disabled(Some(size_enc));
         let same_field_as_color = color_field == Some(size_enc.field.as_str());
         // Merge into a categorical color legend → suppress (color labels it).
         //
@@ -1006,7 +1038,7 @@ fn build_aux_legends(
     // Shape always maps a categorical field; where color enumerates the same
     // field, the shape glyphs fold into that enumeration instead of repeating
     // it (#111).
-    if let (Some(shape_scale), Some(shape_enc)) = (&scales.shape, &spec.encoding.shape) {
+    if let (Some(shape_scale), Some(shape_enc)) = (&scales.shape, shape_enc) {
         match categorical_aux_fate(shape_enc, color_field, state) {
             AuxBlockFate::Drop => {}
             AuxBlockFate::FoldIntoColor => {
@@ -1044,7 +1076,7 @@ fn build_aux_legends(
     // resolves no scale and stays index-based, see StrokeDashScale's own doc),
     // so it takes shape's fate rule unchanged — the two are deliberate
     // mirrors.
-    if let (Some(dash_scale), Some(dash_enc)) = (&scales.stroke_dash, &spec.encoding.stroke_dash) {
+    if let (Some(dash_scale), Some(dash_enc)) = (&scales.stroke_dash, dash_enc) {
         match categorical_aux_fate(dash_enc, color_field, state) {
             AuxBlockFate::Drop => {}
             AuxBlockFate::FoldIntoColor => {
@@ -1634,9 +1666,9 @@ mod tests {
         );
         let numeric = batch_of(DataType::Float64, Arc::new(Float64Array::from(vec![lo as f64, hi as f64])));
         let config = ChartConfig::default();
-        assert_eq!(refuse_time_format_on_non_temporal_legend_fields(&spec, &temporal, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&spec, &temporal, &config), Ok(()));
         assert!(
-            refuse_time_format_on_non_temporal_legend_fields(&spec, &numeric, &config).is_err(),
+            refuse_format_temporality_mismatch_legend_fields(&spec, &numeric, &config).is_err(),
             "negative control: the same spec over a numeric column is refused"
         );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
@@ -1647,6 +1679,79 @@ mod tests {
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
             "expected date-shaped labels from the epoch-ms domain, got {labels:?}"
         );
+    }
+
+    /// `#147` close (wave 6A T22): the shape and stroke-dash legends meet the
+    /// same refusal the color and size legends do, because the validator
+    /// walks the [`aux_legend_channels`] list `build_aux_legends` builds
+    /// from. A `.2f`/`"time"` pair and a bare `"time"` over a string column
+    /// refuse on each; the same spec with that legend disabled (either
+    /// spelling) or with the chart legend disabled does not.
+    #[test]
+    fn shape_and_stroke_dash_legends_refuse_a_time_format_on_a_string_field() {
+        use crate::render::chart_config::{ChartConfig, LegendConfigSpec};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["a", "b"]))],
+        )
+        .unwrap();
+        let time_pairs = [(Some(".2f"), "time"), (None, "time")];
+        let spec_with = |channel: &str, legend: LegendStyleSpec| {
+            let mut spec = empty_spec();
+            let enc = Some(enc_with_legend("g", legend));
+            match channel {
+                "shape" => spec.encoding.shape = enc,
+                "stroke_dash" => spec.encoding.stroke_dash = enc,
+                other => unreachable!("{other}"),
+            }
+            spec
+        };
+        let config = ChartConfig::default();
+        for channel in ["shape", "stroke_dash"] {
+            for (format, format_type) in time_pairs {
+                let pair = LegendStyleSpec {
+                    format: format.map(str::to_string),
+                    format_type: Some(format_type.to_string()),
+                    ..Default::default()
+                };
+                let err = refuse_format_temporality_mismatch_legend_fields(
+                    &spec_with(channel, pair.clone()),
+                    &batch,
+                    &config,
+                )
+                .expect_err("a time format over a string field must refuse");
+                assert!(err.to_string().contains(channel), "{channel}: {err}");
+
+                for disabled in [
+                    LegendStyleSpec { disabled: Some(true), ..pair.clone() },
+                    LegendStyleSpec { orient: Some("none".to_string()), ..pair.clone() },
+                ] {
+                    assert_eq!(
+                        refuse_format_temporality_mismatch_legend_fields(
+                            &spec_with(channel, disabled),
+                            &batch,
+                            &config,
+                        ),
+                        Ok(()),
+                        "{channel}: a disabled legend is exempt"
+                    );
+                }
+                let chart_off = ChartConfig {
+                    legend: Some(LegendConfigSpec {
+                        style: LegendStyleSpec { orient: Some("none".to_string()), ..Default::default() },
+                    }),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    refuse_format_temporality_mismatch_legend_fields(&spec_with(channel, pair), &batch, &chart_off),
+                    Ok(()),
+                    "{channel}: a chart-level disabled legend is exempt"
+                );
+            }
+        }
     }
 
     // ── T5b: line/ribbon inert-continuous-color suppression (spec §4.0, 2026-08-28) ──

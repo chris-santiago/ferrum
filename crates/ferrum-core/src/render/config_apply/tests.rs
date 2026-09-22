@@ -1291,6 +1291,48 @@ mod chart_config_application_tests {
         assert_eq!(axis.tick_labels, vec!["1st", "2nd", "3rd", "11th"]);
     }
 
+    /// `#147` (wave 6A T22): the chart-level `configure_axis(label_format=
+    /// "ordinal")` over a temporal axis refuses, on the plain path and on the
+    /// `tick_values` path alike. Before T22 the plain path rendered year
+    /// ordinals (`2020th`) and the `tick_values` path the ordinal of the
+    /// epoch-ms count. Both paths share one assertion.
+    #[test]
+    fn axis_config_ordinal_preset_on_a_temporal_axis_refuses() {
+        use crate::scale::time::TimeScale;
+        let epoch_lo = 1_577_836_800_000.0;
+        let epoch_hi = epoch_lo + 3.0 * 86_400_000.0;
+        let scale = scale_resolve::ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        for values in [None, Some(vec![epoch_lo, epoch_hi])] {
+            let mut axis = crate::layout::AxisInput::new(
+                crate::layout::AxisOrient::Bottom,
+                None,
+                scale.tick_labels(4),
+                None,
+            );
+            let cfg = AxisConfigSpec {
+                style: AxisStyleSpec {
+                    label_format: Some("__ordinal__".to_string()),
+                    values: values.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+            let err = apply_label_format_to_axis(&mut axis, &scale, 4, false, "x").unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "the \"ordinal\" format on the 'x' axis formats numbers and requires a \
+                 non-temporal scale, but the resolved scale is temporal",
+                "tick values: {values:?}"
+            );
+        }
+    }
+
     /// D8 cascade-inversion fix: the format slot's claim
     /// must block the chart-level fill EVEN THOUGH the `labels.format` slot
     /// itself reads empty — the exact shape `prepare::build_axis_input` produces

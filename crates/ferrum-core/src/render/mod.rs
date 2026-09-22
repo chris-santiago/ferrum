@@ -136,21 +136,35 @@ pub(crate) enum LayerCoordUnplaceableReason {
     },
 }
 
-/// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`] refusal
-/// names — where the caller set the time-typed format, and so what "not
-/// temporal" was checked against.
+/// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`] or
+/// [`RenderError::OrdinalFormatOnTemporalScale`] refusal names: where the
+/// caller set the format, and so what the temporality was checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatSurface {
     /// A tick-label format (`Axis(label_format=)`, `encoding.format` on a
     /// positional channel, `configure_axis(label_format=)`): checked against
     /// the resolved scale.
     Axis,
-    /// `Legend(format=, format_type=)` on the color or size channel: checked
-    /// against that channel's field.
+    /// `Legend(format=, format_type=)` on a legend-bearing channel (color,
+    /// size, shape, stroke-dash): checked against that channel's field.
     Legend,
     /// A mark channel's own `format=`/`format_type=` (`Text(...)`): checked
     /// against that channel's field.
     Channel,
+}
+
+impl FormatSurface {
+    /// `(noun, needs, subject)` for a format-refusal sentence: what the
+    /// surface is called, what it checks, and what was checked. One wording
+    /// for both `TimeFormatOnNonTemporalScale` and
+    /// `OrdinalFormatOnTemporalScale`.
+    fn wording(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            FormatSurface::Axis => ("axis", "scale", "the resolved scale"),
+            FormatSurface::Legend => ("legend", "field", "the field"),
+            FormatSurface::Channel => ("channel", "field", "the field"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -509,8 +523,9 @@ pub enum RenderError {
     /// and the per-panel independent-facet-axis path
     /// (`scene_build::resolve_panel_axes`, `TickFormatMode::Immediate`) the
     /// issue's "both paths" phrasing did not name. Two field-checked surfaces
-    /// reach it too, through the same constructor: the colorbar/size legend
-    /// (`prepare::legend::refuse_time_format_on_non_temporal_legend_fields`) and the text channel
+    /// reach it too, through the same constructor: the colorbar and the size,
+    /// shape and stroke-dash legends
+    /// (`prepare::legend::refuse_format_temporality_mismatch_legend_fields`) and the text channel
     /// (`marks::text::build`). The tooltip column would be a third, but no
     /// Python spelling puts a `format_type` on its wire today (`#147`
     /// follow-up 15c), so it does not call the constructor yet.
@@ -526,6 +541,21 @@ pub enum RenderError {
         channel: &'static str,
         surface: FormatSurface,
         format: Option<String>,
+        coord_flipped: bool,
+    },
+    /// The ordinal preset (`label_format="ordinal"`, the `"__ordinal__"`
+    /// sentinel on the wire) meets a temporal value (`#147` close, wave 6A
+    /// T22). The preset formats NUMBERS; on a temporal field there is no
+    /// number the caller meant, so the surfaces used to give three different
+    /// answers to the identical pair (`2001st` on the shared axis, the format
+    /// dropped on an independent facet axis, the ordinal of the epoch-ms count
+    /// on the legend and text). The mirror of
+    /// [`Self::TimeFormatOnNonTemporalScale`], built by the same single
+    /// constructor (`prepare::refuse_format_temporality_mismatch`) at the same
+    /// surfaces, with the same `channel`/`surface`/`coord_flipped` discipline.
+    OrdinalFormatOnTemporalScale {
+        channel: &'static str,
+        surface: FormatSurface,
         coord_flipped: bool,
     },
     /// A chart combines a projected coordinate system — `Polar` or, since
@@ -606,6 +636,11 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // the field doc on `RenderError::TimeFormatOnNonTemporalScale`.
         RenderError::TimeFormatOnNonTemporalScale { channel, surface, format, .. } => {
             RenderError::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped }
+        }
+        // `#147` T22: the mirror refusal, built by the same constructor at
+        // the same surfaces, so it is patched here for the same reason.
+        RenderError::OrdinalFormatOnTemporalScale { channel, surface, .. } => {
+            RenderError::OrdinalFormatOnTemporalScale { channel, surface, coord_flipped }
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
@@ -863,7 +898,7 @@ impl std::fmt::Display for RenderError {
             ),
             Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                // The sole constructor (`prepare::refuse_time_format_on_non_temporal_target`)
+                // The sole constructor (`prepare::refuse_format_temporality_mismatch`)
                 // resolves under `TimeAutodetect::Denied`, so every refusal is
                 // a DECLARED `"time"` type: naming it names the cause even for
                 // a `%`-free spec like `".2f"`, where the format alone does
@@ -872,15 +907,20 @@ impl std::fmt::Display for RenderError {
                     Some(format) => format!("format {format:?} is typed \"time\", which"),
                     None => "format type \"time\"".to_string(),
                 };
-                let (noun, needs, subject) = match surface {
-                    FormatSurface::Axis => ("axis", "scale", "the resolved scale"),
-                    FormatSurface::Legend => ("legend", "field", "the field"),
-                    FormatSurface::Channel => ("channel", "field", "the field"),
-                };
+                let (noun, needs, subject) = surface.wording();
                 write!(
                     f,
                     "{cause} on the '{channel}' {noun} requires a temporal {needs}, \
                      but {subject} is not temporal"
+                )
+            }
+            Self::OrdinalFormatOnTemporalScale { channel, surface, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let (noun, needs, subject) = surface.wording();
+                write!(
+                    f,
+                    "the \"ordinal\" format on the '{channel}' {noun} formats numbers and \
+                     requires a non-temporal {needs}, but {subject} is temporal"
                 )
             }
             // `{:?}` over the wire TOKEN, never over `axis` itself: the

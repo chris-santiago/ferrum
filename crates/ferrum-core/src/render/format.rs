@@ -432,9 +432,10 @@ impl FormatKind {
     /// - [`ORDINAL_SENTINEL`] is recognized FIRST and yields
     ///   [`FormatKind::Ordinal`] whatever `format_type` says. The declared
     ///   preset is the caller's clearest statement; a stray type does not
-    ///   un-declare it. Axis, colorbar/legend, text and tooltip all render
-    ///   ordinals for `("__ordinal__", "time")`, and no axis refuses it as a
-    ///   time format on a non-temporal scale.
+    ///   un-declare it. On a non-temporal value, axis, colorbar/legend, text
+    ///   and tooltip all render ordinals for `("__ordinal__", "time")`, and no
+    ///   surface refuses it as a time format; on a temporal scale or field
+    ///   the ordinal preset is refused (`#147`, wave 6A T22).
     /// - A time-typed pair naming no pattern yields
     ///   [`FormatKind::TemporalDefault`]: every applier falls back to its own
     ///   spacing-keyed temporal default rather than applying the spec as d3
@@ -479,7 +480,7 @@ impl FormatKind {
 
     /// Whether this kind formats values as TIMESTAMPS, i.e. needs a temporal
     /// scale under it. The one input to the `#133` refusal
-    /// (`prepare::refuse_time_format_on_non_temporal`), so the refusal and
+    /// (`prepare::refuse_format_temporality_mismatch_scale`), so the refusal and
     /// the formatting cannot disagree about [`FormatKind::Ordinal`].
     pub(crate) fn is_temporal(&self) -> bool {
         matches!(self, FormatKind::Strftime(_) | FormatKind::TemporalDefault)
