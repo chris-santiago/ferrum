@@ -139,12 +139,18 @@ def validate_choice(
         )
 
 
-def validate_pixel_value(label: str, value: Any) -> None:
+def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> None:
     """Raise ``ValueError`` when *value* violates the pixel contract (spec §4.7).
 
     A valid pixel value is numeric (``int``/``float``, ``bool`` excluded since
     ``bool`` is a ``int`` subclass), finite (not NaN/±inf), and non-negative.
-    ``None`` is the caller's "unset" sentinel and always passes.
+    ``None`` is the caller's "unset" sentinel and always passes — unless
+    *required* is set, for a caller with no optional-unset case for this
+    field (e.g. one entry of a fixed-length tuple every entry of which is
+    mandatory). ``required=True`` does not add a second message: it simply
+    stops the early return, so ``None`` falls into the same
+    ``not {type(value).__name__}`` branch every other wrong type already
+    raises from, reported as ``not NoneType``.
 
     *label* is a pre-composed description of the field being checked (e.g.
     ``"padding.top"`` or ``"override 'padding_top'"``) so each call site keeps
@@ -156,9 +162,10 @@ def validate_pixel_value(label: str, value: Any) -> None:
     Raises
     ------
     ValueError
-        If *value* is not numeric, is NaN/±inf, or is negative.
+        If *value* is not numeric, is NaN/±inf, or is negative — or, when
+        *required* is set, if *value* is ``None``.
     """
-    if value is None:
+    if value is None and not required:
         return
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(
@@ -171,7 +178,7 @@ def validate_pixel_value(label: str, value: Any) -> None:
         raise ValueError(f"{label} must be non-negative; received {value}")
 
 
-def validate_fraction_value(label: str, value: Any) -> None:
+def validate_fraction_value(label: str, value: Any, *, required: bool = False) -> None:
     """Raise ``ValueError`` when *value* is not a fraction in ``[0, 1]``.
 
     The bounded-fraction sibling of :func:`validate_pixel_value`, and it lives
@@ -183,7 +190,11 @@ def validate_fraction_value(label: str, value: Any) -> None:
 
     A valid fraction is numeric (``bool`` excluded, as it is an ``int``
     subclass), finite, and within ``[0, 1]`` inclusive. ``None`` is the
-    caller's "unset" sentinel and always passes.
+    caller's "unset" sentinel and always passes — unless *required* is set,
+    matching :func:`validate_pixel_value`'s convention: it stops the early
+    return rather than adding a second message, so ``None`` is reported by
+    the same ``not {type(value).__name__}`` branch every other wrong type
+    already raises from.
 
     *label* is a pre-composed field description, matching
     :func:`validate_pixel_value`'s convention.
@@ -191,9 +202,10 @@ def validate_fraction_value(label: str, value: Any) -> None:
     Raises
     ------
     ValueError
-        If *value* is not numeric, is NaN/±inf, or falls outside ``[0, 1]``.
+        If *value* is not numeric, is NaN/±inf, or falls outside ``[0, 1]`` —
+        or, when *required* is set, if *value* is ``None``.
     """
-    if value is None:
+    if value is None and not required:
         return
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(

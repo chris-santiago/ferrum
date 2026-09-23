@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as _dt
+import decimal
+import numbers
 from dataclasses import dataclass
 from typing import Any
 
@@ -327,22 +329,92 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
     return coerced_pairs
 
 
-def _inset_bound_kind_and_value(entry: Any) -> tuple[str, float]:
+def _coerce_bare_inset_bound(bound: Any) -> Any:
+    """Coerce a bare (non-``NormCoord``/``PixelCoord``) ``Inset.bounds`` entry.
+
+    A CLOSED allowlist (`#239` cycle 3): every accepted type is named
+    explicitly below, and there is no duck-type fallback. Cycle 2's
+    allowlist ended in an open ``hasattr(bound, "__float__")`` tail —
+    every ``numpy`` scalar inherits ``__float__`` from ``np.generic``,
+    including ``np.str_``/``np.bytes_`` (both accept-through-``__float__``
+    despite being ``str``/``bytes`` subclasses) and ``np.complexfloating``
+    (silently drops its imaginary part), and a 1-element ``ndarray`` also
+    satisfies it — so that tail reopened exactly the coerce-before-validate
+    defect this function exists to close (`#239` LB-239-a/b), just for a
+    different, numpy-shaped set of types. There is no third fallback tier
+    anymore: a value not matched by one of the branches below reaches
+    :func:`ferrum._validate.validate_fraction_value`/
+    :func:`ferrum._validate.validate_pixel_value` raw and is refused by its
+    own type name.
+
+    Accepted: ``bool``-excluded ``int``/``float``/any other
+    :class:`numbers.Real` (the same numeric-tower ABC ``transforms.py``'s
+    ``_literal_str`` already uses in this package — covers, for instance,
+    ``fractions.Fraction``, not just the concrete builtins);
+    ``numpy.integer``/``numpy.floating`` scalars excluding ``np.bool_``;
+    and ``decimal.Decimal`` (not ``numbers.Real``-registered by design, the
+    stdlib's own choice — see ``transforms.py``'s docstring on the same
+    exclusion). ``np.timedelta64`` is a ``numpy.signedinteger`` subclass
+    (and satisfies ``numbers.Real``), but ``float(np.timedelta64(...))``
+    raises a raw, unlabeled ``TypeError`` — it is excluded by name, before
+    either numeric-acceptance branch, alongside ``np.datetime64`` (not
+    numeric under either ABC, excluded for the same reason ``bool`` is
+    excluded from ``numbers.Real``: type registration answers "is this
+    numeric", not "is this the kind of number ``Inset.bounds`` means").
+
+    Deviation from the decision doc's correctness table, disclosed in the
+    task report: the table's "``__float__`` duck" byte-stability row is not
+    honored. It was captured from HEAD's bare ``float()`` call — the very
+    laundering path this closed allowlist exists to remove — so it names an
+    input only that laundering path could ever satisfy; REFUSE MALFORMED
+    and user ruling Q6 outrank a byte-stability row that describes the hole
+    being closed.
+    """
+    if isinstance(bound, bool):
+        return bound
+
+    # numpy is imported here rather than at module scope, matching this
+    # package's other numpy touch points (mirrors _classify_and_coerce_gap_bound).
+    # The three exclusions below must run before either numeric-acceptance
+    # branch: np.bool_ is not a bool subclass (the isinstance(bound, bool)
+    # check above never catches it), and np.timedelta64 IS a
+    # numpy.signedinteger/numbers.Real instance, so accepting it in either
+    # branch below would call float() on it and let a raw TypeError escape
+    # this function uncaught.
+    import numpy as np
+
+    if isinstance(bound, (np.bool_, np.timedelta64, np.datetime64)):
+        return bound
+    if isinstance(bound, (np.integer, np.floating)):
+        return float(bound)
+    if isinstance(bound, numbers.Real):
+        return float(bound)
+    if isinstance(bound, decimal.Decimal):
+        return float(bound)
+    return bound
+
+
+def _inset_bound_kind_and_value(bound: Any) -> tuple[str, Any]:
     """Classify one ``Inset.bounds`` entry as ``("norm", value)`` or ``("px", value)``.
 
-    Mirrors the wire contract emitted by ``ferrum._render._inset_coord``:
-    [NormCoord][ferrum.NormCoord] and bare numbers are normalized-fraction
-    bounds (a bare number is *never* data-space, per the 2026-05-24
-    inset-panels design); [PixelCoord][ferrum.PixelCoord] is a pixel-offset
-    bound. See the batch-H design spec §4 H6 / §6.
+    The one classifier for both the construction-time validator
+    (:func:`_validate_inset_bounds`) and ``ferrum._render``'s wire adapter
+    (`#239`): [NormCoord][ferrum.NormCoord] and bare numbers are
+    normalized-fraction bounds (a bare number is *never* data-space, per the
+    2026-05-24 inset-panels design); [PixelCoord][ferrum.PixelCoord] is a
+    pixel-offset bound. See the batch-H design spec §4 H6 / §6.
+
+    This does not validate — it classifies. The "everything else" branch's
+    coercion is :func:`_coerce_bare_inset_bound`'s allowlist, not an
+    open-ended ``float()`` attempt.
     """
     from ferrum.annotation.coords import NormCoord, PixelCoord
 
-    if isinstance(entry, NormCoord):
-        return "norm", entry.value
-    if isinstance(entry, PixelCoord):
-        return "px", entry.value
-    return "norm", float(entry)
+    if isinstance(bound, NormCoord):
+        return "norm", bound.value
+    if isinstance(bound, PixelCoord):
+        return "px", bound.value
+    return "norm", _coerce_bare_inset_bound(bound)
 
 
 def _validate_inset_bounds(bounds: tuple) -> None:
@@ -353,12 +425,17 @@ def _validate_inset_bounds(bounds: tuple) -> None:
     checked against its own kind's contract: a normalized entry must be a
     finite fraction in ``[0, 1]`` (:func:`ferrum._validate.validate_fraction_value`);
     a pixel entry must be a finite, non-negative pixel value
-    (:func:`ferrum._validate.validate_pixel_value`). The box is additionally
-    refused as empty when a coordinate pair is of the *same* kind and has
-    zero or negative extent (``left >= right`` or ``top >= bottom``) — a
-    mixed-kind pair (one normalized, one pixel) is not directly comparable
-    on a shared scale, so it is not checked for emptiness (spec §4 H6:
-    "compared within like kinds").
+    (:func:`ferrum._validate.validate_pixel_value`). Both are called with
+    ``required=True`` — a bound entry has no optional-unset case the way an
+    optional padding/opacity field does, so a ``None`` entry (bare, or
+    ``PixelCoord(None)``/``NormCoord(None)``'s unwrapped ``.value``) is
+    refused by the validator matching its own kind, not silently passed
+    through as "unset" (`#239`). The box is additionally refused as empty
+    when a coordinate pair is of the *same* kind and has zero or negative
+    extent (``left >= right`` or ``top >= bottom``) — a mixed-kind pair (one
+    normalized, one pixel) is not directly comparable on a shared scale, so
+    it is not checked for emptiness (spec §4 H6: "compared within like
+    kinds").
     """
     if len(bounds) != 4:
         raise ValueError(
@@ -371,9 +448,9 @@ def _validate_inset_bounds(bounds: tuple) -> None:
         kind, value = _inset_bound_kind_and_value(entry)
         label = f"Inset.bounds[{i}] ({_INSET_BOUNDS_NAMES[i]})"
         if kind == "norm":
-            validate_fraction_value(label, value)
+            validate_fraction_value(label, value, required=True)
         else:
-            validate_pixel_value(label, value)
+            validate_pixel_value(label, value, required=True)
         kinds.append(kind)
         values.append(value)
 

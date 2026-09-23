@@ -328,12 +328,14 @@ def test_inset_pixel_coord_bounds_renders():
     """Inset bounds with PixelCoord render successfully (F-L08-08, batch H T6).
 
     Superseded finding: PixelCoord bounds previously raised a stopgap
-    ``TypeError`` here (see ``_render.py``'s prior ``_inset_coord``). The
-    batch-H fix threads px() through the Rust wire's ``{"px": f}`` tag,
+    ``TypeError`` here (see ``_render.py``'s prior ``_inset_coord``, deleted
+    `#239`; ``ferrum.structural._inset_bound_kind_and_value`` is now the one
+    classifier both this adapter and construction-time validation share).
+    The batch-H fix threads px() through the Rust wire's ``{"px": f}`` tag,
     resolved against the computed plot rect at layout time — the design
     this feature always specified (2026-05-24 inset-panels design).
 
-    Targets _render.py _serialize_structural -> _inset_coord.
+    Targets _render.py _serialize_structural -> ferrum.structural._inset_bound_kind_and_value.
     """
     from ferrum.annotation.coords import px
 
@@ -349,7 +351,7 @@ def test_inset_pixel_coord_bounds_renders():
 def test_inset_norm_coord_bounds_accepted():
     """Inset bounds with NormCoord should be accepted.
 
-    Targets _render.py _serialize_structural -> _inset_coord line 339.
+    Targets _render.py _serialize_structural -> ferrum.structural._inset_bound_kind_and_value.
     """
     from ferrum.annotation.coords import norm
 

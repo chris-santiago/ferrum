@@ -479,7 +479,12 @@ class _RenderMixin:
         independent-y layer at ``Chart.__add__`` time (GH #52,
         ``_desugar_secondary_y``) rather than accumulating in ``_structural``.
         """
-        from ferrum.structural import BreakAxis, Inset, _normalize_break_gaps
+        from ferrum.structural import (
+            BreakAxis,
+            Inset,
+            _inset_bound_kind_and_value,
+            _normalize_break_gaps,
+        )
 
         if isinstance(feat, BreakAxis):
             # Normalize single (start, end) tuple to a list of [start, end]
@@ -497,30 +502,23 @@ class _RenderMixin:
                 "break_style": feat.break_style,
             }
         elif isinstance(feat, Inset):
-            from ferrum.annotation.coords import NormCoord, PixelCoord
-
-            def _inset_coord(c: object) -> float | dict:
-                """Convert one bound coordinate to its Rust wire representation.
-
-                ``NormCoord`` and bare numbers emit a bare float — Rust's
-                back-compat alias for ``{"norm": f}``, a normalized [0, 1]
-                fraction of the plot area. ``PixelCoord`` emits ``{"px": f}``,
-                resolved in Rust against the computed plot rect's origin (no
-                scaling). Range/kind validation happens at ``Inset``
-                construction time (``ferrum.structural._validate_inset_bounds``)
-                — by the time a bound reaches here, it is already valid.
-                """
-                if isinstance(c, PixelCoord):
-                    return {"px": c.value}
-                if isinstance(c, NormCoord):
-                    return c.value
-                return float(c)
-
+            # ``ferrum.structural._inset_bound_kind_and_value`` is the one
+            # classifier (`#239`); this is a one-line adapter from its
+            # ``(kind, value)`` to Rust's wire shape — ``{"px": f}`` for a
+            # pixel-offset bound (resolved in Rust against the computed plot
+            # rect's origin, no scaling), a bare float/int otherwise (Rust's
+            # back-compat alias for ``{"norm": f}``, a normalized [0, 1]
+            # fraction of the plot area). Range/kind validation happens at
+            # ``Inset`` construction time (``_validate_inset_bounds``) — by
+            # the time a bound reaches here, it is already valid.
             inset_svg = feat.chart.to_svg()
             d = {
                 "type": "inset",
                 "svg": inset_svg,
-                "bounds": [_inset_coord(c) for c in feat.bounds],
+                "bounds": [
+                    {"px": v} if k == "px" else v
+                    for k, v in (_inset_bound_kind_and_value(c) for c in feat.bounds)
+                ],
                 "border": feat.border,
                 "border_color": feat.border_color,
                 "background": feat.background,

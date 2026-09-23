@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import re
 import warnings
 
@@ -793,6 +794,409 @@ class TestInsetBoundsValidation:
         Inset(chart=object(), bounds=(0.1, 0.1, 0.9, 0.9))
         Inset(chart=object(), bounds=(px(0), px(0), px(200), px(150)))
         Inset(chart=object(), bounds=(px(10), norm(0.1), px(220), norm(0.9)))
+
+
+# ---------------------------------------------------------------------------
+# One Inset classifier: 26-shape probe (#239)
+# ---------------------------------------------------------------------------
+
+
+class _FloatDuck:
+    """A duck-typed ``__float__`` object, mirroring the research probe's case.
+
+    Cycle 2 accepted this (coerced via its ``__float__``); cycle 3 closes
+    that duck-typed tail entirely (`#239`, decision doc §2 deviation
+    disclosed in the task report), so this is now a *refused* case --
+    ``test_float_duck_no_longer_accepted`` below pins that a custom
+    ``__float__`` object never reopens the coerce-before-validate hole
+    ``np.str_``/``np.bytes_``/``np.complex128`` slipped through via the
+    same mechanism (numpy scalars inherit ``__float__`` from
+    ``np.generic``).
+    """
+
+    def __float__(self) -> float:
+        return 0.25
+
+
+def _real_inset_wire(base_chart, dual_field_df, entry):
+    """Build a real ``Chart + Inset`` and return its serialized ``bounds[0]``
+    through the actual production path (``Chart._resolve_chart_config`` ->
+    ``ferrum._render.Chart._serialize_structural``), not a test-local mirror
+    of the adapter -- a regression in the real adapter at ``_render.py``
+    would not fail a test pinned against a hand-copied reimplementation of
+    it.
+
+    ``right`` is a large ``px()`` bound rather than a norm fraction: a
+    norm-kind *entry* then never shares a kind with ``right``, so the
+    empty-box check (same-kind pairs only) never fires regardless of
+    *entry*'s value (some accepted shapes are ``1.0``/``1``, which would
+    trip an empty-box refusal against a fixed norm ``right``); a px-kind
+    *entry* shares ``right``'s kind but is always well under it.
+    """
+    from ferrum.annotation.coords import px
+
+    inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+    chart = base_chart + Inset(chart=inset_chart, bounds=(entry, 0.1, px(1_000_000), 0.9))
+    return chart._resolve_chart_config()["structural"][0]["bounds"][0]
+
+
+def _assert_wire_type_and_value(actual, expected) -> None:
+    """Assert one serialized ``bounds`` entry matches *expected* by type
+    AND value. Plain ``==`` is not discriminating here: ``1 == 1.0``,
+    ``np.float32(0.25) == 0.25``, and ``np.float64(0.5) == 0.5`` all hold,
+    so a classifier regression that changed ``int`` -> ``float`` or
+    ``numpy`` -> native (each of which changes the emitted JSON bytes, e.g.
+    ``"1"`` vs. ``"1.0"``) would still pass an ``==`` comparison."""
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict) and actual.keys() == {"px"}, (
+            f"expected a {{'px': ...}} wire entry, got {actual!r}"
+        )
+        _assert_wire_type_and_value(actual["px"], expected["px"])
+        return
+    assert type(actual) is type(expected), (
+        f"wire type drift: {type(actual).__name__} != {type(expected).__name__} "
+        f"({actual!r} vs {expected!r})"
+    )
+    assert actual == expected
+
+
+class TestInsetBoundClassifierShapes:
+    """``#239``'s 26-shape probe (research ``python-dedup.md`` §1, ``p239.py``):
+    the one classifier (``ferrum.structural._inset_bound_kind_and_value``)
+    must serialize every accepted shape byte-identically to the pre-fix
+    baseline captured on ``fix/hygiene-wave6`` at ``a34f82c0`` (decision doc
+    §2's correctness table), and every malformed shape must raise a labeled
+    ``ValueError`` naming the entry -- never an unlabeled ``ValueError`` or a
+    different exception class. Accepted shapes are pinned through the real
+    serialization path with a type-plus-value comparison (cycle 2 fix: the
+    cycle 1 pins went through a test-local classifier mirror and compared
+    with plain ``==``, so neither a real-adapter regression nor an
+    int-vs-float/numpy-vs-native type drift would have failed them).
+    """
+
+    # -- Accepted shapes: byte-identical wire, both before and after the fix. --
+
+    @pytest.mark.parametrize(
+        ("case", "entry", "expected_wire"),
+        [
+            ("bare float", 0.5, 0.5),
+            ("bare int", 1, 1.0),
+            ("bare int 0", 0, 0.0),
+            ("norm()", norm(0.5), 0.5),
+            ("px()", px(10), {"px": 10}),
+            ("NormCoord int", norm(1), 1),
+            ("PixelCoord int", px(10), {"px": 10}),
+            ("NormCoord np", norm(np.float64(0.5)), np.float64(0.5)),
+            ("np.float32", np.float32(0.25), 0.25),
+            ("np.int64", np.int64(0), 0.0),
+            ("Decimal", decimal.Decimal("0.5"), 0.5),
+        ],
+    )
+    def test_accepted_shapes_wire_is_byte_identical(
+        self, base_chart, dual_field_df, case, entry, expected_wire
+    ):
+        actual = _real_inset_wire(base_chart, dual_field_df, entry)
+        _assert_wire_type_and_value(actual, expected_wire)
+
+    def test_float_duck_no_longer_accepted(self):
+        """Deliberate deviation from the decision doc's correctness table
+        (`#239` cycle 3, disclosed in the task report): a duck-typed
+        ``__float__`` object was accepted through cycle 2's open-ended
+        ``hasattr(bound, "__float__")`` tail -- the same tail every numpy
+        scalar satisfies via inheritance from ``np.generic``, which is how
+        ``np.str_``/``np.bytes_``/``np.complex128`` laundered through
+        despite being refused-by-name types. Closing that tail for numpy
+        necessarily closes it for a plain custom object too; REFUSE
+        MALFORMED and user ruling Q6 outrank the byte-stability row this
+        case used to satisfy."""
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a number"):
+            Inset(chart=object(), bounds=(_FloatDuck(), 0.1, 0.9, 0.9))
+
+    # -- The five Q6-named malformed shapes: exact labeled ValueError text. --
+
+    def test_non_numeric_string_raises_labeled_value_error(self):
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a number between 0 and 1, "
+            r"not str; received 'a'$",
+        ):
+            Inset(chart=object(), bounds=("a", 0.1, 0.9, 0.9))
+
+    def test_none_raises_labeled_value_error_not_type_error(self):
+        """LB-239-a: ``None`` previously raised ``TypeError``, an exception
+        class an ``except ValueError`` around ``Inset(...)`` would miss."""
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a number between 0 and 1, "
+            r"not NoneType; received None$",
+        ):
+            Inset(chart=object(), bounds=(None, 0.1, 0.9, 0.9))
+
+    def test_true_refused_by_name(self):
+        """LB-239-b: ``True`` previously laundered to ``1.0`` past the
+        package's own bool exclusion."""
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a number between 0 and 1, "
+            r"not bool; received True$",
+        ):
+            Inset(chart=object(), bounds=(True, 0.1, 0.9, 0.9))
+
+    def test_false_refused_by_name(self):
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a number between 0 and 1, "
+            r"not bool; received False$",
+        ):
+            Inset(chart=object(), bounds=(False, 0.1, 0.9, 0.9))
+
+    def test_numeric_string_refused_by_name(self):
+        """LB-239-b: a numeric string previously laundered to a float past
+        the package's own str exclusion (user ruling Q6)."""
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a number between 0 and 1, "
+            r"not str; received '0\.5'$",
+        ):
+            Inset(chart=object(), bounds=("0.5", 0.1, 0.9, 0.9))
+
+    # -- cycle 2: a denylist coercion (exclude bool/str/None, float() the rest)
+    # launders anything else float() the builtin happens to accept through a
+    # non-__float__ code path -- bytes/bytearray parse as numeric strings.
+    # These pin the allowlist fix under both bound kinds: norm (bare) and px
+    # (wrapped in PixelCoord, since PixelCoord.value bypasses the bare-branch
+    # coercion entirely and reaches validate_pixel_value raw either way).
+    # The numpy-specific rows that used to live here (np.bool_, np.int64) are
+    # cycle 3's "hand list of refused numpy shapes" the coordinator asked to
+    # replace -- superseded by TestInsetBoundNumpyScalarMatrix below, which
+    # derives the population from numpy's own scalar-type registry instead.
+
+    @pytest.mark.parametrize(("case", "bad"), [("bytes", b"0.5"), ("bytearray", bytearray(b"0.5"))])
+    def test_norm_kind_refuses_laundering_shapes_by_name(self, case, bad):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a number"):
+            Inset(chart=object(), bounds=(bad, 0.1, 0.9, 0.9))
+
+    @pytest.mark.parametrize(
+        ("case", "bad"), [("bytes", b"10"), ("bytearray", bytearray(b"10")), ("None", None)]
+    )
+    def test_px_kind_refuses_laundering_shapes_by_name(self, case, bad):
+        """``px(None)`` in particular must be refused with the *pixel*
+        contract's wording, not the norm-kind message a kind-blind ``None``
+        guard produced in cycle 1."""
+        with pytest.raises(
+            ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a numeric pixel value"
+        ):
+            Inset(chart=object(), bounds=(px(bad), px(0), px(100), px(100)))
+
+    def test_px_none_refused_with_pixel_wording_exact_text(self):
+        with pytest.raises(
+            ValueError,
+            match=r"^Inset\.bounds\[0\] \(left\) must be a numeric pixel value "
+            r"\(int or float\), not NoneType; received None$",
+        ):
+            Inset(chart=object(), bounds=(px(None), px(0), px(100), px(100)))
+
+    # -- The remaining probe shapes: still refused, labeled (message may change). --
+
+    @pytest.mark.parametrize(
+        ("case", "bad"),
+        [
+            ("px str", "10px"),
+            ("out-of-range norm", 1.5),
+            ("negative", -0.5),
+            ("nan", float("nan")),
+            ("inf", float("inf")),
+            ("list", [0.5]),
+            ("complex", 1 + 0j),
+        ],
+    )
+    def test_remaining_probe_shapes_refuse_with_a_labeled_error(self, case, bad):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\)"):
+            Inset(chart=object(), bounds=(bad, 0.1, 0.9, 0.9))
+
+    def test_negative_px_probe_shape_refuses(self):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\)"):
+            Inset(chart=object(), bounds=(px(-5), px(0), px(10), px(10)))
+
+    # test_pixelcoord_np_int64_probe_shape_refuses (px-kind np.int64) is
+    # superseded by TestInsetBoundNumpyScalarMatrix below, which covers
+    # every numpy scalar type under px, not just int64.
+
+
+def _numpy_scalar_samples() -> dict:
+    """One instance of every numpy concrete scalar type, keyed by type name.
+
+    Derived from ``np.sctypeDict`` (deduplicated by type) rather than a
+    hand-typed list of "the shapes a reviewer happened to probe" -- the
+    exact gap that let ``np.str_``/``np.bytes_``/``np.complex128``/a
+    1-element ``ndarray`` through cycle 2's duck-typed tail, and let
+    ``np.timedelta64`` raise a raw ``TypeError`` (`#239` cycle 3).
+
+    ``np.object_`` is skipped: its constructor never yields an actual
+    ``np.object_`` instance for a scalar argument (``np.object_(5)`` is a
+    plain ``int``, ``np.object_("x")`` is a plain ``str``) -- there is no
+    "one sample" of it to construct. Each sample is built from ``0``
+    (falling back to ``b"0"``/``"0"`` for the types that need it), a value
+    that is finite and in ``[0, 1]`` for the numeric kinds, so an accepted
+    sample also clears the fraction-range check and only the type
+    acceptance/refusal boundary is exercised.
+
+    ``np.timedelta64`` is special-cased to a *unit-qualified* sample
+    (``np.timedelta64(0, "s")``, matching the reviewers' exact
+    reproduction) rather than the generic trial args above: a bare,
+    unit-less ``np.timedelta64(0)`` happens to support ``float()``
+    (returns ``0.0``) and so would not exercise the defect this test
+    exists to pin -- every real ``np.timedelta64`` a pandas/polars/numpy
+    duration column actually produces carries a unit.
+    """
+    import numpy as np
+
+    samples: dict = {}
+    for scalar_type in sorted(set(np.sctypeDict.values()), key=lambda t: t.__name__):
+        if scalar_type is np.object_:
+            continue
+        if scalar_type is np.timedelta64:
+            samples[scalar_type.__name__] = np.timedelta64(0, "s")
+            continue
+        for arg in (0, 0.0, b"0", "0"):
+            try:
+                value = scalar_type(arg)
+            except Exception:  # noqa: BLE001 - probing constructibility, not a real error path
+                continue
+            if type(value) is scalar_type:
+                samples[scalar_type.__name__] = value
+                break
+        else:
+            raise RuntimeError(f"no working sample constructor found for {scalar_type!r}")
+    return samples
+
+
+# The fourteen numpy scalar kinds the closed allowlist in
+# _coerce_bare_inset_bound accepts: np.integer/np.floating concrete leaves,
+# excluding np.bool_ (not a bool subclass but explicitly excluded) and
+# np.timedelta64 (an np.signedinteger subclass whose float() raises).
+_ACCEPTED_NUMPY_NORM_KINDS = frozenset(
+    {
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "longlong",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "ulonglong",
+        "float16",
+        "float32",
+        "float64",
+        "longdouble",
+    }
+)
+
+# Under a PixelCoord-wrapped (px-kind) bound, the bare-branch allowlist
+# above is never consulted at all -- PixelCoord.value reaches
+# validate_pixel_value raw, which has no numpy-awareness of its own
+# (pre-existing, unrelated to this classifier's fix). Only np.float64
+# passes: it is the one numpy scalar type that is a genuine Python `float`
+# subclass (`issubclass(np.float64, float)` is True; no numpy integer type
+# subclasses Python `int`), so it clears validate_pixel_value's plain
+# `isinstance(value, (int, float))` check without any coercion at all.
+_ACCEPTED_NUMPY_PX_KINDS = frozenset({"float64"})
+
+
+class TestInsetBoundNumpyScalarMatrix:
+    """`#239` cycle 3: the closed allowlist's accept/refuse boundary,
+    derived from numpy's own scalar-type registry (``_numpy_scalar_samples``)
+    plus the non-numpy shapes the reviewers named alongside it, under both
+    ``norm`` (bare) and ``px`` (``PixelCoord``-wrapped) bound kinds.
+    """
+
+    @pytest.fixture(scope="class")
+    def numpy_samples(self):
+        return _numpy_scalar_samples()
+
+    def test_population_is_not_vacuous(self, numpy_samples):
+        """Vacuity control: the derived population must contain both an
+        accepted and a refused numpy kind, or the matrix below would pass
+        trivially no matter what the allowlist does."""
+        assert set(numpy_samples) & _ACCEPTED_NUMPY_NORM_KINDS
+        assert set(numpy_samples) - _ACCEPTED_NUMPY_NORM_KINDS
+
+    def test_norm_kind_accepts_only_the_named_numpy_integer_and_floating_kinds(
+        self, base_chart, dual_field_df, numpy_samples
+    ):
+        for kind, value in numpy_samples.items():
+            if kind not in _ACCEPTED_NUMPY_NORM_KINDS:
+                continue
+            actual = _real_inset_wire(base_chart, dual_field_df, value)
+            _assert_wire_type_and_value(actual, float(value))
+
+    def test_norm_kind_refuses_every_other_numpy_kind_by_name(self, numpy_samples):
+        for kind, value in numpy_samples.items():
+            if kind in _ACCEPTED_NUMPY_NORM_KINDS:
+                continue
+            with pytest.raises(
+                ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a number"
+            ) as excinfo:
+                Inset(chart=object(), bounds=(value, 0.5, 0.9, 0.9))
+            # No raw, unlabeled TypeError/ValueError may escape (the
+            # np.timedelta64 finding): pytest.raises above already pins the
+            # exception class to ValueError; this additionally confirms the
+            # message names the actual type, not a bare float()/isfinite
+            # failure with no type name in it.
+            assert "not " in str(excinfo.value)
+
+    def test_px_kind_accepts_only_np_float64(self, numpy_samples):
+        for kind, value in numpy_samples.items():
+            if kind not in _ACCEPTED_NUMPY_PX_KINDS:
+                continue
+            Inset(chart=object(), bounds=(px(value), px(0), px(100), px(100)))
+
+    def test_px_kind_refuses_every_other_numpy_kind_by_name(self, numpy_samples):
+        for kind, value in numpy_samples.items():
+            if kind in _ACCEPTED_NUMPY_PX_KINDS:
+                continue
+            with pytest.raises(
+                ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a numeric pixel value"
+            ):
+                Inset(chart=object(), bounds=(px(value), px(0), px(100), px(100)))
+
+    # -- Non-numpy additions the reviewers named alongside the numpy population. --
+
+    @pytest.mark.parametrize(
+        ("case", "bad"),
+        [
+            ("complex", 1 + 2j),
+            ("str", "0.5"),
+            ("bytes", b"0.5"),
+            ("bytearray", bytearray(b"0.5")),
+            ("bool", True),
+            ("None", None),
+            ("1-element ndarray", np.array([0.5])),
+        ],
+    )
+    def test_norm_kind_refuses_non_numpy_additions_by_name(self, case, bad):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a number"):
+            Inset(chart=object(), bounds=(bad, 0.1, 0.9, 0.9))
+
+    @pytest.mark.parametrize(
+        ("case", "bad"),
+        [
+            ("complex", 1 + 2j),
+            ("str", "10"),
+            ("bytes", b"10"),
+            ("bytearray", bytearray(b"10")),
+            ("bool", True),
+            ("None", None),
+            ("1-element ndarray", np.array([10.0])),
+        ],
+    )
+    def test_px_kind_refuses_non_numpy_additions_by_name(self, case, bad):
+        with pytest.raises(
+            ValueError, match=r"Inset\.bounds\[0\] \(left\) must be a numeric pixel value"
+        ):
+            Inset(chart=object(), bounds=(px(bad), px(0), px(100), px(100)))
 
 
 # ---------------------------------------------------------------------------
