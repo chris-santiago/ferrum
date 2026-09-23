@@ -266,6 +266,74 @@ class TestStrokeDashCommaSplit:
         assert '"4,2"' in message  # comma-separated-string example
         assert "named linetype" in message  # named-linetype form, no longer an "escape hatch"
 
+    # ------------------------------------------------------------------
+    # Dash-length rule (#128 cycle-3): every length must be a real number,
+    # finite, and non-negative -- enforced once in
+    # marks.base._normalize_stroke_dash, for every caller and every
+    # spelling. Before cycle-3 this rule existed only inside selection.py's
+    # conditional-literal list/tuple path; a malformed length reached
+    # MarkBase (and annotate_*/SelectionMark) completely unvalidated,
+    # regardless of spelling.
+    # ------------------------------------------------------------------
+
+    def test_stroke_dash_negative_comma_string_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash="-4,2")
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+        assert "'-4,2'" in message
+
+    def test_stroke_dash_nan_comma_string_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash="nan,2")
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+        assert "'nan,2'" in message
+
+    def test_stroke_dash_negative_list_element_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash=[4, -2])
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+        assert "[4, -2]" in message
+
+    def test_stroke_dash_bool_list_element_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash=[True, 2])
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+        assert "[True, 2]" in message
+
+    def test_stroke_dash_negative_scalar_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash=-3)
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+
+    def test_stroke_dash_nan_scalar_refuses(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase("line", stroke_dash=float("nan"))
+        message = str(exc_info.value)
+        assert "mark_line" in message
+        assert "stroke_dash" in message
+
+    def test_stroke_dash_positive_comma_string_control_still_accepted(self) -> None:
+        """Vacuity control: the new length rule doesn't touch valid input."""
+        mb = MarkBase("line", stroke_dash="4,2")
+        assert mb.kwargs["stroke_dash"] == [4.0, 2.0]
+
+    def test_stroke_dash_positive_list_control_still_accepted(self) -> None:
+        """Vacuity control: the new length rule doesn't touch valid input --
+        and, per _normalize_stroke_dash's passthrough contract, the list
+        keeps its int elements rather than being coerced to floats."""
+        mb = MarkBase("line", stroke_dash=[4, 2])
+        assert mb.kwargs["stroke_dash"] == [4, 2]
+
     def test_linetype_alias_bad_value_message_names_accepted_forms(self) -> None:
         # Same refusal, reached via the linetype= alias with a value that is
         # neither a recognized name nor a valid comma-split numeric string.

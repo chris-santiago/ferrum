@@ -19,12 +19,15 @@ when               — ``fm.when(sel).then(v_if).otherwise(v_else)`` conditional
 
 from __future__ import annotations
 
+import math
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
 from ferrum._validate import is_none_color_sentinel
+from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
 
@@ -515,12 +518,27 @@ def value(v: Any) -> "_LiteralValue":
 
     Parameters
     ----------
-    v : str, int, or float
-        The constant to embed.  Color strings (a CSS name, hex, e.g.
-        ``"#cccccc"``, or ``rgb()``/``rgba()`` form — validated and
-        normalized by ferrum's one Rust color parser) are interpreted as
-        colours; an unparseable string raises ``ValueError`` naming the
-        accepted forms.  Numbers are interpreted as opacity values.
+    v : str, int, float, list, or tuple
+        The constant to embed. What forms are accepted depends on the
+        channel this value ends up assigned to (#128) -- the channel is
+        resolved from the encode key (``encode(<channel>=cond)``) or, for
+        ``.conditional(...)``, inferred from the ``if_selected`` branch:
+
+        - ``color`` (and an unresolved/absent channel): a color string (a
+          CSS name, hex, e.g. ``"#cccccc"``, or ``rgb()``/``rgba()`` form —
+          validated and normalized by ferrum's one Rust color parser); an
+          unparseable string raises ``ValueError`` naming the accepted
+          forms. A number is interpreted as an opacity value.
+        - ``stroke_dash``: a named linetype (``"dashed"``, ``"dotted"``,
+          ...), a comma-separated numeric string (``"4,2"``), a number, or
+          a list/tuple of numbers — the same vocabulary every other
+          ``stroke_dash`` surface accepts, via
+          :func:`ferrum.marks.base._normalize_stroke_dash`.
+        - ``size``, ``opacity``, ``stroke_width``, ``stroke_opacity``,
+          ``fill_opacity``, ``angle``: a number only. A color string here
+          raises ``ValueError`` naming the channel and this call (e.g.
+          ``fm.value('red') for channel='size' needs a number``) rather
+          than silently repainting the mark's fill.
 
     Returns
     -------
@@ -573,10 +591,11 @@ class _When:
         v : Any
             Value applied when a datum falls inside the selection.  Plain
             values are wrapped via ``value()``; passing an already-wrapped
-            ``value(...)`` is also accepted.  Color strings (CSS name, hex,
-            or ``rgb()``/``rgba()``) are interpreted as colours at
-            serialization time (in ``_resolve_encoding_value``), not at this
-            layer.
+            ``value(...)`` is also accepted.  What forms are accepted, and
+            what they mean, is typed by the resolved conditional channel
+            (#128) at serialization time (in ``_resolve_encoding_value``),
+            not at this layer -- see :func:`value` for the per-channel
+            table.
 
         Returns
         -------
@@ -603,8 +622,8 @@ class _WhenThen:
         ----------
         v : Any
             Value applied when a datum falls outside the selection.  Plain
-            numbers and color strings (CSS name, hex, or ``rgb()``/``rgba()``)
-            are auto-wrapped via ``value()``.
+            values are auto-wrapped via ``value()``; see :func:`value` for
+            the per-channel table of what forms are accepted (#128).
 
         Returns
         -------
@@ -646,11 +665,12 @@ def when(parameter: Parameter) -> _When:
     (``fm.param``) drive value/domain/bind references, not the conditional
     predicate; passing one raises ``TypeError``.
 
-    ``v_if`` and ``v_else`` may be plain numbers or ``fm.value(...)``
+    ``v_if`` and ``v_else`` may be plain values or ``fm.value(...)``
     wrappers; they are wrapped via ``value()`` when not already a
-    ``_LiteralValue``.  Color strings (CSS name, hex, or ``rgb()``/``rgba()``)
-    are interpreted as colours at serialization time (in
-    ``_resolve_encoding_value``), not at this layer.
+    ``_LiteralValue``.  What forms are accepted, and what they mean, is
+    typed by the resolved conditional channel (#128) at serialization time
+    (in ``_resolve_encoding_value``), not at this layer -- see
+    :func:`value` for the per-channel table.
 
     Parameters
     ----------
@@ -891,6 +911,141 @@ def _resolve_param_ref(
     return _resolve_encoding_value(_LiteralValue(resolved.value), channel=channel)
 
 
+def _conditional_literal_type_error(v: Any, *, channel: str | None, needs: str) -> ValueError:
+    """Build the one refusal shape every conditional-literal handler raises
+    for a value of the wrong type/content for *channel* (#128 cycle-2
+    remediation: the handlers previously used two different exception types
+    and slightly different wordings for the same failure class -- "the
+    literal doesn't fit this channel"). Every such refusal is a
+    ``ValueError`` reading exactly ``fm.value(<repr>) for channel=<repr>
+    needs <needs>, got <type>: <repr>`` -- the same shape the matrix in
+    ``tests/test_condition_translation.py`` pins byte-for-byte, not a
+    substring.
+    """
+    return ValueError(
+        f"fm.value({v!r}) for channel={channel!r} needs {needs}, got {type(v).__name__}: {v!r}"
+    )
+
+
+#: The dash-pattern description shared by every stroke_dash refusal
+#: (#128 cycle-2) and imported by the test matrix so the prose lives in
+#: exactly one place.
+_DASH_PATTERN_NEEDS = (
+    "a dash pattern (a named linetype, a comma-separated numeric string, a "
+    "number, or a list/tuple of numbers)"
+)
+
+
+def _literal_color(v: str, *, channel: str | None) -> dict:
+    """Parse a color string via the one Rust color parser (``ferrum.color.to_hex``).
+
+    A parseable string is a color; an unparseable one raises ``ValueError``
+    naming the accepted forms -- no silent fallback.
+    """
+    context = f"fm.value({v!r}) for channel={channel!r}"
+    return {"kind": "color", "value": _hex_to_color_dict(v, context=context)}
+
+
+def _literal_color_or_opacity(v: Any, *, channel: str | None) -> dict:
+    """Default conditional-literal handler: ``channel is None`` or ``"color"``.
+
+    A string is a color (see :func:`_literal_color`) -- the one legitimate
+    reading for these two cases, unchanged by #128. A number (excluding
+    ``bool``, which is an ``int`` subclass but not a number a caller meant
+    to write -- #128 cycle-2) carries no typing of its own here and tags
+    the ``"opacity"`` kind: this is the pre-existing numeric fallback (not
+    the string-blind bug #128 fixes), still relied on by a
+    ``.conditional(...)`` branch whose channel is inferred from the
+    *other* branch -- e.g. ``sel.when(Color(...)).otherwise(
+    some_param.ref())`` where the param's static value is numeric (see
+    ``test_parameter_ref.py::TestConditionalValueRef::
+    test_registered_param_ref_resolves_to_static_value``).
+    """
+    if isinstance(v, str):
+        return _literal_color(v, channel=channel)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return {"kind": "opacity", "value": float(v)}
+    raise _conditional_literal_type_error(v, channel=channel, needs="a color string or a number")
+
+
+def _literal_numeric_only(v: Any, *, channel: str) -> dict:
+    """Resolve a literal for one of the six plain-numeric channels (#128): a number only.
+
+    Before #128 a string here reached the color parser unconditionally (the
+    channel-blind string-first branch this table replaces) and either
+    mis-serialized as ``kind=color`` -- which the WASM runtime applies as a
+    fill repaint regardless of the declared channel -- or refused with a
+    color-flavored message that made no sense for a channel like ``size``.
+    Refusing by channel name instead names the public call and what it
+    needed. ``bool`` is excluded from "a number" (#128 cycle-2): it is an
+    ``int`` subclass, but ``fm.value(True)`` is never a deliberate ``1.0``.
+    ``nan``/``inf`` are refused too (#128 cycle-3): they predate #128 and
+    are not a §4.10 row, but they sit on this same REFUSE MALFORMED surface
+    and the check is one ``math.isfinite`` call.
+    """
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        fv = float(v)
+        if math.isfinite(fv):
+            return {"kind": channel, "value": fv}
+    raise _conditional_literal_type_error(v, channel=channel, needs="a number")
+
+
+def _literal_stroke_dash(v: Any, *, channel: str) -> dict:
+    """``stroke_dash`` (#128): the same dash vocabulary every other
+    stroke_dash surface accepts, via the shared
+    :func:`ferrum.marks.base._normalize_stroke_dash` normalizer -- a named
+    linetype, a comma-separated numeric string, a number, or a list/tuple
+    of numbers. Before #128 only a bare number worked; a name or comma
+    string reached the color parser and refused with a color-flavored
+    message, and a list raised ``TypeError`` (``fm.value`` did not accept
+    one).
+
+    Every accepted form (scalar, string, list/tuple) routes through *one*
+    ``_normalize_stroke_dash`` call rather than a local per-form check
+    (#128 cycle-3): the length rule (finite, non-negative, not ``bool``)
+    lives in the normalizer now, not here, so it is enforced identically
+    for a bare number, a comma-string, and a list/tuple -- ``fm.value(-3)``,
+    ``fm.value('-4,2')``, and ``fm.value([-4, 2])`` all refuse the same way,
+    where cycle-2 validated only the list/tuple form. Every rejection --
+    an unparseable string, a malformed length by any spelling, or a value
+    of the wrong type entirely -- raises the *same*
+    :func:`_conditional_literal_type_error` shape: previously the string
+    path re-raised ``_normalize_stroke_dash``'s own message with a context
+    that duplicated the value (``for channel='stroke_dash'='red'``), the
+    list path ran an unguarded ``float()`` that silently accepted numeric
+    strings (``['4', '2']``), and the wrong-type path raised ``TypeError``
+    instead of ``ValueError`` -- different failure shapes for one failure
+    class.
+    """
+    if isinstance(v, (int, float, str, list, tuple)):
+        try:
+            dash = _normalize_stroke_dash(v, context=f"fm.value({v!r}) for channel={channel!r}")
+        except ValueError as exc:
+            raise _conditional_literal_type_error(
+                v, channel=channel, needs=_DASH_PATTERN_NEEDS
+            ) from exc
+        if isinstance(dash, (int, float)):
+            return {"kind": "stroke_dash", "value": [float(dash)]}
+        return {"kind": "stroke_dash", "value": [float(x) for x in dash]}
+    raise _conditional_literal_type_error(v, channel=channel, needs=_DASH_PATTERN_NEEDS)
+
+
+# One channel-keyed table for every conditional literal (#128), replacing
+# the old string-first branch (unconditionally the color parser, blind to
+# `channel`) and the numeric dispatch that lived separately below it (a
+# channel-keyed if/elif chain -- only the string side was blind). Keyed by
+# resolved wire channel; `None` (no channel resolved -- a direct
+# `to_spec_dict()` call) and `"color"` both fall through to `.get`'s
+# default, `_literal_color_or_opacity`. The numeric-only entries are
+# derived from `_CONDITIONAL_CHANNELS` minus the two channels with their
+# own handler, so a newly-added conditional channel defaults to
+# number-only rather than silently accepting a color string.
+_CONDITIONAL_LITERAL_HANDLERS: dict[str, Callable[..., dict]] = {
+    channel: _literal_numeric_only for channel in _CONDITIONAL_CHANNELS - {"color", "stroke_dash"}
+}
+_CONDITIONAL_LITERAL_HANDLERS["stroke_dash"] = _literal_stroke_dash
+
+
 def _resolve_encoding_value(
     enc: Any, *, channel: str | None = None, params: dict[str, Parameter] | None = None
 ) -> dict:
@@ -902,10 +1057,12 @@ def _resolve_encoding_value(
         A ``_LiteralValue`` (from ``fm.value(...)``), a ``ChannelBase``
         subclass, or a ``Parameter.ref()`` marker dict (F-L13-01).
     channel:
-        The resolved channel string (e.g. ``"size"``, ``"opacity"``).  Used to
-        tag numeric literals correctly so the Rust resolver maps them to the right
-        ``EncodingValue`` variant.  When ``None``, numeric literals fall back to
-        the ``"opacity"`` tag (backward-compatible default).
+        The resolved channel string (e.g. ``"size"``, ``"opacity"``). Selects
+        the literal handler from :data:`_CONDITIONAL_LITERAL_HANDLERS`
+        (#128): ``color`` (and ``None``) accept a color string and tag
+        numbers ``"opacity"``; ``stroke_dash`` accepts a name, comma
+        string, number, or list; the six plain-numeric channels accept a
+        number only and refuse a string by name.
     params:
         The chart's registered-parameter registry, forwarded to
         :func:`_resolve_param_ref` when *enc* is a ``Parameter.ref()``
@@ -915,31 +1072,8 @@ def _resolve_encoding_value(
     if ref_name is not None:
         return _resolve_param_ref(ref_name, channel=channel, params=params)
     if isinstance(enc, _LiteralValue):
-        v = enc.val
-        if isinstance(v, str):
-            # Routes through the one Rust color parser (ferrum.color.to_hex);
-            # a parseable string is a color, an unparseable one raises
-            # ValueError naming the accepted forms — no silent fallback.
-            context = f"fm.value({v!r}) for channel={channel!r}"
-            return {"kind": "color", "value": _hex_to_color_dict(v, context=context)}
-        if isinstance(v, (int, float)):
-            fv = float(v)
-            if channel == "size":
-                return {"kind": "size", "value": fv}
-            if channel == "stroke_width":
-                return {"kind": "stroke_width", "value": fv}
-            if channel == "stroke_dash":
-                return {"kind": "stroke_dash", "value": [fv]}
-            if channel == "stroke_opacity":
-                return {"kind": "stroke_opacity", "value": fv}
-            if channel == "fill_opacity":
-                return {"kind": "fill_opacity", "value": fv}
-            if channel == "angle":
-                return {"kind": "angle", "value": fv}
-            return {"kind": "opacity", "value": fv}
-        raise TypeError(
-            f"fm.value(...) accepts a color string or a number, got {type(v).__name__}: {v!r}"
-        )
+        handler = _CONDITIONAL_LITERAL_HANDLERS.get(channel, _literal_color_or_opacity)
+        return handler(enc.val, channel=channel)
     if isinstance(enc, str):
         # A bare string means a FIELD everywhere in ferrum -- literals require
         # fm.value() (encode()'s own rule; see H10). Parse via the same

@@ -182,11 +182,19 @@ def test_value_nonsense_string_message_carries_value_and_channel_context():
     """_resolve_encoding_value threads the fm.value(...) literal and its
     resolved channel into the message, so a bad literal raised many frames
     inside .to_svg() is traceable back to which fm.value(...) call and
-    which conditional channel produced it."""
+    which conditional channel produced it.
+
+    ``channel="color"`` (not a numeric channel like ``"opacity"``): #128
+    types a bad string on a numeric conditional channel as "needs a
+    number" instead of a color message -- see
+    ``test_condition_translation.py::test_conditional_literal_typed_by_channel``
+    for that table. This test is scoped to the color-parser's own context
+    threading, which still applies verbatim to the ``color`` channel.
+    """
     with pytest.raises(
-        ValueError, match=r"fm\.value\('nonsense'\) for channel='opacity' is not a valid color"
+        ValueError, match=r"fm\.value\('nonsense'\) for channel='color' is not a valid color"
     ):
-        _resolve_encoding_value(value("nonsense"), channel="opacity")
+        _resolve_encoding_value(value("nonsense"), channel="color")
 
 
 def test_value_rgb_functional_form_is_color():
@@ -195,9 +203,15 @@ def test_value_rgb_functional_form_is_color():
     assert resolved["value"] == {"r": 70, "g": 130, "b": 180, "a": 255}
 
 
-def test_value_non_str_non_number_raises_typeerror():
-    """Neither a color string nor a number: no silent opacity-1.0 fallback."""
-    with pytest.raises(TypeError, match="color string or a number"):
+def test_value_non_str_non_number_raises_valueerror():
+    """Neither a color string nor a number: no silent opacity-1.0 fallback.
+
+    #128 cycle-2: every conditional-literal handler raises the same
+    exception type (`ValueError`) for "this literal doesn't fit this
+    channel" -- this used to be the one handler that raised `TypeError`
+    instead; see `test_condition_translation.py`'s
+    `_conditional_literal_type_error`-based matrix for the full family."""
+    with pytest.raises(ValueError, match="color string or a number"):
         _resolve_encoding_value(value([1, 2, 3]))
 
 

@@ -44,7 +44,14 @@ from ferrum.encoding._channel_policy import (
     _CONDITIONAL_REFUSALS,
     conditional_wire_channel,
 )
-from ferrum.selection import _resolve_encoding_value, selection_interval, selection_point, value
+from ferrum.marks.base import _LINETYPE_MAP
+from ferrum.selection import (
+    _hex_to_color_dict,
+    _resolve_encoding_value,
+    selection_interval,
+    selection_point,
+    value,
+)
 
 #: The Rust enum the Python conditional vocabulary mirrors. Repo-relative so
 #: the mirror test fails loudly (not silently skips) if the file moves.
@@ -425,15 +432,23 @@ def test_every_condition_honoring_channel_produces_a_valid_wire_channel(df):
     Rust `ChannelName` enum accepts (proven by building the real spec), and
     every other channel must refuse with the typed error. This is the single
     test that keeps the honored-kwarg table, the docstrings, and the Rust
-    enum from drifting apart again."""
+    enum from drifting apart again.
+
+    Uses a numeric `if_not` literal, not `_cond`'s color string: a color
+    string is no longer valid on every conditional channel (#128 -- see
+    `test_conditional_literal_typed_by_channel`), but a plain number is
+    accepted on all eight, exercising the routing question this test is
+    actually about without tripping the literal-typing refusal.
+    """
     sel = selection_point(fields=["category"], name="sel_table")
     for name, cls in sorted(_channel_class_map().items()):
         honors = "condition" in getattr(cls, "_honored_kwargs", frozenset())
+        cond = sel.when(fm.Color("category")).otherwise(value(1.0))
         try:
             chart = (
                 fm.Chart(df)
                 .mark_point()
-                .encode(**{"x": "x:Q", "y": "y:Q", name: cls("category", condition=_cond(sel))})
+                .encode(**{"x": "x:Q", "y": "y:Q", name: cls("category", condition=cond)})
                 .properties(width=200, height=200)
             )
         except ValueError as exc:
@@ -1089,3 +1104,422 @@ def test_condition_honored_bit_is_derived_from_the_vocabulary():
 
     assert "condition" in _FakeConditionalChannel._honored_kwargs
     assert "condition" not in _FakeRefusedChannel._honored_kwargs
+
+
+# ── #128: conditional literals are typed by their channel ───────────────────
+#
+# MATRIX FIRST (binding 6A lesson): written and run red before
+# `selection.py` was touched -- see the task report for the red cell count.
+# The channel population is `_CONDITIONAL_CHANNELS`, never a hand list; the
+# `fill` alias is covered by its own control below, since it never reaches
+# `_resolve_encoding_value` as a channel name of its own --
+# `conditional_wire_channel` translates it to `color` before any
+# conditional value is resolved.
+
+_LITERAL_FORMS: dict[str, Any] = {
+    "color_string": "red",
+    "dash_name": "dashed",
+    "comma_string": "4,2",
+    "numeric_string": "0.5",
+    "number": 4,
+    "list": [4, 2],
+}
+
+_SPELLINGS = ("value", "when_then", "param_ref")
+
+# Hand-copied prose (#128 cycle-3, spec-reviewer finding): deliberately NOT
+# imported from `ferrum.selection._DASH_PATTERN_NEEDS`. Importing it made
+# every stroke_dash refusal oracle compare the resolver's own constant with
+# itself, so a prose change there would pass this matrix vacuously. This is
+# an independently maintained literal copy -- a real pin, not a mirror --
+# and `test_conditional_literal_stroke_dash_color_string_refusal_is_literally_pinned`
+# below cross-checks it against one fully hard-coded expected string with no
+# helper function at all, so a drift between this copy and the source has
+# somewhere to be caught.
+_TEST_DASH_PATTERN_NEEDS = (
+    "a dash pattern (a named linetype, a comma-separated numeric string, a "
+    "number, or a list/tuple of numbers)"
+)
+
+
+def _literal_category(channel: str) -> str:
+    if channel == "color":
+        return "color"
+    if channel == "stroke_dash":
+        return "stroke_dash"
+    return "numeric_only"
+
+
+def _needs_text(form_value: Any, channel: str, needs: str) -> str:
+    """The one refusal shape every conditional-literal handler raises
+    (`_conditional_literal_type_error`, `selection.py`) -- pinned here as
+    the exact text a matrix cell must produce, not a fragment of it
+    (cycle-2 remediation: a message that dropped the channel or garbled the
+    `fm.value(...)` call previously still passed a bare-substring match)."""
+    return (
+        f"fm.value({form_value!r}) for channel={channel!r} needs {needs}, got "
+        f"{type(form_value).__name__}: {form_value!r}"
+    )
+
+
+def _color_parse_refusal_text(form_value: str, channel: str) -> str:
+    """Derive the exact "not a valid color" refusal text by calling the
+    real color parser (`_hex_to_color_dict`) with the exact context
+    `_literal_color` builds. Deriving rather than hand-copying pins the
+    context prefix #128 requires (`fm.value(<repr>) for channel=<repr>`)
+    without hard-coding the Rust color parser's own wording, which is
+    outside this task's control and not what #128 changed."""
+    context = f"fm.value({form_value!r}) for channel={channel!r}"
+    try:
+        _hex_to_color_dict(form_value, context=context)
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError(f"{form_value!r} unexpectedly parsed as a color")  # pragma: no cover
+
+
+def _expected_cell(channel: str, form_name: str) -> tuple[str, Any]:
+    """The #128 rule table (spec `§4.10` / decision doc `§11`), as a test
+    oracle: ``("accept", wire_dict)`` or ``("refuse", exact_message)`` --
+    the exact text `_resolve_encoding_value` raises, not a fragment of it."""
+    form_value = _LITERAL_FORMS[form_name]
+    category = _literal_category(channel)
+    if category == "color":
+        if form_name == "color_string":
+            return "accept", {"kind": "color", "value": {"r": 255, "g": 0, "b": 0, "a": 255}}
+        if form_name == "number":
+            # Pre-existing, #128-unrelated fallback (unchanged): a number
+            # under the `color` channel tags "opacity", not "color" --
+            # preserved for a `.conditional(...)` branch whose channel is
+            # inferred from a DIFFERENT (Color-typed) branch than this
+            # numeric one. See
+            # `test_parameter_ref.py::TestConditionalValueRef::
+            # test_registered_param_ref_resolves_to_static_value`.
+            return "accept", {"kind": "opacity", "value": 4.0}
+        if form_name == "list":
+            return "refuse", _needs_text(form_value, channel, "a color string or a number")
+        if form_name in ("dash_name", "comma_string", "numeric_string"):
+            return "refuse", _color_parse_refusal_text(form_value, channel)
+        raise AssertionError(form_name)  # pragma: no cover
+    if category == "stroke_dash":
+        if form_name == "color_string":
+            return "refuse", _needs_text(form_value, channel, _TEST_DASH_PATTERN_NEEDS)
+        if form_name == "dash_name":
+            return "accept", {"kind": "stroke_dash", "value": list(_LINETYPE_MAP["dashed"])}
+        if form_name == "comma_string":
+            return "accept", {"kind": "stroke_dash", "value": [4.0, 2.0]}
+        if form_name == "numeric_string":
+            return "accept", {"kind": "stroke_dash", "value": [0.5]}
+        if form_name == "number":
+            return "accept", {"kind": "stroke_dash", "value": [4.0]}
+        if form_name == "list":
+            return "accept", {"kind": "stroke_dash", "value": [4.0, 2.0]}
+        raise AssertionError(form_name)  # pragma: no cover
+    # numeric_only: size, opacity, stroke_width, stroke_opacity, fill_opacity, angle
+    if form_name == "number":
+        return "accept", {"kind": channel, "value": 4.0}
+    if form_name in ("color_string", "dash_name", "comma_string", "numeric_string", "list"):
+        return "refuse", _needs_text(form_value, channel, "a number")
+    raise AssertionError(form_name)  # pragma: no cover
+
+
+def _spec_for_spelling(
+    spelling: str, channel: str, form_value: Any, *, param_name: str
+) -> tuple[ConditionalSpec, dict[str, Any] | None]:
+    """Build a `ConditionalSpec` stamped with *channel* (mirroring
+    `Chart.encode()`'s `replace(spec, channel=wire)` in
+    `chart._append_conditional`) whose `if_not` branch carries *form_value*
+    through the given spelling. `if_selected` is always a channel-agnostic
+    filler (a bare number, which the #128 table accepts -- possibly under a
+    different kind -- on every conditional channel), so only `if_not` is
+    under test.
+    """
+    sel = selection_point(name=f"sel_{param_name}")
+    if spelling == "value":
+        cond = sel.when(value(1.0)).otherwise(value(form_value))
+        params = None
+    elif spelling == "when_then":
+        cond = fm.when(sel).then(1.0).otherwise(form_value)
+        params = None
+    elif spelling == "param_ref":
+        p = fm.param(param_name, value=form_value)
+        cond = sel.when(value(1.0)).otherwise(p.ref())
+        params = {param_name: p}
+    else:
+        raise AssertionError(spelling)  # pragma: no cover
+    return replace(cond, channel=channel), params
+
+
+def _matrix_cells() -> list[tuple[str, str, str]]:
+    return [
+        (channel, form_name, spelling)
+        for channel in sorted(_CONDITIONAL_CHANNELS)
+        for form_name in _LITERAL_FORMS
+        for spelling in _SPELLINGS
+    ]
+
+
+@pytest.mark.parametrize(
+    "channel,form_name,spelling",
+    _matrix_cells(),
+    ids=[f"{c}-{f}-{s}" for c, f, s in _matrix_cells()],
+)
+def test_conditional_literal_typed_by_channel(channel, form_name, spelling):
+    """The full channel x literal-form x spelling matrix for #128.
+
+    Every refusal is asserted against the *exact* message text (cycle-2
+    remediation), not a bare substring -- and against exactly `ValueError`,
+    the one exception type every conditional-literal handler now raises for
+    "this literal doesn't fit this channel" (no more `TypeError` on some
+    handlers and `ValueError` on others, which let the matrix's former
+    `(ValueError, TypeError)` catch hide the drift)."""
+    form_value = _LITERAL_FORMS[form_name]
+    outcome, expectation = _expected_cell(channel, form_name)
+    param_name = f"p_{channel}_{form_name}_{spelling}"
+    cond, params = _spec_for_spelling(spelling, channel, form_value, param_name=param_name)
+    if outcome == "accept":
+        result = cond.to_spec_dict(params=params)
+        assert result["if_not"] == expectation
+    else:
+        with pytest.raises(ValueError) as excinfo:
+            cond.to_spec_dict(params=params)
+        assert str(excinfo.value) == expectation
+
+
+# ── #128 cycle-2: bool and stroke_dash list-element validation ──────────────
+#
+# Outside the 6-form matrix above (`bool` and a malformed list are not among
+# the declared literal forms) but part of the same #128 contract: `bool` is
+# refused as "a number" everywhere (it's an `int` subclass, but
+# `fm.value(True)` is never a deliberate `1.0`), and a `stroke_dash` list's
+# elements must already be numbers -- not numeric-looking strings, not
+# `bool`, not negative or non-finite lengths. Before cycle-2 the list path
+# ran an unguarded `float(x) for x in v`, which silently accepted all of
+# these.
+
+
+@pytest.mark.parametrize("channel", sorted(_CONDITIONAL_CHANNELS))
+def test_conditional_literal_bool_refused_as_a_number_everywhere(channel):
+    if channel == "stroke_dash":
+        needs = _TEST_DASH_PATTERN_NEEDS
+    elif channel == "color":
+        needs = "a color string or a number"
+    else:
+        needs = "a number"
+    cond, _ = _spec_for_spelling("value", channel, True, param_name=f"bool_{channel}")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value(True) for channel={channel!r} needs {needs}, got bool: True"
+    )
+
+
+def test_conditional_literal_stroke_dash_list_refuses_string_elements():
+    """A list of numeric-looking strings is not a list of numbers -- the
+    pre-cycle-2 `float(x) for x in v` coercion silently accepted
+    `['4', '2']` as `[4.0, 2.0]`."""
+    bad = ["4", "2"]
+    cond, _ = _spec_for_spelling("value", "stroke_dash", bad, param_name="dash_str_list")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value({bad!r}) for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got list: {bad!r}"
+    )
+
+
+def test_conditional_literal_stroke_dash_list_refuses_bool_element():
+    bad = [True, 2.0]
+    cond, _ = _spec_for_spelling("value", "stroke_dash", bad, param_name="dash_bool_list")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value({bad!r}) for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got list: {bad!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [[-1.0, 2.0], [float("nan"), 2.0], [float("inf"), 2.0], [float("-inf"), 2.0]],
+    ids=["negative", "nan", "inf", "neg_inf"],
+)
+def test_conditional_literal_stroke_dash_list_refuses_negative_and_non_finite(bad):
+    cond, _ = _spec_for_spelling(
+        "value", "stroke_dash", bad, param_name=f"dash_bad_{bad[0]!r}".replace(".", "_")
+    )
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value({bad!r}) for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got list: {bad!r}"
+    )
+
+
+def test_conditional_literal_stroke_dash_list_of_valid_numbers_still_accepted():
+    """Vacuity control for the three tests above: a well-formed numeric
+    list is untouched by the stricter per-element validation."""
+    cond, _ = _spec_for_spelling("value", "stroke_dash", [4, 2.5], param_name="dash_ok_list")
+    assert cond.to_spec_dict()["if_not"] == {"kind": "stroke_dash", "value": [4.0, 2.5]}
+
+
+# ── #128 cycle-3: the dash-length rule applies to EVERY spelling ────────────
+#
+# Cycle-2 validated finite/non-negative lengths only in the list/tuple
+# branch of `_literal_stroke_dash`; the same handler's scalar and string
+# branches still accepted `fm.value(-3)` -> `[-3.0]` and
+# `fm.value('-4,2')` -> `[-4.0, 2.0]` (spec + quality review, cycle-2).
+# `_literal_stroke_dash` now routes every form through the ONE
+# `marks.base._normalize_stroke_dash` call, so the length rule -- enforced
+# once, in that shared function -- covers a scalar and a string identically
+# to a list/tuple.
+
+
+def test_conditional_literal_stroke_dash_negative_scalar_refuses():
+    cond, _ = _spec_for_spelling("value", "stroke_dash", -3, param_name="dash_neg_scalar")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value(-3) for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, got int: -3"
+    )
+
+
+def test_conditional_literal_stroke_dash_nan_scalar_refuses():
+    nan = float("nan")
+    cond, _ = _spec_for_spelling("value", "stroke_dash", nan, param_name="dash_nan_scalar")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value({nan!r}) for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got float: {nan!r}"
+    )
+
+
+def test_conditional_literal_stroke_dash_negative_comma_string_refuses():
+    cond, _ = _spec_for_spelling("value", "stroke_dash", "-4,2", param_name="dash_neg_string")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value('-4,2') for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got str: '-4,2'"
+    )
+
+
+def test_conditional_literal_stroke_dash_nan_comma_string_refuses():
+    cond, _ = _spec_for_spelling("value", "stroke_dash", "nan,2", param_name="dash_nan_string")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value('nan,2') for channel='stroke_dash' needs {_TEST_DASH_PATTERN_NEEDS}, "
+        f"got str: 'nan,2'"
+    )
+
+
+def test_conditional_literal_stroke_dash_positive_scalar_and_string_still_accepted():
+    """Vacuity control for the four tests above: the length rule doesn't
+    touch valid scalar/string input on any of the three spellings."""
+    scalar_cond, _ = _spec_for_spelling("value", "stroke_dash", 4, param_name="dash_ok_scalar")
+    assert scalar_cond.to_spec_dict()["if_not"] == {"kind": "stroke_dash", "value": [4.0]}
+    string_cond, _ = _spec_for_spelling("value", "stroke_dash", "4,2", param_name="dash_ok_string")
+    assert string_cond.to_spec_dict()["if_not"] == {"kind": "stroke_dash", "value": [4.0, 2.0]}
+
+
+# ── #128 cycle-3: two fully-literal pins, independent of any template ───────
+#
+# Every other refusal cell above is built from a template (`_needs_text`,
+# `_TEST_DASH_PATTERN_NEEDS`) shared with the cell that exercises it, so a
+# template bug could still make a cell agree with itself. These two are
+# hard-coded strings with no helper function in the middle -- the exact
+# §4.10 example, and one stroke_dash refusal -- so a drift in either
+# template has somewhere it cannot hide.
+
+
+def test_conditional_literal_size_color_string_refusal_matches_spec_example_literally():
+    """The exact `§4.10` example, pinned with no template in between."""
+    cond, _ = _spec_for_spelling("value", "size", "red", param_name="p_spec_example")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == "fm.value('red') for channel='size' needs a number, got str: 'red'"
+
+
+def test_conditional_literal_stroke_dash_color_string_refusal_is_literally_pinned():
+    """One stroke_dash refusal pinned as a fully literal string -- not built
+    from `_TEST_DASH_PATTERN_NEEDS` or any other helper, so a prose drift
+    in that constant (or in `_needs_text`) cannot pass this test by
+    comparing itself with itself."""
+    cond, _ = _spec_for_spelling("value", "stroke_dash", "red", param_name="p_dash_literal")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        "fm.value('red') for channel='stroke_dash' needs a dash pattern (a named "
+        "linetype, a comma-separated numeric string, a number, or a list/tuple of "
+        "numbers), got str: 'red'"
+    )
+
+
+def test_conditional_literal_matrix_covers_conditional_channels_exactly():
+    """The matrix population is derived from `_CONDITIONAL_CHANNELS`, not a
+    hand list -- if that set ever grows or shrinks, this test moves with
+    it rather than the matrix silently going stale."""
+    covered = {channel for channel, _, _ in _matrix_cells()}
+    assert covered == set(_CONDITIONAL_CHANNELS)
+
+
+def test_conditional_literal_color_channel_still_serializes_color_control():
+    """Vacuity control: `color` conditionals are untouched by #128 -- a
+    color string on the `color` channel still serializes `kind=color`,
+    byte-identical to before."""
+    cond, _ = _spec_for_spelling("value", "color", "red", param_name="p_control_color")
+    assert cond.to_spec_dict()["if_not"] == {
+        "kind": "color",
+        "value": {"r": 255, "g": 0, "b": 0, "a": 255},
+    }
+
+
+def test_conditional_literal_no_color_kind_under_non_color_channel():
+    """Global assertion: across the whole matrix, no accepted cell for a
+    non-`color` channel ever serializes `kind=color` -- the exact silent
+    fill-repaint shape #128 closes."""
+    for channel in _CONDITIONAL_CHANNELS - {"color"}:
+        for form_name in _LITERAL_FORMS:
+            outcome, expectation = _expected_cell(channel, form_name)
+            if outcome != "accept":
+                continue
+            assert expectation["kind"] != "color", (channel, form_name, expectation)
+            cond, params = _spec_for_spelling(
+                "value",
+                channel,
+                _LITERAL_FORMS[form_name],
+                param_name=f"gp_{channel}_{form_name}",
+            )
+            result = cond.to_spec_dict(params=params)
+            assert result["if_not"]["kind"] != "color", (channel, form_name, result)
+
+
+def test_conditional_literal_fill_alias_matches_color_channel():
+    """`fill` (the `+ fill alias` the brief calls out) never reaches
+    `_resolve_encoding_value` as a channel name of its own -- it is
+    translated to `color` before any conditional value is resolved
+    (`conditional_wire_channel`). Control: routing a color string through
+    `encode(fill=cond)` produces the identical wire entry
+    `encode(color=cond)` would."""
+    assert conditional_wire_channel("fill") == "color"
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [2.0, 1.0], "c": ["a", "b"]})
+    sel = selection_point(fields=["c"], name="sel_fill_alias")
+    color_chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color=sel.when(fm.Color("c")).otherwise(value("red")))
+        .add_selection(sel)
+    )
+    sel2 = selection_point(fields=["c"], name="sel_fill_alias_2")
+    fill_chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", fill=sel2.when(fm.Fill("c")).otherwise(value("red")))
+        .add_selection(sel2)
+    )
+    color_cond = color_chart.to_dict()["conditionals"][0]
+    fill_cond = fill_chart.to_dict()["conditionals"][0]
+    assert color_cond["channel"] == fill_cond["channel"] == "color"
+    expected_if_not = {"kind": "color", "value": {"r": 255, "g": 0, "b": 0, "a": 255}}
+    assert color_cond["if_not"] == fill_cond["if_not"] == expected_if_not

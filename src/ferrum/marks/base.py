@@ -6,6 +6,7 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ferrum._validate import is_none_color_sentinel, validate_choice, validate_color_value
@@ -44,6 +45,22 @@ def _stroke_dash_error(context: str, value: Any) -> str:
     )
 
 
+def _check_dash_lengths(lengths: Any, *, context: str, original: Any) -> None:
+    """Validate every dash length in *lengths* (#128 cycle-3): each must be
+    a real number (not ``bool``, not a numeric-looking string), finite, and
+    non-negative. Raises ``ValueError`` naming *context* and *original* --
+    the value the caller actually passed, not the intermediate parsed form
+    -- via :func:`_stroke_dash_error`, so a malformed length reads the same
+    refusal as any other malformed ``stroke_dash=`` value.
+    """
+    for item in lengths:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(_stroke_dash_error(context, original))
+        fv = float(item)
+        if not math.isfinite(fv) or fv < 0:
+            raise ValueError(_stroke_dash_error(context, original))
+
+
 def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
     """Normalize a user-supplied ``stroke_dash=`` value to its wire form (#124).
 
@@ -51,19 +68,20 @@ def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
     ``linetype=``/``line_type=`` aliases), ``annotate_hline``/
     ``annotate_vline`` (``ferrum/annotations.py``, which route
     ``stroke_dash=`` straight into the mark and the ``AnnotationLine``
-    primitive with no ``linetype=`` alias of their own), and
-    ``fm.SelectionMark`` (``ferrum/selection.py``, whose ``stroke_dash=``
-    used to pass through completely unvalidated). One normalization means
-    the three surfaces cannot each accept a different form set — before
-    this helper, named linetypes ("dashed", ...) worked only via the
-    ``linetype=``/``line_type=`` aliases on ``MarkBase``, were unreachable
-    by any spelling on the annotation constructors, and "wiggly" silently
-    constructed a ``SelectionMark``. This reverses `f8148bdc` (batch A T9,
-    2026-09-02), which deliberately restricted the canonical ``stroke_dash=``
-    kwarg to the comma-split form; `#124`, filed the same day by that
-    batch's final design review, ruled the restriction should not have
-    shipped — canonical ``stroke_dash=`` is the superset, not a subset of
-    ``linetype=``.
+    primitive with no ``linetype=`` alias of their own), ``fm.SelectionMark``
+    (``ferrum/selection.py``, whose ``stroke_dash=`` used to pass through
+    completely unvalidated), and the conditional-literal ``stroke_dash``
+    handler (``ferrum/selection.py``'s ``_literal_stroke_dash``, #128). One
+    normalization means the four surfaces cannot each accept a different
+    form set — before this helper, named linetypes ("dashed", ...) worked
+    only via the ``linetype=``/``line_type=`` aliases on ``MarkBase``, were
+    unreachable by any spelling on the annotation constructors, and
+    "wiggly" silently constructed a ``SelectionMark``. This reverses
+    `f8148bdc` (batch A T9, 2026-09-02), which deliberately restricted the
+    canonical ``stroke_dash=`` kwarg to the comma-split form; `#124`, filed
+    the same day by that batch's final design review, ruled the restriction
+    should not have shipped — canonical ``stroke_dash=`` is the superset,
+    not a subset of ``linetype=``.
 
     Accepts, in order:
 
@@ -73,19 +91,28 @@ def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
     - a comma-separated numeric string, spaces around each number tolerated
       (e.g. ``"4,2"``, ``"4, 2"``); ``""`` is the empty-dash spelling and
       normalizes to ``[]`` (solid), matching an already-empty list/tuple.
-    - anything that is not a ``str`` (a list/tuple of numbers, or any other
-      type) — passed through completely unchanged. Named-linetype and
-      comma-split resolution are string-only features; list/tuple values
-      were never touched by any of the three surfaces before this helper
-      (mark kwargs stored them as-is, the annotation constructors forwarded
-      them as-is, and ``SelectionMark`` did not validate them at all), so
-      they stay symmetric across all three by construction rather than by
-      a repeated no-op check.
+    - a bare number, or a list/tuple of numbers — passed through unchanged
+      (same container type, same element types: ``[4, 2]`` stays a list of
+      ints, ``(4.0, 2.0)`` stays a tuple of floats). Named-linetype and
+      comma-split resolution are string-only features, so these forms were
+      never re-shaped by this helper.
+    - ``bool`` (bare, or as a list/tuple element) is refused (#128
+      cycle-3): it is an ``int`` subclass, but a caller writing
+      ``stroke_dash=True`` never meant a length of ``1``.
+
+    Every dash length -- however it was spelled (a comma-string element, a
+    bare number, or a list/tuple element) -- must be finite and
+    non-negative (#128 cycle-3, closing the gap where only the conditional
+    literal's list/tuple form validated lengths: ``"-4,2"``, ``"nan,2"``,
+    a bare ``-3`` or ``nan``, and ``[-4, 2]`` all now refuse identically on
+    every surface this helper serves).
 
     Anything that is a ``str`` but neither a recognized linetype name nor a
-    valid comma-split numeric string raises ``ValueError`` naming *context*
-    (the public entry + kwarg the caller invoked) and the offending value —
-    junk refuses on every surface, unchanged from before this helper.
+    valid comma-split numeric string, or that has a negative/non-finite/
+    non-numeric length by any spelling, raises ``ValueError`` naming
+    *context* (the public entry + kwarg the caller invoked) and the
+    offending value — junk refuses on every surface, unchanged from before
+    this helper.
 
     Parameters
     ----------
@@ -100,16 +127,28 @@ def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
     ------
     ValueError
         If *value* is a ``str`` that is neither a recognized linetype name
-        nor a valid comma-separated numeric string.
+        nor a valid comma-separated numeric string, or if any resolved
+        length is ``bool``, non-numeric, negative, or non-finite.
     """
-    if not isinstance(value, str):
+    if isinstance(value, str):
+        if value in _LINETYPE_MAP:
+            dash = list(_LINETYPE_MAP[value])
+        else:
+            try:
+                dash = [float(x) for x in value.split(",") if x.strip()]
+            except ValueError as exc:
+                raise ValueError(_stroke_dash_error(context, value)) from exc
+        _check_dash_lengths(dash, context=context, original=value)
+        return dash
+    if isinstance(value, bool):
+        raise ValueError(_stroke_dash_error(context, value))
+    if isinstance(value, (int, float)):
+        _check_dash_lengths([value], context=context, original=value)
         return value
-    if value in _LINETYPE_MAP:
-        return list(_LINETYPE_MAP[value])
-    try:
-        return [float(x) for x in value.split(",") if x.strip()]
-    except ValueError as exc:
-        raise ValueError(_stroke_dash_error(context, value)) from exc
+    if isinstance(value, (list, tuple)):
+        _check_dash_lengths(value, context=context, original=value)
+        return value
+    return value
 
 
 def _is_paint_sentinel(value: str) -> bool:
