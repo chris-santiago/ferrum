@@ -221,6 +221,19 @@ Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` dir
 > A flat (no-layers) chart is unaffected, and a layer's own paint — when it
 > sets one — always wins.
 
+> **2026-09-23 (wave 6, `#119`, Breaking):** a layer's style is its own — the batch-A paint-only rule above is now the general rule for every non-paint `mark_style` field too. Python's `Chart.to_spec()` no longer copies layer-0's mark kwargs up to a layered chart's chart-level `mark_style` at all (the compatibility fallback the batch-A note describes is retired outright, not just stripped of paint); Rust's per-layer fallback reads `layer.mark_style` alone and `MarkKwargsSpec::without_paint` is deleted, so the fallback it fed is gone, not merely unreachable. A kwarg-less sibling layer now renders identically to its flat self on both the static and interactive paths, and across `+`, `LayerChart`, independent-y, `SecondaryY`, and a desugar that adds a prior layer (`.mark_smooth()`, and `.mark_function()`'s own multi-layer append). Six shapes, measured:
+>
+> | Chart | Before | After |
+> |---|---|---|
+> | `mark_point(opacity=0.3, stroke_width=5) + mark_line()` | line at 30% opacity, width 5 | line identical to a flat `mark_line()` |
+> | `mark_function(f, clip=False) + mark_point()` | points escape the panel clip | points clipped |
+> | `mark_line().encode(detail="g") + mark_line()` | layer 1 split by layer 0's column | one polyline per its own grouping |
+> | `mark_density(orientation="horizontal") + mark_area()` | area closes to the x baseline | closes to its own baseline |
+> | `mark_point(opacity=.3, stroke_dash=[4,2]).mark_smooth()` | fit line translucent and dashed | fit line default |
+> | `LayerChart(a, b)` | static clean, interactive leaks | both clean, identical |
+>
+> A hand-built layered `ChartSpec` that sets a chart-level `mark_style` stops applying it to a kwarg-less layer — the wire no longer carries a top-level `mark_style` on any layered spec Python produces, and Rust has no reader left for one even on a spec built some other way. Unchanged: a flat (no-layers) chart, whose chart-level `mark_style` still applies in full; a layer that sets its own kwargs, which already replaced the chart-level value wholesale before this change and still does; and a composite-mark or kwarg-less LHS, from which chart-level `mark_style` was never emitted in the first place (`_mark_kwargs` stays empty there), so there was nothing to gate.
+
 > **2026-09-18 (wave 4, #201-D):** a layered chart is judged by the marks it
 > actually draws, and a positional axis may bind from the layer that binds
 > it. Two rules, each now stated once in `render/scale_resolve/`:

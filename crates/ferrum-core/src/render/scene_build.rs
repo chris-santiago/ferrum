@@ -4832,36 +4832,40 @@ mod tests {
     /// `inherit_from` rules — mirrors `heatmap(annot=True)`'s colored-cells +
     /// colorless-annotation-labels shape). `chart_level_fill` sets the
     /// CHART-level `mark_style.fill=` directly, independently of `bar_fill`/
-    /// `text_fill` — lets a test isolate the chart-level `mark_style`
-    /// fallback (`LayerPrepared::from_chart_and_layer`'s `or_else`) from a
-    /// layer's own `mark_style`.
+    /// `text_fill` — lets a test build the hand-built-spec shape `#119`
+    /// disclosed (user ruling Q3): a layered `ChartSpec` carrying a
+    /// chart-level `mark_style` that no producer, Python or otherwise, is
+    /// obligated to leave empty.
     ///
-    /// **What Python's `LayerChart` lowering actually emits** for
-    /// `mark_bar(fill=...) + mark_text()`: it COPIES layer 0's own mark
-    /// kwargs up onto `ChartSpec.mark_style` — layer 0 keeps its own
-    /// `mark_style` too, both carry the fill (verified against the built
-    /// extension's lowered JSON). So the real combined shape is `bar_fill`
-    /// AND `chart_level_fill` both set to the same value, not
-    /// `chart_level_fill` alone; a test wanting the actual Python-emittable
-    /// shape must pass both.
+    /// **What Python's `LayerChart` lowering emits today (post-`#119`).**
+    /// Earlier, `mark_bar(fill=...) + mark_text()` lowered with layer 0's own
+    /// mark kwargs COPIED up onto `ChartSpec.mark_style` as a serialization
+    /// convenience; `Chart.to_spec` now gates that emission on
+    /// `resolved._layers is None`, so a layered chart's wire `mark_style` is
+    /// always absent, whatever `bar_fill` is. `chart_level_fill` in this
+    /// helper therefore no longer mirrors anything Python emits — it stays
+    /// only to construct the hand-built-spec case directly, which
+    /// `LayerPrepared::from_chart_and_layer` must ignore for every
+    /// kwarg-less layer regardless of who built the spec.
     ///
     /// Panel-wide scale resolution (`resolve_panel_scales` in this module)
     /// only builds `ctx.scales.color` from the chart level merged with
     /// **layer 0's** (the bar layer's) encoding — a non-primary layer's color
     /// channel alone, with no chart-level or layer-0 counterpart, never gets
     /// a scale built for it at all. This is a real limitation at the Rust
-    /// seam, but Python's `Chart.__add__` mirrors the mark_style-kwargs copy
-    /// above: a layer's own `encode(color=...)` is ALSO copied up to the
-    /// chart-level `encoding.color` (verified: `mark_bar() +
-    /// mark_text().encode(color="cat")` lowers with chart-level `color="cat"`
-    /// and renders correctly), so this Rust-only limitation is never actually
-    /// reachable through Python's `+` — a test for "the text layer's own
-    /// color IS honored" should use `chart_color_field` (mirroring what `+`
-    /// really produces), not `bar_own_color_field`. `bar_own_color_field`
-    /// stays available for directly exercising the Rust-seam-only shape
-    /// (color declared on a non-primary layer with no chart-level
-    /// counterpart at all), which is a real code path even though `+` cannot
-    /// currently construct it.
+    /// seam, but Python's `Chart.__add__` still copies a layer's own
+    /// `encode(color=...)` up to the chart-level `encoding.color` (a
+    /// separate mechanism from the `mark_style` copy-up `#119` removed —
+    /// `encoding.color` inheritance is untouched by that fix) (verified:
+    /// `mark_bar() + mark_text().encode(color="cat")` lowers with chart-level
+    /// `color="cat"` and renders correctly), so this Rust-only limitation is
+    /// never actually reachable through Python's `+` — a test for "the text
+    /// layer's own color IS honored" should use `chart_color_field`
+    /// (mirroring what `+` really produces), not `bar_own_color_field`.
+    /// `bar_own_color_field` stays available for directly exercising the
+    /// Rust-seam-only shape (color declared on a non-primary layer with no
+    /// chart-level counterpart at all), which is a real code path even
+    /// though `+` cannot currently construct it.
     fn bar_text_layered_spec(
         bar_fill: Option<&str>,
         text_fill: Option<&str>,
@@ -5028,9 +5032,9 @@ mod tests {
     /// not `font_color`) for a text layer that set no fill at all.
     ///
     /// NOTE: this shape alone does not discriminate the cycle-2 finding
-    /// (`prepare/mod.rs`'s chart-level `mark_style` fallback) — see
-    /// `layered_chart_level_hoisted_fill_does_not_leak_into_text` below for
-    /// the shape Python's `LayerChart` lowering actually produces.
+    /// (`prepare/mod.rs`'s former chart-level `mark_style` fallback, deleted
+    /// by `#119`) — see `layered_chart_level_hoisted_fill_does_not_leak_into_text`
+    /// below for the hand-built-spec shape that once exercised it.
     #[test]
     fn layered_bar_fill_does_not_leak_into_text_color() {
         let (spec, batch) = bar_text_layered_spec(Some("#00aa00"), None, None, None, None, None);
@@ -5052,19 +5056,22 @@ mod tests {
         );
     }
 
-    /// The REAL Python-lowered shape for `mark_bar(fill="#00aa00") +
-    /// mark_text()`: `LayerChart` lowering COPIES layer 0's (the bar's) mark
-    /// kwargs up onto the CHART-level `ChartSpec.mark_style` — layer 0 keeps
-    /// its own `mark_style` too, so BOTH `bar_fill` and `chart_level_fill`
-    /// are set here (only the TEXT layer's own `mark_style` stays `None`).
-    /// Cycle-2 finding: `LayerPrepared::from_chart_and_layer`'s
-    /// `layer.mark_style.clone().or_else(|| spec.mark_style.clone())`
-    /// fallback let a kwarg-less text layer resolve that copied chart-level
-    /// fill — reporting a user-set fill source carrying the BAR's green — even
-    /// though `layered_bar_fill_does_not_leak_into_text_color` above (which
-    /// sets ONLY `bar_fill`, with chart-level `mark_style` absent — a shape
-    /// `+` never actually produces) already passed. This is the shape that
-    /// must stay theme font color.
+    /// The hand-built-spec shape `#119` disclosed (user ruling Q3): a
+    /// layered `ChartSpec` for `mark_bar(fill="#00aa00") + mark_text()` with
+    /// BOTH `bar_fill` and `chart_level_fill` set to the same value (only
+    /// the TEXT layer's own `mark_style` stays `None`). Before `#119`,
+    /// `LayerChart` lowering used to COPY layer 0's mark kwargs up onto
+    /// `ChartSpec.mark_style` as a serialization convenience, and
+    /// `LayerPrepared::from_chart_and_layer`'s `or_else` fallback read that
+    /// copied value for a kwarg-less sibling layer — reporting a user-set
+    /// fill source carrying the BAR's green. Post-`#119`, Python's
+    /// `Chart.to_spec` never emits a layered chart's `mark_style` at all
+    /// (the `chart_level_fill` here is set directly by this test, not by any
+    /// Python producer) and Rust's `LayerPrepared::from_chart_and_layer`
+    /// reads `layer.mark_style` alone, with no fallback — so this shape
+    /// stays theme font color for a structurally simpler reason than before:
+    /// the chart-level value is never read, not merely paint-stripped when
+    /// it is.
     #[test]
     fn layered_chart_level_hoisted_fill_does_not_leak_into_text() {
         let (spec, batch) =
@@ -5801,18 +5808,16 @@ mod tests {
         }
     }
 
-    // ── Scope extension (spec §4.0, 2026-08-28 user direction): the
-    // hoisted-paint fix generalizes from Text-only to EVERY layered mark ────
+    // ── Scope extension (spec §4.0, 2026-08-28 user direction; superseded by
+    // `#119`, 2026-09-23): from a Text-only paint strip, to a paint strip for
+    // every layered mark, to `#119`'s uniform rule — a layered chart never
+    // reads `spec.mark_style` for ANY field, paint or otherwise ────────────
 
     /// The mirror of `layered_chart_level_hoisted_fill_does_not_leak_into_text`:
-    /// `mark_text(fill="#ff0000") + mark_bar()` — the TEXT layer's fill
-    /// (present on its own `mark_style` AND hoisted to the chart level,
-    /// matching Python's real lowered shape) must not leak into the BAR
-    /// layer, which has no `mark_style` of its own. Before this scope
-    /// extension, `without_paint()` was applied only for `Mark::Text`
-    /// kwarg-less layers, so a kwarg-less BAR layer still inherited the
-    /// hoisted-from-text fill in full — verified live pre-fix:
-    /// `mark_text(fill='#ff0000') + mark_bar()` rendered red bars.
+    /// `mark_text(fill="#ff0000") + mark_bar()` — the TEXT layer's fill, set
+    /// directly on the hand-built spec's chart-level `mark_style` (the shape
+    /// `#119` disclosed, not something Python emits post-`#119`), must not
+    /// leak into the BAR layer, which has no `mark_style` of its own.
     #[test]
     fn layered_text_fill_hoisted_does_not_leak_into_bar_color() {
         let (spec, batch) =
@@ -5852,7 +5857,8 @@ mod tests {
     /// from bar/text and the existing helper is bar+text-specific.
     /// `bar_fill`/`point_fill` map to each layer's own `mark_style.fill=`;
     /// `chart_level_fill` sets the CHART-level `mark_style.fill=` directly
-    /// (the hoisted-paint shape).
+    /// (the hand-built-spec shape `#119` disclosed, not something Python
+    /// emits for a layered chart).
     fn bar_point_layered_spec(
         bar_fill: Option<&str>,
         point_fill: Option<&str>,
@@ -5940,12 +5946,12 @@ mod tests {
         (spec, batch)
     }
 
-    /// `mark_bar(fill="#00aa00") + mark_point()`: the sanctioned behavior
-    /// change (spec §4.0) — a kwarg-less POINT layer must now render
-    /// default-colored, not the bar's hoisted-to-chart-level fill. Before
-    /// this scope extension the Text-only gate meant every OTHER mark
-    /// (point, line, area, ...) still leaked sibling paint; this pins the
-    /// point case as the representative non-Text example.
+    /// `mark_bar(fill="#00aa00") + mark_point()`: a kwarg-less POINT layer
+    /// renders default-colored, not the bar's chart-level `mark_style.fill`
+    /// (set here directly on the hand-built spec — `#119`'s uniform rule
+    /// means `LayerPrepared::from_chart_and_layer` never reads a chart-level
+    /// `mark_style` for a layered chart at all, so this holds regardless of
+    /// which mark is on either side).
     #[test]
     fn layered_bar_fill_hoisted_does_not_leak_into_point_color() {
         let (spec, batch) = bar_point_layered_spec(Some("#00aa00"), None, Some("#00aa00"));
@@ -5978,11 +5984,10 @@ mod tests {
     }
 
     /// Own-paint-wins for a NON-Text layer: `mark_bar(fill="#00aa00") +
-    /// mark_point(fill="#0000ff")` — the point layer's OWN `mark_style`
-    /// short-circuits the `or_else` chart-level fallback entirely (the
-    /// `without_paint()` strip only ever applies to the FALLBACK value, never
-    /// to a layer's own declared `mark_style`), so the point renders its own
-    /// blue, not the bar's green and not a paint-stripped fallback.
+    /// mark_point(fill="#0000ff")` — the point layer's own `mark_style` is
+    /// the only thing `LayerPrepared::from_chart_and_layer` ever reads for a
+    /// layered chart, so the point renders its own blue regardless of the
+    /// chart-level `mark_style` set on the hand-built spec.
     #[test]
     fn layered_point_own_fill_wins_over_hoisted_bar_fill() {
         let (spec, batch) =
@@ -6012,10 +6017,10 @@ mod tests {
     }
 
     /// Flat (no-`layers`) chart byte-identity: a single-mark
-    /// `mark_point(fill=...)` chart never reaches `from_chart_and_layer`'s
-    /// `or_else` fallback at all (`LayerPrepared::from_chart_only` uses
-    /// `spec.mark_style` directly), so the scope extension must not change
-    /// anything about a flat chart's own paint.
+    /// `mark_point(fill=...)` chart never reaches
+    /// `from_chart_and_layer` at all (`LayerPrepared::from_chart_only` uses
+    /// `spec.mark_style` directly), so `#119`'s uniform layered-only rule
+    /// must not change anything about a flat chart's own paint.
     #[test]
     fn flat_point_chart_fill_unaffected_by_hoisted_paint_scope_extension() {
         use crate::spec::data_ref::DataRef;
@@ -6091,6 +6096,116 @@ mod tests {
         };
         assert!(point_fills.iter().all(|c| *c == Some(magenta)),
             "a flat chart's own mark_style.fill must render unaffected by the layered-only scope extension; got {point_fills:?}");
+    }
+
+    /// `#119` (2026-09-23, user ruling Q3): a hand-built layered `ChartSpec`
+    /// carrying a chart-level `mark_style` leaves a kwarg-less layer at
+    /// THEME defaults, not just paint-stripped defaults — the pre-`#119`
+    /// fallback only stripped `fill`/`stroke` off the chart-level value and
+    /// let every other field (including `size`) cascade through; the
+    /// uniform rule this task lands means a layered chart never reads
+    /// `spec.mark_style` at all. `size` is a representative non-paint field:
+    /// two point layers, chart-level `mark_style.size = 100.0`, neither
+    /// layer declaring its own `mark_style`. If the old fallback still
+    /// applied, every point would render at the radius `size=100.0` implies;
+    /// this pins the theme-default radius instead.
+    #[test]
+    fn layered_chart_level_size_does_not_cascade_to_kwarg_less_layers() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let xy_encoding = || Encoding {
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let point_layer = |name: &str| Layer {
+            mark: Mark::Point,
+            encoding: xy_encoding(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: Some(name.into()),
+            independent_y: false,
+            coord: None,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![point_layer("a"), point_layer("b")]),
+            coord: None,
+            mark_style: Some(MarkKwargsSpec {
+                size: Some(100.0),
+                ..Default::default()
+            }),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+        let radii: Vec<f64> = panel
+            .marks
+            .iter()
+            .flat_map(|m| m.nodes.iter())
+            .filter_map(|n| {
+                if let SceneNode::Circle { r, .. } = n {
+                    Some(*r)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            radii.len(),
+            4,
+            "expected 2 points per layer across 2 layers"
+        );
+        let theme_radius = (ThemeInputs::default().sizes.point_size / std::f64::consts::PI).sqrt();
+        assert!(
+            radii.iter().all(|r| (*r - theme_radius).abs() < 1e-9),
+            "a kwarg-less layer must resolve size at theme default, not the chart-level mark_style.size=100.0; expected radius {theme_radius}, got {radii:?}"
+        );
+        let leaked_radius = (100.0_f64 / std::f64::consts::PI).sqrt();
+        assert!(
+            radii.iter().all(|r| (*r - leaked_radius).abs() > 1e-9),
+            "the chart-level size must not leak into either kwarg-less layer; got {radii:?}"
+        );
     }
 
     /// A non-primary layer's mark batch must carry ITS OWN tooltip_fields —

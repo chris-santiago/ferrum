@@ -3192,7 +3192,18 @@ class Chart(
             from ferrum._override_consume import apply_mark_style
 
             mk = apply_mark_style(mk, _override_payload, is_multi_mark=resolved._layers is not None)
-        if mk:
+        # `#119`: on a layered chart, `mk` here is never a genuine chart-wide
+        # default -- `apply_mark_style` already refuses a mark_* override on
+        # a multi-mark chart above, so the only way `mk` is non-empty on a
+        # layered chart is layer 0's own kwargs, copied up by `Chart.__add__`
+        # (chart.py's `_clone()`-based LHS) or an equivalent desugar clone.
+        # Emitting it here would let Rust's per-layer fallback cascade it
+        # into every sibling layer that set no kwargs of its own (spec §4.8).
+        # Gating on `resolved._layers is None` makes this the single producer
+        # a layer's style is its own: a flat chart still emits its chart-wide
+        # style; a layered chart emits none, so each layer resolves from its
+        # own `mark_style` (or the theme) only.
+        if mk and resolved._layers is None:
             kw["mark_style"] = mk
         if resolved._layers is not None:
             kw["layers"] = resolved._build_layers_list(serialized_layers)

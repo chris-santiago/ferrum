@@ -183,30 +183,25 @@ impl LayerPrepared {
         } else {
             encoding.inherit_from(&spec.encoding);
         }
-        // Chart-level `mark_style` fallback (spec §4.0/§4.4, 2026-08-28 T4
-        // amendment; extended to every mark 2026-08-28 per user direction —
-        // spec §4.0's first bullet): Python's `LayerChart` lowering copies
-        // layer 0's own mark kwargs up onto `spec.mark_style` (layer 0 keeps
-        // its own copy too), so this fallback — meant for genuine chart-wide
-        // style defaults — often actually holds the PRIMARY layer's own
-        // paint. ANY kwarg-less layer, whatever its mark, must not inherit
-        // fill/stroke through it — only a layer's own declared `mark_style`
-        // may paint it; every other field (font_size, dx, dy, align,
-        // opacity, ...) still cascades normally. Originally gated to
-        // `Mark::Text` only (matching spec §4.4's narrower original scope);
-        // the cycle-3 remediation established that Python's lowering COPIES
-        // (not moves) a layer's own kwargs up to chart level for every real
-        // layer, so chart-level paint is reachable only as hoist residue for
-        // ANY mark, not just Text — `mark_bar(fill=...) + mark_point()`
-        // leaked the bar's fill into the points exactly the way
-        // `mark_bar(fill=...) + mark_text()` leaked it into labels. Flat
-        // (`from_chart_only`, no `layers`) charts never reach this fallback
-        // at all — untouched. See `MarkKwargsSpec::without_paint`'s doc
-        // comment.
-        let mark_style = layer
-            .mark_style
-            .clone()
-            .or_else(|| spec.mark_style.clone().map(|s| s.without_paint()));
+        // A layer's style is its own (`#119`, 2026-09-23, one uniform rule):
+        // a layered chart resolves `layer.mark_style > theme`, with no
+        // fallback to `spec.mark_style` at all — paint or otherwise. Earlier
+        // revisions of this fallback (spec §4.0/§4.4, 2026-08-28 T4
+        // amendment) read `spec.mark_style` and stripped just `fill`/
+        // `stroke`, because Python's `LayerChart` lowering used to copy
+        // layer 0's own mark kwargs up onto `spec.mark_style` as a
+        // serialization convenience — that chart-level value was hoist
+        // residue, not a genuine chart-wide default, so any kwarg-less
+        // sibling layer reading it would be repainted in the primary
+        // layer's style. Python's `Chart.to_spec` now gates that emission
+        // on `resolved._layers is None`, so a layered spec never carries a
+        // top-level `mark_style` at all — the old fallback's only feed is
+        // gone. A hand-built `ChartSpec` that sets `mark_style` on a layered
+        // spec directly is simply not read here: a kwarg-less layer
+        // resolves to theme defaults, matching the flat chart's own rule
+        // (`chart.mark_style > theme`) applied at the layer's own scope
+        // instead of the chart's.
+        let mark_style = layer.mark_style.clone();
         Self {
             mark: layer.mark,
             encoding,
