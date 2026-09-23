@@ -1333,6 +1333,81 @@ mod chart_config_application_tests {
         }
     }
 
+    /// A bare chart-level `label_format_type="time"` (no `label_format`) on
+    /// a temporal axis names no pattern: the applier returns with the scale's
+    /// own labels standing, on both of its paths' shared early return
+    /// (`#147` T21; unreachable from Python, which never emits a bare
+    /// chart-level type, so pinned here).
+    #[test]
+    fn axis_config_bare_time_type_on_a_temporal_axis_keeps_the_labels() {
+        use crate::scale::time::TimeScale;
+        let epoch_lo = 1_577_836_800_000.0;
+        let scale = scale_resolve::ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_lo + 3.0 * 86_400_000.0],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let labels = scale.tick_labels(4);
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, labels.clone(), None);
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { label_format_type: Some("time".to_string()), ..Default::default() },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(apply_label_format_to_axis(&mut axis, &scale, 4, false, "x"), Ok(()));
+        assert_eq!(axis.tick_labels, labels);
+    }
+
+    /// `#147` close (wave 6A T23, user ruling): the chart-level applier
+    /// refuses a d3 number format on a temporal axis, on both of its paths,
+    /// untyped or `"number"`-typed (a preset such as `"percent"`). It used
+    /// to reparse the year labels as numbers (`2,001`) or pass other labels
+    /// through with the format dropped.
+    #[test]
+    fn axis_config_number_format_on_a_temporal_axis_refuses() {
+        use crate::scale::time::TimeScale;
+        let epoch_lo = 1_577_836_800_000.0;
+        let epoch_hi = epoch_lo + 3.0 * 86_400_000.0;
+        let scale = scale_resolve::ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        for (format, format_type) in [(",.0f", None), (".1%", Some("number"))] {
+            for values in [None, Some(vec![epoch_lo, epoch_hi])] {
+                let mut axis = crate::layout::AxisInput::new(
+                    crate::layout::AxisOrient::Bottom,
+                    None,
+                    scale.tick_labels(4),
+                    None,
+                );
+                let cfg = AxisConfigSpec {
+                    style: AxisStyleSpec {
+                        label_format: Some(format.to_string()),
+                        label_format_type: format_type.map(str::to_string),
+                        values: values.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+                let err = apply_label_format_to_axis(&mut axis, &scale, 4, false, "x").unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "the number format {format:?} on the 'x' axis requires a non-temporal \
+                         scale, but the resolved scale is temporal; a date pattern (e.g. \"%Y\") \
+                         formats a temporal value"
+                    ),
+                    "{format} {format_type:?}, tick values: {values:?}"
+                );
+            }
+        }
+    }
+
     /// D8 cascade-inversion fix: the format slot's claim
     /// must block the chart-level fill EVEN THOUGH the `labels.format` slot
     /// itself reads empty — the exact shape `prepare::build_axis_input` produces

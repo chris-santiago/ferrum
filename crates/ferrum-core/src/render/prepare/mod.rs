@@ -726,9 +726,26 @@ fn build_axis_input(
     // "number"))` refuses as `X("n:Q", format=".1f", format_type="time")` does
     // (`#147`, wave 6A T21 cycle 3). Independent facet axes are covered too:
     // this global axis is built before any per-panel one.
-    if let Some(e) =
-        rendering_enc.filter(|e| e.axis.as_ref().is_none_or(|a| a.label_format.is_none()))
-    {
+    //
+    // Only a TIME-typed shorthand is checked as written: that is the half an
+    // `Axis` type can launder (`"time"` retyped `"number"` on a numeric
+    // axis). A number-format shorthand an `Axis` retypes `"time"` is read as
+    // the merged pair, so `X("d:T", format=".2f", axis=Axis(
+    // label_format_type="time"))` falls back to the temporal default exactly
+    // as `X("d:T", format=".2f", format_type="time")` does (`#147` T23
+    // cycle 2, user ruling: the merged pair gives its one-place spelling's
+    // answer).
+    let shorthand_is_time_typed = |e: &crate::spec::encoding::EncodingSpec| {
+        crate::render::format::FormatKind::resolve_on(
+            e.format.as_deref(),
+            e.format_type.as_deref(),
+            scale_temporality(scale),
+        )
+        .is_some_and(|kind| kind.is_temporal())
+    };
+    if let Some(e) = rendering_enc.filter(|e| {
+        e.axis.as_ref().is_none_or(|a| a.label_format.is_none()) && shorthand_is_time_typed(e)
+    }) {
         refuse_format_temporality_mismatch_scale(
             e.format.as_deref(),
             e.format_type.as_deref(),
@@ -2517,12 +2534,12 @@ pub(crate) fn resolve_axis_label_format(
 /// `AxisInput`.
 ///
 /// Two paths:
-/// - **Temporal** axis with an explicit strftime pattern (`format` contains `%`
-///   and `format_type` is `"time"` or unset): the raw epoch-ms tick values are
+/// - **Temporal** axis with a strftime pattern (`format` contains `%` and
+///   `format_type` is `"time"` or unset): the raw epoch-ms tick values are
 ///   pulled from the scale and formatted directly via `chrono` here. No override
 ///   is threaded (the strings are already final; re-parsing them downstream
 ///   would fail). Returns `(formatted, None)`.
-/// - **Numeric** axis (or any non-temporal): the spec is threaded forward as the
+/// - **Numeric** axis (or any non-temporal): a d3 spec is threaded forward as the
 ///   `label_format_override` (D3 root-cause fix for `prepare.rs:538`), and the
 ///   labels are returned unchanged. `render::config_apply::apply_label_format_to_axis`
 ///   then applies it centrally — lossless because numeric label strings reparse
@@ -2538,10 +2555,11 @@ pub(crate) fn resolve_axis_label_format(
 /// resolved [`crate::render::scale_resolve::ScaleKind`] is not `Time` at all,
 /// not merely a length-drift between a fresh tick computation and the cached
 /// labels (drift keeps its pre-existing string-reparse fallback, since the
-/// scale genuinely IS temporal there); when the ordinal preset meets a
-/// `Time` scale; and when an undeclared `%`-bearing spec guessed as strftime
-/// meets a non-`Time` scale and is not a valid d3 spec either
-/// (`InvalidFormatSpec`, `#147` T22). `channel` is the RESOLVED token this
+/// scale genuinely IS temporal there); when the ordinal preset (`#147` T22)
+/// or a d3 number format (`#147` T23) meets a `Time` scale; and when the
+/// spec does not parse under the grammar it resolved to, e.g. an undeclared
+/// `"%Y"` on a non-`Time` scale, which is d3 there (`InvalidFormatSpec`,
+/// `#147` T22). `channel` is the RESOLVED token this
 /// call acted on; `coord_flipped` is always constructed `false` here — the
 /// caller boundary (`build_axis_input`'s two call chains) corrects it via R3,
 /// the same discipline `InvalidAxisOrient` uses.
@@ -2554,22 +2572,23 @@ fn apply_axis_format_or_thread(
     reversed: bool,
     channel: &'static str,
 ) -> Result<(Vec<String>, Option<String>), RenderError> {
-    use crate::render::format::{format_time_spec, FormatKind, TimeAutodetect};
+    use crate::render::format::{format_time_spec, FormatKind};
     // The one refusal every surface applies to the identical pair, decided
     // once for every kind below: a declared time type on a non-temporal scale
-    // (`#133`; a bare `format_type="time"` included, `#147` T21 cycle 2) and
-    // the ordinal preset on a temporal one (`#147` T22).
+    // (`#133`; a bare `format_type="time"` included, `#147` T21 cycle 2), the
+    // ordinal preset and a d3 number format on a temporal one (`#147` T22,
+    // T23), and a spec its resolved grammar cannot parse.
     refuse_format_temporality_mismatch_scale(format.as_deref(), format_type, scale, channel)?;
     let Some(fmt) = format else {
         // A bare `format_type="time"` names no pattern: the scale's own
         // labels stand.
         return Ok((labels, None));
     };
-    // `TimeAutodetect::Allowed`: this is the one formatting surface that can
-    // RECOVER from a wrong guess — it commits to `chrono` only when the
-    // resolved scale turns out temporal, and falls through to the d3 grammar
-    // below when it does not. See `TimeAutodetect`'s doc.
-    let kind = FormatKind::resolve(Some(&fmt), format_type, TimeAutodetect::Allowed);
+    // The resolution the refusal above made: an undeclared `%`-bearing spec
+    // is strftime on a temporal scale and d3 on any other, so there is no
+    // guess left to undo here (`#147` T23; the drift fallback below is the
+    // one exception).
+    let kind = FormatKind::resolve_on(Some(&fmt), format_type, scale_temporality(scale));
     if let Some(FormatKind::Strftime(pattern)) = &kind {
         if let Some(mut values) = scale.temporal_tick_values(tick_count) {
             if reversed {
@@ -2584,22 +2603,14 @@ fn apply_axis_format_or_thread(
                     .collect();
                 return Ok((out, None));
             }
-            // Time scale, but drift: pre-existing string-reparse fallback,
-            // unrelated to #133 (the scale genuinely IS temporal here).
-            return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
         }
-        // Non-Time scale (`temporal_tick_values` returned `None`). A declared
-        // `"time"` was already refused above (#133). What reaches here is an
-        // ambiguous bare `%`-containing spec with no declared type, which
-        // `TimeAutodetect::Allowed` guessed as strftime on the chance the
-        // scale was temporal. It was not, so the guess is undone and the spec
-        // is read as what every other surface reads it as: d3. A plain d3
-        // percent format like `".1%"` applies as before; a spec d3 cannot
-        // read either (`"%Y"`) refuses with the same grammar error the
-        // legend and text give it, instead of rendering the lenient
-        // tokenizer's `250.000000%` (`#147` close, wave 6A T22).
-        crate::render::format::validate_d3_format_spec(&fmt)
-            .map_err(|reason| RenderError::InvalidFormatSpec { spec: fmt.clone(), reason })?;
+        // Time scale, but drift: pre-existing string-reparse fallback,
+        // unrelated to #133 (the scale genuinely IS temporal here, since a
+        // strftime kind resolves only on one). It re-resolves the raw pair
+        // under `TimeAutodetect::Denied` inside `apply_tick_format`, so an
+        // undeclared pattern is read as d3 there: the one place in this fn
+        // that does not use `kind` (pre-existing, ledgered in the `#147` T23
+        // report as a follow-up).
         return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
     }
     if matches!(kind, Some(FormatKind::TemporalDefault)) {
@@ -2621,23 +2632,18 @@ fn apply_axis_format_or_thread(
 /// at all — a non-`Time` [`crate::render::scale_resolve::ScaleKind`] (the
 /// case `scale.temporal_tick_values` answers `None`), never a length-drift on
 /// a genuinely temporal scale; and, the rule's other half, when the ordinal
-/// preset meets a temporal scale. The axis wrapper of
+/// preset or a d3 number format meets a temporal scale. The axis wrapper of
 /// [`refuse_format_temporality_mismatch`], which owns the rule.
 ///
-/// Keyed on the DECLARED `format_type` (resolved under `TimeAutodetect::Denied`,
-/// where the ordinal preset resolves to [`crate::render::format::FormatKind::Ordinal`]
-/// whatever the type says, so it is never refused as a time format but is
-/// refused on a temporal scale), deliberately narrower than
-/// [`crate::render::format::FormatKind::resolve`] under
-/// [`crate::render::format::TimeAutodetect::Allowed`] (which also tolerates an
-/// unset `format_type`): an ambiguous bare
-/// `%`-containing spec with no declared type (a plain d3 percent format like
-/// `".1%"`) must keep falling through to the numeric grammar, matching
-/// [`apply_tick_format`]'s own `TimeAutodetect::Denied` resolution —
-/// see [`apply_axis_format_or_thread`]'s matching non-Time arm, which
-/// `build_axis_tick_inputs`'s `Immediate`-mode arm (the per-panel
-/// independent-facet-axis surface) now reaches by delegating to that same fn,
-/// so the two format-application
+/// The pair resolves by the scale's temporality, as the axis applier formats
+/// it: an undeclared `%`-bearing spec is strftime on a `Time` scale and d3 on
+/// any other, so a plain d3 percent format like `".1%"` keeps the numeric
+/// grammar on a numeric axis, and the ordinal preset resolves to
+/// [`crate::render::format::FormatKind::Ordinal`] whatever the type says (so
+/// it is never refused as a time format). Both of
+/// `build_axis_tick_inputs`'s mode arms reach this through
+/// [`apply_axis_format_or_thread`] (the per-panel independent-facet-axis
+/// surface included), so the two format-application
 /// disciplines cannot drift on which scale kinds refuse. `channel` is the
 /// RESOLVED token; `coord_flipped` is always constructed `false` — corrected
 /// by the caller boundary (R3, same discipline as `InvalidAxisOrient`).
@@ -2656,15 +2662,27 @@ pub(crate) fn refuse_format_temporality_mismatch_scale(
     scale: &crate::render::scale_resolve::ScaleKind,
     channel: &'static str,
 ) -> Result<(), RenderError> {
-    // `ScaleKind::Time` is exactly when `temporal_tick_values` answers `Some`.
-    let scale_is_temporal = matches!(scale, crate::render::scale_resolve::ScaleKind::Time(_));
     refuse_format_temporality_mismatch(
         fmt,
         format_type,
-        scale_is_temporal,
+        scale_temporality(scale),
         channel,
         crate::render::FormatSurface::Axis,
     )
+}
+
+/// Whether an axis's resolved scale is temporal: `ScaleKind::Time`, exactly
+/// when `temporal_tick_values` answers `Some`. The axis half of the
+/// temporality [`refuse_format_temporality_mismatch`] and the axis applier
+/// both read (the field half is [`field_temporality`]).
+fn scale_temporality(
+    scale: &crate::render::scale_resolve::ScaleKind,
+) -> crate::render::format::Temporality {
+    use crate::render::format::Temporality;
+    match scale {
+        crate::render::scale_resolve::ScaleKind::Time(_) => Temporality::Temporal,
+        _ => Temporality::NonTemporal,
+    }
 }
 
 /// The field-checked sibling of [`refuse_format_temporality_mismatch_scale`], for
@@ -2691,43 +2709,63 @@ pub(crate) fn refuse_format_temporality_mismatch_field(
     channel: &'static str,
     surface: crate::render::FormatSurface,
 ) -> Result<(), RenderError> {
-    use crate::spec::encoding::DataType as SpecDataType;
-    let field_type = batch
-        .column_by_name(&enc.field)
-        .map(|col| crate::render::scale_resolve::infer_spec_type(enc, col.data_type()))
-        .or(enc.type_);
-    let Some(field_type) = field_type else {
+    let Some(field) = field_temporality(enc, batch) else {
         return Ok(());
     };
-    refuse_format_temporality_mismatch(
-        fmt,
-        format_type,
-        field_type == SpecDataType::Temporal,
-        channel,
-        surface,
-    )
+    refuse_format_temporality_mismatch(fmt, format_type, field, channel, surface)
 }
 
-/// The one rule behind every `TimeFormatOnNonTemporalScale` and
-/// `OrdinalFormatOnTemporalScale`: the `(fmt, format_type)` pair is resolved
-/// once (under `TimeAutodetect::Denied`, so only a DECLARED `"time"` counts)
-/// and its kind must match the temporality of the value it would format.
-/// A time-typed kind (`Strftime` or `TemporalDefault`) refuses on a value
-/// that is not temporal; the ordinal preset, which formats numbers, refuses
-/// on a value that is (`#147` close, wave 6A T22: the surfaces used to give
-/// three answers there, `2001st` on the shared axis, the format dropped on an
-/// independent facet axis, and the ordinal of the epoch-ms count on the
-/// legend and text). The two wrappers above answer "is it temporal" for their
-/// surface; this answers everything else.
+/// Whether `enc`'s field is temporal, by the scale resolver's own rule
+/// ([`crate::render::scale_resolve::infer_spec_type`]: a declared type wins,
+/// else the column's dtype). `None` when the field has no declared type and
+/// `batch` does not carry it. The one answer the field-checked refusal and
+/// the legend and text appliers ([`crate::render::format::format_value_with_spec`])
+/// both read, so the kind a surface refuses and the kind it formats with
+/// come from the same temporality (`#147` T23).
+pub(in crate::render) fn field_temporality(
+    enc: &crate::spec::encoding::EncodingSpec,
+    batch: &RecordBatch,
+) -> Option<crate::render::format::Temporality> {
+    use crate::render::format::Temporality;
+    batch
+        .column_by_name(&enc.field)
+        .map(|col| crate::render::scale_resolve::infer_spec_type(enc, col.data_type()))
+        .or(enc.type_)
+        .map(|t| match t {
+            crate::spec::encoding::DataType::Temporal => Temporality::Temporal,
+            _ => Temporality::NonTemporal,
+        })
+}
+
+/// The one rule behind every `TimeFormatOnNonTemporalScale`,
+/// `OrdinalFormatOnTemporalScale` and `NumberFormatOnTemporalScale`: the
+/// `(fmt, format_type)` pair is resolved once, by the value's temporality
+/// ([`crate::render::format::FormatKind::resolve_on`], the resolution every
+/// applier formats with: an undeclared `%`-bearing spec is strftime on a
+/// temporal value and d3 otherwise), and its kind must match that
+/// temporality. A time-typed kind (`Strftime` or `TemporalDefault`) refuses
+/// on a value that is not temporal. On a value that is, the ordinal preset
+/// refuses (`#147` close, wave 6A T22) and so does a d3 number format
+/// (`#147` close, wave 6A T23, user ruling): the surfaces used to give three
+/// answers to each, the calendar year (`2001st`, `2001.00`) on the shared
+/// axis, the format dropped on an independent facet axis, and the epoch-ms
+/// count on the legend and text. A matching kind must parse under its
+/// grammar (`InvalidFormatSpec`, the declaration-time gate's own error).
+/// The two wrappers above answer "is it temporal" for their surface; this
+/// answers everything else.
 fn refuse_format_temporality_mismatch(
     fmt: Option<&str>,
     format_type: Option<&str>,
-    target_is_temporal: bool,
+    target: crate::render::format::Temporality,
     channel: &'static str,
     surface: crate::render::FormatSurface,
 ) -> Result<(), RenderError> {
-    use crate::render::format::{FormatKind, TimeAutodetect};
-    match FormatKind::resolve(fmt, format_type, TimeAutodetect::Denied) {
+    use crate::render::format::{validate_d3_format_spec, validate_strftime_spec, FormatKind};
+    // An empty spec names no format: every applier renders its default.
+    let fmt = fmt.filter(|f| !f.is_empty());
+    let invalid = |spec: &str, reason| RenderError::InvalidFormatSpec { spec: spec.to_string(), reason };
+    let target_is_temporal = target == crate::render::format::Temporality::Temporal;
+    match FormatKind::resolve_on(fmt, format_type, target) {
         Some(kind) if kind.is_temporal() && !target_is_temporal => {
             Err(RenderError::TimeFormatOnNonTemporalScale {
                 channel,
@@ -2738,6 +2776,25 @@ fn refuse_format_temporality_mismatch(
         }
         Some(FormatKind::Ordinal) if target_is_temporal => {
             Err(RenderError::OrdinalFormatOnTemporalScale { channel, surface, coord_flipped: false })
+        }
+        Some(FormatKind::D3(_)) if target_is_temporal => {
+            Err(RenderError::NumberFormatOnTemporalScale {
+                channel,
+                surface,
+                format: fmt.unwrap_or_default().to_string(),
+                coord_flipped: false,
+            })
+        }
+        // The kind matches the value; its grammar must parse. The
+        // declaration-time gate could not always check it: an undeclared
+        // field's `%`-bearing spec is either grammar until the field's
+        // temporality is known, which is here.
+        Some(FormatKind::Strftime(pattern)) => {
+            validate_strftime_spec(&pattern).map_err(|reason| invalid(&pattern, reason))
+        }
+        Some(FormatKind::D3(_)) => {
+            let spec = fmt.unwrap_or_default();
+            validate_d3_format_spec(spec).map_err(|reason| invalid(spec, reason))
         }
         _ => Ok(()),
     }
@@ -7667,14 +7724,19 @@ mod tests {
 
     /// #133 control: an ambiguous bare `%`-containing spec with NO declared
     /// `format_type` (a plain d3 percent format like `".1%"`) must NOT
-    /// refuse on a non-temporal scale — it is "valid under either grammar"
-    /// per `TimeAutodetect::Allowed`'s own tolerance, and must keep resolving as
-    /// the numeric percent format it actually is. Guards against a fix that
-    /// over-refuses every bare-`%` spec regardless of declared type.
+    /// refuse on a non-temporal scale — it must keep resolving as the numeric
+    /// percent format it actually is. Guards against a fix that over-refuses
+    /// every bare-`%` spec regardless of declared type.
+    ///
+    /// Since `#147` T23 the pair resolves by the scale's temporality up
+    /// front, so on a numeric scale it is a d3 spec from the start and takes
+    /// the d3 path every d3 spec takes: `Thread` threads it, `Immediate`
+    /// applies it. (It used to be guessed as strftime, un-guessed, and
+    /// applied immediately in both modes.)
     #[test]
     fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal_scale() {
         let scale = linear_scale(0.0, 1.0);
-        let (labels, _proj, threaded) = build_axis_tick_inputs(
+        let (_labels, _proj, threaded) = build_axis_tick_inputs(
             &scale,
             5,
             TickFormatMode::Thread {
@@ -7685,13 +7747,19 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
+        assert_eq!(threaded.as_deref(), Some(".1%"), "threaded like every d3 spec");
+        let (labels, _proj, threaded) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Immediate { format: Some(".1%"), format_type: None },
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(threaded, None);
         assert!(
-            labels.iter().any(|l| l.ends_with('%')),
+            labels.iter().all(|l| l.ends_with('%')),
             "must format as the numeric percent spec it is, got {labels:?}"
-        );
-        assert_eq!(
-            threaded, None,
-            "the ambiguous time-shaped branch applies immediately"
         );
     }
 
@@ -7865,9 +7933,8 @@ mod tests {
     /// found, each given one answer in BOTH axis modes (the shared and the
     /// independent-facet axis).
     ///
-    /// 1. An untyped `%`-bearing spec that `TimeAutodetect::Allowed` guessed
-    ///    as strftime, on a scale that turned out not temporal, is read as d3
-    ///    like every other surface reads it: `"%Y"` refuses with the d3
+    /// 1. An untyped `%`-bearing spec on a scale that is not temporal is read
+    ///    as d3 like every other surface reads it: `"%Y"` refuses with the d3
     ///    grammar error (it used to render `250.000000%`), while `".1%"`, a
     ///    real d3 percent spec, still applies.
     /// 2. The ordinal preset on a temporal scale refuses, with or without a
@@ -7991,6 +8058,149 @@ mod tests {
             "the \"ordinal\" format on the 'color' legend formats numbers and requires a \
              non-temporal field, but the field is temporal"
         );
+    }
+
+    /// `#147` close (wave 6A T23, user ruling), the two untyped cells on a
+    /// temporal value, decided once by the rule owner for every surface:
+    ///
+    /// 1. A d3 number format (`.2f`, `,.0f`, `d`, or a `"number"`-typed
+    ///    preset) on a temporal field refuses. The axes used to format the
+    ///    year, and the legend and text the epoch-ms count. The typed
+    ///    `.2f` + `"time"` pair still falls back to the temporal default.
+    /// 2. An untyped `"%Y"` on a temporal field is a date pattern, as on the
+    ///    axis (the legend and text used to refuse it as d3); on a numeric
+    ///    field it stays d3 and refuses with the d3 grammar error. A `%`
+    ///    spec a temporal field cannot read as a date pattern (`".1%"`)
+    ///    refuses with the strftime grammar error instead of echoing itself.
+    #[test]
+    fn untyped_specs_on_a_temporal_field_get_one_answer() {
+        use crate::render::FormatSurface;
+        use crate::spec::encoding::EncodingSpec;
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("n", DataType::Float64, false),
+                Field::new(
+                    "d",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000])),
+            ],
+        )
+        .unwrap();
+        let enc = |field: &str| EncodingSpec { field: field.into(), ..Default::default() };
+        let check = |field: &str, fmt: &str, format_type: Option<&str>| {
+            refuse_format_temporality_mismatch_field(
+                &enc(field),
+                &batch,
+                Some(fmt),
+                format_type,
+                "color",
+                FormatSurface::Legend,
+            )
+        };
+        for (fmt, format_type) in
+            [(".2f", None), (",.0f", None), ("d", None), (".1%", Some("number"))]
+        {
+            assert_eq!(
+                check("d", fmt, format_type),
+                Err(RenderError::NumberFormatOnTemporalScale {
+                    channel: "color",
+                    surface: FormatSurface::Legend,
+                    format: fmt.into(),
+                    coord_flipped: false,
+                }),
+                "{fmt} {format_type:?}"
+            );
+            assert_eq!(check("n", fmt, format_type), Ok(()), "{fmt} on a number");
+        }
+        assert_eq!(check("d", ".2f", Some("time")), Ok(()), "typed: temporal default");
+        assert_eq!(check("d", "", None), Ok(()), "an empty spec names no format");
+
+        assert_eq!(check("d", "%Y", None), Ok(()));
+        match check("n", "%Y", None) {
+            Err(RenderError::InvalidFormatSpec { spec, reason }) => {
+                assert_eq!(spec, "%Y");
+                assert!(reason.contains("unrecognized token"), "{reason}");
+            }
+            other => panic!("expected the d3 grammar refusal, got {other:?}"),
+        }
+        match check("d", ".1%", None) {
+            Err(RenderError::InvalidFormatSpec { spec, reason }) => {
+                assert_eq!(spec, ".1%");
+                assert!(reason.contains("invalid strftime pattern"), "{reason}");
+            }
+            other => panic!("expected the strftime grammar refusal, got {other:?}"),
+        }
+        assert_eq!(check("n", ".1%", None), Ok(()), "a real d3 percent on a number");
+
+        // The applier formats with the same resolution: years, not epoch ms.
+        let d = 978_307_200_000.0; // 2001-01-01
+        assert_eq!(crate::render::format::format_value_with_spec(
+            d,
+            Some("%Y"),
+            None,
+            crate::render::format::Temporality::Temporal,
+        ), "2001");
+        use crate::render::format::Temporality;
+        assert_eq!(field_temporality(&enc("d"), &batch), Some(Temporality::Temporal));
+        assert_eq!(field_temporality(&enc("n"), &batch), Some(Temporality::NonTemporal));
+        assert_eq!(field_temporality(&enc("missing"), &batch), None);
+    }
+
+    /// `#147` T23 on the axes: a d3 number format on a `Time` scale refuses
+    /// in both modes (the shared axis rendered `2001.00`, the independent
+    /// facet axis dropped the format), while the untyped `"%Y"` renders years
+    /// in both.
+    #[test]
+    fn build_axis_tick_inputs_refuse_a_number_format_on_time() {
+        use crate::scale::time::TimeScale;
+        let time = ScaleKind::Time(TimeScale::new_internal(
+            vec![1_514_764_800_000.0, 1_514_764_800_000.0 + 6.0 * 365.0 * 86_400_000.0],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let run = |format: &str, format_type: Option<&'static str>| {
+            let thread = build_axis_tick_inputs(
+                &time,
+                6,
+                TickFormatMode::Thread { format: Some(format.to_string()), format_type },
+                true,
+                Vec::new(),
+            );
+            let immediate = build_axis_tick_inputs(
+                &time,
+                6,
+                TickFormatMode::Immediate { format: Some(format), format_type },
+                true,
+                Vec::new(),
+            );
+            (thread, immediate)
+        };
+        for fmt in [".2f", ",.0f", "d"] {
+            let expected = RenderError::NumberFormatOnTemporalScale {
+                channel: "y",
+                surface: crate::render::FormatSurface::Axis,
+                format: fmt.into(),
+                coord_flipped: false,
+            };
+            let (thread, immediate) = run(fmt, None);
+            assert_eq!(thread.unwrap_err(), expected, "Thread {fmt}");
+            assert_eq!(immediate.unwrap_err(), expected, "Immediate {fmt}");
+        }
+        let (thread, immediate) = run("%Y", None);
+        for (mode, got) in [("Thread", thread), ("Immediate", immediate)] {
+            let (labels, _, threaded) = got.unwrap();
+            assert_eq!(threaded, None, "{mode}");
+            assert!(labels.iter().all(|l| l.len() == 4 && l.starts_with("20")), "{mode}: {labels:?}");
+        }
+        let (thread, immediate) = run(".2f", Some("time"));
+        assert!(thread.is_ok() && immediate.is_ok(), "typed: temporal default stands");
     }
 
     /// `#147` close (wave 6A T17), output-moving: the ordinal preset beside a

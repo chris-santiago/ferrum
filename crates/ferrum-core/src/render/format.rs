@@ -355,18 +355,23 @@ impl Default for D3Spec {
 /// site can fail the second half while passing the first — see the inert case
 /// below.
 ///
-/// - **`Allowed`** — the site guesses and can then UN-guess. Two sites:
-///   `prepare::apply_axis_format_or_thread`, which resolves `Strftime`, calls
-///   `ScaleKind::temporal_tick_values`, and falls through to the d3 grammar on
-///   `None`; and `config_apply::validate_chart_format_specs`' `check_loose`,
-///   which disambiguates by `EncodingSpec.type_` and tolerates either grammar
-///   when the type is fully auto-inferred. Both are reached with the declared
-///   type still open, which is what leaves anything for the guess to decide.
+/// - **`Allowed`** — the site guesses and can then UN-guess:
+///   `config_apply::validate_chart_format_specs`' `check_loose`, which
+///   disambiguates by `EncodingSpec.type_` and tolerates either grammar when
+///   the type is fully auto-inferred, leaving the answer to the render-time
+///   rule that sees the resolved scale or field. It is reached with the
+///   declared type still open, which is what leaves anything to guess.
+/// - **Decided by the value** ([`FormatKind::resolve_on`], `#147` T23) — the
+///   site knows whether the value it formats is temporal, so there is no
+///   guess to recover from: `Allowed` on a temporal value, `Denied`
+///   otherwise. The `#147` rule owner (`prepare::refuse_format_temporality_mismatch`),
+///   the axis applier `prepare::apply_axis_format_or_thread` (by scale),
+///   and the legend and text appliers ([`format_value_with_spec`], by field).
 /// - **`Denied`, load-bearing** — the site formats one value and is done, so a
 ///   wrong guess ships garbage (a percent-formatted epoch-millisecond count,
 ///   or `chrono` literal text) with nothing downstream to catch it:
-///   `prepare::apply_tick_format`, [`format_value_with_spec`], `draw.rs`'s
-///   tooltip columns, `marks/text.rs`, and `check_strict`.
+///   `prepare::apply_tick_format`, `draw.rs`'s tooltip columns, and
+///   `check_strict`.
 /// - **`Denied`, inert** — `config_apply::apply_label_format_to_axis` DOES
 ///   hold the scale and DOES call `temporal_tick_values` itself, so it has the
 ///   same recovery machinery as the first `Allowed` site. Its `Denied` is
@@ -390,6 +395,16 @@ impl Default for D3Spec {
 pub(crate) enum TimeAutodetect {
     Allowed,
     Denied,
+}
+
+/// Whether the value a surface formats is temporal: an axis's resolved scale
+/// (`ScaleKind::Time`) or a field's type (declared, else its dtype). The
+/// input [`FormatKind::resolve_on`] maps to a [`TimeAutodetect`] setting, and
+/// what the `#147` rule checks a format's kind against (`#147` T23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Temporality {
+    Temporal,
+    NonTemporal,
 }
 
 /// What a resolved `(format, format_type)` pair MEANS — the product of the
@@ -465,6 +480,26 @@ impl FormatKind {
             return Some(FormatKind::TemporalDefault);
         }
         Some(FormatKind::D3(parse_format_spec(spec)))
+    }
+
+    /// [`Self::resolve`] for a site that knows whether the value it formats
+    /// is temporal: an undeclared `%`-bearing spec is a strftime pattern
+    /// exactly when the value is temporal ([`TimeAutodetect::Allowed`]) and
+    /// a d3 spec otherwise ([`TimeAutodetect::Denied`]). Every surface that
+    /// formats a scale's ticks or a field's values resolves through this, so
+    /// `Text("d", format="%Y")` and `Legend(format="%Y")` over a datetime
+    /// column render years exactly as the axis does (`#147` close, wave 6A
+    /// T23, user ruling).
+    pub(crate) fn resolve_on(
+        spec: Option<&str>,
+        format_type: Option<&str>,
+        value: Temporality,
+    ) -> Option<FormatKind> {
+        let autodetect = match value {
+            Temporality::Temporal => TimeAutodetect::Allowed,
+            Temporality::NonTemporal => TimeAutodetect::Denied,
+        };
+        Self::resolve(spec, format_type, autodetect)
     }
 
     /// Apply this kind to one value. Strftime treats `v` as epoch
@@ -678,17 +713,23 @@ pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
 /// `LegendStyleSpec.format_type` threading) rather than an
 /// already-string-formatted axis label.
 ///
-/// Classification is [`FormatKind::resolve`] with [`TimeAutodetect::Denied`]:
-/// this surface holds no scale to fall back on, so an untyped `%`-bearing
-/// spec stays d3 numeric (which is what keeps the `"percent"` preset's `.1%`
-/// from being handed to `chrono` — NF-B2, spec §4.5). A resolved strftime
+/// Classification is [`FormatKind::resolve_on`] over `value`,
+/// the temporality of the field the value comes from: an untyped `%`-bearing
+/// spec is a strftime pattern on a temporal field and stays d3 numeric
+/// otherwise (which is what keeps the `"percent"` preset's `.1%` from being
+/// handed to `chrono` on a number — NF-B2, spec §4.5). A resolved strftime
 /// pattern is applied to `v` as an epoch-millisecond timestamp; a time-typed
 /// pair that names NO pattern ([`FormatKind::TemporalDefault`]) falls back to
 /// the day-granularity [`format_time`] default; the ordinal preset renders
 /// ordinals whatever `format_type` says. Anything else formats `v` as a plain
 /// number via [`format_with_spec`].
-pub fn format_value_with_spec(v: f64, spec: Option<&str>, format_type: Option<&str>) -> String {
-    match FormatKind::resolve(spec, format_type, TimeAutodetect::Denied) {
+pub fn format_value_with_spec(
+    v: f64,
+    spec: Option<&str>,
+    format_type: Option<&str>,
+    value: Temporality,
+) -> String {
+    match FormatKind::resolve_on(spec, format_type, value) {
         // Via `format_with_spec`, which keeps its empty-spec default.
         Some(FormatKind::D3(_)) | None => format_with_spec(v, spec),
         Some(kind) => kind.format(v),
@@ -1538,25 +1579,25 @@ mod tests {
     #[test]
     fn format_value_with_spec_time_uses_pattern() {
         assert_eq!(
-            format_value_with_spec(1_577_836_800_000.0, Some("%Y-%m-%d"), Some("time")),
+            format_value_with_spec(1_577_836_800_000.0, Some("%Y-%m-%d"), Some("time"), Temporality::NonTemporal),
             "2020-01-01"
         );
     }
     #[test]
     fn format_value_with_spec_time_no_pattern_uses_default() {
         assert_eq!(
-            format_value_with_spec(1_577_836_800_000.0, None, Some("time")),
+            format_value_with_spec(1_577_836_800_000.0, None, Some("time"), Temporality::NonTemporal),
             format_time(1_577_836_800_000, 86_400_000)
         );
     }
     #[test]
     fn format_value_with_spec_numeric_matches_format_with_spec() {
-        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), None), "1,234");
-        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), Some("number")), "1,234");
+        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), None, Temporality::NonTemporal), "1,234");
+        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), Some("number"), Temporality::NonTemporal), "1,234");
     }
     #[test]
     fn format_value_with_spec_ordinal() {
-        assert_eq!(format_value_with_spec(2.0, Some("__ordinal__"), Some("number")), "2nd");
+        assert_eq!(format_value_with_spec(2.0, Some("__ordinal__"), Some("number"), Temporality::NonTemporal), "2nd");
     }
 
     /// `#147` close (wave 6A T17), output-moving: the ordinal preset beside a
@@ -1567,12 +1608,12 @@ mod tests {
     fn format_value_with_spec_ordinal_wins_over_a_stray_time_type() {
         for format_type in [None, Some("number"), Some("time")] {
             assert_eq!(
-                format_value_with_spec(2.0, Some(ORDINAL_SENTINEL), format_type),
+                format_value_with_spec(2.0, Some(ORDINAL_SENTINEL), format_type, Temporality::NonTemporal),
                 "2nd",
                 "{format_type:?}"
             );
         }
-        assert_eq!(format_value_with_spec(11.0, Some(ORDINAL_SENTINEL), Some("time")), "11th");
+        assert_eq!(format_value_with_spec(11.0, Some(ORDINAL_SENTINEL), Some("time"), Temporality::NonTemporal), "11th");
     }
 
     /// #147 predicate unification, declared output move: a numeric spec
@@ -1583,9 +1624,9 @@ mod tests {
     /// text `.2f` on every colorbar tick.
     #[test]
     fn format_value_with_spec_time_typed_numeric_spec_uses_the_temporal_default() {
-        let out = format_value_with_spec(0.0, Some(".2f"), Some("time"));
+        let out = format_value_with_spec(0.0, Some(".2f"), Some("time"), Temporality::NonTemporal);
         assert_ne!(out, ".2f");
-        assert_eq!(out, format_value_with_spec(0.0, None, Some("time")));
+        assert_eq!(out, format_value_with_spec(0.0, None, Some("time"), Temporality::NonTemporal));
     }
 
     /// The other side of the same rule: a REAL pattern is still applied here,
@@ -1593,7 +1634,7 @@ mod tests {
     #[test]
     fn format_value_with_spec_time_typed_pattern_is_applied() {
         assert_eq!(
-            format_value_with_spec(0.0, Some("%Y-%m-%d"), Some("time")),
+            format_value_with_spec(0.0, Some("%Y-%m-%d"), Some("time"), Temporality::NonTemporal),
             "1970-01-01"
         );
     }

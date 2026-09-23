@@ -26,7 +26,7 @@ use crate::render::draw::{
     col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
     ClearablePaint, DrawCtx,
 };
-use crate::render::format::{format_numeric, format_value_with_spec};
+use crate::render::format::{format_numeric, format_value_with_spec, Temporality};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
@@ -91,6 +91,12 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // `#147` close (wave 6A T21): a time-typed format on a non-temporal text
     // field refuses with the axes' own error, instead of rendering every
     // label as a 1970 epoch date.
+    // The field's temporality decides whether an undeclared `%`-bearing spec
+    // is a date pattern, as the axis's scale does (`#147` T23), and is the
+    // one answer the refusal below checks against.
+    let text_temporality = text_enc
+        .and_then(|enc| crate::render::prepare::field_temporality(enc, ctx.batch))
+        .unwrap_or(Temporality::NonTemporal);
     if let Some(enc) = text_enc {
         crate::render::prepare::refuse_format_temporality_mismatch_field(
             enc,
@@ -112,13 +118,16 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                                 return None;
                             }
                             // ONE resolution (`#147`): the same
-                            // `TimeAutodetect::Denied` classification the
-                            // colorbar uses for the identical pair, so a
-                            // `text=fm.Text(field, format="%Y/%m/%d",
-                            // format_type="time")` channel APPLIES its
-                            // pattern instead of silently falling back to the
-                            // default day-granularity formatter.
-                            Some(format_value_with_spec(v, text_format, text_format_type))
+                            // field-temporality classification the colorbar
+                            // uses for the identical pair, so a
+                            // `text=fm.Text(field, format="%Y/%m/%d")` channel
+                            // over a datetime field APPLIES its pattern.
+                            Some(format_value_with_spec(
+                                v,
+                                text_format,
+                                text_format_type,
+                                text_temporality,
+                            ))
                         })
                     })
                     .collect()
@@ -433,6 +442,72 @@ mod tests {
         }).collect();
         assert!(contents.contains(&"42"), "expected literal '42' label, got: {contents:?}");
         assert!(contents.contains(&"hello"), "expected literal 'hello' label, got: {contents:?}");
+    }
+
+    /// `#147` close (wave 6A T23, user ruling): the text channel reads an
+    /// untyped spec by its field's temporality, as the axis reads it by the
+    /// scale's. Over a datetime column `"%Y"` renders years (it used to
+    /// refuse as a d3 spec) and `".2f"` refuses (it used to format the
+    /// epoch-ms count, `978307200000.00`).
+    #[test]
+    fn text_reads_an_untyped_spec_by_the_field_temporality() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::{StringArray, TimestampMillisecondArray};
+        let spec_with = |format: &str| ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "px".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "ax".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                text: Some(EncodingSpec { field: "d".into(), format: Some(format.into()), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("px", DataType::Utf8, false),
+            Field::new("ax", DataType::Utf8, false),
+            Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(StringArray::from(vec!["x", "y"])),
+            Arc::new(TimestampMillisecondArray::from(vec![978_307_200_000_i64, 1_009_843_200_000])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
+        let build = |spec: &ChartSpec| {
+            let (scales, _) = resolve_scales(spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+            let ctx = DrawCtx {
+                spec, panel: &panel, theme: &theme,
+                scales: &scales, batch: &batch, mark_style: &mark_style,
+            };
+            super::build(&ctx).map(|r| {
+                r.nodes.iter().filter_map(|n| match n {
+                    ferrum_scene::SceneNode::Text { content, .. } => Some(content.clone()),
+                    _ => None,
+                }).collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(build(&spec_with("%Y")).unwrap(), ["2001", "2002"]);
+        assert_eq!(
+            build(&spec_with(".2f")).unwrap_err(),
+            crate::render::RenderError::NumberFormatOnTemporalScale {
+                channel: "text",
+                surface: crate::render::FormatSurface::Channel,
+                format: ".2f".into(),
+                coord_flipped: false,
+            }
+        );
     }
 
     // ── Task 2: mark_text must still produce MarkBatchKind::Text (not Label) ──

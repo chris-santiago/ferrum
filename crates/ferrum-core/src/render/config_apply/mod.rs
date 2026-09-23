@@ -1516,12 +1516,17 @@ fn apply_legend_values_to_entries(
 ///   .label_format`, consumed by `prepare::apply_axis_format_or_thread`,
 ///   which commits to `chrono` only once the resolved scale turns out
 ///   temporal. This fn adds its own recovery for the same reason: it
-///   disambiguates by the channel's declared `DataType` (see below).
+///   disambiguates by the channel's declared `DataType` (see below). Since
+///   `#147` T23 the per-channel `.legend.format` and the `text` channel's
+///   `.format` are gated the same way: their consumers (`prepare::legend`'s
+///   and `marks/text.rs`'s `format_value_with_spec`) read an undeclared
+///   `%`-bearing spec by the field's temporality, and the render-time rule
+///   (`prepare::refuse_format_temporality_mismatch`) checks the grammar it
+///   resolved to once that temporality is known.
 /// - `check_strict` passes `Denied`, for every other surface's real consumer
 ///   (`render::apply_label_format_to_axis` for chart-level `AxisConfigSpec`;
-///   `prepare::legend`'s `format_value_with_spec` for every `.legend.format`;
-///   `draw.rs`/`marks/text.rs` for `text`/`tooltip`/`tooltip_fields`), none of
-///   which holds a scale to fall back on. So this pre-pass never refuses a
+///   `draw.rs` for `tooltip`/`tooltip_fields`; the chart-level legend
+///   style), none of which holds a scale or field to decide by. So this pre-pass never refuses a
 ///   spec its own real consumer would have accepted as numeric — and,
 ///   conversely, it refuses at those surfaces exactly the inputs on which
 ///   `Denied` would have misformatted, which is what makes `Denied` safe
@@ -1676,21 +1681,25 @@ pub(in crate::render) fn validate_chart_format_specs(
         })
     }
 
-    fn check_legend_style(style: &chart_config::LegendStyleSpec) -> Result<(), RenderError> {
-        check_strict(style.format.as_deref(), style.format_type.as_deref())
-    }
-
     /// `format_is_strict`: whether THIS channel's own `.format`/`.format_type`
     /// (not the nested `.axis`/`.legend`, which always use their own fixed
-    /// rule) is consumed by a strict-only reader (`text`/`tooltip`/
-    /// `tooltip_fields` — `draw.rs`/`marks/text.rs`) versus the loose,
-    /// auto-detecting `x`/`y` axis-shorthand reader. Channels with no
+    /// rule) is consumed by a strict-only reader (`tooltip`/`tooltip_fields`
+    /// — `draw.rs`) versus a reader that decides an undeclared `%`-bearing
+    /// spec by the value's temporality (the `x`/`y` axis shorthand and, since
+    /// `#147` T23, the `text` channel). Channels with no
     /// consumer for their own `.format` today (color/size/shape/opacity/
     /// x2/y2) are swept with the loose rule — harmless either way since
     /// nothing reads it yet, and loose is the more permissive default.
+    ///
+    /// `legend_type` is the declared type of the field the channel's
+    /// `.legend` format labels: the channel's own for an aux legend, the
+    /// color field's for the `x`/`y` legend specs that cascade onto the color
+    /// legend. A legend format is read by field temporality at render time
+    /// (`#147` T23), so it is gated loosely by that field's declared type.
     fn check_encoding(
         e: Option<&crate::spec::encoding::EncodingSpec>,
         format_is_strict: bool,
+        legend_type: Option<DataType>,
     ) -> Result<(), RenderError> {
         let Some(e) = e else { return Ok(()) };
         if format_is_strict {
@@ -1716,30 +1725,32 @@ pub(in crate::render) fn validate_chart_format_specs(
             check_loose(fmt.as_deref(), format_type.as_deref(), e.type_)?;
         }
         if let Some(legend) = e.legend.as_deref() {
-            check_legend_style(legend)?;
+            check_loose(legend.format.as_deref(), legend.format_type.as_deref(), legend_type)?;
         }
         Ok(())
     }
 
     fn check_encoding_set(enc: &crate::spec::encoding::Encoding) -> Result<(), RenderError> {
-        check_encoding(enc.x.as_ref(), false)?;
-        check_encoding(enc.y.as_ref(), false)?;
-        check_encoding(enc.color.as_ref(), false)?;
-        check_encoding(enc.size.as_ref(), false)?;
-        check_encoding(enc.shape.as_ref(), false)?;
+        let own = |e: Option<&crate::spec::encoding::EncodingSpec>| e.and_then(|e| e.type_);
+        let color_type = own(enc.color.as_ref());
+        check_encoding(enc.x.as_ref(), false, color_type)?;
+        check_encoding(enc.y.as_ref(), false, color_type)?;
+        check_encoding(enc.color.as_ref(), false, color_type)?;
+        check_encoding(enc.size.as_ref(), false, own(enc.size.as_ref()))?;
+        check_encoding(enc.shape.as_ref(), false, own(enc.shape.as_ref()))?;
         // A legend-bearing channel (`prepare::legend::build_aux_legends`)
         // whose `Legend(format=)` this sweep used to miss, so a malformed
         // spec there rendered where the shape legend's refused (`#147` close,
         // wave 6A T22).
-        check_encoding(enc.stroke_dash.as_ref(), false)?;
-        check_encoding(enc.opacity.as_ref(), false)?;
-        check_encoding(enc.x2.as_ref(), false)?;
-        check_encoding(enc.y2.as_ref(), false)?;
-        check_encoding(enc.text.as_ref(), true)?;
-        check_encoding(enc.tooltip.as_ref(), true)?;
+        check_encoding(enc.stroke_dash.as_ref(), false, own(enc.stroke_dash.as_ref()))?;
+        check_encoding(enc.opacity.as_ref(), false, own(enc.opacity.as_ref()))?;
+        check_encoding(enc.x2.as_ref(), false, own(enc.x2.as_ref()))?;
+        check_encoding(enc.y2.as_ref(), false, own(enc.y2.as_ref()))?;
+        check_encoding(enc.text.as_ref(), false, own(enc.text.as_ref()))?;
+        check_encoding(enc.tooltip.as_ref(), true, own(enc.tooltip.as_ref()))?;
         if let Some(fields) = enc.tooltip_fields.as_ref() {
             for f in fields {
-                check_encoding(Some(f), true)?;
+                check_encoding(Some(f), true, f.type_)?;
             }
         }
         Ok(())
@@ -1750,7 +1761,7 @@ pub(in crate::render) fn validate_chart_format_specs(
     check_axis_cfg(chart_config.axis_y.as_ref())?;
     check_axis_cfg(chart_config.axis_y2.as_ref())?;
     if let Some(legend) = chart_config.legend.as_ref() {
-        check_legend_style(&legend.style)?;
+        check_strict(legend.style.format.as_deref(), legend.style.format_type.as_deref())?;
     }
 
     check_encoding_set(&spec.encoding)?;

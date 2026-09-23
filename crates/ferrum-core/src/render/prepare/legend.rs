@@ -13,6 +13,7 @@ use crate::layout::{
 };
 use crate::layout::axis::resolve_axis_title;
 use crate::render::chart_config::LegendStyleSpec;
+use crate::render::format::Temporality;
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::ChannelName;
@@ -190,6 +191,15 @@ pub(crate) fn build_color_legend(
     // value as an epoch-ms timestamp instead of a d3 numeric spec — mirrors
     // the axis half (`AxisStyleSpec.label_format_type`).
     let format_type: Option<&str> = pick(&legend_specs, |l| l.format_type.as_deref());
+    // The color field's temporality decides whether an undeclared `%`-bearing
+    // spec is a date pattern, as the axis's scale does (`#147` T23): the one
+    // answer `refuse_format_temporality_mismatch_legend_fields` checked.
+    let color_temporality = spec
+        .encoding
+        .color
+        .as_ref()
+        .and_then(|enc| super::field_temporality(enc, transformed))
+        .unwrap_or(Temporality::NonTemporal);
     // The two gates below (`format_spec.is_some() || format_type ==
     // Some("time")`) are deliberately narrower than "either field set"
     // (quality-review S2, 2026-09-03): `fm.Legend(format_type=...)` alone,
@@ -243,7 +253,12 @@ pub(crate) fn build_color_legend(
                             let t = i as f64 / 4.0;
                             let v = lo + t * (hi - lo);
                             if format_spec.is_some() || format_type == Some("time") {
-                                crate::render::format::format_value_with_spec(v, format_spec, format_type)
+                                crate::render::format::format_value_with_spec(
+                                    v,
+                                    format_spec,
+                                    format_type,
+                                    color_temporality,
+                                )
                             } else {
                                 format_colorbar_tick(v, lo, hi)
                             }
@@ -286,7 +301,12 @@ pub(crate) fn build_color_legend(
                         .iter()
                         .map(|&v| {
                             if format_spec.is_some() || format_type == Some("time") {
-                                crate::render::format::format_value_with_spec(v, format_spec, format_type)
+                                crate::render::format::format_value_with_spec(
+                                    v,
+                                    format_spec,
+                                    format_type,
+                                    color_temporality,
+                                )
                             } else {
                                 format_colorbar_tick(v, lo, hi)
                             }
@@ -401,6 +421,7 @@ pub(crate) fn build_color_legend(
     // that the identity is dropped.
     let AuxLegends { blocks: aux_legends, folded } = build_aux_legends(
         spec,
+        transformed,
         provisional_scales,
         ColorLegendState {
             inert_on_line_or_ribbon: inert_consumer_marks.is_some(),
@@ -943,6 +964,7 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 /// no-color-merge case.
 fn build_aux_legends(
     spec: &ChartSpec,
+    transformed: &RecordBatch,
     scales: &ResolvedScales,
     state: ColorLegendState,
 ) -> AuxLegends {
@@ -990,6 +1012,8 @@ fn build_aux_legends(
             // D8 (legend half of format_type threading, Task 4): mirrors the
             // color legend's colorbar handling just above.
             let format_type = size_enc.legend.as_ref().and_then(|l| l.format_type.as_deref());
+            let size_temporality = super::field_temporality(size_enc, transformed)
+                .unwrap_or(Temporality::NonTemporal);
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
                 let values = nice_ticks(lo, hi, 5);
                 let entries: Vec<SizeLegendEntry> = values
@@ -1018,7 +1042,7 @@ fn build_aux_legends(
                             None
                         };
                         Some(SizeLegendEntry {
-                            label: format_value_with_spec(v, format_spec, format_type),
+                            label: format_value_with_spec(v, format_spec, format_type, size_temporality),
                             radius,
                             color_hex,
                         })
@@ -1679,6 +1703,71 @@ mod tests {
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
             "expected date-shaped labels from the epoch-ms domain, got {labels:?}"
         );
+    }
+
+    /// `#147` close (wave 6A T23, user ruling): the colorbar reads an untyped
+    /// spec by the color field's temporality, the answer the refusal pass
+    /// checks. Over a datetime field `"%Y"` renders years (it used to refuse
+    /// as d3) and `".2f"` refuses (it used to format the epoch-ms count);
+    /// over a numeric field `".2f"` formats numbers.
+    #[test]
+    fn colorbar_reads_an_untyped_spec_by_the_color_field_temporality() {
+        use crate::render::chart_config::ChartConfig;
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+        let (lo, hi) = (978_307_200_000_i64, 1_104_537_600_000_i64); // 2001-01-01 .. 2005-01-01
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (lo as f64, hi as f64),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec_with = |format: &str| {
+            let mut spec = spec_with_color_field("v");
+            spec.encoding.color.as_mut().unwrap().legend =
+                Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                    format: Some(format.to_string()),
+                    ..Default::default()
+                }));
+            spec
+        };
+        let batch_of = |data_type: DataType, column: arrow::array::ArrayRef| {
+            RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("v", data_type, false)])), vec![column])
+                .unwrap()
+        };
+        let temporal = batch_of(
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            Arc::new(TimestampMillisecondArray::from(vec![lo, hi])),
+        );
+        let numeric = batch_of(DataType::Float64, Arc::new(Float64Array::from(vec![1.0, 2.0])));
+        let config = ChartConfig::default();
+        let labels = |spec: &ChartSpec, batch: &RecordBatch| {
+            let layers = vec![LayerPrepared::from_chart_only(spec)];
+            build_color_legend(spec, batch, &scales, &layers, false, &mut Vec::new())
+                .colorbar
+                .expect("must build a colorbar")
+                .tick_labels
+        };
+
+        let year = spec_with("%Y");
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&year, &temporal, &config), Ok(()));
+        assert_eq!(labels(&year, &temporal), ["2001", "2002", "2003", "2004", "2005"]);
+
+        let number = spec_with(".2f");
+        assert_eq!(
+            refuse_format_temporality_mismatch_legend_fields(&number, &temporal, &config),
+            Err(crate::render::RenderError::NumberFormatOnTemporalScale {
+                channel: "color",
+                surface: crate::render::FormatSurface::Legend,
+                format: ".2f".into(),
+                coord_flipped: false,
+            })
+        );
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&number, &numeric, &config), Ok(()));
+        // The fixture's scale domain is the epoch-ms span; over a numeric
+        // field those are just numbers, formatted as the d3 spec says.
+        assert_eq!(labels(&number, &numeric)[0], "978307200000.00");
     }
 
     /// `#147` close (wave 6A T22): the shape and stroke-dash legends meet the

@@ -78,6 +78,27 @@ def patterned_labels(chart) -> list[str]:
     return [t for t in rendered_text(chart) if t.count("/") == 2]
 
 
+@pytest.mark.parametrize(
+    "x",
+    [
+        fm.X("q", format=".1%", axis=fm.Axis(values=[0.2, 0.6])),
+        fm.X("q", axis=fm.Axis(label_format=".1%", values=[0.2, 0.6])),
+    ],
+    ids=["shorthand", "axis"],
+)
+def test_an_untyped_percent_spec_formats_explicit_tick_values(x):
+    """Regression pin (wave 6A T23 cycle 3). An untyped ``".1%"`` on a numeric
+    axis is a d3 spec from the start and takes the path every d3 spec takes, so
+    explicit ``Axis(values=)`` ticks render as percents, as ``".2f"`` and the
+    ``"percent"`` preset already did. Pre-fix the spec was guessed as a date
+    pattern, un-guessed and applied to the computed ticks only, and the
+    explicit ticks rendered unformatted (``0.2``, ``0.6``)."""
+    df = pl.DataFrame({"q": [0.0, 0.5, 1.0], "v": [1.0, 2, 3]})
+    labels = rendered_text(fm.Chart(df).mark_point().encode(x=x, y="v:Q"))
+    assert "20.0%" in labels and "60.0%" in labels, labels
+    assert "0.2" not in labels and "0.6" not in labels, labels
+
+
 class TestIndependentFacetAxisHonorsATemporalFormat:
     """An independent-x facet axis applies the caller's temporal tick format.
 
@@ -607,6 +628,23 @@ class TestTheLegendRefusalValidatesTheSpecTheCallerWrote:
         with pytest.raises(ValueError, match=REFUSED_ON["colorbar"]):
             _colorbar_chart(mark, legend=TIME_LEGEND).to_svg()
 
+    def test_a_size_legend_disabled_by_orient_none_is_exempt(self):
+        """Invariant guard for the size legend's per-channel exemption, the
+        sibling of the color legend's above (a disabled legend is never
+        validated). The control is the same chart with the legend shown."""
+
+        def chart(**legend_kwargs):
+            legend = fm.Legend(format=".2f", format_type="time", **legend_kwargs)
+            return (
+                fm.Chart(YEARLY)
+                .mark_point()
+                .encode(x="n:Q", y="n:Q", size=fm.Size("n", legend=legend))
+            )
+
+        self._renders_without_epoch_labels(chart(orient="none"))
+        with pytest.raises(ValueError, match=REFUSED_ON["size_legend"]):
+            chart().to_svg()
+
     def test_a_categorical_color_legend_refuses_too(self):
         """Regression pin. The rule does not depend on the scale kind: pre-fix
         (and at T21 cycle 1) a categorical legend over the string field ``g``
@@ -684,6 +722,26 @@ class TestTheMergedCrossSpellingPairMeetsTheSameGates:
         assert merged == _refusal(_x_chart(fm.X("n:Q", format=".1f", format_type="time"), surface))
 
     @pytest.mark.parametrize("surface", AXIS_SURFACES)
+    def test_a_number_shorthand_the_axis_retypes_as_time_keeps_the_temporal_default(self, surface):
+        """Regression pin (wave 6A T23 cycle 2, user ruling). The merged pair
+        ``.2f`` + ``"time"`` gives its one-place spellings' answer, the
+        temporal default. At T23 cycle 1 the shorthand ``.2f`` was checked as
+        written and refused as a number format on a temporal axis, a new
+        disagreement with both one-place spellings."""
+        merged = rendered_text(
+            _x_chart(fm.X("d:T", format=".2f", axis=fm.Axis(label_format_type="time")), surface)
+        )
+        assert merged == rendered_text(
+            _x_chart(fm.X("d:T", format=".2f", format_type="time"), surface)
+        )
+        assert merged == rendered_text(
+            _x_chart(
+                fm.X("d:T", axis=fm.Axis(label_format=".2f", label_format_type="time")), surface
+            )
+        )
+        assert "2001" in merged and "2001.00" not in merged, merged
+
+    @pytest.mark.parametrize("surface", AXIS_SURFACES)
     def test_the_bare_time_type_in_the_shorthand_spelling_refuses(self, surface):
         """Regression pin (T21 cycle 2 behavior, unpinned until cycle 3): the
         bare ``X(format_type="time")`` on a quantitative field used to drop the
@@ -697,3 +755,166 @@ class TestTheMergedCrossSpellingPairMeetsTheSameGates:
         assert shorthand == _refusal(
             _x_chart(fm.X("n:Q", axis=fm.Axis(label_format_type="time")), surface)
         )
+
+    @pytest.mark.parametrize("surface", AXIS_SURFACES)
+    def test_a_time_typed_shorthand_a_full_axis_format_replaces_is_not_read(self, surface):
+        """Invariant guard (the adjudicated shadow case, T21 cycle 3). A full
+        ``Axis(label_format=)`` replaces the shorthand pair wholesale, so the
+        time-typed shorthand is never read and is not refused: the axis
+        renders the ``Axis`` format. Fails if the shorthand refusal ever runs
+        on a pair the axis does not read."""
+        x = fm.X("n:Q", format=".1f", format_type="time", axis=fm.Axis(label_format=".2f"))
+        labels = rendered_text(_x_chart(x, surface))
+        assert {"1.00", "2.00", "8.00"} <= set(labels), labels
+
+
+# ---- the two untyped cells on a temporal field (wave 6A T23, user ruling) ----
+
+
+def _y_axis(field: str, fmt: str | None, fmt_type: str | None):
+    kwargs = {}
+    if fmt is not None:
+        kwargs["label_format"] = fmt
+    if fmt_type is not None:
+        kwargs["label_format_type"] = fmt_type
+    return fm.Chart(YEARLY).mark_point().encode(x="n:Q", y=fm.Y(field, axis=fm.Axis(**kwargs)))
+
+
+#: Every surface whose field can be temporal, both axes included.
+TEMPORAL_SURFACES = {**{s: REFUSABLE[s] for s in TEMPORAL_CAPABLE}, "y_axis": _y_axis}
+
+#: Where each number-format refusal lands, and what it was checked against.
+_ON_SCALE = "requires a non-temporal scale, but the resolved scale is temporal"
+_ON_FIELD = "requires a non-temporal field, but the field is temporal"
+NUMBER_REFUSED_ON = {
+    "axis": f"'x' axis {_ON_SCALE}",
+    "independent_facet_axis": f"'x' axis {_ON_SCALE}",
+    "y_axis": f"'y' axis {_ON_SCALE}",
+    "colorbar": f"'color' legend {_ON_FIELD}",
+    "size_legend": f"'size' legend {_ON_FIELD}",
+    "text": f"'text' channel {_ON_FIELD}",
+}
+_DATE_HINT = '; a date pattern (e.g. "%Y") formats a temporal value'
+
+#: Years, as a surface formats them, and an epoch-millisecond count leaking
+#: out as a number (plain or in the default formatter's exponent form).
+_YEAR = re.compile(r"^20\d\d$")
+_YEAR_MONTH = re.compile(r"^20\d\d/\d\d$")
+_EPOCH_MS = re.compile(r"^\d{10,}(\.\d+)?$|e1[12]$")
+
+
+class TestAnUntypedSpecOnATemporalFieldGetsOneAnswer:
+    """The two cells the third intent re-check found, both an untyped spec on a
+    temporal field, settled by the user's ruling (wave 6A T23) to one answer on
+    every surface: a d3 number format refuses, and a date pattern formats
+    dates. The field is spelled both ways, undeclared (``"d"``, temporal by
+    dtype) and declared (``"d:T"``)."""
+
+    @pytest.mark.parametrize("field", ["d", "d:T"])
+    @pytest.mark.parametrize(
+        ("fmt", "resolved"), [(".2f", ".2f"), (",.0f", ",.0f"), ("d", "d"), ("percent", ".1%")]
+    )
+    @pytest.mark.parametrize("surface", sorted(TEMPORAL_SURFACES))
+    def test_a_number_format_on_a_temporal_field_refuses(self, surface, fmt, resolved, field):
+        """Regression pin for every row (``percent``, a ``"number"``-typed
+        preset, included).
+
+        Pre-fix, three answers: both axes formatted the calendar year
+        (``2001.00``, ``2,001``), the independent facet axis dropped the
+        format, and the colorbar, size legend and text formatted the
+        epoch-millisecond count (``959817600000.00``).
+        """
+        message = f'the number format "{resolved}" on the {NUMBER_REFUSED_ON[surface]}'
+        assert _refusal(TEMPORAL_SURFACES[surface](field, fmt, None)) == message + _DATE_HINT
+
+    @pytest.mark.parametrize("surface", sorted(TEMPORAL_SURFACES))
+    def test_a_time_typed_number_format_keeps_the_temporal_default(self, surface):
+        """Invariant guard — passes pre-fix too (T17). The typed pair names no
+        pattern, so each surface falls back to its temporal default instead of
+        refusing or formatting the year as a number."""
+        labels = rendered_text(TEMPORAL_SURFACES[surface]("d", ".2f", "time"))
+        assert labels
+        assert not any(t.endswith(".00") or _EPOCH_MS.search(t) for t in labels), labels
+
+    @pytest.mark.parametrize("field", ["d", "d:T"])
+    @pytest.mark.parametrize(
+        ("fmt", "shape"), [("%Y", _YEAR), ("%Y/%m", _YEAR_MONTH)], ids=["%Y", "%Y/%m"]
+    )
+    @pytest.mark.parametrize("surface", sorted(TEMPORAL_SURFACES))
+    def test_an_untyped_date_pattern_on_a_temporal_field_formats_dates(
+        self, surface, fmt, shape, field
+    ):
+        """Regression pin for the colorbar, size legend and text rows, which
+        refused both patterns pre-fix with the d3 grammar error
+        (``invalid format spec "%Y": unrecognized token "Y"``). The axis rows
+        are invariant guards that pass pre-fix too: the axes already applied
+        both patterns, and the ``%Y/%m`` rows (unlike ``%Y``, whose default
+        labels are years as well) fail if an axis ever drops the pattern.
+        """
+        labels = rendered_text(TEMPORAL_SURFACES[surface](field, fmt, None))
+        assert len([t for t in labels if shape.match(t)]) >= 2, labels
+        assert not any(_EPOCH_MS.search(t) for t in labels), labels
+
+    @pytest.mark.parametrize("surface", sorted(TEMPORAL_SURFACES))
+    def test_a_percent_spec_on_a_temporal_field_refuses_as_a_date_pattern(self, surface):
+        """Regression pin for the colorbar, size legend and text rows. An
+        untyped ``%`` spec on a temporal field is read as a date pattern (the
+        ruling's second cell), and ``".1%"`` is not one, so it refuses with the
+        strftime grammar error. Pre-fix those three formatted the epoch-ms
+        count as a percentage. The axis rows are invariant guards: the axes
+        gave this refusal pre-fix too. On a numeric field ``".1%"`` is still a
+        d3 percent (``TestPercentSpecIsNeverMisreadAsStrftime``).
+        """
+        assert _refusal(TEMPORAL_SURFACES[surface]("d", ".1%", None)).startswith(
+            'invalid format spec ".1%": invalid strftime pattern ".1%"'
+        )
+
+    @pytest.mark.parametrize(
+        "tick_values", [None, [dt.datetime(2001, 6, 1).timestamp() * 1000]], ids=["plain", "values"]
+    )
+    def test_the_chart_level_number_format_on_a_temporal_axis_refuses(self, tick_values):
+        """Regression pin for the chart-level surface, on both of its paths.
+
+        Pre-fix ``configure_axis(label_format="percent")`` over a temporal x
+        axis re-parsed the year labels as numbers or passed them through with
+        the format dropped. It now refuses with the per-channel message. The
+        chart-level format reaches both axes, so a percent-valued y beside a
+        temporal x needs ``configure(axis_y=AxisConfig(label_format=...))`` or
+        the per-channel ``Axis``.
+        """
+        chart = (
+            fm.Chart(YEARLY)
+            .mark_point()
+            .encode(x="d:T", y="n:Q")
+            .configure_axis(label_format="percent", tick_values=tick_values)
+        )
+        assert (
+            _refusal(chart) == f"the number format \".1%\" on the 'x' axis {_ON_SCALE}" + _DATE_HINT
+        )
+
+
+@pytest.mark.parametrize(
+    ("fmt", "message"),
+    [
+        (
+            "ordinal",
+            "the \"ordinal\" format on the 'x' axis formats numbers and requires a "
+            "non-temporal scale, but the resolved scale is temporal",
+        ),
+        (".2f", f"the number format \".2f\" on the 'x' axis {_ON_SCALE}" + _DATE_HINT),
+    ],
+    ids=["ordinal", "number"],
+)
+def test_a_temporal_axis_refusal_under_coord_flip_names_the_axis_the_caller_wrote(fmt, message):
+    """Regression pin for the R3 un-flip of both temporal-axis refusals
+    (``with_coord_flipped``). Under ``CoordFlip`` the format written on ``X``
+    is resolved on the ``y`` slot; the refusal must still name ``'x'``, the
+    channel the caller wrote. Nothing exercised the flip patch before (a
+    mutant naming ``'y'`` survived the wave 6A T22 mutation gate)."""
+    chart = (
+        fm.Chart(YEARLY)
+        .mark_point()
+        .encode(x=fm.X("d:T", axis=fm.Axis(label_format=fmt)), y="n:Q")
+        .coord(fm.CoordFlip())
+    )
+    assert _refusal(chart) == message

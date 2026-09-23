@@ -136,8 +136,9 @@ pub(crate) enum LayerCoordUnplaceableReason {
     },
 }
 
-/// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`] or
-/// [`RenderError::OrdinalFormatOnTemporalScale`] refusal names: where the
+/// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`],
+/// [`RenderError::OrdinalFormatOnTemporalScale`] or
+/// [`RenderError::NumberFormatOnTemporalScale`] refusal names: where the
 /// caller set the format, and so what the temporality was checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatSurface {
@@ -156,8 +157,8 @@ pub enum FormatSurface {
 impl FormatSurface {
     /// `(noun, needs, subject)` for a format-refusal sentence: what the
     /// surface is called, what it checks, and what was checked. One wording
-    /// for both `TimeFormatOnNonTemporalScale` and
-    /// `OrdinalFormatOnTemporalScale`.
+    /// for `TimeFormatOnNonTemporalScale`, `OrdinalFormatOnTemporalScale` and
+    /// `NumberFormatOnTemporalScale`.
     fn wording(self) -> (&'static str, &'static str, &'static str) {
         match self {
             FormatSurface::Axis => ("axis", "scale", "the resolved scale"),
@@ -558,6 +559,24 @@ pub enum RenderError {
         surface: FormatSurface,
         coord_flipped: bool,
     },
+    /// A d3 number format (`".2f"`, `",.0f"`, `"d"`, a `"number"`-typed
+    /// preset such as `"percent"`) meets a temporal value (`#147` close, wave
+    /// 6A T23, user ruling). The surfaces used to give three answers to the
+    /// identical pair: the shared axes formatted the calendar year
+    /// (`2001.00`), an independent facet axis dropped the format, and the
+    /// legend and text formatted the epoch-millisecond count
+    /// (`959817600000.00`). The number-format sibling of
+    /// [`Self::OrdinalFormatOnTemporalScale`], built by the same single
+    /// constructor at the same surfaces with the same
+    /// `channel`/`surface`/`coord_flipped` discipline. A time-typed numeric
+    /// spec (`".2f"` + `"time"`) is not this error: it names no pattern and
+    /// falls back to the temporal default.
+    NumberFormatOnTemporalScale {
+        channel: &'static str,
+        surface: FormatSurface,
+        format: String,
+        coord_flipped: bool,
+    },
     /// A chart combines a projected coordinate system — `Polar` or, since
     /// 2026-09-12, `Geo` — with a `BreakAxis` structural spec (#230-8, D3:
     /// REFUSE MALFORMED). `coord` names which one (`"Polar"`/`"Geo"`);
@@ -641,6 +660,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // the same surfaces, so it is patched here for the same reason.
         RenderError::OrdinalFormatOnTemporalScale { channel, surface, .. } => {
             RenderError::OrdinalFormatOnTemporalScale { channel, surface, coord_flipped }
+        }
+        // `#147` T23: the number-format sibling, same constructor and surfaces.
+        RenderError::NumberFormatOnTemporalScale { channel, surface, format, .. } => {
+            RenderError::NumberFormatOnTemporalScale { channel, surface, format, coord_flipped }
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
@@ -899,7 +922,8 @@ impl std::fmt::Display for RenderError {
             Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 // The sole constructor (`prepare::refuse_format_temporality_mismatch`)
-                // resolves under `TimeAutodetect::Denied`, so every refusal is
+                // resolves a non-temporal value's pair under
+                // `TimeAutodetect::Denied`, so every refusal is
                 // a DECLARED `"time"` type: naming it names the cause even for
                 // a `%`-free spec like `".2f"`, where the format alone does
                 // not say why a temporal value is needed (wave 6A T17).
@@ -921,6 +945,16 @@ impl std::fmt::Display for RenderError {
                     f,
                     "the \"ordinal\" format on the '{channel}' {noun} formats numbers and \
                      requires a non-temporal {needs}, but {subject} is temporal"
+                )
+            }
+            Self::NumberFormatOnTemporalScale { channel, surface, format, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let (noun, needs, subject) = surface.wording();
+                write!(
+                    f,
+                    "the number format {format:?} on the '{channel}' {noun} requires a \
+                     non-temporal {needs}, but {subject} is temporal; a date pattern \
+                     (e.g. \"%Y\") formats a temporal value"
                 )
             }
             // `{:?}` over the wire TOKEN, never over `axis` itself: the
@@ -1957,6 +1991,19 @@ mod tests {
         assert_eq!(
             format!("{text}"),
             r#"format type "time" on the 'text' channel requires a temporal field, but the field is not temporal"#
+        );
+
+        // `#147` T23: a d3 number format on a temporal value, and R3's
+        // un-flip on the axis surface.
+        let number = RenderError::NumberFormatOnTemporalScale {
+            channel: "y",
+            surface: FormatSurface::Axis,
+            format: ".2f".into(),
+            coord_flipped: true,
+        };
+        assert_eq!(
+            format!("{}", with_coord_flipped(number, true)),
+            r#"the number format ".2f" on the 'x' axis requires a non-temporal scale, but the resolved scale is temporal; a date pattern (e.g. "%Y") formats a temporal value"#
         );
     }
 
