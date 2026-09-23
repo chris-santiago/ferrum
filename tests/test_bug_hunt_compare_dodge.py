@@ -386,7 +386,7 @@ def test_mismatched_feature_sets_render_union_not_intersection():
 # legible ValueError in _resolve_source.
 def test_compare_base_key_collision_must_not_silently_discard_primary():
     X, y, ridge, rf = _reg_setup()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"reserved for the primary"):
         ferrum.importance_chart(ridge, X, y, compare={"base": rf})
 
 

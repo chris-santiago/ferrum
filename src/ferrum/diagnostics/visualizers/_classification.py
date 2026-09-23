@@ -42,32 +42,21 @@ def _build_compare_source(
     accepts ``compare=``: the three that gained it in the G5 parity sweep
     (``ROCVisualizer``, ``PRVisualizer``,
     ``DiscriminationThresholdVisualizer``) plus ``CalibrationVisualizer``
-    (#212, 2026-09-13) -- one local home rather than four copies of the
-    reserved-``"base"``-key check, so every one of them refuses the same
-    malformed ``compare=`` with the same words. This mirrors
-    ``ferrum.plots._helpers._resolve_source``'s own compare-merge branch
-    (the figure-function entry point for the same ``compare=`` contract);
-    diagnostics modules may not import ``plots._helpers`` (a plots-private
-    module, enforced by ``test_finding_p5.py``), so the logic is duplicated
-    here rather than imported -- DUPLICATION-PENDING: hoist both into one
-    shared home (e.g. a classmethod on ``ferrum.diagnostics.source
-    .ModelSource``) once a maintainer owns that cross-package move.
+    (#212, 2026-09-13) -- one local home so every one of them refuses the
+    same malformed ``compare=`` with the same words. The ``compare is not
+    None`` merge itself (the dict check, the reserved-``"base"`` refusal,
+    and the delegation to ``ModelSource.compare``) has one owner,
+    ``ModelSource.from_base_and_compare`` (#214) -- the same one
+    ``ferrum.plots._helpers._resolve_source`` calls for the figure-function
+    entry point. Both callers already import ``ferrum.diagnostics.source``,
+    so routing through the classmethod adds no import edge and does not
+    trip the diagnostics -> plots-private ban (``test_finding_p5.py``).
     """
     import ferrum
 
     if compare is None:
         return ferrum.ModelSource(model, X, y, random_state=random_state)
-    if not isinstance(compare, dict):
-        raise TypeError(f"compare= must be dict[str, model] or None; got {type(compare).__name__}.")
-    if "base" in compare:
-        raise ValueError(
-            "compare= must not use the key 'base' -- it is reserved for the "
-            "primary model= argument. A compare={'base': ...} entry would "
-            "silently overwrite the primary model with no error (GH #76); "
-            "rename this entry (e.g. compare={'rival': ...}) instead."
-        )
-    models = {"base": model, **compare}
-    return ferrum.ModelSource.compare(models, X, y, random_state=random_state)
+    return ferrum.ModelSource.from_base_and_compare(model, compare, X, y, random_state=random_state)
 
 
 def _base_model_rows(df: pl.DataFrame) -> pl.DataFrame:

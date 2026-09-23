@@ -262,10 +262,11 @@ def test_calibration_two_positional_score_is_not_silently_first_model_only(binar
 def test_compare_dict_supported_path_overlays_two_models(binary):
     """compare= on a SUPPORTED chart (roc_chart) overlays two model series.
 
-    Exercises `_resolve_source` compare branch (`_helpers.py` 460-471): the
-    base model becomes label "base"; compare keys add the rest. ROC's legend
-    builder appends the per-series AUC to the ``model`` value, so we assert the
-    two distinct series each carry a base/alt prefix rather than exact labels.
+    Exercises `_resolve_source`'s delegation to `ModelSource
+    .from_base_and_compare` (`diagnostics/source.py`, #214): the base model
+    becomes label "base"; compare keys add the rest. ROC's legend builder
+    appends the per-series AUC to the ``model`` value, so we assert the two
+    distinct series each carry a base/alt prefix rather than exact labels.
     """
     model, X, y = binary
     chart = ferrum.roc_chart(model, X, y, compare={"alt": model})
@@ -319,8 +320,9 @@ def test_compare_on_excluded_chart_message_carries_reason(regression):
 def test_compare_non_dict_raises_typeerror(binary):
     """compare= must be dict[str, model] or None — a list raises TypeError.
 
-    Exercises `_resolve_source` (`_helpers.py` 461-464): the isinstance(dict)
-    guard on the compare path.
+    Exercises `_resolve_source`'s delegation to `ModelSource
+    .from_base_and_compare` (`diagnostics/source.py`, #214): the
+    isinstance(dict) guard on the compare path.
     """
     model, X, y = binary
     with pytest.raises(TypeError, match=r"dict\[str, model\]"):
@@ -342,7 +344,8 @@ def test_compare_none_byte_identical_to_omitting_kwarg(regression):
 def test_compare_random_state_forwarded_through_compare_source(binary):
     """random_state passed alongside compare= reaches each wrapped ModelSource.
 
-    Exercises `_resolve_source` (`_helpers.py` 466-470): random_state is
+    Exercises `_resolve_source`'s delegation to `ModelSource
+    .from_base_and_compare` (`diagnostics/source.py`, #214): random_state is
     forwarded to ModelSource.compare. Two builds with the same seed must be
     byte-identical (deterministic).
     """
@@ -359,10 +362,11 @@ def test_compare_random_state_forwarded_through_compare_source(binary):
 def test_compare_empty_dict_on_supported_chart_produces_base_only_series(regression):
     """compare={} on a supported chart yields a lone 'base' model series.
 
-    Exercises `_resolve_source` (`_helpers.py` 465): models = {"base": m, **{}}
-    = {"base": m}. The empty comparison is silently promoted to a one-model
-    "comparison" rather than collapsing to the no-compare default. This pins
-    the (surprising) current behaviour.
+    Exercises `_resolve_source`'s delegation to `ModelSource
+    .from_base_and_compare` (`diagnostics/source.py`, #214): models =
+    {"base": m, **{}} = {"base": m}. The empty comparison is silently
+    promoted to a one-model "comparison" rather than collapsing to the
+    no-compare default. This pins the (surprising) current behaviour.
     """
     model, X, y = regression
     chart = ferrum.prediction_error_chart(model, X, y, compare={})

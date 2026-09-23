@@ -171,6 +171,72 @@ class ModelSource(
         sources = {name: cls(model, X, y, **kwargs) for name, model in models.items()}
         return ComparedModelSource(sources)
 
+    @classmethod
+    def from_base_and_compare(
+        cls,
+        model: Any,
+        compare: dict[str, Any],
+        X: Any,
+        y: Any = None,
+        *,
+        random_state: int | None = None,
+    ) -> "ComparedModelSource":
+        """Merge a base ``model`` with a ``compare=`` dict into one
+        ``ComparedModelSource``.
+
+        The single owner of the ``compare=`` merge rule shared by the
+        figure-function ``_resolve_source`` path
+        (``ferrum.plots._helpers``) and the classification visualizers
+        (``ferrum.diagnostics.visualizers._classification``): the
+        ``dict`` type check, the reserved-``"base"`` refusal, and the
+        delegation to ``ModelSource.compare``. Callers pre-check
+        ``compare is not None`` themselves and keep their own
+        ``compare=None`` handling -- this method assumes a non-``None``
+        ``compare`` was passed.
+
+        Parameters
+        ----------
+        model : Any
+            The primary/base fitted estimator, stamped ``"base"`` in the
+            returned source's ``model`` column.
+        compare : dict[str, Any]
+            Mapping from display name to fitted estimator. Must not
+            contain the key ``"base"`` (reserved for ``model``).
+        X : array-like
+            Feature matrix shared by all models.
+        y : array-like, optional
+            Target shared by all models.
+        random_state : int, optional
+            Seed forwarded to every wrapped ``ModelSource``.
+
+        Returns
+        -------
+        ComparedModelSource
+            Built from ``{"base": model, **compare}``.
+
+        Raises
+        ------
+        TypeError
+            If ``compare`` is not a ``dict``.
+        ValueError
+            If ``compare`` contains the reserved key ``"base"`` (GH #76:
+            a ``compare={"base": ...}`` entry would silently overwrite
+            the primary model with no error).
+        """
+        if not isinstance(compare, dict):
+            raise TypeError(
+                f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
+            )
+        if "base" in compare:
+            raise ValueError(
+                "compare= must not use the key 'base' -- it is reserved for the "
+                "primary model= argument. A compare={'base': ...} entry would "
+                "silently overwrite the primary model with no error (GH #76); "
+                "rename this entry (e.g. compare={'rival': ...}) instead."
+            )
+        models = {"base": model, **compare}
+        return cls.compare(models, X, y, random_state=random_state)
+
 
 if TYPE_CHECKING:
     # Type-only conformance: ``ModelSource`` is one of the concrete adapters

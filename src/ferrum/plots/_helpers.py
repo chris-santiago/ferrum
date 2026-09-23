@@ -667,23 +667,8 @@ def _resolve_source(
     if isinstance(model, ComparedModelSource):
         return model
     if compare is not None:
-        if not isinstance(compare, dict):
-            raise TypeError(
-                f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
-            )
-        if "base" in compare:
-            raise ValueError(
-                "compare= must not use the key 'base' -- it is reserved for the "
-                "primary model= argument. A compare={'base': ...} entry would "
-                "silently overwrite the primary model with no error (GH #76); "
-                "rename this entry (e.g. compare={'rival': ...}) instead."
-            )
-        models = {"base": model, **compare}
-        return ferrum.ModelSource.compare(
-            models,
-            X,
-            y,
-            random_state=random_state,
+        return ferrum.ModelSource.from_base_and_compare(
+            model, compare, X, y, random_state=random_state
         )
     if isinstance(model, dict):
         return ferrum.ModelSource.compare(

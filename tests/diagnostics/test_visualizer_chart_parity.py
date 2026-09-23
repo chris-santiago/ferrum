@@ -218,9 +218,9 @@ _MUST_HAVE_COMPARE: tuple[type[FerrumVisualizer], ...] = (
     DiscriminationThresholdVisualizer,
     # Joined 2026-09-13 (#212): the last classification visualizer that
     # refused compare= now accepts it with the same distinguished-base
-    # semantics, routed through the same `_build_compare_source` -- which
-    # is what makes the reserved-"base" and non-dict refusal tests below
-    # cover it too.
+    # semantics, routed through the same delegation to `ModelSource
+    # .from_base_and_compare` (#214) -- which is what makes the
+    # reserved-"base" and non-dict refusal tests below cover it too.
     CalibrationVisualizer,
 )
 
@@ -899,12 +899,13 @@ def test_visualizer_family_docstring_describes_the_real_surface() -> None:
 
 def test_compare_rejects_the_reserved_base_key_on_every_visualizer() -> None:
     """`compare={"base": ...}` would silently overwrite the primary `model=`
-    (GH #76). The refusal exists in two places -- `plots._helpers
-    ._resolve_source` for the figure functions and `visualizers
-    ._classification._build_compare_source` for the visualizers (a
-    DUPLICATION-PENDING pair; a diagnostics module may not import the
-    plots-private helper) -- and only the figure-function copy was pinned,
-    so the visualizer copy's guard could be deleted with the suite green.
+    (GH #76). The refusal has one owner, `ModelSource.from_base_and_compare`
+    (#214), which both `plots._helpers._resolve_source` (the figure
+    functions) and `visualizers._classification._build_compare_source`
+    (the visualizers) delegate to -- so this pin and the figure-function
+    pin (`test_bug_hunt_compare_dodge.py::
+    test_compare_base_key_collision_must_not_silently_discard_primary`)
+    exercise the same code path from both surfaces.
     """
     model = load_fixture("binary_logistic")
     rival = load_fixture("binary_logistic")
@@ -924,8 +925,8 @@ def test_compare_rejects_the_reserved_base_key_on_every_visualizer() -> None:
 
 
 def test_compare_rejects_a_non_dict_on_every_visualizer() -> None:
-    """The sibling guard in the same duplicated block: `compare=` must be a
-    dict, and the refusal names the type it got.
+    """The sibling guard in `ModelSource.from_base_and_compare` (#214):
+    `compare=` must be a dict, and the refusal names the type it got.
     """
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
