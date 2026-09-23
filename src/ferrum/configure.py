@@ -6,7 +6,7 @@ import math
 import numbers
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import InitVar, dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
@@ -150,7 +150,7 @@ def _validate_config_band_colors(owner: str, field: str, values: list[str] | Non
         _validate_config_color(owner, f"{field}[{i}]", value)
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class AxisConfig:
     """Chart-level axis configuration applied uniformly to all axes (or a specific one).
 
@@ -307,82 +307,51 @@ class AxisConfig:
     title: TitleParam = _UNSET
     offset: float | None = None
     label_flush: bool | None = None
+    # Deprecated aliases — accepted with a DeprecationWarning, resolved in
+    # __post_init__ into min_band/max_band. InitVar so the generated __init__
+    # accepts them as constructor kwargs without them becoming real fields
+    # (dataclasses.fields() excludes InitVars, so this is invisible to
+    # to_dict()/repr/eq/replace — see __post_init__ below).
+    min_extent: InitVar[object] = _MISSING
+    max_extent: InitVar[object] = _MISSING
 
-    # ------------------------------------------------------------------
-    # Custom __init__ — accepts deprecated min_extent=/max_extent= aliases
-    # and maps them to the canonical min_band=/max_band= fields.
-    # The dataclass is declared with init=False so we own the full init.
-    # We use object.__setattr__ because the dataclass is frozen=True.
-    # ------------------------------------------------------------------
-
-    def __init__(
-        self,
-        x: bool = True,
-        y: bool = True,
-        label_angle: float | None = None,
-        label_font_size: float | None = None,
-        label_color: str | None = None,
-        label_format: str | None = None,
-        label_format_raw: str | None = None,
-        label_overlap: str | None = None,
-        tick_count: int | None = None,
-        tick_size: float | None = None,
-        tick_values: list | None = None,
-        title_font_size: float | None = None,
-        title_color: str | None = None,
-        title_padding: float | None = None,
-        domain: bool | None = None,
-        domain_color: str | None = None,
-        domain_width: float | None = None,
-        grid: bool | None = None,
-        grid_color: str | None = None,
-        grid_dash: list[float] | None = None,
-        grid_width: float | None = None,
-        domain_min: float | None = None,
-        domain_max: float | None = None,
-        nice: bool | None = None,
-        zero: bool | None = None,
-        label_padding: float | None = None,
-        grid_opacity: float | None = None,
-        orient: str | None = None,
-        translate: float | None = None,
-        min_band: float | None = None,
-        max_band: float | None = None,
-        tick_extra: bool | None = None,
-        tick_min_step: float | None = None,
-        title_orient: str | None = None,
-        zindex: int | None = None,
-        labels: bool | None = None,
-        ticks: bool | None = None,
-        title: TitleParam = _UNSET,
-        offset: float | None = None,
-        label_flush: bool | None = None,
-        # Deprecated aliases — accepted with a DeprecationWarning.
-        min_extent: object = _MISSING,
-        max_extent: object = _MISSING,
-    ) -> None:
+    def __post_init__(self, min_extent: object, max_extent: object) -> None:
         # Resolve deprecated aliases (min_extent → min_band, max_extent → max_band)
         # through the shared canonical helper so all three surfaces stay in sync.
-        min_band = _resolve_band_alias(
-            min_band,
-            min_extent,
-            canonical_name="min_band",
-            alias_name="min_extent",
-            owner="AxisConfig",
-            stacklevel=2,
+        # stacklevel=4 accounts for the frame chain from warnings.warn() (inside
+        # _resolve_band_alias) to the caller: _resolve_band_alias <- this
+        # method (__post_init__) <- the generated __init__ <- the caller's line.
+        object.__setattr__(
+            self,
+            "min_band",
+            _resolve_band_alias(
+                self.min_band,
+                min_extent,
+                canonical_name="min_band",
+                alias_name="min_extent",
+                owner="AxisConfig",
+                stacklevel=4,
+            ),
         )
-        max_band = _resolve_band_alias(
-            max_band,
-            max_extent,
-            canonical_name="max_band",
-            alias_name="max_extent",
-            owner="AxisConfig",
-            stacklevel=2,
+        object.__setattr__(
+            self,
+            "max_band",
+            _resolve_band_alias(
+                self.max_band,
+                max_extent,
+                canonical_name="max_band",
+                alias_name="max_extent",
+                owner="AxisConfig",
+                stacklevel=4,
+            ),
         )
 
-        # Reuse the existing validation logic from __post_init__.
-        _warn_axis_xy_deprecated(x=x, y=y, stacklevel=2)
-        if label_format is not None and label_format_raw is not None:
+        # _warn_axis_xy_deprecated is called one frame deeper than before
+        # (this method <- the generated __init__ <- the caller), so its
+        # stacklevel is bumped from 2 to 3 to keep attributing the warning
+        # to the caller's line, not this method's.
+        _warn_axis_xy_deprecated(x=self.x, y=self.y, stacklevel=3)
+        if self.label_format is not None and self.label_format_raw is not None:
             raise ValueError(
                 "AxisConfig: 'label_format' and 'label_format_raw' are mutually exclusive; "
                 "provide at most one."
@@ -394,61 +363,20 @@ class AxisConfig:
         # label_format_raw field. An unrecognized name is a typed
         # construction-time refusal, not a silently-passed-through raw spec
         # (the exact NF-B1 harm class this surface must stay immune to).
-        if label_format is not None:
+        if self.label_format is not None:
             from ferrum.format_presets import resolve_format
 
-            resolve_format(label_format)
+            resolve_format(self.label_format)
 
-        _validate_domain_bounds(domain_min, domain_max)
+        _validate_domain_bounds(self.domain_min, self.domain_max)
 
-        if label_overlap is not None:
-            validate_label_overlap("AxisConfig.label_overlap", label_overlap)
+        if self.label_overlap is not None:
+            validate_label_overlap("AxisConfig.label_overlap", self.label_overlap)
 
-        _validate_config_color("AxisConfig", "label_color", label_color)
-        _validate_config_color("AxisConfig", "title_color", title_color)
-        _validate_config_color("AxisConfig", "domain_color", domain_color)
-        _validate_config_color("AxisConfig", "grid_color", grid_color)
-
-        object.__setattr__(self, "x", x)
-        object.__setattr__(self, "y", y)
-        object.__setattr__(self, "labels", labels)
-        object.__setattr__(self, "ticks", ticks)
-        object.__setattr__(self, "title", title)
-        object.__setattr__(self, "offset", offset)
-        object.__setattr__(self, "label_flush", label_flush)
-        object.__setattr__(self, "label_angle", label_angle)
-        object.__setattr__(self, "label_font_size", label_font_size)
-        object.__setattr__(self, "label_color", label_color)
-        object.__setattr__(self, "label_format", label_format)
-        object.__setattr__(self, "label_format_raw", label_format_raw)
-        object.__setattr__(self, "label_overlap", label_overlap)
-        object.__setattr__(self, "tick_count", tick_count)
-        object.__setattr__(self, "tick_size", tick_size)
-        object.__setattr__(self, "tick_values", tick_values)
-        object.__setattr__(self, "title_font_size", title_font_size)
-        object.__setattr__(self, "title_color", title_color)
-        object.__setattr__(self, "title_padding", title_padding)
-        object.__setattr__(self, "domain", domain)
-        object.__setattr__(self, "domain_color", domain_color)
-        object.__setattr__(self, "domain_width", domain_width)
-        object.__setattr__(self, "grid", grid)
-        object.__setattr__(self, "grid_color", grid_color)
-        object.__setattr__(self, "grid_dash", grid_dash)
-        object.__setattr__(self, "grid_width", grid_width)
-        object.__setattr__(self, "domain_min", domain_min)
-        object.__setattr__(self, "domain_max", domain_max)
-        object.__setattr__(self, "nice", nice)
-        object.__setattr__(self, "zero", zero)
-        object.__setattr__(self, "label_padding", label_padding)
-        object.__setattr__(self, "grid_opacity", grid_opacity)
-        object.__setattr__(self, "orient", orient)
-        object.__setattr__(self, "translate", translate)
-        object.__setattr__(self, "min_band", min_band)
-        object.__setattr__(self, "max_band", max_band)
-        object.__setattr__(self, "tick_extra", tick_extra)
-        object.__setattr__(self, "tick_min_step", tick_min_step)
-        object.__setattr__(self, "title_orient", title_orient)
-        object.__setattr__(self, "zindex", zindex)
+        _validate_config_color("AxisConfig", "label_color", self.label_color)
+        _validate_config_color("AxisConfig", "title_color", self.title_color)
+        _validate_config_color("AxisConfig", "domain_color", self.domain_color)
+        _validate_config_color("AxisConfig", "grid_color", self.grid_color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values.

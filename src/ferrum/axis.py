@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import InitVar, dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
@@ -62,7 +62,7 @@ _UNSET_DEFAULTED_FIELDS: frozenset[str] = frozenset(
 _PYTHON_ONLY_FIELDS: frozenset[str] = frozenset({"label_map"})
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
 class Axis:
     """Per-channel axis configuration.
 
@@ -209,108 +209,47 @@ class Axis:
     values: list | None = None
     zindex: int | None = None
     label_map: dict[str, str] | None = None
+    # Deprecated aliases — accepted with a DeprecationWarning, resolved in
+    # __post_init__ into min_band/max_band. InitVar so the generated __init__
+    # accepts them as constructor kwargs without them becoming real fields
+    # (dataclasses.fields() excludes InitVars, so this is invisible to
+    # to_dict()/repr/eq/replace — see __post_init__ below).
+    min_extent: InitVar[object] = _MISSING
+    max_extent: InitVar[object] = _MISSING
 
-    # ------------------------------------------------------------------
-    # Custom __init__ — accepts deprecated min_extent=/max_extent= aliases
-    # and maps them to the canonical min_band=/max_band= fields.
-    # The dataclass is declared with init=False so we own the full init.
-    # We use object.__setattr__ because the dataclass is frozen=True.
-    # ------------------------------------------------------------------
-
-    def __init__(
-        self,
-        title: TitleParam = _UNSET,
-        orient: str | None = None,
-        ticks: "bool | None | _UnsetType" = _UNSET,
-        tick_count: int | None = None,
-        tick_extra: "bool | None | _UnsetType" = _UNSET,
-        tick_min_step: float | None = None,
-        grid: "bool | None | _UnsetType" = _UNSET,
-        grid_dash: list[float] | None = None,
-        grid_width: float | None = None,
-        grid_color: str | None = None,
-        grid_opacity: float | None = None,
-        labels: "bool | None | _UnsetType" = _UNSET,
-        label_angle: float | None = None,
-        label_flush: "bool | None | _UnsetType" = _UNSET,
-        label_overlap: "str | None | _UnsetType" = _UNSET,
-        label_format: str | None = None,
-        label_format_type: str | None = None,
-        label_font_size: float | None = None,
-        label_color: str | None = None,
-        domain: "bool | None | _UnsetType" = _UNSET,
-        domain_width: float | None = None,
-        domain_color: str | None = None,
-        offset: float | None = None,
-        translate: float | None = None,
-        min_band: float | None = None,
-        max_band: float | None = None,
-        title_orient: str | None = None,
-        title_font_size: float | None = None,
-        title_color: str | None = None,
-        title_padding: float | None = None,
-        values: list | None = None,
-        zindex: int | None = None,
-        label_map: dict[str, str] | None = None,
-        # Deprecated aliases — accepted with a DeprecationWarning.
-        min_extent: object = _MISSING,
-        max_extent: object = _MISSING,
-    ) -> None:
+    def __post_init__(self, min_extent: object, max_extent: object) -> None:
         # Resolve deprecated aliases (min_extent → min_band, max_extent → max_band)
         # through the shared canonical helper so all three surfaces stay in sync.
-        min_band = _resolve_band_alias(
-            min_band,
-            min_extent,
-            canonical_name="min_band",
-            alias_name="min_extent",
-            owner="Axis",
-            stacklevel=2,
+        # stacklevel=4 accounts for the frame chain from warnings.warn() (inside
+        # _resolve_band_alias) to the caller: _resolve_band_alias <- this
+        # method (__post_init__) <- the generated __init__ <- the caller's line.
+        object.__setattr__(
+            self,
+            "min_band",
+            _resolve_band_alias(
+                self.min_band,
+                min_extent,
+                canonical_name="min_band",
+                alias_name="min_extent",
+                owner="Axis",
+                stacklevel=4,
+            ),
         )
-        max_band = _resolve_band_alias(
-            max_band,
-            max_extent,
-            canonical_name="max_band",
-            alias_name="max_extent",
-            owner="Axis",
-            stacklevel=2,
+        object.__setattr__(
+            self,
+            "max_band",
+            _resolve_band_alias(
+                self.max_band,
+                max_extent,
+                canonical_name="max_band",
+                alias_name="max_extent",
+                owner="Axis",
+                stacklevel=4,
+            ),
         )
 
-        if not is_unspecified(label_overlap):
-            validate_label_overlap("Axis.label_overlap", label_overlap)  # type: ignore[arg-type]
-
-        object.__setattr__(self, "title", title)
-        object.__setattr__(self, "orient", orient)
-        object.__setattr__(self, "ticks", ticks)
-        object.__setattr__(self, "tick_count", tick_count)
-        object.__setattr__(self, "tick_extra", tick_extra)
-        object.__setattr__(self, "tick_min_step", tick_min_step)
-        object.__setattr__(self, "grid", grid)
-        object.__setattr__(self, "grid_dash", grid_dash)
-        object.__setattr__(self, "grid_width", grid_width)
-        object.__setattr__(self, "grid_color", grid_color)
-        object.__setattr__(self, "grid_opacity", grid_opacity)
-        object.__setattr__(self, "labels", labels)
-        object.__setattr__(self, "label_angle", label_angle)
-        object.__setattr__(self, "label_flush", label_flush)
-        object.__setattr__(self, "label_overlap", label_overlap)
-        object.__setattr__(self, "label_format", label_format)
-        object.__setattr__(self, "label_format_type", label_format_type)
-        object.__setattr__(self, "label_font_size", label_font_size)
-        object.__setattr__(self, "label_color", label_color)
-        object.__setattr__(self, "domain", domain)
-        object.__setattr__(self, "domain_width", domain_width)
-        object.__setattr__(self, "domain_color", domain_color)
-        object.__setattr__(self, "offset", offset)
-        object.__setattr__(self, "translate", translate)
-        object.__setattr__(self, "min_band", min_band)
-        object.__setattr__(self, "max_band", max_band)
-        object.__setattr__(self, "title_orient", title_orient)
-        object.__setattr__(self, "title_font_size", title_font_size)
-        object.__setattr__(self, "title_color", title_color)
-        object.__setattr__(self, "title_padding", title_padding)
-        object.__setattr__(self, "values", values)
-        object.__setattr__(self, "zindex", zindex)
-        object.__setattr__(self, "label_map", label_map)
+        if not is_unspecified(self.label_overlap):
+            validate_label_overlap("Axis.label_overlap", self.label_overlap)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for the renderer, omitting only unset/None/Python-only fields.

@@ -57,9 +57,13 @@ def _resolve_band_alias(
         (e.g. ``"Axis"``, ``"AxisConfig"``, ``"configure_axis"``).  Defaults to
         ``"configure_axis"`` for backward compatibility with the mixin call site.
     stacklevel
-        The :func:`warnings.warn` ``stacklevel``.  Direct constructors
-        (``Axis``/``AxisConfig``) pass ``2`` (one frame to the caller); the
-        mixin method passes ``3`` (caller → ``configure_axis`` → helper).
+        The :func:`warnings.warn` ``stacklevel``, passed straight through
+        (this function does not add its own frame).  ``Axis``/``AxisConfig``
+        resolve the alias from their generated dataclass ``__post_init__``,
+        so their call sites pass ``4`` (caller → generated ``__init__`` →
+        ``__post_init__`` → this helper); the mixin method calls this helper
+        directly from ``configure_axis`` and passes the default ``3``
+        (caller → ``configure_axis`` → this helper).
 
     Returns
     -------
@@ -256,7 +260,7 @@ class ConfigureMixin:
         ``configure(axis_y=AxisConfig(orient="right"))`` or per-channel
         ``fm.X("f", axis=fm.Axis(orient="top"))``.
         """
-        from ferrum.configure import AxisConfig, Configure
+        from ferrum.configure import AxisConfig, Configure, _warn_axis_xy_deprecated
 
         # Resolve deprecated aliases before forwarding to AxisConfig.
         min_band = _resolve_band_alias(
@@ -266,9 +270,25 @@ class ConfigureMixin:
             max_band, max_extent, canonical_name="max_band", alias_name="max_extent"
         )
 
+        # Warn here, directly, attributed to this method's caller
+        # (stacklevel=2 — a direct call to the helper, the same depth
+        # AxisConfig's own hand-written __init__ used to call it at before
+        # #149's generated-__init__ refactor). x/y are never forwarded to
+        # AxisConfig below: they are vestigial no-op flags (deprecated, no
+        # effect — see the docstring above), nothing in this codebase reads
+        # `.x`/`.y` off a config `configure_axis` produced, and forwarding
+        # them would make AxisConfig's own identical check re-fire on the
+        # same input one frame deeper than a direct AxisConfig(...) call —
+        # a different call depth needing a different stacklevel, and no
+        # single constant on AxisConfig can serve both shapes (LB-149-b's
+        # fix showed the same thing for the band alias). Deliberately does
+        # not use the warnings module's own scoped-suppression context
+        # manager either (mutates process-global filter state, not
+        # thread-safe, resets every module's warning dedup registry on
+        # exit) — this method never touches that state.
+        _warn_axis_xy_deprecated(x=x, y=y, stacklevel=2)
+
         cfg = AxisConfig(
-            x=x,
-            y=y,
             label_angle=label_angle,
             label_font_size=label_font_size,
             label_color=label_color,

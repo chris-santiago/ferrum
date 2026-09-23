@@ -24,25 +24,23 @@ module carries three legs:
    manifest is complete relative to the Rust struct fields, not relative to
    Python) — see the spec-reviewer's ``cannot_verify[0]`` and the
    quality-reviewer's ``lossiness[1]`` findings on task 2, cycle 2.
-3. **``object.__setattr__`` mirror completeness** (2026-09-03, design-review
-   remediation, finding F3): ``AxisConfig``/``Axis`` are
-   ``dataclass(init=False)`` with hand-written ``__init__``s that mirror
-   every field three times (field declaration, ``__init__`` parameter,
-   ``object.__setattr__`` line); a dropped ``object.__setattr__`` line
-   silently leaves that field at its class default. This leg mechanically
-   derives the field list, the constructor's parameters, and the constructor
-   source's ``object.__setattr__`` calls and asserts all three agree, so a
-   missing mirror line fails loudly instead of silently. This is a cheap
-   structural guard, not the full ``init=False`` refactor (a separate filed
-   follow-up).
+3. **Generated ``__init__``, not the hand-written mirror** (originally
+   2026-09-03 design-review remediation, finding F3, as a scrape-based
+   structural guard over a hand-written ``init=False`` mirror; rewritten
+   2026-09-22, ``#149``, once ``AxisConfig``/``Axis`` moved onto the
+   *generated* dataclass ``__init__`` with ``min_extent``/``max_extent`` as
+   ``dataclasses.InitVar`` fields resolved in ``__post_init__``). A missing
+   field assignment is now structurally impossible rather than merely
+   detected, so this leg asserts the shape stays that way: no ``init=False``
+   escape hatch, and the constructor's parameters are exactly
+   ``fields() | {min_extent, max_extent}``.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
-import re
-from dataclasses import dataclass, fields
+from dataclasses import InitVar, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -837,38 +835,30 @@ def test_manifest_twin_is_red_provable():
 
 
 # ---------------------------------------------------------------------------
-# Leg 3 — object.__setattr__ mirror completeness (2026-09-03, design-review
-# remediation, finding F3).
+# Leg 3 — generated __init__, not the hand-written mirror (#149, 2026-09-22).
 #
-# `AxisConfig` and `Axis` are `dataclass(init=False)` with hand-written
-# `__init__`s that mirror every field three times: field declaration,
-# `__init__` parameter, and `object.__setattr__(self, "<name>", <name>)`
-# line. A dropped `object.__setattr__` line silently leaves that field at its
-# class default and the caller's value vanishes — the precise "accepted on
-# one surface, silently lost on another" failure class legs 1/2 above exist
-# to catch, reproduced structurally inside these two classes' own
-# hand-written constructors. This leg does not attempt the full `init=False`
-# refactor (a separate filed follow-up); it is a cheap structural guard that
-# mechanically derives the field list, the constructor's parameter list, and
-# the constructor source's `object.__setattr__` calls, and asserts all three
-# agree.
+# `AxisConfig` and `Axis` used to be `dataclass(init=False)` with a
+# hand-written `__init__` that mirrored every field three times: field
+# declaration, `__init__` parameter, and
+# `object.__setattr__(self, "<name>", <name>)` line. A dropped
+# `object.__setattr__` line silently left that field at its class default —
+# the previous shape of this leg mechanically scraped the constructor source
+# to catch that. Both classes now construct through the *generated*
+# dataclass `__init__`: `min_extent`/`max_extent` are declared as
+# `dataclasses.InitVar` fields, resolved into the canonical
+# `min_band`/`max_band` fields inside `__post_init__`. A missing
+# `object.__setattr__` for a real field is now structurally impossible (the
+# generated `__init__` assigns every field itself) rather than merely
+# detected after the fact, so this leg no longer scrapes source; it instead
+# guards against the anti-pattern being reintroduced — `init=False` coming
+# back, or a field/alias silently losing its `__init__` parameter.
 # ---------------------------------------------------------------------------
 
-_SETATTR_NAME_RE = re.compile(r'object\.__setattr__\(\s*self\s*,\s*"([^"]+)"')
-
-
-def _setattr_names(cls: type) -> set[str]:
-    """Return the field names ``object.__setattr__`` writes inside ``cls.__init__``."""
-    source = inspect.getsource(cls.__init__)
-    return set(_SETATTR_NAME_RE.findall(source))
-
-
 # Each entry: (dataclass, alias-only __init__ params). Alias-only params
-# (the deprecated `min_extent=`/`max_extent=` spellings) resolve into a
-# different canonical field (`min_band`/`max_band`) before construction and
-# so never get their own `object.__setattr__` line or dataclass field of
-# their own — the same documented-exception shape as `_MANIFEST`'s
-# `method_only` above.
+# (the deprecated `min_extent=`/`max_extent=` spellings) are `InitVar`s that
+# resolve into a different canonical field (`min_band`/`max_band`) inside
+# `__post_init__` and so are excluded from `dataclasses.fields()` — the same
+# documented-exception shape as `_MANIFEST`'s `method_only` above.
 _SETATTR_MIRROR_TARGETS = (
     (AxisConfig, frozenset({"min_extent", "max_extent"})),
     (Axis, frozenset({"min_extent", "max_extent"})),
@@ -881,53 +871,71 @@ _SETATTR_MIRROR_TARGETS = (
     ids=[cls.__name__ for cls, _ in _SETATTR_MIRROR_TARGETS],
 )
 def test_setattr_mirrors_every_field(config_cls, alias_only_params):
-    """Every dataclass field has exactly one ``object.__setattr__`` line in
-    ``__init__``, and every constructor parameter maps to a real field
-    (modulo the documented deprecated-alias params)."""
+    """``config_cls`` constructs through the generated dataclass ``__init__``
+    (no hand-written ``init=False`` escape hatch), and every constructor
+    parameter is exactly the dataclass fields plus the documented
+    deprecated-alias ``InitVar`` params — no field or alias can silently
+    lose its ``__init__`` parameter."""
+    assert config_cls.__dataclass_params__.init, (
+        f"{config_cls.__name__} must construct through the generated "
+        "dataclass __init__ (init=False reintroduces the hand-written-mirror "
+        "failure mode this leg used to scrape for)"
+    )
+
     dataclass_fields = {f.name for f in fields(config_cls)}
-    setattr_names = _setattr_names(config_cls)
     params = {n for n in inspect.signature(config_cls.__init__).parameters if n != "self"}
 
-    missing_setattr = dataclass_fields - setattr_names
-    assert not missing_setattr, (
-        f"{config_cls.__name__}.__init__ has no object.__setattr__ line for "
-        f"field(s) {sorted(missing_setattr)} — a caller's value for this "
-        "field would silently vanish, left at the class default"
-    )
-
-    orphaned_setattr = setattr_names - dataclass_fields
-    assert not orphaned_setattr, (
-        f"{config_cls.__name__}.__init__ has object.__setattr__ line(s) for "
-        f"non-field name(s) {sorted(orphaned_setattr)}"
-    )
-
-    missing_param = dataclass_fields - params - alias_only_params
-    assert not missing_param, (
-        f"{config_cls.__name__} field(s) {sorted(missing_param)} have no "
-        "matching __init__ parameter"
+    assert params == dataclass_fields | alias_only_params, (
+        f"{config_cls.__name__}.__init__ parameters {sorted(params)} must equal "
+        f"fields() {sorted(dataclass_fields)} plus the alias-only params "
+        f"{sorted(alias_only_params)}"
     )
 
 
 def test_setattr_mirror_check_is_red_provable():
-    """``_setattr_names`` discriminates rather than vacuously passing.
+    """The leg-3 assertions discriminate rather than vacuously passing.
 
-    A synthetic frozen, ``init=False`` dataclass whose hand-written
-    ``__init__`` drops one ``object.__setattr__`` line must surface as a
-    gap — the RED proof this leg's completeness claim rests on.
+    A synthetic frozen, ``init=False`` dataclass — the exact anti-pattern
+    this leg guards against reintroducing — must fail the ``init`` check.
+
+    A synthetic generated-``__init__`` dataclass, carrying the *same* two
+    alias-only ``InitVar`` params ``AxisConfig``/``Axis`` do, must fail the
+    parameter-equality check when a real field silently loses its
+    ``__init__`` parameter (``field(init=False)`` — the exact guarded
+    failure mode: a field the generated ``__init__`` no longer assigns).
+    Carrying the aliases on the synthetic class matters: without them, the
+    equality check would fail merely because the aliases are *absent*,
+    proving nothing about whether a genuinely drifted field is what the
+    check catches.
     """
 
     @dataclass(frozen=True, init=False)
-    class _SyntheticAxisLike:
+    class _SyntheticHandInit:
         kept: int | None = None
-        dropped: int | None = None  # __init__ below never assigns this
 
-        def __init__(self, kept: int | None = None, dropped: int | None = None) -> None:
+        def __init__(self, kept: int | None = None) -> None:
             object.__setattr__(self, "kept", kept)
-            # BUG (deliberate, for this test): no object.__setattr__ for "dropped".
 
-    dataclass_fields = {f.name for f in fields(_SyntheticAxisLike)}
-    setattr_names = _setattr_names(_SyntheticAxisLike)
-    assert dataclass_fields - setattr_names == {"dropped"}
+    assert not _SyntheticHandInit.__dataclass_params__.init
+
+    _synthetic_missing = object()
+
+    @dataclass(frozen=True)
+    class _SyntheticGeneratedInit:
+        kept: int | None = None
+        dropped: int | None = field(default=None, init=False)  # loses its __init__ param
+        min_extent: InitVar[object] = _synthetic_missing
+        max_extent: InitVar[object] = _synthetic_missing
+
+    alias_only = frozenset({"min_extent", "max_extent"})
+    params = {
+        n for n in inspect.signature(_SyntheticGeneratedInit.__init__).parameters if n != "self"
+    }
+    dataclass_fields = {f.name for f in fields(_SyntheticGeneratedInit)}
+    assert params != dataclass_fields | alias_only
+    # And specifically because of "dropped", not because the aliases are
+    # missing (they are present in both sides of the comparison above).
+    assert dataclass_fields - params - alias_only == {"dropped"}
 
 
 # ---------------------------------------------------------------------------
