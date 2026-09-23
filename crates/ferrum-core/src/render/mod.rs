@@ -490,6 +490,44 @@ pub enum RenderError {
     /// which used to `filter_map(...ok())` bad stops out with no warning at
     /// all — is folded in here as a sibling defect of the same root cause.
     ColorRangeParseFailure { entry: String },
+    /// A `Shape(scale=...)` explicit range entry does not match the fixed
+    /// point-shape name table
+    /// ([`marks::point::shape_from_str_strict`](crate::render::marks::point::shape_from_str_strict),
+    /// no circle fallback) (#123, spec §4.9). `entry` is the offending entry,
+    /// rendered via [`crate::scale::ordinal::OrdinalRangeValue`]'s `Display`
+    /// regardless of whether it arrived as a string or (malformed) number —
+    /// mirroring [`Self::ColorRangeParseFailure`]'s all-or-nothing rule: one
+    /// bad entry refuses the whole range rather than silently drawing every
+    /// unmatched glyph as a circle. `Shape(scale=…)`'s primary gate is
+    /// Python's own eager `_VALID_POINT_SHAPES` check at construction
+    /// (`ferrum.encoding.appearance.Shape._validate`); this is the defense
+    /// for a hand-built spec that bypasses it (`ChartSpec::from_json` and
+    /// similar raw-spec routes, the same audience
+    /// [`marks::point::shape_from_str`](crate::render::marks::point::shape_from_str)'s
+    /// own doc comment names) — including a range that mixes in a numeric
+    /// entry, which used to make the string-range parse quietly return
+    /// `None` and fall through to the default palette rather than refuse
+    /// (rust-quality-review cycle-1 finding).
+    ShapeRangeEntryUnrecognized { entry: String },
+    /// A `StrokeDash(scale=...)` carries an explicit `range` at all — string,
+    /// numeric, or mixed (#123, spec §4.9). That channel's output is a fixed
+    /// 4-slot GPU dash-index palette
+    /// ([`crate::render::draw::DASH_PALETTE`]), not a value a scale can
+    /// redeclare, so ANY explicit range refuses outright rather than being
+    /// parsed entry-by-entry — there is no "one bad entry" to name, every
+    /// entry is equally unsupported, unlike [`Self::ShapeRangeEntryUnrecognized`].
+    /// `entries` is the received range verbatim (each item rendered via
+    /// [`crate::scale::ordinal::OrdinalRangeValue`]'s `Display`), so the
+    /// message still names the value received (spec-reviewer cycle-2
+    /// finding: a fieldless variant here missed the "names the public entry
+    /// AND the value received" rule item 1 already applied on the Python
+    /// side — the same gap cycle 1's `entry: "range"` sentinel had before the
+    /// variant split). An explicit `StrokeDash(scale=...)` range never
+    /// reaches this path via the public Python API — Python's own
+    /// `StrokeDash._validate` refuses it at construction, naming the fixed
+    /// palette — but a hand-built spec can still carry one, and it must
+    /// refuse rather than be silently ignored.
+    StrokeDashRangeUnsupported { entries: Vec<String> },
     /// A time-typed format (`label_format="%b %Y"`, a preset like
     /// `"date_iso"` that resolves to one, or a `%`-free spec declared
     /// `format_type="time"`) was applied where the value it formats is not
@@ -712,7 +750,12 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::BreakAxisIncompatibleCoord { .. }
         // `#172`(1): carries a layer index, a coord constructor and the
         // panel-scoped property it declared — no channel token either.
-        | RenderError::LayerCoordUnplaceable { .. }) => other,
+        | RenderError::LayerCoordUnplaceable { .. }
+        // #123: neither variant carries a positional coordinate channel
+        // token (an entry string, or a list of them) — nothing here to
+        // un-flip, same as `ColorRangeParseFailure` above.
+        | RenderError::ShapeRangeEntryUnrecognized { .. }
+        | RenderError::StrokeDashRangeUnsupported { .. }) => other,
     }
 }
 
@@ -918,6 +961,19 @@ impl std::fmt::Display for RenderError {
             Self::ColorRangeParseFailure { entry } => write!(
                 f,
                 "could not parse color '{entry}' in an explicit color range"
+            ),
+            Self::StrokeDashRangeUnsupported { entries } => {
+                let received = entries.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(", ");
+                write!(
+                    f,
+                    "stroke_dash(scale=...) does not honor an explicit range (received [{received}]): \
+                     stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can \
+                     redeclare"
+                )
+            }
+            Self::ShapeRangeEntryUnrecognized { entry } => write!(
+                f,
+                "shape(scale=...) range entry '{entry}' is not a recognized shape name"
             ),
             Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);

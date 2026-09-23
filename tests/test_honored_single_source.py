@@ -25,7 +25,6 @@ from ferrum.encoding import _apply_channel_aliases
 from ferrum.encoding._aliases import apply_channel_aliases
 from ferrum.encoding._honored import (
     APPEARANCE_BASE,
-    APPEARANCE_FULL,
     APPEARANCE_SORT,
     BARE,
     FACET,
@@ -50,7 +49,11 @@ _REPRESENTATIVE_KWARGS = {
     "scale": fm.LinearScale(),
     "title": "T",
     "axis": {"grid": False},
-    "legend": {"orient": "top"},
+    # No "orient" key (#123, 2026-09-23): an aux-legend channel (Size, Shape,
+    # StrokeDash) refuses a legend value whose orient= is anything other than
+    # "none", so a shared representative value used across every row must
+    # stay orient-free to keep exercising those rows' legend emission.
+    "legend": {"title": "T"},
     "sort": ["a", "b"],
     "stack": "zero",
     "impute": {"value": 0},
@@ -192,8 +195,20 @@ _ROLE_CONTRACT = [
             "legend",
         },
     ),
-    (fm.FillOpacity, APPEARANCE_FULL, {"field", "type_", "scale", "title", "legend"}),
-    (fm.Angle, APPEARANCE_BASE, {"field", "type_", "legend"}),
+    # FillOpacity and Angle both have `_legend_surface == "none"` (#123,
+    # 2026-09-23): any truthy `legend=` value is refused outright (not just
+    # an orient sub-key), so `legend` is excluded from the representative
+    # construction below -- unlike every other row, this channel's `legend`
+    # key never reaches the wire at all, which the shorter expected_keys
+    # documents. FillOpacity's role is also its own derived _honored_kwargs,
+    # not the bare APPEARANCE_FULL constant, since APPEARANCE_FULL still
+    # carries "title" (Size's role) and FillOpacity no longer does.
+    (
+        fm.FillOpacity,
+        fm.FillOpacity._honored_kwargs - {"legend"},
+        {"field", "type_", "scale"},
+    ),
+    (fm.Angle, APPEARANCE_BASE - {"legend"}, {"field", "type_"}),
     (fm.Text, TEXT_FORMATTED, {"field", "type_", "format", "format_type"}),
     (
         fm.TooltipField,

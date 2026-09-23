@@ -559,57 +559,50 @@ def test_encode_facet_bare_without_columns_still_preserves_prior_ncols():
     assert c._facet.ncols == 3
 
 
-def test_facet_row_columns_still_warns_and_drops():
-    """FacetRow(columns=...) stays a warn-and-noop: F-L06-02 scopes `columns` to Facet only."""
+def test_facet_row_columns_now_refuses():
+    """FacetRow(columns=...) refuses at construction (#123, 2026-09-23, wave 6B).
+
+    Was a warn-and-noop (F-L06-02 scoped `columns` to Facet only); flipped to
+    the same typed refusal every other permanently-inert appearance kwarg
+    gets, so the "accepted but structurally impossible" table has one
+    policy (user ruling Q2) instead of warn here and refuse elsewhere.
+    """
     _, df = _facet_columns_test_data()
     reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        c = Chart(df).mark_point().encode(x="x", y="y", facet_row=fm.FacetRow("grp", columns=2))
-    assert any("columns" in str(rec.message) for rec in w), (
-        "FacetRow(columns=...) must still warn (grid-mode channels don't honor columns)"
-    )
-    assert c._facet.ncols is None
+    with pytest.raises(ValueError, match=r"FacetRow\(columns=2\) is grid-mode-inapplicable"):
+        Chart(df).mark_point().encode(x="x", y="y", facet_row=fm.FacetRow("grp", columns=2))
 
 
-def test_facet_col_columns_still_warns_and_drops():
-    """FacetCol(columns=...) stays a warn-and-noop: F-L06-02 scopes `columns` to Facet only."""
+def test_facet_col_columns_now_refuses():
+    """FacetCol(columns=...) refuses at construction (#123, 2026-09-23, wave 6B). See above."""
     _, df = _facet_columns_test_data()
     reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        c = Chart(df).mark_point().encode(x="x", y="y", facet_col=fm.FacetCol("grp", columns=2))
-    assert any("columns" in str(rec.message) for rec in w), (
-        "FacetCol(columns=...) must still warn (grid-mode channels don't honor columns)"
-    )
-    assert c._facet.ncols is None
+    with pytest.raises(ValueError, match=r"FacetCol\(columns=2\) is grid-mode-inapplicable"):
+        Chart(df).mark_point().encode(x="x", y="y", facet_col=fm.FacetCol("grp", columns=2))
 
 
-def test_facet_row_columns_warning_states_permanent_fact_not_future_phase():
+def test_facet_row_columns_refusal_states_permanent_fact_not_future_phase():
     """FacetRow(columns=...) states the true, permanent reason -- not the
     generic "planned for a future Phase" text, which would falsely imply
     row-faceting might someday honor a wrap-count it structurally has no use
-    for (#240 defect 2, 2026-09-11 wave-1 hardening)."""
+    for (#240 defect 2, 2026-09-11 wave-1 hardening; flipped warn->refuse
+    2026-09-23, #123)."""
     reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError) as excinfo:
         fm.FacetRow("grp", columns=2)
-    assert len(w) == 1
-    msg = str(w[0].message)
+    msg = str(excinfo.value)
     assert "planned for a future Phase" not in msg, f"still lying about columns=: {msg!r}"
     assert "grid-mode-inapplicable" in msg or "permanent" in msg, (
         f"message must state the permanent-fact reason: {msg!r}"
     )
 
 
-def test_facet_col_columns_warning_states_permanent_fact_not_future_phase():
+def test_facet_col_columns_refusal_states_permanent_fact_not_future_phase():
     """Companion to the FacetRow case above for FacetCol."""
     reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError) as excinfo:
         fm.FacetCol("grp", columns=2)
-    assert len(w) == 1
-    msg = str(w[0].message)
+    msg = str(excinfo.value)
     assert "planned for a future Phase" not in msg, f"still lying about columns=: {msg!r}"
     assert "grid-mode-inapplicable" in msg or "permanent" in msg, (
         f"message must state the permanent-fact reason: {msg!r}"

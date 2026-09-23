@@ -539,6 +539,430 @@ fn shape_sort_missing_field_emits_warning_not_panic() {
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
 }
 
+// --- #123 D1: Shape/StrokeDash `scale=` domain+range honored (Q1) ---
+
+/// Helper: build a spec with a shape encoding carrying an explicit `scale=`.
+fn make_spec_with_shape_scale(scale: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec { field: "species".into(), type_: None, scale, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Helper: build a spec with a stroke_dash encoding carrying an explicit `scale=`.
+fn make_spec_with_stroke_dash_scale(scale: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            stroke_dash: Some(EncodingSpec {
+                field: "level".into(),
+                type_: None,
+                scale,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Three species rows in first-appearance order `["cat", "bird", "dog"]`.
+fn species_batch() -> RecordBatch {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap()
+}
+
+fn ordinal_scale(domain: Option<Vec<&str>>, range: Option<Vec<&str>>) -> crate::spec::encoding::ScaleSpec {
+    let mut json = serde_json::json!({"type": "ordinal"});
+    if let Some(d) = domain {
+        json["domain"] = serde_json::json!(d);
+    }
+    if let Some(r) = range {
+        json["range"] = serde_json::json!(r);
+    }
+    serde_json::from_value(json).expect("ordinal scale spec must deserialize")
+}
+
+/// #123 D1: an explicit `scale.domain` reorders the domain and, with it,
+/// which glyph each category gets — unconditionally, unlike color's
+/// range-gated D1 (no `range` is set here at all).
+#[test]
+fn shape_scale_explicit_domain_reassigns_glyph_assignment() {
+    let batch = species_batch();
+    let outputs = std::collections::HashMap::new();
+    let baseline_spec = make_spec_with_shape_scale(None);
+    let (baseline, _) = build_shape_scale(&baseline_spec.encoding, &batch, &outputs, false, false).unwrap();
+    let baseline = baseline.unwrap();
+    assert_eq!(baseline.domain, vec!["cat", "bird", "dog"], "sanity: first-appearance order");
+
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["dog", "bird", "cat"]), None)));
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    assert_eq!(scale.domain, vec!["dog", "bird", "cat"], "declared domain wins over first-appearance order");
+    // dog is now first -> circle; cat (was first, circle) is now last -> cross.
+    assert_eq!(scale.lookup("dog"), Some(ShapeKind::Circle));
+    assert_eq!(scale.lookup("cat"), Some(ShapeKind::Cross));
+    assert_ne!(scale.lookup("cat"), baseline.lookup("cat"), "glyph assignment must change");
+}
+
+/// #123 D1: an explicit `scale.range` of shape names assigns glyphs by name
+/// (cycling positionally against the domain) instead of the fixed
+/// `SHAPE_PALETTE` order.
+#[test]
+fn shape_scale_explicit_range_selects_the_named_glyphs() {
+    let batch = species_batch();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(
+        Some(vec!["cat", "bird", "dog"]),
+        Some(vec!["square", "cross", "diamond"]),
+    )));
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
+    assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
+    assert_eq!(scale.lookup("cat"), Some(ShapeKind::Square));
+    assert_eq!(scale.lookup("bird"), Some(ShapeKind::Cross));
+    assert_eq!(scale.lookup("dog"), Some(ShapeKind::Diamond));
+}
+
+/// #123: an unrecognized range entry refuses with
+/// `RenderError::ShapeRangeEntryUnrecognized`, naming the entry, rather than
+/// silently drawing it as a circle. This is the hand-built-spec defense
+/// behind Python's own eager `_VALID_POINT_SHAPES` gate at
+/// `Shape(scale=...)` construction.
+#[test]
+fn shape_scale_unknown_range_entry_refuses() {
+    let batch = species_batch();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(
+        Some(vec!["cat", "bird", "dog"]),
+        Some(vec!["square", "hexagon", "diamond"]),
+    )));
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    assert_eq!(
+        err,
+        crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "hexagon".to_string() },
+        "must refuse naming the offending entry"
+    );
+}
+
+/// #123 (rust-quality-review cycle-1 finding): a hand-built range that mixes
+/// in a NON-STRING entry (e.g. a number where a shape name belongs) must
+/// also refuse — `explicit_ordinal_string_range` would return `None` for
+/// this range (not all-string) and silently fall through to the default
+/// palette; `build_shape_scale` must instead read
+/// [`super::domain::explicit_ordinal_range`] (every declared entry) so a
+/// malformed-but-declared range is distinguishable from an absent one.
+#[test]
+fn shape_scale_non_string_range_entry_refuses_rather_than_silently_dropping() {
+    let batch = species_batch();
+    let outputs = std::collections::HashMap::new();
+    let scale: crate::spec::encoding::ScaleSpec = serde_json::from_value(serde_json::json!({
+        "type": "ordinal",
+        "domain": ["cat", "bird", "dog"],
+        "range": ["square", 4, "diamond"],
+    }))
+    .expect("ordinal scale spec must deserialize");
+    let spec = make_spec_with_shape_scale(Some(scale));
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    assert_eq!(
+        err,
+        crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "4".to_string() },
+        "a numeric range entry must refuse, not silently fall through to the default palette"
+    );
+}
+
+/// #123: a range shorter than the resolved domain cycles positionally
+/// (`range[i % range.len()]`), mirroring `SHAPE_PALETTE`'s own wraparound —
+/// the explicit-range path is a drop-in replacement for the default
+/// palette's indexing rule, not a different one.
+#[test]
+fn shape_scale_range_shorter_than_domain_cycles() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    // 4 distinct categories, a 2-entry range.
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog", "fox"])),
+        ],
+    )
+    .unwrap();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(
+        Some(vec!["cat", "bird", "dog", "fox"]),
+        Some(vec!["square", "cross"]),
+    )));
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
+    assert_eq!(scale.lookup("cat"), Some(ShapeKind::Square));
+    assert_eq!(scale.lookup("bird"), Some(ShapeKind::Cross));
+    assert_eq!(scale.lookup("dog"), Some(ShapeKind::Square), "cycles back to range[0]");
+    assert_eq!(scale.lookup("fox"), Some(ShapeKind::Cross), "cycles back to range[1]");
+}
+
+/// #123: a range with NO declared domain still resolves — the domain comes
+/// from data first-appearance order (exactly as the unscaled default path
+/// does), and the range assigns positionally against that data-derived
+/// order, not against any name-to-shape mapping.
+#[test]
+fn shape_scale_range_with_no_declared_domain_uses_data_order() {
+    let batch = species_batch(); // first-appearance order: cat, bird, dog
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(
+        None,
+        Some(vec!["diamond", "cross", "square"]),
+    )));
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
+    assert_eq!(scale.domain, vec!["cat", "bird", "dog"], "domain falls back to data first-appearance order");
+    assert_eq!(scale.lookup("cat"), Some(ShapeKind::Diamond));
+    assert_eq!(scale.lookup("bird"), Some(ShapeKind::Cross));
+    assert_eq!(scale.lookup("dog"), Some(ShapeKind::Square));
+}
+
+/// #123: an explicit `scale.domain` composes with `sort=` rather than one
+/// overriding the other — `sorted_categorical_domain` applies `sort` on top
+/// of WHATEVER domain it resolved, declared or data-derived.
+///
+/// Uses the explicit-ARRAY sort form, not `"ascending"`/`"descending"`: an
+/// alphabetical sort re-derives the final order from the domain's SET of
+/// values alone, so it produces the identical result whether the pre-sort
+/// domain was the declared order or the data-derived order — it cannot
+/// discriminate the two. The explicit-array form naming only a STRICT
+/// SUBSET of the domain does discriminate: values not named keep their
+/// *relative order from whatever domain was fed in*, so a declared domain
+/// with a different bird/cat relative order than the data (`cat, bird, dog`)
+/// produces a different leftover order than falling back to data order
+/// would. Declared `["dog", "bird", "cat"]`, `sort=["dog"]`: honoring the
+/// declared domain must leave `bird` before `cat` (their declared relative
+/// order); silently falling back to data order instead would leave `cat`
+/// before `bird` (the data's relative order) — `["dog", "cat", "bird"]`.
+#[test]
+fn shape_scale_explicit_domain_composes_with_sort() {
+    let batch = species_batch(); // data order: cat, bird, dog
+    let outputs = std::collections::HashMap::new();
+    // `ordinal_scale` has no `sort` slot — `sort` lives on the encoding, not
+    // the scale spec — so it is set directly on the built spec below.
+    let scale = ordinal_scale(Some(vec!["dog", "bird", "cat"]), None);
+    let mut spec = make_spec_with_shape_scale(Some(scale));
+    spec.encoding.shape.as_mut().unwrap().sort = Some(serde_json::json!(["dog"]));
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    assert_eq!(
+        scale.domain,
+        vec!["dog", "bird", "cat"],
+        "sort= must apply on top of the DECLARED domain's relative order for \
+         leftover categories, not the data-derived order"
+    );
+}
+
+/// #123: no `scale=` at all must resolve byte-identically to the pre-#123
+/// behavior — the fixed `SHAPE_PALETTE` in first-appearance order, no
+/// warnings. Guards against the D1 domain/range plumbing changing the
+/// unscaled default path.
+#[test]
+fn shape_scale_absent_is_byte_identical_to_pre_123() {
+    let batch = species_batch();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(None);
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
+    assert_eq!(scale.shapes, vec![ShapeKind::Circle, ShapeKind::Square, ShapeKind::Cross]);
+}
+
+/// #123 D1: an explicit `scale.domain` reorders the dash-pattern assignment,
+/// mirroring shape's own domain-reorder cell.
+#[test]
+fn stroke_dash_scale_explicit_domain_reassigns_pattern_assignment() {
+    let batch = appearance_batch();
+    let outputs = std::collections::HashMap::new();
+    let baseline_spec = make_spec_with_stroke_dash_scale(None);
+    let (baseline, _) =
+        build_stroke_dash_scale(&baseline_spec.encoding, &batch, &outputs, false, false).unwrap();
+    let baseline = baseline.unwrap();
+    assert_eq!(baseline.domain, vec!["low", "mid", "high"], "sanity: first-appearance order");
+
+    let spec =
+        make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["mid", "low", "high"]), None)));
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    assert_eq!(scale.domain, vec!["mid", "low", "high"], "declared domain wins over first-appearance order");
+    assert_ne!(
+        scale.dash_for("low"),
+        baseline.dash_for("low"),
+        "dash-pattern assignment must change"
+    );
+}
+
+/// #123: an explicit `scale.range` on `stroke_dash` refuses outright — that
+/// channel's output is the fixed 4-slot GPU dash palette, not a value a
+/// scale can redeclare. Python's own `StrokeDash._validate` refuses this at
+/// construction, so this exercises the hand-built-spec defense
+/// (`ChartSpec::from_json` and similar raw-spec routes).
+#[test]
+fn stroke_dash_scale_explicit_range_refuses() {
+    let batch = appearance_batch();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(None, Some(vec!["a", "b"]))));
+    let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    assert_eq!(
+        err,
+        crate::render::RenderError::StrokeDashRangeUnsupported {
+            entries: vec!["a".to_string(), "b".to_string()],
+        },
+        "must refuse, naming the received range verbatim (spec-reviewer cycle-2 finding)"
+    );
+}
+
+/// #123: no `scale=` at all must resolve byte-identically to the pre-#123
+/// behavior for stroke_dash too.
+#[test]
+fn stroke_dash_scale_absent_is_byte_identical_to_pre_123() {
+    let batch = appearance_batch();
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_stroke_dash_scale(None);
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    assert_eq!(scale.domain, vec!["low", "mid", "high"]);
+}
+
+/// #123: an explicit `scale.domain` composes with `sort=` for stroke-dash
+/// too, mirroring [`shape_scale_explicit_domain_composes_with_sort`] — the
+/// same `sorted_categorical_domain` helper both channels call.
+#[test]
+fn stroke_dash_scale_explicit_domain_composes_with_sort() {
+    let batch = appearance_batch(); // data order: low, mid, high
+    let outputs = std::collections::HashMap::new();
+    // Same explicit-array discriminator as `shape_scale_explicit_domain_composes_with_sort`
+    // (see its doc comment): `sort=["high"]` forces "high" first; whether the
+    // leftover ("mid", "low") keeps ITS DECLARED relative order or falls back
+    // to the data's relative order ("low", "mid") is what distinguishes a
+    // real domain hand-off from a silently ignored one.
+    let scale = ordinal_scale(Some(vec!["mid", "low", "high"]), None);
+    let mut spec = make_spec_with_stroke_dash_scale(Some(scale));
+    spec.encoding.stroke_dash.as_mut().unwrap().sort = Some(serde_json::json!(["high"]));
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    assert_eq!(
+        scale.domain,
+        vec!["high", "mid", "low"],
+        "sort= must apply on top of the DECLARED domain's relative order for \
+         leftover categories, not the data-derived order"
+    );
+}
+
+/// #123: pins the exact `Display` text for both new refusals (rust-quality-
+/// review cycle-1 finding 1 — the discriminating half of a "make the
+/// compiler own the split" fix is that each variant's message is checked on
+/// its own, not inferred from a shared stringly-typed fallback).
+#[test]
+fn shape_range_entry_unrecognized_display_text_is_pinned() {
+    let err = crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "hexagon".to_string() };
+    assert_eq!(err.to_string(), "shape(scale=...) range entry 'hexagon' is not a recognized shape name");
+}
+
+/// Pins the exact text for a multi-entry received range (spec-reviewer
+/// cycle-2 finding: the message must name the value received, not just that
+/// a range was declared — the same rule `ShapeRangeEntryUnrecognized`
+/// already followed).
+#[test]
+fn stroke_dash_range_unsupported_display_text_is_pinned() {
+    let err = crate::render::RenderError::StrokeDashRangeUnsupported {
+        entries: vec!["a".to_string(), "b".to_string()],
+    };
+    assert_eq!(
+        err.to_string(),
+        "stroke_dash(scale=...) does not honor an explicit range (received ['a', 'b']): \
+         stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
+    );
+}
+
+/// The empty-entries edge case still names an (empty) received list rather
+/// than panicking or omitting the parenthetical — `entries` is built from
+/// whatever `explicit_ordinal_range` returns, which is never empty in
+/// practice (`ScaleSpec::Ordinal { range: Some(r), .. } if !r.is_empty()`),
+/// but `Display` itself makes no such assumption.
+#[test]
+fn stroke_dash_range_unsupported_display_text_handles_empty_entries() {
+    let err = crate::render::RenderError::StrokeDashRangeUnsupported { entries: vec![] };
+    assert_eq!(
+        err.to_string(),
+        "stroke_dash(scale=...) does not honor an explicit range (received []): \
+         stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
+    );
+}
+
 // --- Phase 8b: y2/x2 extends the primary axis domain ---
 
 #[test]

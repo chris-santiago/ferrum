@@ -77,6 +77,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // source of truth; Python derives its key lists from these accessors.
     m.add_function(wrap_pyfunction!(render::binding::theme_known_keys, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::theme_color_keys, m)?)?;
+    // #123 close (wave 6B T8 cycle 2): the aux-legend channel names
+    // (`render/prepare/legend.rs::AUX_LEGEND_CHANNEL_NAMES`), published so
+    // `ferrum.encoding.base` reads the list instead of hand-mirroring it.
+    m.add_function(wrap_pyfunction!(render::prepare::aux_legend_channels, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

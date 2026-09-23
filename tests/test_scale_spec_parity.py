@@ -457,14 +457,30 @@ class TestEncodeSmoke:
 
 
 class TestAppearanceScaleWireGate:
-    """StrokeOpacity/StrokeDash ``scale=`` (and ``title=``) now reach the wire.
+    """StrokeOpacity/StrokeDash ``scale=`` now reaches the wire.
 
     Batch-A appearance-resolution spec §4.3 (2026-08-28): these two channels
     moved from ``APPEARANCE_BASE`` to ``APPEARANCE_FULL`` in ``_honored.py``
-    so ``scale=``/``title=`` serialize instead of warn-and-drop. Task 6
-    (concurrent, Rust) is the consumer — these tests pin the Python-side wire
-    contract independent of whether the Rust scale resolver has landed yet;
-    a render must not error either way.
+    so ``scale=`` serializes instead of warn-and-drop. Task 6 (concurrent,
+    Rust) was the consumer for StrokeOpacity, whose opacity-family scale
+    builder was already live; these tests pin the Python-side wire contract.
+
+    **Dated note (2026-09-23, #123, wave 6B):** ``title=`` is no longer part
+    of this gate for StrokeOpacity -- Opacity/FillOpacity/StrokeOpacity all
+    lost ``title`` (`tests/test_appearance_honored_kwargs.py`'s sixth
+    change): none of the three draws a legend, so ``title=`` is now a
+    construction-time refusal, not a wire admission to test here.
+    ``StrokeDash``'s ``title=`` is unaffected and still serializes (its
+    legend surface is ``"own"``). ``StrokeDash``'s ``scale=`` was wire-only
+    ("a render must not error either way") until #123 wired its *domain*
+    for real and refused an explicit *range* outright --
+    `test_stroke_dash_scale_serializes` now asserts the render, not just the
+    wire (cycle 2: was a docstring pointer to `tests/
+    test_appearance_kwarg_matrix.py` that never landed a matching assertion
+    in either place, a spec-review finding). The matrix carries the
+    complementary channel × kwarg cross-surface coverage; this class keeps
+    pinning the wire *shape* (which keys serialize) alongside one concrete
+    per-category render check.
     """
 
     @pytest.fixture()
@@ -489,19 +505,33 @@ class TestAppearanceScaleWireGate:
                 stroke_opacity=fr.StrokeOpacity(
                     "sw",
                     scale=fr.LinearScale(domain=[0.0, 1.0], range=[0.2, 1.0]),
-                    title="Opacity",
                 ),
             )
         )
         json_str = chart.to_json()
         assert '"stroke_opacity"' in json_str
         assert '"scale":{"type":"linear"' in json_str
-        assert '"title":"Opacity"' in json_str
         svg = chart.to_svg()
         assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
 
+    def test_stroke_opacity_title_is_refused(self, opacity_df: pl.DataFrame):
+        """StrokeOpacity(title=...) refuses (#123): no legend exists to label."""
+        with pytest.raises(ValueError, match=r"StrokeOpacity\(title='Opacity'\) is not supported"):
+            fr.StrokeOpacity("sw", title="Opacity")
+
     def test_stroke_dash_scale_serializes(self, opacity_df: pl.DataFrame):
-        """StrokeDash(scale=OrdinalScale(...)) reaches the wire, not dropped."""
+        """StrokeDash(scale=OrdinalScale(domain=...)) reaches the wire AND reassigns
+        which dash pattern each category renders with (#123, cycle 2: was a
+        wire-only admission -- "a render must not error either way" -- now a
+        render assertion, per spec §9's `#123` acceptance criterion).
+
+        ``domain=["b", "a"]`` reverses category "cat"'s natural first-appearance
+        order (a, b): "b" becomes the palette's solid (index 0) entry and "a"
+        becomes the first dash pattern (index 1, "6,3") -- the opposite of the
+        assignment an unreordered domain would give. ``color="cat"`` pins which
+        polyline is which category (the default categorical palette's first two
+        colors, `#2563eb`/`#dc2626`, independent of the dash scale under test).
+        """
         chart = (
             fr.Chart(opacity_df)
             .mark_line()
@@ -511,8 +541,9 @@ class TestAppearanceScaleWireGate:
                 color="cat",
                 stroke_dash=fr.StrokeDash(
                     "cat",
-                    scale=fr.OrdinalScale(domain=["a", "b"]),
+                    scale=fr.OrdinalScale(domain=["b", "a"]),
                     title="Category",
+                    legend=None,
                 ),
             )
         )
@@ -521,7 +552,15 @@ class TestAppearanceScaleWireGate:
         assert '"scale":{"type":"ordinal"' in json_str
         assert '"title":"Category"' in json_str
         svg = chart.to_svg()
-        assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+        a_polyline = re.search(r'<polyline[^>]*stroke="#2563eb"[^>]*/>', svg)
+        b_polyline = re.search(r'<polyline[^>]*stroke="#dc2626"[^>]*/>', svg)
+        assert a_polyline is not None and b_polyline is not None
+        assert 'stroke-dasharray="6,3"' in a_polyline.group(0), (
+            "category 'a', reordered to domain index 1, must render dash pattern index 1"
+        )
+        assert "stroke-dasharray" not in b_polyline.group(0), (
+            "category 'b', reordered to domain index 0, must render solid"
+        )
 
     def test_stroke_opacity_no_scale_still_omits_scale_key(self, opacity_df: pl.DataFrame):
         """Absent-case byte-identity: no scale= means no "scale" key on the wire."""

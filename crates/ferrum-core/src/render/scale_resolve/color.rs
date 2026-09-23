@@ -252,7 +252,7 @@ pub fn build_color_scale(
                     // Build the domain from the declared scale.domain (if present),
                     // falling back to data first-appearance order from the
                     // domain_batch (global when facet_shared).
-                    let mut domain = match explicit_ordinal_domain(c_enc) {
+                    let mut domain = match super::domain::explicit_ordinal_domain(c_enc) {
                         Some(declared) => declared,
                         None => distinct_values_in_order(domain_batch, &c_enc.field)?,
                     };
@@ -847,32 +847,20 @@ fn scale_spec_is_reversed(enc: &crate::spec::encoding::EncodingSpec) -> bool {
 /// Extract an explicit color-string range from a color `EncodingSpec`.
 ///
 /// Returns `Some(Vec<String>)` for `ScaleSpec::Ordinal` with a string-array
-/// `range` (D1 path) and for `ScaleSpec::Quantize`, whose `range` is typed as
-/// color strings — the one discretizing variant that can carry explicit
-/// swatches (`Quantile`/`Threshold` ranges are numeric outputs and `BinOrdinal`
-/// names a scheme instead). Returns `None` for all other scale types and when
-/// the range is absent or numeric.
+/// `range` (D1 path, via [`super::domain::explicit_ordinal_string_range`],
+/// shared with shape/stroke-dash's own D1 range resolution, #123) and for
+/// `ScaleSpec::Quantize`, whose `range` is typed as color strings — the one
+/// discretizing variant that can carry explicit swatches (`Quantile`/
+/// `Threshold` ranges are numeric outputs and `BinOrdinal` names a scheme
+/// instead). Returns `None` for all other scale types and when the range is
+/// absent or numeric.
 fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
     use crate::spec::encoding::ScaleSpec;
-    match enc.scale.as_ref()? {
-        ScaleSpec::Ordinal { range, .. } => {
-            crate::scale::ordinal::OrdinalRangeValue::all_strings(range.as_deref()?)
-        }
-        ScaleSpec::Quantize { range, .. } => range.clone(),
-        _ => None,
+    if let Some(strings) = super::domain::explicit_ordinal_string_range(enc) {
+        return Some(strings);
     }
-}
-
-/// Extract the declared `domain` from a `ScaleSpec::Ordinal` encoding.
-///
-/// Returns `Some(Vec<String>)` when the encoding has `scale = ScaleSpec::Ordinal`
-/// with an explicit non-empty `domain`.  Returns `None` for all other scale types
-/// and when no domain is declared (the caller falls back to data first-appearance
-/// order).
-fn explicit_ordinal_domain(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
-    use crate::spec::encoding::ScaleSpec;
     match enc.scale.as_ref()? {
-        ScaleSpec::Ordinal { domain: Some(d), .. } if !d.is_empty() => Some(d.clone()),
+        ScaleSpec::Quantize { range, .. } => range.clone(),
         _ => None,
     }
 }

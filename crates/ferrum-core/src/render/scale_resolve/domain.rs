@@ -81,6 +81,78 @@ pub(in crate::render) fn encoding_explicit_extent(
     (extent.len() >= 2).then(|| (extent[0], extent[extent.len() - 1]))
 }
 
+/// Extract the declared `domain` from a `ScaleSpec::Ordinal` encoding.
+///
+/// Returns `Some(Vec<String>)` when the encoding has `scale = ScaleSpec::Ordinal`
+/// with an explicit non-empty `domain`. Returns `None` for all other scale types
+/// and when no domain is declared (the caller falls back to data first-appearance
+/// order).
+///
+/// Shared by every ordinal auxiliary channel's D1 explicit-domain path — color
+/// (`color.rs`'s categorical resolver), shape, and stroke-dash
+/// (`auxiliary.rs`'s `build_shape_scale`/`build_stroke_dash_scale`, #123) — so
+/// the one resolution rule lives once rather than three times.
+pub(in crate::render) fn explicit_ordinal_domain(
+    enc: &crate::spec::encoding::EncodingSpec,
+) -> Option<Vec<String>> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Ordinal { domain: Some(d), .. } if !d.is_empty() => Some(d.clone()),
+        _ => None,
+    }
+}
+
+/// Extract the declared `range` from a `ScaleSpec::Ordinal` encoding,
+/// whatever its entries' types.
+///
+/// Returns `Some` for a non-empty declared range, `None` for every other
+/// scale type and when no range is declared (or it is declared empty).
+/// Unlike [`explicit_ordinal_string_range`] below, this does NOT require
+/// every entry to be a string — it answers "was a range declared at all",
+/// which `build_stroke_dash_scale` needs on its own (that channel refuses
+/// ANY explicit range outright, string or not — its output is a fixed
+/// palette index, not a value a scale can redeclare) and which
+/// `build_shape_scale` needs to tell "no range" (fall through to the
+/// default palette) apart from "a range was declared but one of its
+/// entries isn't a shape-name string" (refuse, #123 — a hand-built spec's
+/// numeric range entry used to make [`explicit_ordinal_string_range`]
+/// return `None` and silently fall through to the default palette, exactly
+/// the silent-drop `explicit_ordinal_string_range` exists to avoid for a
+/// recognized-but-wrong string).
+pub(in crate::render) fn explicit_ordinal_range(
+    enc: &crate::spec::encoding::EncodingSpec,
+) -> Option<&[crate::scale::ordinal::OrdinalRangeValue]> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Ordinal { range: Some(r), .. } if !r.is_empty() => Some(r.as_slice()),
+        _ => None,
+    }
+}
+
+/// Extract an explicit all-string `ScaleSpec::Ordinal` range from an encoding.
+///
+/// Returns `Some(Vec<String>)` only when [`explicit_ordinal_range`] is
+/// non-empty AND entirely strings ([`OrdinalRangeValue::all_strings`]);
+/// `None` for every other scale type, an absent/empty range, or a range
+/// mixing in numeric entries (a pixel range meant for a positional scale,
+/// not this path).
+///
+/// The Ordinal-only slice of [`super::color::explicit_string_range`] (which
+/// adds a `Quantize` arm on top for color's discretizing swatches — no other
+/// auxiliary channel has a `Quantize` variant to honor) and of
+/// `auxiliary.rs`'s shape range resolution (#123): color and shape both read
+/// the identical "is this an Ordinal scale with an explicit all-string
+/// range" question, so it is asked once here. **Stroke-dash does NOT call
+/// this** — its range is a fixed 4-slot GPU dash-index palette, not
+/// declarable colors or names, so it only asks [`explicit_ordinal_range`]
+/// whether a range was declared at all (and refuses outright if so), never
+/// this stricter all-string question.
+pub(in crate::render) fn explicit_ordinal_string_range(
+    enc: &crate::spec::encoding::EncodingSpec,
+) -> Option<Vec<String>> {
+    crate::scale::ordinal::OrdinalRangeValue::all_strings(explicit_ordinal_range(enc)?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortOp {
     Sum,

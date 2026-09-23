@@ -34,8 +34,26 @@ use crate::render::scale_resolve::{ScaleKind, ShapeKind};
 /// The Python layer (`ferrum.marks.base._VALID_POINT_SHAPES`) is the
 /// primary validation gate for user-facing errors — unknown shape names
 /// produce a clear `ValueError` there before any JSON is produced.
+///
+/// Delegates to [`shape_from_str_strict`], the single owner of the name
+/// table, so the circle-fallback callers below and the refusing callers in
+/// `scale_resolve::auxiliary::build_shape_scale` (#123) read one table
+/// rather than two copies that could drift.
 pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
-    match s {
+    shape_from_str_strict(s).unwrap_or(ShapeKind::Circle)
+}
+
+/// The strict counterpart of [`shape_from_str`]: `None` for any name not in
+/// the point-shape table, instead of defaulting to `Circle`.
+///
+/// Used by `scale_resolve::auxiliary::build_shape_scale` to parse an
+/// explicit `Shape(scale=OrdinalScale(range=[...]))` range (#123): there, an
+/// unrecognized entry must refuse
+/// ([`crate::render::RenderError::AuxiliaryScaleRangeUnsupported`]) rather
+/// than silently draw every unmatched glyph as a circle, so that call site
+/// needs to tell "recognized" apart from "defaulted".
+pub(crate) fn shape_from_str_strict(s: &str) -> Option<ShapeKind> {
+    Some(match s {
         "circle" => ShapeKind::Circle,
         "square" => ShapeKind::Square,
         "cross" => ShapeKind::Cross,
@@ -44,11 +62,8 @@ pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
         "triangle-down" | "triangle_down" => ShapeKind::TriangleDown,
         "|" | "vline" => ShapeKind::VLine,
         "-" | "hline" => ShapeKind::HLine,
-        // Unknown strings from raw/JSON specs fall back to circle.
-        // This path is not reachable via the normal Python API because
-        // mark_point(shape=) validates against _VALID_POINT_SHAPES first.
-        _ => ShapeKind::Circle,
-    }
+        _ => return None,
+    })
 }
 
 // ── Scene-graph build path (11a) ───────────────────────────────────

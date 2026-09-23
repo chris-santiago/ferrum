@@ -948,6 +948,13 @@ def render_png(
 def theme_known_keys() -> list[str]: ...
 def theme_color_keys() -> list[str]: ...
 
+# #123 close (wave 6B T8 cycle 2): the aux-legend channel names (``size``,
+# ``shape``, ``stroke_dash`` — the channels whose ``legend=`` shares the
+# chart's single legend surface instead of getting its own), published from
+# Rust's ``AUX_LEGEND_CHANNEL_NAMES`` so ``ferrum.encoding.base`` reads the
+# list instead of hand-mirroring it as a Python literal.
+def aux_legend_channels() -> list[str]: ...
+
 # Batch C task 4 round 4 (#95): the raw-dict scale key gate's own per-type
 # accepted-key table, published for Python to filter against instead of
 # hand-mirroring a subset of it. Raises ValueError naming the type on an

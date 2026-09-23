@@ -12,7 +12,7 @@ use crate::render::draw::{resolve_stroke_dash, DASH_PALETTE};
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
-use super::domain::{apply_sort_to_domain, SortContext};
+use super::domain::{apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, SortContext};
 use super::{column_min_max_f64, distinct_values_in_order, infer_spec_type, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, SHAPE_PALETTE};
 
 /// The explicit `domain`/`range` a user's `scale=` puts on a *numeric auxiliary*
@@ -72,14 +72,26 @@ fn scale_spec_kind_name(spec: &ScaleSpec) -> &'static str {
 
 /// Shared prelude for a *sorted categorical domain*: resolve the (possibly
 /// facet-shared) domain batch, take distinct values in first-appearance
-/// order, then reorder per `sort`. [`build_shape_scale`] and
-/// [`build_stroke_dash_scale`] both need exactly this sequence — same domain
-/// resolution, same sort context shape — so a future change to sort context
-/// or facet-shared domain resolution is made once here, not twice at each
-/// call site.
+/// order (unless `explicit_domain` overrides it, #123 D1), then reorder per
+/// `sort`. [`build_shape_scale`] and [`build_stroke_dash_scale`] both need
+/// exactly this sequence — same domain resolution, same sort context shape
+/// — so a future change to sort context or facet-shared domain resolution
+/// is made once here, not twice at each call site.
+///
+/// `explicit_domain` is the encoding's own declared `scale.domain`
+/// ([`explicit_ordinal_domain`]), when present. It wins outright over the
+/// data-derived first-appearance order — mirroring color's D1 domain
+/// resolution (`color.rs`'s categorical resolver) — and, unlike color's
+/// default (no-explicit-range) path, is honored here unconditionally: a
+/// `Shape`/`StrokeDash(scale=OrdinalScale(domain=[...]))` with no range must
+/// already reassign glyphs/patterns (#123, user ruling Q1), so there is no
+/// range-gated carve-out to mirror. `sort=`, when present, still applies on
+/// top of either source.
+#[allow(clippy::too_many_arguments)]
 fn sorted_categorical_domain(
     encoding: &Encoding,
     field: &str,
+    explicit_domain: Option<Vec<String>>,
     sort: Option<&serde_json::Value>,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
@@ -87,7 +99,10 @@ fn sorted_categorical_domain(
     coord_flipped: bool,
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
     let domain_batch = shared_categorical_batch(batch, field, transform_outputs, facet_shared);
-    let mut distinct = distinct_values_in_order(domain_batch, field)?;
+    let mut distinct = match explicit_domain {
+        Some(declared) => declared,
+        None => distinct_values_in_order(domain_batch, field)?,
+    };
 
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
     let sort_ctx = SortContext {
@@ -208,15 +223,60 @@ pub fn build_shape_scale(
     // KG-8: honors `encoding.shape.sort` by reordering the domain, mirroring
     // the categorical color path in color.rs. When no sort is set the domain
     // stays in first-appearance order (byte-identical to pre-KG-8).
+    //
+    // #123 D1: an explicit `scale.domain` (`explicit_ordinal_domain`) wins
+    // over the data-derived order — see [`sorted_categorical_domain`]'s doc
+    // comment for why this is unconditional, unlike color's range-gated D1.
     let (distinct, mut warnings) = sorted_categorical_domain(
         encoding,
         &shape_enc.field,
+        explicit_ordinal_domain(shape_enc),
         shape_enc.sort.as_ref(),
         batch,
         transform_outputs,
         facet_shared,
         coord_flipped,
     )?;
+
+    // #123 D1: an explicit ordinal range assigns glyphs by the named shapes
+    // (cycling positionally against `distinct`) instead of the fixed
+    // `SHAPE_PALETTE`. All-or-nothing, mirroring `ColorRangeParseFailure`'s
+    // rule (#126): one unrecognized entry refuses the whole range rather
+    // than silently drawing every unmatched glyph as a circle. Parsed
+    // through the strict point-shape table
+    // ([`crate::render::marks::point::shape_from_str_strict`], no circle
+    // fallback) — `Shape(scale=...)`'s primary gate is Python's own eager
+    // `_VALID_POINT_SHAPES` check at construction; this is the defense for a
+    // hand-built spec that bypasses it.
+    //
+    // Reads [`explicit_ordinal_range`] (every declared entry, whatever its
+    // type) rather than [`explicit_ordinal_string_range`] (only when EVERY
+    // entry is a string): a range that mixes in a non-string entry is a
+    // DECLARED-BUT-MALFORMED range, not an absent one, and must refuse the
+    // same as an unrecognized name — rust-quality-review cycle-1 finding.
+    // `explicit_ordinal_string_range` would instead return `None` for it and
+    // fall through to the default palette below, silently dropping the
+    // user's declared range (the one behavior the whole all-or-nothing rule
+    // above exists to rule out).
+    if let Some(range) = explicit_ordinal_range(shape_enc) {
+        let range_shapes: Vec<ShapeKind> = range
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .and_then(crate::render::marks::point::shape_from_str_strict)
+                    .ok_or_else(|| RenderError::ShapeRangeEntryUnrecognized {
+                        entry: entry.to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // No overflow warning: the user supplied the range explicitly and
+        // owns the mapping, mirroring color's explicit-range carve-out.
+        let shapes: Vec<ShapeKind> = (0..distinct.len())
+            .map(|i| range_shapes[i % range_shapes.len()])
+            .collect();
+        return Ok((Some(ShapeScale { domain: distinct, shapes }), warnings));
+    }
 
     if distinct.len() > SHAPE_PALETTE.len() {
         warnings.push(crate::render::RenderWarning::ShapePaletteOverflowed {
@@ -395,6 +455,22 @@ pub fn build_stroke_dash_scale(
     let Some(dash_enc) = &encoding.stroke_dash else {
         return Ok((None, Vec::new()));
     };
+    // #123: an explicit `scale.range` is refused outright, regardless of the
+    // field's dtype — `stroke_dash`'s output is the fixed 4-slot GPU dash
+    // palette ([`DASH_PALETTE`]), not a value a scale can redeclare, so
+    // there is no entry-by-entry parse to attempt (unlike `shape`'s range,
+    // above) — only an echo of what was received, for the message (spec-
+    // reviewer cycle-2 finding: naming the value received, not just that a
+    // range was declared). Python's own `StrokeDash._validate` refuses any
+    // explicit `range=` key at construction, naming the fixed palette, so
+    // this path is reached only by a hand-built spec that bypasses it
+    // (`ChartSpec::from_json` and similar raw-spec routes) — it must refuse
+    // rather than be silently ignored.
+    if let Some(range) = explicit_ordinal_range(dash_enc) {
+        return Err(RenderError::StrokeDashRangeUnsupported {
+            entries: range.iter().map(|v| v.to_string()).collect(),
+        });
+    }
     let col = batch
         .column_by_name(&dash_enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: dash_enc.field.clone() })?;
@@ -403,9 +479,14 @@ pub fn build_stroke_dash_scale(
         return Ok((None, Vec::new()));
     }
 
+    // #123 D1: an explicit `scale.domain` wins over the data-derived order —
+    // see [`sorted_categorical_domain`]'s doc comment. `stroke_dash` has no
+    // explicit-range case to reach here (refused above), so only the domain
+    // override threads through.
     let (distinct, mut warnings) = sorted_categorical_domain(
         encoding,
         &dash_enc.field,
+        explicit_ordinal_domain(dash_enc),
         dash_enc.sort.as_ref(),
         batch,
         transform_outputs,

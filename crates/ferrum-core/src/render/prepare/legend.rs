@@ -17,6 +17,7 @@ use crate::render::format::Temporality;
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::ChannelName;
+use pyo3::prelude::*;
 
 use super::super::scale_resolve::ResolvedScales;
 use super::LegendPreparedOverrides;
@@ -587,7 +588,7 @@ pub(crate) fn build_color_legend(
 /// This validates the spec the caller wrote, not what happens to be drawn:
 /// the color legend (the colorbar, or a categorical legend) and every aux
 /// legend channel [`build_aux_legends`] builds (size, shape, stroke-dash,
-/// read from the one [`aux_legend_channels`] list both sides walk) each
+/// read from the one [`aux_legend_channel_pairs`] list both sides walk) each
 /// check their own field through the rule the axes use
 /// ([`super::refuse_format_temporality_mismatch_field`]), so the refusal
 /// fires whatever the scale kind, and also where the renderer itself later
@@ -634,7 +635,7 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
             )?;
         }
     }
-    for (channel, enc) in aux_legend_channels(spec) {
+    for (channel, enc) in aux_legend_channel_pairs(spec) {
         let Some(enc) = enc else { continue };
         if legend_channel_disabled(Some(enc)) {
             continue;
@@ -652,21 +653,51 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
     Ok(())
 }
 
-/// The aux legend channels, in block order: the one list
-/// [`build_aux_legends`] destructures and
+/// Canonical aux-legend channel names, in block order. The ONE list both
+/// [`aux_legend_channel_pairs`] (the Rust-side per-spec builder/validator,
+/// directly below) and the Python-visible [`aux_legend_channels`] pyfunction
+/// read (#123 close, wave 6B T8 cycle 2): `ferrum.encoding.base`'s
+/// `_AUX_LEGEND_CHANNELS` used to hand-mirror this exact set as a Python
+/// literal — three channel names, hand-typed a second time, with only a
+/// comment claiming they matched this list by name and no guard checking
+/// that claim ever held. Publishing it from here means there is one place
+/// this fact is stated at all.
+const AUX_LEGEND_CHANNEL_NAMES: [&str; 3] = ["size", "shape", "stroke_dash"];
+
+/// The aux legend channels paired with their spec encoding, in block order:
+/// the one list [`build_aux_legends`] destructures and
 /// [`refuse_format_temporality_mismatch_legend_fields`] walks. The guarantee
 /// runs one way: a fourth entry here fails to compile at the destructure until
 /// the builder handles it, but an aux block the builder reads straight from
 /// `spec.encoding` (bypassing this list) would compile without meeting the
-/// `#147` rule, so a new aux legend channel belongs in this list.
-fn aux_legend_channels(
+/// `#147` rule, so a new aux legend channel belongs in this list. Channel
+/// names come from [`AUX_LEGEND_CHANNEL_NAMES`], the same array the
+/// Python-visible [`aux_legend_channels`] pyfunction reads, so the two
+/// cannot drift apart on names or order.
+fn aux_legend_channel_pairs(
     spec: &ChartSpec,
 ) -> [(&'static str, Option<&crate::spec::encoding::EncodingSpec>); 3] {
     [
-        ("size", spec.encoding.size.as_ref()),
-        ("shape", spec.encoding.shape.as_ref()),
-        ("stroke_dash", spec.encoding.stroke_dash.as_ref()),
+        (AUX_LEGEND_CHANNEL_NAMES[0], spec.encoding.size.as_ref()),
+        (AUX_LEGEND_CHANNEL_NAMES[1], spec.encoding.shape.as_ref()),
+        (AUX_LEGEND_CHANNEL_NAMES[2], spec.encoding.stroke_dash.as_ref()),
     ]
+}
+
+/// The aux-legend channel names, published to Python (#123 close, wave 6B
+/// T8 cycle 2, spec-reviewer finding): `ferrum.encoding.base` used to
+/// hand-mirror [`AUX_LEGEND_CHANNEL_NAMES`] as a Python literal
+/// (`_AUX_LEGEND_CHANNELS`), violating "no Python literal mirrors a Rust
+/// vocabulary" with no guard against the two drifting. Reads the identical
+/// array [`aux_legend_channel_pairs`] reads, so the Rust-side validator and
+/// the Python-visible list are the same source, not two hand-kept copies —
+/// pinned by `aux_legend_channels_pyfunction_matches_aux_legend_channel_pairs_names`
+/// below. Registered in `lib.rs`, re-exported through
+/// `crate::render::prepare::aux_legend_channels` (this module, `legend`, is
+/// private — see the `pub(crate) use` there), typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn aux_legend_channels() -> Vec<String> {
+    AUX_LEGEND_CHANNEL_NAMES.iter().map(|s| s.to_string()).collect()
 }
 
 /// Read whether a channel's typed `legend` spec suppresses that channel's aux
@@ -989,7 +1020,7 @@ fn build_aux_legends(
 
     let mut out = Vec::new();
     let mut folded = FoldedChannels::default();
-    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channels(spec);
+    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channel_pairs(spec);
 
     // ── Size legend ──────────────────────────────────────────────────────
     if let (Some(size_scale), Some(size_enc)) = (&scales.size, size_enc) {
@@ -1772,7 +1803,7 @@ mod tests {
 
     /// `#147` close (wave 6A T22): the shape and stroke-dash legends meet the
     /// same refusal the color and size legends do, because the validator
-    /// walks the [`aux_legend_channels`] list `build_aux_legends` builds
+    /// walks the [`aux_legend_channel_pairs`] list `build_aux_legends` builds
     /// from. A `.2f`/`"time"` pair and a bare `"time"` over a string column
     /// refuse on each; the same spec with that legend disabled (either
     /// spelling) or with the chart legend disabled does not.
@@ -2592,5 +2623,25 @@ mod tests {
         let text = warnings[0].to_string();
         assert!(text.contains("stroke_dash") && text.contains("could not be shown"), "{text}");
         assert!(!text.contains("LegendFoldNotShown"), "Display leaked Debug: {text}");
+    }
+
+    // ── Aux legend channel list: Python-visible pyfunction vs the Rust-side
+    //    builder (#123 close, wave 6B T8 cycle 2, spec-reviewer finding) ────
+
+    /// `aux_legend_channels()` (the `#[pyfunction]` published to Python) and
+    /// `aux_legend_channel_pairs()` (the Rust-side per-spec builder/validator)
+    /// must name the same channels, in the same order — the drift guard the
+    /// spec review asked for, mirroring `scale_accepted_keys`'s own
+    /// `scale_accepted_keys_matches_accepted_keys_for_scale_type_for_every_tag`
+    /// precedent (`spec/encoding/gate.rs`). Both read `AUX_LEGEND_CHANNEL_NAMES`
+    /// directly, so this test is a belt-and-suspenders proof, not the only
+    /// thing standing between them.
+    #[test]
+    fn aux_legend_channels_pyfunction_matches_aux_legend_channel_pairs_names() {
+        let spec = empty_spec();
+        let pair_names: Vec<String> =
+            aux_legend_channel_pairs(&spec).iter().map(|(name, _)| name.to_string()).collect();
+        assert_eq!(aux_legend_channels(), pair_names);
+        assert_eq!(aux_legend_channels(), vec!["size", "shape", "stroke_dash"]);
     }
 }

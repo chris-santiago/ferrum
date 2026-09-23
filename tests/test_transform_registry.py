@@ -121,6 +121,8 @@ _DELETED_MIRROR_LITERALS = (
     "_VALID_KERNELS",
     "_VALID_QQ_DISTRIBUTIONS",
     "_VALID_AGGREGATES",
+    # #123, wave 6B, cycle 2: replaced by ferrum._core.aux_legend_channels().
+    "_AUX_LEGEND_CHANNELS",
 )
 
 

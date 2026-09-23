@@ -77,7 +77,7 @@ class X(ChannelBase):
     _channel_name = "x"
     _honored_kwargs = PRIMARY_POSITIONAL
     _stack_kwarg = True
-    _has_own_legend = False
+    _legend_surface = "cascade"
 
 
 class Y(ChannelBase):
@@ -141,7 +141,7 @@ class Y(ChannelBase):
     _channel_name = "y"
     _honored_kwargs = PRIMARY_POSITIONAL
     _stack_kwarg = True
-    _has_own_legend = False
+    _legend_surface = "cascade"
 
 
 class X2(ChannelBase):

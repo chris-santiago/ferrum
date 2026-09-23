@@ -98,6 +98,21 @@ impl OrdinalRangeValue {
     }
 }
 
+/// A bare, user-facing rendering of one range entry, whatever its variant —
+/// the string verbatim, or the number in its ordinary (non-`Debug`) form.
+/// Used by error messages that must name the offending entry regardless of
+/// which variant it turned out to be (e.g. `RenderError::ShapeRangeEntryUnrecognized`
+/// when a `Shape(scale=...)` range carries a number where a shape name
+/// belongs, #123).
+impl std::fmt::Display for OrdinalRangeValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrdinalRangeValue::Number(n) => write!(f, "{n}"),
+            OrdinalRangeValue::Str(s) => write!(f, "{s}"),
+        }
+    }
+}
+
 /// Provenance of an `OrdinalScale`'s pixel range (GH #79b).
 ///
 /// Replaces the former `range_user_set`/`explicit_pixel_range` boolean pair

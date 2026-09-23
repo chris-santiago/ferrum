@@ -13,6 +13,7 @@ from ferrum.encoding._honored import (
     APPEARANCE_FULL,
     APPEARANCE_SCHEME,
     APPEARANCE_SORT,
+    SCALE,
 )
 from ferrum.encoding.base import ChannelBase
 
@@ -122,7 +123,15 @@ class Shape(ChannelBase):
         Data type. Inferred from the column dtype when omitted; ``"N"`` is
         the most common choice.
     scale : Scale, optional
-        Explicit scale override.
+        Explicit scale override.  ``domain`` reorders the category-to-glyph
+        assignment, mirroring ``Color``.  ``range`` picks the glyphs
+        directly: a list of point-shape names (``"square"``, ``"cross"``,
+        ``"diamond"``, ``"triangle-up"``, ``"triangle-down"``, ``"|"``,
+        ``"-"``, ...; see ``ferrum.marks.base._VALID_POINT_SHAPES`` for the
+        exact vocabulary) parsed all-or-nothing -- an unrecognized entry
+        raises ``ValueError`` naming ``Shape(scale=...)`` at construction,
+        and a hand-built spec that reaches Rust with the same problem raises
+        a typed ``RenderError`` at render (2026-09-23, #123).
     title : str, optional
         Legend title override.
 
@@ -132,6 +141,10 @@ class Shape(ChannelBase):
     the shape legend in the rendered SVG.  ``legend=Legend(title=..., format=...)``
     customizes the legend title.  When ``legend`` is omitted, a categorical shape
     legend is rendered automatically showing one glyph per distinct category value.
+    A ``legend=`` value whose ``orient=`` is anything other than ``"none"`` is
+    refused (2026-09-23, #123): ``Shape``'s legend is an auxiliary block that
+    always shares the chart's legend position -- place it with
+    ``Color(legend=Legend(orient=...))`` or ``configure_legend(orient=...)``.
     ``sort`` is honored: pass ``"ascending"``, ``"descending"``, a list of strings
     for an explicit domain order, or a channel shorthand such as ``"-y"`` to sort
     by the per-category aggregate of another channel.
@@ -166,7 +179,54 @@ class Shape(ChannelBase):
     # (a real EncodingValue::StrokeDash exists) -- see APPEARANCE_SORT's
     # docstring; the derivation, not a second role set, is what keeps the two
     # channels apart.
+    # Shape's legend is an auxiliary block (2026-09-23, #123,
+    # encoding.base._aux_legend_channels(), read from Rust): it always
+    # shares the chart's legend position, so an explicit orient= other than
+    # "none" is refused by ChannelBase._validate_legend_value.
     _honored_kwargs = APPEARANCE_SORT
+
+    def _validate(self) -> None:
+        """Eagerly validate an explicit ``scale=`` range against the point-shape table.
+
+        Mirrors ``mark_point(shape=...)``'s own gate
+        (``ferrum.marks.base._VALID_POINT_SHAPES``) so an unrecognized shape
+        name in ``Shape(scale=...)``'s range is refused at construction,
+        naming ``Shape(scale=...)``, rather than reaching Rust silently
+        (2026-09-23, #123, user ruling Q1). Domain-only scales, and scales
+        with no range at all, pass through unchanged -- Rust's
+        ``build_shape_scale`` resolves the categorical domain and assigns
+        palette glyphs the same way it always has when no explicit range is
+        given.
+
+        Reuses :func:`~ferrum._validate.validate_choice` -- the same
+        membership check ``mark_point(shape=...)`` itself runs -- for the
+        actual "is this a known shape name" question (quality-review
+        remediation, cycle 2), rather than a hand-rolled ``in`` loop. A
+        non-``str`` entry (e.g. a nested list) is refused by name BEFORE
+        that call: ``_VALID_POINT_SHAPES`` is a ``frozenset``, and Python's
+        ``in`` raises ``TypeError`` for an unhashable left operand, which
+        would otherwise leak a raw ``TypeError`` instead of the documented
+        ``ValueError``.
+        """
+        super()._validate()
+        scale = self._kwargs.get("scale")
+        if scale is None:
+            return
+        from ferrum._validate import validate_choice
+        from ferrum.encoding._scale import _scale_to_dict
+        from ferrum.marks.base import _VALID_POINT_SHAPES
+
+        spec = _scale_to_dict(scale)
+        range_ = spec.get("range") if isinstance(spec, dict) else None
+        if not isinstance(range_, (list, tuple)):
+            return
+        for entry in range_:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"Shape(scale=...): range entry must be one of "
+                    f"{sorted(_VALID_POINT_SHAPES)}; got {entry!r}"
+                )
+            validate_choice("Shape(scale=...)", "range entry", entry, _VALID_POINT_SHAPES)
 
 
 class Opacity(ChannelBase):
@@ -183,8 +243,6 @@ class Opacity(ChannelBase):
         Data type. Inferred from the column dtype when omitted.
     scale : Scale, optional
         Explicit scale override.
-    title : str, optional
-        Legend title override.
 
     Notes
     -----
@@ -192,6 +250,12 @@ class Opacity(ChannelBase):
     ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
     to switch opacity based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
+
+    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
+    (2026-09-23, #123): ``Opacity`` draws no legend of its own, so there is
+    nothing for either to customize -- both raise ``ValueError`` at
+    construction. ``legend=None``/``legend=False`` stay silent (the
+    harmless "I want no legend, and there is none" idiom keeps working).
 
     Examples
     --------
@@ -201,9 +265,15 @@ class Opacity(ChannelBase):
 
     _channel_name = "opacity"
 
-    # {"type","legend","scale","title"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- "opacity" is a real conditional channel.
-    _honored_kwargs = APPEARANCE_FULL
+    # {"type","legend","scale"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- "opacity" is a real conditional
+    # channel. No "title" (2026-09-23, #123): Opacity draws no legend, so a
+    # title has nothing to label -- APPEARANCE_FULL (which carries "title")
+    # is deliberately not used here; see _honored.py's SCALE/LEGEND_TITLE
+    # atoms and their module-docstring note.
+    _honored_kwargs = APPEARANCE_BASE | SCALE
+    _legend_surface = "none"
+    _title_refused = True
 
 
 # Deferred to Phase 9:
@@ -324,16 +394,23 @@ class FillOpacity(ChannelBase):
         Column name to map to fill opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scale : Scale, optional
+        Explicit scale override.
 
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.  ``condition`` is honored: pass a
+    the legend in the rendered SVG.  ``scale`` (explicit scale override) is
+    also honored.  ``condition`` is honored: pass a
     ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
     ``fm.when(sel).then(...).otherwise(...)``) to switch fill opacity based on
     selection state -- see ``Chart.encode()``'s condition= translation
     (``ferrum-spec.md`` §3.10).
+
+    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
+    (2026-09-23, #123): ``FillOpacity`` draws no legend of its own, so there
+    is nothing for either to customize -- both raise ``ValueError`` at
+    construction. ``legend=None``/``legend=False`` stay silent.
 
     Examples
     --------
@@ -343,10 +420,13 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
 
-    # {"type","legend","scale","title"} plus "condition", added by
+    # {"type","legend","scale"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- fill_opacity is a conditional channel
-    # on the wire and its condition= works end to end.
-    _honored_kwargs = APPEARANCE_FULL
+    # on the wire and its condition= works end to end. No "title"
+    # (2026-09-23, #123): see Opacity's comment above for the reason.
+    _honored_kwargs = APPEARANCE_BASE | SCALE
+    _legend_surface = "none"
+    _title_refused = True
 
 
 class StrokeOpacity(ChannelBase):
@@ -363,18 +443,21 @@ class StrokeOpacity(ChannelBase):
         Data type. Inferred from the column dtype when omitted.
     scale : Scale, optional
         Explicit scale override.
-    title : str, optional
-        Legend title override.
 
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.  ``condition`` is honored: pass a
+    the legend in the rendered SVG.  ``scale`` (explicit scale override) is
+    also honored.  ``condition`` is honored: pass a
     ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
     ``fm.when(sel).then(...).otherwise(...)``) to switch stroke opacity based on
     selection state -- see ``Chart.encode()``'s condition= translation
     (``ferrum-spec.md`` §3.10).
+
+    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
+    (2026-09-23, #123): ``StrokeOpacity`` draws no legend of its own, so
+    there is nothing for either to customize -- both raise ``ValueError`` at
+    construction. ``legend=None``/``legend=False`` stay silent.
 
     Examples
     --------
@@ -384,10 +467,13 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    # {"type","legend","scale","title"} plus "condition", added by
+    # {"type","legend","scale"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- stroke_opacity is a conditional channel
-    # on the wire and its condition= works end to end.
-    _honored_kwargs = APPEARANCE_FULL
+    # on the wire and its condition= works end to end. No "title"
+    # (2026-09-23, #123): see Opacity's comment above for the reason.
+    _honored_kwargs = APPEARANCE_BASE | SCALE
+    _legend_surface = "none"
+    _title_refused = True
 
 
 class StrokeWidth(ChannelBase):
@@ -411,6 +497,11 @@ class StrokeWidth(ChannelBase):
     selection state -- see ``Chart.encode()``'s condition= translation
     (``ferrum-spec.md`` §3.10).
 
+    A ``legend=`` dict/``Legend(...)`` is **not** honored (2026-09-23,
+    #123): ``StrokeWidth`` draws no legend of its own, so there is nothing
+    for it to customize -- it raises ``ValueError`` at construction.
+    ``legend=None``/``legend=False`` stay silent.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -423,6 +514,7 @@ class StrokeWidth(ChannelBase):
     # ChannelBase.__init_subclass__ -- stroke_width is a conditional channel
     # on the wire and its condition= works end to end.
     _honored_kwargs = APPEARANCE_BASE
+    _legend_surface = "none"
 
 
 class StrokeDash(ChannelBase):
@@ -438,15 +530,25 @@ class StrokeDash(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
     scale : Scale, optional
-        Explicit scale override.
+        Explicit scale override.  ``domain`` reorders the category-to-dash
+        assignment, mirroring ``Shape``.  ``range`` is **not** honored
+        (2026-09-23, #123, user ruling Q1b): the dash output is a fixed
+        4-slot GPU palette index (solid plus three patterns), which cannot
+        carry an arbitrary domain-to-range mapping, so a ``range`` key
+        raises ``ValueError`` at construction naming the fixed palette.
     title : str, optional
         Legend title override.
 
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.  ``sort`` is honored: pass
+    the legend in the rendered SVG.  ``scale`` (explicit scale override, domain
+    only -- see above) and ``title`` (legend title) are also honored.  A
+    ``legend=`` value whose ``orient=`` is anything other than ``"none"`` is
+    refused (2026-09-23, #123): ``StrokeDash``'s legend is an auxiliary block
+    that always shares the chart's legend position -- place it with
+    ``Color(legend=Legend(orient=...))`` or ``configure_legend(orient=...)``.
+    ``sort`` is honored: pass
     ``"ascending"``, ``"descending"``, a list of strings for an explicit domain
     order, or a channel shorthand such as ``"-y"`` to sort by the per-category
     aggregate of another channel — mirroring ``Shape``, since the Rust
@@ -470,8 +572,39 @@ class StrokeDash(ChannelBase):
     # channel. sort added 2026-09-01 (batch-A T12 spec-review addendum, spec
     # §4.3) so a user's sort= reaches the wire; Rust's build_stroke_dash_scale
     # already read it. Shape shares this same role set and does NOT gain
-    # "condition" -- see APPEARANCE_SORT's docstring.
+    # "condition" -- see APPEARANCE_SORT's docstring. Legend is an auxiliary
+    # block (2026-09-23, #123, encoding.base._aux_legend_channels(), read
+    # from Rust): a non-"none" orient= is refused by
+    # ChannelBase._validate_legend_value.
     _honored_kwargs = APPEARANCE_SORT
+
+    def _validate(self) -> None:
+        """Refuse an explicit ``scale=`` range naming the fixed dash palette.
+
+        Mirrors ``Shape._validate``'s eager gate, but StrokeDash's range
+        cannot be wired at all: the dash scale resolves to a palette INDEX
+        (solid plus three patterns, ``crates/ferrum-core/src/render/
+        draw.rs::DASH_PALETTE``), which the GPU-packed interactive path
+        reads as a 4-slot index -- there is no way to carry an arbitrary
+        domain-to-range mapping through that representation. Domain-only
+        scales pass through unchanged (2026-09-23, #123, user ruling Q1b).
+        """
+        super()._validate()
+        scale = self._kwargs.get("scale")
+        if scale is None:
+            return
+        from ferrum.encoding._scale import _scale_to_dict
+
+        spec = _scale_to_dict(scale)
+        range_ = spec.get("range") if isinstance(spec, dict) else None
+        if range_ is not None:
+            raise ValueError(
+                f"StrokeDash(scale=...): range={range_!r} is not supported -- "
+                "stroke-dash output is drawn from the fixed 4-slot GPU palette "
+                "(solid plus three patterns), not an arbitrary domain-to-range "
+                "mapping. Wire only the domain: "
+                "StrokeDash('field', scale=OrdinalScale(domain=[...]))."
+            )
 
 
 class Angle(ChannelBase):
@@ -496,6 +629,11 @@ class Angle(ChannelBase):
     selection state -- see ``Chart.encode()``'s condition= translation
     (``ferrum-spec.md`` §3.10).
 
+    A ``legend=`` dict/``Legend(...)`` is **not** honored (2026-09-23,
+    #123): ``Angle`` draws no legend of its own, so there is nothing for it
+    to customize -- it raises ``ValueError`` at construction.
+    ``legend=None``/``legend=False`` stay silent.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -508,3 +646,4 @@ class Angle(ChannelBase):
     # ChannelBase.__init_subclass__ -- angle is a conditional channel on the
     # wire and its condition= works end to end.
     _honored_kwargs = APPEARANCE_BASE
+    _legend_surface = "none"

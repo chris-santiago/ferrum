@@ -16,11 +16,17 @@ because their scale resolution is out of scope by design (per-row constants,
 
 **Further deliberate contract change (2026-09-01, batch-A T12 spec-review
 addendum):** StrokeDash moves a second time, from ``APPEARANCE_FULL`` to
-``APPEARANCE_SORT`` — mirroring Shape, ``sort=`` (and, as a consequence of
-the role hierarchy, ``condition``) is now honored too. The Rust-side
-``build_stroke_dash_scale`` domain builder (T6, ``auxiliary.rs:394``) already
-read ``dash_enc.sort``; the Python channel was silently dropping it before
-this change. StrokeOpacity is unaffected and stays on ``APPEARANCE_FULL``.
+``APPEARANCE_SORT`` — mirroring Shape, ``sort=`` is now honored too. (At the
+time this note was written, ``condition`` was still a hand-placed role-set
+member and StrokeDash's move onto ``APPEARANCE_SORT`` looked like the reason
+it also gained ``condition`` — "as a consequence of the role hierarchy". The
+fifth change below replaced that mechanism entirely: ``condition`` is now
+derived from the conditional vocabulary, independent of which role set a
+channel declares, so the role hierarchy is no longer why StrokeDash honors
+it.) The Rust-side ``build_stroke_dash_scale`` domain builder (T6,
+``auxiliary.rs:394``) already read ``dash_enc.sort``; the Python channel was
+silently dropping it before this change. StrokeOpacity is unaffected and
+stays on ``APPEARANCE_FULL``.
 
 **Third deliberate contract change (2026-09-11, batch-H close remediation):**
 StrokeWidth, StrokeOpacity, FillOpacity and Angle gain ``condition``.
@@ -53,6 +59,21 @@ bit per class from ``_channel_policy.channel_honors_condition(cls._channel_name)
 so this test and the conditional vocabulary in
 ``ferrum.encoding._channel_policy`` cannot drift apart the way they did
 across the third and fourth changes above.
+
+**Sixth deliberate contract change (2026-09-23, #123, wave 6B):** Opacity,
+FillOpacity and StrokeOpacity LOSE ``title``. All three draw no legend of
+their own (``_legend_surface == "none"``), so a ``title=`` had nothing to
+label and was accepted-but-inert -- the exact "surfaces agree on identical
+input" defect this issue exists to close. ``title=`` is now a construction-
+time ``ValueError`` for these three (`ChannelBase._REFUSED_KWARGS`), not a
+silently-serialized no-op. Their ``scale`` stays honored: it IS wired (the
+Rust opacity-family scale builders read it), unlike ``title``. No other
+channel's set changes: Shape's and StrokeDash's ``scale`` behavior changes
+at RENDER time (Shape's range now selects real glyphs; StrokeDash's range is
+refused instead of silently ignored), but neither drops from
+``_honored_kwargs`` -- see ``encoding/appearance.py``'s ``Shape``/
+``StrokeDash`` ``_validate`` overrides and ``ferrum-spec.md`` §3.2's
+2026-09-23 note.
 """
 
 from __future__ import annotations
@@ -92,7 +113,9 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # grows EncodingValue::Shape (no table change needed here then either --
     # only the derivation's answer for "shape" flips).
     Shape: frozenset({"type", "scale", "title", "legend", "sort"}),
-    Opacity: frozenset({"type", "scale", "title", "legend", "condition"}),
+    # Opacity LOST "title" 2026-09-23 (#123, wave 6B, sixth change above):
+    # Opacity draws no legend, so a title has nothing to label.
+    Opacity: frozenset({"type", "scale", "legend", "condition"}),
     Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme"}),
     # Stroke LOST "condition" 2026-09-11 (batch-H close re-review): a stroke
     # conditional would repaint the fill (ferrum-wasm's apply_value_common
@@ -105,9 +128,12 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # FillOpacity/StrokeOpacity/StrokeWidth/Angle gained "condition"
     # 2026-09-11 (batch-H close remediation) — all four are conditional
     # channels on the wire; StrokeWidth/Angle still carry no "scale"/"title".
-    FillOpacity: frozenset({"type", "scale", "title", "legend", "condition"}),
-    # StrokeOpacity/StrokeDash gained "scale"/"title" 2026-08-28 (batch-A §4.3).
-    StrokeOpacity: frozenset({"type", "scale", "title", "legend", "condition"}),
+    # FillOpacity/StrokeOpacity LOST "title" 2026-09-23 (#123, sixth change
+    # above), the same reason as Opacity's.
+    FillOpacity: frozenset({"type", "scale", "legend", "condition"}),
+    # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3), then
+    # LOST "title" again 2026-09-23 (#123, sixth change above).
+    StrokeOpacity: frozenset({"type", "scale", "legend", "condition"}),
     StrokeWidth: frozenset({"type", "legend", "condition"}),
     # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review
     # addendum) — moved to APPEARANCE_SORT, mirroring Shape.

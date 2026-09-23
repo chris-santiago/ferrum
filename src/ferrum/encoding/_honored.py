@@ -48,6 +48,17 @@ derivation, not a second set, is what keeps Stroke/Shape without the bit and
 Fill/StrokeDash with it. The two tables are now structurally unable to
 disagree again.
 
+**Sixth change (2026-09-23, #123, wave 6B).** The appearance roles below
+compose from four orthogonal atoms (``SCALE``, ``LEGEND_TITLE``, ``SORT``,
+``SCHEME``) instead of one linear chain rooted at ``APPEARANCE_FULL``. The
+chain could not express "has ``scale`` but not ``title``", which is exactly
+Opacity/FillOpacity/StrokeOpacity's real contract: their ``scale=`` is wired
+and live, but none of the three draws a legend, so a ``title=`` had nothing
+to label and is now a construction-time refusal (``ChannelBase._validate``)
+rather than a silently-serialized no-op. See each atom's docstring below and
+``encoding/appearance.py``'s Opacity/FillOpacity/StrokeOpacity classes for
+the direct ``APPEARANCE_BASE | SCALE`` union this enabled.
+
 The appearance-channel membership is pinned by
 ``tests/test_appearance_honored_kwargs.py``, which documents each intentional
 change with a dated comment.
@@ -131,12 +142,29 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 #: channels.)
 APPEARANCE_BASE = frozenset({"type", "legend"})
 
-#: Adds an explicit scale override and legend title. (Size, Opacity,
-#: FillOpacity, StrokeOpacity all gain ``condition`` via the derivation —
-#: each is a real conditional channel on the wire. StrokeDash started here
-#: too on 2026-08-28 but moved up to ``APPEARANCE_SORT`` on 2026-09-01 — see
-#: that constant's docstring.)
-APPEARANCE_FULL = APPEARANCE_BASE | {"scale", "title"}
+#: **Added 2026-09-23 (#123, wave 6B).** Orthogonal capability atoms that
+#: compose onto ``APPEARANCE_BASE``. Before this, every appearance role
+#: chained upward from ``APPEARANCE_FULL`` (``BASE | {"scale", "title"}``),
+#: so a channel could not have ``scale`` without also carrying ``title`` --
+#: the exact shape that forced ``title=`` onto Opacity/FillOpacity/
+#: StrokeOpacity even though none of the three draws a legend for a title to
+#: label (research: ``.claude/output/api-contract-audit/wave6-research/
+#: honored-lattice-123.md`` §4). Composing from these atoms directly lets
+#: the opacity family keep ``scale`` (real, wired) without ``title`` (no
+#: legend exists to title), which a single linear chain could not express.
+SCALE = frozenset({"scale"})
+LEGEND_TITLE = frozenset({"title"})
+SORT = frozenset({"sort"})
+SCHEME = frozenset({"scheme"})
+
+#: Adds an explicit scale override and legend title. (Size gains
+#: ``condition`` via the derivation above -- ``size`` is a real conditional
+#: channel. StrokeDash started here too on 2026-08-28 but moved up to
+#: ``APPEARANCE_SORT`` on 2026-09-01 -- see that constant's docstring.
+#: Opacity/FillOpacity/StrokeOpacity moved OFF this set 2026-09-23 (#123):
+#: each unions ``APPEARANCE_BASE | SCALE`` directly in ``appearance.py``
+#: instead, since none of the three has ``title`` to lose.)
+APPEARANCE_FULL = APPEARANCE_BASE | SCALE | LEGEND_TITLE
 
 #: Adds an explicit domain-order sort. (StrokeDash and Shape both use this
 #: set, as of 2026-09-01 / 2026-09-11 respectively — Shape mirrors
@@ -146,19 +174,19 @@ APPEARANCE_FULL = APPEARANCE_BASE | {"scale", "title"}
 #: ``shape`` is refused by ``_channel_policy._CONDITIONAL_REFUSALS`` and does
 #: not. One set, two derived outcomes — that split is the point of deriving
 #: rather than hand-copying.)
-APPEARANCE_SORT = APPEARANCE_FULL | {"sort"}
+APPEARANCE_SORT = APPEARANCE_FULL | SORT
 
 #: Adds a named color scheme. (Fill and Stroke both use this set, same split
 #: as ``APPEARANCE_SORT`` above: ``fill`` aliases to ``color`` and gains
 #: ``condition``; ``stroke`` is refused — its only conditional colour value
 #: (``EncodingValue::Color``) would repaint the mark's fill, not its stroke
 #: — and does not.)
-APPEARANCE_SCHEME = APPEARANCE_FULL | {"scheme"}
+APPEARANCE_SCHEME = APPEARANCE_FULL | SCHEME
 
 #: The Color channel: full appearance contract plus both sort and scheme.
 #: (Gains ``condition`` via the derivation — ``color`` is the canonical
 #: conditional channel.)
-APPEARANCE_COLOR = APPEARANCE_FULL | {"sort", "scheme"}
+APPEARANCE_COLOR = APPEARANCE_FULL | SORT | SCHEME
 
 
 # ---------------------------------------------------------------------------

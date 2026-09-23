@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
+from ferrum._title_sentinel import is_unspecified
 from ferrum._validate import validate_choice
 from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
-from ferrum.legend import _normalize_legend
+from ferrum.legend import Legend, _normalize_legend
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.position import STACK_OFFSETS, _validate_stack_offset
 
@@ -33,45 +34,29 @@ _TYPE_NORMALIZE = {
     "temporal": "T",
 }
 
-# Per-(channel, kwarg) message overrides for the honored-kwarg warn_once call
+
+# Per-(channel, kwarg) message override for the honored-kwarg warn_once call
 # in ChannelBase.__init__ (#240, 2026-09-11 wave-1 hardening). warn_once's
 # generic default -- "accepted but not yet honored; planned for a future
 # Phase" -- is true for most un-honored kwargs: no design exists yet and one
-# might land later. It is a LIE for the two carve-outs below, which are
-# permanent, documented facts rather than forward-looking promises. Mirrors
-# ``_channel_policy._CONDITIONAL_REFUSALS``'s shape: one table, keyed by the
-# same axis the refusal itself is keyed on, rather than a per-call-site
-# string literal that could drift from the real reason.
-#
-# `None` (i.e., no entry — see `_honored_kwarg_message`) falls through to
-# warn_once's own default text, which stays correct for everything else.
-_FACET_COLUMNS_MESSAGE = (
-    "{channel}(columns=...) is grid-mode-inapplicable and permanently ignored: "
-    "row/column faceting has no wrap-count to apply it to. Use Facet(columns=...) "
-    "for wrap-mode panel-per-row counts."
-)
-_HONORED_KWARG_MESSAGES: dict[tuple[str, str], str] = {
-    ("facet_row", "columns"): _FACET_COLUMNS_MESSAGE.format(channel="FacetRow"),
-    ("facet_col", "columns"): _FACET_COLUMNS_MESSAGE.format(channel="FacetCol"),
-}
-
-
+# might land later. It is a LIE for ``condition``: the kwarg is stripped from
+# ``_honored_kwargs`` by ``__init_subclass__`` for a refused channel, so the
+# generic loop below would otherwise describe a future Phase for a
+# conditional ``Chart.encode()`` refuses outright and permanently.
 def _honored_kwarg_message(channel: str, kwarg: str) -> str | None:
     """Return an explicit warn_once message for an un-honored (channel, kwarg), or None.
 
     ``None`` falls through to ``warn_once``'s generic "not yet honored"
-    default. Two carve-outs get a channel-specific, permanent-fact message
-    instead:
+    default. The one carve-out, ``condition`` on a channel
+    :func:`~ferrum.encoding._channel_policy.channel_honors_condition`
+    refuses, previews (without duplicating) the ``ValueError``
+    ``conditional_wire_channel`` raises at ``Chart.encode()`` time.
 
-    - ``condition`` on a channel :func:`~ferrum.encoding._channel_policy
-      .channel_honors_condition` refuses: the kwarg is stripped from
-      ``_honored_kwargs`` by ``__init_subclass__``, so the generic loop below
-      would otherwise say "planned for a future Phase" about a conditional
-      that ``Chart.encode()`` refuses outright and permanently (see
-      ``conditional_wire_channel``'s ``ValueError``, which this message
-      previews without duplicating its exact wording).
-    - ``columns`` on ``FacetRow``/``FacetCol``: `_HONORED_KWARG_MESSAGES`
-      above.
+    A kwarg that can *never* do anything on a channel -- as opposed to one
+    that merely has no design yet -- is not routed through here: it is a
+    REFUSE, not a WARN (see the `_REFUSED_KWARGS` lookup and the
+    `_title_refused` check, both consulted before this function is called,
+    in ``ChannelBase.__init__``'s loop).
     """
     if kwarg == "condition":
         from ferrum.encoding._channel_policy import (
@@ -85,7 +70,87 @@ def _honored_kwarg_message(channel: str, kwarg: str) -> str | None:
                 f"a selection conditional can target only {_CONDITIONAL_CHANNELS_DISPLAY}. "
                 "Building the chart raises before this value is used."
             )
-    return _HONORED_KWARG_MESSAGES.get((channel, kwarg))
+    return None
+
+
+# Per-(channel, kwarg) REFUSAL message templates (#123, 2026-09-23, wave 6B).
+# Unlike `_honored_kwarg_message` above (a preview of a LATER raise, or a
+# "maybe someday" warning), every entry here is a permanent structural fact:
+# the kwarg can never do anything on this channel, so accepting it and
+# warning would be an accepted-but-inert input surviving on a touched
+# surface -- exactly what REFUSE MALFORMED, WARN DEGRADED forbids. Checked
+# in `ChannelBase.__init__` BEFORE the generic warn_once loop, so a kwarg
+# listed here raises instead of falling through to a warning. Every message
+# is a template naming both the public entry AND the value received
+# (never `...`) -- filled in with `.format(channel=..., value=...)` at the
+# call site, since the value is only known at construction time. Only
+# `facet_row`/`facet_col` `columns=` lives here: the opacity-family `title=`
+# refusal is NOT a hand-listed entry -- see the structural check in
+# `ChannelBase.__init__` below, derived from `_legend_surface`/
+# `_honored_kwargs` instead of a name-keyed table, so the "no legend" fact
+# has exactly one home (spec-review remediation, cycle 2).
+_FACET_COLUMNS_MESSAGE = (
+    "{channel}(columns={value!r}) is grid-mode-inapplicable and permanently refused: "
+    "row/column faceting has no wrap-count to apply it to. Use Facet(columns=...) "
+    "for wrap-mode panel-per-row counts."
+)
+_REFUSED_KWARGS: dict[tuple[str, str], str] = {
+    ("facet_row", "columns"): _FACET_COLUMNS_MESSAGE,
+    ("facet_col", "columns"): _FACET_COLUMNS_MESSAGE,
+}
+
+_NO_LEGEND_MESSAGE = (
+    "{channel}({kwarg}={value!r}) is not supported: {channel} draws no legend of "
+    "its own, so there is nothing for {kwarg}= to customize."
+)
+
+
+def _aux_legend_channels() -> frozenset[str]:
+    """Return the channel names whose legend is an auxiliary block (Size, Shape, StrokeDash).
+
+    Read from Rust's ``ferrum._core.aux_legend_channels()`` -- the one list
+    ``build_aux_legends`` (``render/prepare/legend.rs``) walks -- rather than
+    mirrored by hand, so the two cannot drift (#123 spec-review remediation,
+    2026-09-23; the deleted hand-mirrored literal joins
+    ``tests/test_transform_registry.py``'s no-reappearance guard). Used only
+    to decide whether a legend value's ``orient=`` sub-key is refused (Q10):
+    an aux legend has no independent screen position of its own, so it
+    always shares the chart's legend block, placed by
+    ``Color(legend=Legend(orient=))`` or ``configure_legend(orient=...)`` --
+    ``orient="none"`` still disables the aux block itself.
+    """
+    from ferrum._core import aux_legend_channels  # type: ignore[attr-defined]
+
+    return frozenset(aux_legend_channels())
+
+
+_AUX_LEGEND_ORIENT_MESSAGE = (
+    "{channel}(legend=...): orient={orient!r} is not supported on an "
+    "auxiliary legend -- Size, Shape and StrokeDash legends always share "
+    "the chart's legend block. Place it with Color(legend=Legend(orient=...)) "
+    'or configure_legend(orient=...). orient="none" still disables this '
+    "channel's own legend block."
+)
+
+
+def _legend_value_orient(value: Any) -> str | None:
+    """Return the explicit ``orient=`` a legend kwarg value carries, or None.
+
+    ``value`` is the raw ``legend=`` kwarg (already known not to be
+    ``None``/``False`` by the caller): a :class:`~ferrum.legend.Legend`
+    instance, a raw dict, or some other truthy value `_normalize_legend`
+    treats as "not specified". Mirrors `Legend.to_dict`'s omit-vs-explicit
+    contract via `~ferrum._title_sentinel.is_unspecified` so an omitted or
+    explicit-``None`` ``orient`` reads identically here to how it reads
+    there.
+    """
+    if isinstance(value, Legend):
+        orient = value.orient
+    elif isinstance(value, dict):
+        orient = value.get("orient")
+    else:
+        return None
+    return None if is_unspecified(orient) else orient
 
 
 @dataclass(frozen=True)
@@ -327,13 +392,41 @@ class ChannelBase:
     # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
     # leave it False and the normalization is skipped.
     _stack_kwarg: ClassVar[bool] = False
-    # Whether this channel renders a legend block of its own (Color, Size,
-    # Shape, ...).  X and Y set this False: they contribute style overrides
-    # to the shared color-legend cascade (NF-B13) but own no legend surface,
-    # so bare ``legend=None``/``False`` on them cannot mean "suppress THIS
-    # channel's legend" the way it does on Color/Size/Shape — see
-    # `_emit_legend_cascade_only`.
-    _has_own_legend: ClassVar[bool] = True
+    # This channel's legend surface (#123, 2026-09-23 -- widened from the
+    # former ``_has_own_legend: bool`` to a three-state value the same bool
+    # could not express):
+    #
+    # - "own" (Color, Size, Shape, StrokeDash, Fill, Stroke): the channel
+    #   renders a legend block of its own.  A bare ``legend=None``/``False``
+    #   suppresses THAT block; a ``Legend(...)``/dict configures it fully
+    #   (`_emit_legend`).
+    # - "cascade" (X, Y): no legend surface of its own -- contributes style
+    #   overrides to the shared color-legend cascade (NF-B13) instead.  Bare
+    #   ``None``/``False`` is a no-op (there is no "this channel's legend" to
+    #   suppress); an explicit value still reaches the cascade
+    #   (`_emit_legend_cascade_only`).
+    # - "none" (Opacity, FillOpacity, StrokeOpacity, StrokeWidth, Angle): no
+    #   legend exists at all.  Bare ``None``/``False`` stays silent (the
+    #   harmless "I want no legend and there is none" idiom); a
+    #   ``Legend(...)``/dict is refused (`_validate_legend_value`) rather
+    #   than accepted and silently dropped.
+    _legend_surface: ClassVar[Literal["own", "cascade", "none"]] = "own"
+    # Whether an un-honored ``title=`` refuses outright instead of the
+    # generic warn (#123, 2026-09-23, cycle 3). ``True`` only for Opacity,
+    # FillOpacity, StrokeOpacity: none of the three draws a legend, so
+    # ``title=`` -- which their siblings on the same "scale but no
+    # legend-title" shape would otherwise carry -- has nothing to label.
+    # StrokeWidth/Angle also have ``_legend_surface == "none"`` but never
+    # claimed ``title=`` as part of their contract at all (they are
+    # documented per-row constants, ``spec/encoding.rs:746``), so their
+    # ``title=`` stays on the ordinary "accepted but not yet honored" warn
+    # path, unchanged. This is a direct, named fact -- not inferred from an
+    # unrelated capability like ``"scale" in self._honored_kwargs`` (cycle-2
+    # quality-review finding: that check happened to produce the right
+    # answer for today's three channels, but nothing tied it to the actual
+    # rule, so a future channel gaining ``scale`` without gaining a legend
+    # would have silently flipped its ``title=`` from warn to refuse).
+    _title_refused: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Derive the ``condition`` honored-kwarg bit from the one conditional vocabulary.
@@ -415,6 +508,26 @@ class ChannelBase:
 
         for k in self._kwargs:
             if k not in self._honored_kwargs:
+                refused_template = _REFUSED_KWARGS.get((self._channel_name, k))
+                if refused_template is not None:
+                    raise ValueError(
+                        refused_template.format(
+                            channel=self.__class__.__name__, value=self._kwargs[k]
+                        )
+                    )
+                # `title=` on a channel with no legend surface (Opacity,
+                # FillOpacity, StrokeOpacity) is the same permanent fact as
+                # a legend dict/Legend() there (`_validate_legend_value`
+                # below): there is no legend to title. `_title_refused` is a
+                # direct, named class attribute stating that fact (see its
+                # docstring above) rather than inferred from an unrelated
+                # capability.
+                if k == "title" and self._title_refused:
+                    raise ValueError(
+                        _NO_LEGEND_MESSAGE.format(
+                            channel=self.__class__.__name__, kwarg="title", value=self._kwargs[k]
+                        )
+                    )
                 warn_once(self._channel_name, k, _honored_kwarg_message(self._channel_name, k))
 
     def _validate(self) -> None:
@@ -438,6 +551,45 @@ class ChannelBase:
             stack = self._kwargs.get("stack")
             if stack is not None:
                 self._kwargs["stack"] = self._normalize_stack(stack)
+        self._validate_legend_value()
+
+    def _validate_legend_value(self) -> None:
+        """Refuse a ``legend=`` value this channel's legend surface cannot honor (#123).
+
+        ``legend`` stays a member of every channel's ``_honored_kwargs`` (so
+        the harmless ``legend=None``/``legend=False`` "I want no legend"
+        idiom never warns), so this value-dependent check runs unconditionally
+        rather than through the honored/refused-kwarg membership gate above.
+
+        - ``None``/``False``: always silent, on every legend surface.
+        - ``_legend_surface == "none"`` (Opacity, FillOpacity, StrokeOpacity,
+          StrokeWidth, Angle): any other value is refused -- there is no
+          legend for a dict/``Legend(...)`` to configure.
+        - An auxiliary-legend channel (`_aux_legend_channels`: Size, Shape,
+          StrokeDash) whose legend value carries an explicit ``orient=``
+          other than ``"none"`` is refused: an aux legend has no independent
+          screen position, so it always shares the chart's legend block.
+          ``orient="none"`` still disables the aux block itself.
+        """
+        if "legend" not in self._kwargs:
+            return
+        value = self._kwargs["legend"]
+        if value is None or value is False:
+            return
+        if self._legend_surface == "none":
+            raise ValueError(
+                _NO_LEGEND_MESSAGE.format(
+                    channel=self.__class__.__name__, kwarg="legend", value=value
+                )
+            )
+        if self._channel_name in _aux_legend_channels():
+            orient = _legend_value_orient(value)
+            if orient is not None and orient != "none":
+                raise ValueError(
+                    _AUX_LEGEND_ORIENT_MESSAGE.format(
+                        channel=self.__class__.__name__, orient=orient
+                    )
+                )
 
     def _normalize_stack(self, value: Any) -> str:
         """Normalize a ``stack=`` kwarg value to a string for Rust's ``Option<String>``.
@@ -496,11 +648,14 @@ class ChannelBase:
         `_SPEC_DICT_HANDLERS` to its serializer; keys with no handler
         (``bin``/``aggregate``) are honored for the warn guard but consumed via
         `to_implicit_transforms`, so they contribute nothing here.  ``legend``
-        is the one key whose serializer depends on more than its own value:
-        a channel with no legend surface of its own (``_has_own_legend =
-        False`` — X, Y) routes through `_emit_legend_cascade_only` instead of
-        `_emit_legend`, so a bare ``None``/``False`` cannot suppress a
-        different channel's legend (see that function's docstring).
+        is the one key whose serializer depends on more than its own value,
+        branching on `_legend_surface`: ``"own"`` routes through
+        `_emit_legend`; ``"cascade"`` (X, Y) routes through
+        `_emit_legend_cascade_only` instead, so a bare ``None``/``False``
+        cannot suppress a different channel's legend (see that function's
+        docstring); ``"none"`` (Opacity, FillOpacity, StrokeOpacity,
+        StrokeWidth, Angle) never emits anything -- `_validate_legend_value`
+        has already refused every value except the silent ``None``/``False``.
 
         Keys are emitted in `_SPEC_DICT_ORDER` so the dict layout is
         stable regardless of ``frozenset`` iteration order.
@@ -509,8 +664,11 @@ class ChannelBase:
         for key in _SPEC_DICT_ORDER:
             if key not in self._honored_kwargs or key not in self._kwargs:
                 continue
-            if key == "legend" and not self._has_own_legend:
-                _emit_legend_cascade_only(self._kwargs[key], out)
+            if key == "legend":
+                if self._legend_surface == "cascade":
+                    _emit_legend_cascade_only(self._kwargs[key], out)
+                elif self._legend_surface == "own":
+                    _emit_legend(self._kwargs[key], out)
                 continue
             handler = _SPEC_DICT_HANDLERS.get(key)
             if handler is None:

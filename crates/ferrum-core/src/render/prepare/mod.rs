@@ -36,6 +36,14 @@ mod legend;
 // same visibility-only pattern as `bin::resolve_bin_extent`'s cycle-1 export.
 pub(crate) use extent::fix_transform_extents_for_facet;
 
+// `pub(crate)` so `lib.rs` can register the `#[pyfunction]` — same shape as
+// `fix_transform_extents_for_facet` above: `mod legend` stays private (its
+// other items are prepare-internal), only this one Python-visible symbol is
+// re-exported through `prepare`'s own namespace (#123 close, wave 6B T8
+// cycle 2, spec-reviewer finding — `ferrum.encoding.base` no longer
+// hand-mirrors the aux-legend channel list as a Python literal).
+pub(crate) use legend::aux_legend_channels;
+
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
 /// `None` row value = wrap mode (single-field facet).
 type FacetPartitionKey = (String, Option<String>);

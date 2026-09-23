@@ -68,6 +68,13 @@ class FacetRow(ChannelBase):
         grid mode (used together with ``facet_col``), ``title`` drives the
         row-header strip.
 
+    Notes
+    -----
+    ``columns`` is **not** honored (2026-09-23, #123): row/column faceting
+    has no wrap-count to apply it to, so ``FacetRow(field, columns=N)``
+    raises ``ValueError`` at construction naming ``Facet(columns=...)`` for
+    wrap-mode panel-per-row counts instead.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -97,6 +104,13 @@ class FacetCol(ChannelBase):
         Column/wrap-strip title.  When set, the strip text renders
         ``"{title}: {value}"``; when omitted, the strip shows the bare
         value (not the field name).
+
+    Notes
+    -----
+    ``columns`` is **not** honored (2026-09-23, #123): row/column faceting
+    has no wrap-count to apply it to, so ``FacetCol(field, columns=N)``
+    raises ``ValueError`` at construction naming ``Facet(columns=...)`` for
+    wrap-mode panel-per-row counts instead.
 
     Examples
     --------
