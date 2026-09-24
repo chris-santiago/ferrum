@@ -3218,6 +3218,7 @@ class Chart(
                 inherited_details=layered_chart_detail(
                     chart_detail, [layer.mark for layer in serialized_layers]
                 ),
+                override_encoding=_override_encoding,
             )
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()

@@ -18,7 +18,8 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning};
 
 use super::domain::{
-    apply_sort_to_domain, locate_field, numeric_domain_union, positional_category_union,
+    apply_sort_to_domain, locate_field, numeric_domain_union, numeric_domain_union_over,
+    positional_category_union, LayerUnion,
     SortContext,
 };
 use super::{
@@ -154,7 +155,8 @@ pub(in crate::render) fn build_axis_scale(
     // domain also unions the global all-panels batch (`FINAL_OUTPUT_KEY`) so a
     // faceted raw field's positional domain spans every panel (T4). `false` for
     // non-faceted charts and `Independent`-mode channels → byte-identical
-    // per-panel behavior. Ignored on the explicit `enc.scale` bypass.
+    // per-panel behavior. On the explicit `enc.scale` bypass it reaches only a
+    // layered spec's domain-less continuous scale, through the same union.
     include_final: bool,
     // Composite-shared domain for this channel (D4b). `Some` only for a
     // composite leaf whose channel shares a domain across the tree; it seeds this
@@ -228,7 +230,8 @@ pub(in crate::render) fn build_axis_scale(
     // the LHS's own layer), so this is the predicate saying what it means rather
     // than a fix for a live shape. Pinned by
     // `injected_scale_with_an_empty_layers_list_keeps_the_bypass`.
-    let yields_to_auto_path = shared.is_some() || spec.layers.as_ref().is_some_and(|l| !l.is_empty());
+    let layered = spec.layers.as_ref().is_some_and(|l| !l.is_empty());
+    let yields_to_auto_path = shared.is_some() || layered;
     let explicit_scale =
         enc.scale.as_ref().filter(|s| !(yields_to_auto_path && s.is_system_injected()));
     if let Some(scale_spec) = explicit_scale {
@@ -239,7 +242,43 @@ pub(in crate::render) fn build_axis_scale(
             y_field: positional_fields.y,
             coord_flipped,
         };
-        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, warnings);
+        // What a continuous scale stating no `domain` spans: the data of every
+        // layer carrying this same scale, with their paired `x2`/`y2`
+        // endpoints and the facet-shared global batch. A composite mark's
+        // layers each carry a copy of the one scale the caller wrote on it, so
+        // the axis covers the whole mark; a sibling layer without it stays out
+        // (see `LayerUnion::CarryingScale`). Unlayered, it is the bound column
+        // and its paired `x2`/`y2` column.
+        let data_extent = || {
+            if layered {
+                numeric_domain_union_over(
+                    channel,
+                    &enc.field,
+                    paired_enc.map(|p| p.field.as_str()),
+                    primary_batch,
+                    transform_outputs,
+                    spec,
+                    include_final,
+                    LayerUnion::CarryingScale(scale_spec),
+                )
+                .map_err(|e| match e {
+                    RenderError::UnsupportedDtype { field, dtype, context: None } => {
+                        RenderError::UnsupportedDtype { field, dtype, context: Some("scale") }
+                    }
+                    e => e,
+                })
+            } else {
+                let (lo, hi) = column_extent(located.batch, &enc.field)?;
+                match paired_enc.and_then(|p| locate_field(&p.field, primary_batch, transform_outputs).map(|l| (l, p))) {
+                    Some((l, p)) => {
+                        let (plo, phi) = column_extent(l.batch, &p.field)?;
+                        Ok((lo.min(plo), hi.max(phi)))
+                    }
+                    None => Ok((lo, hi)),
+                }
+            }
+        };
+        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, &data_extent, warnings);
     }
 
     let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
@@ -446,10 +485,15 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 
 /// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.
 ///
+/// `data_extent` answers what a continuous scale stating no `domain` spans; it
+/// is asked only then, so a categorical scale on a non-numeric column never
+/// reads it.
+///
 /// `channel` (`"x"`/`"y"`) names the axis in the #152 explicit-domain/range shape
 /// refusal below — the same field `apply_axis_domain_config`'s sibling refusal on
 /// this type already carries — and picks the opposite positional channel for the
 /// discrete arms' null-band occupancy rule (`#247`B).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn build_from_scale_spec(
     channel: &str,
     scale_spec: &crate::spec::encoding::ScaleSpec,
@@ -457,13 +501,14 @@ pub(in crate::render) fn build_from_scale_spec(
     batch: &RecordBatch,
     pr: (f64, f64),
     sort_ctx: &SortContext<'_>,
+    data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::spec::encoding::ScaleSpec;
 
-    let col = batch
-        .column_by_name(&enc.field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
+    if batch.column_by_name(&enc.field).is_none() {
+        return Err(RenderError::UnknownColumn { name: enc.field.clone() });
+    }
 
     // `#247`B: an explicit Ordinal/Band/Point scale that names no `domain` resolves
     // one from the data, so it bands nulls by the same rule the auto path does.
@@ -480,22 +525,22 @@ pub(in crate::render) fn build_from_scale_spec(
         // reaches here it resolves identically whoever wrote it (#247A).
         ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, *zero, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, *zero, common.reverse)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, *nice))
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -519,17 +564,17 @@ pub(in crate::render) fn build_from_scale_spec(
         }
         ScaleSpec::Pow { exponent, common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
             // F-L04-06: `utc=true` survives resolution — the wire tag no
             // longer collapses into an indistinguishable `TimeScale` once
             // resolved (`new_internal` used to default it away here).
@@ -616,7 +661,7 @@ pub(in crate::render) fn build_from_scale_spec(
             // completely separate resolution path — `scale_resolve::color`),
             // so both are hard-coded `false` rather than threading a value
             // that could never mean anything else here.
-            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, None, col.as_ref(), &enc.field, pr, false, false)?;
+            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, None, data_extent, pr, false, false)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }
     })
@@ -781,13 +826,11 @@ pub(in crate::render) fn extend_extent_to_zero(lo: f64, hi: f64) -> (f64, f64) {
 /// assumption rather than merely fail to match a hand-written descending
 /// domain. Every other variant passes `false`, a guaranteed no-op (the
 /// `d.len() == 2` guard below).
-#[allow(clippy::too_many_arguments)]
 fn resolve_continuous_domain_and_range(
     domain: &Option<Vec<f64>>,
     range: &Option<Vec<f64>>,
     padding: Option<f64>,
-    col: &dyn Array,
-    field: &str,
+    data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
     pr: (f64, f64),
     zero: bool,
     reverse: bool,
@@ -795,11 +838,7 @@ fn resolve_continuous_domain_and_range(
     let mut d = match domain {
         Some(d) => d.clone(),
         None => {
-            let (mn, mx) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-                field: field.to_string(),
-                dtype: format!("{:?}", col.data_type()),
-                context: Some("scale"),
-            })?;
+            let (mn, mx) = data_extent()?;
             vec![mn, mx]
         }
     };
@@ -817,6 +856,20 @@ fn resolve_continuous_domain_and_range(
     }
     let d = apply_domain_reverse(d, reverse);
     Ok((d, r))
+}
+
+/// The data extent of `field` in `batch`, refused in the scale's voice: what
+/// an explicit continuous scale stating no `domain` reads per column on an
+/// unlayered spec.
+fn column_extent(batch: &RecordBatch, field: &str) -> Result<(f64, f64), RenderError> {
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+        field: field.to_string(),
+        dtype: format!("{:?}", col.data_type()),
+        context: Some("scale"),
+    })
 }
 
 /// Domain-swap sugar for `ContinuousScaleCommon::reverse` (F-L04-07, spec
@@ -1356,7 +1409,7 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &|| super::column_extent(&batch, "cat"), &mut warnings)
             .unwrap()
     }
 
@@ -1695,7 +1748,7 @@ mod tests {
             coord_flipped: false,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &|| super::column_extent(batch, field), &mut warnings)
     }
 
     fn resolve_scale(
@@ -2393,6 +2446,243 @@ mod tests {
         let layers = vec![y_layer(Mark::Bar, "v"), y_layer(Mark::Point, "p")];
         let scale = build_zero_anchored_y(false, None, Some(layers));
         assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+    }
+
+    /// A composite mark's layers (a box's whisker rule `lo..hi` plus its
+    /// outlier points `out`), the whisker carrying the caller-written scale and
+    /// the outliers carrying a copy of it only when `outliers_scaled`.
+    /// Columns: `lo = [2, 3]`, `hi = [5, 6]`, `out = [0.5, 9]`, so the bound
+    /// column alone spans `[2, 3]`, the whisker `[2, 6]`, and the whole mark
+    /// `[0.5, 9]`.
+    fn build_composite_y(
+        common: crate::spec::encoding::ContinuousScaleCommon,
+        outliers_scaled: bool,
+    ) -> Result<ScaleKind, RenderError> {
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("lo", ArrowDataType::Float64, false),
+            Field::new("hi", ArrowDataType::Float64, false),
+            Field::new("out", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0])),
+                Arc::new(Float64Array::from(vec![0.5, 9.0])),
+            ],
+        )
+        .unwrap();
+        let scale = ScaleSpec::Linear { common, nice: false, zero: false, system_injected: false };
+        let scaled = |field: &str| EncodingSpec {
+            field: field.into(),
+            type_: None,
+            scale: Some(scale.clone()),
+            ..Default::default()
+        };
+        let mut whisker = y_layer(Mark::Rule, "lo");
+        whisker.encoding.y = Some(scaled("lo"));
+        whisker.encoding.y2 = Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() });
+        let mut outliers = y_layer(Mark::Point, "out");
+        if outliers_scaled {
+            outliers.encoding.y = Some(scaled("out"));
+        }
+        let mut spec = minimal_point_chart_spec();
+        spec.layers = Some(vec![whisker, outliers]);
+        let mut warnings = Vec::new();
+        super::build_axis_scale(
+            "y",
+            &scaled("lo"),
+            None,
+            super::PositionalFields { x: None, y: Some("lo") },
+            &batch,
+            &HashMap::new(),
+            (0.0, 400.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+    }
+
+    /// A caller's scale that declares no `domain` (here `reverse`) spans every
+    /// layer carrying a copy of it, reversed: `(9, 0.5)`. It used to resolve the
+    /// bound column alone, `(3, 2)`, so a boxplot drawn with
+    /// `scale={"reverse": True}` lost its upper whiskers and outliers off the
+    /// axis while the same chart without the scale covered them.
+    #[test]
+    fn domainless_user_scale_spans_every_layer_carrying_it() {
+        let scale = build_composite_y(reverse_common(None, None, true), true).unwrap();
+        assert_eq!(scale.data_domain(), Some((9.0, 0.5)));
+    }
+
+    /// A sibling layer that does not carry the scale stays out: the axis is the
+    /// scaled whisker's own `lo..hi`, `(6, 2)` reversed, not the outliers' `9`.
+    #[test]
+    fn domainless_user_scale_leaves_out_a_layer_without_it() {
+        let scale = build_composite_y(reverse_common(None, None, true), false).unwrap();
+        assert_eq!(scale.data_domain(), Some((6.0, 2.0)));
+    }
+
+    /// Control: a stated `domain` is the caller's extent and is taken
+    /// literally, layers or not.
+    #[test]
+    fn stated_domain_on_a_layered_spec_is_taken_literally() {
+        let scale = build_composite_y(reverse_common(Some(vec![1.0, 4.0]), None, false), true).unwrap();
+        assert_eq!(scale.data_domain(), Some((1.0, 4.0)));
+    }
+
+    /// A caller's continuous scale on a non-numeric column refuses in the
+    /// scale's voice whether or not the spec is layered.
+    #[test]
+    fn layered_domainless_scale_on_a_text_column_refuses_as_a_scale() {
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        use std::collections::HashMap;
+
+        let batch = category_batch("cat", &["a".to_string(), "b".to_string()]);
+        let enc = EncodingSpec {
+            field: "cat".into(),
+            type_: None,
+            scale: Some(ScaleSpec::Linear {
+                common: reverse_common(None, None, true),
+                nice: false,
+                zero: false,
+                system_injected: false,
+            }),
+            ..Default::default()
+        };
+        let mut layer = y_layer(Mark::Point, "cat");
+        layer.encoding.y = Some(enc.clone());
+        let mut spec = minimal_point_chart_spec();
+        spec.layers = Some(vec![layer]);
+        let mut warnings = Vec::new();
+        let err = super::build_axis_scale(
+            "y",
+            &enc,
+            None,
+            super::PositionalFields { x: None, y: Some("cat") },
+            &batch,
+            &HashMap::new(),
+            (0.0, 400.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "scale: column 'cat' has unsupported dtype: Utf8");
+    }
+
+    /// Resolve `y` for `enc` (bound field) and `paired` (its `y2`) through the
+    /// real `build_axis_scale`, with `layers` as the spec's layers.
+    fn resolve_y(
+        batch: &RecordBatch,
+        enc: &crate::spec::encoding::EncodingSpec,
+        paired: Option<&crate::spec::encoding::EncodingSpec>,
+        layers: Option<Vec<crate::spec::layer::Layer>>,
+    ) -> ScaleKind {
+        let mut spec = minimal_point_chart_spec();
+        spec.layers = layers;
+        let mut warnings = Vec::new();
+        super::build_axis_scale(
+            "y",
+            enc,
+            paired,
+            super::PositionalFields { x: None, y: Some(enc.field.as_str()) },
+            batch,
+            &std::collections::HashMap::new(),
+            (0.0, 400.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap()
+    }
+
+    /// `field` bound to y with a caller-written linear scale.
+    fn linear_y(field: &str, zero: bool, reverse: bool) -> crate::spec::encoding::EncodingSpec {
+        crate::spec::encoding::EncodingSpec {
+            field: field.into(),
+            type_: None,
+            scale: Some(crate::spec::encoding::ScaleSpec::Linear {
+                common: reverse_common(None, None, reverse),
+                nice: false,
+                zero,
+                system_injected: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A `mark` layer binding y to `enc`.
+    fn scaled_layer(mark: crate::spec::mark::Mark, enc: crate::spec::encoding::EncodingSpec) -> crate::spec::layer::Layer {
+        let mut layer = y_layer(mark, &enc.field);
+        layer.encoding.y = Some(enc);
+        layer
+    }
+
+    /// An unlayered `y`/`y2` mark with a domain-less caller scale spans both
+    /// endpoints: `v = [1, 2]`, `w = [30, 40]` resolves `(40, 1)` reversed, not
+    /// the bound column's `(2, 1)` with every `y2` endpoint off the axis.
+    #[test]
+    fn unlayered_domainless_scale_spans_its_paired_endpoint() {
+        use crate::spec::encoding::EncodingSpec;
+        let schema_batch = {
+            use arrow::array::Float64Array;
+            use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+            use std::sync::Arc;
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("v", ArrowDataType::Float64, false),
+                    Field::new("w", ArrowDataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![30.0, 40.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let paired = EncodingSpec { field: "w".into(), type_: None, ..Default::default() };
+        let scale = resolve_y(&schema_batch, &linear_y("v", false, true), Some(&paired), None);
+        assert_eq!(scale.data_domain(), Some((40.0, 1.0)));
+    }
+
+    /// One row, `v = 5`, under a caller scale with `zero: true`: the layered
+    /// spec (a bar and a point both carrying the scale) resolves `(0, 5)`, the
+    /// same as the unlayered one. The auto path's single-value `±0.5` widening
+    /// is not the caller scale's to take, and would give `(0, 5.5)`.
+    #[test]
+    fn single_value_caller_scale_resolves_the_same_layered_and_unlayered() {
+        use crate::spec::mark::Mark;
+        let batch = numeric_batch("v", vec![5.0]);
+        let enc = linear_y("v", true, false);
+        let flat = resolve_y(&batch, &enc, None, None);
+        let layers = vec![scaled_layer(Mark::Bar, enc.clone()), scaled_layer(Mark::Point, enc.clone())];
+        let layered = resolve_y(&batch, &enc, None, Some(layers));
+        assert_eq!(flat.data_domain(), Some((0.0, 5.0)));
+        assert_eq!(layered.data_domain(), flat.data_domain());
+    }
+
+    /// A bar layer carrying a caller scale with `zero: false` is not anchored
+    /// at zero: its scale's own `zero` decides, not the auto path's bar rule.
+    /// `v = [1, 3]` and `p = [40, 80]`, both scaled, resolve `(1, 80)`.
+    #[test]
+    fn a_scaled_bar_layer_takes_its_scales_zero_not_the_bar_anchor() {
+        use crate::spec::mark::Mark;
+        let batch = bar_and_sibling_batch();
+        let enc = linear_y("v", false, false);
+        let layers = vec![scaled_layer(Mark::Bar, enc.clone()), scaled_layer(Mark::Point, linear_y("p", false, false))];
+        let scale = resolve_y(&batch, &enc, None, Some(layers));
+        assert_eq!(scale.data_domain(), Some((1.0, 80.0)));
     }
 
     /// The other half: with NEITHER a shared domain nor layers there is nothing

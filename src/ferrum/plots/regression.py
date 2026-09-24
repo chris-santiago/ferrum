@@ -526,6 +526,7 @@ def _fit_chart_from_named_transform(
     ci: float | None,
     line_kwargs: dict,
     chart_x: Any,
+    chart_y: Any,
     x_title: str,
     y_title: str,
     neutral_stroke: bool = False,
@@ -566,11 +567,13 @@ def _fit_chart_from_named_transform(
     ``Robust`` of the three dedicated fit transforms supports it; see
     ``lmplot``'s ``metrics_applied`` computation).
 
-    ``chart_x`` is the chart-level x channel the caller would have encoded.
-    The layers below read the transform's own output columns, so an explicit
-    ``scale=`` on that channel (``lmplot(logx=True)``) has to be propagated
-    onto them -- the step ``_resolve_pending_impl`` performs automatically for
-    a chart built through the desugar path. Doing it here, at construction,
+    ``chart_x``/``chart_y`` are the chart-level x/y channels the caller would
+    have encoded. The layers below read the transform's own output columns, so
+    an explicit ``scale=`` on either (``lmplot(logx=True)``, or a caller's
+    ``y=fm.Y(..., scale=...)``) has to be propagated onto them, so the band,
+    line and metrics carry the same scale the scatter does -- the step
+    ``_resolve_pending_impl`` performs automatically for a chart built
+    through the desugar path. Doing it here, at construction,
     is what keeps ``logx`` ONE mechanism: the alternative was a second
     implementation in ``lmplot``, re-running the propagation by hand for
     charts this function had left in a state the desugar pipeline never
@@ -592,7 +595,7 @@ def _fit_chart_from_named_transform(
     chart = Chart(data)._clone()
     chart._transforms = [transform]
     chart._layers = [
-        _propagate_layer_scale({"x": chart_x}, layer)
+        _propagate_layer_scale({"x": chart_x, "y": chart_y}, layer)
         for layer in build_fit_layers(
             kind,
             data_source=kind,
@@ -727,6 +730,7 @@ def _build_smooth_fit(method: str, req: _FitRequest) -> Chart:
         ci=req.ci,
         line_kwargs=lkw,
         chart_x=req.x,
+        chart_y=req.y,
         x_title=req.x_field,
         y_title=req.y_field,
         metrics=req.metrics,
@@ -754,6 +758,7 @@ def _dedicated_fit_chart(kind: str, transform: Any, req: _FitRequest) -> Chart:
         ci=req.ci,
         line_kwargs=req.line_kwargs,
         chart_x=req.x,
+        chart_y=req.y,
         x_title=req.x_field,
         y_title=req.y_field,
         neutral_stroke=req.color_active,

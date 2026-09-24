@@ -634,6 +634,50 @@ pub(in crate::render) fn numeric_domain_union(
     spec: &ChartSpec,
     include_final: bool,
 ) -> Result<(f64, f64), RenderError> {
+    numeric_domain_union_over(
+        channel,
+        field,
+        paired_field,
+        primary_batch,
+        transform_outputs,
+        spec,
+        include_final,
+        LayerUnion::Every,
+    )
+}
+
+/// Which of `spec.layers` [`numeric_domain_union_over`] reads beyond the bound
+/// field and its paired endpoint.
+#[derive(Clone, Copy)]
+pub(in crate::render) enum LayerUnion<'a> {
+    /// The auto path: every layer, and an eligible bar layer anchors the
+    /// extent at zero.
+    Every,
+    /// A caller's scale that states no `domain`: only the layers whose own
+    /// encoding for this channel carries this same scale. A composite mark
+    /// desugars into several layers that each hold a copy of the one scale the
+    /// caller wrote on it, so the scale spans all of them. A layer without it
+    /// stays out, since a caller's own scale is never unioned with a sibling
+    /// layer it was not written on. The scale's own `zero` decides the zero
+    /// anchor, so the auto path's bar rule does not apply, and the raw extent
+    /// is returned without the auto path's all-null and single-value
+    /// fallbacks, exactly as an unlayered caller scale reads its column: the
+    /// scale's own resolution handles a degenerate domain either way.
+    CarryingScale(&'a crate::spec::encoding::ScaleSpec),
+}
+
+/// [`numeric_domain_union`] with the layer selection spelled out.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn numeric_domain_union_over(
+    channel: &str,
+    field: &str,
+    paired_field: Option<&str>,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    spec: &ChartSpec,
+    include_final: bool,
+    layer_union: LayerUnion<'_>,
+) -> Result<(f64, f64), RenderError> {
     let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
         Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
         None => std::collections::HashSet::new(),
@@ -757,6 +801,16 @@ pub(in crate::render) fn numeric_domain_union(
                 e
             });
             let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
+            if let LayerUnion::CarryingScale(scale) = layer_union {
+                let own = match channel {
+                    "x" => encoding.x.as_ref(),
+                    "y" => encoding.y.as_ref(),
+                    _ => None,
+                };
+                if own.and_then(|e| e.scale.as_ref()) != Some(scale) {
+                    continue;
+                }
+            }
             let layer_fields: [Option<&str>; 2] = match channel {
                 "x" => [
                     encoding.x.as_ref().map(|e| e.field.as_str()),
@@ -791,18 +845,23 @@ pub(in crate::render) fn numeric_domain_union(
                     value_field_contributed = contributed;
                 }
             }
-            if layer_wants_bar_zero_anchor(
-                layer,
-                channel,
-                coord_flipped,
-                layer_fields,
-                value_field_contributed,
-            ) {
+            if matches!(layer_union, LayerUnion::Every)
+                && layer_wants_bar_zero_anchor(
+                    layer,
+                    channel,
+                    coord_flipped,
+                    layer_fields,
+                    value_field_contributed,
+                )
+            {
                 bar_zero_wanted = true;
             }
         }
     }
 
+    if matches!(layer_union, LayerUnion::CarryingScale(_)) {
+        return Ok((mn, mx));
+    }
     if !mn.is_finite() || !mx.is_finite() {
         // All values were null/NaN — return a default domain so the chart
         // renders with axes but no marks, instead of raising an error.
@@ -837,11 +896,12 @@ pub(in crate::render) fn numeric_domain_union(
     // axis no visible span to lay out against; expanding to a symmetric band
     // around `mn == mx` gives the auto-inferred axis a real (if synthetic)
     // extent to tick and label, which #104's per-value guard has no way to
-    // provide. Guard fires only here because `numeric_domain_union` is called
-    // exclusively from the auto-inferred (no explicit ScaleSpec) path in
-    // `build_axis_scale`; explicit domains go through `build_from_scale_spec`
-    // → `resolve_continuous_domain_and_range`, where #104's per-scale guard
-    // is what keeps a degenerate explicit domain finite instead.
+    // provide. This widening and the all-null fallback above serve only the
+    // auto path (`LayerUnion::Every`): a caller's scale, layered or not, never
+    // reaches them (`CarryingScale` returns the raw extent earlier, and an
+    // unlayered or stated-domain scale resolves in `build_from_scale_spec` →
+    // `resolve_continuous_domain_and_range`), and relies on #104's per-scale
+    // guard to keep a degenerate domain finite instead.
     if mn == mx {
         if mn == 0.0 {
             mn = -1.0;

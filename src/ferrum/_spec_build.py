@@ -18,7 +18,11 @@ import json
 import math
 from typing import Any, NamedTuple
 
-from ferrum._core import EncodingSpec as _EncodingSpec, scale_accepted_keys as _scale_accepted_keys
+from ferrum._core import (
+    EncodingSpec as _EncodingSpec,
+    scale_accepted_keys as _scale_accepted_keys,
+    validate_scale_dict as _validate_scale_dict,
+)
 from ferrum._facet import (
     build_facet_dict as _build_facet_dict_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
@@ -40,6 +44,33 @@ class _ResolvedBins(NamedTuple):
 
     transforms: list
     encoding: dict
+
+
+def _with_override_scale(d: dict, channel: str, override_encoding: dict | None) -> dict:
+    """Return channel spec dict *d* with ``Chart.override``'s scale leaves for *channel* merged in.
+
+    The one place an override's ``<channel>_scale_*`` leaves meet a channel's
+    own ``scale=``, for the chart-level encoding and for every layer that
+    declares the channel alike, so a layered chart renders the override exactly
+    as the channel's own ``scale=`` would. Override leaves win (spec §7). The
+    merged dict goes back through ``_scale_to_dict`` so a typeless override
+    (just ``domain``) gains the ``type`` discriminator the wire requires, and
+    through the scale gate, so a refused override refuses in the gate's own
+    voice on every path, including a layer-only channel whose JSON wire dict
+    would otherwise refuse in serde's. *d* is never mutated.
+    """
+    if override_encoding is None:
+        return d
+    scale_overrides = override_encoding.get(channel, {}).get("scale")
+    if not scale_overrides:
+        return d
+    from ferrum.encoding._scale import _scale_to_dict
+
+    existing_scale = d.get("scale")
+    base_scale = existing_scale if isinstance(existing_scale, dict) else {}
+    merged = _scale_to_dict(_merge_encoding_scale(base_scale, scale_overrides))
+    _validate_scale_dict(merged)
+    return {**d, "scale": merged}
 
 
 def _scale_type_accepts_zero(scale_type: Any) -> bool:
@@ -375,12 +406,8 @@ class SpecBuildMixin:
             # annotation was given.  Explicit ":T" / ":Q" / type_= / type= always
             # win; only the unannotated case is changed here.
             d = _apply_inferred_type(d, d.get("field"), resolved._data)
-            # Chart.override(<channel>_scale_<leaf>=...) — merge the override scale
-            # leaves into this channel's scale dict so override wins over the
-            # channel's own scale= setting (override wins the cascade, spec §7).
-            # Route the merged dict back through _scale_to_dict so a typeless
-            # override scale (e.g. just `domain`) gains the `type` discriminator
-            # Rust's tagged-enum ScaleSpec deserialiser requires.
+            # Chart.override(<channel>_scale_<leaf>=...) wins over the channel's
+            # own scale= (spec §7).
             #
             # Applied BEFORE the bar zero-anchor injection below (not after,
             # as an earlier revision had it) so the zero-anchor sees the
@@ -392,14 +419,7 @@ class SpecBuildMixin:
             # gate-refused shape the zero-anchor fix below exists to avoid,
             # just reached through override composition instead of a direct
             # scale= dict.
-            if override_encoding is not None:
-                scale_overrides = override_encoding.get(axis, {}).get("scale")
-                if scale_overrides:
-                    from ferrum.encoding._scale import _scale_to_dict
-
-                    existing_scale = d.get("scale")
-                    base_scale = existing_scale if isinstance(existing_scale, dict) else {}
-                    d["scale"] = _scale_to_dict(_merge_encoding_scale(base_scale, scale_overrides))
+            d = _with_override_scale(d, axis, override_encoding)
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or
@@ -487,7 +507,11 @@ class SpecBuildMixin:
         return kw
 
     def _build_layers_list(
-        self, layers: list | None = None, *, inherited_details: list[object | None] | None = None
+        self,
+        layers: list | None = None,
+        *,
+        inherited_details: list[object | None] | None = None,
+        override_encoding: dict | None = None,
     ) -> list:
         """Convert ``_layers`` to a list of JSON-serializable dicts for Rust.
 
@@ -505,6 +529,14 @@ class SpecBuildMixin:
             when it has none of its own, or ``None`` (see
             :func:`ferrum.encoding._aliases.layered_chart_detail`, which owns
             the "which marks read ``detail``" rule).
+        override_encoding :
+            ``Chart.override`` encoding-scale payload (``{channel: {"scale": {...}}}``),
+            or ``None``. Merged into every channel a layer declares, exactly as
+            ``_build_encoding_specs`` merges it into the chart-level encoding;
+            a layer that does not declare the channel inherits the chart-level
+            (already overridden) one. ``to_spec`` builds the chart-level
+            encoding first, so a refused override refuses there, before any
+            layer is serialized.
         """
         from ferrum.chart import _apply_inferred_type, _strip_unstackable
         from ferrum.encoding._aliases import apply_channel_aliases
@@ -570,6 +602,7 @@ class SpecBuildMixin:
                     # Auto-infer temporal type from column dtype when no explicit type
                     # annotation was given (same logic as _build_encoding_specs).
                     d = _apply_inferred_type(d, field, self._data)
+                    d = _with_override_scale(d, axis, override_encoding)
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -653,7 +686,9 @@ class SpecBuildMixin:
                         enc_json_dict["formatType"] = d["format_type"]
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
-                    encoding_dict[axis] = {"field": ch}
+                    encoding_dict[axis] = _with_override_scale(
+                        {"field": ch}, axis, override_encoding
+                    )
             layer_dict: dict = {
                 "mark": layer.mark or "point",
                 "encoding": encoding_dict,
