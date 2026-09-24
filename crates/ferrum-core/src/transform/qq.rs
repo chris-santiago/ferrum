@@ -376,10 +376,7 @@ pub(crate) fn secondary_outputs(
     let line_batch = RecordBatch::try_new(line_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_qq: qq_line: {e}")))?;
 
-    let key = match &spec.name {
-        Some(s) => format!("{s}_{QQ_LINE_KEY}"),
-        None => QQ_LINE_KEY.to_string(),
-    };
+    let key = crate::transform::registry::secondary_key(spec.name.as_deref(), QQ_LINE_KEY);
     Ok(vec![(key, line_batch)])
 }
 

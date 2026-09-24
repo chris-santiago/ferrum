@@ -873,5 +873,24 @@ pub fn transform_registry(py: Python<'_>, kind: &str) -> PyResult<Py<PyDict>> {
     Ok(dict.into())
 }
 
+/// `ferrum._core.secondary_key(name, key)`: the one home of the
+/// `"{name}_{key}"` secondary-output naming rule documented above
+/// (`secondary_outputs` convention). `name=None` returns `key` unprefixed —
+/// the default-construction key this table's `secondary_outputs` entries
+/// already declare; `name=Some(n)` returns `"{n}_{key}"`. Called internally
+/// by `qq`, `letter_value` and `linkage` (the three transforms with declared
+/// `secondary_outputs`) and across the wire by Python's composition call
+/// sites, so the convention exists exactly once instead of being composed by
+/// hand at every site (#165(1), decision record §6). Mirrors
+/// `interpolate_accepted_values`'s shape: registered in `lib.rs`, typed in
+/// `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn secondary_key(name: Option<&str>, key: &str) -> String {
+    match name {
+        Some(n) => format!("{n}_{key}"),
+        None => key.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests;

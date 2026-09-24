@@ -42,6 +42,7 @@ and its accounting are computed, so the claim cannot outrun the code again.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -183,11 +184,25 @@ def test_registry_output_columns_raises_on_undeclared_column():
     """RED-proof of the lookup half of M6a: a name that is not declared for
     the kind raises, naming the kind and the stale column -- this is what
     would fire if a Rust-side rename shipped without a matching Python
-    update."""
+    update. Exact-string pin (not just a substring/regex match) on the
+    PRIMARY helper's wording, `"known output columns"` -- distinct from
+    `registry_secondary_columns`'s `"known columns"` below (#165(2), wave 6B
+    T10 cycle 2 Q1): a regex could pass even if the `{missing}`/`{declared}`
+    placeholders were swapped or the wording collapsed to match the
+    secondary helper's. `['ci_lower', 'ci_upper', 'x', 'y']` is `smooth`'s
+    real declared output set, read directly off `transform_registry("smooth")`
+    (see `test_returns_documented_five_key_shape`'s use of the same kind),
+    hand-pinned here rather than re-derived so this test cannot pass by
+    sharing the same computation as the code it is checking."""
     from ferrum._registry import registry_output_columns
 
-    with pytest.raises(ValueError, match="smooth.*not_a_real_column"):
+    with pytest.raises(ValueError) as excinfo:
         registry_output_columns("smooth", ["x", "not_a_real_column"])
+    assert str(excinfo.value) == (
+        "transform_registry('smooth')['outputs'] does not declare "
+        "['not_a_real_column']; known output columns: "
+        "['ci_lower', 'ci_upper', 'x', 'y']"
+    )
 
 
 def test_registry_output_columns_rejects_an_unknown_kind():
@@ -208,11 +223,22 @@ def test_registry_secondary_columns_returns_a_lookup_of_the_validated_names():
 
 def test_registry_secondary_columns_raises_on_an_undeclared_column():
     """RED-proof of the secondary half: a Rust-side rename of a dendrogram
-    segment column raises here, naming the stale name."""
+    segment column raises here, naming the stale name. Exact-string pin on
+    the SECONDARY helper's wording, `"known columns"` -- no `"output"`
+    qualifier, distinct from `registry_output_columns`'s message above
+    (#165(2), wave 6B T10 cycle 2 Q1). `['x', 'x2', 'y', 'y2']` is
+    `linkage`'s real `segments` batch schema, hand-pinned rather than
+    re-derived from the registry for the same reason as the primary pin
+    above."""
     from ferrum._registry import registry_secondary_columns
 
-    with pytest.raises(ValueError, match="linkage.*segments.*not_a_real_column"):
+    with pytest.raises(ValueError) as excinfo:
         registry_secondary_columns("linkage", "segments", ["x", "not_a_real_column"])
+    assert str(excinfo.value) == (
+        "transform_registry('linkage')['secondary_outputs']['segments'] "
+        "does not declare ['not_a_real_column']; known columns: "
+        "['x', 'x2', 'y', 'y2']"
+    )
 
 
 def test_registry_secondary_columns_raises_on_an_undeclared_key():
@@ -234,3 +260,199 @@ def test_registry_secondary_columns_refuses_the_primary_schema():
     assert registry_output_columns("letter_value", ["depth"]) == {"depth": "depth"}
     with pytest.raises(ValueError, match="does not declare"):
         registry_secondary_columns("letter_value", "depth_1", ["depth"])
+
+
+# ---------------------------------------------------------------------------
+# 4. Secondary-key composition + `registry_*_columns` call-site pins
+#    (wave 6B T10, `#165`(1)(2)) -- captured from HEAD before `_check_declared`
+#    was extracted out of `registry_output_columns`/`registry_secondary_columns`,
+#    and before the six Python `f"{name}_{key}"` composition sites
+#    (`marks/heavy_stat.py`, `marks/composite.py` x3, `plots/matrix.py` x3)
+#    were switched to call `ferrum._core.secondary_key`.
+# ---------------------------------------------------------------------------
+
+# The (kind, names) / (kind, key, names) argument tuples every real
+# `registry_output_columns`/`registry_secondary_columns` call site in
+# `src/ferrum/` passes, copied verbatim from source rather than invented, so
+# a renamed/dropped/reordered column at any site would move one of these
+# pins. `grep -rnoE "registry_(output|secondary)_columns\(" src/ferrum`
+# reports 25 hits, but one (`plots/distribution.py:876`) is inside a comment
+# referencing the helper, not a call -- 24 real physical call sites.
+# `marks/_fit_layers.py:110` is one of those 24 physical sites but is reached
+# with four different `kind`s at runtime (`smooth`/`logistic`/`glm`/`robust`,
+# from `statistical.py`'s and `regression.py`'s dedicated-fit dispatch), so
+# it is pinned once per real kind below -- 27 total pinned invocations.
+_PRIMARY_CALL_SITES = [
+    ("bin", ["bin_start", "bin_end", "count", "agg_value"]),  # _layer_transforms.py:434
+    (
+        "contour",
+        ["contour_x", "contour_y", "contour_x2", "contour_y2", "level_id", "level_value"],
+    ),  # marks/heavy_stat.py:148
+    ("violin", ["violin_y", "group_id"]),  # marks/heavy_stat.py:393
+    ("box_stats", ["q1", "median", "q3"]),  # marks/heavy_stat.py:497
+    ("qq", ["theoretical", "sample"]),  # marks/heavy_stat.py:668
+    ("hex", ["hex_x", "hex_y", "hex_id", "value"]),  # marks/heavy_stat.py:946
+    ("kde", ["value", "density"]),  # marks/statistical.py:199
+    ("bin", ["bin_start", "bin_end", "count", "density"]),  # marks/statistical.py:417
+    ("smooth", ["x", "y"]),  # marks/statistical.py:601
+    (
+        "box_stats",
+        ["q1", "median", "q3", "lower_whisker", "upper_whisker"],
+    ),  # marks/composite.py:316
+    ("error_extent", ["lower", "upper"]),  # marks/composite.py:515
+    ("error_extent", ["lower", "upper"]),  # marks/composite.py:670
+    # marks/_fit_layers.py:110 -- one physical call, four real `kind`s:
+    ("smooth", ["x", "y", "ci_lower", "ci_upper"]),  # regplot/lmplot smooth path
+    ("logistic", ["x", "y", "ci_lower", "ci_upper"]),  # logplot
+    ("glm", ["x", "y", "ci_lower", "ci_upper"]),  # glmplot
+    ("robust", ["x", "y", "ci_lower", "ci_upper"]),  # residplot / robust fit
+    ("bin_2d", ["x_lo", "x_hi", "y_lo", "y_hi", "count"]),  # plots/matrix.py:1474
+    ("qq", ["sample"]),  # plots/regression.py:304
+    ("smooth", ["x", "y"]),  # plots/regression.py:1620
+    ("kde", ["value", "density"]),  # plots/distribution.py:283
+    ("bin", ["bin_start", "count"]),  # plots/distribution.py:806
+    ("summary", ["mean", "lower", "upper"]),  # plots/distribution.py:1358
+]
+
+_SECONDARY_CALL_SITES = [
+    (
+        "qq",
+        "qq_line",
+        ["qq_line_x_start", "qq_line_y_start", "qq_line_x_end", "qq_line_y_end"],
+    ),  # marks/heavy_stat.py:688
+    ("letter_value", "depth_1", ["group", "lower", "upper"]),  # marks/composite.py:1210
+    ("letter_value", "outliers", ["group", "value"]),  # marks/composite.py:1213
+    ("linkage", "segments", ["x", "y", "x2", "y2"]),  # plots/matrix.py:1130
+    ("linkage", "order", ["original_idx"]),  # plots/matrix.py:1131
+]
+
+
+def test_all_registry_columns_call_sites_return_their_identity_lookup():
+    """Every argument tuple the real `registry_output_columns`/
+    `registry_secondary_columns` call sites in `src/ferrum/` pass (27
+    site x kind invocations across 24 physical call sites, see the module
+    comment above), replayed directly against the live registry: each must
+    still return `{name: name}` after the `_check_declared` tail extraction,
+    proving the extraction did not silently drop, reorder, or dedupe a name
+    at any site."""
+    from ferrum._registry import registry_output_columns, registry_secondary_columns
+
+    assert len(_PRIMARY_CALL_SITES) + len(_SECONDARY_CALL_SITES) == 27
+    for kind, names in _PRIMARY_CALL_SITES:
+        assert registry_output_columns(kind, names) == {n: n for n in names}
+    for kind, key, names in _SECONDARY_CALL_SITES:
+        assert registry_secondary_columns(kind, key, names) == {n: n for n in names}
+
+
+def test_pinned_secondary_keys_from_the_six_composition_sites():
+    """The six composed secondary keys, captured from the real desugar /
+    `clustermap` paths (not hand-built mirrors): `qq`'s reference line,
+    `letter_value`'s depth-1 band and outliers, and `linkage`'s row reorder
+    index plus column/row dendrogram segments. All six sites use a fixed
+    internal `name=` (never the caller's own), so only the name-set half is
+    reachable here -- the name=None half is pinned directly against
+    `secondary_key` below."""
+    import polars as pl
+
+    import ferrum as fm
+    from ferrum.marks.composite import desugar_boxen
+    from ferrum.marks.heavy_stat import desugar_qq
+
+    qq_layers = desugar_qq("sample", line=True).layers
+    reference = next(layer for layer in qq_layers if layer.name == "reference")
+    assert reference.data_source == "qq_main_qq_line"
+
+    boxen_layers = desugar_boxen("cat", "value").layers
+    depth_1 = next(layer for layer in boxen_layers if layer.name == "depth_1")
+    outlier = next(layer for layer in boxen_layers if layer.name == "outlier")
+    assert depth_1.data_source == "lv_depth_1"
+    assert outlier.data_source == "lv_outliers"
+
+    frame = pl.DataFrame(
+        {
+            "row": ["r0", "r1", "r2", "r3"],
+            "A": [0.1, 0.4, 0.2, 0.9],
+            "B": [1.0, 0.3, 0.6, 0.2],
+        }
+    )
+    cm = fm.clustermap(frame)
+    reorder = next(t for t in cm.heatmap._transforms if "Reorder" in repr(t))
+    assert 'from=Some("row_link_order")' in repr(reorder)
+    assert cm.col_dendrogram._layers[0].data_source == "col_link_segments"
+    assert cm.row_dendrogram._layers[0].data_source == "row_link_segments"
+
+
+@pytest.mark.parametrize("key", ["qq_line", "depth_1", "outliers", "order", "segments"])
+def test_secondary_key_with_no_name_is_unprefixed(key):
+    """`name=None` is not reachable through any of the six Python
+    composition sites above (each uses a fixed internal `name=` constant) --
+    pinned directly against the real `ferrum._core.secondary_key` pyfunction
+    instead, so the None-name half of the rule is proven against the real
+    path even though no Python call site currently exercises it."""
+    from ferrum._core import secondary_key
+
+    assert secondary_key(None, key) == key
+
+
+#: A hand-composed secondary key looks like ``f"{some_name}_{some_key}"`` --
+#: an f-string whose entire body is exactly two brace-delimited expressions
+#: joined by a literal underscore, where the second expression may itself be
+#: a call (`` _lv_depth_key(k)``). This is the shape the six sites had before
+#: #165(1); it is unrelated to `plots/_helpers.py`'s/`plots/distribution.py`'s
+#: `f"{base}_{n}"` layer-name uniquifier, which is a different concern
+#: (deduplicating a layer NAME, not composing a transform's secondary key)
+#: and lives outside the three files this test scans.
+_HAND_COMPOSED_SECONDARY_KEY_PATTERN = re.compile(
+    r'f"\{[A-Za-z_][A-Za-z0-9_]*\}_\{[A-Za-z_][A-Za-z0-9_]*(?:\([^{}]*\))?\}"'
+)
+
+
+def _code_only(text: str) -> str:
+    """*text* with every ``#``-prefixed comment line dropped.
+
+    `marks/heavy_stat.py`'s `_QQ_LINE_KEY` doc-comment names
+    `` ``secondary_key(_QQ_TRANSFORM_NAME, _QQ_LINE_KEY)`` `` in prose (wave
+    6B T10 cycle 2's fix for the stale-docstring false positive against
+    `_HAND_COMPOSED_SECONDARY_KEY_PATTERN`). Left in, that same prose
+    satisfies a bare `"secondary_key(" in text` / `.count(...) >= 1` check
+    on its own -- a reverted call site rewritten as a non-f-string
+    concatenation (`_QQ_TRANSFORM_NAME + "_" + _QQ_LINE_KEY`, which the
+    f-string-shape regex above also can't see) would then still pass both
+    checks (cycle 3, lite-review finding). Stripping comment lines before
+    either check runs means both checks only ever see real code."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_six_composition_sites_call_secondary_key_not_a_hand_composed_f_string():
+    """#165(1): every one of the six known secondary-key composition sites
+    (`marks/heavy_stat.py`'s qq line; `marks/composite.py`'s depth-band,
+    median and outlier `data_source=`; `plots/matrix.py`'s row reorder
+    `from_=` and column/row dendrogram `data_source=`) must call
+    `ferrum._core.secondary_key` rather than hand-composing
+    `f"{name}_{key}"`. A structural pin, not a behavioral one: it would fail
+    if a site were reverted to the old f-string even though the composed
+    string happens to still match (the RED case a value-only pin can't see).
+
+    Checks BOTH directions (wave 6B T10 cycle 2 Q3): the new calls are
+    present, AND the old hand-composed shape is absent -- so a new
+    `f"{name}_{key}"` site added *alongside* the existing `secondary_key(`
+    calls (rather than replacing one) would still fail this test, not just a
+    site that reverted an existing call. Both checks run against
+    `_code_only`-filtered text (cycle 3): a `#`-prefixed comment mentioning
+    either shape in prose must not be able to satisfy either assertion on
+    its own."""
+    heavy_stat = _code_only((_SRC / "marks" / "heavy_stat.py").read_text())
+    composite = _code_only((_SRC / "marks" / "composite.py").read_text())
+    matrix = _code_only((_SRC / "plots" / "matrix.py").read_text())
+
+    assert heavy_stat.count("secondary_key(") >= 1
+    assert composite.count("secondary_key(") >= 3
+    assert matrix.count("secondary_key(") >= 3
+
+    for relpath, text in (
+        ("marks/heavy_stat.py", heavy_stat),
+        ("marks/composite.py", composite),
+        ("plots/matrix.py", matrix),
+    ):
+        hits = _HAND_COMPOSED_SECONDARY_KEY_PATTERN.findall(text)
+        assert not hits, f"{relpath} still hand-composes a secondary key: {hits}"

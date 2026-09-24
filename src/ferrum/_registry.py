@@ -20,6 +20,43 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 
+def _check_declared(
+    declared: set[str], names: Sequence[str], err_prefix: str, *, known_label: str
+) -> dict[str, str]:
+    """Shared validate/raise/return tail for :func:`registry_output_columns`
+    and :func:`registry_secondary_columns`.
+
+    *declared* is the set of column names actually published under the
+    schema the caller is checking against (a transform's primary output, or
+    one of its secondary batches). *err_prefix* is the caller's own fully
+    resolved message lead-in (already ending in ``"does not declare "``,
+    with its own ``kind!r``/``key!r`` already interpolated) and *known_label*
+    is the noun phrase after ``"; known "`` (``"output columns"`` vs
+    ``"columns"``) -- both plain, already-resolved text, concatenated here
+    in a single pass alongside the freshly computed ``missing``/``declared``
+    lists. Deliberately not a second :meth:`str.format` pass over a template
+    string: *err_prefix* can itself contain ``kind``/``key`` values that a
+    caller controls (e.g. a transform kind or batch key containing ``{``/
+    ``}``), and re-parsing already-resolved text as a format template would
+    let such a value be misread as a field reference instead of literal
+    characters.
+
+    Returns
+    -------
+    dict of str to str
+        ``{name: name}`` for every name in *names*, in the order given.
+
+    Raises
+    ------
+    ValueError
+        If any name in *names* is not a member of *declared*.
+    """
+    missing = sorted({name for name in names if name not in declared})
+    if missing:
+        raise ValueError(f"{err_prefix}{missing}; known {known_label}: {sorted(declared)}")
+    return {name: name for name in names}
+
+
 def registry_output_columns(kind: str, names: Sequence[str]) -> dict[str, str]:
     """Validate a desugar/figure consumer's output-column names against
     ``transform_registry(kind)["outputs"]`` and return them as a lookup.
@@ -67,13 +104,12 @@ def registry_output_columns(kind: str, names: Sequence[str]) -> dict[str, str]:
     from ferrum._core import transform_registry
 
     declared = {name for name, _dtype in transform_registry(kind)["outputs"]}
-    missing = sorted({name for name in names if name not in declared})
-    if missing:
-        raise ValueError(
-            f"transform_registry({kind!r})['outputs'] does not declare "
-            f"{missing}; known output columns: {sorted(declared)}"
-        )
-    return {name: name for name in names}
+    return _check_declared(
+        declared,
+        names,
+        err_prefix=f"transform_registry({kind!r})['outputs'] does not declare ",
+        known_label="output columns",
+    )
 
 
 def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dict[str, str]:
@@ -131,10 +167,11 @@ def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dic
             f"{key!r} batch; known keys: {sorted(declared_batches)}"
         )
     declared = {name for name, _dtype in declared_batches[key]}
-    missing = sorted({name for name in names if name not in declared})
-    if missing:
-        raise ValueError(
-            f"transform_registry({kind!r})['secondary_outputs'][{key!r}] does "
-            f"not declare {missing}; known columns: {sorted(declared)}"
-        )
-    return {name: name for name in names}
+    return _check_declared(
+        declared,
+        names,
+        err_prefix=(
+            f"transform_registry({kind!r})['secondary_outputs'][{key!r}] does not declare "
+        ),
+        known_label="columns",
+    )

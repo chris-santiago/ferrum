@@ -17,7 +17,7 @@ from ferrum import (
     Swarm,
     Violin,
 )
-from ferrum._core import transform_registry
+from ferrum._core import secondary_key, transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns, registry_secondary_columns
@@ -582,8 +582,8 @@ _QQ_TRANSFORM_NAME = "qq_main"
 #: below. A caller-supplied ``name=`` (here, ``_QQ_TRANSFORM_NAME``) prefixes
 #: it as ``"{name}_qq_line"`` (R3 close-remediation: `qq` now prefixes like
 #: ``letter_value``/``linkage`` already did), so the reference layer's real
-#: ``data_source`` is the composed ``f"{_QQ_TRANSFORM_NAME}_{_QQ_LINE_KEY}"``,
-#: not this bare key.
+#: ``data_source`` is
+#: ``secondary_key(_QQ_TRANSFORM_NAME, _QQ_LINE_KEY)``, not this bare key.
 _QQ_LINE_KEY = "qq_line"
 
 
@@ -700,7 +700,7 @@ def desugar_qq(
                     "x2": _qq_line_cols["qq_line_x_end"],
                     "y2": _qq_line_cols["qq_line_y_end"],
                 },
-                data_source=f"{_QQ_TRANSFORM_NAME}_{_QQ_LINE_KEY}",
+                data_source=secondary_key(_QQ_TRANSFORM_NAME, _QQ_LINE_KEY),
             )
         )
     return MarkDesugarResult(transforms=transforms, layers=layers)

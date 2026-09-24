@@ -34,6 +34,7 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
+from ferrum._core import secondary_key
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -1167,7 +1168,7 @@ def _clustermap_build(
             col_link,
             Reorder(
                 by=_order_cols["original_idx"],
-                from_=f"{row_link_name}_{_order_key}",
+                from_=secondary_key(row_link_name, _order_key),
                 drop_index=False,
             ),
             unpivot,
@@ -1201,7 +1202,7 @@ def _clustermap_build(
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },
-        data_source=f"{col_link_name}_{_segments_key}",
+        data_source=secondary_key(col_link_name, _segments_key),
     )
     col_dendro = Chart(data).transform(col_link)
     col_dendro._mark = None
@@ -1223,7 +1224,7 @@ def _clustermap_build(
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },
-        data_source=f"{row_link_name}_{_segments_key}",
+        data_source=secondary_key(row_link_name, _segments_key),
     )
     row_dendro = Chart(data).transform(row_link)
     row_dendro._mark = None

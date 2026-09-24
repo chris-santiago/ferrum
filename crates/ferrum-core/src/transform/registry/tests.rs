@@ -2108,6 +2108,221 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
     }
 }
 
+/// PIN (wave 6B T10, `#165`(1)): every composed secondary key, captured from
+/// HEAD as hand-typed literal strings (not derived via the same `format!`
+/// the production code uses, which would make this vacuous), for both
+/// `name=None` (unprefixed) and a set `name` — before `secondary_key`
+/// existed. These strings must stay byte-identical after `qq`, `letter_value`
+/// and `linkage` are switched to call `secondary_key(name, key)` instead of
+/// composing `"{name}_{key}"` by hand at each site.
+#[test]
+fn pinned_secondary_keys_captured_from_head() {
+    pyo3::Python::initialize();
+
+    // qq
+    {
+        use crate::transform::qq::QQSpec;
+        let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+        let unnamed = TransformSpec::Qq(QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: None,
+        });
+        let primary = unnamed.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec!["qq_line".to_string()], "qq, name=None");
+
+        let named = TransformSpec::Qq(QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: Some("pinned".into()),
+        });
+        let primary = named.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec!["pinned_qq_line".to_string()], "qq, name=Some");
+    }
+
+    // letter_value
+    {
+        use crate::transform::letter_value::{KDepth, LetterValueSpec};
+        let batch = value_group_batch(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &["a", "a", "a", "a", "a", "a", "a", "a"],
+        );
+        let unnamed = TransformSpec::LetterValue(LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        });
+        let primary = unnamed.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        let mut expected = vec!["outliers".to_string()];
+        expected.extend((1..=12).map(|k| format!("depth_{k}")));
+        assert_eq!(keys, expected, "letter_value, name=None");
+
+        let named = TransformSpec::LetterValue(LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: Some("pinned".into()),
+            sort: None,
+        });
+        let primary = named.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        let mut expected = vec!["pinned_outliers".to_string()];
+        expected.extend((1..=12).map(|k| format!("pinned_depth_{k}")));
+        assert_eq!(keys, expected, "letter_value, name=Some");
+    }
+
+    // linkage
+    {
+        use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
+        let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
+        let unnamed = TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward,
+            metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows,
+            z_score: None,
+            standard_scale: None,
+            name: None,
+        });
+        let primary = unnamed.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            unnamed.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec!["linkage".to_string(), "order".to_string(), "coords".to_string(), "segments".to_string()],
+            "linkage, name=None"
+        );
+
+        let named = TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward,
+            metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows,
+            z_score: None,
+            standard_scale: None,
+            name: Some("pinned".into()),
+        });
+        let primary = named.apply(&batch).unwrap();
+        let keys: Vec<String> =
+            named.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "pinned_linkage".to_string(),
+                "pinned_order".to_string(),
+                "pinned_coords".to_string(),
+                "pinned_segments".to_string()
+            ],
+            "linkage, name=Some"
+        );
+    }
+}
+
+/// Two-sided (wave 6B T10, `#165`(1)): the `secondary_key(name, key)`
+/// pyfunction and the three transforms that call it internally
+/// (`qq`, `letter_value`, `linkage`) agree, for `name=None` and a set
+/// `name`. Expected keys are derived by calling `secondary_key` directly
+/// against each kind's real key constants (`QQ_LINE_KEY`, `OUTLIERS_KEY`,
+/// `depth_key`, `LINKAGE_KEY`/`ORDER_KEY`/`COORDS_KEY`/`SEGMENTS_KEY`) —
+/// never a hand-typed mirror — and compared against each real
+/// `TransformSpec::secondary_outputs()` call, the same production path the
+/// pin test above exercises. RED-proven (wave 6B T10 report): reverting
+/// `qq.rs`'s call site to its pre-`secondary_key` hand-composed form while
+/// temporarily mutating `secondary_key`'s separator makes exactly the `qq`
+/// assertion fail while `letter_value`/`linkage` (still routed through the
+/// mutated function) stay green — proving this test would catch a call site
+/// that stopped calling `secondary_key`, not just a value mismatch.
+#[test]
+fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
+    use crate::transform::registry::secondary_key;
+    pyo3::Python::initialize();
+
+    for name in [None, Some("pinned2")] {
+        // qq
+        {
+            use crate::transform::qq::{QQSpec, QQ_LINE_KEY};
+            let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+            let spec = TransformSpec::Qq(QQSpec {
+                field: "v".into(),
+                distribution: "normal".into(),
+                dequantize: false,
+                emit_line: true,
+                seed: 0,
+                name: name.map(String::from),
+            });
+            let primary = spec.apply(&batch).unwrap();
+            let actual: Vec<String> =
+                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            assert_eq!(actual, vec![secondary_key(name, QQ_LINE_KEY)], "qq name={name:?}");
+        }
+
+        // letter_value
+        {
+            use crate::transform::letter_value::{depth_key, KDepth, LetterValueSpec, K_MAX_NAMED, OUTLIERS_KEY};
+            let batch = value_group_batch(
+                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                &["a", "a", "a", "a", "a", "a", "a", "a"],
+            );
+            let spec = TransformSpec::LetterValue(LetterValueSpec {
+                value: "v".into(),
+                group: Some("g".into()),
+                k_depth: KDepth::Tukey,
+                outlier_threshold: 1.5,
+                name: name.map(String::from),
+                sort: None,
+            });
+            let primary = spec.apply(&batch).unwrap();
+            let actual: Vec<String> =
+                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            let mut expected = vec![secondary_key(name, OUTLIERS_KEY)];
+            expected.extend((1..=K_MAX_NAMED).map(|k| secondary_key(name, &depth_key(k))));
+            assert_eq!(actual, expected, "letter_value name={name:?}");
+        }
+
+        // linkage
+        {
+            use crate::transform::linkage::{
+                DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec, COORDS_KEY, LINKAGE_KEY, ORDER_KEY,
+                SEGMENTS_KEY,
+            };
+            let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
+            let spec = TransformSpec::Linkage(LinkageSpec {
+                method: LinkageMethod::Ward,
+                metric: DistanceMetric::Euclidean,
+                axis: LinkageAxis::Rows,
+                z_score: None,
+                standard_scale: None,
+                name: name.map(String::from),
+            });
+            let primary = spec.apply(&batch).unwrap();
+            let actual: Vec<String> =
+                spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+            let expected = vec![
+                secondary_key(name, LINKAGE_KEY),
+                secondary_key(name, ORDER_KEY),
+                secondary_key(name, COORDS_KEY),
+                secondary_key(name, SEGMENTS_KEY),
+            ];
+            assert_eq!(actual, expected, "linkage name={name:?}");
+        }
+    }
+}
+
 #[test]
 fn transform_registry_exposes_secondary_outputs_to_python() {
     attach(|py| {

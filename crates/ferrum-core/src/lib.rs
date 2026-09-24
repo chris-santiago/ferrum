@@ -88,6 +88,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // wave 6B T9 cycle 6: `Smooth(x_estimator=)`'s vocabulary
     // (`transform/aggregate.rs::XEstimator`), published the same way.
     m.add_function(wrap_pyfunction!(transform::aggregate::x_estimator_accepted_values, m)?)?;
+    // #165(1) (wave 6B T10): the "{name}_{key}" secondary-output naming rule
+    // (`transform/registry/mod.rs::secondary_key`), the one home for a
+    // convention previously composed by hand at 3 Rust + 6 Python sites.
+    m.add_function(wrap_pyfunction!(transform::registry::secondary_key, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

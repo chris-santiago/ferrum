@@ -592,20 +592,13 @@ pub(crate) fn secondary_outputs(
     .map_err(|e| PyValueError::new_err(format!("linkage segments: {e}")))?;
 
     // Build output keys based on the naming convention.
-    let (key_linkage, key_order, key_coords, key_segments) = match &spec.name {
-        Some(s) => (
-            format!("{s}_{LINKAGE_KEY}"),
-            format!("{s}_{ORDER_KEY}"),
-            format!("{s}_{COORDS_KEY}"),
-            format!("{s}_{SEGMENTS_KEY}"),
-        ),
-        None => (
-            LINKAGE_KEY.to_string(),
-            ORDER_KEY.to_string(),
-            COORDS_KEY.to_string(),
-            SEGMENTS_KEY.to_string(),
-        ),
-    };
+    let name = spec.name.as_deref();
+    let (key_linkage, key_order, key_coords, key_segments) = (
+        crate::transform::registry::secondary_key(name, LINKAGE_KEY),
+        crate::transform::registry::secondary_key(name, ORDER_KEY),
+        crate::transform::registry::secondary_key(name, COORDS_KEY),
+        crate::transform::registry::secondary_key(name, SEGMENTS_KEY),
+    );
 
     // We also publish the linkage batch itself under the explicit key so that named
     // transforms have a stable key alongside the three derived outputs.

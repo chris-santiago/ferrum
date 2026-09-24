@@ -633,17 +633,7 @@ pub(crate) fn secondary_outputs(
         entry.3.push(level_col.value(i).to_string());
     }
 
-    let (key_outliers, key_depth_fmt): (String, Box<dyn Fn(usize) -> String>) = match &spec.name {
-        Some(s) => {
-            let s_cloned = s.clone();
-            let fmt: Box<dyn Fn(usize) -> String> = Box::new(move |k: usize| format!("{s_cloned}_depth_{k}"));
-            (format!("{s}_outliers"), fmt)
-        }
-        None => {
-            let fmt: Box<dyn Fn(usize) -> String> = Box::new(depth_key);
-            (OUTLIERS_KEY.to_string(), fmt)
-        }
-    };
+    let key_outliers = crate::transform::registry::secondary_key(spec.name.as_deref(), OUTLIERS_KEY);
 
     let mut out: Vec<(String, RecordBatch)> = Vec::new();
     out.push((key_outliers, outliers_batch));
@@ -663,7 +653,7 @@ pub(crate) fn secondary_outputs(
         ];
         let batch = RecordBatch::try_new(depth_schema.clone(), cols)
             .map_err(|e| PyValueError::new_err(format!("stat_letter_value depth_{k}: {e}")))?;
-        out.push((key_depth_fmt(k), batch));
+        out.push((crate::transform::registry::secondary_key(spec.name.as_deref(), &depth_key(k)), batch));
     }
     Ok(out)
 }

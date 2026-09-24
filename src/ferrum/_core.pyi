@@ -965,6 +965,12 @@ def interpolate_accepted_values() -> list[str]: ...
 # refusal-message order) so Python reads it instead of mirroring it.
 def x_estimator_accepted_values() -> list[str]: ...
 
+# #165(1) (wave 6B T10): the one home of the ``"{name}_{key}"`` secondary-
+# output naming rule (``qq``, ``letter_value``, ``linkage``).
+# ``secondary_key(None, k)`` returns ``k`` unprefixed;
+# ``secondary_key(n, k)`` returns ``f"{n}_{k}"``.
+def secondary_key(name: str | None, key: str) -> str: ...
+
 # Batch C task 4 round 4 (#95): the raw-dict scale key gate's own per-type
 # accepted-key table, published for Python to filter against instead of
 # hand-mirroring a subset of it. Raises ValueError naming the type on an

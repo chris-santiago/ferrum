@@ -25,6 +25,7 @@ import warnings
 from typing import Any, Optional, Sequence
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
+from ferrum._core import secondary_key
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns, registry_secondary_columns
@@ -1306,7 +1307,7 @@ def desugar_boxen(
                 mark="rect",
                 encoding=enc(depth_cols["lower"], depth_cols["upper"]),
                 mark_kwargs=depth_kwargs,
-                data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(k)}",
+                data_source=secondary_key(_LV_TRANSFORM_NAME, _lv_depth_key(k)),
             )
         )
 
@@ -1328,7 +1329,7 @@ def desugar_boxen(
             mark="tick",
             encoding=enc(depth_cols["lower"]),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
-            data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(1)}",
+            data_source=secondary_key(_LV_TRANSFORM_NAME, _lv_depth_key(1)),
         )
     )
 
@@ -1338,7 +1339,7 @@ def desugar_boxen(
             name="outlier",
             mark="point",
             encoding=enc(outlier_cols["value"]),
-            data_source=f"{_LV_TRANSFORM_NAME}_{_LV_OUTLIERS_KEY}",
+            data_source=secondary_key(_LV_TRANSFORM_NAME, _LV_OUTLIERS_KEY),
         )
     )
 
