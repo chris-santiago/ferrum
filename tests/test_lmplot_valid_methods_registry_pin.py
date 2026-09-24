@@ -1,12 +1,11 @@
 """Batch-D T13: drift guard for `lmplot`'s `_VALID_METHODS`.
 
-Closes the T12 spec-review carry (`.sdd/task-12-spec-reviewer.md` cycle 5's
-"⚠️ `_VALID_METHODS` widening blind spot"): T12 shipped `_VALID_METHODS` as a
-hand-picked, routing-coupled subset (`{"lm", "logistic", "glm", "loess",
+Closes the `_VALID_METHODS` widening blind spot (commit d787dbc0): `_VALID_METHODS`
+was once a hand-picked, routing-coupled subset (`{"lm", "logistic", "glm", "loess",
 "robust"}`) that refused every other `transform_registry("smooth")["methods"]`
 spelling ("quadratic"/"cubic"/"sqrt"/"log"/"gam") even though `mark_smooth`
 already rendered all of them -- a widening in the registry could never be
-detected because nothing derived from it. T13 routes the remaining smooth
+detected because nothing derived from it. `lmplot` now routes the remaining smooth
 methods through `lmplot` (see `regression.py`'s `_SMOOTH_ROUTED_METHODS`
 module comment for the full "why glm stays dedicated" reasoning) and DERIVES
 `_VALID_METHODS` from the registry instead of hand-listing it, so this test

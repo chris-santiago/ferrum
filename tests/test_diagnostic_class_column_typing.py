@@ -61,7 +61,7 @@ cell count, correlation coefficient -- already explicitly wrapped in
 ``Color(...)`` at their call sites) and ``desugar_decision_boundary`` /
 ``desugar_intercluster_distance`` (rect/point, intentionally continuous or a
 point-mark scatter reading unsplit per-row data) are also unaffected by this
-class of bug and not touched. See ``.sdd/task-5c-report.md`` for that
+class of bug and not touched. See commit cf1f4987 for that
 original per-site reasoning -- **but note its claim that
 ``desugar_class_prediction_error`` and ``desugar_silhouette`` (rect/bar
 marks) were "safe because the inert-color warning only fires for
@@ -91,7 +91,7 @@ produce. This is a sanctioned, deliberate behavior change -- a legend
 having its title is correct; the title's prior absence was an artifact of
 the untyped bare-string binding, not an intentional design choice -- not a
 regression to suppress. See the 5 ``pr_chart_*``/5 ``roc_chart_*`` golden
-movers in ``.sdd/task-5c-report.md``.
+movers in commit cf1f4987.
 """
 
 from __future__ import annotations

@@ -1787,6 +1787,7 @@ mod tests {
     fn mark_style_sentinels_are_not_parseable_colors() {
         assert!(crate::render::color::parse_color("theme:label").is_err());
         assert!(crate::render::color::parse_color("none").is_err());
+        assert!(crate::render::color::parse_color("transparent").is_err());
     }
 
     #[test]

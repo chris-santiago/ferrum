@@ -15,8 +15,7 @@ Round 2 additions: `degree` on `"quadratic"`/`"cubic"` is accepted only as
 a no-op when it matches the alias's fixed degree and otherwise refuses
 (the alias-degree policy), and a `degree` that leaves the design
 rank-deficient for the data at hand refuses on the ungrouped fit path
-(the rank-deficiency policy) — both locked in `.sdd/task-9-report.md`'s
-round-2 "policy decisions". These are Rust-side policies; the tests below
+(the rank-deficiency policy) — both locked in commit 4057d3ac. These are Rust-side policies; the tests below
 pin them from the Python entry points that reach them (`Smooth` directly
 and `mark_smooth`).
 
@@ -162,7 +161,7 @@ def test_smooth_lm_default_degree_stays_linear_not_promoted_to_quadratic(curved_
     genuinely curved data (`_xy()`'s near-straight-line data makes a
     quadratic fit visually indistinguishable from linear, which is exactly
     why the original version of this test didn't discriminate — see
-    `.sdd/task-9-python-quality-reviewer.md` finding 1): a bare `lm` call
+    commit 4057d3ac): a bare `lm` call
     must render identically to an explicit `degree=1` call, and distinctly
     from a real quadratic fit."""
     df = curved_xy_df

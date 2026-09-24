@@ -68,7 +68,7 @@ introduction earned -- the type-switch merge and its eight remediation rounds
 -- live in ``tests/test_override_scale_merge.py``, next to
 ``tests/test_override.py`` where the rest of the override surface is pinned.
 The round-by-round remediation narrative that used to open this module is in
-the commit history and ``.sdd/``, where it cannot go stale against the code.
+the commit history (bc6c2775), where it cannot go stale against the code.
 """
 
 from __future__ import annotations
@@ -357,7 +357,7 @@ def test_typo_key_refused_via_encoding_constructor_path() -> None:
     not just ``ChartSpec.from_json``.
 
     Both paths bottom out at the identical ``ScaleSpec::deserialize`` call
-    (see ``.sdd/task-4-report.md``'s "chokepoint" section), so a gate placed
+    (see commit bc6c2775), so a gate placed
     anywhere else could plausibly cover one path and silently miss the
     other. This proves both are covered. Substring-only (not the exact
     ``"scale: scale: unknown key ..."`` double-prefixed message the

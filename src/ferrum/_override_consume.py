@@ -64,9 +64,8 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
       the gate's own "unknown variant" / type error surfaces instead of a PyO3
       argument-coercion error naming ``scale_accepted_keys``'s parameter.
 
-    ``base_scale`` is never mutated.  The eight remediation rounds behind these
-    rules are recorded in the commit history and ``.sdd/``, not here;
-    ``tests/test_override_scale_merge.py`` pins each one.
+    ``base_scale`` is never mutated.  ``tests/test_override_scale_merge.py``
+    pins each of these rules (introduced in b6ed6e6d).
     """
     old_type = base_scale.get("type")
     new_type = scale_overrides.get("type", old_type)

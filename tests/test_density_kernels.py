@@ -6,7 +6,7 @@ must actually compute, not raise or silently alias to gaussian) and
 F-L05-12 (`transform_density(kernel=)` must exist and route on the wire).
 The Rust half (`crates/ferrum-core/src/transform/kde.rs`, `qq.rs`,
 `density_data.rs`) is pinned by its own unit tests against the closed-form
-kernel/distribution formulas (see `.sdd/task-11-report.md`); these tests
+kernel/distribution formulas (see commit ff3b3cb8); these tests
 prove the *integration* path -- Python kwargs actually reach that Rust
 dispatch through `mark_density`/`mark_qq`/`transform_density`, not a
 hand-built shape that never touches the real render pipeline (operating

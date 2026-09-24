@@ -415,8 +415,9 @@ class MarkBase:
         # ``color=`` alias is already folded into ``fill``/``stroke`` above,
         # so checking those two canonical keys covers all three user-facing
         # spellings. Paint sentinels (see ``_is_paint_sentinel``) are
-        # short-circuited ahead of the parser — both raise in to_hex by
-        # design and are not colors. The stored value stays the user's
+        # short-circuited ahead of the parser — ``"theme:label"``,
+        # ``"none"`` and ``"transparent"`` all raise in to_hex by design and
+        # are not colors. The stored value stays the user's
         # original string; to_hex is consulted only for validation.
         for paint_key in ("fill", "stroke"):
             paint_val = resolved.get(paint_key)

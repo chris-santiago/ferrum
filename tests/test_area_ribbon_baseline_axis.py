@@ -194,7 +194,7 @@ def test_horizontal_density_closes_on_its_own_left_baseline():
     (`src/ferrum/marks/statistical.py`) now stamps
     ``mark_kwargs={"value_axis": "x"}`` for this orientation, which reaches
     `DrawCtx::series_curve_axis` through `MarkKwargsSpec.value_axis` (the
-    wire contract published in `.sdd/task-5-report.md`) and moves the
+    wire contract published in commit 9c570342) and moves the
     closure to a vertical segment on the plot's own left edge — the fill's
     own baseline, not the panel's.
     """

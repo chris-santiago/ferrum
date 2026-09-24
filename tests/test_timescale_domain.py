@@ -7,7 +7,7 @@ continuous siblings), added a custom PyO3-boundary extraction accepting
 ``float | datetime.date | datetime.datetime | str`` domain elements under one
 naive-means-UTC rule, and threaded ``utc`` through resolution so
 ``ScaleSpec::Utc`` resolves with ``utc=true`` (previously hardcoded
-``false``). See ``.sdd/task-3-report.md`` for the Rust-side detail — notably
+``false``). See commit 382f00bd for the Rust-side detail — notably
 that the ISO-string path delegates to the real ``datetime.date.fromisoformat``
 / ``datetime.datetime.fromisoformat`` classmethods rather than a hand-rolled
 parser, which is what makes the cross-language parity test below a real proof

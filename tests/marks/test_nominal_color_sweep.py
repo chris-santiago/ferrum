@@ -29,7 +29,7 @@ legend for a two-value group column -- **with no warning**, since
 line/ribbon consumers. ``bar`` and ``rect`` marks (silhouette,
 class_prediction_error, rank1d, importance, shap_bar) were previously
 believed safe on the reasoning "the warning doesn't fire for these marks"
-(``.sdd/task-5c-report.md``) -- that reasoning conflates "does not warn"
+(commit cf1f4987) -- that reasoning conflates "does not warn"
 with "renders correctly"; direct probing (Int64 vs. Utf8 same-shape
 comparison) proves it renders a continuous colorbar for these marks too,
 identically to the violin/errorbar defect.

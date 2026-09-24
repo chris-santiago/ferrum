@@ -1696,8 +1696,7 @@ def test_norm_coordinate_annotation_is_untouched_by_a_break():
 
 
 # --------------------------------------------------------------------------
-# cycle-2 fixes: ordinal-axis filtering, multi-break fold, x-axis parity
-# (quality-review cycle-2, .sdd/task-4-rust-quality-reviewer.md)
+# Ordinal-axis filtering, multi-break fold, x-axis parity (commit 7edbf821)
 # --------------------------------------------------------------------------
 
 

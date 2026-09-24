@@ -30,11 +30,10 @@ each names a pre-fix value; both were false, and the file contradicted one of
 its own docstrings eighty lines below. Corrected at cycle 3 after quality
 review. If you add a test here, say which kind it is.
 
-See `.sdd/task-13-report.md` §12-13 for the probe matrix and the RED proof,
-`.sdd/task-17-report.md` for the cross-surface matrix's RED proof,
-`.sdd/task-21-report.md` for the legend/text refusal rows' RED proof, and
-`.sdd/task-22-report.md` for the shape/stroke-dash rows and the two last
-cells' RED proof.
+See commit 2108784a for the probe matrix and the RED proof, a9bafffb for
+the cross-surface matrix's RED proof, 6138d4e5 for the legend/text refusal
+rows' RED proof, and 30f7463b for the shape/stroke-dash rows and the two
+last cells' RED proof (all under #147).
 """
 
 from __future__ import annotations

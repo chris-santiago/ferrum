@@ -90,7 +90,7 @@ def test_relplot_style_line_polylines_have_distinct_dash_patterns():
     # pass the two assertions above.
     pairs = _legend_dash_pairs(svg, "style_col")
     assert set(dashes) == {d for _, d in pairs}, (
-        f"mark polyline dashes {set(dashes)} should match legend dashes {{d for _, d in pairs}}"
+        f"mark polyline dashes {set(dashes)} should match legend dashes { ({d for _, d in pairs}) }"
     )
 
 

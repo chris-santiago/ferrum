@@ -13,8 +13,7 @@ Two carried obligations close here:
    ``ValueError: unknown column 'fitted' referenced by an encoding``. Every
    test below that renders a `logistic`/`glm`/`robust` chart pins the fix by
    construction -- none of them could pass against the pre-fix branches.
-2. **The T12 `_VALID_METHODS` widening obligation**
-   (`.sdd/task-12-spec-reviewer.md` cycle 5's carried ⚠️). Resolved by
+2. **The `_VALID_METHODS` widening** (commit d787dbc0). Resolved by
    *routing*, not a dated-note carve-out: `regression.py`'s
    `_SMOOTH_ROUTED_METHODS` is now derived from
    `transform_registry("smooth")["methods"]`, so `"quadratic"`/`"cubic"`/
@@ -36,47 +35,28 @@ quadratic` (written by T9). This module additionally covers the T13 round-2
 below), which belongs here rather than either of those two modules since it
 is `lmplot`'s own routing decision, not `Smooth`'s.
 
-Round 3 (`.sdd/task-13-python-quality-reviewer.md` cycle-2, both blocking
-findings): the "order= forwards..." section below was widened from a
-quadratic/cubic-only carve-out to ONE rule for every
-`_SMOOTH_ROUTED_METHODS` member (log/sqrt/gam now raise the same typed
-refusal `mark_smooth` gives directly; loess picks up its own local-fit
-`degree` instead of silently ignoring `order=`). The hue= color-door tests
-above (`test_dedicated_method_hue_pools_fit_but_colors_scatter`) are joined
-by two siblings pinning the SAME pooled-fit-stays-neutral contract through
-`color=` and `encode={"color": ...}` -- round 2's fix gated the neutral
-stroke on `hue is not None` alone, which left those two other doors to the
-same encoding open.
+`order=` forwards as `degree=` under ONE rule for every
+`_SMOOTH_ROUTED_METHODS` member (commit d787dbc0): log/sqrt/gam raise the same
+typed refusal `mark_smooth` gives directly, and loess picks up its own
+local-fit `degree`. `order=None` (the default) is the only "no explicit
+degree" value; an explicit `order=1` forwards like any other value, so
+loess's local-fit degree=1 (a real, different fit from its degree=2 default)
+is reachable through `lmplot` (see
+`test_loess_order_1_is_a_real_linear_local_fit_not_a_noop`,
+`test_order_conflicting_with_fixed_degree_raises`,
+`test_order_forwarded_and_refused_for_no_degree_methods`); a bare call is the
+only shape that forwards nothing
+(`test_widened_smooth_method_bare_call_does_not_forward_order`). A negative
+`order` raises a typed `ValueError`, not an untyped PyO3 `OverflowError`
+(`test_negative_order_raises_typed_value_error`).
 
-Round 4 (`.sdd/task-13-python-quality-reviewer.md` cycle-3, findings 1 and
-2; `.sdd/task-13-spec-reviewer.md` cycle-3's ⚠️ on `order=-1`): two more
-closures.
-
-1. The color-door gate is no longer an enumeration at all. Round 3's
-   `test_dedicated_method_color_kwarg_pools_fit_but_colors_scatter` /
-   `test_dedicated_method_encode_dict_color_pools_fit_but_colors_scatter`
-   (three literal-key doors) are replaced by
-   `test_dedicated_method_color_channel_pools_fit_but_colors_scatter`, one
-   matrix parametrized over every channel `ferrum.encoding._aliases.
-   _ENCODING_ALIASES` resolves onto `color` (`color` directly, `fill`/
-   `stroke` via the alias table) x both doors (bare keyword, `encode={...}`
-   dict) x all three dedicated methods -- the `fill=`/`stroke=` doors round
-   3 missed.
-2. `order=1` stops being lmplot's "no explicit degree" sentinel -- that
-   moved to `order=None` (`lmplot`'s new default). Round 3's docstring
-   claimed `order=1` was a harmless loess no-op; it never forwarded at
-   all, so `loess`'s own local-fit degree=1 (a real, different fit from
-   its degree=2 default) was unreachable through `lmplot`, and the claim
-   was false. An explicit `order=1` now forwards like any other value for
-   every `_SMOOTH_ROUTED_METHODS` member (see
-   `test_loess_order_1_is_a_real_linear_local_fit_not_a_noop`,
-   `test_order_conflicting_with_fixed_degree_raises`,
-   `test_order_forwarded_and_refused_for_no_degree_methods`); a bare call
-   (`order` omitted) is the only shape that still forwards nothing
-   (`test_widened_smooth_method_bare_call_does_not_forward_order`). A
-   negative `order` now raises a typed `ValueError` instead of an untyped
-   PyO3 `OverflowError`
-   (`test_negative_order_raises_typed_value_error`).
+A dedicated method's pooled fit stays neutral whatever door colors the
+scatter: `test_dedicated_method_hue_pools_fit_but_colors_scatter` pins `hue=`,
+and `test_dedicated_method_color_channel_pools_fit_but_colors_scatter` is one
+matrix over every channel `ferrum.encoding._aliases._ENCODING_ALIASES`
+resolves onto `color` (`color` directly, `fill`/`stroke` via the alias table)
+x both doors (bare keyword, `encode={...}` dict) x all three dedicated
+methods, so a new alias door cannot slip past it.
 """
 
 from __future__ import annotations
@@ -235,10 +215,9 @@ def test_regplot_routes_dedicated_methods_through_lmplot(binary_xy_df, curved_xy
 
 # ---------------------------------------------------------------------------
 # hue= on a dedicated method: scatter is colored per group, the pooled fit is
-# NOT (batch-D T13 round-2 fix -- replaces the round-1 test that only pinned
-# `polyline count == 1`, which passed equally whether the fit's color was
-# honest or misleading; see `.sdd/task-13-spec-reviewer.md` cycle-1 ❌ and
-# `.sdd/task-13-python-quality-reviewer.md` finding 1).
+# NOT (commit d787dbc0). The assertion reads the fit's stroke color, since a
+# `polyline count == 1` check passes equally whether that color is honest or
+# misleading.
 # ---------------------------------------------------------------------------
 
 
@@ -282,12 +261,10 @@ def test_dedicated_method_hue_absent_keeps_default_accent_stroke(curved_xy_df):
 # color= / fill= / stroke=, each via a keyword or an encode={...} dict, on a
 # dedicated method: the SAME pooled-fit impersonation as hue= reaches through
 # every channel `ferrum.encoding._aliases._ENCODING_ALIASES` resolves onto
-# `color` (batch-D T13 round-4 fix -- round 3 gated the neutral-stroke fix on
-# three literal keys (`hue`, `"color" in enc`, `"color" in encode`), which
-# left the alias doors (`fill=`, `stroke=`) open; see
-# `.sdd/task-13-python-quality-reviewer.md` cycle-3 finding 1). One
-# parametrized matrix over {color, fill, stroke} x {keyword, encode=}
-# replaces the two round-3 door tests (one hand-written per door) -- `hue=`
+# `color` (commit d787dbc0). The population is derived from the alias table,
+# not hand-listed keys, so an alias door (`fill=`, `stroke=`) cannot be missed.
+# One parametrized matrix over {color, fill, stroke} x {keyword, encode=} --
+# `hue=`
 # keeps its own dedicated test above since it has no `encode=` counterpart
 # (`hue` is not a `Chart.encode()` channel; `encode={"hue": ...}` would hit
 # the unbucketed-channel warn_once safety net, not set color).
@@ -386,12 +363,9 @@ def test_widened_smooth_method_bare_call_does_not_forward_order(curved_xy_df, me
 
 # ---------------------------------------------------------------------------
 # order= forwards as degree= UNIFORMLY for every `_SMOOTH_ROUTED_METHODS`
-# member (batch-D T13 round 2 closed quadratic/cubic; round 3 widened the
-# same single rule to log/sqrt/gam and loess; round 4 --
-# `.sdd/task-13-python-quality-reviewer.md` cycle-3 finding 2 -- moves the
-# "no explicit degree" sentinel from `order == 1` to `order is None`, so an
-# EXPLICIT `order=1` now forwards like any other value instead of being
-# silently absorbed by the old sentinel). A bare call (`order` omitted) is
+# member (commit d787dbc0). The "no explicit degree" sentinel is
+# `order is None`, so an EXPLICIT `order=1` forwards like any other value.
+# A bare call (`order` omitted) is
 # the only shape that still doesn't forward -- pinned above by
 # `test_widened_smooth_method_bare_call_does_not_forward_order`.
 # ---------------------------------------------------------------------------
@@ -432,14 +406,13 @@ def test_order_conflicting_with_fixed_degree_raises(curved_xy_df, method, confli
 @pytest.mark.parametrize("method", ["log", "sqrt", "gam"])
 @pytest.mark.parametrize("order", [1, 2])
 def test_order_forwarded_and_refused_for_no_degree_methods(curved_xy_df, method, order):
-    """`log`/`sqrt`/`gam` have no degree concept at all -- batch-D T13
-    round-3 fix (`.sdd/task-13-python-quality-reviewer.md` cycle-2 finding
-    2): `order=` now forwards as `degree=` UNIFORMLY for every
+    """`log`/`sqrt`/`gam` have no degree concept at all (commit d787dbc0):
+    `order=` forwards as `degree=` UNIFORMLY for every
     `_SMOOTH_ROUTED_METHODS` member (one rule, not a per-method carve-out),
     so an explicit `order=` for these three now reaches `Smooth`'s own
     typed refusal -- the same error a direct `mark_smooth(method=...,
     degree=...)` call raises -- rather than being silently dropped.
-    `order=1` is included (round 4: `1` is no longer the "no explicit
+    `order=1` is included (`1` is not the "no explicit
     degree" sentinel -- see `test_widened_smooth_method_bare_call_does_not_
     forward_order` for the shape that IS still a no-forward)."""
     with pytest.raises(ValueError, match="degree is not valid for method"):
@@ -461,15 +434,11 @@ def test_loess_order_2_matches_default_local_fit_degree(curved_xy_df):
 
 
 def test_loess_order_1_is_a_real_linear_local_fit_not_a_noop(curved_xy_df):
-    """Batch-D T13 round 4 (`.sdd/task-13-python-quality-reviewer.md`
-    cycle-3 finding 2): `order=1` is no longer the "no explicit degree"
-    sentinel (that moved to `order=None`), so it now reaches loess's own
+    """`order=1` is not the "no explicit degree" sentinel (that is
+    `order=None`, commit d787dbc0), so it reaches loess's own
     local-fit degree matrix as a REAL, distinguishable value -- a
     genuinely different (linear) local fit from the bare call's default
-    (loess's own default local-fit degree, `2`). Round 3 shipped a
-    docstring claiming `order=1` was a harmless no-op for loess; it never
-    actually forwarded at all, so the claim was untestable -- and false,
-    since a real forward changes the rendered curve."""
+    (loess's own default local-fit degree, `2`)."""
     bare = fm.lmplot(
         curved_xy_df, x="x", y="y", method="loess", ci=None, scatter=False, show_metrics=False
     ).to_svg()

@@ -1560,8 +1560,8 @@ mod tests {
     // uses, injected by `_spec_build.py`) was measured and rejected: it
     // routes through `build_from_scale_spec`, which resolves the domain from
     // ONE column, so it silently clipped the whisker layer's own extent (3 of
-    // 4 upper CI whiskers vanished off-panel) — see the coder's report,
-    // `.sdd/task-5-report.md` concern 1, and this function's own doc comment
+    // 4 upper CI whiskers vanished off-panel) — see commit 32117b00 and
+    // this function's own doc comment
     // ("Bar zero-anchor") above.
 
     /// Verbatim `chart.to_dict()` JSON for `fm.catplot(df, x="cat", y="val",

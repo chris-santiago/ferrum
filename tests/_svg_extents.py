@@ -35,7 +35,16 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import NamedTuple
+from collections.abc import Iterable
+from typing import NamedTuple, TypeVar
+
+_T = TypeVar("_T")
+
+# An axis's tick row/column has at least this many labels; a smaller group
+# sharing one coordinate is an axis/legend title, not ticks.
+MIN_TICK_GROUP = 3
+# A tick ladder fits a linear axis through its extremes, so it needs two ticks.
+MIN_LADDER_TICKS = 2
 
 
 class AxisExtent(NamedTuple):
@@ -109,6 +118,25 @@ def text_runs(svg: str) -> list[str]:
     return re.findall(r"<text[^>]*>([^<]*)</text>", svg)
 
 
+def _tick_groups(
+    entries: Iterable[tuple[float, float, _T]], *, axis: str
+) -> dict[int, list[tuple[float, _T]]]:
+    """Group ``(x, y, payload)`` text entries into candidate tick rows/columns for ``axis``.
+
+    An x axis's ticks share one row, so entries group by rounded ``y`` and keep
+    their along-axis ``x``; a y axis's ticks share one column, so entries group
+    by rounded ``x`` and keep ``y``. Each group is ``[(along, payload), ...]``;
+    groups smaller than :data:`MIN_TICK_GROUP` are dropped.
+    """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+    groups: dict[int, list[tuple[float, _T]]] = defaultdict(list)
+    for x, y, payload in entries:
+        across, along = (y, x) if axis == "x" else (x, y)
+        groups[round(across)].append((along, payload))
+    return {key: ents for key, ents in groups.items() if len(ents) >= MIN_TICK_GROUP}
+
+
 def numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
     """Return (x, y, value) for every ``<text>`` element whose content parses as float."""
     entries = []
@@ -127,8 +155,8 @@ def axis_tick_labels(svg: str, *, axis: str) -> list[str]:
     x-axis ticks share the largest rounded ``y`` (the bottom row); returned
     left-to-right (ascending screen ``x``). y-axis ticks share the smallest
     rounded ``x`` (the left column); returned top-to-bottom (ascending
-    screen ``y``). Groups smaller than 3 entries are axis/legend titles, not
-    the tick row/column, and are excluded.
+    screen ``y``). Groups smaller than :data:`MIN_TICK_GROUP` entries are
+    axis/legend titles, not the tick row/column, and are excluded.
 
     This is the single-panel, raw-string sibling of ``x_axis_extents``/
     ``y_axis_extents`` below: those assume multiple side-by-side panels and
@@ -138,29 +166,12 @@ def axis_tick_labels(svg: str, *, axis: str) -> list[str]:
     ``reverse=True`` scale's ticks descend) or when labels aren't
     float-parseable (e.g. ``TimeScale``'s ``"HH:MM:SS"`` formatting).
     """
-    if axis not in ("x", "y"):
-        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
-
-    entries = ordered_text_entries(svg)
-
-    if axis == "x":
-        rows: dict[int, list[tuple[float, str]]] = defaultdict(list)
-        for x, y, text in entries:
-            rows[round(y)].append((x, text))
-        candidates = [(y, ents) for y, ents in rows.items() if len(ents) >= 3]
-        if not candidates:
-            return []
-        _, ents = max(candidates, key=lambda item: item[0])
-        return [text for _, text in sorted(ents)]
-
-    cols: dict[int, list[tuple[float, str]]] = defaultdict(list)
-    for x, y, text in entries:
-        cols[round(x)].append((y, text))
-    candidates = [(x, ents) for x, ents in cols.items() if len(ents) >= 3]
-    if not candidates:
+    groups = _tick_groups(ordered_text_entries(svg), axis=axis)
+    if not groups:
         return []
-    _, ents = min(candidates, key=lambda item: item[0])
-    return [text for _, text in sorted(ents)]
+    # The x tick row is the bottom-most row; the y tick column the left-most.
+    key = max(groups) if axis == "x" else min(groups)
+    return [text for _, text in sorted(groups[key])]
 
 
 def y_axis_units_per_pixel(svg: str) -> float:
@@ -178,19 +189,15 @@ def y_axis_units_per_pixel(svg: str) -> float:
     convert LENGTHS (a whisker's height, a point's distance from another
     point), never a lone coordinate.
 
-    The ladder is the leftmost column of at least three numeric tick labels --
-    the same rule :func:`axis_tick_labels` uses for ``axis="y"``. Raises when
-    there is none: a chart with no numeric y ticks cannot answer the question.
+    The ladder is the leftmost column of at least :data:`MIN_TICK_GROUP`
+    numeric tick labels -- the same rule :func:`axis_tick_labels` uses for
+    ``axis="y"``. Raises when there is none: a chart with no numeric y ticks
+    cannot answer the question.
     """
-    columns: dict[int, list[tuple[float, float]]] = defaultdict(list)
-    for x, y, value in numeric_text_entries(svg):
-        columns[round(x)].append((y, value))
-    for x_key in sorted(columns):
-        ladder = sorted(columns[x_key])
-        if len(ladder) >= 3:
-            break
-    else:
+    columns = _tick_groups(numeric_text_entries(svg), axis="y")
+    if not columns:
         raise AssertionError("no y-axis tick ladder in the rendered SVG")
+    ladder = sorted(columns[min(columns)])
     (pixel_top, value_top), (pixel_bottom, value_bottom) = ladder[0], ladder[-1]
     return abs((value_bottom - value_top) / (pixel_bottom - pixel_top))
 
@@ -201,22 +208,17 @@ def x_axis_extents(svg: str) -> list[AxisExtent]:
     Column facets are laid out side-by-side (issue #24), so every panel's
     x-axis tick row shares the same bottom y-coordinate while spanning a
     distinct x-band.  We take the bottom-most tick row (the x-axis row with the
-    largest y among rows of at least 3 numeric entries) and split it into panels
+    largest y among rows of at least ``MIN_TICK_GROUP`` numeric entries) and split it into panels
     by value-reset: tick values ascend within a panel and drop at the boundary
     where the next panel's x-axis restarts from its own minimum value.
 
     Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
-    entries = numeric_text_entries(svg)
-    y_groups: dict[int, list[tuple[float, float]]] = defaultdict(list)
-    for x, y, val in entries:
-        y_groups[round(y)].append((x, val))
-    rows = [(y, ents) for y, ents in y_groups.items() if len(ents) >= 3]
+    rows = _tick_groups(numeric_text_entries(svg), axis="x")
     if not rows:
         return []
     # x-axis tick rows sit at the bottom of each panel; take the lowest row.
-    _, axis_row = max(rows, key=lambda r: r[0])
-    return _split_axis_groups_by_position(axis_row)
+    return _split_axis_groups_by_position(rows[max(rows)])
 
 
 def y_axis_extents(svg: str) -> list[AxisExtent]:
@@ -224,18 +226,17 @@ def y_axis_extents(svg: str) -> list[AxisExtent]:
 
     Column facets are laid out side-by-side (issue #24), so each panel carries
     its own y-axis at a distinct x-coordinate.  We group numeric ``<text>``
-    elements by their rounded x-coordinate; every column with at least 3 entries
-    is one panel's y-axis.
+    elements by their rounded x-coordinate; every column with at least
+    ``MIN_TICK_GROUP`` entries is one panel's y-axis.
 
     Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
-    entries = numeric_text_entries(svg)
-    x_groups: dict[int, list[float]] = defaultdict(list)
-    for x, _, val in entries:
-        x_groups[round(x)].append(val)
-    cols = [(x, vals) for x, vals in x_groups.items() if len(vals) >= 3]
-    cols.sort()
-    return [AxisExtent(min(vals), max(vals)) for _, vals in cols]
+    cols = _tick_groups(numeric_text_entries(svg), axis="y")
+    extents = []
+    for _, ents in sorted(cols.items()):
+        vals = [val for _, val in ents]
+        extents.append(AxisExtent(min(vals), max(vals)))
+    return extents
 
 
 def _split_axis_groups_by_position(
@@ -402,7 +403,11 @@ def value_axis_ladders(svg: str, *, axis: str) -> list[tuple[float, dict[float, 
             except ValueError:
                 continue
             by_position.setdefault(round(across), {})[value] = tick_along(group.dash, axis=axis)
-    return [(float(pos), lad) for pos, lad in sorted(by_position.items()) if len(lad) >= 2]
+    return [
+        (float(pos), lad)
+        for pos, lad in sorted(by_position.items())
+        if len(lad) >= MIN_LADDER_TICKS
+    ]
 
 
 def value_axis_ladder(svg: str, *, axis: str) -> dict[float, float]:
@@ -417,7 +422,7 @@ def value_axis_ladder(svg: str, *, axis: str) -> dict[float, float]:
         f"expected exactly one {axis} tick ladder (a single-axis chart); got {len(ladders)}"
     )
     ladder = ladders[0][1]
-    assert len(ladder) >= 2, f"need at least two numeric {axis} ticks; got {ladder}"
+    assert len(ladder) >= MIN_LADDER_TICKS, f"need at least two numeric {axis} ticks; got {ladder}"
     return ladder
 
 

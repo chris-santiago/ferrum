@@ -458,15 +458,15 @@ def test_violin_quartile_ticks_render_per_hue_stroke_color():
     Cycle-2 review found the same silent-drop class as cycle-1's dash bug,
     one channel later: this task's ``mark="rule"`` -> ``mark="tick"`` switch
     carries a hue ``color`` encoding onto the wire for the quartile layers
-    (pre-existing ``split_hue`` branch, ``heavy_stat.py``), but pre-T11r-
-    cycle-3 ``tick.rs`` resolved stroke color as one flat expression computed
+    (pre-existing ``split_hue`` branch, ``heavy_stat.py``), but before commit
+    2204db2a ``tick.rs`` resolved stroke color as one flat expression computed
     ONCE outside any per-row loop -- so every quartile crossbar rendered the
     same theme-blue regardless of hue.
 
     RED-proof (analytic, not reproduced by reverting this task's own diff):
     the regression lived entirely in ``tick.rs``'s stroke-color resolution,
-    which is Rust code outside this task's authority to revert (T11r cycle 3
-    already landed the fix upstream, see ``.sdd/task-11r-report.md``).
+    which is Rust code outside this test's own diff (the fix landed in
+    commit 2204db2a).
     Reverting only this task's Python ``rule``->``tick`` hunk does not
     isolate it: on ``rule``, hue color always rendered correctly (color was
     never the bug on that mark), so there is no clean "broken" baseline to

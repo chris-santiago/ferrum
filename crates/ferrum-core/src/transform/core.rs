@@ -694,7 +694,7 @@ mod tests {
 
     // ── Wave-1 close mutation-pin: dispatch-integrity test ────────────────
     //
-    // The mutation-close finding (`.sdd/close-mutation-tester.md`) moved
+    // A mutation test (commit 49edb758) moved
     // `Robust` OUT of `apply_with_context`'s context-aware `arm!` invocation
     // (above) and INTO its plain-`apply(batch)` fallback list, and the whole
     // suite still passed: every per-transform test that exercises this
