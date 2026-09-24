@@ -292,7 +292,7 @@ impl PyFlatten {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::Flatten(s) => format!("Flatten(fields={:?})", s.fields),
+            TransformSpec::Flatten(s) => format!("Flatten(fields={:?}, as_={:?}, name={:?})", s.fields, s.as_, s.name),
             _ => "Flatten(?)".to_string(),
         }
     }

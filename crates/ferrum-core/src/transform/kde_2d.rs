@@ -547,8 +547,8 @@ impl PyKde2D {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Kde2D(s) => format!(
-                "Kde2D(x='{}', y='{}', bandwidth={:?}, n={}, extent={:?}, groupby={:?})",
-                s.x, s.y, s.bandwidth, s.n, s.extent, s.groupby
+                "Kde2D(x='{}', y='{}', bandwidth={:?}, n={}, extent={:?}, groupby={:?}, name={:?})",
+                s.x, s.y, s.bandwidth, s.n, s.extent, s.groupby, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

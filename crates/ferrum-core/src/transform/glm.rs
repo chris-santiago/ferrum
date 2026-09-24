@@ -669,9 +669,9 @@ impl PyGlm {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Glm(s) => format!(
-                "Glm(x='{}', y='{}', family='{}', link='{}', n_grid={}, ci={:?}, max_iter={}, tol={})",
+                "Glm(x='{}', y='{}', family='{}', link='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, name={:?})",
                 s.x, s.y, family_name(s.family), link_name(s.link),
-                s.n_grid, s.ci, s.max_iter, s.tol,
+                s.n_grid, s.ci, s.max_iter, s.tol, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

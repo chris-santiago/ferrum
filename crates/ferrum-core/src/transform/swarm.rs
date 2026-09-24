@@ -537,8 +537,8 @@ impl PySwarm {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Swarm(s) => format!(
-                "Swarm(category='{}', value='{}', point_size={}, spacing={}, side={:?}, orient={:?}, name={:?})",
-                s.category, s.value, s.point_size, s.spacing, s.side, s.orient, s.name
+                "Swarm(category='{}', value='{}', point_size={}, spacing={}, side={:?}, orient={:?}, dodge={:?}, name={:?})",
+                s.category, s.value, s.point_size, s.spacing, s.side, s.orient, s.dodge, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

@@ -221,8 +221,8 @@ impl PyUnpivot {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Unpivot(s) => format!(
-                "Unpivot(id_vars={:?}, value_vars={:?}, var_name='{}', value_name='{}')",
-                s.id_vars, s.value_vars, s.var_name, s.value_name,
+                "Unpivot(id_vars={:?}, value_vars={:?}, var_name='{}', value_name='{}', name={:?})",
+                s.id_vars, s.value_vars, s.var_name, s.value_name, s.name,
             ),
             #[allow(unreachable_patterns)] _ => unreachable!(),
         }

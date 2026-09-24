@@ -471,8 +471,8 @@ impl PyHex {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Hex(s) => format!(
-                "Hex(x='{}', y='{}', bin_size={:?}, aggregate='{}', field={:?})",
-                s.x, s.y, s.bin_size, s.aggregate, s.field
+                "Hex(x='{}', y='{}', bin_size={:?}, aggregate='{}', field={:?}, name={:?})",
+                s.x, s.y, s.bin_size, s.aggregate, s.field, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

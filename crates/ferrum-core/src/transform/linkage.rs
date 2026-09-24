@@ -755,8 +755,8 @@ impl PyLinkage {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Linkage(s) => format!(
-                "Linkage(method={:?}, metric={:?}, axis={:?})",
-                s.method, s.metric, s.axis,
+                "Linkage(method={:?}, metric={:?}, axis={:?}, z_score={:?}, standard_scale={:?}, name={:?})",
+                s.method, s.metric, s.axis, s.z_score, s.standard_scale, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

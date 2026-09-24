@@ -425,7 +425,10 @@ impl PyTopK {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::TopK(s) => format!("TopK(n={}, field='{}')", s.n, s.field),
+            TransformSpec::TopK(s) => format!(
+                "TopK(n={}, field='{}', op='{}', sort='{}', groupby={:?}, name={:?})",
+                s.n, s.field, s.op, s.sort, s.groupby, s.name,
+            ),
             _ => "TopK(?)".to_string(),
         }
     }

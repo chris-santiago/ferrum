@@ -651,9 +651,9 @@ impl PyRobust {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Robust(s) => format!(
-                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
+                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?})",
                 s.x, s.y, s.n_grid, s.ci, s.huber_c, s.max_iter, s.tol, s.output,
-                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

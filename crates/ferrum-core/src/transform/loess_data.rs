@@ -261,7 +261,10 @@ impl PyLoessData {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::LoessData(s) => format!("LoessData(x='{}', y='{}')", s.x, s.y),
+            TransformSpec::LoessData(s) => format!(
+                "LoessData(x='{}', y='{}', bandwidth={}, name={:?})",
+                s.x, s.y, s.bandwidth, s.name,
+            ),
             _ => "LoessData(?)".to_string(),
         }
     }

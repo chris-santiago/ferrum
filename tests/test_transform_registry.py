@@ -377,7 +377,8 @@ def test_pinned_secondary_keys_from_the_six_composition_sites():
     )
     cm = fm.clustermap(frame)
     reorder = next(t for t in cm.heatmap._transforms if "Reorder" in repr(t))
-    assert 'from=Some("row_link_order")' in repr(reorder)
+    # A repr spells each argument as its constructor parameter (`from_=`, as `AggregateOp`'s `fn_=`), #195.
+    assert 'from_=Some("row_link_order")' in repr(reorder)
     assert cm.col_dendrogram._layers[0].data_source == "col_link_segments"
     assert cm.row_dendrogram._layers[0].data_source == "row_link_segments"
 

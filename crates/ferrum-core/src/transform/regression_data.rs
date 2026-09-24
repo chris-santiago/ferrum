@@ -393,7 +393,10 @@ impl PyRegressionData {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::RegressionData(s) => format!("RegressionData(x='{}', y='{}')", s.x, s.y),
+            TransformSpec::RegressionData(s) => format!(
+                "RegressionData(x='{}', y='{}', method='{}', order={}, name={:?})",
+                s.x, s.y, s.method, s.order, s.name,
+            ),
             _ => "RegressionData(?)".to_string(),
         }
     }

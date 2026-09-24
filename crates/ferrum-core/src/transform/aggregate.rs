@@ -349,6 +349,14 @@ pub(crate) struct AggregateOp {
 }
 
 impl AggregateOp {
+    /// The `AggregateOp(...)` repr, spelled with the constructor's keywords
+    /// and `fn_`'s canonical spelling (so the `var` alias renders
+    /// `variance`). Shared by `AggregateOp.__repr__` and `Aggregate`'s `ops=`.
+    fn repr(&self) -> String {
+        format!("AggregateOp(field='{}', fn_='{}', as_='{}')",
+            self.field, self.fn_.as_str(), self.as_)
+    }
+
     /// The `count():Q` shorthand: a row-counting fn with field `""` or `"*"`,
     /// which needs no column lookup.
     fn is_count_star(&self) -> bool {
@@ -585,8 +593,7 @@ impl PyAggregateOp {
     }
 
     fn __repr__(&self) -> String {
-        format!("AggregateOp(field='{}', fn='{:?}', as_='{}')",
-            self.0.field, self.0.fn_, self.0.as_)
+        self.0.repr()
     }
 }
 
@@ -655,8 +662,9 @@ impl PyAggregate {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Aggregate(s) => format!(
-                "Aggregate(ops=[{} ops], groupby={:?})",
-                s.ops.len(), s.groupby,
+                "Aggregate(ops=[{}], groupby={:?}, name={:?})",
+                s.ops.iter().map(AggregateOp::repr).collect::<Vec<_>>().join(", "),
+                s.groupby, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

@@ -674,7 +674,10 @@ impl PyImpute {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::Impute(s) => format!("Impute(field='{}', method='{}')", s.field, s.method),
+            TransformSpec::Impute(s) => format!(
+                "Impute(field='{}', method='{}', value={:?}, name={:?})",
+                s.field, s.method, s.value, s.name,
+            ),
             _ => "Impute(?)".to_string(),
         }
     }

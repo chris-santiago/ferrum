@@ -816,8 +816,8 @@ impl PyLetterValue {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::LetterValue(s) => format!(
-                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={}, sort={:?})",
-                s.value, s.group, s.k_depth, s.outlier_threshold, s.sort,
+                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={}, sort={:?}, name={:?})",
+                s.value, s.group, s.k_depth, s.outlier_threshold, s.sort, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

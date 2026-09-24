@@ -633,8 +633,8 @@ impl PyRaster {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Raster(s) => format!(
-                "Raster(x='{}', y='{}', aggregate='{}', field={:?}, resolution={:?}, min_count={:?}, log_scale={})",
-                s.x, s.y, s.aggregate, s.field, s.resolution, s.min_count, s.log_scale
+                "Raster(x='{}', y='{}', aggregate='{}', field={:?}, resolution={:?}, min_count={:?}, log_scale={}, name={:?})",
+                s.x, s.y, s.aggregate, s.field, s.resolution, s.min_count, s.log_scale, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

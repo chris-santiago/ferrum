@@ -24,6 +24,7 @@ import pytest
 import ferrum as fm
 from ferrum import Kde2D, Contour
 from ferrum.marks.heavy_stat import desugar_contour
+from tests._repr_probe import has_arg
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +82,9 @@ class TestDesugaredContourGroupby:
         transforms = result.transforms
         assert len(transforms) >= 1
         kde_repr = repr(transforms[0])
-        assert "groupby=Some" in kde_repr or "g" in kde_repr, (
-            f"Kde2D repr must mention groupby field 'g'; got: {kde_repr}"
+        assert kde_repr.startswith("Kde2D("), kde_repr
+        assert has_arg(kde_repr, 'groupby=["g"]'), (
+            f'Kde2D repr must carry groupby=["g"]; got: {kde_repr}'
         )
 
     def test_groupby_none_kde2d_no_groupby(self):
@@ -90,7 +92,10 @@ class TestDesugaredContourGroupby:
         result = desugar_contour("x", "y", groupby=None, fill=True)
         transforms = result.transforms
         kde_repr = repr(transforms[0])
-        assert "groupby=[]" in kde_repr, f"Kde2D repr must show empty groupby; got: {kde_repr}"
+        assert kde_repr.startswith("Kde2D("), kde_repr
+        assert has_arg(kde_repr, "groupby=[]"), (
+            f"Kde2D repr must show empty groupby; got: {kde_repr}"
+        )
 
     def test_groupby_fill_layer_colors_by_group(self):
         """When groupby is set, the segment layer colors by the group field, typed Nominal.
@@ -228,11 +233,10 @@ class TestJointplotKdeHue:
         """The center chart's transforms include Kde2D with groupby set."""
         chart = fm.jointplot(df_two_clusters, x="x", y="y", kind="kde", hue="g")
         center = chart.center
-        # Resolve the center to get the transforms list
-        # The center may be a pre-desugar Chart (composite mark); check pending transforms
-        # OR it may already be desugared. Walk the center's structure for Kde2D with groupby.
-        found_grouped_kde = _find_grouped_kde2d(center, "g")
-        assert found_grouped_kde, "Center chart must include a Kde2D transform with groupby='g'"
+        # Exact `groupby=[...]` fragment (#195): a bare `Some("g")` would also
+        # match `name=Some("g")`, so it cannot prove the grouping.
+        reprs = _kde2d_reprs(center)
+        assert any(has_arg(r, 'groupby=["g"]') for r in reprs), reprs
 
     def test_jointplot_kde_hue_svg_has_geometry(self, df_two_clusters):
         """jointplot(kind='kde', hue=...) produces non-empty geometry.
@@ -249,8 +253,9 @@ class TestJointplotKdeHue:
         """Without hue, the center chart uses the no-groupby contour path (byte-stable)."""
         chart = fm.jointplot(df_no_hue, x="x", y="y", kind="kde")
         center = chart.center
-        found_grouped = _find_grouped_kde2d(center, group_col=None)
-        assert not found_grouped, "No-hue jointplot kind='kde' center must not have grouped Kde2D"
+        reprs = _kde2d_reprs(center)
+        assert reprs, "No-hue jointplot kind='kde' center must still build a Kde2D"
+        assert all(has_arg(r, "groupby=[]") for r in reprs), reprs
 
 
 # ---------------------------------------------------------------------------
@@ -334,51 +339,14 @@ class TestGroupedContourVisualSmoke:
 # ---------------------------------------------------------------------------
 
 
-def _find_grouped_kde2d(chart, group_col: str | None) -> bool:
-    """Walk a chart's transforms, layers, and pending stat mark to check groupby.
-
-    If group_col is not None: returns True if a Kde2D with groupby=group_col exists.
-    If group_col is None: returns True if any Kde2D has a non-None groupby (unwanted).
-    """
-    transforms_to_check = []
-
-    # Direct transforms
-    if hasattr(chart, "_transforms") and chart._transforms:
-        transforms_to_check.extend(chart._transforms)
-
-    # Layers' transforms (for composite marks that have been desugared)
-    if hasattr(chart, "_layers") and chart._layers:
-        for layer in chart._layers:
-            if hasattr(layer, "_transforms") and layer._transforms:
-                transforms_to_check.extend(layer._transforms)
-
-    for t in transforms_to_check:
-        r = repr(t)
-        if "Kde2D" in r:
-            if group_col is not None:
-                if f'Some("{group_col}")' in r or "groupby=Some" in r:
-                    return True
-            else:
-                # We want to confirm NO groupby; return True if found (violation)
-                if "groupby=Some" in r:
-                    return True
-
-    # For charts with composite mark pending desugar, check _pending_stat_mark.
-    # The pending mark's kwargs contain the groupby setting before resolution.
-    pending = getattr(chart, "_pending_stat_mark", None)
-    if pending is not None:
-        kwargs = getattr(pending, "kwargs", {}) or {}
-        pending_groupby = kwargs.get("groupby")
-        if group_col is not None:
-            # Looking for groupby=group_col in pending
-            if pending_groupby == group_col:
-                return True
-        else:
-            # Looking for absence of groupby; return True if found (violation)
-            if pending_groupby is not None:
-                return True
-
-    return False
+def _kde2d_reprs(chart) -> list[str]:
+    """The reprs of every Kde2D transform the chart holds once its pending
+    stat mark is desugared (the center chart is pre-desugar until render)."""
+    resolved = chart._resolve_pending()
+    transforms = list(resolved._transforms or [])
+    for layer in resolved._layers or []:
+        transforms.extend(getattr(layer, "_transforms", None) or [])
+    return [repr(t) for t in transforms if repr(t).startswith("Kde2D(")]
 
 
 def _find_polygon_color_encoding(chart) -> str | None:

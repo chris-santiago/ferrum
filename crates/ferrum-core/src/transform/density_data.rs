@@ -302,7 +302,7 @@ impl PyDensityData {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::DensityData(s) => format!("DensityData(field='{}')", s.field),
+            TransformSpec::DensityData(s) => format!("DensityData(field='{}', name={:?})", s.field, s.name),
             _ => "DensityData(?)".to_string(),
         }
     }

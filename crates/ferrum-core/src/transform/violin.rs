@@ -563,8 +563,12 @@ impl PyViolin {
     fn __repr__(&self) -> String {
         match &self.0 {
             crate::transform::core::TransformSpec::Violin(s) => format!(
-                "Violin(field='{}', groupby={:?}, bandwidth={:?}, n={}, width={})",
-                s.field, s.groupby, s.bandwidth, s.n, s.width
+                "Violin(field='{}', groupby={:?}, bandwidth={:?}, bw_adjust={}, n={}, width={}, \
+                 shared_extent={}, horizontal={}, name={:?})",
+                s.field, s.groupby, s.bandwidth, s.bw_adjust, s.n, s.width,
+                if s.shared_extent { "True" } else { "False" },
+                if s.horizontal { "True" } else { "False" },
+                s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

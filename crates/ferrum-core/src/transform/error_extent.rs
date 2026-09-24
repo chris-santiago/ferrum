@@ -340,8 +340,8 @@ impl PyErrorExtent {
     fn __repr__(&self) -> String {
         match &self.0 {
             crate::transform::core::TransformSpec::ErrorExtent(s) => format!(
-                "ErrorExtent(field='{}', groupby={:?}, method={:?}, seed={}, n_boot={})",
-                s.field, s.groupby, s.method, s.seed, s.n_boot
+                "ErrorExtent(field='{}', groupby={:?}, method={:?}, seed={}, n_boot={}, name={:?})",
+                s.field, s.groupby, s.method, s.seed, s.n_boot, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

@@ -887,13 +887,12 @@ impl PyKde {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            // Every constructor parameter appears, matching the completeness
-            // `Robust::__repr__` gained in this same batch (batch-F close
-            // review, F7 — the two siblings had made opposite decisions about
-            // repr completeness). `count_scale_extent` is deliberately absent:
-            // it has no constructor parameter and is set only by the
-            // facet-pinning pass, so it is never part of the value a user
-            // wrote.
+            // Every constructor parameter appears with its value, the rule
+            // every transform pyclass repr follows (#195), enforced
+            // family-wide by `tests/test_transform_repr_completeness.py`.
+            // `count_scale_extent` is deliberately absent: it has no
+            // constructor parameter and is set only by the facet-pinning
+            // pass, so it is never part of the value a user wrote.
             TransformSpec::Kde(s) => format!(
                 "Kde(field='{}', bandwidth={:?}, bw_adjust={}, n={}, extent={:?}, \
                  cumulative={}, shared_extent={}, kernel='{}', groupby={:?}, \

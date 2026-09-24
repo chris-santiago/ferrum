@@ -152,8 +152,8 @@ impl PyReorder {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Reorder(s) => format!(
-                "Reorder(by='{}', drop_index={}, from={:?})",
-                s.by, s.drop_index, s.from),
+                "Reorder(by='{}', drop_index={}, from_={:?}, name={:?})",
+                s.by, s.drop_index, s.from, s.name),
             #[allow(unreachable_patterns)] _ => unreachable!(),
         }
     }

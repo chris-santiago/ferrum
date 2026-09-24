@@ -295,8 +295,8 @@ impl PySummary {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Summary(s) => format!(
-                "Summary(field='{}', groupby={:?}, error_fn={:?}, ci={}, n_boot={}, seed={})",
-                s.field, s.groupby, s.error_fn, s.ci, s.n_boot, s.seed,
+                "Summary(field='{}', groupby={:?}, error_fn={:?}, ci={}, n_boot={}, seed={}, name={:?})",
+                s.field, s.groupby, s.error_fn, s.ci, s.n_boot, s.seed, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

@@ -738,8 +738,8 @@ impl PyContour {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Contour(s) => format!(
-                "Contour(thresholds={}, fill={}, smooth={})",
-                s.thresholds, s.fill, s.smooth
+                "Contour(thresholds={}, fill={}, smooth={}, name={:?})",
+                s.thresholds, s.fill, s.smooth, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

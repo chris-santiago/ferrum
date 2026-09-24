@@ -145,7 +145,11 @@ impl PyJoinAggregate {
     }
 
     fn __repr__(&self) -> String {
-        "JoinAggregate(...)".to_string()
+        match &self.0 {
+            TransformSpec::JoinAggregate(s) => format!("JoinAggregate(name={:?})", s.name),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
     }
 }
 

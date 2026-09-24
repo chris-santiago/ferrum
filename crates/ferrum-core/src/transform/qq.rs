@@ -470,8 +470,8 @@ impl PyQq {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Qq(s) => format!(
-                "QQ(field='{}', distribution='{}', dequantize={}, emit_line={}, seed={})",
-                s.field, s.distribution, s.dequantize, s.emit_line, s.seed,
+                "QQ(field='{}', distribution='{}', dequantize={}, emit_line={}, seed={}, name={:?})",
+                s.field, s.distribution, s.dequantize, s.emit_line, s.seed, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

@@ -377,10 +377,8 @@ impl PyBin2D {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Bin2D(s) => format!(
-                "Bin2D(x='{}', y='{}', cumulative={})",
-                s.x,
-                s.y,
-                s.cumulative,
+                "Bin2D(x='{}', y='{}', bins_x={:?}, bins_y={:?}, extent_x={:?}, extent_y={:?}, cumulative={}, name={:?})",
+                s.x, s.y, s.bins_x, s.bins_y, s.extent_x, s.extent_y, s.cumulative, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

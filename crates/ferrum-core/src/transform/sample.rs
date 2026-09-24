@@ -81,7 +81,7 @@ impl PySample {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::Sample(s) => format!("Sample(n={})", s.n),
+            TransformSpec::Sample(s) => format!("Sample(n={}, seed={}, name={:?})", s.n, s.seed, s.name),
             _ => "Sample(?)".to_string(),
         }
     }

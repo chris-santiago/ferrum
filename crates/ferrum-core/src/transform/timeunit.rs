@@ -250,7 +250,10 @@ impl PyTimeUnit {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::TimeUnit(s) => format!("TimeUnit(field='{}', unit='{}')", s.field, s.unit),
+            TransformSpec::TimeUnit(s) => format!(
+                "TimeUnit(field='{}', unit='{}', utc={}, as_={:?}, name={:?})",
+                s.field, s.unit, if s.utc { "True" } else { "False" }, s.as_, s.name,
+            ),
             _ => "TimeUnit(?)".to_string(),
         }
     }

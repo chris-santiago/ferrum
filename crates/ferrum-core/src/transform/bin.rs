@@ -860,13 +860,6 @@ impl PyBin {
                     BinMode::Width { w } => (None, Some(*w)),
                     BinMode::Sturges | BinMode::FreedmanDiaconis => (None, None),
                 };
-                // batch-E T7 cycle-2 correction: `__repr__` reverts to its
-                // pre-T7 field set. It already omits `groupby`/`name`
-                // unconditionally (not just when unset), so an unconditional
-                // `agg_field`/`agg` addition broke that convention for every
-                // pre-existing `Bin(...)` repr without being requested by
-                // the brief or spec, and nothing pinned it. Not reintroduced.
-                //
                 // #193: a rule mode the numeric projection cannot spell gains a
                 // trailing `bins=` term rather than printing as `bin_count=None,
                 // bin_width=None`, which would repr-lie about the binning the
@@ -879,10 +872,13 @@ impl PyBin {
                     .map(|rule| format!(", bins='{rule}'"))
                     .unwrap_or_default();
                 format!(
-                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={}{})",
+                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={}, \
+                     shared_extent={}, groupby={:?}, agg_field={:?}, agg={:?}, name={:?}{})",
                     s.field, bin_count, bin_width, s.extent,
                     if s.nice { "True" } else { "False" },
                     if s.cumulative { "True" } else { "False" },
+                    if s.shared_extent { "True" } else { "False" },
+                    s.groupby, s.agg_field, s.agg, s.name,
                     bins_term,
                 )
             }

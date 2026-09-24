@@ -377,8 +377,8 @@ impl PyLogistic {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Logistic(s) => format!(
-                "Logistic(x='{}', y='{}', n_grid={}, ci={:?}, max_iter={}, tol={})",
-                s.x, s.y, s.n_grid, s.ci, s.max_iter, s.tol,
+                "Logistic(x='{}', y='{}', n_grid={}, ci={:?}, max_iter={}, tol={}, name={:?})",
+                s.x, s.y, s.n_grid, s.ci, s.max_iter, s.tol, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

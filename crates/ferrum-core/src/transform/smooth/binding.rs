@@ -363,10 +363,11 @@ impl PySmooth {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, k={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, k={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?}, x_range={:?})",
                 s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.k, s.n, s.seed,
-                s.x_bins, s.x_estimator, s.output,
-                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name,
+                // The canonical `AggFn` spelling, as `AggregateOp`'s `fn_=`.
+                s.x_bins, s.x_estimator.map(<&'static str>::from), s.output,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name, s.x_range,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

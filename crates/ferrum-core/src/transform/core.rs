@@ -196,6 +196,12 @@ pub(crate) use for_each_transform;
 /// functions and have no typed pyclass (SEAM-02). They still round-trip through
 /// the `transforms_json` serde path; the getter renders them as plain dicts via
 /// the `_ =>` fallback arm, mirroring the `layers`/`coord`/`position` getters.
+///
+/// A new entry ships a row in `tests/test_transform_repr_completeness.py`
+/// (#195): its `__repr__` renders every constructor argument with its value,
+/// and that table's coverage leg fails on a pyclass without a row. The table
+/// reads each constructor's `__text_signature__`, so a new constructor
+/// parameter on an existing entry needs a sentinel in its row too.
 macro_rules! for_each_py_transform {
     ($mac:ident) => {
         $mac! {
