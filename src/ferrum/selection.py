@@ -1000,6 +1000,10 @@ _CONDITIONAL_LITERAL_HANDLERS: dict[str, Callable[..., dict]] = {
     "color": _literal_color_only,
     "stroke_dash": _literal_stroke_dash,
 }
+# `_resolve_encoding_value` subscripts this table with whatever
+# `conditional_wire_channel` returns, a member of `_CONDITIONAL_CHANNELS`, so the
+# two sets must be equal for that lookup to be total (pinned by
+# `tests/test_conditional_channel_inference.py`).
 
 
 def _resolve_encoding_value(

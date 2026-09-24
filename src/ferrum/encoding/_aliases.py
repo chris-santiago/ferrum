@@ -216,20 +216,21 @@ def _warn_detail_ignored(mark: str | None) -> None:
     )
 
 
-def layered_chart_detail(detail_ch: object, layer_marks: list) -> object | None:
-    """Return the chart-level ``detail`` a layered chart's layers inherit, or ``None``.
+def layered_chart_detail(detail_ch: object, layer_marks: list) -> list[object | None]:
+    """Return, per layer, the chart-level ``detail`` that layer inherits, or ``None``.
 
     A layered chart's chart-level encoding is shared by every layer at
     serialization (``color`` is inherited the same way, by Rust). ``detail`` is
     mark style on the wire, not an encoding Rust inherits, so Python hands it
-    to each layer: every line/area/polygon layer without a ``detail`` of its
-    own gets this one (``_build_layers_list``). When no layer's mark reads
-    ``detail``, the flat chart's "accepted but ignored" warning fires once and
-    nothing is inherited.
+    to each layer: the returned list, aligned with *layer_marks*, holds the
+    channel for every line/area/polygon layer and ``None`` for the rest. A
+    layer's own ``detail`` still wins (``_build_layers_list`` only fills an
+    absent one). When no layer's mark reads ``detail``, the flat chart's
+    "accepted but ignored" warning fires once and nothing is inherited.
     """
     if _channel_field(detail_ch) is None:
-        return None
-    if not any(mark in _DETAIL_CONSUMING_MARKS for mark in layer_marks):
+        return [None] * len(layer_marks)
+    inherits = [mark in _DETAIL_CONSUMING_MARKS for mark in layer_marks]
+    if not any(inherits):
         _warn_detail_ignored(layer_marks[0] if layer_marks else None)
-        return None
-    return detail_ch
+    return [detail_ch if inherit else None for inherit in inherits]

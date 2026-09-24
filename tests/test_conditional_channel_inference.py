@@ -96,3 +96,12 @@ def test_unstamped_spec_to_spec_dict_refuses_a_non_conditional_branch():
 def test_channelless_literal_keeps_its_own_kind():
     assert _resolve_encoding_value(value(0.5)) == {"kind": "opacity", "value": 0.5}
     assert _resolve_encoding_value(value("red"))["kind"] == "color"
+
+
+def test_literal_handler_table_covers_exactly_the_conditional_channels():
+    """`_resolve_encoding_value` subscripts the table with `conditional_wire_channel`'s
+    result, a member of `_CONDITIONAL_CHANNELS`; equal sets keep that lookup total."""
+    from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
+    from ferrum.selection import _CONDITIONAL_LITERAL_HANDLERS
+
+    assert set(_CONDITIONAL_LITERAL_HANDLERS) == _CONDITIONAL_CHANNELS

@@ -3094,7 +3094,7 @@ class Chart(
 
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
-        layer_detail = None
+        chart_detail = None
         if resolved._layers is None:
             mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         else:
@@ -3105,9 +3105,7 @@ class Chart(
             # the wire, so it is handed to the layers (`_build_layers_list`)
             # rather than routed into a chart-level `mark_style`.
             mk = {}
-            layer_detail = layered_chart_detail(
-                enc.pop("detail", None), [layer.mark for layer in resolved._layers]
-            )
+            chart_detail = enc.pop("detail", None)
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
         # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
@@ -3213,7 +3211,10 @@ class Chart(
             kw["mark_style"] = mk
         if resolved._layers is not None:
             kw["layers"] = resolved._build_layers_list(
-                serialized_layers, inherited_detail=layer_detail
+                serialized_layers,
+                inherited_details=layered_chart_detail(
+                    chart_detail, [layer.mark for layer in serialized_layers]
+                ),
             )
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()

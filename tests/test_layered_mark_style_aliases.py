@@ -110,6 +110,11 @@ SHAPES = {
         6,
     ),
     "declared_before_any_plus": (lambda k: _line(**{k: "g"}) + _line(), 4),
+    # A layer's own value wins over the inherited chart-level one.
+    "layer_own_differs_from_chart_level": (
+        lambda k: _line(**{k: "g"}) + _line(**{k: "one"}),
+        3,
+    ),
     # A later declaration replaces the earlier one on every layer.
     "plus_redeclared": (
         lambda k: (_line() + _line()).encode(**{k: "g"}).encode(**{k: "one"}),
@@ -153,6 +158,12 @@ def test_layered_wire_carries_the_key_per_layer_not_chart_level(key):
     spec = json.loads((_line() + _line()).encode(**{key: "g"}).to_spec().to_json())
     assert "mark_style" not in spec
     assert [layer["mark_style"] for layer in spec["layers"]] == [{key: "g"}, {key: "g"}]
+
+
+@pytest.mark.parametrize("key", ALIAS_KEYS)
+def test_layer_own_key_wins_on_the_wire(key):
+    spec = json.loads((_line(**{key: "g"}) + _line(**{key: "one"})).to_spec().to_json())
+    assert [layer["mark_style"] for layer in spec["layers"]] == [{key: "g"}, {key: "one"}]
 
 
 def test_layered_detail_on_non_consuming_marks_warns_once():
