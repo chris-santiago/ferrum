@@ -504,10 +504,8 @@ pub enum RenderError {
     /// for a hand-built spec that bypasses it (`ChartSpec::from_json` and
     /// similar raw-spec routes, the same audience
     /// [`marks::point::shape_from_str`](crate::render::marks::point::shape_from_str)'s
-    /// own doc comment names) — including a range that mixes in a numeric
-    /// entry, which used to make the string-range parse quietly return
-    /// `None` and fall through to the default palette rather than refuse
-    /// (rust-quality-review cycle-1 finding).
+    /// own doc comment names), including a range that mixes in a numeric
+    /// entry.
     ShapeRangeEntryUnrecognized { entry: String },
     /// A `StrokeDash(scale=...)` carries an explicit `range` at all — string,
     /// numeric, or mixed (#123, spec §4.9). That channel's output is a fixed
@@ -518,16 +516,15 @@ pub enum RenderError {
     /// entry is equally unsupported, unlike [`Self::ShapeRangeEntryUnrecognized`].
     /// `entries` is the received range verbatim (each item rendered via
     /// [`crate::scale::ordinal::OrdinalRangeValue`]'s `Display`), so the
-    /// message still names the value received (spec-reviewer cycle-2
-    /// finding: a fieldless variant here missed the "names the public entry
-    /// AND the value received" rule item 1 already applied on the Python
-    /// side — the same gap cycle 1's `entry: "range"` sentinel had before the
-    /// variant split). An explicit `StrokeDash(scale=...)` range never
-    /// reaches this path via the public Python API — Python's own
-    /// `StrokeDash._validate` refuses it at construction, naming the fixed
-    /// palette — but a hand-built spec can still carry one, and it must
-    /// refuse rather than be silently ignored.
+    /// message names the value received. Python's `StrokeDash._validate`
+    /// refuses the range at construction; this refuses a hand-built spec that
+    /// carries one.
     StrokeDashRangeUnsupported { entries: Vec<String> },
+    /// A layered `ChartSpec` (`layers` set) also carries a chart-level
+    /// `mark_style`. A layered chart is styled per layer (each layer resolves
+    /// `layer.mark_style > theme`), so the chart-level value could only be
+    /// ignored; it refuses instead. `layers` is the layer count.
+    LayeredChartMarkStyle { layers: usize },
     /// A time-typed format (`label_format="%b %Y"`, a preset like
     /// `"date_iso"` that resolves to one, or a `%`-free spec declared
     /// `format_type="time"`) was applied where the value it formats is not
@@ -755,7 +752,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // token (an entry string, or a list of them) — nothing here to
         // un-flip, same as `ColorRangeParseFailure` above.
         | RenderError::ShapeRangeEntryUnrecognized { .. }
-        | RenderError::StrokeDashRangeUnsupported { .. }) => other,
+        | RenderError::StrokeDashRangeUnsupported { .. }
+        // A layer count, no channel token.
+        | RenderError::LayeredChartMarkStyle { .. }) => other,
     }
 }
 
@@ -966,14 +965,20 @@ impl std::fmt::Display for RenderError {
                 let received = entries.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(", ");
                 write!(
                     f,
-                    "stroke_dash(scale=...) does not honor an explicit range (received [{received}]): \
+                    "StrokeDash(scale=...) does not honor an explicit range (received [{received}]): \
                      stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can \
                      redeclare"
                 )
             }
+            Self::LayeredChartMarkStyle { layers } => write!(
+                f,
+                "ChartSpec.mark_style is set on a layered chart ({layers} layers), where it has no \
+                 effect: a layered chart is styled per layer. Move the style onto each layer's \
+                 own mark_style."
+            ),
             Self::ShapeRangeEntryUnrecognized { entry } => write!(
                 f,
-                "shape(scale=...) range entry '{entry}' is not a recognized shape name"
+                "Shape(scale=...) range entry '{entry}' is not a recognized shape name"
             ),
             Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);

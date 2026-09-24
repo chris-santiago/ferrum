@@ -1155,16 +1155,24 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     new = chart._clone()
     new._pending_stat_mark = None
 
-    # Build a scatter layer from the prior mark if present.
+    # Keep the prior primitive mark as layer(s). On an already-layered chart
+    # those are its existing layers, each with its own style: the chart's
+    # `_mark`/`_mark_kwargs` there are only layer 0's, copied up by the clone
+    # that built it (spec §4.8).
     _prior_mark = chart._pending_stat_mark.prior_mark
-    _prior_layer = None
+    _prior_layers: list = []
     if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
-        _prior_layer = _build_prior_layer(
-            _prior_mark,
-            chart._encoding,
-            chart._mark_kwargs,
-            chart._position,
-        )
+        if chart._layers:
+            _prior_layers = list(chart._layers)
+        else:
+            _prior_layers = [
+                _build_prior_layer(
+                    _prior_mark,
+                    chart._encoding,
+                    chart._mark_kwargs,
+                    chart._position,
+                )
+            ]
 
     # Layered mode: result.layers is set.
     if result.layers is not None:
@@ -1183,10 +1191,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         # prerequisite): reattach any chart-level explicit x/y scale the
         # desugar's fresh per-layer encodings would otherwise drop.
         emitted = [_propagate_layer_scale(chart._encoding, lyr) for lyr in emitted]
-        all_layers = emitted
-        if _prior_layer is not None:
-            all_layers = [_prior_layer] + emitted
-        new._layers = all_layers
+        new._layers = _prior_layers + emitted
         new._mark = None  # signals layered mode in to_spec
         return new
 
@@ -1199,7 +1204,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # the same `layer_kwargs=` door, and the keys aimed there are recorded as
     # the caller's so the chart-level catch-all below cannot override them.
     single_mark_kwargs, single_caller_keys = _aim_single_mark_kwargs(result, layer_kwargs)
-    if _prior_layer is not None:
+    if _prior_layers:
         if result.data is not None:
             # No shipped desugar produces this combination today (the only
             # `.data`-producing desugar, `desugar_function`, never runs with a
@@ -1232,7 +1237,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
             data_source="smooth",
         )
         new._transforms = list(chart._transforms) + list(transforms)
-        new._layers = [_prior_layer, smooth_layer]
+        new._layers = _prior_layers + [smooth_layer]
         new._mark = None
         return new
     new._mark = mark

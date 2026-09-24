@@ -666,20 +666,14 @@ def _resolve_source(
 
     if isinstance(model, ComparedModelSource):
         return model
-    if compare is not None:
-        return ferrum.ModelSource.from_base_and_compare(
-            model, compare, X, y, random_state=random_state
-        )
-    if isinstance(model, dict):
-        return ferrum.ModelSource.compare(
-            model,
-            X,
-            y,
-            random_state=random_state,
-        )
-    if isinstance(model, ferrum.ModelSource):
-        return model
-    return ferrum.ModelSource(model, X, y, random_state=random_state)
+    if compare is None:
+        if isinstance(model, dict):
+            return ferrum.ModelSource.compare(model, X, y, random_state=random_state)
+        if isinstance(model, ferrum.ModelSource):
+            return model
+    return ferrum.ModelSource._from_base_and_compare(
+        model, compare, X, y, random_state=random_state
+    )
 
 
 # ---------------------------------------------------------------------------

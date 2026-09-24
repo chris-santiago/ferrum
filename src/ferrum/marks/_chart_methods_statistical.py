@@ -382,7 +382,8 @@ class StatisticalMarksMixin:
         Chart(mark='line', encoding=['x', 'y'])
         """
         from ferrum._desugar import validate_layer_kwargs
-        from ferrum.marks.base import validate_x_estimator_kwarg
+        from ferrum._core import x_estimator_accepted_values
+        from ferrum._validate import validate_optional_choice
 
         # Declared in this signature rather than left to `**kwargs` because
         # it is the mark whose layered shape most needs it, and a named
@@ -391,12 +392,10 @@ class StatisticalMarksMixin:
         # layer name refuses at the `mark_smooth(...)` call that wrote it
         # rather than at the eventual `.to_svg()`.
         validate_layer_kwargs("smooth", layer_kwargs, where="mark_smooth")
-        # x_estimator= eager gate (same sibling-timing fix as mark_ribbon's
-        # interpolate= gate, #137/#176): Smooth and lmplot already refuse a
-        # bad x_estimator at their own call; mark_smooth used to defer to
-        # .to_svg() because the transform is only actually built once
-        # .encode() is known. Shared with lmplot's own gate.
-        validate_x_estimator_kwarg("mark_smooth", kwargs.get("x_estimator"))
+        # x_estimator= is refused at the call, like lmplot's.
+        validate_optional_choice(
+            "mark_smooth", "x_estimator", kwargs.get("x_estimator"), x_estimator_accepted_values()
+        )
         if layer_kwargs is not None:
             kwargs["layer_kwargs"] = layer_kwargs
         _pm = self._mark if self._mark in _PRIMITIVE_MARKS else None
@@ -802,16 +801,14 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_ribbon().encode(x="x", y="y_lo", y2="y_hi")
         Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
         """
-        from ferrum.marks.base import validate_interpolate_kwarg
+        from ferrum._core import interpolate_accepted_values
+        from ferrum._validate import validate_optional_choice
         from ferrum.marks.composite import desugar_ribbon
 
-        # #137/#176: validated eagerly, at mark_ribbon() call time, like
-        # mark_raster()'s aggregate=/field= gate (#136) -- ribbon's
-        # interpolate= is a composite-mark constructor parameter, not
-        # forwarded through MarkBase, so it shares MarkBase's own gate
-        # function directly rather than inheriting the class or hand-copying
-        # the check.
-        validate_interpolate_kwarg("mark_ribbon", interpolate)
+        # Refused at the call, like every other interpolate= door.
+        validate_optional_choice(
+            "mark_ribbon", "interpolate", interpolate, interpolate_accepted_values()
+        )
 
         return self._set_composite_mark(
             "ribbon",
@@ -1137,26 +1134,17 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y")
         Chart(mark='image', encoding=['x', 'y'])
         """
-        from ferrum._core import transform_registry
+        from ferrum._registry import (
+            aggregate_needs_field,
+            require_aggregate_field,
+            validate_aggregate,
+        )
         from ferrum.marks.heavy_stat import desugar_raster
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
-        from ferrum.render_config import _raster_no_field_hint
 
-        # #136: validate the aggregate/field combination eagerly, at
-        # mark_raster() call time -- reading the live registry (spec §4.6,
-        # #137/#176) rather than a hand-copy of the Rust Raster transform's
-        # accepted set -- rather than deferring to desugar_raster's
-        # resolution-time check (which only fires once .encode(x=,y=) is
-        # set) or, for aggregate validity, all the way to a Rust ValueError
-        # at render time.
-        raster_entry = transform_registry("raster")
-        validate_choice("mark_raster", "aggregate", aggregate, raster_entry["methods"])
-        if aggregate in raster_entry["methods_needing_field"] and field is None:
-            raise ValueError(
-                f"mark_raster: aggregate={aggregate!r} requires field=... (the "
-                f"column to aggregate); pass field=... or use "
-                f"aggregate={_raster_no_field_hint(raster_entry)}, which need no field."
-            )
+        # The aggregate/field pair is refused here, at the call, not at render.
+        validate_aggregate("raster", "mark_raster", aggregate)
+        require_aggregate_field("raster", "mark_raster", aggregate, field)
 
         # #136 (close-remediation): when the Chart already carries data
         # (Chart(df).mark_raster(...), not a deferred-data chart), field=
@@ -1177,9 +1165,9 @@ class StatisticalMarksMixin:
         # this eager check is skipped and render time surfaces whatever
         # error applies, exactly as it did before this check existed.
         if (
-            aggregate in raster_entry["methods_needing_field"]
-            and field is not None
+            field is not None
             and self._data is not None
+            and aggregate_needs_field("raster", aggregate)
         ):
             schema = _mark_raster_field_schema(self._data)
             if schema is not None:
@@ -1272,9 +1260,13 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_hex(bin_size=0.5).encode(x="x", y="y")
         Chart(mark='polygon', encoding=['x', 'y'])
         """
+        from ferrum._registry import validate_aggregate
         from ferrum.marks.heavy_stat import desugar_hex
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
+        # The vocabulary is refused at the call; the needs-field rule waits
+        # for resolution, since `.encode(color=...)` may still supply `field`.
+        validate_aggregate("hex", "mark_hex", aggregate)
         return self._set_composite_mark(
             "hex",
             desugar_hex,

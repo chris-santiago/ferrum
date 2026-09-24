@@ -211,7 +211,7 @@ def test_value_non_str_non_number_raises_valueerror():
     channel" -- this used to be the one handler that raised `TypeError`
     instead; see `test_condition_translation.py`'s
     `_conditional_literal_type_error`-based matrix for the full family."""
-    with pytest.raises(ValueError, match="color string or a number"):
+    with pytest.raises(ValueError, match="needs a color string, got list"):
         _resolve_encoding_value(value([1, 2, 3]))
 
 

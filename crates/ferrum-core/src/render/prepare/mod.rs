@@ -39,9 +39,8 @@ pub(crate) use extent::fix_transform_extents_for_facet;
 // `pub(crate)` so `lib.rs` can register the `#[pyfunction]` — same shape as
 // `fix_transform_extents_for_facet` above: `mod legend` stays private (its
 // other items are prepare-internal), only this one Python-visible symbol is
-// re-exported through `prepare`'s own namespace (#123 close, wave 6B T8
-// cycle 2, spec-reviewer finding — `ferrum.encoding.base` no longer
-// hand-mirrors the aux-legend channel list as a Python literal).
+// re-exported through `prepare`'s own namespace (#123: Python reads the
+// aux-legend channel list instead of mirroring it).
 pub(crate) use legend::aux_legend_channels;
 
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
@@ -191,24 +190,9 @@ impl LayerPrepared {
         } else {
             encoding.inherit_from(&spec.encoding);
         }
-        // A layer's style is its own (`#119`, 2026-09-23, one uniform rule):
-        // a layered chart resolves `layer.mark_style > theme`, with no
-        // fallback to `spec.mark_style` at all — paint or otherwise. Earlier
-        // revisions of this fallback (spec §4.0/§4.4, 2026-08-28 T4
-        // amendment) read `spec.mark_style` and stripped just `fill`/
-        // `stroke`, because Python's `LayerChart` lowering used to copy
-        // layer 0's own mark kwargs up onto `spec.mark_style` as a
-        // serialization convenience — that chart-level value was hoist
-        // residue, not a genuine chart-wide default, so any kwarg-less
-        // sibling layer reading it would be repainted in the primary
-        // layer's style. Python's `Chart.to_spec` now gates that emission
-        // on `resolved._layers is None`, so a layered spec never carries a
-        // top-level `mark_style` at all — the old fallback's only feed is
-        // gone. A hand-built `ChartSpec` that sets `mark_style` on a layered
-        // spec directly is simply not read here: a kwarg-less layer
-        // resolves to theme defaults, matching the flat chart's own rule
-        // (`chart.mark_style > theme`) applied at the layer's own scope
-        // instead of the chart's.
+        // A layer's style is its own: a layered chart resolves
+        // `layer.mark_style > theme` and never reads `spec.mark_style`
+        // (`build_layers` refuses a layered spec that sets it).
         let mark_style = layer.mark_style.clone();
         Self {
             mark: layer.mark,
@@ -980,7 +964,7 @@ pub fn prepare_render_inputs(
     // Build per-layer prepared inputs (swapping x↔y / x2↔y2 for every layer
     // whose own effective coord flips — `#172`(1)).
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
-    let layers = build_layers(spec);
+    let layers = build_layers(spec)?;
 
     // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
     // ONCE here from the layers' `independent_y` flags, then hand it to every
@@ -1390,22 +1374,29 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// `PreparedInputs::coord_flipped` survives unchanged for the chart-level
 /// questions it answers (which axis the chrome describes, how a refusal names
 /// the channel the user wrote at chart level).
-fn build_layers(spec: &ChartSpec) -> Vec<LayerPrepared> {
+///
+/// A layered spec that also sets a chart-level `mark_style` is refused
+/// ([`RenderError::LayeredChartMarkStyle`]): no layer reads it.
+fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
     let raw: Vec<LayerPrepared> = match &spec.layers {
         None => vec![LayerPrepared::from_chart_only(spec)],
+        Some(layer_vec) if spec.mark_style.is_some() => {
+            return Err(RenderError::LayeredChartMarkStyle { layers: layer_vec.len() });
+        }
         Some(layer_vec) => layer_vec
             .iter()
             .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
             .collect(),
     };
-    raw.into_iter()
+    Ok(raw
+        .into_iter()
         .map(|mut lp| {
             if crate::spec::coord::flips_positional_channels(lp.coord.as_ref()) {
                 lp.flip_coords();
             }
             lp
         })
-        .collect()
+        .collect())
 }
 
 /// Build both positional [`AxisInput`]s and their tick counts (SPINE-08/12).
@@ -3653,7 +3644,7 @@ mod tests {
             ..spec.clone()
         };
 
-        let unflipped = build_layers(&spec);
+        let unflipped = build_layers(&spec).unwrap();
         assert_eq!(
             unflipped.len(),
             1,
@@ -3670,7 +3661,7 @@ mod tests {
             "control premise: the channels did not move either"
         );
 
-        let flipped = build_layers(&flipped_spec);
+        let flipped = build_layers(&flipped_spec).unwrap();
         assert_eq!(
             flipped[0].encoding.x.as_ref().unwrap().field,
             "value",
@@ -3690,7 +3681,7 @@ mod tests {
         let mut bare = flipped_spec.clone();
         bare.mark_style = None;
         assert!(
-            build_layers(&bare)[0].mark_style.is_none(),
+            build_layers(&bare).unwrap()[0].mark_style.is_none(),
             "a layer with no mark kwargs gains none from the flip"
         );
     }
@@ -4518,7 +4509,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             name: None,
             extent_x: None,
@@ -4554,7 +4545,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             name: None,
             extent_x: Some(user_x),
@@ -4586,7 +4577,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None,
@@ -4624,7 +4615,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None,
@@ -4988,7 +4979,7 @@ mod tests {
         spec.transforms = vec![TransformSpec::Raster(RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             resolution: ResolutionSpec::Named("screen".into()),
             min_count: None,
@@ -5007,7 +4998,7 @@ mod tests {
         spec.transforms = vec![TransformSpec::Raster(RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             resolution: ResolutionSpec::Fixed(n),
             min_count: None,

@@ -26,20 +26,11 @@ def _check_declared(
     """Shared validate/raise/return tail for :func:`registry_output_columns`
     and :func:`registry_secondary_columns`.
 
-    *declared* is the set of column names actually published under the
-    schema the caller is checking against (a transform's primary output, or
-    one of its secondary batches). *err_prefix* is the caller's own fully
-    resolved message lead-in (already ending in ``"does not declare "``,
-    with its own ``kind!r``/``key!r`` already interpolated) and *known_label*
-    is the noun phrase after ``"; known "`` (``"output columns"`` vs
-    ``"columns"``) -- both plain, already-resolved text, concatenated here
-    in a single pass alongside the freshly computed ``missing``/``declared``
-    lists. Deliberately not a second :meth:`str.format` pass over a template
-    string: *err_prefix* can itself contain ``kind``/``key`` values that a
-    caller controls (e.g. a transform kind or batch key containing ``{``/
-    ``}``), and re-parsing already-resolved text as a format template would
-    let such a value be misread as a field reference instead of literal
-    characters.
+    *declared* is the set of column names published under the schema being
+    checked. *err_prefix* is the caller's resolved message lead-in and
+    *known_label* the noun after ``"; known "``; both are concatenated as
+    plain text, never re-parsed as a format template, so a ``{``/``}`` in a
+    kind or key name stays literal.
 
     Returns
     -------
@@ -175,3 +166,55 @@ def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dic
         ),
         known_label="columns",
     )
+
+
+def aggregate_needs_field(kind: str, aggregate: str) -> bool:
+    """Return whether *kind*'s *aggregate* reads a ``field`` column (the Rust-published rule)."""
+    from ferrum._core import transform_registry
+
+    return aggregate in transform_registry(kind)["methods_needing_field"]
+
+
+def validate_aggregate(
+    kind: str, door: str, aggregate: object, *, param: str = "aggregate"
+) -> None:
+    """Refuse an ``aggregate=`` outside ``transform_registry(kind)["methods"]``, naming *door*.
+
+    The declaration-time vocabulary gate for every door that forwards an
+    aggregate to a registry transform (``mark_hex``, ``mark_raster``,
+    ``RenderConfig``), in :func:`ferrum._validate.validate_choice` wording.
+    """
+    from ferrum._core import transform_registry
+    from ferrum._validate import validate_choice
+
+    validate_choice(door, param, aggregate, transform_registry(kind)["methods"])
+
+
+def require_aggregate_field(
+    kind: str,
+    door: str,
+    aggregate: object,
+    field: str | None,
+    *,
+    aggregate_param: str = "aggregate",
+    field_param: str = "field",
+) -> None:
+    """Refuse an *aggregate* that reads a column when no *field* names one.
+
+    The one composer of the needs-field refusal: it names *door* and the
+    parameter spellings the caller used, and lists the aggregates of *kind*
+    that need no field. A door whose field is always known at declaration
+    (``mark_raster``, ``RenderConfig``) calls it there; ``mark_hex`` calls it
+    at resolution, because ``.encode(color=...)`` may still supply the field.
+    """
+    from ferrum._core import transform_registry
+
+    entry = transform_registry(kind)
+    needing = set(entry["methods_needing_field"])
+    if field is None and aggregate in needing:
+        no_field = "|".join(f"'{m}'" for m in entry["methods"] if m not in needing)
+        raise ValueError(
+            f"{door}: {aggregate_param}={aggregate!r} requires {field_param}=... (the "
+            f"column to aggregate); pass {field_param}=... or use "
+            f"{aggregate_param}={no_field}, which need no field."
+        )

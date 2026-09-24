@@ -216,13 +216,12 @@ class TestExprLiteralHelper:
         with pytest.raises(ValueError):
             _expr_literal(np.float64("-inf"))
 
-    def test_decimal_boundary_case_still_raises(self):
-        # decimal.Decimal looks scalar but is deliberately not registered
-        # under numbers.Real by the stdlib itself (mixing Decimal and float
-        # arithmetic is unsafe), so it must still hit the TypeError branch
-        # rather than being silently coerced through float().
-        with pytest.raises(TypeError):
-            _expr_literal(Decimal("2.5"))
+    def test_decimal_is_a_number(self):
+        # One real-number predicate (`ferrum._validate.is_real_number`) for
+        # every numeric parameter: a Decimal is a number here as it is for
+        # Inset bounds and padding. The expression grammar evaluates f64, so
+        # the float literal loses nothing the evaluation would keep.
+        assert _expr_literal(Decimal("2.5")) == "2.5"
 
     def test_datetime_boundary_case_still_raises(self):
         with pytest.raises(TypeError):

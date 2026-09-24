@@ -148,16 +148,9 @@ impl PySmooth {
                 return Err(PyValueError::new_err("Smooth: ci must be in (0, 1)"));
             }
         }
-        // Batch-D T9 round 2 (Required Fix 2): `METHODS` is the single
-        // vocabulary the registry, this pre-check, and the error message all
-        // read — see `METHODS`'s doc comment. A string not in `METHODS`
-        // refuses here, before the match below ever runs.
-        if !METHODS.contains(&method) {
-            return Err(PyValueError::new_err(format!(
-                "Smooth: unknown method '{method}'; expected {}",
-                METHODS.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(" | "),
-            )));
-        }
+        // `METHODS` is the one vocabulary the registry and this pre-check
+        // read: a string not in it refuses here, before the match below runs.
+        crate::transform::vocabulary::check_declared(METHODS, "Smooth", "method", method)?;
         // Batch-D T9 (spec §4.6): "lm"/"linear" promotes to a polynomial fit
         // when `degree >= 2` is given; `degree == 1` (or omitted) keeps the
         // plain linear fit — the no-op case `lmplot(order=1)` (and every
@@ -313,16 +306,11 @@ impl PySmooth {
         };
         let method = resolved_method;
         use crate::transform::aggregate::XEstimator;
+        use crate::transform::vocabulary::Vocabulary;
         let x_estimator_parsed = x_estimator
-            .map(|s| {
-                XEstimator::parse(s).map(XEstimator::agg_fn).ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "Smooth: unknown x_estimator '{s}'; expected {}",
-                        XEstimator::accepted_values()
-                    ))
-                })
-            })
-            .transpose()?;
+            .map(|s| XEstimator::parse_or_refuse("x_estimator", s).map(XEstimator::agg_fn))
+            .transpose()
+            .map_err(|e| PyValueError::new_err(format!("Smooth: {e}")))?;
         let output_parsed = match output {
             "fitted" => SmoothOutput::Fitted,
             "residuals" => SmoothOutput::Residuals,

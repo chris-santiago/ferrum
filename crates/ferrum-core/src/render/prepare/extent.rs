@@ -428,7 +428,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             name: None,
             extent_x: None,
@@ -448,7 +448,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: Default::default(),
             field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None,

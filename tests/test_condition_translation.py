@@ -434,16 +434,16 @@ def test_every_condition_honoring_channel_produces_a_valid_wire_channel(df):
     test that keeps the honored-kwarg table, the docstrings, and the Rust
     enum from drifting apart again.
 
-    Uses a numeric `if_not` literal, not `_cond`'s color string: a color
-    string is no longer valid on every conditional channel (#128 -- see
-    `test_conditional_literal_typed_by_channel`), but a plain number is
-    accepted on all eight, exercising the routing question this test is
-    actually about without tripping the literal-typing refusal.
+    The `if_not` literal is typed by the channel (#128 -- see
+    `test_conditional_literal_typed_by_channel`): a color string on the
+    color-wire channels, a number on the rest, so the routing question this
+    test is about is exercised without tripping the literal-typing refusal.
     """
     sel = selection_point(fields=["category"], name="sel_table")
     for name, cls in sorted(_channel_class_map().items()):
         honors = "condition" in getattr(cls, "_honored_kwargs", frozenset())
-        cond = sel.when(fm.Color("category")).otherwise(value(1.0))
+        literal = value("red") if name in ("color", "fill") else value(1.0)
+        cond = sel.when(fm.Color("category")).otherwise(literal)
         try:
             chart = (
                 fm.Chart(df)
@@ -1186,17 +1186,11 @@ def _expected_cell(channel: str, form_name: str) -> tuple[str, Any]:
     if category == "color":
         if form_name == "color_string":
             return "accept", {"kind": "color", "value": {"r": 255, "g": 0, "b": 0, "a": 255}}
-        if form_name == "number":
-            # Pre-existing, #128-unrelated fallback (unchanged): a number
-            # under the `color` channel tags "opacity", not "color" --
-            # preserved for a `.conditional(...)` branch whose channel is
-            # inferred from a DIFFERENT (Color-typed) branch than this
-            # numeric one. See
-            # `test_parameter_ref.py::TestConditionalValueRef::
-            # test_registered_param_ref_resolves_to_static_value`.
-            return "accept", {"kind": "opacity", "value": 4.0}
-        if form_name == "list":
-            return "refuse", _needs_text(form_value, channel, "a color string or a number")
+        if form_name in ("number", "list"):
+            # A literal is typed by its channel: a number on `color` is not a
+            # color (the former opacity-kind fallback compensated for
+            # `.conditional()` inferring the channel from one branch only).
+            return "refuse", _needs_text(form_value, channel, "a color string")
         if form_name in ("dash_name", "comma_string", "numeric_string"):
             return "refuse", _color_parse_refusal_text(form_value, channel)
         raise AssertionError(form_name)  # pragma: no cover
@@ -1234,15 +1228,16 @@ def _spec_for_spelling(
     under test.
     """
     sel = selection_point(name=f"sel_{param_name}")
+    filler = "blue" if channel == "color" else 1.0
     if spelling == "value":
-        cond = sel.when(value(1.0)).otherwise(value(form_value))
+        cond = sel.when(value(filler)).otherwise(value(form_value))
         params = None
     elif spelling == "when_then":
-        cond = fm.when(sel).then(1.0).otherwise(form_value)
+        cond = fm.when(sel).then(filler).otherwise(form_value)
         params = None
     elif spelling == "param_ref":
         p = fm.param(param_name, value=form_value)
-        cond = sel.when(value(1.0)).otherwise(p.ref())
+        cond = sel.when(value(filler)).otherwise(p.ref())
         params = {param_name: p}
     else:
         raise AssertionError(spelling)  # pragma: no cover
@@ -1302,7 +1297,7 @@ def test_conditional_literal_bool_refused_as_a_number_everywhere(channel):
     if channel == "stroke_dash":
         needs = _TEST_DASH_PATTERN_NEEDS
     elif channel == "color":
-        needs = "a color string or a number"
+        needs = "a color string"
     else:
         needs = "a number"
     cond, _ = _spec_for_spelling("value", channel, True, param_name=f"bool_{channel}")
@@ -1310,6 +1305,17 @@ def test_conditional_literal_bool_refused_as_a_number_everywhere(channel):
         cond.to_spec_dict()
     assert str(excinfo.value) == (
         f"fm.value(True) for channel={channel!r} needs {needs}, got bool: True"
+    )
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")], ids=repr)
+@pytest.mark.parametrize("channel", sorted(_CONDITIONAL_CHANNELS - {"color", "stroke_dash"}))
+def test_conditional_literal_non_finite_refused_on_every_numeric_channel(channel, bad):
+    cond, _ = _spec_for_spelling("value", channel, bad, param_name=f"nonfinite_{channel}")
+    with pytest.raises(ValueError) as excinfo:
+        cond.to_spec_dict()
+    assert str(excinfo.value) == (
+        f"fm.value({bad!r}) for channel={channel!r} needs a number, got float: {bad!r}"
     )
 
 

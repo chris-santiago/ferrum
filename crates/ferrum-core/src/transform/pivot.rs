@@ -61,6 +61,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    crate::transform::vocabulary::check_declared(OPS, "data_pivot", "op", &spec.op)?;
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 

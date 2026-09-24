@@ -846,20 +846,19 @@ fn scale_spec_is_reversed(enc: &crate::spec::encoding::EncodingSpec) -> bool {
 
 /// Extract an explicit color-string range from a color `EncodingSpec`.
 ///
-/// Returns `Some(Vec<String>)` for `ScaleSpec::Ordinal` with a string-array
-/// `range` (D1 path, via [`super::domain::explicit_ordinal_string_range`],
-/// shared with shape/stroke-dash's own D1 range resolution, #123) and for
-/// `ScaleSpec::Quantize`, whose `range` is typed as color strings — the one
-/// discretizing variant that can carry explicit swatches (`Quantile`/
-/// `Threshold` ranges are numeric outputs and `BinOrdinal` names a scheme
-/// instead). Returns `None` for all other scale types and when the range is
-/// absent or numeric.
+/// Returns `Some(Vec<String>)` for `ScaleSpec::Ordinal` with a non-empty,
+/// all-string `range` (D1 path, on [`super::domain::explicit_ordinal_range`])
+/// and for `ScaleSpec::Quantize`, whose `range` is typed as color strings —
+/// the one discretizing variant that can carry explicit swatches
+/// (`Quantile`/`Threshold` ranges are numeric outputs and `BinOrdinal` names
+/// a scheme instead). Returns `None` for all other scale types and when the
+/// range is absent, empty or numeric.
 fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
     use crate::spec::encoding::ScaleSpec;
-    if let Some(strings) = super::domain::explicit_ordinal_string_range(enc) {
-        return Some(strings);
-    }
     match enc.scale.as_ref()? {
+        ScaleSpec::Ordinal { .. } => crate::scale::ordinal::OrdinalRangeValue::all_strings(
+            super::domain::explicit_ordinal_range(enc)?,
+        ),
         ScaleSpec::Quantize { range, .. } => range.clone(),
         _ => None,
     }

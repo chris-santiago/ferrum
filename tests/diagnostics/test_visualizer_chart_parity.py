@@ -219,7 +219,7 @@ _MUST_HAVE_COMPARE: tuple[type[FerrumVisualizer], ...] = (
     # Joined 2026-09-13 (#212): the last classification visualizer that
     # refused compare= now accepts it with the same distinguished-base
     # semantics, routed through the same delegation to `ModelSource
-    # .from_base_and_compare` (#214) -- which is what makes the
+    # ._from_base_and_compare` (#214) -- which is what makes the
     # reserved-"base" and non-dict refusal tests below cover it too.
     CalibrationVisualizer,
 )
@@ -899,7 +899,7 @@ def test_visualizer_family_docstring_describes_the_real_surface() -> None:
 
 def test_compare_rejects_the_reserved_base_key_on_every_visualizer() -> None:
     """`compare={"base": ...}` would silently overwrite the primary `model=`
-    (GH #76). The refusal has one owner, `ModelSource.from_base_and_compare`
+    (GH #76). The refusal has one owner, `ModelSource._from_base_and_compare`
     (#214), which both `plots._helpers._resolve_source` (the figure
     functions) and `visualizers._classification._build_compare_source`
     (the visualizers) delegate to -- so this pin and the figure-function
@@ -925,7 +925,7 @@ def test_compare_rejects_the_reserved_base_key_on_every_visualizer() -> None:
 
 
 def test_compare_rejects_a_non_dict_on_every_visualizer() -> None:
-    """The sibling guard in `ModelSource.from_base_and_compare` (#214):
+    """The sibling guard in `ModelSource._from_base_and_compare` (#214):
     `compare=` must be a dict, and the refusal names the type it got.
     """
     model = load_fixture("binary_logistic")
@@ -998,3 +998,16 @@ def test_defaults_diff_targets_the_public_figure_function() -> None:
         "these visualizers' defaults are diffed against a private builder, "
         f"so a public re-default would be invisible: {sorted(set(private_fallbacks))}"
     )
+
+
+def test_compare_merge_is_private_and_owns_the_none_case() -> None:
+    """The `compare=` merge is an internal owner, not public `ModelSource` API;
+    `compare=None` is its own case, so callers make one call with no precondition."""
+    assert not hasattr(ferrum.ModelSource, "from_base_and_compare")
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource._from_base_and_compare(model, None, X, df["y"])
+    assert type(source) is ferrum.ModelSource
+    compared = ferrum.ModelSource._from_base_and_compare(model, {"rival": model}, X, df["y"])
+    assert type(compared).__name__ == "ComparedModelSource"

@@ -250,6 +250,19 @@ class TestBandAliasWarningLocation:
         assert warning.filename == __file__
         assert warning.lineno == expected_line
 
+    @pytest.mark.parametrize("cls", [Axis, AxisConfig], ids=lambda c: c.__name__)
+    def test_replace_with_an_alias_attributes_to_caller_line(self, cls) -> None:
+        """`dataclasses.replace` adds frames above the generated `__init__`;
+        the warning still names the line that called `replace`."""
+        base = cls()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            expected_line = inspect.currentframe().f_lineno + 1  # type: ignore[union-attr]
+            replace(base, min_extent=30)
+        warning = _sole_deprecation_warning(caught)
+        assert warning.filename == __file__
+        assert warning.lineno == expected_line
+
     def test_axisconfig_x_false_warning_still_attributes_to_caller_line(self) -> None:
         """Regression control: the unrelated x=/y= deprecation warning (resolved
         directly in __post_init__, not through the InitVar alias machinery) must

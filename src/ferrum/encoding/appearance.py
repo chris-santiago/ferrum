@@ -13,7 +13,6 @@ from ferrum.encoding._honored import (
     APPEARANCE_FULL,
     APPEARANCE_SCHEME,
     APPEARANCE_SORT,
-    SCALE,
 )
 from ferrum.encoding.base import ChannelBase
 
@@ -56,6 +55,7 @@ class Color(ChannelBase):
     """
 
     _channel_name = "color"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title","sort","scheme"} plus "condition",
     # added by ChannelBase.__init_subclass__ -- "color" is a real conditional
@@ -103,6 +103,7 @@ class Size(ChannelBase):
     """
 
     _channel_name = "size"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- "size" is a real conditional channel.
@@ -170,6 +171,7 @@ class Shape(ChannelBase):
     """
 
     _channel_name = "shape"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title","sort"} — no "condition": a shape
     # conditional serializes and then applies as a no-op (no
@@ -198,35 +200,21 @@ class Shape(ChannelBase):
         palette glyphs the same way it always has when no explicit range is
         given.
 
-        Reuses :func:`~ferrum._validate.validate_choice` -- the same
-        membership check ``mark_point(shape=...)`` itself runs -- for the
-        actual "is this a known shape name" question (quality-review
-        remediation, cycle 2), rather than a hand-rolled ``in`` loop. A
-        non-``str`` entry (e.g. a nested list) is refused by name BEFORE
-        that call: ``_VALID_POINT_SHAPES`` is a ``frozenset``, and Python's
-        ``in`` raises ``TypeError`` for an unhashable left operand, which
-        would otherwise leak a raw ``TypeError`` instead of the documented
-        ``ValueError``.
+        Each entry goes through :func:`~ferrum._validate.validate_choice`, the
+        same membership check ``mark_point(shape=...)`` runs, against a sorted
+        tuple so a non-string entry is refused with the same wording instead
+        of an unhashable-operand ``TypeError``.
         """
         super()._validate()
-        scale = self._kwargs.get("scale")
-        if scale is None:
-            return
-        from ferrum._validate import validate_choice
-        from ferrum.encoding._scale import _scale_to_dict
-        from ferrum.marks.base import _VALID_POINT_SHAPES
-
-        spec = _scale_to_dict(scale)
-        range_ = spec.get("range") if isinstance(spec, dict) else None
+        range_ = self._explicit_scale_range()
         if not isinstance(range_, (list, tuple)):
             return
+        from ferrum._validate import validate_choice
+        from ferrum.marks.base import _VALID_POINT_SHAPES
+
+        shapes = tuple(sorted(_VALID_POINT_SHAPES))
         for entry in range_:
-            if not isinstance(entry, str):
-                raise ValueError(
-                    f"Shape(scale=...): range entry must be one of "
-                    f"{sorted(_VALID_POINT_SHAPES)}; got {entry!r}"
-                )
-            validate_choice("Shape(scale=...)", "range entry", entry, _VALID_POINT_SHAPES)
+            validate_choice("Shape(scale=...)", "range entry", entry, shapes)
 
 
 class Opacity(ChannelBase):
@@ -251,11 +239,9 @@ class Opacity(ChannelBase):
     to switch opacity based on selection state -- see ``Chart.encode()``'s
     condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
-    (2026-09-23, #123): ``Opacity`` draws no legend of its own, so there is
-    nothing for either to customize -- both raise ``ValueError`` at
-    construction. ``legend=None``/``legend=False`` stay silent (the
-    harmless "I want no legend, and there is none" idiom keeps working).
+    ``Opacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
+    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
+    ``ValueError`` at construction, since there is nothing for them to label.
 
     Examples
     --------
@@ -265,15 +251,9 @@ class Opacity(ChannelBase):
 
     _channel_name = "opacity"
 
-    # {"type","legend","scale"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- "opacity" is a real conditional
-    # channel. No "title" (2026-09-23, #123): Opacity draws no legend, so a
-    # title has nothing to label -- APPEARANCE_FULL (which carries "title")
-    # is deliberately not used here; see _honored.py's SCALE/LEGEND_TITLE
-    # atoms and their module-docstring note.
-    _honored_kwargs = APPEARANCE_BASE | SCALE
+    # Plus "condition", derived from the conditional vocabulary.
+    _honored_kwargs = APPEARANCE_FULL
     _legend_surface = "none"
-    _title_refused = True
 
 
 # Deferred to Phase 9:
@@ -318,6 +298,7 @@ class Fill(ChannelBase):
     """
 
     _channel_name = "fill"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title","scheme"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- "fill" aliases to "color" and gains
@@ -372,6 +353,7 @@ class Stroke(ChannelBase):
     """
 
     _channel_name = "stroke"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title","scheme"} — no "condition": a stroke
     # conditional would repaint the fill (no EncodingValue::StrokeColor), so
@@ -399,18 +381,14 @@ class FillOpacity(ChannelBase):
 
     Notes
     -----
-    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``scale`` (explicit scale override) is
-    also honored.  ``condition`` is honored: pass a
-    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
-    ``fm.when(sel).then(...).otherwise(...)``) to switch fill opacity based on
-    selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch fill opacity based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
-    (2026-09-23, #123): ``FillOpacity`` draws no legend of its own, so there
-    is nothing for either to customize -- both raise ``ValueError`` at
-    construction. ``legend=None``/``legend=False`` stay silent.
+    ``FillOpacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
+    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
+    ``ValueError`` at construction, since there is nothing for them to label.
 
     Examples
     --------
@@ -420,13 +398,9 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
 
-    # {"type","legend","scale"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- fill_opacity is a conditional channel
-    # on the wire and its condition= works end to end. No "title"
-    # (2026-09-23, #123): see Opacity's comment above for the reason.
-    _honored_kwargs = APPEARANCE_BASE | SCALE
+    # Plus "condition", derived from the conditional vocabulary.
+    _honored_kwargs = APPEARANCE_FULL
     _legend_surface = "none"
-    _title_refused = True
 
 
 class StrokeOpacity(ChannelBase):
@@ -446,18 +420,14 @@ class StrokeOpacity(ChannelBase):
 
     Notes
     -----
-    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``scale`` (explicit scale override) is
-    also honored.  ``condition`` is honored: pass a
-    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
-    ``fm.when(sel).then(...).otherwise(...)``) to switch stroke opacity based on
-    selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch stroke opacity based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
-    ``title`` and a ``legend=`` dict/``Legend(...)`` are **not** honored
-    (2026-09-23, #123): ``StrokeOpacity`` draws no legend of its own, so
-    there is nothing for either to customize -- both raise ``ValueError`` at
-    construction. ``legend=None``/``legend=False`` stay silent.
+    ``StrokeOpacity`` draws no legend of its own. ``legend=None``/``legend=False`` are
+    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
+    ``ValueError`` at construction, since there is nothing for them to label.
 
     Examples
     --------
@@ -467,13 +437,9 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    # {"type","legend","scale"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- stroke_opacity is a conditional channel
-    # on the wire and its condition= works end to end. No "title"
-    # (2026-09-23, #123): see Opacity's comment above for the reason.
-    _honored_kwargs = APPEARANCE_BASE | SCALE
+    # Plus "condition", derived from the conditional vocabulary.
+    _honored_kwargs = APPEARANCE_FULL
     _legend_surface = "none"
-    _title_refused = True
 
 
 class StrokeWidth(ChannelBase):
@@ -490,17 +456,14 @@ class StrokeWidth(ChannelBase):
 
     Notes
     -----
-    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``condition`` is honored: pass a
-    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
-    ``fm.when(sel).then(...).otherwise(...)``) to switch stroke width based on
-    selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch stroke width based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
-    A ``legend=`` dict/``Legend(...)`` is **not** honored (2026-09-23,
-    #123): ``StrokeWidth`` draws no legend of its own, so there is nothing
-    for it to customize -- it raises ``ValueError`` at construction.
-    ``legend=None``/``legend=False`` stay silent.
+    ``StrokeWidth`` draws no legend of its own. ``legend=None``/``legend=False`` are
+    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
+    ``ValueError`` at construction, since there is nothing for them to label.
 
     Examples
     --------
@@ -510,9 +473,7 @@ class StrokeWidth(ChannelBase):
 
     _channel_name = "stroke_width"
 
-    # {"type","legend"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- stroke_width is a conditional channel
-    # on the wire and its condition= works end to end.
+    # Plus "condition", derived from the conditional vocabulary.
     _honored_kwargs = APPEARANCE_BASE
     _legend_surface = "none"
 
@@ -566,6 +527,7 @@ class StrokeDash(ChannelBase):
     """
 
     _channel_name = "stroke_dash"
+    _legend_surface = "own"
 
     # {"type","legend","scale","title","sort"} plus "condition", added by
     # ChannelBase.__init_subclass__ -- stroke_dash is a real conditional
@@ -590,13 +552,7 @@ class StrokeDash(ChannelBase):
         scales pass through unchanged (2026-09-23, #123, user ruling Q1b).
         """
         super()._validate()
-        scale = self._kwargs.get("scale")
-        if scale is None:
-            return
-        from ferrum.encoding._scale import _scale_to_dict
-
-        spec = _scale_to_dict(scale)
-        range_ = spec.get("range") if isinstance(spec, dict) else None
+        range_ = self._explicit_scale_range()
         if range_ is not None:
             raise ValueError(
                 f"StrokeDash(scale=...): range={range_!r} is not supported -- "
@@ -622,17 +578,14 @@ class Angle(ChannelBase):
 
     Notes
     -----
-    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.  ``condition`` is honored: pass a
-    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
-    ``fm.when(sel).then(...).otherwise(...)``) to switch rotation based on
-    selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch rotation based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
-    A ``legend=`` dict/``Legend(...)`` is **not** honored (2026-09-23,
-    #123): ``Angle`` draws no legend of its own, so there is nothing for it
-    to customize -- it raises ``ValueError`` at construction.
-    ``legend=None``/``legend=False`` stay silent.
+    ``Angle`` draws no legend of its own. ``legend=None``/``legend=False`` are
+    accepted silently; ``title=`` and a legend dict/``Legend(...)`` raise
+    ``ValueError`` at construction, since there is nothing for them to label.
 
     Examples
     --------
@@ -642,8 +595,6 @@ class Angle(ChannelBase):
 
     _channel_name = "angle"
 
-    # {"type","legend"} plus "condition", added by
-    # ChannelBase.__init_subclass__ -- angle is a conditional channel on the
-    # wire and its condition= works end to end.
+    # Plus "condition", derived from the conditional vocabulary.
     _honored_kwargs = APPEARANCE_BASE
     _legend_surface = "none"

@@ -28,11 +28,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::HexAggregate;
+use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
-
-fn default_aggregate() -> String {
-    "count".into()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -41,11 +38,10 @@ pub(crate) struct HexSpec {
     pub y: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bin_size: Option<f64>,
-    #[serde(default = "default_aggregate")]
-    /// One of [`HexAggregate::all`]'s spellings, which both enforcement
-    /// sites parse. Kept as the caller's spelling so the wire and `repr`
-    /// round-trip what was passed.
-    pub aggregate: String,
+    /// Typed at the door: an alias (`std`, `var`) is stored, written and
+    /// `repr`'d as its canonical spelling, as `AggregateOp.fn_` is.
+    #[serde(default)]
+    pub aggregate: HexAggregate,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -114,21 +110,12 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .index_of(&spec.y)
         .map_err(|_| PyValueError::new_err(format!("stat_hex: column '{}' not found", spec.y)))?;
 
-    // Validate aggregate.
-    let Some(agg) = HexAggregate::parse(&spec.aggregate) else {
-        return Err(PyValueError::new_err(format!(
-            "stat_hex: unknown aggregate '{}'; expected {}",
-            spec.aggregate,
-            HexAggregate::accepted_values(),
-        )));
-    };
+    // The aggregate is typed; only its field requirement is checked here,
+    // for a wire-built spec that never passed the constructor.
+    let agg = spec.aggregate;
     let needs_field = agg.needs_field();
-    if needs_field && spec.field.is_none() {
-        return Err(PyValueError::new_err(format!(
-            "stat_hex: aggregate='{}' requires `field`",
-            spec.aggregate
-        )));
-    }
+    require_field(agg, agg.as_str(), spec.field.as_deref())
+        .map_err(|e| PyValueError::new_err(format!("stat_hex: {e}")))?;
 
     // Validate + coerce field column if present (owned Float64Array).
     let field_arr: Option<Float64Array> = match &spec.field {
@@ -438,17 +425,9 @@ impl PyHex {
                 "Hex: x and y fields must be non-empty",
             ));
         }
-        let Some(agg) = HexAggregate::parse(aggregate) else {
-            return Err(PyValueError::new_err(format!(
-                "Hex: unknown aggregate '{aggregate}'; expected {}",
-                HexAggregate::accepted_values(),
-            )));
-        };
-        if agg.needs_field() && field.is_none() {
-            return Err(PyValueError::new_err(format!(
-                "Hex: aggregate='{aggregate}' requires field"
-            )));
-        }
+        let hex_err = |e: String| PyValueError::new_err(format!("Hex: {e}"));
+        let agg = HexAggregate::parse_or_refuse("aggregate", aggregate).map_err(hex_err)?;
+        require_field(agg, aggregate, field.as_deref()).map_err(hex_err)?;
         if let Some(bs) = bin_size {
             if !bs.is_finite() || bs <= 0.0 {
                 return Err(PyValueError::new_err(
@@ -460,7 +439,7 @@ impl PyHex {
             x: x.to_string(),
             y: y.to_string(),
             bin_size,
-            aggregate: aggregate.to_string(),
+            aggregate: agg,
             field,
             name,
             extent_x: None,
@@ -472,7 +451,7 @@ impl PyHex {
         match &self.0 {
             TransformSpec::Hex(s) => format!(
                 "Hex(x='{}', y='{}', bin_size={:?}, aggregate='{}', field={:?}, name={:?})",
-                s.x, s.y, s.bin_size, s.aggregate, s.field, s.name
+                s.x, s.y, s.bin_size, s.aggregate.as_str(), s.field, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -548,7 +527,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -591,7 +570,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "mean".into(),
+            aggregate: HexAggregate::Mean,
             field: None,
             name: None,
             extent_x: None,
@@ -604,7 +583,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "sum".into(),
+            aggregate: HexAggregate::Sum,
             field: None,
             name: None,
             extent_x: None,
@@ -617,7 +596,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "mean".into(),
+            aggregate: HexAggregate::Mean,
             field: Some("v".into()),
             name: None,
             extent_x: None,
@@ -640,7 +619,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -682,7 +661,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -717,7 +696,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "mean".into(),
+            aggregate: HexAggregate::Mean,
             field: Some("v".into()),
             name: None,
             extent_x: None,
@@ -749,7 +728,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: Some(1.0),
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -773,7 +752,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None, // auto: (49 - 0) / 30 ≈ 1.633
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -824,7 +803,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -849,7 +828,7 @@ mod tests {
             x: "x".into(),
             y: "y".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: Some((0.0, 10.0)),
@@ -877,13 +856,13 @@ mod tests {
 
         let spec_unpinned_a = HexSpec {
             x: "x".into(), y: "y".into(),
-            bin_size: None, aggregate: "count".into(),
+            bin_size: None, aggregate: HexAggregate::Count,
             field: None, name: None,
             extent_x: None, extent_y: None,
         };
         let spec_unpinned_b = HexSpec {
             x: "x".into(), y: "y".into(),
-            bin_size: None, aggregate: "count".into(),
+            bin_size: None, aggregate: HexAggregate::Count,
             field: None, name: None,
             extent_x: None, extent_y: None,
         };
@@ -913,7 +892,7 @@ mod tests {
         // AFTER: pin both to the global [0,10] range.
         let spec_pinned = HexSpec {
             x: "x".into(), y: "y".into(),
-            bin_size: None, aggregate: "count".into(),
+            bin_size: None, aggregate: HexAggregate::Count,
             field: None, name: None,
             extent_x: Some((0.0, 10.0)),
             extent_y: Some((0.0, 10.0)),
@@ -970,7 +949,7 @@ mod tests {
             x: "xc".into(),
             y: "yc".into(),
             bin_size: None,
-            aggregate: "count".into(),
+            aggregate: HexAggregate::Count,
             field: None,
             name: None,
             extent_x: None,
@@ -981,48 +960,40 @@ mod tests {
         assert!(!json.contains("extent_y"), "extent_y must not appear when None: {json}");
     }
 
-    /// wave 6B T9 (Q4): hex accepts `stdev`/`variance` canonically and
-    /// `std`/`var` as aliases; the alias aggregates byte-identically to its
-    /// canonical spelling at `apply`, and both doors refuse an aggregate
-    /// outside the declared `AggFn` subset with the `a|b|c` rendering.
+    /// User ruling Q4: hex accepts `stdev`/`variance` canonically and
+    /// `std`/`var` as aliases. The door stores an alias as its canonical
+    /// variant (so it aggregates identically and writes the canonical wire
+    /// spelling); the constructor and the wire refuse an aggregate outside
+    /// the declared `AggFn` subset with the `a|b|c` rendering; the field
+    /// requirement has one text, prefixed by the door that checks it.
     #[test]
-    fn hex_alias_matches_canonical_and_both_doors_refuse_with_one_rendering() {
+    fn hex_alias_matches_canonical_and_every_door_refuses_with_one_rendering() {
         pyo3::Python::initialize();
-        let b = make_xyf_batch(
-            vec![0.0, 0.1, 0.2, 3.0, 3.1, 3.2],
-            vec![0.0, 0.1, 0.2, 3.0, 3.1, 3.2],
-            vec![1.0, 5.0, 2.0, 9.0, 4.0, 7.0],
-        );
-        let spec = |aggregate: &str| HexSpec {
-            x: "x".into(),
-            y: "y".into(),
-            bin_size: Some(1.0),
-            aggregate: aggregate.into(),
-            field: Some("v".into()),
-            name: None,
-            extent_x: None,
-            extent_y: None,
+        let new = |aggregate: &str, field: Option<&str>| {
+            PyHex::new("x", "y", None, aggregate, field.map(str::to_string), None)
         };
         for (alias, canonical) in [("std", "stdev"), ("var", "variance")] {
-            let a = apply(&spec(alias), &b).unwrap();
-            let c = apply(&spec(canonical), &b).unwrap();
-            assert_eq!(a, c, "Hex(aggregate='{alias}') must equal Hex(aggregate='{canonical}')");
-            for door in [alias, canonical] {
-                assert!(PyHex::new("x", "y", None, door, Some("v".into()), None).is_ok());
-            }
+            let a = new(alias, Some("v")).unwrap();
+            assert_eq!(a, new(canonical, Some("v")).unwrap(), "Hex(aggregate='{alias}')");
+            let TransformSpec::Hex(spec) = &a.0 else { unreachable!() };
+            let json = serde_json::to_string(spec).unwrap();
+            assert!(json.contains(&format!(r#""aggregate":"{canonical}""#)), "{json}");
         }
-        assert_ne!(apply(&spec("std"), &b).unwrap(), apply(&spec("var"), &b).unwrap());
         let expected = HexAggregate::accepted_values();
+        let wire = serde_json::from_str::<HexSpec>(r#"{"x":"x","y":"y","aggregate":"q1"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(wire.starts_with(&format!("unknown aggregate 'q1'; expected {expected}")), "{wire}");
+        let fieldless: HexSpec =
+            serde_json::from_str(r#"{"x":"x","y":"y","aggregate":"var"}"#).unwrap();
+        let b = make_xyf_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 2.0]);
         pyo3::Python::attach(|py| {
-            let e = PyHex::new("x", "y", None, "q1", Some("v".into()), None).unwrap_err();
+            let e = new("q1", Some("v")).unwrap_err();
             assert_eq!(e.value(py).to_string(), format!("Hex: unknown aggregate 'q1'; expected {expected}"));
-            let e = apply(&spec("q1"), &b).unwrap_err();
-            assert_eq!(
-                e.value(py).to_string(),
-                format!("stat_hex: unknown aggregate 'q1'; expected {expected}")
-            );
-            let e = PyHex::new("x", "y", None, "var", None, None).unwrap_err();
+            let e = new("var", None).unwrap_err();
             assert_eq!(e.value(py).to_string(), "Hex: aggregate='var' requires field");
+            let e = apply(&fieldless, &b).unwrap_err();
+            assert_eq!(e.value(py).to_string(), "stat_hex: aggregate='variance' requires field");
         });
     }
 }

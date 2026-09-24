@@ -9,8 +9,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ferrum._core import interpolate_accepted_values, x_estimator_accepted_values
-from ferrum._validate import is_none_color_sentinel, validate_choice, validate_color_value
+from ferrum._core import interpolate_accepted_values
+from ferrum._validate import (
+    is_none_color_sentinel,
+    is_real_number,
+    validate_choice,
+    validate_color_value,
+    validate_optional_choice,
+)
 
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
@@ -46,110 +52,64 @@ def _stroke_dash_error(context: str, value: Any) -> str:
     )
 
 
-def _check_dash_lengths(lengths: Any, *, context: str, original: Any) -> None:
-    """Validate every dash length in *lengths* (#128 cycle-3): each must be
-    a real number (not ``bool``, not a numeric-looking string), finite, and
-    non-negative. Raises ``ValueError`` naming *context* and *original* --
-    the value the caller actually passed, not the intermediate parsed form
-    -- via :func:`_stroke_dash_error`, so a malformed length reads the same
-    refusal as any other malformed ``stroke_dash=`` value.
+def _dash_lengths(lengths: Any, *, context: str, original: Any) -> list[float]:
+    """Return *lengths* as floats, refusing any that is not a finite, non-negative real number.
+
+    A length must satisfy :func:`ferrum._validate.is_real_number` (so never
+    ``bool`` or a numeric-looking string; numpy scalars are fine). The refusal
+    names *context* and *original*, the value the caller passed, via
+    :func:`_stroke_dash_error`.
     """
+    out = []
     for item in lengths:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
+        if not is_real_number(item):
             raise ValueError(_stroke_dash_error(context, original))
         fv = float(item)
         if not math.isfinite(fv) or fv < 0:
             raise ValueError(_stroke_dash_error(context, original))
+        out.append(fv)
+    return out
 
 
-def _normalize_stroke_dash(value: Any, *, context: str) -> Any:
-    """Normalize a user-supplied ``stroke_dash=`` value to its wire form (#124).
+def _normalize_stroke_dash(value: Any, *, context: str) -> list[float] | None:
+    """Normalize a user-supplied ``stroke_dash=`` value to its wire form, a list of floats.
 
-    Shared by :class:`MarkBase` (the mark-kwarg path, including the
-    ``linetype=``/``line_type=`` aliases), ``annotate_hline``/
-    ``annotate_vline`` (``ferrum/annotations.py``, which route
-    ``stroke_dash=`` straight into the mark and the ``AnnotationLine``
-    primitive with no ``linetype=`` alias of their own), ``fm.SelectionMark``
-    (``ferrum/selection.py``, whose ``stroke_dash=`` used to pass through
-    completely unvalidated), and the conditional-literal ``stroke_dash``
-    handler (``ferrum/selection.py``'s ``_literal_stroke_dash``, #128). One
-    normalization means the four surfaces cannot each accept a different
-    form set — before this helper, named linetypes ("dashed", ...) worked
-    only via the ``linetype=``/``line_type=`` aliases on ``MarkBase``, were
-    unreachable by any spelling on the annotation constructors, and
-    "wiggly" silently constructed a ``SelectionMark``. This reverses
-    `f8148bdc` (batch A T9, 2026-09-02), which deliberately restricted the
-    canonical ``stroke_dash=`` kwarg to the comma-split form; `#124`, filed
-    the same day by that batch's final design review, ruled the restriction
-    should not have shipped — canonical ``stroke_dash=`` is the superset,
-    not a subset of ``linetype=``.
+    The one dash vocabulary for every surface that accepts ``stroke_dash=``:
+    :class:`MarkBase` (including the ``linetype=``/``line_type=`` aliases),
+    ``annotate_hline``/``annotate_vline``, ``fm.SelectionMark``, and the
+    ``stroke_dash`` conditional literal (``selection._literal_stroke_dash``).
 
-    Accepts, in order:
+    Accepts a closed set of forms:
 
-    - ``None`` — passes through unchanged (solid / mark default).
-    - a named linetype string: one of ``sorted(_LINETYPE_MAP)`` (``"solid"``,
-      ``"dashed"``, ``"dotted"``, ``"dashdot"``, ``"longdash"``).
-    - a comma-separated numeric string, spaces around each number tolerated
-      (e.g. ``"4,2"``, ``"4, 2"``); ``""`` is the empty-dash spelling and
-      normalizes to ``[]`` (solid), matching an already-empty list/tuple.
-    - a bare number, or a list/tuple of numbers — passed through unchanged
-      (same container type, same element types: ``[4, 2]`` stays a list of
-      ints, ``(4.0, 2.0)`` stays a tuple of floats). Named-linetype and
-      comma-split resolution are string-only features, so these forms were
-      never re-shaped by this helper.
-    - ``bool`` (bare, or as a list/tuple element) is refused (#128
-      cycle-3): it is an ``int`` subclass, but a caller writing
-      ``stroke_dash=True`` never meant a length of ``1``.
+    - ``None``: unset (solid / mark default); returned as ``None``.
+    - a named linetype, one of ``sorted(_LINETYPE_MAP)``.
+    - a comma-separated numeric string, spaces tolerated (``"4,2"``,
+      ``"4, 2"``); ``""`` is the empty (solid) dash.
+    - a real number (one dash length, ``[value]``), or a list/tuple of them.
 
-    Every dash length -- however it was spelled (a comma-string element, a
-    bare number, or a list/tuple element) -- must be finite and
-    non-negative (#128 cycle-3, closing the gap where only the conditional
-    literal's list/tuple form validated lengths: ``"-4,2"``, ``"nan,2"``,
-    a bare ``-3`` or ``nan``, and ``[-4, 2]`` all now refuse identically on
-    every surface this helper serves).
-
-    Anything that is a ``str`` but neither a recognized linetype name nor a
-    valid comma-split numeric string, or that has a negative/non-finite/
-    non-numeric length by any spelling, raises ``ValueError`` naming
-    *context* (the public entry + kwarg the caller invoked) and the
-    offending value — junk refuses on every surface, unchanged from before
-    this helper.
-
-    Parameters
-    ----------
-    value:
-        The raw ``stroke_dash=`` value as the caller received it.
-    context:
-        Pre-composed ``"<entry>: <kwarg>"`` label, without the value — this
-        function appends ``={value!r}`` itself, matching
-        :func:`ferrum._validate.validate_color_value`'s ``label`` convention.
-
-    Raises
-    ------
-    ValueError
-        If *value* is a ``str`` that is neither a recognized linetype name
-        nor a valid comma-separated numeric string, or if any resolved
-        length is ``bool``, non-numeric, negative, or non-finite.
+    Every length must be a finite, non-negative real number (see
+    :func:`_dash_lengths`). Anything else, including a ``bool``, a dict, or an
+    array, raises ``ValueError`` naming *context* (the public entry and kwarg
+    the caller invoked, without the value; this function appends
+    ``={value!r}``) and the value.
     """
+    if value is None:
+        return None
     if isinstance(value, str):
         if value in _LINETYPE_MAP:
-            dash = list(_LINETYPE_MAP[value])
+            lengths: Any = _LINETYPE_MAP[value]
         else:
             try:
-                dash = [float(x) for x in value.split(",") if x.strip()]
+                lengths = [float(x) for x in value.split(",") if x.strip()]
             except ValueError as exc:
                 raise ValueError(_stroke_dash_error(context, value)) from exc
-        _check_dash_lengths(dash, context=context, original=value)
-        return dash
-    if isinstance(value, bool):
+    elif is_real_number(value):
+        lengths = [value]
+    elif isinstance(value, (list, tuple)):
+        lengths = value
+    else:
         raise ValueError(_stroke_dash_error(context, value))
-    if isinstance(value, (int, float)):
-        _check_dash_lengths([value], context=context, original=value)
-        return value
-    if isinstance(value, (list, tuple)):
-        _check_dash_lengths(value, context=context, original=value)
-        return value
-    return value
+    return _dash_lengths(lengths, context=context, original=value)
 
 
 def _is_paint_sentinel(value: str) -> bool:
@@ -202,70 +162,6 @@ _VALID_POINT_SHAPES: frozenset[str] = frozenset(
         "hline",
     ]
 )
-
-
-def validate_interpolate_kwarg(door: str, value: Any) -> None:
-    """Refuse an ``interpolate=`` value at declaration if it is set and unknown.
-
-    One gate for every door that accepts ``interpolate=`` (spec §4.6,
-    `#137`/`#176`): :class:`MarkBase` (``mark_line``/``mark_area``, via
-    ``_MARK_KWARG_HONORED``) and ``mark_ribbon``
-    (``marks/_chart_methods_statistical.py``), which is a composite-mark
-    constructor parameter never routed through :class:`MarkBase`. Sharing
-    this one function is what keeps the two call sites from drifting: there
-    is exactly one place the ``None``-skip or the vocabulary lookup could
-    diverge, and every door imports it rather than copying it.
-
-    ``None`` means "not set" on every door and always passes -- it is never
-    a member of :func:`ferrum._core.interpolate_accepted_values`'s vocabulary,
-    so this is a genuine skip, not a hand-added exception to the accepted
-    set. No ``isinstance(str)`` guard: a non-string value
-    (``mark_line(interpolate=5)``) must also refuse here by name (REFUSE
-    MALFORMED), not pass through to a Rust serde type-mismatch message that
-    never names the door the caller called.
-
-    Parameters
-    ----------
-    door : str
-        The public entry the caller invoked (``"mark_line"``, ``"mark_ribbon"``, ...).
-    value : Any
-        The ``interpolate=`` value as received, or ``None`` if unset.
-    """
-    if value is None:
-        return
-    validate_choice(door, "interpolate", value, interpolate_accepted_values())
-
-
-def validate_x_estimator_kwarg(door: str, value: Any) -> None:
-    """Refuse a ``Smooth``-routed ``x_estimator=`` value at declaration.
-
-    One gate for the two Python doors that accept ``x_estimator=``:
-    ``mark_smooth`` (``marks/_chart_methods_statistical.py``) and ``lmplot``
-    (``plots/regression.py``), both of which forward the value into a
-    ``Smooth`` transform built later. ``fm.Smooth`` itself is the raw PyO3
-    pyclass with no Python wrapper -- its own Rust constructor is the third
-    door's gate, and it cannot be edited from here, so this function does
-    not run for it.
-
-    ``None`` means "not set" and always passes, matching
-    :func:`validate_interpolate_kwarg`. Every other value, string or not,
-    refuses through :func:`ferrum._validate.validate_choice` naming *door*
-    (REFUSE MALFORMED): the wave constraint that every new refusal names the
-    public entry the caller invoked outranks matching ``Smooth``'s own
-    wording, so ``mark_smooth``/``lmplot`` render their own text rather than
-    a copy of ``Smooth``'s -- the same shape :func:`validate_interpolate_kwarg`
-    already uses, letting the raw Rust door keep its own text undisturbed.
-
-    Parameters
-    ----------
-    door : str
-        The public entry the caller invoked (``"mark_smooth"``, ``"lmplot"``).
-    value : Any
-        The ``x_estimator=`` value as received, or ``None`` if unset.
-    """
-    if value is None:
-        return
-    validate_choice(door, "x_estimator", value, x_estimator_accepted_values())
 
 
 # Core style fields honored by every mark (Phase 8a: "covers all kwargs
@@ -506,10 +402,13 @@ class MarkBase:
         shape_val = resolved.get("shape")
         if shape_val is not None and isinstance(shape_val, str):
             validate_choice(f"mark_{mark_name}", "shape", shape_val, _VALID_POINT_SHAPES)
-        # Validate interpolate= at declaration (spec §4.6, #137/#176). Shared
-        # with mark_ribbon's own gate (marks/_chart_methods_statistical.py),
-        # which is not routed through MarkBase -- see validate_interpolate_kwarg.
-        validate_interpolate_kwarg(f"mark_{mark_name}", resolved.get("interpolate"))
+        # interpolate= is refused at declaration, like every door that takes it.
+        validate_optional_choice(
+            f"mark_{mark_name}",
+            "interpolate",
+            resolved.get("interpolate"),
+            interpolate_accepted_values(),
+        )
         # Validate literal fill/stroke color strings at construction time via
         # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
         # colors fail immediately rather than silently at render time. The

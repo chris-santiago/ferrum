@@ -33,17 +33,16 @@ from ferrum import (
     Smooth,
 )
 from ferrum._coerce import to_polars
-from ferrum._core import transform_registry
+from ferrum._core import transform_registry, x_estimator_accepted_values
 from ferrum._desugar import _propagate_layer_scale
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
-from ferrum._validate import validate_choice
+from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
 from ferrum.encoding._aliases import resolve_color_alias
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._fit_layers import build_fit_layers
-from ferrum.marks.base import validate_x_estimator_kwarg
 from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
     _color_field_for,
@@ -1059,11 +1058,9 @@ def lmplot(
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
     validate_choice("lmplot", "method", method, _VALID_METHODS)
-    # x_estimator= eager gate, shared with mark_smooth's own (#137/#176):
-    # names `lmplot` for any unrecognized value, string or not, instead of
-    # letting a bad string reach `Smooth`'s own Rust text (which does not
-    # name lmplot) or a non-string reach a raw PyO3 TypeError.
-    validate_x_estimator_kwarg("lmplot", x_estimator)
+    # x_estimator= is refused here naming lmplot, not by Smooth's own Rust
+    # text or a raw PyO3 TypeError.
+    validate_optional_choice("lmplot", "x_estimator", x_estimator, x_estimator_accepted_values())
 
     # x_bins/x_estimator: `Logistic`/`Glm`/`Robust` expose no binning
     # parameters at all (`transform_registry` lists none for any of the

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import InitVar, dataclass, fields
 from typing import Any
 
-from ferrum._configure_mixin import _MISSING, _resolve_band_alias
+from ferrum._configure_mixin import _MISSING, _post_init_warning_stacklevel, _resolve_band_alias
 from ferrum._title_sentinel import _UNSET, TitleParam, is_unspecified, serialize_title
 from ferrum._validate import (
     validate_choice,
@@ -318,9 +318,7 @@ class AxisConfig:
     def __post_init__(self, min_extent: object, max_extent: object) -> None:
         # Resolve deprecated aliases (min_extent → min_band, max_extent → max_band)
         # through the shared canonical helper so all three surfaces stay in sync.
-        # stacklevel=4 accounts for the frame chain from warnings.warn() (inside
-        # _resolve_band_alias) to the caller: _resolve_band_alias <- this
-        # method (__post_init__) <- the generated __init__ <- the caller's line.
+        stacklevel = _post_init_warning_stacklevel()
         object.__setattr__(
             self,
             "min_band",
@@ -330,7 +328,7 @@ class AxisConfig:
                 canonical_name="min_band",
                 alias_name="min_extent",
                 owner="AxisConfig",
-                stacklevel=4,
+                stacklevel=stacklevel,
             ),
         )
         object.__setattr__(
@@ -342,15 +340,12 @@ class AxisConfig:
                 canonical_name="max_band",
                 alias_name="max_extent",
                 owner="AxisConfig",
-                stacklevel=4,
+                stacklevel=stacklevel,
             ),
         )
 
-        # _warn_axis_xy_deprecated is called one frame deeper than before
-        # (this method <- the generated __init__ <- the caller), so its
-        # stacklevel is bumped from 2 to 3 to keep attributing the warning
-        # to the caller's line, not this method's.
-        _warn_axis_xy_deprecated(x=self.x, y=self.y, stacklevel=3)
+        # _warn_axis_xy_deprecated adds its own frame to the stacklevel it is given.
+        _warn_axis_xy_deprecated(x=self.x, y=self.y, stacklevel=stacklevel - 1)
         if self.label_format is not None and self.label_format_raw is not None:
             raise ValueError(
                 "AxisConfig: 'label_format' and 'label_format_raw' are mutually exclusive; "
@@ -547,8 +542,8 @@ class TitleConfig:
         return _to_dict_omit_none(self)
 
 
-def _validate_grid_style(owner: str, width: Any, opacity: Any) -> None:
-    """Validate the numeric grid-style values shared by both grid classes.
+def _normalize_grid_style(owner: str, width: Any, opacity: Any) -> dict[str, float | None]:
+    """Validate the numeric grid-style values shared by both grid classes and return them as floats.
 
     :class:`GridConfig` (both-axes shorthand) and :class:`GridAxisConfig`
     (per-axis) declare the same ``width``/``opacity`` pair, so they validate it
@@ -568,8 +563,10 @@ def _validate_grid_style(owner: str, width: Any, opacity: Any) -> None:
     (#107), not here — this function only owns the ``width``/``opacity`` pair
     the two grid classes share.
     """
-    validate_pixel_value(f"{owner}.width", width)
-    validate_fraction_value(f"{owner}.opacity", opacity)
+    return {
+        "width": validate_pixel_value(f"{owner}.width", width),
+        "opacity": validate_fraction_value(f"{owner}.opacity", opacity),
+    }
 
 
 @dataclass(frozen=True)
@@ -610,8 +607,10 @@ class GridAxisConfig:
     opacity: float | None = None
 
     def __post_init__(self) -> None:
-        """Validate the numeric style values (see :func:`_validate_grid_style`) and color."""
-        _validate_grid_style("GridAxisConfig", self.width, self.opacity)
+        """Validate the numeric style values (see :func:`_normalize_grid_style`) and color."""
+        normalized = _normalize_grid_style("GridAxisConfig", self.width, self.opacity)
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
         _validate_config_color("GridAxisConfig", "color", self.color)
 
     def to_dict(self) -> dict[str, Any]:
@@ -698,7 +697,9 @@ class GridConfig:
         handles exactly one nested type, so any ``Mapping`` (not just
         ``dict``) serializes correctly.
         """
-        _validate_grid_style("GridConfig", self.width, self.opacity)
+        normalized = _normalize_grid_style("GridConfig", self.width, self.opacity)
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
         _validate_config_color("GridConfig", "color", self.color)
         _validate_config_band_colors("GridConfig", "band_colors", self.band_colors)
         for axis in ("x", "y"):
@@ -765,10 +766,9 @@ class PaddingConfig:
     def __post_init__(self) -> None:
         # Validate at construction time (NF-B5/B6/B7): each side must be a
         # finite, non-negative pixel value (spec §4.7's pixel contract).
-        validate_pixel_value("padding.top", self.top)
-        validate_pixel_value("padding.right", self.right)
-        validate_pixel_value("padding.bottom", self.bottom)
-        validate_pixel_value("padding.left", self.left)
+        for side in ("top", "right", "bottom", "left"):
+            value = validate_pixel_value(f"padding.{side}", getattr(self, side))
+            object.__setattr__(self, side, value)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""

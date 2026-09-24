@@ -653,15 +653,10 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
     Ok(())
 }
 
-/// Canonical aux-legend channel names, in block order. The ONE list both
+/// Canonical aux-legend channel names, in block order: the one list both
 /// [`aux_legend_channel_pairs`] (the Rust-side per-spec builder/validator,
 /// directly below) and the Python-visible [`aux_legend_channels`] pyfunction
-/// read (#123 close, wave 6B T8 cycle 2): `ferrum.encoding.base`'s
-/// `_AUX_LEGEND_CHANNELS` used to hand-mirror this exact set as a Python
-/// literal — three channel names, hand-typed a second time, with only a
-/// comment claiming they matched this list by name and no guard checking
-/// that claim ever held. Publishing it from here means there is one place
-/// this fact is stated at all.
+/// read (#123), so Python reads the set instead of mirroring it.
 const AUX_LEGEND_CHANNEL_NAMES: [&str; 3] = ["size", "shape", "stroke_dash"];
 
 /// The aux legend channels paired with their spec encoding, in block order:
@@ -684,17 +679,13 @@ fn aux_legend_channel_pairs(
     ]
 }
 
-/// The aux-legend channel names, published to Python (#123 close, wave 6B
-/// T8 cycle 2, spec-reviewer finding): `ferrum.encoding.base` used to
-/// hand-mirror [`AUX_LEGEND_CHANNEL_NAMES`] as a Python literal
-/// (`_AUX_LEGEND_CHANNELS`), violating "no Python literal mirrors a Rust
-/// vocabulary" with no guard against the two drifting. Reads the identical
-/// array [`aux_legend_channel_pairs`] reads, so the Rust-side validator and
-/// the Python-visible list are the same source, not two hand-kept copies —
-/// pinned by `aux_legend_channels_pyfunction_matches_aux_legend_channel_pairs_names`
-/// below. Registered in `lib.rs`, re-exported through
+/// `ferrum._core.aux_legend_channels()`: [`AUX_LEGEND_CHANNEL_NAMES`], the
+/// array [`aux_legend_channel_pairs`] reads, so Python's list and the Rust
+/// validator are one source (#123). Pinned by
+/// `aux_legend_channels_pyfunction_matches_aux_legend_channel_pairs_names`.
+/// Registered in `lib.rs`, re-exported through
 /// `crate::render::prepare::aux_legend_channels` (this module, `legend`, is
-/// private — see the `pub(crate) use` there), typed in `src/ferrum/_core.pyi`.
+/// private), typed in `src/ferrum/_core.pyi`.
 #[pyfunction]
 pub(crate) fn aux_legend_channels() -> Vec<String> {
     AUX_LEGEND_CHANNEL_NAMES.iter().map(|s| s.to_string()).collect()
@@ -2626,12 +2617,11 @@ mod tests {
     }
 
     // ── Aux legend channel list: Python-visible pyfunction vs the Rust-side
-    //    builder (#123 close, wave 6B T8 cycle 2, spec-reviewer finding) ────
+    //    builder (#123) ────
 
     /// `aux_legend_channels()` (the `#[pyfunction]` published to Python) and
     /// `aux_legend_channel_pairs()` (the Rust-side per-spec builder/validator)
-    /// must name the same channels, in the same order — the drift guard the
-    /// spec review asked for, mirroring `scale_accepted_keys`'s own
+    /// must name the same channels, in the same order — mirroring `scale_accepted_keys`'s own
     /// `scale_accepted_keys_matches_accepted_keys_for_scale_type_for_every_tag`
     /// precedent (`spec/encoding/gate.rs`). Both read `AUX_LEGEND_CHANNEL_NAMES`
     /// directly, so this test is a belt-and-suspenders proof, not the only

@@ -49,7 +49,7 @@ pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
 /// Used by `scale_resolve::auxiliary::build_shape_scale` to parse an
 /// explicit `Shape(scale=OrdinalScale(range=[...]))` range (#123): there, an
 /// unrecognized entry must refuse
-/// ([`crate::render::RenderError::AuxiliaryScaleRangeUnsupported`]) rather
+/// ([`crate::render::RenderError::ShapeRangeEntryUnrecognized`]) rather
 /// than silently draw every unmatched glyph as a circle, so that call site
 /// needs to tell "recognized" apart from "defaulted".
 pub(crate) fn shape_from_str_strict(s: &str) -> Option<ShapeKind> {

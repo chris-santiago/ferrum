@@ -239,7 +239,7 @@ fn bin_outputs_match_actual_schema_with_agg() {
         shared_extent: false,
         groupby: vec![],
         agg_field: Some("w".into()),
-        agg: Some("mean".into()),
+        agg: Some(crate::transform::aggregate::AggFn::Mean),
         name: None,
     };
     let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0]), ("w", &[10.0, 20.0, 30.0, 40.0, 50.0])]);
@@ -477,7 +477,7 @@ fn raster_outputs_match_actual_schema() {
     let spec = RasterSpec {
         x: "x".into(),
         y: "y".into(),
-        aggregate: "count".into(),
+        aggregate: Default::default(),
         field: None,
         resolution: Default::default(),
         min_count: None,
@@ -499,7 +499,7 @@ fn hex_outputs_match_actual_schema() {
         x: "x".into(),
         y: "y".into(),
         bin_size: None,
-        aggregate: "count".into(),
+        aggregate: Default::default(),
         field: None,
         name: None,
         extent_x: None,
@@ -887,12 +887,12 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             z_score: None, standard_scale: None, name: None,
         })),
         ("raster", Raster(RasterSpec {
-            x: "x".into(), y: "y".into(), aggregate: "count".into(), field: None,
+            x: "x".into(), y: "y".into(), aggregate: Default::default(), field: None,
             resolution: ResolutionSpec::Named("screen".into()), min_count: None, log_scale: false,
             name: None, extent_x: None, extent_y: None,
         })),
         ("hex", Hex(HexSpec {
-            x: "x".into(), y: "y".into(), bin_size: None, aggregate: "count".into(), field: None,
+            x: "x".into(), y: "y".into(), bin_size: None, aggregate: Default::default(), field: None,
             name: None, extent_x: None, extent_y: None,
         })),
         ("swarm", Swarm(SwarmSpec {
@@ -1331,7 +1331,7 @@ fn linkage_methods_accepted_and_bogus_method_rejected() {
 /// `density_data` has no PyO3-constructor-time acceptance/refusal site for
 /// `kernel` — `PyDensityData::new` doesn't expose the parameter at all, so
 /// there is no type object to call through. Its real refusal site is
-/// `apply()` (via `kde::kernel_density_at_grid`'s typed error), so this
+/// `apply()` (its entry `check_declared`), so this
 /// guard asserts against that directly, matching the shape the quality
 /// reviewer prescribed for this fix.
 #[test]
@@ -1396,7 +1396,7 @@ const KINDS_WITH_METHODS_GUARD: &[&str] = &[
     "data_stack",
 ];
 
-/// wave 6B T9: `aggregate` publishes `AggFn`'s vocabulary, aliases
+/// `aggregate` publishes `AggFn`'s vocabulary, aliases
 /// included. Its hard refusal site is `AggregateOp`'s PyO3 constructor
 /// (`Aggregate` itself only holds already-parsed ops).
 #[test]
@@ -1412,7 +1412,7 @@ fn aggregate_methods_accepted_and_bogus_fn_rejected() {
     });
 }
 
-/// wave 6B T9: `join_aggregate` publishes `AggFn`'s vocabulary. It has no
+/// `join_aggregate` publishes `AggFn`'s vocabulary. It has no
 /// PyO3 constructor; its refusal site is the wire (`AggFn`'s serde goes
 /// through `AggFn::parse`), so every declared spelling must deserialize AND
 /// apply, and a bogus one must be refused at deserialization.
@@ -1471,6 +1471,19 @@ fn field_probe_batch() -> RecordBatch {
 /// string (`aggregate`'s `count()` shorthand shape, the others'
 /// column); nothing to omit for `smooth`/`linkage`/`regression_data`.
 fn field_probe(py: Python<'_>, kind: &str, method: &str, with_field: bool) -> Result<(), String> {
+    let (spec, batch) = door_spec(py, kind, method, with_field)?;
+    spec.apply(&batch).map(|_| ()).map_err(|e| e.value(py).to_string())
+}
+
+/// [`field_probe`]'s door, without the apply: the spec `kind`'s real door
+/// builds for `method`, and the batch it applies to. `Err` is the door's own
+/// refusal.
+fn door_spec(
+    py: Python<'_>,
+    kind: &str,
+    method: &str,
+    with_field: bool,
+) -> Result<(crate::transform::core::TransformSpec, RecordBatch), String> {
     use crate::transform::core::TransformSpec;
     let batch = field_probe_batch();
     let msg = |e: PyErr| e.value(py).to_string();
@@ -1517,7 +1530,7 @@ fn field_probe(py: Python<'_>, kind: &str, method: &str, with_field: bool) -> Re
         "linkage" => {
             let only_numeric = f64_batch(&[("x", &[0.0, 1.0, 5.0, 6.0]), ("y", &[0.0, 1.0, 5.0, 7.0])]);
             let spec = door!(t::linkage::PyLinkage, (), kw(&[("method", method)]));
-            return spec.apply(&only_numeric).map(|_| ()).map_err(msg);
+            return Ok((spec, only_numeric));
         }
         "aggregate" => {
             let obj = py
@@ -1601,10 +1614,140 @@ fn field_probe(py: Python<'_>, kind: &str, method: &str, with_field: bool) -> Re
         }),
         other => panic!("{other} declares `methods` but has no field probe here"),
     };
-    spec.apply(&batch).map(|_| ()).map_err(msg)
+    Ok((spec, batch))
 }
 
-/// wave 6B T9, two-sided, orchestrator ruling cycle 3: `methods_needing_field`
+/// Spellings `kind`'s doors must refuse: every other kind's declared
+/// spelling this kind does not declare (the realistic drift: one
+/// vocabulary's word leaking into a sibling's match), plus case and affix
+/// mutations of its own.
+fn non_spellings(kind: &str) -> Vec<String> {
+    let own = entry_for_kind(kind).unwrap().methods;
+    let mut out: std::collections::BTreeSet<String> = all_transform_kinds()
+        .into_iter()
+        .flat_map(|k| entry_for_kind(k).unwrap().methods)
+        .filter(|m| !own.contains(m))
+        .map(str::to_string)
+        .collect();
+    for m in &own {
+        out.insert(m.to_uppercase());
+        out.insert(format!("{m}_"));
+        out.insert(format!(" {m}"));
+    }
+    out.into_iter().collect()
+}
+
+/// `spec`'s wire form with its one vocabulary value `from` replaced by `to`,
+/// read back through serde: the door a hand-built spec meets.
+fn rewire(
+    spec: &crate::transform::core::TransformSpec,
+    from: &str,
+    to: &str,
+) -> Result<crate::transform::core::TransformSpec, String> {
+    let mut v = serde_json::to_value(spec).unwrap();
+    assert_eq!(swap_strings(&mut v, from, to), 1, "fixture: '{from}' must occur once in {v}");
+    serde_json::from_value(v).map_err(|e| e.to_string())
+}
+
+/// Replace every string `from` in `v` with `to`; returns how many it replaced.
+fn swap_strings(v: &mut serde_json::Value, from: &str, to: &str) -> usize {
+    match v {
+        serde_json::Value::String(s) if s == from => {
+            *s = to.to_string();
+            1
+        }
+        serde_json::Value::Array(a) => a.iter_mut().map(|x| swap_strings(x, from, to)).sum(),
+        serde_json::Value::Object(o) => o.values_mut().map(|x| swap_strings(x, from, to)).sum(),
+        _ => 0,
+    }
+}
+
+/// A declared spelling whose door-built spec writes it exactly once (a
+/// default the wire omits, or an alias the wire canonicalizes, does not), and
+/// that spec: the template [`rewire`] edits.
+fn wire_template(
+    py: Python<'_>,
+    kind: &str,
+) -> (&'static str, crate::transform::core::TransformSpec, RecordBatch) {
+    entry_for_kind(kind)
+        .unwrap()
+        .methods
+        .into_iter()
+        .find_map(|m| {
+            let (spec, batch) = door_spec(py, kind, m, true).unwrap();
+            let mut v = serde_json::to_value(&spec).unwrap();
+            (swap_strings(&mut v, m, m) == 1).then_some((m, spec, batch))
+        })
+        .unwrap_or_else(|| panic!("{kind}: no declared spelling appears once on the wire"))
+}
+
+/// Kinds whose wire carries the constructor's RESOLVED value rather than the
+/// declared spelling, so the wire door is not a `methods` door: `smooth`
+/// writes `SmoothMethod` (`quadratic` lands as `poly {degree: 2}`).
+const WIRE_NOT_A_METHODS_DOOR: &[&str] = &["smooth"];
+
+/// `#165`(3), both directions, every kind that declares `methods`: every
+/// declared spelling is accepted by the constructor/field door AND by the
+/// wire, and every [`non_spellings`] candidate is refused by both, naming
+/// the value, on the probe batch and on an empty batch (a door whose only
+/// check sits inside a per-row or per-group `match` accepts anything when no
+/// row reaches it). Each door's accepted set is therefore its declared set:
+/// the typed vocabularies parse through [`Vocabulary`], and every
+/// string-stored one runs `check_declared` before its dispatch `match`.
+#[test]
+fn every_methods_door_accepts_exactly_its_declared_spellings() {
+    attach(|py| {
+        for kind in all_transform_kinds() {
+            let methods = entry_for_kind(kind).unwrap().methods;
+            if methods.is_empty() {
+                continue;
+            }
+            let refuses = |res: Result<(), String>, bad: &str, door: &str| match res {
+                Ok(()) => panic!("{kind}: {door} accepted undeclared '{bad}'"),
+                Err(e) => assert!(e.contains(bad), "{kind}: {door} refused '{bad}' without naming it: {e}"),
+            };
+            let (first, template, batch) = wire_template(py, kind);
+            let empty = RecordBatch::new_empty(batch.schema());
+            let wire_apply = |spec: &crate::transform::core::TransformSpec, b: &RecordBatch| {
+                spec.apply(b).map(|_| ()).map_err(|e| e.value(py).to_string())
+            };
+            let wire_is_door = !WIRE_NOT_A_METHODS_DOOR.contains(&kind);
+            for &m in &methods {
+                if wire_is_door {
+                    let spec = rewire(&template, first, m)
+                        .unwrap_or_else(|e| panic!("{kind}: wire refused declared '{m}': {e}"));
+                    if let Err(e) = wire_apply(&spec, &batch) {
+                        panic!("{kind}: wire apply refused declared '{m}': {e}");
+                    }
+                }
+            }
+            for bad in non_spellings(kind) {
+                refuses(field_probe(py, kind, &bad, true), &bad, "door");
+                if wire_is_door {
+                    for (b, label) in [(&batch, "wire"), (&empty, "wire on an empty batch")] {
+                        refuses(rewire(&template, first, &bad).and_then(|s| wire_apply(&s, b)), &bad, label);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The typed vocabularies read by serde's derived variant names
+/// (`LinkageMethod`, `ErrorMethod`) serialize every variant as its declared
+/// spelling, so the wire and the constructor accept one set.
+#[test]
+fn derived_serde_vocabularies_write_their_declared_spellings() {
+    fn check<V: Vocabulary + serde::Serialize + std::fmt::Debug>() {
+        for &v in V::ALL {
+            assert_eq!(serde_json::to_value(v).unwrap(), v.as_str(), "{v:?}");
+        }
+    }
+    check::<crate::transform::linkage::LinkageMethod>();
+    check::<crate::transform::error_extent::ErrorMethod>();
+}
+
+/// Two-sided: `methods_needing_field`
 /// is "the spellings this kind's door refuses without a field". For EVERY
 /// kind that declares `methods` (an empty needs-field set is proved, never
 /// assumed), each declared method is probed through [`field_probe`]:
@@ -1646,7 +1789,7 @@ fn methods_needing_field_is_a_subset_of_declared_methods() {
     });
 }
 
-/// Orchestrator ruling (T9 cycle 2): `aggregate`'s declared needs-field set
+/// `aggregate`'s declared needs-field set
 /// equals the set of `AggFn` spellings `AggregateOp("", fn_)` refuses,
 /// computed by calling the door over every spelling, not hand-listed.
 #[test]
@@ -1663,7 +1806,7 @@ fn aggregate_methods_needing_field_equal_the_spellings_aggregate_op_refuses_fiel
     });
 }
 
-/// wave 6B T9 cycle 3: `data_aggregate` publishes `AggFn`'s vocabulary like
+/// `data_aggregate` publishes `AggFn`'s vocabulary like
 /// its `join_aggregate` sibling; its refusal site is the wire (`AggFn`'s
 /// serde goes through `AggFn::parse`) and `apply()`.
 #[test]
@@ -2108,7 +2251,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
     }
 }
 
-/// PIN (wave 6B T10, `#165`(1)): every composed secondary key, captured from
+/// PIN (`#165`(1)): every composed secondary key, captured from
 /// HEAD as hand-typed literal strings (not derived via the same `format!`
 /// the production code uses, which would make this vacuous), for both
 /// `name=None` (unprefixed) and a set `name` — before `secondary_key`
@@ -2233,7 +2376,7 @@ fn pinned_secondary_keys_captured_from_head() {
     }
 }
 
-/// Two-sided (wave 6B T10, `#165`(1)): the `secondary_key(name, key)`
+/// Two-sided (`#165`(1)): the `secondary_key(name, key)`
 /// pyfunction and the three transforms that call it internally
 /// (`qq`, `letter_value`, `linkage`) agree, for `name=None` and a set
 /// `name`. Expected keys are derived by calling `secondary_key` directly
@@ -2241,12 +2384,8 @@ fn pinned_secondary_keys_captured_from_head() {
 /// `depth_key`, `LINKAGE_KEY`/`ORDER_KEY`/`COORDS_KEY`/`SEGMENTS_KEY`) —
 /// never a hand-typed mirror — and compared against each real
 /// `TransformSpec::secondary_outputs()` call, the same production path the
-/// pin test above exercises. RED-proven (wave 6B T10 report): reverting
-/// `qq.rs`'s call site to its pre-`secondary_key` hand-composed form while
-/// temporarily mutating `secondary_key`'s separator makes exactly the `qq`
-/// assertion fail while `letter_value`/`linkage` (still routed through the
-/// mutated function) stay green — proving this test would catch a call site
-/// that stopped calling `secondary_key`, not just a value mismatch.
+/// pin test above exercises, so a call site that stops calling
+/// `secondary_key` fails here, not just a value mismatch.
 #[test]
 fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
     use crate::transform::registry::secondary_key;

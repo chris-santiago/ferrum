@@ -5,23 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ferrum._core import transform_registry
-
-
-def _raster_no_field_hint(entry: dict) -> str:
-    """Return the quoted, pipe-joined raster aggregates that need no ``field=``.
-
-    Read live from *entry* (``transform_registry("raster")``) -- the same
-    door-refusal wording pattern every declared vocabulary's message uses
-    (spec §4.6, #137/#176) -- rather than a hand-typed literal that would go
-    stale the moment a new no-field Rust raster aggregate ships. Shared by
-    ``RenderConfig.__post_init__`` and ``Chart.mark_raster``'s eager
-    needs-field message, the two doors that state this hint in prose.
-    """
-    needing = set(entry["methods_needing_field"])
-    no_field = [m for m in entry["methods"] if m not in needing]
-    return "|".join(f"'{m}'" for m in no_field)
-
 
 @dataclass(frozen=True)
 class RenderConfig:
@@ -104,23 +87,20 @@ class RenderConfig:
     raster_field: Optional[str] = None
 
     def __post_init__(self) -> None:
-        from ferrum._validate import validate_choice
+        from ferrum._registry import require_aggregate_field, validate_aggregate
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
-        raster_entry = transform_registry("raster")
-        validate_choice(
-            "RenderConfig", "raster_aggregate", self.raster_aggregate, raster_entry["methods"]
+        validate_aggregate(
+            "raster", "RenderConfig", self.raster_aggregate, param="raster_aggregate"
         )
-        if (
-            self.raster_aggregate in raster_entry["methods_needing_field"]
-            and self.raster_field is None
-        ):
-            raise ValueError(
-                f"RenderConfig: raster_aggregate={self.raster_aggregate!r} requires "
-                f"raster_field=... (the column to aggregate); pass raster_field= or "
-                f"use raster_aggregate={_raster_no_field_hint(raster_entry)}, which "
-                f"need no field."
-            )
+        require_aggregate_field(
+            "raster",
+            "RenderConfig",
+            self.raster_aggregate,
+            self.raster_field,
+            aggregate_param="raster_aggregate",
+            field_param="raster_field",
+        )
 
         resolved = resolve_cmap_alias(
             scheme=self.raster_scheme, cmap=self.raster_cmap, where="RenderConfig"

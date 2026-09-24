@@ -141,7 +141,7 @@ class TestTransformFilterRef:
 
 class TestConditionalValueRef:
     def test_registered_param_ref_resolves_to_static_value(self):
-        q = fm.param("qmax", value=10)
+        q = fm.param("qcolor", value="red")
         sel = fm.selection_point()
         chart = (
             fm.Chart(DF)
@@ -152,7 +152,7 @@ class TestConditionalValueRef:
         )
         spec = chart.to_dict()
         (cond,) = spec["conditionals"]
-        assert cond["if_not"] == {"kind": "opacity", "value": 10.0}
+        assert cond["if_not"] == {"kind": "color", "value": {"r": 255, "g": 0, "b": 0, "a": 255}}
 
     def test_unregistered_ref_raises_value_error_naming_the_parameter(self):
         ghost = fm.param("ghost", value=1)

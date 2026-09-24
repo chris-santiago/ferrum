@@ -77,21 +77,23 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // source of truth; Python derives its key lists from these accessors.
     m.add_function(wrap_pyfunction!(render::binding::theme_known_keys, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::theme_color_keys, m)?)?;
-    // #123 close (wave 6B T8 cycle 2): the aux-legend channel names
+    // #123: the aux-legend channel names
     // (`render/prepare/legend.rs::AUX_LEGEND_CHANNEL_NAMES`), published so
     // `ferrum.encoding.base` reads the list instead of hand-mirroring it.
     m.add_function(wrap_pyfunction!(render::prepare::aux_legend_channels, m)?)?;
-    // #176 item (wave 6B T9): the `interpolate=` vocabulary
+    // #176: the `interpolate=` vocabulary
     // (`render/marks/curve.rs::Interpolate::ALL`), published so `marks/base.py`
     // gates it at declaration instead of the renderer refusing it.
     m.add_function(wrap_pyfunction!(render::marks::curve::interpolate_accepted_values, m)?)?;
-    // wave 6B T9 cycle 6: `Smooth(x_estimator=)`'s vocabulary
+    // `Smooth(x_estimator=)`'s vocabulary
     // (`transform/aggregate.rs::XEstimator`), published the same way.
     m.add_function(wrap_pyfunction!(transform::aggregate::x_estimator_accepted_values, m)?)?;
-    // #165(1) (wave 6B T10): the "{name}_{key}" secondary-output naming rule
-    // (`transform/registry/mod.rs::secondary_key`), the one home for a
-    // convention previously composed by hand at 3 Rust + 6 Python sites.
+    // #165(1): the "{name}_{key}" secondary-output naming rule
+    // (`transform/registry/mod.rs::secondary_key`), its one home.
     m.add_function(wrap_pyfunction!(transform::registry::secondary_key, m)?)?;
+    // The mark-kwargs wire keys (`spec/mark_style.rs::mark_kwargs_field_names`),
+    // published so Python reads them instead of parsing the Rust source.
+    m.add_function(wrap_pyfunction!(spec::mark_style::mark_kwargs_fields, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

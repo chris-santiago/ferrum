@@ -127,13 +127,21 @@ def _apply_mark_overrides(
     resolved = chart._resolve_pending()
     names = resolved.layer_names
 
-    # Single-mark chart with no named layers: if _skip_unknown, leave it
-    # untouched (this child panel doesn't have composite layers at all).
-    # Otherwise treat overrides as flat mark kwargs.
+    # No named layers: if _skip_unknown, leave it untouched (this child panel
+    # has no composite layers at all). Otherwise a flat chart takes the
+    # overrides as its own mark kwargs and an unnamed layered chart takes them
+    # on every layer, since a layered chart's style is its own per layer
+    # (spec §4.8).
     if not names:
         if _skip_unknown:
             return resolved
         new = resolved._clone()
+        if new._layers:
+            new._layers = [
+                replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **overrides})
+                for ly in new._layers
+            ]
+            return new
         existing_kwargs = dict(new._mark_kwargs) if new._mark_kwargs else {}
         existing_kwargs.update(overrides)
         new._mark_kwargs = existing_kwargs

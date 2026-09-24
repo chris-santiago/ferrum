@@ -20,7 +20,11 @@ from ferrum import (
 from ferrum._core import secondary_key, transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
-from ferrum._registry import registry_output_columns, registry_secondary_columns
+from ferrum._registry import (
+    registry_output_columns,
+    registry_secondary_columns,
+    require_aggregate_field,
+)
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
@@ -791,9 +795,9 @@ def desugar_raster(
     Raises
     ------
     ValueError
-        If either ``x_field`` or ``y_field`` is ``None``, or if ``aggregate``
-        is in ``transform_registry("raster")["methods_needing_field"]`` and
-        ``field`` is ``None``.
+        If either ``x_field`` or ``y_field`` is ``None``. The aggregate/field
+        pair is refused earlier, at the door (``_registry.validate_aggregate``
+        and ``_registry.require_aggregate_field``).
 
     Examples
     --------
@@ -803,8 +807,6 @@ def desugar_raster(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
-    if aggregate in transform_registry("raster")["methods_needing_field"] and field is None:
-        raise ValueError(f"mark_raster aggregate={aggregate!r} requires field=...")
 
     # Default to log-scale for count/density aggregates to improve contrast
     # when most cells are empty and a few have high counts.
@@ -916,11 +918,10 @@ def desugar_hex(
     Raises
     ------
     ValueError
-        If either ``x_field`` or ``y_field`` is ``None``; if ``aggregate`` is
-        not one of the declared ``transform_registry("hex")["methods"]``; or
-        if ``aggregate`` is in
-        ``transform_registry("hex")["methods_needing_field"]`` and ``field``
-        is ``None``.
+        If either ``x_field`` or ``y_field`` is ``None``, or if ``aggregate``
+        needs a field and neither ``field=`` nor a color encoding supplied one
+        (``_registry.require_aggregate_field``; the vocabulary itself is
+        refused earlier, at ``mark_hex``).
 
     Examples
     --------
@@ -930,10 +931,7 @@ def desugar_hex(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
-    hex_entry = transform_registry("hex")
-    validate_choice("mark_hex", "aggregate", aggregate, hex_entry["methods"])
-    if aggregate in hex_entry["methods_needing_field"] and field is None:
-        raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
+    require_aggregate_field("hex", "mark_hex", aggregate, field)
     from ferrum.encoding import X, Y
 
     transforms = [

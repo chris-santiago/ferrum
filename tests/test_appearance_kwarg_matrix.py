@@ -525,12 +525,13 @@ def test_legend_dict_or_object_refused_for_no_legend_channels(
 
 
 # ---------------------------------------------------------------------------
-# `title=` -- works, refused, or n/a
+# `title=` -- works on a legend owner, refused on every no-legend channel
 # ---------------------------------------------------------------------------
 
-_TITLE_REFUSED_CHANNELS = frozenset({"opacity", "fill_opacity", "stroke_opacity"})
-_TITLE_NA_CHANNELS = frozenset({"stroke_width", "angle"})
-_TITLE_WORKS_CHANNELS = frozenset(_BY_NAME) - _TITLE_REFUSED_CHANNELS - _TITLE_NA_CHANNELS
+_TITLE_REFUSED_CHANNELS = frozenset(
+    {"opacity", "fill_opacity", "stroke_opacity", "stroke_width", "angle"}
+)
+_TITLE_WORKS_CHANNELS = frozenset(_BY_NAME) - _TITLE_REFUSED_CHANNELS
 
 
 @pytest.mark.parametrize(
@@ -552,21 +553,6 @@ def test_title_refused(channel_cls: type) -> None:
     name = channel_cls.__name__
     with pytest.raises(ValueError, match=rf"{name}\(title='MyProbeTitle'\) is not supported"):
         channel_cls(_field_for(channel_cls._channel_name), title="MyProbeTitle")
-
-
-@pytest.mark.parametrize(
-    "channel_cls",
-    sorted((_BY_NAME[n] for n in _TITLE_NA_CHANNELS), key=lambda c: c.__name__),
-    ids=lambda c: c.__name__,
-)
-def test_title_na_warns_unchanged(channel_cls: type) -> None:
-    reset_warnings()
-    field = _field_for(channel_cls._channel_name)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        channel_cls(field, title="MyProbeTitle")
-    assert len(caught) == 1
-    assert issubclass(caught[0].category, UserWarning)
 
 
 # ---------------------------------------------------------------------------

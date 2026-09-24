@@ -65,6 +65,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    crate::transform::vocabulary::check_declared(METHODS, "data_regression", "method", &spec.method)?;
     match &spec.groupby {
         Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols, ctx),
         _ => apply_one_group(spec, batch, None, ctx, None),

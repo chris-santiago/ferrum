@@ -946,8 +946,12 @@ impl SizeScale {
 /// An ordinal shape scale: maps a categorical field to one of 8 shapes.
 #[derive(Debug, Clone)]
 pub struct ShapeScale {
-    pub domain: Vec<String>,   // distinct values in encounter order
-    pub shapes: Vec<ShapeKind>, // mapped from SHAPE_PALETTE
+    /// The declared `scale.domain` when one is set, else the distinct values
+    /// in encounter order.
+    pub domain: Vec<String>,
+    /// One glyph per `domain` entry: the declared `scale.range` cycled
+    /// positionally when one is set, else `SHAPE_PALETTE`.
+    pub shapes: Vec<ShapeKind>,
 }
 
 impl ShapeScale {

@@ -108,8 +108,8 @@ def test_the_dedicated_fit_methods_refuse_binning(method, kwargs):
 
 def test_an_unknown_x_estimator_is_refused_at_the_call():
     """`x_estimator=` is validated at the `lmplot(...)` call itself through
-    `validate_x_estimator_kwarg` (the sibling of `validate_interpolate_kwarg`,
-    which gates `interpolate=`), not deferred to `.to_svg()` and the `Smooth`
+    `ferrum._validate.validate_optional_choice` (the same gate `mark_smooth`
+    uses for `x_estimator=` and every mark uses for `interpolate=`), not deferred to `.to_svg()` and the `Smooth`
     transform's own refusal. The refusal names `lmplot`, the public entry the
     caller invoked, not `Smooth`."""
     with pytest.raises(ValueError, match=r"^lmplot: x_estimator must be one of .*; got 'bogus'$"):

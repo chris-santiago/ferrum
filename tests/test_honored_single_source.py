@@ -25,7 +25,6 @@ from ferrum.encoding import _apply_channel_aliases
 from ferrum.encoding._aliases import apply_channel_aliases
 from ferrum.encoding._honored import (
     APPEARANCE_BASE,
-    APPEARANCE_SORT,
     BARE,
     FACET,
     POLAR_PRIMARY,
@@ -71,9 +70,11 @@ _REPRESENTATIVE_KWARGS = {
 # through to_implicit_transforms, so they never appear in the spec dict.
 _ROLE_CONTRACT = [
     # (channel class, role frozenset, expected emitted spec-dict keys)
+    # X/Y/Shape: the role param is the class's own derived set, which adds
+    # the `legend` bit (and Shape's legend `title`) to the declared role.
     (
         fm.X,
-        PRIMARY_POSITIONAL,
+        fm.X._honored_kwargs,
         {
             "field",
             "type_",
@@ -90,7 +91,7 @@ _ROLE_CONTRACT = [
     ),
     (
         fm.Y,
-        PRIMARY_POSITIONAL,
+        fm.Y._honored_kwargs,
         {
             "field",
             "type_",
@@ -158,7 +159,7 @@ _ROLE_CONTRACT = [
     # HAS a wire value, so the derivation adds the bit.
     (
         fm.Shape,
-        APPEARANCE_SORT,
+        fm.Shape._honored_kwargs,
         {
             "field",
             "type_",
@@ -195,20 +196,14 @@ _ROLE_CONTRACT = [
             "legend",
         },
     ),
-    # FillOpacity and Angle both have `_legend_surface == "none"` (#123,
-    # 2026-09-23): any truthy `legend=` value is refused outright (not just
-    # an orient sub-key), so `legend` is excluded from the representative
-    # construction below -- unlike every other row, this channel's `legend`
-    # key never reaches the wire at all, which the shorter expected_keys
-    # documents. FillOpacity's role is also its own derived _honored_kwargs,
-    # not the bare APPEARANCE_FULL constant, since APPEARANCE_FULL still
-    # carries "title" (Size's role) and FillOpacity no longer does.
+    # FillOpacity and Angle have `_legend_surface == "none"` (#123): they
+    # honor no `legend`, so their `legend` key never reaches the wire.
     (
         fm.FillOpacity,
-        fm.FillOpacity._honored_kwargs - {"legend"},
+        fm.FillOpacity._honored_kwargs,
         {"field", "type_", "scale"},
     ),
-    (fm.Angle, APPEARANCE_BASE - {"legend"}, {"field", "type_"}),
+    (fm.Angle, APPEARANCE_BASE, {"field", "type_"}),
     (fm.Text, TEXT_FORMATTED, {"field", "type_", "format", "format_type"}),
     (
         fm.TooltipField,
@@ -412,5 +407,5 @@ def test_rendered_honored_name_removed_from_channel_modules():
 
 
 def test_x_and_y_share_the_primary_positional_role():
-    assert fm.X._honored_kwargs is PRIMARY_POSITIONAL
-    assert fm.Y._honored_kwargs is PRIMARY_POSITIONAL
+    assert fm.X._honored_kwargs is fm.Y._honored_kwargs
+    assert fm.X._honored_kwargs == PRIMARY_POSITIONAL | {"legend"}

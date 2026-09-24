@@ -72,6 +72,12 @@ pub(crate) const OPS: &[&str] = &[
 /// `compute_window_op`.
 pub(crate) const OPS_WITHOUT_FIELD: &[&str] = &["row_number", "rank", "dense_rank"];
 
+/// The [`OPS`] outside [`OPS_WITHOUT_FIELD`], in [`OPS`] order: the
+/// registry's `methods_needing_field` for `data_window`.
+pub(crate) fn ops_needing_field() -> Vec<&'static str> {
+    OPS.iter().copied().filter(|op| !OPS_WITHOUT_FIELD.contains(op)).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WindowOp {
@@ -133,6 +139,9 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    for op in &spec.ops {
+        crate::transform::vocabulary::check_declared(OPS, "data_window", "window op", &op.op)?;
+    }
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 

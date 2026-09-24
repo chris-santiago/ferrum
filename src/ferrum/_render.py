@@ -266,7 +266,7 @@ class _RenderMixin:
         case, not a bug: both spellings request the same thing (auto-raster's
         default policy), so they resolve identically.
         """
-        from ferrum._core import transform_registry
+        from ferrum._registry import aggregate_needs_field
         from ferrum.render_config import RenderConfig
 
         cfg = self._render_config or RenderConfig()
@@ -379,14 +379,14 @@ class _RenderMixin:
             substituted._encoding.pop("color", None)
 
         # Only forward the field to aggregates in
-        # transform_registry("raster")["methods_needing_field"]; every other
+        # `aggregate_needs_field("raster", ...)`; every other
         # aggregate needs none, so a stray field must stay genuinely inert
         # for them -- forwarding it unconditionally would resolve it in the
         # Rust Raster transform regardless of aggregate, surfacing a
         # deferred-to-render "column not found" error for an unused value,
         # which is exactly the deferred-failure shape
         # RenderConfig.__post_init__ exists to remove.
-        needs_field = aggregate in transform_registry("raster")["methods_needing_field"]
+        needs_field = aggregate_needs_field("raster", aggregate)
         substituted._pending_stat_mark = _PendingMark(
             "raster",
             {

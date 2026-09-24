@@ -214,9 +214,9 @@ class TestStrokeDashCommaSplit:
         mb = MarkBase("line", stroke_dash=[4.0, 2.0])
         assert mb.kwargs["stroke_dash"] == [4.0, 2.0]
 
-    def test_stroke_dash_tuple_passthrough_unchanged(self) -> None:
+    def test_stroke_dash_tuple_normalizes_to_a_float_list(self) -> None:
         mb = MarkBase("line", stroke_dash=(4.0, 2.0))
-        assert mb.kwargs["stroke_dash"] == (4.0, 2.0)
+        assert mb.kwargs["stroke_dash"] == [4.0, 2.0]
 
     def test_linetype_named_form_still_resolves_via_alias(self) -> None:
         # REVERSED (#124, batch-A T9 reversal of f8148bdc): named forms are

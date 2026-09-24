@@ -288,3 +288,30 @@ def build(prefix):
 """
     by_label = _labels_for(tmp_path, source)
     assert by_label["message-text"] == {"build:count"}
+
+
+# ---------------------------------------------------------------------------
+# The two verdict functions, each fed a hit (vacuity would otherwise pass them).
+# ---------------------------------------------------------------------------
+
+
+def test_undispositioned_reports_a_bare_column_reference(tmp_path):
+    (tmp_path / "synthetic.py").write_text('def encode():\n    return {"x": "bin_start"}\n')
+    hits = lint.undispositioned(lint.run(tmp_path))
+    assert [(o.function, o.literal) for o in hits] == [("encode", "bin_start")]
+
+
+def test_stale_dispositions_reports_a_key_no_live_hit_matches(tmp_path):
+    live_key = next(iter(lint.DISPOSITIONED))
+    path, function, literal = live_key
+    live = lint.Occurrence(path, 1, function, literal, "column-reference")
+    findings = lint.Findings(
+        outer_bound=(live,),
+        declared_names=frozenset({literal}),
+        converted={},
+        converted_secondary={},
+    )
+    stale = lint.stale_dispositions(findings)
+    assert live_key not in stale
+    assert stale == sorted(k for k in lint.DISPOSITIONED if k != live_key)
+    assert stale

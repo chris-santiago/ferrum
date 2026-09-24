@@ -1,6 +1,11 @@
 """Shared zero-import leaf-validation predicates for the rest of ``ferrum``.
 
-Four independent predicates live here today:
+Independent predicates live here:
+
+- ``is_real_number`` is the one answer to "is this a real number" for every
+  numeric parameter: any ``numbers.Real`` or ``decimal.Decimal``, never
+  ``bool``. The pixel/fraction validators, ``Inset.bounds``, dash lengths and
+  the transform literal serializers all ask it.
 
 - ``validate_choice`` is the canonical way to reject a value that is not a
   member of a documented closed vocabulary (a ``kind=``/``method=``/``order=``
@@ -86,8 +91,32 @@ itself, even lazily.
 
 from __future__ import annotations
 
+import decimal
 import math
+import numbers
 from typing import Any, Callable
+
+
+def is_real_number(value: Any) -> bool:
+    """Return whether *value* is a real number a numeric parameter accepts.
+
+    Accepts every :class:`numbers.Real` (``int``, ``float``,
+    ``fractions.Fraction``, numpy integer and floating scalars) and
+    :class:`decimal.Decimal`. Rejects ``bool`` (a truth value is not a
+    quantity, though ``bool`` subclasses ``int``) and ``numpy.timedelta64``
+    (registered as a numpy integer, but ``float()`` on it raises). ``np.bool_``
+    and ``np.datetime64`` are not ``numbers.Real`` and are rejected with
+    every other non-number.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, decimal.Decimal):
+        return True
+    if not isinstance(value, numbers.Real):
+        return False
+    import numpy as np
+
+    return not isinstance(value, np.timedelta64)
 
 
 def is_none_color_sentinel(value: str) -> bool:
@@ -139,11 +168,28 @@ def validate_choice(
         )
 
 
-def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> None:
+def validate_optional_choice(
+    func_name: str,
+    param: str,
+    value: Any,
+    choices: "frozenset[Any] | set[Any] | tuple[Any, ...] | list[Any]",
+) -> None:
+    """:func:`validate_choice` for an optional keyword: ``None`` (unset) always passes.
+
+    Any other value, string or not, must be in *choices*, so a malformed value
+    is refused at the declaring door (*func_name*) instead of reaching a Rust
+    serde type error that names no door. Used with a Rust-published
+    vocabulary the caller passes in (``interpolate=``, ``x_estimator=``).
+    """
+    if value is not None:
+        validate_choice(func_name, param, value, choices)
+
+
+def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
     """Raise ``ValueError`` when *value* violates the pixel contract (spec §4.7).
 
-    A valid pixel value is numeric (``int``/``float``, ``bool`` excluded since
-    ``bool`` is a ``int`` subclass), finite (not NaN/±inf), and non-negative.
+    A valid pixel value is a real number (:func:`is_real_number`: ``bool``
+    excluded, numpy scalars accepted), finite (not NaN/±inf), and non-negative.
     ``None`` is the caller's "unset" sentinel and always passes — unless
     *required* is set, for a caller with no optional-unset case for this
     field (e.g. one entry of a fixed-length tuple every entry of which is
@@ -159,6 +205,12 @@ def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> N
     the ``Chart.override`` padding guard — otherwise had to keep in sync by
     hand.
 
+    Returns
+    -------
+    float or None
+        *value* as a ``float`` (so a numpy scalar reaches the JSON wire as a
+        plain number), or ``None`` when unset.
+
     Raises
     ------
     ValueError
@@ -167,7 +219,7 @@ def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> N
     """
     if value is None and not required:
         return
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if not is_real_number(value):
         raise ValueError(
             f"{label} must be a numeric pixel value (int or float), "
             f"not {type(value).__name__}; received {value!r}"
@@ -176,20 +228,20 @@ def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> N
         raise ValueError(f"{label} must be a finite numeric pixel value; received {value}")
     if value < 0:
         raise ValueError(f"{label} must be non-negative; received {value}")
+    return float(value)
 
 
-def validate_fraction_value(label: str, value: Any, *, required: bool = False) -> None:
+def validate_fraction_value(label: str, value: Any, *, required: bool = False) -> float | None:
     """Raise ``ValueError`` when *value* is not a fraction in ``[0, 1]``.
 
     The bounded-fraction sibling of :func:`validate_pixel_value`, and it lives
     here for the same reason that one does: the numeric-and-finite half of the
     two contracts is identical, so expressing it twice is how the two drift.
-    (It was briefly expressed twice — ``configure._validate_grid_style``
+    (It was briefly expressed twice — ``configure._normalize_grid_style``
     called ``validate_pixel_value`` for ``width`` and hand-rolled the same
     numeric/finite check for ``opacity`` one line below.)
 
-    A valid fraction is numeric (``bool`` excluded, as it is an ``int``
-    subclass), finite, and within ``[0, 1]`` inclusive. ``None`` is the
+    A valid fraction is a real number (:func:`is_real_number`), finite, and within ``[0, 1]`` inclusive. ``None`` is the
     caller's "unset" sentinel and always passes — unless *required* is set,
     matching :func:`validate_pixel_value`'s convention: it stops the early
     return rather than adding a second message, so ``None`` is reported by
@@ -199,6 +251,12 @@ def validate_fraction_value(label: str, value: Any, *, required: bool = False) -
     *label* is a pre-composed field description, matching
     :func:`validate_pixel_value`'s convention.
 
+    Returns
+    -------
+    float or None
+        *value* as a ``float``, or ``None`` when unset (see
+        :func:`validate_pixel_value`).
+
     Raises
     ------
     ValueError
@@ -207,13 +265,14 @@ def validate_fraction_value(label: str, value: Any, *, required: bool = False) -
     """
     if value is None and not required:
         return
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if not is_real_number(value):
         raise ValueError(
             f"{label} must be a number between 0 and 1, "
             f"not {type(value).__name__}; received {value!r}"
         )
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError(f"{label} must be between 0 and 1; received {value!r}")
+    return float(value)
 
 
 def validate_positive_int(label: str, value: Any) -> None:

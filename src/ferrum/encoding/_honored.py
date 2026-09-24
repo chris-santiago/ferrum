@@ -48,16 +48,14 @@ derivation, not a second set, is what keeps Stroke/Shape without the bit and
 Fill/StrokeDash with it. The two tables are now structurally unable to
 disagree again.
 
-**Sixth change (2026-09-23, #123, wave 6B).** The appearance roles below
-compose from four orthogonal atoms (``SCALE``, ``LEGEND_TITLE``, ``SORT``,
-``SCHEME``) instead of one linear chain rooted at ``APPEARANCE_FULL``. The
-chain could not express "has ``scale`` but not ``title``", which is exactly
-Opacity/FillOpacity/StrokeOpacity's real contract: their ``scale=`` is wired
-and live, but none of the three draws a legend, so a ``title=`` had nothing
-to label and is now a construction-time refusal (``ChannelBase._validate``)
-rather than a silently-serialized no-op. See each atom's docstring below and
-``encoding/appearance.py``'s Opacity/FillOpacity/StrokeOpacity classes for
-the direct ``APPEARANCE_BASE | SCALE`` union this enabled.
+**Legend bits are derived, not declared.** No role set below carries
+``legend``, and none carries the ``title`` that labels a legend: both follow
+the channel's ``_legend_surface`` (``ChannelBase.__init_subclass__`` via
+``base._derive_honored``). A role set declares ``title`` only where it labels
+something other than a legend (X/Y's axis title, a facet strip, a tooltip
+field). The appearance roles compose from orthogonal atoms (``SCALE``,
+``SORT``, ``SCHEME``), so Size (``own`` surface) and Opacity (``none``) can
+share ``APPEARANCE_FULL`` and differ only in whether they draw a legend.
 
 The appearance-channel membership is pinned by
 ``tests/test_appearance_honored_kwargs.py``, which documents each intentional
@@ -105,11 +103,6 @@ PRIMARY_POSITIONAL = frozenset(
         "format",
         "format_type",
         "formatType",
-        # legend dict — honored by render::prepare::legend::per_channel_legend_specs
-        # (the color > x > y cascade NF-B13 gave X/Y a real consumer for,
-        # 2026-09-02 batch-B task 7; the never-existent legend_orient_override
-        # citation this replaced predates that consumer).
-        "legend",
     }
 )
 
@@ -135,36 +128,19 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 # express theirs) is never spelled out as a role-set member here.
 # ---------------------------------------------------------------------------
 
-#: Minimum appearance contract — data type + legend suppression/customization.
-#: (StrokeWidth, Angle — both documented as per-row constants with no scale
-#: resolution; see ``spec/encoding.rs:746``. Both gain ``condition`` via the
-#: derivation above — ``stroke_width``/``angle`` are real conditional
-#: channels.)
-APPEARANCE_BASE = frozenset({"type", "legend"})
+#: Minimum appearance contract: the data type. (StrokeWidth, Angle, per-row
+#: constants with no scale resolution; see ``spec/encoding.rs:746``.)
+APPEARANCE_BASE = frozenset({"type"})
 
-#: **Added 2026-09-23 (#123, wave 6B).** Orthogonal capability atoms that
-#: compose onto ``APPEARANCE_BASE``. Before this, every appearance role
-#: chained upward from ``APPEARANCE_FULL`` (``BASE | {"scale", "title"}``),
-#: so a channel could not have ``scale`` without also carrying ``title`` --
-#: the exact shape that forced ``title=`` onto Opacity/FillOpacity/
-#: StrokeOpacity even though none of the three draws a legend for a title to
-#: label (research: ``.claude/output/api-contract-audit/wave6-research/
-#: honored-lattice-123.md`` §4). Composing from these atoms directly lets
-#: the opacity family keep ``scale`` (real, wired) without ``title`` (no
-#: legend exists to title), which a single linear chain could not express.
+#: Orthogonal capability atoms that compose onto ``APPEARANCE_BASE``.
 SCALE = frozenset({"scale"})
-LEGEND_TITLE = frozenset({"title"})
 SORT = frozenset({"sort"})
 SCHEME = frozenset({"scheme"})
 
-#: Adds an explicit scale override and legend title. (Size gains
-#: ``condition`` via the derivation above -- ``size`` is a real conditional
-#: channel. StrokeDash started here too on 2026-08-28 but moved up to
-#: ``APPEARANCE_SORT`` on 2026-09-01 -- see that constant's docstring.
-#: Opacity/FillOpacity/StrokeOpacity moved OFF this set 2026-09-23 (#123):
-#: each unions ``APPEARANCE_BASE | SCALE`` directly in ``appearance.py``
-#: instead, since none of the three has ``title`` to lose.)
-APPEARANCE_FULL = APPEARANCE_BASE | SCALE | LEGEND_TITLE
+#: Adds an explicit scale override. (Size, which draws a legend and so also
+#: honors ``legend``/``title``; Opacity, FillOpacity, StrokeOpacity, which do
+#: not.)
+APPEARANCE_FULL = APPEARANCE_BASE | SCALE
 
 #: Adds an explicit domain-order sort. (StrokeDash and Shape both use this
 #: set, as of 2026-09-01 / 2026-09-11 respectively — Shape mirrors

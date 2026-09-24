@@ -29,6 +29,7 @@ import numbers
 import operator
 from typing import TYPE_CHECKING, Any, Sequence
 
+from ferrum._validate import is_real_number
 from ferrum.position import _validate_stack_offset
 
 if TYPE_CHECKING:
@@ -315,8 +316,8 @@ def _expr_literal(value: object, *, field: str | None = None) -> str:
     result of a pandas/polars boolean column access), both normalized to
     ``"true"`` or ``"false"``.
 
-    Numeric values are accepted by ABC (``numbers.Integral`` /
-    ``numbers.Real``), not by concrete type, so numpy scalars — the routine
+    Numeric values are accepted by :func:`ferrum._validate.is_real_number`,
+    not by concrete type, so numpy scalars — the routine
     result of a pandas/polars aggregation (``df[col].mean()``,
     ``.max()``, ...) — are accepted and normalized to a plain literal
     rather than forwarding a hostile ``repr()`` (numpy >= 2's
@@ -324,11 +325,10 @@ def _expr_literal(value: object, *, field: str | None = None) -> str:
     tokenizer cannot parse). Integers and floats are normalized separately
     (``operator.index`` / ``float``) rather than collapsed into one path,
     since routing a large integer through ``float()`` would lose precision.
-    ``decimal.Decimal`` and ``datetime`` are deliberately *not* accepted:
-    neither is registered under ``numbers.Real`` (the stdlib's own
-    ``decimal`` module opts out for the same reason — silently coercing a
-    ``Decimal`` to ``float`` reintroduces the precision-loss hazard this
-    normalization exists to avoid), so both types still raise ``TypeError``.
+    A ``decimal.Decimal`` is emitted as its ``float`` value: the expression
+    grammar evaluates every number as ``f64`` (see below), so no precision a
+    ``Decimal`` literal could carry survives evaluation anyway. ``datetime``
+    is not a number and raises ``TypeError``.
 
     Note on large-integer precision
     --------------------------------
@@ -360,9 +360,9 @@ def _expr_literal(value: object, *, field: str | None = None) -> str:
             .replace("\t", "\\t")
         )
         return f'"{escaped}"'
-    if isinstance(value, numbers.Integral):
-        return repr(operator.index(value))
-    if isinstance(value, numbers.Real):
+    if is_real_number(value):
+        if isinstance(value, numbers.Integral):
+            return repr(operator.index(value))
         as_float = float(value)
         if not math.isfinite(as_float):
             where = f" for field {field!r}" if field is not None else ""
@@ -1034,9 +1034,9 @@ def _normalize_keyval(value: object, *, key: str | None) -> bool | int | float |
     if isinstance(value, str):
         return value
     where = f" for key {key!r}" if key is not None else ""
-    if isinstance(value, numbers.Integral):
-        return operator.index(value)
-    if isinstance(value, numbers.Real):
+    if is_real_number(value):
+        if isinstance(value, numbers.Integral):
+            return operator.index(value)
         as_float = float(value)
         if not math.isfinite(as_float):
             raise ValueError(

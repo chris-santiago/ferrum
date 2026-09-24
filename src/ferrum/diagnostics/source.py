@@ -172,36 +172,34 @@ class ModelSource(
         return ComparedModelSource(sources)
 
     @classmethod
-    def from_base_and_compare(
+    def _from_base_and_compare(
         cls,
         model: Any,
-        compare: dict[str, Any],
+        compare: dict[str, Any] | None,
         X: Any,
         y: Any = None,
         *,
         random_state: int | None = None,
-    ) -> "ComparedModelSource":
-        """Merge a base ``model`` with a ``compare=`` dict into one
-        ``ComparedModelSource``.
+    ) -> "ModelSource | ComparedModelSource":
+        """Build the source for a base ``model`` plus an optional ``compare=`` dict.
 
         The single owner of the ``compare=`` merge rule shared by the
-        figure-function ``_resolve_source`` path
-        (``ferrum.plots._helpers``) and the classification visualizers
-        (``ferrum.diagnostics.visualizers._classification``): the
-        ``dict`` type check, the reserved-``"base"`` refusal, and the
-        delegation to ``ModelSource.compare``. Callers pre-check
-        ``compare is not None`` themselves and keep their own
-        ``compare=None`` handling -- this method assumes a non-``None``
-        ``compare`` was passed.
+        figure-function ``_resolve_source`` path (``ferrum.plots._helpers``)
+        and the classification visualizers
+        (``ferrum.diagnostics.visualizers._classification``): ``None`` gives
+        a plain ``ModelSource``; otherwise the ``dict`` type check, the
+        reserved-``"base"`` refusal, and the delegation to
+        ``ModelSource.compare``.
 
         Parameters
         ----------
         model : Any
             The primary/base fitted estimator, stamped ``"base"`` in the
             returned source's ``model`` column.
-        compare : dict[str, Any]
-            Mapping from display name to fitted estimator. Must not
-            contain the key ``"base"`` (reserved for ``model``).
+        compare : dict[str, Any] or None
+            Mapping from display name to fitted estimator, or ``None`` for no
+            comparison. Must not contain the key ``"base"`` (reserved for
+            ``model``).
         X : array-like
             Feature matrix shared by all models.
         y : array-like, optional
@@ -211,8 +209,9 @@ class ModelSource(
 
         Returns
         -------
-        ComparedModelSource
-            Built from ``{"base": model, **compare}``.
+        ModelSource or ComparedModelSource
+            ``ModelSource(model, ...)`` when *compare* is ``None``, else a
+            ``ComparedModelSource`` built from ``{"base": model, **compare}``.
 
         Raises
         ------
@@ -223,6 +222,8 @@ class ModelSource(
             a ``compare={"base": ...}`` entry would silently overwrite
             the primary model with no error).
         """
+        if compare is None:
+            return cls(model, X, y, random_state=random_state)
         if not isinstance(compare, dict):
             raise TypeError(
                 f"compare= must be dict[str, model] or None; got {type(compare).__name__}."

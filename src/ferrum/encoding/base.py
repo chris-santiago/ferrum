@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
+from functools import lru_cache
 from typing import Any, ClassVar, Literal
 
 from ferrum._title_sentinel import is_unspecified
@@ -54,9 +55,8 @@ def _honored_kwarg_message(channel: str, kwarg: str) -> str | None:
 
     A kwarg that can *never* do anything on a channel -- as opposed to one
     that merely has no design yet -- is not routed through here: it is a
-    REFUSE, not a WARN (see the `_REFUSED_KWARGS` lookup and the
-    `_title_refused` check, both consulted before this function is called,
-    in ``ChannelBase.__init__``'s loop).
+    REFUSE, not a WARN (``ChannelBase._refusal_message``, consulted first in
+    ``ChannelBase.__init__``'s loop).
     """
     if kwarg == "condition":
         from ferrum.encoding._channel_policy import (
@@ -73,31 +73,19 @@ def _honored_kwarg_message(channel: str, kwarg: str) -> str | None:
     return None
 
 
-# Per-(channel, kwarg) REFUSAL message templates (#123, 2026-09-23, wave 6B).
-# Unlike `_honored_kwarg_message` above (a preview of a LATER raise, or a
-# "maybe someday" warning), every entry here is a permanent structural fact:
-# the kwarg can never do anything on this channel, so accepting it and
-# warning would be an accepted-but-inert input surviving on a touched
-# surface -- exactly what REFUSE MALFORMED, WARN DEGRADED forbids. Checked
-# in `ChannelBase.__init__` BEFORE the generic warn_once loop, so a kwarg
-# listed here raises instead of falling through to a warning. Every message
-# is a template naming both the public entry AND the value received
-# (never `...`) -- filled in with `.format(channel=..., value=...)` at the
-# call site, since the value is only known at construction time. Only
-# `facet_row`/`facet_col` `columns=` lives here: the opacity-family `title=`
-# refusal is NOT a hand-listed entry -- see the structural check in
-# `ChannelBase.__init__` below, derived from `_legend_surface`/
-# `_honored_kwargs` instead of a name-keyed table, so the "no legend" fact
-# has exactly one home (spec-review remediation, cycle 2).
+# Refusal templates for a kwarg that can never do anything on a channel.
+# Each names the public entry and the value received, filled in with
+# `.format(channel=..., kwarg=..., value=...)` at construction.
 _FACET_COLUMNS_MESSAGE = (
     "{channel}(columns={value!r}) is grid-mode-inapplicable and permanently refused: "
     "row/column faceting has no wrap-count to apply it to. Use Facet(columns=...) "
     "for wrap-mode panel-per-row counts."
 )
-_REFUSED_KWARGS: dict[tuple[str, str], str] = {
-    ("facet_row", "columns"): _FACET_COLUMNS_MESSAGE,
-    ("facet_col", "columns"): _FACET_COLUMNS_MESSAGE,
-}
+
+_NO_TITLE_MESSAGE = (
+    "{channel}(title={value!r}) is not supported: {channel} draws no legend or "
+    "axis title of its own, so there is nothing for title= to label."
+)
 
 _NO_LEGEND_MESSAGE = (
     "{channel}({kwarg}={value!r}) is not supported: {channel} draws no legend of "
@@ -105,21 +93,43 @@ _NO_LEGEND_MESSAGE = (
 )
 
 
+@lru_cache(maxsize=None)
+def _derive_honored(
+    role: frozenset[str], legend_surface: str, honors_condition: bool
+) -> frozenset[str]:
+    """Return a channel class's honored-kwarg set with its derived bits applied.
+
+    *role* is the class body's declared capabilities. Three bits are not
+    declared there but derived: ``legend`` is honored iff the channel has a
+    legend surface (``own`` or ``cascade``), a legend owner's ``title`` labels
+    that legend, and ``condition`` follows the conditional vocabulary.
+    Cached, so classes with equal inputs share one set object; returns *role*
+    itself when nothing changes.
+    """
+    derived = set(role) - {"legend", "condition"}
+    if legend_surface != "none":
+        derived.add("legend")
+    if legend_surface == "own":
+        derived.add("title")
+    if honors_condition:
+        derived.add("condition")
+    return role if derived == role else frozenset(derived)
+
+
 def _aux_legend_channels() -> frozenset[str]:
     """Return the channel names whose legend is an auxiliary block (Size, Shape, StrokeDash).
 
     Read from Rust's ``ferrum._core.aux_legend_channels()`` -- the one list
     ``build_aux_legends`` (``render/prepare/legend.rs``) walks -- rather than
-    mirrored by hand, so the two cannot drift (#123 spec-review remediation,
-    2026-09-23; the deleted hand-mirrored literal joins
-    ``tests/test_transform_registry.py``'s no-reappearance guard). Used only
+    mirrored by hand, so the two cannot drift (a hand-mirrored literal is
+    guarded against by ``tests/test_transform_registry.py``). Used only
     to decide whether a legend value's ``orient=`` sub-key is refused (Q10):
     an aux legend has no independent screen position of its own, so it
     always shares the chart's legend block, placed by
     ``Color(legend=Legend(orient=))`` or ``configure_legend(orient=...)`` --
     ``orient="none"`` still disables the aux block itself.
     """
-    from ferrum._core import aux_legend_channels  # type: ignore[attr-defined]
+    from ferrum._core import aux_legend_channels
 
     return frozenset(aux_legend_channels())
 
@@ -392,81 +402,43 @@ class ChannelBase:
     # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
     # leave it False and the normalization is skipped.
     _stack_kwarg: ClassVar[bool] = False
-    # This channel's legend surface (#123, 2026-09-23 -- widened from the
-    # former ``_has_own_legend: bool`` to a three-state value the same bool
-    # could not express):
+    # This channel's legend surface, the one fact every legend and
+    # legend-title rule derives from (`_derive_honored`, `_validate_legend_value`,
+    # `_refusal_message`):
     #
-    # - "own" (Color, Size, Shape, StrokeDash, Fill, Stroke): the channel
-    #   renders a legend block of its own.  A bare ``legend=None``/``False``
-    #   suppresses THAT block; a ``Legend(...)``/dict configures it fully
-    #   (`_emit_legend`).
-    # - "cascade" (X, Y): no legend surface of its own -- contributes style
-    #   overrides to the shared color-legend cascade (NF-B13) instead.  Bare
-    #   ``None``/``False`` is a no-op (there is no "this channel's legend" to
-    #   suppress); an explicit value still reaches the cascade
-    #   (`_emit_legend_cascade_only`).
-    # - "none" (Opacity, FillOpacity, StrokeOpacity, StrokeWidth, Angle): no
-    #   legend exists at all.  Bare ``None``/``False`` stays silent (the
-    #   harmless "I want no legend and there is none" idiom); a
-    #   ``Legend(...)``/dict is refused (`_validate_legend_value`) rather
-    #   than accepted and silently dropped.
-    _legend_surface: ClassVar[Literal["own", "cascade", "none"]] = "own"
-    # Whether an un-honored ``title=`` refuses outright instead of the
-    # generic warn (#123, 2026-09-23, cycle 3). ``True`` only for Opacity,
-    # FillOpacity, StrokeOpacity: none of the three draws a legend, so
-    # ``title=`` -- which their siblings on the same "scale but no
-    # legend-title" shape would otherwise carry -- has nothing to label.
-    # StrokeWidth/Angle also have ``_legend_surface == "none"`` but never
-    # claimed ``title=`` as part of their contract at all (they are
-    # documented per-row constants, ``spec/encoding.rs:746``), so their
-    # ``title=`` stays on the ordinary "accepted but not yet honored" warn
-    # path, unchanged. This is a direct, named fact -- not inferred from an
-    # unrelated capability like ``"scale" in self._honored_kwargs`` (cycle-2
-    # quality-review finding: that check happened to produce the right
-    # answer for today's three channels, but nothing tied it to the actual
-    # rule, so a future channel gaining ``scale`` without gaining a legend
-    # would have silently flipped its ``title=`` from warn to refuse).
-    _title_refused: ClassVar[bool] = False
+    # - "own" (Color, Fill, Stroke, Size, Shape, StrokeDash): the channel
+    #   renders a legend block of its own; `legend` and `title` are honored.
+    #   A bare ``legend=None``/``False`` suppresses that block; a
+    #   ``Legend(...)``/dict configures it (`_emit_legend`).
+    # - "cascade" (X, Y): no legend block of its own; an explicit legend value
+    #   contributes style overrides to the shared color-legend cascade, and a
+    #   bare ``None``/``False`` is a no-op (`_emit_legend_cascade_only`).
+    # - "none" (every other channel): no legend exists. ``legend=None``/``False``
+    #   is the silent "no legend here" idiom and puts nothing on the wire; any
+    #   other legend value, and a ``title=`` the class does not declare for
+    #   another purpose, is refused.
+    _legend_surface: ClassVar[Literal["own", "cascade", "none"]] = "none"
+    # Kwargs this channel permanently refuses for a reason other than having
+    # no legend, keyed to a message template (see `_FACET_COLUMNS_MESSAGE`).
+    _refused_kwargs: ClassVar[dict[str, str]] = {}
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Derive the ``condition`` honored-kwarg bit from the one conditional vocabulary.
+        """Apply the derived honored-kwarg bits once the class body has run.
 
-        ``ferrum.encoding._channel_policy`` is the single source of truth for
-        which channel *names* a selection conditional can target (Rust's
-        ``EncodingValue`` variants, plus the ``fill -> color`` alias). Before
-        this (2026-09-11, batch-H close cycle 3), every channel class hand-set
-        whether ``"condition"`` belonged in its own ``_honored_kwargs`` -- a
-        second, manually-synced copy of the same yes/no answer that
-        vocabulary already encodes, and exactly how ``Fill``/``Stroke`` and
-        later ``Shape``/``StrokeDash`` drifted from it one channel at a time
-        (the batch's own H9/C2/C2b findings). Deriving the bit here instead
-        makes the two tables structurally unable to disagree again: a
-        subclass declares its role set WITHOUT ``condition`` (the role
-        constants in ``ferrum.encoding._honored`` no longer carry it either),
-        and this hook adds or removes the single bit from ``_honored_kwargs``
-        based on ``cls._channel_name`` once the class body has finished
-        executing (``__init_subclass__`` runs after every class-body
-        assignment, so both class attributes are already set).
-
-        Only reassigns ``_honored_kwargs`` when the derived bit actually
-        changes membership -- ``frozenset.__or__``/``__sub__`` always return a
-        *new* object, even as a no-op, which would silently break the several
-        channels that share one role-set object by identity (e.g.
-        ``fm.X._honored_kwargs is PRIMARY_POSITIONAL``,
-        ``tests/test_honored_single_source.py``). A channel whose derived bit
-        matches its class-body role set (the common case -- most roles carry
-        no ``condition`` and most channel names are not conditional targets)
-        keeps the exact object its class body assigned.
+        A subclass declares its role set without ``legend``, the legend's
+        ``title`` or ``condition``: ``legend``/``title`` follow the class's
+        ``_legend_surface`` and ``condition`` follows the conditional
+        vocabulary (``_channel_policy.channel_honors_condition``), so neither
+        fact is kept by hand beside its owner. See `_derive_honored`.
         """
         super().__init_subclass__(**kwargs)
         from ferrum.encoding._channel_policy import channel_honors_condition
 
-        should_honor = channel_honors_condition(cls._channel_name)
-        already_honors = "condition" in cls._honored_kwargs
-        if should_honor and not already_honors:
-            cls._honored_kwargs = cls._honored_kwargs | frozenset({"condition"})
-        elif already_honors and not should_honor:
-            cls._honored_kwargs = cls._honored_kwargs - frozenset({"condition"})
+        cls._honored_kwargs = _derive_honored(
+            cls._honored_kwargs,
+            cls._legend_surface,
+            channel_honors_condition(cls._channel_name),
+        )
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:
         # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.
@@ -507,28 +479,27 @@ class ChannelBase:
         self._validate()
 
         for k in self._kwargs:
-            if k not in self._honored_kwargs:
-                refused_template = _REFUSED_KWARGS.get((self._channel_name, k))
-                if refused_template is not None:
-                    raise ValueError(
-                        refused_template.format(
-                            channel=self.__class__.__name__, value=self._kwargs[k]
-                        )
-                    )
-                # `title=` on a channel with no legend surface (Opacity,
-                # FillOpacity, StrokeOpacity) is the same permanent fact as
-                # a legend dict/Legend() there (`_validate_legend_value`
-                # below): there is no legend to title. `_title_refused` is a
-                # direct, named class attribute stating that fact (see its
-                # docstring above) rather than inferred from an unrelated
-                # capability.
-                if k == "title" and self._title_refused:
-                    raise ValueError(
-                        _NO_LEGEND_MESSAGE.format(
-                            channel=self.__class__.__name__, kwarg="title", value=self._kwargs[k]
-                        )
-                    )
-                warn_once(self._channel_name, k, _honored_kwarg_message(self._channel_name, k))
+            if k in self._honored_kwargs:
+                continue
+            refusal = self._refusal_message(k)
+            if refusal is not None:
+                raise ValueError(refusal)
+            if k == "legend":
+                # No legend surface: `_validate_legend_value` has already
+                # refused every value except the silent None/False.
+                continue
+            warn_once(self._channel_name, k, _honored_kwarg_message(self._channel_name, k))
+
+    def _refusal_message(self, kwarg: str) -> str | None:
+        """Return the refusal for an un-honored *kwarg* that can never work here, or None."""
+        template = self._refused_kwargs.get(kwarg)
+        if template is None and kwarg == "title":
+            template = _NO_TITLE_MESSAGE
+        if template is None:
+            return None
+        return template.format(
+            channel=self.__class__.__name__, kwarg=kwarg, value=self._kwargs[kwarg]
+        )
 
     def _validate(self) -> None:
         """Enforce kwarg-value constraints; subclasses may override."""
@@ -553,18 +524,23 @@ class ChannelBase:
                 self._kwargs["stack"] = self._normalize_stack(stack)
         self._validate_legend_value()
 
+    def _explicit_scale_range(self) -> Any:
+        """Return the ``range`` of an explicit ``scale=`` kwarg, or ``None`` when it sets none."""
+        scale = self._kwargs.get("scale")
+        if scale is None:
+            return None
+        spec = _scale_to_dict(scale)
+        return spec.get("range") if isinstance(spec, dict) else None
+
     def _validate_legend_value(self) -> None:
         """Refuse a ``legend=`` value this channel's legend surface cannot honor (#123).
 
-        ``legend`` stays a member of every channel's ``_honored_kwargs`` (so
-        the harmless ``legend=None``/``legend=False`` "I want no legend"
-        idiom never warns), so this value-dependent check runs unconditionally
-        rather than through the honored/refused-kwarg membership gate above.
+        Value-dependent, so it runs for every channel rather than through the
+        honored-kwarg gate in ``__init__``.
 
         - ``None``/``False``: always silent, on every legend surface.
-        - ``_legend_surface == "none"`` (Opacity, FillOpacity, StrokeOpacity,
-          StrokeWidth, Angle): any other value is refused -- there is no
-          legend for a dict/``Legend(...)`` to configure.
+        - ``_legend_surface == "none"``: any other value is refused -- there
+          is no legend for a dict/``Legend(...)`` to configure.
         - An auxiliary-legend channel (`_aux_legend_channels`: Size, Shape,
           StrokeDash) whose legend value carries an explicit ``orient=``
           other than ``"none"`` is refused: an aux legend has no independent
@@ -653,9 +629,9 @@ class ChannelBase:
         `_emit_legend`; ``"cascade"`` (X, Y) routes through
         `_emit_legend_cascade_only` instead, so a bare ``None``/``False``
         cannot suppress a different channel's legend (see that function's
-        docstring); ``"none"`` (Opacity, FillOpacity, StrokeOpacity,
-        StrokeWidth, Angle) never emits anything -- `_validate_legend_value`
-        has already refused every value except the silent ``None``/``False``.
+        docstring); on ``"none"`` ``legend`` is not honored, so nothing is
+        emitted -- `_validate_legend_value` has already refused every value
+        except the silent ``None``/``False``.
 
         Keys are emitted in `_SPEC_DICT_ORDER` so the dict layout is
         stable regardless of ``frozenset`` iteration order.
@@ -664,11 +640,8 @@ class ChannelBase:
         for key in _SPEC_DICT_ORDER:
             if key not in self._honored_kwargs or key not in self._kwargs:
                 continue
-            if key == "legend":
-                if self._legend_surface == "cascade":
-                    _emit_legend_cascade_only(self._kwargs[key], out)
-                elif self._legend_surface == "own":
-                    _emit_legend(self._kwargs[key], out)
+            if key == "legend" and self._legend_surface == "cascade":
+                _emit_legend_cascade_only(self._kwargs[key], out)
                 continue
             handler = _SPEC_DICT_HANDLERS.get(key)
             if handler is None:

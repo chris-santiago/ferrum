@@ -151,8 +151,8 @@ _DELETED_MIRROR_LITERALS = (
     "_RASTER_AGGREGATES_NEEDING_FIELD",
     # #137/#176, wave 6B T9 cycle 4 (spec-review finding): the hand-typed
     # raster no-field hint in RenderConfig's and mark_raster's needs-field
-    # messages, replaced by render_config._raster_no_field_hint(), computed
-    # from transform_registry("raster") rather than mirrored as a literal.
+    # messages, now composed by _registry.require_aggregate_field() from
+    # transform_registry("raster") rather than mirrored as a literal.
     "'count'|'density'|'any'",
 )
 

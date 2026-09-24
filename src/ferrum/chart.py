@@ -94,6 +94,7 @@ from ferrum._facet import (
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
+from ferrum.encoding._aliases import set_layers_detail
 from ferrum.selection import ConditionalSpec
 
 
@@ -387,24 +388,24 @@ def _append_unique_by_name(seq: list, item: object) -> None:
 def _conditional_wire_channel_of(spec: object) -> Optional[str]:
     """Return the wire channel *spec* will serialize under, or ``None``.
 
-    A spec stamped by ``encode()`` carries its channel; one built by
-    ``sel.when(...)`` and handed straight to :meth:`Chart.conditional` carries
-    ``None`` and infers the channel from its ``if_selected`` branch at
-    serialization time (``ConditionalSpec.to_spec_dict``). This resolves the
-    same answer either way, so the collision check below sees the channel the
-    wire will actually carry rather than the one the declaration happened to
-    spell.
+    A spec stamped by ``encode()`` or :meth:`Chart.conditional` carries its
+    channel; an unstamped one infers it from its branches
+    (``selection._infer_conditional_channel``) exactly as
+    ``ConditionalSpec.to_spec_dict`` does, so the collision check sees the
+    channel the wire will actually carry.
 
     Returns ``None`` for anything that is not a ``ConditionalSpec`` --
     ``Chart.conditional()`` is annotated to accept any object, so the
     conditional list is not guaranteed homogeneous, and a foreign entry
     should not be treated as claiming a channel.
     """
-    from ferrum.selection import _resolve_channel
+    from ferrum.selection import _infer_conditional_channel
 
     if not isinstance(spec, ConditionalSpec):
         return None
-    return spec.channel if spec.channel is not None else _resolve_channel(spec.if_selected)
+    if spec.channel is not None:
+        return spec.channel
+    return _infer_conditional_channel(spec.if_selected, spec.if_not)
 
 
 def _channel_already_conditioned(chart: "Chart", wire: str) -> bool:
@@ -1816,6 +1817,11 @@ class Chart(
             declare=lambda n: f"encode({n}=...)",
         )
 
+        # `detail` is mark style on the wire and a layered chart's style is
+        # its own, so on a layered chart it is written into the layers.
+        if new._layers and "detail" in channels:
+            new._layers = set_layers_detail(new._layers, new._encoding["detail"])
+
         # Synthesize _facet whenever facet encoding channels are passed in this
         # call. This wires encode(facet_col=...) / encode(facet_row=...) /
         # encode(facet=...) to the same _facet path that .facet() uses.
@@ -3093,7 +3099,17 @@ class Chart(
 
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
-        mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
+        if resolved._layers is None:
+            mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
+        else:
+            # `#119`: a layered chart's style is its own (spec §4.8). Its
+            # `_mark_kwargs` is layer 0's, copied up by the clone that built
+            # it, and a chart-level `detail` is either layer 0's (a flat chart
+            # that became that layer) or already written into the layers by
+            # `encode()`. Neither is chart-wide, so neither reaches the wire
+            # here; each layer serializes its own in `_build_layers_list`.
+            mk = {}
+            enc.pop("detail", None)
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
         # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
@@ -3195,18 +3211,7 @@ class Chart(
             from ferrum._override_consume import apply_mark_style
 
             mk = apply_mark_style(mk, _override_payload, is_multi_mark=resolved._layers is not None)
-        # `#119`: on a layered chart, `mk` here is never a genuine chart-wide
-        # default -- `apply_mark_style` already refuses a mark_* override on
-        # a multi-mark chart above, so the only way `mk` is non-empty on a
-        # layered chart is layer 0's own kwargs, copied up by `Chart.__add__`
-        # (chart.py's `_clone()`-based LHS) or an equivalent desugar clone.
-        # Emitting it here would let Rust's per-layer fallback cascade it
-        # into every sibling layer that set no kwargs of its own (spec §4.8).
-        # Gating on `resolved._layers is None` makes this the single producer
-        # a layer's style is its own: a flat chart still emits its chart-wide
-        # style; a layered chart emits none, so each layer resolves from its
-        # own `mark_style` (or the theme) only.
-        if mk and resolved._layers is None:
+        if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:
             kw["layers"] = resolved._build_layers_list(serialized_layers)
@@ -3549,26 +3554,13 @@ class Chart(
         # this entry point cannot smuggle an unsupported channel past the
         # typed refusal and into serde.
         if isinstance(spec, ConditionalSpec):
-            # The vocabulary check runs on the channel this spec will actually
-            # serialize under -- the stamped one, or the one inferred from the
-            # branch value when unstamped. Checking only the stamped case would
-            # leave this entry point emitting exactly the conditionals the
-            # vocabulary refuses: `conditional(sel.when(fm.Shape(...)))` infers
-            # `shape` at serialization and would otherwise sail past.
-            # _conditional_wire_channel_of returns Optional[str] (None only
-            # for a non-ConditionalSpec, which this isinstance guard already
-            # excludes) but conditional_wire_channel takes str; _resolve_channel
-            # is total over a ConditionalSpec's if_selected, so this is never
-            # actually None here -- named explicitly rather than relying on
-            # the reader re-deriving that from the isinstance guard above.
+            # Resolve (and vocabulary-check) the channel once, here, and stamp
+            # it, so serialization uses the channel this declaration was
+            # checked under: a stamped spec's own, or the one its branches name.
             wire_source = _conditional_wire_channel_of(spec)
-            assert wire_source is not None, (
-                "a ConditionalSpec's wire channel is never unresolvable -- "
-                "_resolve_channel is total"
-            )
+            assert wire_source is not None
             wire = conditional_wire_channel(wire_source)
-            if spec.channel is not None:
-                spec = replace(spec, channel=wire)
+            spec = replace(spec, channel=wire)
             # Same one-conditional-per-wire-channel rule encode() enforces.
             if _channel_already_conditioned(new, wire):
                 raise ValueError(

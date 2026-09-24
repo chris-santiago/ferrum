@@ -11,13 +11,16 @@ use crate::transform::group_key::{
     materialize_groupby_col, refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::vocabulary::{FieldOperand, Vocabulary};
 
 /// The aggregate-function vocabulary shared by `Aggregate`, `JoinAggregate`,
-/// `DataAggregate`, `Bin(agg=)` and (as a declared subset) `Hex`.
+/// `DataAggregate`, `Bin(agg=)` and (as declared subsets) `Hex` and
+/// `Smooth(x_estimator=)`.
 ///
-/// Serde reads and writes it through [`AggFn::parse`]/[`AggFn::as_str`]
-/// (`try_from`/`into`), so the wire accepts exactly the spellings every PyO3
-/// door accepts, aliases included, and refuses with the same rendering.
+/// Serde reads and writes it through [`Vocabulary::parse_or_refuse`]/
+/// [`Vocabulary::as_str`] (`try_from`/`into`), so the wire accepts exactly the
+/// spellings every PyO3 door accepts, aliases included, and refuses with the
+/// same rendering.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "String", into = "&'static str")]
 pub(crate) enum AggFn {
@@ -34,91 +37,48 @@ pub(crate) enum AggFn {
     Distinct,
 }
 
-impl AggFn {
-    /// Every `AggFn` variant, in declaration order: the one list
-    /// [`AggFn::all`]/[`AggFn::parse`] derive from. [`AggFn::spellings`]'s
-    /// match has NO wildcard arm, so a variant added without a spelling fails
-    /// to COMPILE; `agg_fn_all_fns_round_trips_through_parse_and_serde`
-    /// proves every listed variant round-trips through `parse` and serde.
+impl Vocabulary for AggFn {
     /// Stable Rust has no derive-free way to prove this list names every
-    /// variant (that needs a crate like `strum`); the exhaustive match is the
-    /// strongest guard available without one.
-    const ALL_FNS: &'static [AggFn] = &[
-        AggFn::Mean,
-        AggFn::Sum,
-        AggFn::Count,
-        AggFn::Min,
-        AggFn::Max,
-        AggFn::Median,
-        AggFn::Variance,
-        AggFn::Stdev,
-        AggFn::Q1,
-        AggFn::Q3,
-        AggFn::Distinct,
+    /// variant; `spellings`'s exhaustive match plus
+    /// `agg_fn_all_fns_round_trips_through_parse_and_serde` are the guard.
+    const ALL: &'static [Self] = &[
+        Self::Mean,
+        Self::Sum,
+        Self::Count,
+        Self::Min,
+        Self::Max,
+        Self::Median,
+        Self::Variance,
+        Self::Stdev,
+        Self::Q1,
+        Self::Q3,
+        Self::Distinct,
     ];
 
-    /// Every accepted spelling of one variant: the canonical one first, then
-    /// its declared aliases (user ruling Q4: `var` for `variance`, `std` for
-    /// `stdev`). Exhaustive, no wildcard arm.
-    const fn spellings(self) -> &'static [&'static str] {
+    /// User ruling Q4: `var` aliases `variance`, `std` aliases `stdev`.
+    fn spellings(self) -> &'static [&'static str] {
         match self {
-            AggFn::Mean => &["mean"],
-            AggFn::Sum => &["sum"],
-            AggFn::Count => &["count"],
-            AggFn::Min => &["min"],
-            AggFn::Max => &["max"],
-            AggFn::Median => &["median"],
-            AggFn::Variance => &["variance", "var"],
-            AggFn::Stdev => &["stdev", "std"],
-            AggFn::Q1 => &["q1"],
-            AggFn::Q3 => &["q3"],
-            AggFn::Distinct => &["distinct"],
+            Self::Mean => &["mean"],
+            Self::Sum => &["sum"],
+            Self::Count => &["count"],
+            Self::Min => &["min"],
+            Self::Max => &["max"],
+            Self::Median => &["median"],
+            Self::Variance => &["variance", "var"],
+            Self::Stdev => &["stdev", "std"],
+            Self::Q1 => &["q1"],
+            Self::Q3 => &["q3"],
+            Self::Distinct => &["distinct"],
         }
     }
+}
 
-    /// The canonical spelling: what serde writes and what a parsed alias
-    /// normalizes to.
-    const fn as_str(self) -> &'static str {
-        self.spellings()[0]
-    }
-
-    /// Every accepted spelling, aliases included, in [`AggFn::ALL_FNS`] order
-    /// with each alias right after its canonical name. Read by every door's
-    /// parser, the registry's `methods` for `bin`/`aggregate`/
-    /// `join_aggregate`, and [`AggFn::accepted_values`].
-    pub(crate) fn all() -> Vec<&'static str> {
-        Self::all_where(|_| true)
-    }
-
-    /// The spellings (aliases included, [`AggFn::all`] order) of every
-    /// variant `keep` selects. How the registry derives a kind's
-    /// `methods_needing_field` from this vocabulary instead of listing it.
-    pub(crate) fn all_where(keep: impl Fn(Self) -> bool) -> Vec<&'static str> {
-        Self::ALL_FNS
-            .iter()
-            .copied()
-            .filter(|&f| keep(f))
-            .flat_map(|f| f.spellings().iter().copied())
-            .collect()
-    }
-
+impl AggFn {
     /// Whether this fn can run without a field: only `count`, through
     /// `Aggregate`'s `count()` shorthand (field `""` or `"*"` counts rows).
     /// Every other fn reads a column, so `AggregateOp` refuses it field-less.
     pub(crate) const fn counts_rows_without_field(self) -> bool {
         matches!(self, AggFn::Count)
-    }
-
-    /// Parse any of [`AggFn::all`]'s spellings; an alias resolves to its
-    /// canonical variant. `None` for anything else.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        Self::ALL_FNS.iter().copied().find(|f| f.spellings().contains(&s))
-    }
-
-    /// The `a|b|c` rendering of [`AggFn::all`] used by every refusal built
-    /// from it, so the accepted set and the error text cannot drift apart.
-    pub(crate) fn accepted_values() -> String {
-        Self::all().join("|")
     }
 }
 
@@ -126,8 +86,7 @@ impl TryFrom<String> for AggFn {
     type Error = String;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::parse(&s)
-            .ok_or_else(|| format!("unknown fn '{s}'; expected {}", Self::accepted_values()))
+        Self::parse_or_refuse("fn", &s)
     }
 }
 
@@ -139,33 +98,42 @@ impl From<AggFn> for &'static str {
 
 /// `Hex`'s aggregate vocabulary: a declared subset of [`AggFn`], not a
 /// parallel vocabulary. Spellings (aliases included) come from the `AggFn`
-/// each variant maps to, so `Hex(aggregate="stdev")` and `Bin(agg="std")`
-/// read the same table. Lives beside `AggFn` because it is a view of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// each variant maps to, and [`Vocabulary::ALL`] follows `AggFn`'s declared
+/// order, so `Hex(aggregate="stdev")` and `Bin(agg="std")` read the same
+/// table and list it the same way. `HexSpec.aggregate` stores it typed; serde
+/// goes through [`Vocabulary::parse_or_refuse`]/[`Vocabulary::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
 pub(crate) enum HexAggregate {
-    Count,
     Mean,
     Sum,
+    #[default]
+    Count,
     Min,
     Max,
     Median,
-    Stdev,
     Variance,
+    Stdev,
 }
 
-impl HexAggregate {
-    /// Every variant, in the order the refusal message lists them.
-    pub(crate) const ALL: [Self; 8] = [
-        Self::Count,
+impl Vocabulary for HexAggregate {
+    const ALL: &'static [Self] = &[
         Self::Mean,
         Self::Sum,
+        Self::Count,
         Self::Min,
         Self::Max,
         Self::Median,
-        Self::Stdev,
         Self::Variance,
+        Self::Stdev,
     ];
 
+    fn spellings(self) -> &'static [&'static str] {
+        self.agg_fn().spellings()
+    }
+}
+
+impl HexAggregate {
     /// The `AggFn` this variant is. Exhaustive, no wildcard arm: a variant
     /// without a mapping (and so without a spelling) fails to compile.
     const fn agg_fn(self) -> AggFn {
@@ -181,53 +149,50 @@ impl HexAggregate {
         }
     }
 
-    /// This variant's accepted spellings (`AggFn`'s: canonical first, then
-    /// aliases).
-    pub(crate) const fn spellings(self) -> &'static [&'static str] {
-        self.agg_fn().spellings()
-    }
+}
 
-    /// Every accepted spelling, aliases included, in [`HexAggregate::ALL`]
-    /// order.
-    pub(crate) fn all() -> Vec<&'static str> {
-        subset_spellings(&Self::ALL, Self::agg_fn)
-    }
-
-    /// Parse any spelling `AggFn` accepts, if its variant is in this subset.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        subset_parse(&Self::ALL, Self::agg_fn, s)
-    }
-
-    /// The `a|b|c` rendering of [`HexAggregate::all`] used by both refusals.
-    pub(crate) fn accepted_values() -> String {
-        Self::all().join("|")
-    }
-
-    /// Whether this aggregate reads a `field`: `AggFn`'s own fact, so the
-    /// row-counting exception is stated once.
-    pub(crate) const fn needs_field(self) -> bool {
+impl FieldOperand for HexAggregate {
+    /// `AggFn`'s own fact, so the row-counting exception is stated once.
+    fn needs_field(self) -> bool {
         !self.agg_fn().counts_rows_without_field()
     }
 }
 
+impl TryFrom<String> for HexAggregate {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse_or_refuse("aggregate", &s)
+    }
+}
+
+impl From<HexAggregate> for &'static str {
+    fn from(a: HexAggregate) -> Self {
+        a.as_str()
+    }
+}
+
 /// `Smooth(x_estimator=)`'s vocabulary: the per-bin estimator, a declared
-/// subset of [`AggFn`] on the [`HexAggregate`] pattern. Spellings come from
-/// `AggFn` through the exhaustive [`XEstimator::agg_fn`] mapping, parsing
-/// goes through `AggFn::parse`, and the refusal uses the shared `a|b|c`
-/// rendering.
+/// subset of [`AggFn`] on the [`HexAggregate`] pattern (spellings from the
+/// exhaustive [`XEstimator::agg_fn`] mapping, `AggFn`'s declared order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XEstimator {
     Mean,
-    Median,
     Sum,
     Min,
     Max,
+    Median,
+}
+
+impl Vocabulary for XEstimator {
+    const ALL: &'static [Self] = &[Self::Mean, Self::Sum, Self::Min, Self::Max, Self::Median];
+
+    fn spellings(self) -> &'static [&'static str] {
+        self.agg_fn().spellings()
+    }
 }
 
 impl XEstimator {
-    /// Every variant, in the order the refusal message lists them.
-    pub(crate) const ALL: [Self; 5] = [Self::Mean, Self::Median, Self::Sum, Self::Min, Self::Max];
-
     /// The `AggFn` this variant is: what `SmoothSpec.x_estimator` stores.
     /// Exhaustive, no wildcard arm.
     pub(crate) const fn agg_fn(self) -> AggFn {
@@ -239,44 +204,16 @@ impl XEstimator {
             Self::Max => AggFn::Max,
         }
     }
-
-    /// Every accepted spelling, in [`XEstimator::ALL`] order.
-    pub(crate) fn all() -> Vec<&'static str> {
-        subset_spellings(&Self::ALL, Self::agg_fn)
-    }
-
-    /// Parse any spelling `AggFn` accepts, if its variant is in this subset.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        subset_parse(&Self::ALL, Self::agg_fn, s)
-    }
-
-    /// The `a|b|c` rendering of [`XEstimator::all`] used by the refusal.
-    pub(crate) fn accepted_values() -> String {
-        Self::all().join("|")
-    }
 }
 
 /// `ferrum._core.x_estimator_accepted_values()`: every `Smooth(x_estimator=)`
-/// spelling, in [`XEstimator::accepted_values`] order, so Python reads the
+/// spelling, in [`Vocabulary::accepted_values`] order, so Python reads the
 /// vocabulary the constructor parses instead of mirroring it. Registered in
 /// `lib.rs`, typed in `src/ferrum/_core.pyi`; mirrors
 /// `interpolate_accepted_values`.
-#[pyo3::pyfunction]
+#[pyfunction]
 pub(crate) fn x_estimator_accepted_values() -> Vec<String> {
     XEstimator::all().into_iter().map(str::to_string).collect()
-}
-
-/// The spellings (aliases included) of a declared `AggFn` subset, in the
-/// subset's own order. Shared by [`HexAggregate`] and [`XEstimator`].
-fn subset_spellings<T: Copy>(members: &[T], agg_fn: fn(T) -> AggFn) -> Vec<&'static str> {
-    members.iter().flat_map(|&m| agg_fn(m).spellings().iter().copied()).collect()
-}
-
-/// Parse `s` through `AggFn`'s one table, then keep it only if its variant is
-/// a member of the subset. Shared by [`HexAggregate`] and [`XEstimator`].
-fn subset_parse<T: Copy>(members: &[T], agg_fn: fn(T) -> AggFn, s: &str) -> Option<T> {
-    let f = AggFn::parse(s)?;
-    members.iter().copied().find(|&m| agg_fn(m) == f)
 }
 
 /// An aggregate op's source column, resolved once per batch.
@@ -1051,16 +988,16 @@ mod tests {
         }
     }
 
-    // ── AggFn vocabulary exhaustiveness (cycle-2 review) ─────────────────────
+    // ── AggFn vocabulary exhaustiveness ─────────────────────
 
     /// Cross-checks `AggFn`'s spellings against `parse` and serde for every
-    /// entry in `ALL_FNS`: the canonical spelling and every alias parse to
+    /// entry in `ALL`: the canonical spelling and every alias parse to
     /// the variant, serde writes the canonical spelling and reads every
     /// spelling back to the same variant. `spellings`'s match is exhaustive
     /// (no wildcard), so a variant without a spelling fails to COMPILE.
     #[test]
     fn agg_fn_all_fns_round_trips_through_parse_and_serde() {
-        for &f in AggFn::ALL_FNS {
+        for &f in AggFn::ALL {
             let canonical = f.as_str();
             assert_eq!(
                 serde_json::to_string(&f).unwrap(),
@@ -1073,7 +1010,7 @@ mod tests {
                 assert_eq!(read, f, "serde must read '{spelling}' as {f:?}");
             }
         }
-        let every: usize = AggFn::ALL_FNS.iter().map(|f| f.spellings().len()).sum();
+        let every: usize = AggFn::ALL.iter().map(|f| f.spellings().len()).sum();
         assert_eq!(AggFn::all().len(), every, "AggFn::all() lists every spelling once");
     }
 
@@ -1131,14 +1068,14 @@ mod tests {
     #[test]
     fn x_estimator_accepted_values_pyfunction_equals_the_subset_spellings() {
         let published = x_estimator_accepted_values();
-        assert_eq!(published, ["mean", "median", "sum", "min", "max"]);
+        assert_eq!(published, ["mean", "sum", "min", "max", "median"]);
         assert_eq!(published.join("|"), XEstimator::accepted_values());
         for value in &published {
             let parsed = XEstimator::parse(value).expect("every published spelling must parse");
             assert!(parsed.agg_fn().spellings().contains(&value.as_str()));
         }
         for x in XEstimator::ALL {
-            for spelling in x.agg_fn().spellings() {
+            for spelling in x.spellings() {
                 assert!(published.iter().any(|p| p == spelling), "'{spelling}' of {x:?} unpublished");
             }
         }
@@ -1162,11 +1099,21 @@ mod tests {
         assert_eq!(HexAggregate::parse("var"), Some(HexAggregate::Variance));
         assert_eq!(
             HexAggregate::accepted_values(),
-            "count|mean|sum|min|max|median|stdev|std|variance|var"
+            "mean|sum|count|min|max|median|variance|var|stdev|std"
         );
         let needs: Vec<_> =
             HexAggregate::ALL.iter().filter(|h| !h.needs_field()).map(|h| h.spellings()[0]).collect();
         assert_eq!(needs, vec!["count"], "count is hex's only no-field aggregate");
+    }
+
+    /// A declared subset lists its spellings in `AggFn`'s declared order, so
+    /// its refusal text is its parent's text filtered, never reordered.
+    #[test]
+    fn declared_subsets_list_in_agg_fn_order() {
+        let hex: Vec<AggFn> = HexAggregate::ALL.iter().map(|h| h.agg_fn()).collect();
+        assert_eq!(HexAggregate::all(), AggFn::all_where(|f| hex.contains(&f)));
+        let xe: Vec<AggFn> = XEstimator::ALL.iter().map(|x| x.agg_fn()).collect();
+        assert_eq!(XEstimator::all(), AggFn::all_where(|f| xe.contains(&f)));
     }
 
     // ── FA-3: integer groupby columns ─────────────────────────────────────────
@@ -1670,6 +1617,29 @@ mod tests {
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1, "the whole-batch group survives an empty batch");
         assert_eq!(col_f64(&out, "n")[0], 0.0);
+    }
+
+    /// `count` over field `"*"` is the row-counting shorthand, like `""`: it
+    /// counts every row of the group, nulls included, with no column lookup.
+    /// Only `count` gets the shorthand; another fn over `"*"` looks for a
+    /// column named `*` and refuses.
+    #[test]
+    fn aggregate_count_over_star_counts_every_row() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0), None, Some(3.0)], vec!["a", "a", "b"]);
+        let spec = |field: &str, fn_: AggFn| AggregateSpec {
+            ops: vec![AggregateOp { field: field.into(), fn_, as_: "n".into() }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let star = apply(&spec("*", AggFn::Count), &batch).unwrap();
+        assert_eq!(col_f64(&star, "n"), vec![2.0, 1.0], "group a has two rows, one null");
+        let non_null = apply(&spec("v", AggFn::Count), &batch).unwrap();
+        assert_eq!(col_f64(&non_null, "n"), vec![1.0, 1.0], "control: a column count skips the null");
+        let err = apply(&spec("*", AggFn::Mean), &batch).unwrap_err();
+        pyo3::Python::attach(|py| {
+            assert_eq!(err.value(py).to_string(), "stat_aggregate: column '*' not found");
+        });
     }
 
 }

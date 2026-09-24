@@ -883,10 +883,12 @@ class TestInsetBoundClassifierShapes:
             ("bare int", 1, 1.0),
             ("bare int 0", 0, 0.0),
             ("norm()", norm(0.5), 0.5),
-            ("px()", px(10), {"px": 10}),
-            ("NormCoord int", norm(1), 1),
-            ("PixelCoord int", px(10), {"px": 10}),
-            ("NormCoord np", norm(np.float64(0.5)), np.float64(0.5)),
+            # Wrapped values reach the wire as floats too (the one
+            # real-number predicate coerces every accepted number).
+            ("px()", px(10), {"px": 10.0}),
+            ("NormCoord int", norm(1), 1.0),
+            ("PixelCoord int", px(10), {"px": 10.0}),
+            ("NormCoord np", norm(np.float64(0.5)), 0.5),
             ("np.float32", np.float32(0.25), 0.25),
             ("np.int64", np.int64(0), 0.0),
             ("Decimal", decimal.Decimal("0.5"), 0.5),
@@ -1071,8 +1073,7 @@ def _numpy_scalar_samples() -> dict:
     return samples
 
 
-# The fourteen numpy scalar kinds the closed allowlist in
-# _coerce_bare_inset_bound accepts: np.integer/np.floating concrete leaves,
+# The fourteen numpy scalar kinds `ferrum._validate.is_real_number` accepts: np.integer/np.floating concrete leaves,
 # excluding np.bool_ (not a bool subclass but explicitly excluded) and
 # np.timedelta64 (an np.signedinteger subclass whose float() raises).
 _ACCEPTED_NUMPY_NORM_KINDS = frozenset(
@@ -1094,15 +1095,9 @@ _ACCEPTED_NUMPY_NORM_KINDS = frozenset(
     }
 )
 
-# Under a PixelCoord-wrapped (px-kind) bound, the bare-branch allowlist
-# above is never consulted at all -- PixelCoord.value reaches
-# validate_pixel_value raw, which has no numpy-awareness of its own
-# (pre-existing, unrelated to this classifier's fix). Only np.float64
-# passes: it is the one numpy scalar type that is a genuine Python `float`
-# subclass (`issubclass(np.float64, float)` is True; no numpy integer type
-# subclasses Python `int`), so it clears validate_pixel_value's plain
-# `isinstance(value, (int, float))` check without any coercion at all.
-_ACCEPTED_NUMPY_PX_KINDS = frozenset({"float64"})
+# A PixelCoord-wrapped (px-kind) bound accepts the same numpy kinds: both
+# kinds ask the one real-number predicate (`ferrum._validate.is_real_number`).
+_ACCEPTED_NUMPY_PX_KINDS = _ACCEPTED_NUMPY_NORM_KINDS
 
 
 class TestInsetBoundNumpyScalarMatrix:
@@ -1147,7 +1142,7 @@ class TestInsetBoundNumpyScalarMatrix:
             # failure with no type name in it.
             assert "not " in str(excinfo.value)
 
-    def test_px_kind_accepts_only_np_float64(self, numpy_samples):
+    def test_px_kind_accepts_the_numpy_integer_and_floating_kinds(self, numpy_samples):
         for kind, value in numpy_samples.items():
             if kind not in _ACCEPTED_NUMPY_PX_KINDS:
                 continue

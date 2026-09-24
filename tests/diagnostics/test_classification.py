@@ -1013,7 +1013,7 @@ def test_calibration_visualizer_compare_refusals_match_the_curve_visualizers():
     """``compare=``'s malformed-input refusals come from the shared owner.
 
     Routing ``fit`` through ``_build_compare_source``'s delegation to
-    ``ModelSource.from_base_and_compare`` (#214) is what buys the
+    ``ModelSource._from_base_and_compare`` (#214) is what buys the
     reserved-``"base"`` guard and the non-dict refusal for free; these two
     pins fail if the class grows its own private resolution instead.
     """

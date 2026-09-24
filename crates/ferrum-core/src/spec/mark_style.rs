@@ -1,3 +1,4 @@
+use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Per-mark constant style overrides. Phase 8a fields cover all kwargs accepted
@@ -198,8 +199,76 @@ pub struct MarkKwargsSpec {
     pub value_axis: Option<crate::spec::position::StackValueAxis>,
 }
 
+/// Every `MarkKwargsSpec` wire key, in declaration order: the field list
+/// serde derives for the struct. Read by handing the derived `Deserialize` a
+/// deserializer that records the `fields` serde passes to
+/// `deserialize_struct` and stops, so the list cannot drift from the struct.
+pub(crate) fn mark_kwargs_field_names() -> &'static [&'static str] {
+    use serde::de::{Error, Visitor};
+
+    struct FieldTracer<'a>(&'a mut &'static [&'static str]);
+
+    impl<'de> serde::Deserializer<'de> for FieldTracer<'_> {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(Error::custom("FieldTracer reads a struct's field names only"))
+        }
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(Error::custom("field names recorded"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+            identifier ignored_any
+        }
+    }
+
+    let mut fields: &'static [&'static str] = &[];
+    // The tracer always errs once it has the list; the list is the result.
+    let _ = MarkKwargsSpec::deserialize(FieldTracer(&mut fields));
+    fields
+}
+
+/// `ferrum._core.mark_kwargs_fields()`: [`mark_kwargs_field_names`], so
+/// Python reads the mark-kwargs wire keys instead of parsing this file.
+/// Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn mark_kwargs_fields() -> Vec<String> {
+    mark_kwargs_field_names().iter().map(|f| f.to_string()).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    /// Every traced name is a real field: a wrong-typed value under it is
+    /// refused, where an unknown key would be ignored (the struct does not
+    /// deny unknown fields). The reverse holds by construction: the list is
+    /// serde's own. `size`/`value_axis` bracket the declaration order.
+    #[test]
+    fn mark_kwargs_field_names_are_the_structs_fields() {
+        let names = super::mark_kwargs_field_names();
+        assert_eq!(names.first(), Some(&"size"));
+        assert_eq!(names.last(), Some(&"value_axis"));
+        for name in names {
+            let json = serde_json::json!({ *name: [[[]]] });
+            assert!(
+                serde_json::from_value::<super::MarkKwargsSpec>(json).is_err(),
+                "'{name}' is not a MarkKwargsSpec field"
+            );
+        }
+        let unknown = serde_json::json!({ "not_a_field": [[[]]] });
+        assert!(serde_json::from_value::<super::MarkKwargsSpec>(unknown).is_ok(), "control");
+        assert_eq!(super::mark_kwargs_fields(), names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+    }
+
     use super::*;
     use crate::spec::position::StackValueAxis;
 

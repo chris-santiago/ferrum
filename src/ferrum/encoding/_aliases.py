@@ -14,6 +14,8 @@ that already populated the target wins over a later one (the later one then sees
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 # The alias TABLE itself lives in the sibling routing module
 # (``_channel_policy``, the zero-import leaf that owns every other
 # per-channel-name disposition) and is re-exported here, where the loop that
@@ -190,8 +192,6 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
     exists to eliminate). Does not mutate *enc*; returns the
     (possibly-modified) *mk*.
     """
-    from ferrum._warn import warn_once
-
     detail_ch = enc.get("detail")
     if detail_ch is None:
         return mk
@@ -200,13 +200,44 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
         return mk
     mk.setdefault("detail", field)
     if mark not in _DETAIL_CONSUMING_MARKS:
-        warn_once(
-            "encoding",
-            "detail",
-            message=(
-                f"encode(detail=...) is accepted but ignored by mark_{mark or 'point'}; "
-                "only mark_line, mark_area, and mark_polygon read the detail "
-                "channel for per-group splitting."
-            ),
-        )
+        _warn_detail_ignored(mark)
     return mk
+
+
+def _warn_detail_ignored(mark: str | None) -> None:
+    from ferrum._warn import warn_once
+
+    warn_once(
+        "encoding",
+        "detail",
+        message=(
+            f"encode(detail=...) is accepted but ignored by mark_{mark or 'point'}; "
+            "only mark_line, mark_area, and mark_polygon read the detail "
+            "channel for per-group splitting."
+        ),
+    )
+
+
+def set_layers_detail(layers: list, detail_ch: object) -> list:
+    """Return *layers* with *detail_ch* as the ``detail`` of every layer whose mark reads it.
+
+    ``encode(detail=...)`` on an already-layered chart. A layered chart emits no
+    chart-level ``mark_style`` (a layer's style is its own), and ``detail`` is
+    not a wire encoding channel a layer could inherit, so the channel is written
+    into each consuming layer's own encoding, replacing any ``detail`` the layer
+    had: the latest declaration wins on every layer. Layers whose mark ignores
+    ``detail`` are left alone; when no layer reads it, the flat chart's
+    "accepted but ignored" warning fires once.
+
+    A ``detail`` declared on a flat chart before it became a layer is not
+    routed here: it is already in that layer's own encoding.
+    """
+    if not any(layer.mark in _DETAIL_CONSUMING_MARKS for layer in layers):
+        _warn_detail_ignored(layers[0].mark if layers else None)
+        return layers
+    return [
+        replace(layer, encoding={**layer.encoding, "detail": detail_ch})
+        if layer.mark in _DETAIL_CONSUMING_MARKS
+        else layer
+        for layer in layers
+    ]

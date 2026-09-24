@@ -14,6 +14,7 @@ pub(crate) mod kde;
 pub(crate) mod kde_2d;
 pub(crate) mod smooth;
 pub(crate) mod aggregate;
+pub(crate) mod vocabulary;
 pub(crate) mod summary;
 pub(crate) mod outliers;
 pub(crate) mod error_extent;

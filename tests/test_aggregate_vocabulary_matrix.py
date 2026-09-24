@@ -32,8 +32,8 @@ where rust-coder would insert the two new aliases inside that
 declaration-ordered list was not yet decided. Phase 2 landed the order --
 each alias sits immediately after its canonical spelling
 (``mean|sum|count|min|max|median|variance|var|stdev|std|q1|q3|distinct`` for
-``AggFn``, ``count|mean|sum|min|max|median|stdev|std|variance|var`` for
-``HexAggregate``) -- so phase 3 tightened all four assertions to full
+``AggFn``, and ``HexAggregate``, a declared ``AggFn`` subset, lists in the
+same order: ``mean|sum|count|min|max|median|variance|var|stdev|std``) -- so phase 3 tightened all four assertions to full
 ordered-string equality.
 
 Cycle 3 (quality-review remediation): every field-requirement population
@@ -61,7 +61,7 @@ letting a render-time refusal hide the difference.
 Cycle 8 (quality-review remediation): ``x_estimator_accepted_values()`` now
 exists, so ``_X_ESTIMATOR_METHODS`` reads it live like every other
 population in this file. ``mark_smooth``'s throwaway-``Smooth``-construction
-gate is replaced by ``validate_x_estimator_kwarg``, shared with ``lmplot``.
+gate is replaced by ``validate_optional_choice``, shared with ``lmplot``.
 ``fm.Smooth`` is the raw PyO3 pyclass with no Python wrapper, so it is not
 one of that gate's callers -- its own constructor is the third door's gate,
 unreachable from Python source. A non-string ``x_estimator`` now refuses by
@@ -70,13 +70,13 @@ caller); ``fm.Smooth`` keeps its own PyO3 ``TypeError`` for a non-string,
 documented as the one gap this task's gate cannot close without editing
 ``crates/``.
 
-Cycle 9 (orchestrator ruling reversed): ``validate_x_estimator_kwarg`` no
+Cycle 9 (orchestrator ruling reversed): ``validate_optional_choice`` no
 longer hand-rebuilds ``fm.Smooth``'s own Rust text for a bad string. The
 wave constraint ("every refusal names the public entry the caller invoked")
 outranks the three-doors-agree-on-text invariant cycle 8 kept, so
 ``mark_smooth``/``lmplot`` now render ``validate_choice``'s usual door-named
 wording for any non-member value, string or not -- the same shape
-``validate_interpolate_kwarg`` already used. ``fm.Smooth``'s own Rust text
+``validate_optional_choice`` already used. ``fm.Smooth``'s own Rust text
 is unaffected (it has no Python wrapper to gate through). The matrix's
 invariant is now "each door names itself, and all three render the same
 accepted set" rather than "identical text across all three."
@@ -151,7 +151,7 @@ _RASTER_TARGET = _RASTER_METHODS  # unaffected: raster has no std/var overlap
 # against the derived target sets, so a future re-ordering fails this file
 # loudly instead of silently going stale.
 _STAT_JOINED = "mean|sum|count|min|max|median|variance|var|stdev|std|q1|q3|distinct"
-_HEX_JOINED = "count|mean|sum|min|max|median|stdev|std|variance|var"
+_HEX_JOINED = "mean|sum|count|min|max|median|variance|var|stdev|std"
 _RASTER_JOINED = "count|density|mean|sum|any"
 assert frozenset(_STAT_JOINED.split("|")) == _STAT_ALL
 assert frozenset(_HEX_JOINED.split("|")) == _HEX_TARGET
@@ -322,7 +322,7 @@ def test_raster_door(spelling, field_present):
     elif target == "refuse_field":
         with pytest.raises(ValueError) as exc:
             fm.Raster("x", "y", **kwargs)
-        assert str(exc.value) == f"Raster: aggregate='{spelling}' requires `field`"
+        assert str(exc.value) == f"Raster: aggregate='{spelling}' requires field"
     else:
         with pytest.raises(ValueError) as exc:
             fm.Raster("x", "y", **kwargs)
@@ -332,9 +332,17 @@ def test_raster_door(spelling, field_present):
 
 
 # ---------------------------------------------------------------------------
-# mark_hex(aggregate=) -- Python door, validate_choice wording, deferred to
-# .to_svg() (desugar_hex only runs once x/y are encoded).
+# mark_hex(aggregate=) -- Python door, validate_choice wording. The vocabulary
+# is checked eagerly at call time like mark_raster; the needs-field rule at
+# resolution, since a color encoding may supply the field.
 # ---------------------------------------------------------------------------
+
+
+_HEX_NO_FIELD = "|".join(
+    f"'{m}'"
+    for m in transform_registry("hex")["methods"]
+    if m not in transform_registry("hex")["methods_needing_field"]
+)
 
 
 @pytest.fixture()
@@ -358,16 +366,22 @@ def _hex_render_svg(df: pl.DataFrame, aggregate: str, field: str | None = "v") -
 def test_mark_hex_door(hex_df, spelling, field_present):
     field = "v" if field_present else None
     target = _hex_target(spelling, field_present)
-    chart = fm.Chart(hex_df).mark_hex(aggregate=spelling, field=field).encode(x="x", y="y")
     if target == "accept":
-        chart.to_svg()
+        fm.Chart(hex_df).mark_hex(aggregate=spelling, field=field).encode(x="x", y="y").to_svg()
     elif target == "refuse_field":
+        # Declared, then refused at resolution: `.encode(color=...)` could
+        # still have supplied the field.
+        chart = fm.Chart(hex_df).mark_hex(aggregate=spelling, field=field).encode(x="x", y="y")
         with pytest.raises(ValueError) as exc:
             chart.to_svg()
-        assert str(exc.value) == f"mark_hex aggregate={spelling!r} requires field=..."
+        assert str(exc.value) == (
+            f"mark_hex: aggregate={spelling!r} requires field=... (the "
+            f"column to aggregate); pass field=... or use "
+            f"aggregate={_HEX_NO_FIELD}, which need no field."
+        )
     else:
         with pytest.raises(ValueError) as exc:
-            chart.to_svg()
+            fm.Chart(hex_df).mark_hex(aggregate=spelling, field=field)
         assert str(exc.value) == _validate_choice_text(
             "mark_hex", "aggregate", _HEX_TARGET, spelling
         )
@@ -452,7 +466,7 @@ def test_render_config_door(spelling, field_present):
             fm.RenderConfig(**kwargs)
         assert str(exc.value) == (
             f"RenderConfig: raster_aggregate={spelling!r} requires raster_field=... (the "
-            f"column to aggregate); pass raster_field= or use "
+            f"column to aggregate); pass raster_field=... or use "
             f"raster_aggregate='count'|'density'|'any', which need no field."
         )
     else:
@@ -668,7 +682,7 @@ def test_interpolate_none_is_unset_and_renders_like_the_default_on_every_door(do
 # it, so it keeps its own Rust text ("Smooth: unknown x_estimator '...';
 # expected a|b|c") for any bad string, and its own raw PyO3 TypeError for a
 # non-string. mark_smooth and lmplot both refuse at declaration through
-# validate_x_estimator_kwarg, naming themselves for ANY non-member value,
+# validate_optional_choice, naming themselves for ANY non-member value,
 # string or not (the wave constraint -- every new refusal names the public
 # entry the caller invoked -- outranks matching fm.Smooth's own wording).
 # The cross-door invariant is no longer "identical text": it is "each door
@@ -742,7 +756,7 @@ def test_smooth_x_estimator_every_declared_spelling_accepted(door, spelling):
 def test_smooth_refused_with_its_own_rust_text(bad):
     """Refused at declaration, in fm.Smooth's own Rust constructor text --
     unaffected by the wave-constraint ruling, since fm.Smooth has no Python
-    wrapper for validate_x_estimator_kwarg to gate through."""
+    wrapper for validate_optional_choice to gate through."""
     expected = f"Smooth: unknown x_estimator {bad!r}; expected {_X_ESTIMATOR_JOINED}"
     with pytest.raises(ValueError) as exc:
         _smooth_x_estimator_declare("Smooth", bad)

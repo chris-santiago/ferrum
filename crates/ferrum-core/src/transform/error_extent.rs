@@ -11,6 +11,7 @@ use crate::transform::group_key::{
     refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::vocabulary::Vocabulary;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +20,23 @@ pub(crate) enum ErrorMethod {
     Stderr,
     Stdev,
     Iqr,
+}
+
+/// `ErrorExtent(method=)`'s vocabulary: [`PyErrorExtent::new`] parses
+/// through it and `registry::entry_for_kind("error_extent")` publishes it, so
+/// the door accepts exactly the declared spellings. The spellings equal
+/// serde's lowercase variant names, which the wire reads.
+impl Vocabulary for ErrorMethod {
+    const ALL: &'static [Self] = &[Self::Ci, Self::Stderr, Self::Stdev, Self::Iqr];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Ci => &["ci"],
+            Self::Stderr => &["stderr"],
+            Self::Stdev => &["stdev"],
+            Self::Iqr => &["iqr"],
+        }
+    }
 }
 
 fn default_seed() -> u64 { 0 }
@@ -277,17 +295,6 @@ use pyo3::prelude::*;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyErrorExtent(pub(crate) crate::transform::core::TransformSpec);
 
-/// The single source of truth for `ErrorExtent`'s free-string `method`
-/// vocabulary — read by [`PyErrorExtent::new`]'s error message and by
-/// `registry::entry_for_kind("error_extent")`'s `methods` list, mirroring the
-/// `smooth::METHODS` / `kde::KERNELS` / `qq::DISTRIBUTIONS` precedent (R1
-/// design finding 1: this entry was a hand-copied literal in the registry
-/// with no guard). The match arms below are the enforcement site; a value
-/// here without an arm is caught by
-/// `error_extent_methods_accepted_and_bogus_method_rejected`
-/// (`registry/tests.rs`), which calls through the real PyO3 constructor.
-pub(crate) const METHODS: &[&str] = &["ci", "stderr", "stdev", "iqr"];
-
 #[pymethods]
 impl PyErrorExtent {
     #[new]
@@ -303,18 +310,8 @@ impl PyErrorExtent {
         if field.is_empty() {
             return Err(PyValueError::new_err("ErrorExtent: field must be non-empty"));
         }
-        let parsed = match method {
-            "ci" => ErrorMethod::Ci,
-            "stderr" => ErrorMethod::Stderr,
-            "stdev" => ErrorMethod::Stdev,
-            "iqr" => ErrorMethod::Iqr,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "ErrorExtent: unknown method '{other}'; expected {}",
-                    METHODS.join("|"),
-                )))
-            }
-        };
+        let parsed = ErrorMethod::parse_or_refuse("method", method)
+            .map_err(|e| PyValueError::new_err(format!("ErrorExtent: {e}")))?;
         if matches!(parsed, ErrorMethod::Ci) && n_boot == 0 {
             return Err(PyValueError::new_err(
                 "ErrorExtent: n_boot must be > 0 when method='ci'",

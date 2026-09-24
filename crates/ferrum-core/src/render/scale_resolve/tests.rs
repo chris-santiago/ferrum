@@ -701,13 +701,9 @@ fn shape_scale_unknown_range_entry_refuses() {
     );
 }
 
-/// #123 (rust-quality-review cycle-1 finding): a hand-built range that mixes
-/// in a NON-STRING entry (e.g. a number where a shape name belongs) must
-/// also refuse — `explicit_ordinal_string_range` would return `None` for
-/// this range (not all-string) and silently fall through to the default
-/// palette; `build_shape_scale` must instead read
-/// [`super::domain::explicit_ordinal_range`] (every declared entry) so a
-/// malformed-but-declared range is distinguishable from an absent one.
+/// #123: a hand-built range that mixes in a NON-STRING entry (e.g. a number
+/// where a shape name belongs) must refuse, not fall through to the default
+/// palette: a declared-but-malformed range is not an absent one.
 #[test]
 fn shape_scale_non_string_range_entry_refuses_rather_than_silently_dropping() {
     let batch = species_batch();
@@ -879,7 +875,7 @@ fn stroke_dash_scale_explicit_range_refuses() {
         crate::render::RenderError::StrokeDashRangeUnsupported {
             entries: vec!["a".to_string(), "b".to_string()],
         },
-        "must refuse, naming the received range verbatim (spec-reviewer cycle-2 finding)"
+        "must refuse, naming the received range verbatim"
     );
 }
 
@@ -922,20 +918,15 @@ fn stroke_dash_scale_explicit_domain_composes_with_sort() {
     );
 }
 
-/// #123: pins the exact `Display` text for both new refusals (rust-quality-
-/// review cycle-1 finding 1 — the discriminating half of a "make the
-/// compiler own the split" fix is that each variant's message is checked on
-/// its own, not inferred from a shared stringly-typed fallback).
+/// #123: pins the exact `Display` text of each aux-range refusal on its own.
 #[test]
 fn shape_range_entry_unrecognized_display_text_is_pinned() {
     let err = crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "hexagon".to_string() };
-    assert_eq!(err.to_string(), "shape(scale=...) range entry 'hexagon' is not a recognized shape name");
+    assert_eq!(err.to_string(), "Shape(scale=...) range entry 'hexagon' is not a recognized shape name");
 }
 
-/// Pins the exact text for a multi-entry received range (spec-reviewer
-/// cycle-2 finding: the message must name the value received, not just that
-/// a range was declared — the same rule `ShapeRangeEntryUnrecognized`
-/// already followed).
+/// Pins the exact text for a multi-entry received range: the message names
+/// the value received, as `ShapeRangeEntryUnrecognized`'s does.
 #[test]
 fn stroke_dash_range_unsupported_display_text_is_pinned() {
     let err = crate::render::RenderError::StrokeDashRangeUnsupported {
@@ -943,7 +934,7 @@ fn stroke_dash_range_unsupported_display_text_is_pinned() {
     };
     assert_eq!(
         err.to_string(),
-        "stroke_dash(scale=...) does not honor an explicit range (received ['a', 'b']): \
+        "StrokeDash(scale=...) does not honor an explicit range (received ['a', 'b']): \
          stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
     );
 }
@@ -958,7 +949,7 @@ fn stroke_dash_range_unsupported_display_text_handles_empty_entries() {
     let err = crate::render::RenderError::StrokeDashRangeUnsupported { entries: vec![] };
     assert_eq!(
         err.to_string(),
-        "stroke_dash(scale=...) does not honor an explicit range (received []): \
+        "StrokeDash(scale=...) does not honor an explicit range (received []): \
          stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
     );
 }

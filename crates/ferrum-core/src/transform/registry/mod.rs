@@ -136,33 +136,25 @@
 //! non-empty list for it and there is no ambiguity to carve out — it was
 //! simply missed initially, not a deliberate `[]`.
 //!
-//! **Every non-empty `methods` entry READS its enforcement site's own const,
-//! and every one has a drift guard, completed 2026-09-06.** Before that,
-//! only 4 of 14 did: the other ten were hand-copied literals, seven of them
-//! with no acceptance/drift test at all,
-//! and several enforcement sites spelled their own vocabulary more than once
-//! (`raster` three times, `linkage` baked into an error string). Each of the
-//! ten now has a `pub(crate) const` beside its enforcement site —
-//! `error_extent::METHODS`, `linkage::METHODS`, `pivot::OPS`,
-//! `data_window::OPS`, `regression_data::METHODS`, `impute::METHODS`,
-//! `top_k::OPS`, `data_stack::OFFSETS` — which the site's validation and its
-//! error message both read, and which this table clones. `raster`/`hex`
-//! (and `bin`/`aggregate`/`join_aggregate`, via `AggFn`) went one step
-//! further in wave 6B T9: their vocabularies are enums (`RasterAggregate`,
-//! `HexAggregate`, `AggFn`) whose spellings come from an exhaustive match,
-//! so a variant without a spelling fails to compile. `methods_drift_guard_covers_every_declared_vocabulary`
-//! (`tests.rs`) pins the guard set against "every kind with a non-empty
-//! `methods`", so a future kind cannot join this table without one.
-//! `pivot` and `top_k` were the two kinds that genuinely could not be guarded
-//! before, because each had a silent `_ => sum()` fallback rather than a
-//! refusal site (which is also how the earlier undetected `pivot` vocabulary
-//! drift went unnoticed, and a latent silent-wrong-answer path in its own
-//! right); both now refuse an unrecognized op, so both are guardable and
-//! guarded.
+//! **Every non-empty `methods` entry reads the vocabulary its doors enforce,
+//! and every door accepts exactly that set.** Two shapes: typed vocabularies
+//! implement [`Vocabulary`] (`AggFn` and its subsets `HexAggregate`/
+//! `XEstimator`, `RasterAggregate`, `LinkageMethod`, `ErrorMethod`), whose
+//! spellings come from an exhaustive match and whose doors parse through the
+//! trait, so there are no string arms to drift; string-stored vocabularies
+//! keep a `pub(crate) const` beside their dispatch (`kde::KERNELS`,
+//! `qq::DISTRIBUTIONS`, `smooth::METHODS`, `pivot::OPS`, `data_window::OPS`,
+//! `regression_data::METHODS`, `impute::METHODS`, `top_k::OPS`,
+//! `data_stack::OFFSETS`), and every door runs
+//! `vocabulary::check_declared` against it before its `match`, so an arm for
+//! an undeclared spelling is unreachable. `methods_drift_guard_covers_every_declared_vocabulary`
+//! (`tests.rs`) pins the per-kind guard set, and
+//! `every_methods_door_accepts_exactly_its_declared_spellings` proves both
+//! directions at every door, on data and on an empty batch.
 //!
-//! **`methods_needing_field` convention (wave 6B T9).** The spellings this
-//! door refuses without a field, probed per kind (orchestrator ruling, T9
-//! cycle 3); the field is the door's operand column, `agg_field` for `bin`.
+//! **`methods_needing_field` convention.** The spellings this kind's door
+//! refuses without a field, probed per kind; the field is the door's operand
+//! column, `agg_field` for `bin`.
 //! Always a subset of `methods`. Derived from the
 //! owning vocabulary: `raster` `mean`/`sum`; `hex`/`aggregate` every spelling
 //! but `count` (`AggFn::counts_rows_without_field`, aliases included);
@@ -210,6 +202,7 @@ use pyo3::types::PyDict;
 
 use crate::transform::aggregate::{AggFn, HexAggregate};
 use crate::transform::raster::RasterAggregate;
+use crate::transform::vocabulary::{FieldOperand, Vocabulary};
 
 /// One named secondary output batch: the key it is published under (under
 /// default construction — see the module doc's `secondary_outputs`
@@ -217,7 +210,9 @@ use crate::transform::raster::RasterAggregate;
 pub(crate) type SecondaryOutput = (String, Vec<(&'static str, DataType)>);
 
 /// One transform kind's registry entry. See the module doc for the
-/// `outputs`/`secondary_outputs`/`methods` inclusion conventions.
+/// `outputs`/`secondary_outputs`/`methods` inclusion conventions. A kind with
+/// no vocabulary leaves `methods`/`methods_needing_field` to `Default`.
+#[derive(Default)]
 pub(crate) struct TransformRegistryEntry {
     pub methods: Vec<&'static str>,
     /// The spellings of `methods` this kind's door refuses without a field,
@@ -354,8 +349,6 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
         },
         "bin_2d" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("x_lo", DataType::Float64),
                 ("x_hi", DataType::Float64),
@@ -367,6 +360,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec![
                 "x", "y", "bins_x", "bins_y", "extent_x", "extent_y", "cumulative", "name",
             ],
+            ..Default::default()
         },
         // `methods` reads the SAME const the parser's pre-check and error
         // string read (`crate::transform::kde::KERNELS`) — batch-D T11,
@@ -409,8 +403,6 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec!["ops", "groupby", "name"],
         },
         "summary" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("mean", DataType::Float64),
                 ("lower", DataType::Float64),
@@ -418,17 +410,17 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: vec![],
             params: vec!["field", "groupby", "error_fn", "ci", "n_boot", "seed", "name"],
+            ..Default::default()
         },
         "outliers" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "groupby", "extent", "name"],
+            ..Default::default()
         },
         "error_extent" => TransformRegistryEntry {
-            methods: crate::transform::error_extent::METHODS.to_vec(),
-            methods_needing_field: crate::transform::error_extent::METHODS.to_vec(),
+            methods: crate::transform::error_extent::ErrorMethod::all(),
+            methods_needing_field: crate::transform::error_extent::ErrorMethod::all(),
             outputs: vec![
                 ("mean", DataType::Float64),
                 ("lower", DataType::Float64),
@@ -438,8 +430,6 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec!["field", "groupby", "method", "seed", "n_boot", "name"],
         },
         "box_stats" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("q1", DataType::Float64),
                 ("median", DataType::Float64),
@@ -449,10 +439,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: vec![],
             params: vec!["field", "groupby", "whisker_extent", "name"],
+            ..Default::default()
         },
         "violin" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("group_id", DataType::UInt32),
                 ("violin_x", DataType::Float64),
@@ -464,10 +453,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "field", "groupby", "bandwidth", "bw_adjust", "n", "width", "extent",
                 "shared_extent", "name", "horizontal",
             ],
+            ..Default::default()
         },
         "kde_2d" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("grid_x", list_f64_dtype()),
                 ("grid_y", list_f64_dtype()),
@@ -478,6 +466,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: vec![],
             params: vec!["x", "y", "bandwidth", "n", "extent", "groupby", "name"],
+            ..Default::default()
         },
         // Default construction is `fill=false` (contour.rs's `default_fill`
         // equivalent is the bool default), whose real schema is the 6-column
@@ -486,8 +475,6 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // emits the 4-column isoband form instead; see the module doc's
         // "under default construction" note.
         "contour" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("level_id", DataType::UInt32),
                 ("level_value", DataType::Float64),
@@ -498,6 +485,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: vec![],
             params: vec!["thresholds", "fill", "smooth", "name"],
+            ..Default::default()
         },
         // `methods` reads the SAME const the parser's pre-check and error
         // string read (`crate::transform::qq::DISTRIBUTIONS`) — batch-D T11,
@@ -520,7 +508,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // shape as `kde`/`qq`/`smooth`/`hex`/`raster`. Declared 2026-09-05;
         // see the module doc's `methods` convention note.
         "linkage" => TransformRegistryEntry {
-            methods: crate::transform::linkage::METHODS.to_vec(),
+            methods: crate::transform::linkage::LinkageMethod::all(),
             methods_needing_field: vec![],
             outputs: crate::transform::linkage::LINKAGE_COLUMNS.to_vec(),
             // The first key re-publishes the primary batch under a stable
@@ -530,11 +518,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         },
         "raster" => TransformRegistryEntry {
             methods: RasterAggregate::all(),
-            methods_needing_field: RasterAggregate::ALL
-                .iter()
-                .filter(|a| a.needs_field())
-                .map(|a| a.as_str())
-                .collect(),
+            methods_needing_field: RasterAggregate::all_where(RasterAggregate::needs_field),
             outputs: vec![
                 ("x_min", DataType::Float64),
                 ("x_max", DataType::Float64),
@@ -552,11 +536,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         },
         "hex" => TransformRegistryEntry {
             methods: HexAggregate::all(),
-            methods_needing_field: HexAggregate::ALL
-                .iter()
-                .filter(|h| h.needs_field())
-                .flat_map(|h| h.spellings().iter().copied())
-                .collect(),
+            methods_needing_field: HexAggregate::all_where(HexAggregate::needs_field),
             outputs: vec![
                 ("hex_x", DataType::Float64),
                 ("hex_y", DataType::Float64),
@@ -576,8 +556,6 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // NOT caller-controlled, so they're declarable even though the
         // pass-through part of the schema (the input's own columns) isn't.
         "swarm" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("swarm_x", DataType::Float64),
                 ("swarm_y", DataType::Float64),
@@ -587,31 +565,27 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec![
                 "category", "value", "point_size", "spacing", "side", "orient", "dodge", "name",
             ],
+            ..Default::default()
         },
         "unpivot" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["id_vars", "value_vars", "var_name", "value_name", "name"],
+            ..Default::default()
         },
         "reorder" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["by", "drop_index", "from", "name"],
+            ..Default::default()
         },
         "reference_line" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["x_field", "y_field", "x", "y", "name"],
+            ..Default::default()
         },
         "letter_value" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![
                 ("group", DataType::Utf8),
                 ("depth", DataType::Int32),
@@ -621,58 +595,52 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: letter_value_secondary_outputs(),
             params: vec!["value", "group", "k_depth", "outlier_threshold", "name", "sort"],
+            ..Default::default()
         },
         "logistic" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: fit_outputs(),
             secondary_outputs: vec![],
             params: vec!["x", "y", "n_grid", "ci", "max_iter", "tol", "name"],
+            ..Default::default()
         },
         "glm" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: fit_outputs(),
             secondary_outputs: vec![],
             params: vec!["x", "y", "family", "link", "n_grid", "ci", "max_iter", "tol", "name"],
+            ..Default::default()
         },
         "robust" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: fit_outputs(),
             secondary_outputs: vec![],
             params: vec![
                 "x", "y", "n_grid", "ci", "huber_c", "max_iter", "tol", "output",
                 "inject_zero_ref", "inject_metrics", "groupby", "name", "x_range",
             ],
+            ..Default::default()
         },
         "identity" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["name"],
+            ..Default::default()
         },
         "filter" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["predicate", "name", "param"],
+            ..Default::default()
         },
         "calculate" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["as_field", "expr", "name"],
+            ..Default::default()
         },
         "fold" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["fields", "as_", "name"],
+            ..Default::default()
         },
         // `pivot` was the one declared vocabulary with no drift guard:
         // `aggregate_values` (pivot.rs) had a silent
@@ -701,11 +669,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         },
         "data_window" => TransformRegistryEntry {
             methods: crate::transform::data_window::OPS.to_vec(),
-            methods_needing_field: crate::transform::data_window::OPS
-                .iter()
-                .copied()
-                .filter(|op| !crate::transform::data_window::OPS_WITHOUT_FIELD.contains(op))
-                .collect(),
+            methods_needing_field: crate::transform::data_window::ops_needing_field(),
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["ops", "sort", "groupby", "frame", "ignore_peers", "name"],
@@ -718,11 +682,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // site (`PyDensityData::new` doesn't expose `kernel` at all —
         // `DensityDataSpec` is built directly from wire JSON by
         // `transform_density`), so unlike `kde`/`qq`/`smooth`/`hex`/
-        // `raster`/`linkage` its real enforcement point is `apply()`-time,
-        // via `kernel_density_at_grid`'s typed error — same shape as
-        // `pivot`'s "no hard-refusal site" note above, except `density_data`
-        // DOES have a real refusal site, just at `apply()` rather than
-        // `__init__`. `density_data_methods_accepted_and_bogus_kernel_rejected`
+        // `raster`/`linkage` its only door is `apply()`, whose entry
+        // `check_declared` refuses an undeclared kernel.
+        // `density_data_methods_accepted_and_bogus_kernel_rejected`
         // (`registry/tests.rs`) asserts against that site directly.
         "density_data" => TransformRegistryEntry {
             methods: crate::transform::kde::KERNELS.to_vec(),
@@ -742,11 +704,10 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec!["x", "y", "method", "order", "groupby", "as_", "name"],
         },
         "loess_data" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![("x", DataType::Float64), ("y", DataType::Float64)],
             secondary_outputs: vec![],
             params: vec!["x", "y", "bandwidth", "groupby", "as_", "name"],
+            ..Default::default()
         },
         "impute" => TransformRegistryEntry {
             methods: crate::transform::impute::METHODS.to_vec(),
@@ -756,18 +717,16 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec!["field", "method", "value", "groupby", "key", "keyvals", "name"],
         },
         "flatten" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["fields", "as_", "name"],
+            ..Default::default()
         },
         "sample" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["n", "seed", "name"],
+            ..Default::default()
         },
         "top_k" => TransformRegistryEntry {
             methods: crate::transform::top_k::OPS.to_vec(),
@@ -784,18 +743,16 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             params: vec!["field", "groupby", "sort", "as_", "offset", "name"],
         },
         "timeunit" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "unit", "utc", "as_", "name"],
+            ..Default::default()
         },
         "data_bin" => TransformRegistryEntry {
-            methods: vec![],
-            methods_needing_field: vec![],
             outputs: vec![],
             secondary_outputs: vec![],
             params: vec!["field", "as_", "maxbins", "step", "nice", "name", "extent"],
+            ..Default::default()
         },
         // Same `AggFn` wire vocabulary as `join_aggregate`, and like it no
         // `count()` shorthand: every aggregate resolves its `field` column.

@@ -250,14 +250,9 @@ pub fn build_shape_scale(
     // hand-built spec that bypasses it.
     //
     // Reads [`explicit_ordinal_range`] (every declared entry, whatever its
-    // type) rather than [`explicit_ordinal_string_range`] (only when EVERY
-    // entry is a string): a range that mixes in a non-string entry is a
-    // DECLARED-BUT-MALFORMED range, not an absent one, and must refuse the
-    // same as an unrecognized name — rust-quality-review cycle-1 finding.
-    // `explicit_ordinal_string_range` would instead return `None` for it and
-    // fall through to the default palette below, silently dropping the
-    // user's declared range (the one behavior the whole all-or-nothing rule
-    // above exists to rule out).
+    // type): a range that mixes in a non-string entry is declared but
+    // malformed, not absent, so it refuses like an unrecognized name instead
+    // of falling through to the default palette.
     if let Some(range) = explicit_ordinal_range(shape_enc) {
         let range_shapes: Vec<ShapeKind> = range
             .iter()
@@ -456,16 +451,12 @@ pub fn build_stroke_dash_scale(
         return Ok((None, Vec::new()));
     };
     // #123: an explicit `scale.range` is refused outright, regardless of the
-    // field's dtype — `stroke_dash`'s output is the fixed 4-slot GPU dash
-    // palette ([`DASH_PALETTE`]), not a value a scale can redeclare, so
-    // there is no entry-by-entry parse to attempt (unlike `shape`'s range,
-    // above) — only an echo of what was received, for the message (spec-
-    // reviewer cycle-2 finding: naming the value received, not just that a
-    // range was declared). Python's own `StrokeDash._validate` refuses any
-    // explicit `range=` key at construction, naming the fixed palette, so
-    // this path is reached only by a hand-built spec that bypasses it
-    // (`ChartSpec::from_json` and similar raw-spec routes) — it must refuse
-    // rather than be silently ignored.
+    // field's dtype: `stroke_dash`'s output is the fixed 4-slot GPU dash
+    // palette ([`DASH_PALETTE`]), not a value a scale can redeclare, so there
+    // is no entry-by-entry parse (unlike `shape`'s range, above); the
+    // refusal echoes the received range. Python's `StrokeDash._validate`
+    // refuses `range=` at construction, so only a hand-built spec
+    // (`ChartSpec::from_json` and similar) reaches this.
     if let Some(range) = explicit_ordinal_range(dash_enc) {
         return Err(RenderError::StrokeDashRangeUnsupported {
             entries: range.iter().map(|v| v.to_string()).collect(),

@@ -11,6 +11,8 @@ the new instance.
 
 from __future__ import annotations
 
+import dataclasses
+import sys
 import warnings
 from abc import abstractmethod
 
@@ -19,6 +21,24 @@ from ferrum._title_sentinel import _UNSET, TitleParam
 # Sentinel for "caller did not pass this kwarg" — used by the deprecated-alias
 # resolver so that an explicit alias=None is still detected as "supplied".
 _MISSING = object()
+
+
+def _post_init_warning_stacklevel() -> int:
+    """Return the ``stacklevel`` naming the user's line, for a warning a ``__post_init__`` raises.
+
+    For ``warnings.warn`` called one helper deep inside a dataclass
+    ``__post_init__`` (the helper, ``__post_init__``, the generated
+    ``__init__``, then the caller). The generated ``__init__`` and any
+    ``dataclasses`` frames above it (``dataclasses.replace``) are skipped, so
+    ``replace(Axis(), min_extent=...)`` names the caller's line, not
+    ``dataclasses.py``. Call it directly from ``__post_init__``.
+    """
+    frame = sys._getframe(2)  # the generated __init__
+    level = 3
+    while frame is not None and frame.f_code.co_filename in ("<string>", dataclasses.__file__):
+        frame = frame.f_back
+        level += 1
+    return level
 
 
 def _resolve_band_alias(
@@ -59,10 +79,9 @@ def _resolve_band_alias(
     stacklevel
         The :func:`warnings.warn` ``stacklevel``, passed straight through
         (this function does not add its own frame).  ``Axis``/``AxisConfig``
-        resolve the alias from their generated dataclass ``__post_init__``,
-        so their call sites pass ``4`` (caller → generated ``__init__`` →
-        ``__post_init__`` → this helper); the mixin method calls this helper
-        directly from ``configure_axis`` and passes the default ``3``
+        resolve the alias from their generated dataclass ``__post_init__`` and
+        pass :func:`_post_init_warning_stacklevel`; the mixin method calls this
+        helper directly from ``configure_axis`` and passes the default ``3``
         (caller → ``configure_axis`` → this helper).
 
     Returns

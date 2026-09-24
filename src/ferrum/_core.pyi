@@ -948,24 +948,28 @@ def render_png(
 def theme_known_keys() -> list[str]: ...
 def theme_color_keys() -> list[str]: ...
 
-# #123 close (wave 6B T8 cycle 2): the aux-legend channel names (``size``,
+# #123: the aux-legend channel names (``size``,
 # ``shape``, ``stroke_dash`` — the channels whose ``legend=`` shares the
 # chart's single legend surface instead of getting its own), published from
 # Rust's ``AUX_LEGEND_CHANNEL_NAMES`` so ``ferrum.encoding.base`` reads the
 # list instead of hand-mirroring it as a Python literal.
 def aux_legend_channels() -> list[str]: ...
 
-# #176 item (wave 6B T9): the ``interpolate=`` vocabulary, published from
-# Rust's ``Interpolate::ALL`` (in its order) so ``marks/base.py`` gates it at
-# declaration instead of mirroring the list as a Python literal.
+# Every ``MarkKwargsSpec`` wire key (the ``mark_style`` dict's keys), in
+# declaration order, read from the struct's derived serde field list.
+def mark_kwargs_fields() -> list[str]: ...
+
+# #176: the ``interpolate=`` vocabulary, published from Rust's
+# ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
+# at declaration instead of mirroring the list as a Python literal.
 def interpolate_accepted_values() -> list[str]: ...
 
-# wave 6B T9 cycle 6: the ``Smooth(x_estimator=)`` vocabulary, published from
+# #137: the ``Smooth(x_estimator=)`` vocabulary, published from
 # Rust's ``XEstimator`` (a declared subset of the aggregate vocabulary, in its
 # refusal-message order) so Python reads it instead of mirroring it.
 def x_estimator_accepted_values() -> list[str]: ...
 
-# #165(1) (wave 6B T10): the one home of the ``"{name}_{key}"`` secondary-
+# #165(1): the one home of the ``"{name}_{key}"`` secondary-
 # output naming rule (``qq``, ``letter_value``, ``linkage``).
 # ``secondary_key(None, k)`` returns ``k`` unprefixed;
 # ``secondary_key(n, k)`` returns ``f"{n}_{k}"``.

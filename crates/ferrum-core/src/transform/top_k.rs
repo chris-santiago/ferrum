@@ -133,6 +133,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    crate::transform::vocabulary::check_declared(OPS, "data_top_k", "op", &spec.op)?;
     match &spec.groupby {
         Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols, ctx),
         _ => apply_ungrouped(spec, batch),

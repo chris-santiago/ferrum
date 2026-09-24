@@ -348,13 +348,7 @@ pub(crate) fn apply_with_context(
 }
 
 fn validate_method(method: &str) -> PyResult<()> {
-    if METHODS.contains(&method) {
-        return Ok(());
-    }
-    Err(PyValueError::new_err(format!(
-        "data_impute: unknown method '{method}'; expected {}",
-        METHODS.join("|"),
-    )))
+    crate::transform::vocabulary::check_declared(METHODS, "data_impute", "method", method)
 }
 
 /// The fill value for one method, restricted to `rows` when given (a group's

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
-from ferrum._validate import is_none_color_sentinel
+from ferrum._validate import is_none_color_sentinel, is_real_number
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
@@ -284,7 +284,11 @@ class ConditionalSpec:
             registry is available -- see :func:`_resolve_encoding_value` for
             what that means for an unresolved ref.
         """
-        channel = self.channel if self.channel is not None else _resolve_channel(self.if_selected)
+        channel = (
+            self.channel
+            if self.channel is not None
+            else _infer_conditional_channel(self.if_selected, self.if_not)
+        )
         return {
             "selection_name": self.selection_name,
             "channel": channel,
@@ -803,43 +807,44 @@ def _hex_to_color_dict(color_str: str, *, context: str) -> dict[str, int]:
     }
 
 
-def _resolve_channel(enc: Any) -> str:
-    from ferrum.encoding.appearance import (
-        Angle,
-        Color,
-        FillOpacity,
-        Opacity,
-        Shape,
-        Size,
-        StrokeDash,
-        StrokeOpacity,
-        StrokeWidth,
-    )
+def _resolve_channel(enc: Any) -> str | None:
+    """Return the channel one conditional branch names, or ``None`` if it names none.
 
-    if isinstance(enc, Color):
-        return "color"
-    if isinstance(enc, Opacity):
-        return "opacity"
-    if isinstance(enc, Size):
-        return "size"
-    if isinstance(enc, Shape):
-        return "shape"
-    if isinstance(enc, StrokeWidth):
-        return "stroke_width"
-    if isinstance(enc, StrokeOpacity):
-        return "stroke_opacity"
-    if isinstance(enc, StrokeDash):
-        return "stroke_dash"
-    if isinstance(enc, FillOpacity):
-        return "fill_opacity"
-    if isinstance(enc, Angle):
-        return "angle"
-    if isinstance(enc, _LiteralValue) and isinstance(enc.val, (int, float)):
-        # A bare number carries no channel of its own. Default to "opacity":
-        # it is the sensible default for a numeric literal and the only numeric
-        # channel whose (channel, kind) tuple the WASM matcher handles when no
-        # explicit channel is supplied via encode(<channel>=...).
-        return "opacity"
+    An encoding channel names its own channel. A literal names one by its
+    type: a real number is an opacity, anything else a color. A
+    ``Parameter.ref()`` names none.
+    """
+    from ferrum.encoding.base import ChannelBase
+
+    if isinstance(enc, ChannelBase):
+        return enc._channel_name
+    if isinstance(enc, _LiteralValue):
+        return "opacity" if is_real_number(enc.val) else "color"
+    return None
+
+
+def _infer_conditional_channel(if_selected: Any, if_not: Any) -> str:
+    """Return the wire channel of a conditional declared without one.
+
+    ``sel.when(...).otherwise(...)`` handed to ``Chart.conditional()`` names no
+    channel, so it is read off the branches: an encoding-channel branch on
+    either side wins (``sel.when(value("red")).otherwise(fm.Color("g"))`` is a
+    color conditional); otherwise the first branch whose literal names one
+    decides; two ``Parameter.ref()`` branches default to ``color``. The name
+    goes through the conditional vocabulary, so a channel no conditional can
+    target (``shape``, ``x``) is refused by name here.
+    """
+    from ferrum.encoding._channel_policy import conditional_wire_channel
+    from ferrum.encoding.base import ChannelBase
+
+    branches = (if_selected, if_not)
+    named = next((b for b in branches if isinstance(b, ChannelBase)), None)
+    if named is not None:
+        return conditional_wire_channel(named._channel_name)
+    for branch in branches:
+        channel = _resolve_channel(branch)
+        if channel is not None:
+            return channel
     return "color"
 
 
@@ -913,11 +918,8 @@ def _resolve_param_ref(
 
 def _conditional_literal_type_error(v: Any, *, channel: str | None, needs: str) -> ValueError:
     """Build the one refusal shape every conditional-literal handler raises
-    for a value of the wrong type/content for *channel* (#128 cycle-2
-    remediation: the handlers previously used two different exception types
-    and slightly different wordings for the same failure class -- "the
-    literal doesn't fit this channel"). Every such refusal is a
-    ``ValueError`` reading exactly ``fm.value(<repr>) for channel=<repr>
+    for a value of the wrong type/content for *channel* ("the literal doesn't
+    fit this channel"). Every such refusal is a ``ValueError`` reading exactly ``fm.value(<repr>) for channel=<repr>
     needs <needs>, got <type>: <repr>`` -- the same shape the matrix in
     ``tests/test_condition_translation.py`` pins byte-for-byte, not a
     substring.
@@ -927,9 +929,8 @@ def _conditional_literal_type_error(v: Any, *, channel: str | None, needs: str) 
     )
 
 
-#: The dash-pattern description shared by every stroke_dash refusal
-#: (#128 cycle-2) and imported by the test matrix so the prose lives in
-#: exactly one place.
+#: The dash-pattern description shared by every stroke_dash refusal and
+#: imported by the test matrix so the prose lives in exactly one place.
 _DASH_PATTERN_NEEDS = (
     "a dash pattern (a named linetype, a comma-separated numeric string, a "
     "number, or a list/tuple of numbers)"
@@ -946,44 +947,26 @@ def _literal_color(v: str, *, channel: str | None) -> dict:
     return {"kind": "color", "value": _hex_to_color_dict(v, context=context)}
 
 
-def _literal_color_or_opacity(v: Any, *, channel: str | None) -> dict:
-    """Default conditional-literal handler: ``channel is None`` or ``"color"``.
+def _literal_color_only(v: Any, *, channel: str) -> dict:
+    """``color``: a color string only (see :func:`_literal_color`).
 
-    A string is a color (see :func:`_literal_color`) -- the one legitimate
-    reading for these two cases, unchanged by #128. A number (excluding
-    ``bool``, which is an ``int`` subclass but not a number a caller meant
-    to write -- #128 cycle-2) carries no typing of its own here and tags
-    the ``"opacity"`` kind: this is the pre-existing numeric fallback (not
-    the string-blind bug #128 fixes), still relied on by a
-    ``.conditional(...)`` branch whose channel is inferred from the
-    *other* branch -- e.g. ``sel.when(Color(...)).otherwise(
-    some_param.ref())`` where the param's static value is numeric (see
-    ``test_parameter_ref.py::TestConditionalValueRef::
-    test_registered_param_ref_resolves_to_static_value``).
+    A number on a color conditional is refused by name rather than tagged as
+    an opacity: the literal is typed by the channel the conditional targets.
     """
     if isinstance(v, str):
         return _literal_color(v, channel=channel)
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return {"kind": "opacity", "value": float(v)}
-    raise _conditional_literal_type_error(v, channel=channel, needs="a color string or a number")
+    raise _conditional_literal_type_error(v, channel=channel, needs="a color string")
 
 
 def _literal_numeric_only(v: Any, *, channel: str) -> dict:
-    """Resolve a literal for one of the six plain-numeric channels (#128): a number only.
+    """Resolve a literal for one of the six plain-numeric channels: a finite number only.
 
-    Before #128 a string here reached the color parser unconditionally (the
-    channel-blind string-first branch this table replaces) and either
-    mis-serialized as ``kind=color`` -- which the WASM runtime applies as a
-    fill repaint regardless of the declared channel -- or refused with a
-    color-flavored message that made no sense for a channel like ``size``.
-    Refusing by channel name instead names the public call and what it
-    needed. ``bool`` is excluded from "a number" (#128 cycle-2): it is an
-    ``int`` subclass, but ``fm.value(True)`` is never a deliberate ``1.0``.
-    ``nan``/``inf`` are refused too (#128 cycle-3): they predate #128 and
-    are not a §4.10 row, but they sit on this same REFUSE MALFORMED surface
-    and the check is one ``math.isfinite`` call.
+    A string is refused by channel name rather than reaching the color parser
+    (a ``kind=color`` value would repaint the fill whatever the declared
+    channel). A number is :func:`ferrum._validate.is_real_number` (never
+    ``bool``), and ``nan``/``inf`` are refused.
     """
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
+    if is_real_number(v):
         fv = float(v)
         if math.isfinite(fv):
             return {"kind": channel, "value": fv}
@@ -991,59 +974,32 @@ def _literal_numeric_only(v: Any, *, channel: str) -> dict:
 
 
 def _literal_stroke_dash(v: Any, *, channel: str) -> dict:
-    """``stroke_dash`` (#128): the same dash vocabulary every other
-    stroke_dash surface accepts, via the shared
-    :func:`ferrum.marks.base._normalize_stroke_dash` normalizer -- a named
-    linetype, a comma-separated numeric string, a number, or a list/tuple
-    of numbers. Before #128 only a bare number worked; a name or comma
-    string reached the color parser and refused with a color-flavored
-    message, and a list raised ``TypeError`` (``fm.value`` did not accept
-    one).
-
-    Every accepted form (scalar, string, list/tuple) routes through *one*
-    ``_normalize_stroke_dash`` call rather than a local per-form check
-    (#128 cycle-3): the length rule (finite, non-negative, not ``bool``)
-    lives in the normalizer now, not here, so it is enforced identically
-    for a bare number, a comma-string, and a list/tuple -- ``fm.value(-3)``,
-    ``fm.value('-4,2')``, and ``fm.value([-4, 2])`` all refuse the same way,
-    where cycle-2 validated only the list/tuple form. Every rejection --
-    an unparseable string, a malformed length by any spelling, or a value
-    of the wrong type entirely -- raises the *same*
-    :func:`_conditional_literal_type_error` shape: previously the string
-    path re-raised ``_normalize_stroke_dash``'s own message with a context
-    that duplicated the value (``for channel='stroke_dash'='red'``), the
-    list path ran an unguarded ``float()`` that silently accepted numeric
-    strings (``['4', '2']``), and the wrong-type path raised ``TypeError``
-    instead of ``ValueError`` -- different failure shapes for one failure
-    class.
+    """``stroke_dash``: the dash vocabulary every other ``stroke_dash`` surface
+    accepts, through the shared :func:`ferrum.marks.base._normalize_stroke_dash`
+    (a named linetype, a comma-separated numeric string, a number, or a
+    list/tuple of numbers). Any value it refuses raises the conditional-literal
+    refusal shape (:func:`_conditional_literal_type_error`).
     """
-    if isinstance(v, (int, float, str, list, tuple)):
-        try:
-            dash = _normalize_stroke_dash(v, context=f"fm.value({v!r}) for channel={channel!r}")
-        except ValueError as exc:
-            raise _conditional_literal_type_error(
-                v, channel=channel, needs=_DASH_PATTERN_NEEDS
-            ) from exc
-        if isinstance(dash, (int, float)):
-            return {"kind": "stroke_dash", "value": [float(dash)]}
-        return {"kind": "stroke_dash", "value": [float(x) for x in dash]}
-    raise _conditional_literal_type_error(v, channel=channel, needs=_DASH_PATTERN_NEEDS)
+    try:
+        dash = _normalize_stroke_dash(v, context=f"fm.value({v!r}) for channel={channel!r}")
+    except ValueError as exc:
+        raise _conditional_literal_type_error(
+            v, channel=channel, needs=_DASH_PATTERN_NEEDS
+        ) from exc
+    if dash is None:
+        raise _conditional_literal_type_error(v, channel=channel, needs=_DASH_PATTERN_NEEDS)
+    return {"kind": "stroke_dash", "value": dash}
 
 
-# One channel-keyed table for every conditional literal (#128), replacing
-# the old string-first branch (unconditionally the color parser, blind to
-# `channel`) and the numeric dispatch that lived separately below it (a
-# channel-keyed if/elif chain -- only the string side was blind). Keyed by
-# resolved wire channel; `None` (no channel resolved -- a direct
-# `to_spec_dict()` call) and `"color"` both fall through to `.get`'s
-# default, `_literal_color_or_opacity`. The numeric-only entries are
-# derived from `_CONDITIONAL_CHANNELS` minus the two channels with their
-# own handler, so a newly-added conditional channel defaults to
+# One channel-keyed literal handler per conditional channel: the literal is
+# typed by the channel it targets. The numeric-only entries are derived from
+# `_CONDITIONAL_CHANNELS`, so a newly added conditional channel defaults to
 # number-only rather than silently accepting a color string.
 _CONDITIONAL_LITERAL_HANDLERS: dict[str, Callable[..., dict]] = {
-    channel: _literal_numeric_only for channel in _CONDITIONAL_CHANNELS - {"color", "stroke_dash"}
+    **{channel: _literal_numeric_only for channel in _CONDITIONAL_CHANNELS},
+    "color": _literal_color_only,
+    "stroke_dash": _literal_stroke_dash,
 }
-_CONDITIONAL_LITERAL_HANDLERS["stroke_dash"] = _literal_stroke_dash
 
 
 def _resolve_encoding_value(
@@ -1058,11 +1014,12 @@ def _resolve_encoding_value(
         subclass, or a ``Parameter.ref()`` marker dict (F-L13-01).
     channel:
         The resolved channel string (e.g. ``"size"``, ``"opacity"``). Selects
-        the literal handler from :data:`_CONDITIONAL_LITERAL_HANDLERS`
-        (#128): ``color`` (and ``None``) accept a color string and tag
-        numbers ``"opacity"``; ``stroke_dash`` accepts a name, comma
-        string, number, or list; the six plain-numeric channels accept a
-        number only and refuse a string by name.
+        the literal handler from :data:`_CONDITIONAL_LITERAL_HANDLERS`:
+        ``color`` accepts a color string; ``stroke_dash`` a name, comma
+        string, number, or list; the six plain-numeric channels a number.
+        ``None`` (a direct call with no channel) takes the channel the
+        literal names (:func:`_resolve_channel`). A channel no conditional
+        can target is refused by name.
     params:
         The chart's registered-parameter registry, forwarded to
         :func:`_resolve_param_ref` when *enc* is a ``Parameter.ref()``
@@ -1072,7 +1029,14 @@ def _resolve_encoding_value(
     if ref_name is not None:
         return _resolve_param_ref(ref_name, channel=channel, params=params)
     if isinstance(enc, _LiteralValue):
-        handler = _CONDITIONAL_LITERAL_HANDLERS.get(channel, _literal_color_or_opacity)
+        if channel is None:
+            channel = _resolve_channel(enc)
+        handler = _CONDITIONAL_LITERAL_HANDLERS.get(channel)
+        if handler is None:
+            raise ValueError(
+                f"fm.value({enc.val!r}) for channel={channel!r}: no selection conditional "
+                f"can target {channel!r}"
+            )
         return handler(enc.val, channel=channel)
     if isinstance(enc, str):
         # A bare string means a FIELD everywhere in ferrum -- literals require

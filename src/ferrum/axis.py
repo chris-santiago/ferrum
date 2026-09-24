@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass, fields
 from typing import Any
 
-from ferrum._configure_mixin import _MISSING, _resolve_band_alias
+from ferrum._configure_mixin import _MISSING, _post_init_warning_stacklevel, _resolve_band_alias
 from ferrum._title_sentinel import TitleParam, _UNSET, _UnsetType, is_unspecified, serialize_title
 from ferrum._validate import validate_choice
 
@@ -220,9 +220,7 @@ class Axis:
     def __post_init__(self, min_extent: object, max_extent: object) -> None:
         # Resolve deprecated aliases (min_extent → min_band, max_extent → max_band)
         # through the shared canonical helper so all three surfaces stay in sync.
-        # stacklevel=4 accounts for the frame chain from warnings.warn() (inside
-        # _resolve_band_alias) to the caller: _resolve_band_alias <- this
-        # method (__post_init__) <- the generated __init__ <- the caller's line.
+        stacklevel = _post_init_warning_stacklevel()
         object.__setattr__(
             self,
             "min_band",
@@ -232,7 +230,7 @@ class Axis:
                 canonical_name="min_band",
                 alias_name="min_extent",
                 owner="Axis",
-                stacklevel=4,
+                stacklevel=stacklevel,
             ),
         )
         object.__setattr__(
@@ -244,7 +242,7 @@ class Axis:
                 canonical_name="max_band",
                 alias_name="max_extent",
                 owner="Axis",
-                stacklevel=4,
+                stacklevel=stacklevel,
             ),
         )
 

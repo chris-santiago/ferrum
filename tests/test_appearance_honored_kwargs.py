@@ -60,20 +60,14 @@ so this test and the conditional vocabulary in
 ``ferrum.encoding._channel_policy`` cannot drift apart the way they did
 across the third and fourth changes above.
 
-**Sixth deliberate contract change (2026-09-23, #123, wave 6B):** Opacity,
-FillOpacity and StrokeOpacity LOSE ``title``. All three draw no legend of
-their own (``_legend_surface == "none"``), so a ``title=`` had nothing to
-label and was accepted-but-inert -- the exact "surfaces agree on identical
-input" defect this issue exists to close. ``title=`` is now a construction-
-time ``ValueError`` for these three (`ChannelBase._REFUSED_KWARGS`), not a
-silently-serialized no-op. Their ``scale`` stays honored: it IS wired (the
-Rust opacity-family scale builders read it), unlike ``title``. No other
-channel's set changes: Shape's and StrokeDash's ``scale`` behavior changes
-at RENDER time (Shape's range now selects real glyphs; StrokeDash's range is
-refused instead of silently ignored), but neither drops from
-``_honored_kwargs`` -- see ``encoding/appearance.py``'s ``Shape``/
-``StrokeDash`` ``_validate`` overrides and ``ferrum-spec.md`` §3.2's
-2026-09-23 note.
+**Sixth deliberate contract change (2026-09-23, #123):** ``legend`` and a
+legend's ``title`` are derived from ``_legend_surface`` (``base._derive_honored``),
+not declared by role sets. A channel with no legend of its own
+(``_legend_surface == "none"``: Opacity, FillOpacity, StrokeOpacity,
+StrokeWidth, Angle) honors neither: ``title=`` and a legend dict/``Legend(...)``
+are construction-time ``ValueError``s, and ``legend=None``/``False`` is
+accepted silently and puts nothing on the wire. ``scale`` stays honored on the
+opacity family: it IS wired. No legend-owning channel's set changes.
 """
 
 from __future__ import annotations
@@ -113,9 +107,9 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # grows EncodingValue::Shape (no table change needed here then either --
     # only the derivation's answer for "shape" flips).
     Shape: frozenset({"type", "scale", "title", "legend", "sort"}),
-    # Opacity LOST "title" 2026-09-23 (#123, wave 6B, sixth change above):
-    # Opacity draws no legend, so a title has nothing to label.
-    Opacity: frozenset({"type", "scale", "legend", "condition"}),
+    # Opacity LOST "title" and "legend" 2026-09-23 (#123, sixth change
+    # above): it draws no legend.
+    Opacity: frozenset({"type", "scale", "condition"}),
     Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme"}),
     # Stroke LOST "condition" 2026-09-11 (batch-H close re-review): a stroke
     # conditional would repaint the fill (ferrum-wasm's apply_value_common
@@ -128,17 +122,16 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # FillOpacity/StrokeOpacity/StrokeWidth/Angle gained "condition"
     # 2026-09-11 (batch-H close remediation) — all four are conditional
     # channels on the wire; StrokeWidth/Angle still carry no "scale"/"title".
-    # FillOpacity/StrokeOpacity LOST "title" 2026-09-23 (#123, sixth change
-    # above), the same reason as Opacity's.
-    FillOpacity: frozenset({"type", "scale", "legend", "condition"}),
-    # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3), then
-    # LOST "title" again 2026-09-23 (#123, sixth change above).
-    StrokeOpacity: frozenset({"type", "scale", "legend", "condition"}),
-    StrokeWidth: frozenset({"type", "legend", "condition"}),
+    # All four LOST "legend" (and FillOpacity/StrokeOpacity "title")
+    # 2026-09-23 (#123, sixth change above), the same reason as Opacity's.
+    FillOpacity: frozenset({"type", "scale", "condition"}),
+    # StrokeOpacity gained "scale"/"title" 2026-08-28 (batch-A §4.3).
+    StrokeOpacity: frozenset({"type", "scale", "condition"}),
+    StrokeWidth: frozenset({"type", "condition"}),
     # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review
     # addendum) — moved to APPEARANCE_SORT, mirroring Shape.
     StrokeDash: frozenset({"type", "scale", "title", "legend", "condition", "sort"}),
-    Angle: frozenset({"type", "legend", "condition"}),
+    Angle: frozenset({"type", "condition"}),
 }
 
 

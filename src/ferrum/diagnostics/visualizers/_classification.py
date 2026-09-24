@@ -43,10 +43,10 @@ def _build_compare_source(
     (``ROCVisualizer``, ``PRVisualizer``,
     ``DiscriminationThresholdVisualizer``) plus ``CalibrationVisualizer``
     (#212, 2026-09-13) -- one local home so every one of them refuses the
-    same malformed ``compare=`` with the same words. The ``compare is not
-    None`` merge itself (the dict check, the reserved-``"base"`` refusal,
-    and the delegation to ``ModelSource.compare``) has one owner,
-    ``ModelSource.from_base_and_compare`` (#214) -- the same one
+    same malformed ``compare=`` with the same words. The merge itself (the
+    ``None`` case, the dict check, the reserved-``"base"`` refusal, and the
+    delegation to ``ModelSource.compare``) has one owner,
+    ``ModelSource._from_base_and_compare`` (#214) -- the same one
     ``ferrum.plots._helpers._resolve_source`` calls for the figure-function
     entry point. Both callers already import ``ferrum.diagnostics.source``,
     so routing through the classmethod adds no import edge and does not
@@ -54,9 +54,9 @@ def _build_compare_source(
     """
     import ferrum
 
-    if compare is None:
-        return ferrum.ModelSource(model, X, y, random_state=random_state)
-    return ferrum.ModelSource.from_base_and_compare(model, compare, X, y, random_state=random_state)
+    return ferrum.ModelSource._from_base_and_compare(
+        model, compare, X, y, random_state=random_state
+    )
 
 
 def _base_model_rows(df: pl.DataFrame) -> pl.DataFrame:

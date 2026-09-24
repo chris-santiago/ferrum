@@ -96,6 +96,12 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    crate::transform::vocabulary::check_declared(
+        crate::transform::kde::KERNELS,
+        "data_density",
+        "kernel",
+        &spec.kernel,
+    )?;
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_density: column '{}' not found", spec.field))
@@ -526,12 +532,11 @@ mod tests {
         );
     }
 
-    /// An unrecognized kernel string must error at `apply()` time (routed
-    /// through `kde::kernel_density_at_grid`'s typed refusal), not silently
-    /// fall back to Gaussian — `DensityData` has no constructor-time kernel
-    /// validation of its own (`PyDensityData::new` doesn't expose the
-    /// parameter; `transform_density` builds the spec directly from wire
-    /// JSON), so this is the only enforcement point for this path.
+    /// An unrecognized kernel string must error at `apply()` time (its
+    /// entry `check_declared`), not silently fall back to Gaussian:
+    /// `DensityData` has no constructor-time kernel parameter
+    /// (`transform_density` builds the spec from wire JSON), so `apply` is
+    /// its only door.
     #[test]
     fn density_data_unknown_kernel_errors() {
         pyo3::Python::initialize();

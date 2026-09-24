@@ -26,9 +26,10 @@ has ANY chart-level-to-layer fallback at all -- see "Revert-provability" below
 for what that means for this module's RED proof. This module is the
 RED-first proof, per the wave's binding "matrix first" rule.
 
-**Population, derived, not hand-listed.** `_rust_non_paint_fields()` parses
-`crates/ferrum-core/src/spec/mark_style.rs`'s `pub struct MarkKwargsSpec` for
-every `pub <name>: Option<...>` field and drops `fill`/`stroke` (paint,
+**Population, derived, not hand-listed.** `_rust_non_paint_fields()` reads
+`MarkKwargsSpec`'s fields from the Rust-published
+`ferrum._core.mark_kwargs_fields()` (serde's own field list, in declaration
+order) and drops `fill`/`stroke` (paint,
 already covered by the batch-A `without_paint` strip and out of `#119`'s
 scope). `_primitive_reachable_fields()` intersects that set with the keys
 `MarkBase.to_mark_kwargs_dict`'s source actually forwards (parsed from its
@@ -120,21 +121,19 @@ import inspect
 import json
 import re
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Callable
 
 import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._core import mark_kwargs_fields
 from ferrum._layer import _PRIMITIVE_MARKS
 from ferrum._scene import _render_scene
 from ferrum.marks.base import MarkBase
 
 from _svg_rects import THEME_BACKGROUND, data_bar_rects
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-MARK_STYLE_RS = REPO_ROOT / "crates" / "ferrum-core" / "src" / "spec" / "mark_style.rs"
 
 # ---------------------------------------------------------------------------
 # Derived population (never hand-listed -- see module docstring).
@@ -142,10 +141,9 @@ MARK_STYLE_RS = REPO_ROOT / "crates" / "ferrum-core" / "src" / "spec" / "mark_st
 
 
 def _rust_non_paint_fields() -> list[str]:
-    """Every `pub <name>: Option<...>` field of `MarkKwargsSpec`, minus paint."""
-    rust_src = MARK_STYLE_RS.read_text()
-    fields = re.findall(r"pub (\w+): Option<", rust_src)
-    assert fields, f"no fields parsed from {MARK_STYLE_RS} -- regex or path drifted"
+    """Every `MarkKwargsSpec` field (Rust-published, declaration order), minus paint."""
+    fields = mark_kwargs_fields()
+    assert fields, "ferrum._core.mark_kwargs_fields() published no fields"
     return [f for f in fields if f not in ("fill", "stroke")]
 
 
@@ -1100,3 +1098,45 @@ def test_row6_layerchart_static_equals_interactive():
     assert static_attrs["stroke-width"] == "1.5"
     assert interactive_style["color"]["a"] == 255
     assert interactive_style["width"] == 1.5
+
+
+# ---------------------------------------------------------------------------
+# The wire half: a layered `ChartSpec` carrying a chart-level `mark_style`
+# (a shape the Python producer never emits) is refused, not silently ignored.
+# ---------------------------------------------------------------------------
+
+_LAYERED_MARK_STYLE_REFUSAL = (
+    "ChartSpec.mark_style is set on a layered chart (2 layers), where it has no "
+    "effect: a layered chart is styled per layer. Move the style onto each "
+    "layer's own mark_style."
+)
+
+
+def _layered_spec_json(*, chart_mark_style: dict | None) -> str:
+    chart = fm.Chart(CURVE).mark_point().encode(**_XY) + fm.Chart(CURVE).mark_line().encode(**_XY)
+    spec = _spec_dict(chart)
+    if chart_mark_style is not None:
+        spec["mark_style"] = chart_mark_style
+    return json.dumps(spec)
+
+
+def _render_from_json(spec_json: str, output_kind: str) -> None:
+    from ferrum import ChartSpec
+    from ferrum._core import render_interactive, render_svg
+
+    spec = ChartSpec.from_json(spec_json)
+    renderer = render_svg if output_kind == "static" else render_interactive
+    renderer(spec, CURVE.to_arrow(), viewport=(400.0, 300.0))
+
+
+@pytest.mark.parametrize("output_kind", ["static", "interactive"])
+def test_layered_spec_with_chart_level_mark_style_is_refused(output_kind):
+    with pytest.raises(ValueError) as exc:
+        _render_from_json(_layered_spec_json(chart_mark_style={"size": 100}), output_kind)
+    assert str(exc.value) == _LAYERED_MARK_STYLE_REFUSAL
+
+
+@pytest.mark.parametrize("output_kind", ["static", "interactive"])
+def test_layered_spec_without_chart_level_mark_style_round_trips(output_kind):
+    """Vacuity control: the same layered spec without the chart-level style renders."""
+    _render_from_json(_layered_spec_json(chart_mark_style=None), output_kind)

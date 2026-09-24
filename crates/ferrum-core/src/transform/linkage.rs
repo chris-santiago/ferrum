@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
+use crate::transform::vocabulary::Vocabulary;
 
 // ---------- Spec types ----------
 
@@ -50,6 +51,34 @@ pub(crate) enum LinkageMethod {
     Centroid,
     Median,
     Ward,
+}
+
+/// `Linkage(method=)`'s vocabulary: [`PyLinkage::new`] parses through it and
+/// `registry::entry_for_kind("linkage")` publishes it, so the door accepts
+/// exactly the declared spellings. The spellings equal serde's snake_case
+/// variant names, which the wire reads.
+impl Vocabulary for LinkageMethod {
+    const ALL: &'static [Self] = &[
+        Self::Single,
+        Self::Complete,
+        Self::Average,
+        Self::Weighted,
+        Self::Centroid,
+        Self::Median,
+        Self::Ward,
+    ];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Single => &["single"],
+            Self::Complete => &["complete"],
+            Self::Average => &["average"],
+            Self::Weighted => &["weighted"],
+            Self::Centroid => &["centroid"],
+            Self::Median => &["median"],
+            Self::Ward => &["ward"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -616,15 +645,6 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
-/// The single source of truth for `Linkage`'s free-string `method`
-/// vocabulary — read by [`PyLinkage::new`]'s error message and by
-/// `registry::entry_for_kind("linkage")`'s `methods` list, mirroring the
-/// `smooth::METHODS` precedent (R1 design finding 1: the registry entry was a
-/// hand-copied literal and the enforcement site baked the same seven names
-/// into an error string).
-pub(crate) const METHODS: &[&str] =
-    &["single", "complete", "average", "weighted", "centroid", "median", "ward"];
-
 /// Hierarchical clustering linkage for clustermap row/column ordering.
 ///
 /// Computes a linkage tree from a numeric matrix batch and emits a
@@ -686,21 +706,8 @@ impl PyLinkage {
         standard_scale: Option<&str>,
         name: Option<String>,
     ) -> PyResult<Self> {
-        let method = match method {
-            "single" => LinkageMethod::Single,
-            "complete" => LinkageMethod::Complete,
-            "average" => LinkageMethod::Average,
-            "weighted" => LinkageMethod::Weighted,
-            "centroid" => LinkageMethod::Centroid,
-            "median" => LinkageMethod::Median,
-            "ward" => LinkageMethod::Ward,
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "Linkage: unknown method '{method}'; expected {}",
-                    METHODS.join("|"),
-                )))
-            }
-        };
+        let method = LinkageMethod::parse_or_refuse("method", method)
+            .map_err(|e| PyValueError::new_err(format!("Linkage: {e}")))?;
         let metric = match metric {
             "euclidean" => DistanceMetric::Euclidean,
             "manhattan" => DistanceMetric::Manhattan,

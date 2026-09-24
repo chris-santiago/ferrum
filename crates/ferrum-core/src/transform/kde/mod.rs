@@ -14,6 +14,7 @@ use crate::transform::group_key::{
     NullKeyPolicy,
 };
 use crate::transform::numeric_util::resolve_shared_extent;
+use crate::transform::vocabulary::check_declared;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -25,37 +26,13 @@ pub(crate) enum BandwidthSpec {
 
 pub(crate) fn default_kernel() -> String { "gaussian".to_string() }
 
-/// The single source of truth for `Kde`'s (and `DensityData`'s, which shares
-/// this module's [`kernel_density_at_grid`] dispatch) free-string `kernel`
-/// vocabulary. Mirrors `smooth::METHODS`'s structural-guard shape (batch-D
-/// T9, extended to `kde`/`density_data` by T11): consumed by THREE sites —
-/// `registry::entry_for_kind("kde")`'s `methods` list (`registry/mod.rs`, via
-/// `KERNELS.to_vec()`), `PyKde::new`'s pre-check below, and
-/// `kernel_density_at_grid`'s "unknown kernel" error (built FROM this slice,
-/// not a hand-kept parallel literal).
-///
-/// The pre-check in `PyKde::new` makes the guarantee structural for `Kde`:
-/// a dispatch arm added to `kernel_density_at_grid` for a new kernel without
-/// adding it here is unreachable at construction time. `DensityData` has no
-/// constructor-time kernel parameter at all (`PyDensityData::new` doesn't
-/// expose one — `DensityDataSpec` is built directly from wire JSON), so for
-/// that caller `kernel_density_at_grid`'s own `other => Err(...)` arm is the
-/// *only* enforcement point; this is precisely why that arm returns a typed
-/// error instead of silently defaulting to Gaussian (the prior behavior this
-/// const and its guard replace).
-///
-/// The reverse direction (`KERNELS ⊆ kernel_density_at_grid`'s match arms —
-/// an entry added here without a corresponding dispatch arm below) is NOT
-/// compile-time-enforced, the same gap `smooth::METHODS`'s doc names for
-/// itself: nothing in Rust's exhaustiveness checking ties a `&str` slice to
-/// a `match` on a different `&str`. Unlike `Smooth` (where `PySmooth::new`'s
-/// own match arm IS the dispatch, so the constructor test doubles as the
-/// reverse guard), `PyKde::new`'s pre-check only proves
-/// `KERNELS.contains(&kernel)` — it never calls `kernel_density_at_grid`, so
-/// it cannot catch a `KERNELS` entry with no matching arm.
-/// `test_all_kernels_reach_a_dispatch_arm` (below, round 2 batch-D T11 cycle
-/// 2) closes this gap for real by iterating `KERNELS` itself through
-/// `kernel_density_at_grid` directly.
+/// The one `kernel` vocabulary of `Kde` and `DensityData` (which share
+/// [`kernel_density_at_grid`]): read by the registry's `methods`, and by the
+/// `check_declared` pre-check every door runs before dispatch (`PyKde::new`,
+/// `Kde`'s and `DensityData`'s `apply`), so a dispatch arm for a spelling not
+/// listed here is unreachable. The reverse (an entry here with no arm) is
+/// caught by `test_all_kernels_reach_a_dispatch_arm`, which iterates this
+/// slice through `kernel_density_at_grid` directly.
 pub(crate) const KERNELS: &[&str] = &[
     "gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine", "exponential", "linear",
 ];
@@ -255,6 +232,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
     validate_count_scale_extent(spec)?;
     if !spec.groupby.is_empty() {
         // `count_scale`'s bin-edge sharing mirrors `Bin::apply_grouped`'s own
@@ -545,10 +523,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 /// Dispatch to the requested kernel's density estimator. Shared by `Kde`
 /// (`apply_one_group` above) and `DensityData`
 /// (`density_data::apply_one_group`) so the crate has exactly one
-/// kernel-math table. Returns a typed error for any kernel string not in
-/// [`KERNELS`] — no silent fallback to Gaussian; see `KERNELS`'s doc comment
-/// for why this is the only enforcement point for `DensityData`, which has
-/// no constructor-time kernel validation of its own.
+/// kernel-math table. Both `apply`s refuse a kernel outside [`KERNELS`]
+/// first; the fallback arm here is a typed error, never a Gaussian default.
 pub(crate) fn kernel_density_at_grid(
     x: &[f64],
     h: f64,
@@ -856,12 +832,7 @@ impl PyKde {
                 ));
             }
         }
-        if !KERNELS.contains(&kernel) {
-            return Err(PyValueError::new_err(format!(
-                "Kde: unknown kernel '{kernel}'; expected {}",
-                KERNELS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(" | "),
-            )));
-        }
+        check_declared(KERNELS, "Kde", "kernel", kernel)?;
         let kernel_str = kernel.to_string();
         let groupby = parse_groupby_pyany(groupby)?;
         let count_scale = count_scale.map(|obj| parse_bin_axis(obj, "stat_kde")).transpose()?;

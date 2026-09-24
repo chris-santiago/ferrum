@@ -2375,7 +2375,7 @@ fn gam_ci_half_width_matches_student_t_on_residual_dof_not_raw_n() {
     }
 }
 
-/// wave 6B T9 cycle 5: `Smooth(x_estimator=)` parses through
+/// `Smooth(x_estimator=)` parses through
 /// `XEstimator`, a declared subset of `AggFn`. Every accepted spelling stores
 /// the same `AggFn` the old private match mapped it to, so the transform
 /// output is byte-identical to a spec carrying that `AggFn` directly; a bogus
@@ -2383,6 +2383,7 @@ fn gam_ci_half_width_matches_student_t_on_residual_dof_not_raw_n() {
 #[test]
 fn smooth_x_estimator_parses_through_the_agg_fn_subset() {
     use crate::transform::aggregate::{AggFn, XEstimator};
+    use crate::transform::vocabulary::Vocabulary;
     pyo3::Python::initialize();
     let xs: Vec<f64> = (0..60).map(|i| i as f64 / 6.0).collect();
     let ys: Vec<f64> = xs.iter().enumerate().map(|(i, x)| x * 1.5 + ((i * 7) % 5) as f64).collect();
@@ -2402,10 +2403,10 @@ fn smooth_x_estimator_parses_through_the_agg_fn_subset() {
     // The pre-fix mapping (binding.rs's former private match), as the oracle.
     let old_table = [
         ("mean", AggFn::Mean),
-        ("median", AggFn::Median),
         ("sum", AggFn::Sum),
         ("min", AggFn::Min),
         ("max", AggFn::Max),
+        ("median", AggFn::Median),
     ];
     assert_eq!(XEstimator::all(), old_table.iter().map(|(s, _)| *s).collect::<Vec<_>>());
     for (spelling, expected) in old_table {
@@ -2429,7 +2430,7 @@ fn smooth_x_estimator_parses_through_the_agg_fn_subset() {
             let err = build(Some(bogus)).unwrap_err();
             assert_eq!(
                 err.value(py).to_string(),
-                format!("Smooth: unknown x_estimator '{bogus}'; expected mean|median|sum|min|max")
+                format!("Smooth: unknown x_estimator '{bogus}'; expected mean|sum|min|max|median")
             );
         }
     });

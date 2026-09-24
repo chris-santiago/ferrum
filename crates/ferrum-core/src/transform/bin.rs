@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
 use crate::transform::aggregate::{AggColumn, AggFn};
+use crate::transform::vocabulary::Vocabulary;
 use crate::transform::bin_mode::{resolve_bin_count, BinMode};
 use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
@@ -104,7 +105,8 @@ pub(crate) struct BinSpec {
     /// Column to aggregate per bin (batch-E T7). Must be set together with
     /// [`agg`](Self::agg) — either both are `Some` or both are `None`.
     pub agg_field: Option<String>,
-    /// Per-bin aggregate method, one of [`AggFn::all()`]. When set (together
+    /// Per-bin aggregate method, typed at the door (an alias is stored as its
+    /// canonical fn, as `AggregateOp.fn_` is). When set (together
     /// with `agg_field`), the output batch gains an `agg_value: Float64`
     /// column: the aggregate of `agg_field`'s values over the rows in each
     /// bin, using the same null/NaN-drop policy `Aggregate` uses. A
@@ -115,7 +117,7 @@ pub(crate) struct BinSpec {
     /// Unaffected by `cumulative`: a per-bin aggregate like `median` has no
     /// well-defined running-total form, so `agg_value` is always the
     /// non-cumulative per-bin statistic even when `cumulative=true`.
-    pub agg: Option<String>,
+    pub agg: Option<AggFn>,
     pub name: Option<String>,
 }
 
@@ -190,6 +192,11 @@ impl TryFrom<BinWire> for BinSpec {
             (None, None, Some(width)) => BinMode::Width { w: width },
             (None, None, None) => BinMode::Sturges,
         };
+        let agg = w
+            .agg
+            .map(|m| AggFn::parse_or_refuse("agg", &m))
+            .transpose()
+            .map_err(|e| format!("stat_bin: {e}"))?;
         Ok(BinSpec {
             field: w.field,
             mode,
@@ -199,7 +206,7 @@ impl TryFrom<BinWire> for BinSpec {
             shared_extent: w.shared_extent,
             groupby: w.groupby,
             agg_field: w.agg_field,
-            agg: w.agg,
+            agg,
             name: w.name,
         })
     }
@@ -228,7 +235,7 @@ impl From<BinSpec> for BinWire {
             shared_extent: s.shared_extent,
             groupby: s.groupby,
             agg_field: s.agg_field,
-            agg: s.agg,
+            agg: s.agg.map(|f| f.as_str().to_string()),
             name: s.name,
         }
     }
@@ -317,31 +324,31 @@ pub(crate) fn apply_with_context(
 
 /// Resolve `spec`'s optional per-bin aggregate column (batch-E T7).
 ///
-/// `agg_field`/`agg` must be set together — either both `Some` or both
-/// `None`. When both are set, `agg` is validated against [`AggFn::all()`] (the
-/// same vocabulary `Aggregate` itself accepts) and `agg_field` is resolved
-/// via [`AggColumn::resolve`], the same numeric-widening/null-drop policy
+/// `agg_field`/`agg` must be set together ([`check_agg_pairing`]; a wire-built
+/// spec meets that check only here). When both are set, `agg_field` is
+/// resolved via [`AggColumn::resolve`], the same numeric-widening/null-drop policy
 /// `stat_aggregate` uses — so a bin's `agg_value` matches what `Aggregate`
 /// would compute over the same rows.
 fn resolve_bin_agg(spec: &BinSpec, batch: &RecordBatch) -> PyResult<Option<AggColumn>> {
-    match (&spec.agg_field, &spec.agg) {
-        (None, None) => Ok(None),
-        (Some(field), Some(method)) => {
-            let fn_ = AggFn::parse(method).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "stat_bin: unknown agg '{method}'; expected {}",
-                    AggFn::accepted_values()
-                ))
-            })?;
-            let schema = batch.schema();
-            let idx = schema.index_of(field).map_err(|_| {
-                PyValueError::new_err(format!("stat_bin: agg_field column '{field}' not found"))
-            })?;
-            Ok(Some(AggColumn::resolve(batch.column(idx), field, fn_, "stat_bin")?))
-        }
-        _ => Err(PyValueError::new_err(
-            "stat_bin: agg_field and agg must both be set, or both omitted",
-        )),
+    check_agg_pairing(spec.agg_field.is_some(), spec.agg.is_some())
+        .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))?;
+    let (Some(field), Some(fn_)) = (&spec.agg_field, spec.agg) else {
+        return Ok(None);
+    };
+    let schema = batch.schema();
+    let idx = schema.index_of(field).map_err(|_| {
+        PyValueError::new_err(format!("stat_bin: agg_field column '{field}' not found"))
+    })?;
+    Ok(Some(AggColumn::resolve(batch.column(idx), field, fn_, "stat_bin")?))
+}
+
+/// `Bin`'s field requirement: `agg_field` and `agg` are set together or not
+/// at all. The one refusal text; each door prefixes itself.
+fn check_agg_pairing(has_field: bool, has_agg: bool) -> Result<(), &'static str> {
+    if has_field == has_agg {
+        Ok(())
+    } else {
+        Err("agg_field and agg must both be set, or both omitted")
     }
 }
 
@@ -787,27 +794,9 @@ impl PyBin {
                 ));
             }
         }
-        // batch-E T7: agg_field/agg must be set together, and agg (when set)
-        // must name one of AggFn::all() — the same vocabulary `Aggregate`
-        // accepts. `apply()`'s `resolve_bin_agg` re-validates this at
-        // apply-time too, covering wire-deserialized/Rust-internal specs
-        // that bypass this constructor.
-        match (&agg_field, &agg) {
-            (Some(_), Some(method)) => {
-                if AggFn::parse(method).is_none() {
-                    return Err(PyValueError::new_err(format!(
-                        "Bin: unknown agg '{method}'; expected {}",
-                        AggFn::accepted_values()
-                    )));
-                }
-            }
-            (None, None) => {}
-            _ => {
-                return Err(PyValueError::new_err(
-                    "Bin: agg_field and agg must both be set, or both omitted",
-                ))
-            }
-        }
+        let bin_err = |e: String| PyValueError::new_err(format!("Bin: {e}"));
+        check_agg_pairing(agg_field.is_some(), agg.is_some()).map_err(|e| bin_err(e.into()))?;
+        let agg = agg.map(|m| AggFn::parse_or_refuse("agg", &m)).transpose().map_err(bin_err)?;
         let groupby = parse_groupby_pyany(groupby)?;
         // `bins` names the whole decision in one value — the rule-bearing
         // spelling `Bin2D(bins_x=)` and `Kde(count_scale=)` already accept,
@@ -878,7 +867,7 @@ impl PyBin {
                     if s.nice { "True" } else { "False" },
                     if s.cumulative { "True" } else { "False" },
                     if s.shared_extent { "True" } else { "False" },
-                    s.groupby, s.agg_field, s.agg, s.name,
+                    s.groupby, s.agg_field, s.agg.map(AggFn::as_str), s.name,
                     bins_term,
                 )
             }
@@ -2228,7 +2217,7 @@ mod tests {
             shared_extent: false,
             groupby: vec![],
             agg_field: Some(agg_field.into()),
-            agg: Some(agg.into()),
+            agg: Some(AggFn::parse(agg).expect("a declared AggFn spelling")),
             name: None,
         }
     }
@@ -2277,19 +2266,6 @@ mod tests {
         assert_eq!(col_f64_opt(&med_out, "agg_value"), vec![Some(4.0)]);
     }
 
-    /// An unknown `agg` method refuses at `apply()` (the Rust-internal /
-    /// wire-deserialized enforcement site), naming the Aggregate vocabulary.
-    #[test]
-    fn bin_agg_unknown_method_errors_at_apply() {
-        pyo3::Python::initialize();
-        let batch = batch_with_agg(vec![1.0, 2.0], vec![Some(1.0), Some(2.0)]);
-        let spec = agg_spec("x", BinMode::Fixed { n: 1 }, Some((1.0, 2.0)), "w", "not_a_real_agg");
-        let err = apply(&spec, &batch).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("not_a_real_agg"), "err must name the bad value: {msg}");
-        assert!(msg.contains("mean") && msg.contains("distinct"), "err must enumerate the accepted set: {msg}");
-    }
-
     /// `agg_field` set without `agg` must refuse (the pairing contract).
     #[test]
     fn bin_agg_field_without_agg_errors() {
@@ -2312,7 +2288,7 @@ mod tests {
         let batch = batch_with_agg(vec![1.0, 2.0], vec![Some(1.0), Some(2.0)]);
         let spec = BinSpec {
             agg_field: None,
-            agg: Some("mean".into()),
+            agg: Some(AggFn::Mean),
             ..agg_spec("x", BinMode::Fixed { n: 1 }, Some((1.0, 2.0)), "w", "mean")
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -2583,9 +2559,10 @@ mod tests {
     }
 
 
-    /// wave 6B T9 (Q4): `std`/`var` are declared aliases on `Bin(agg=)`: the
-    /// alias bins byte-identically to its canonical spelling, and a bogus
-    /// agg is refused with the `AggFn::accepted_values()` rendering.
+    /// User ruling Q4: `std`/`var` are declared aliases on `Bin(agg=)`: the
+    /// alias is stored as its canonical fn (so it bins identically and writes
+    /// the canonical wire spelling), and a bogus agg is refused with the
+    /// `AggFn::accepted_values()` rendering at the constructor and the wire.
     #[test]
     fn bin_agg_alias_matches_canonical_and_bogus_is_refused() {
         pyo3::Python::initialize();
@@ -2595,18 +2572,34 @@ mod tests {
         );
         let mode = || BinMode::Fixed { n: 2 };
         for (alias, canonical) in [("std", "stdev"), ("var", "variance")] {
-            let a = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", alias), &batch).unwrap();
-            let c = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", canonical), &batch).unwrap();
-            assert_eq!(a, c, "Bin(agg='{alias}') must equal Bin(agg='{canonical}')");
+            let a = agg_spec("x", mode(), Some((1.0, 6.0)), "w", alias);
+            assert_eq!(a, agg_spec("x", mode(), Some((1.0, 6.0)), "w", canonical));
+            let json = serde_json::to_string(&a).unwrap();
+            assert!(json.contains(&format!(r#""agg":"{canonical}""#)), "{json}");
         }
         let std = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "std"), &batch).unwrap();
         let var = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "var"), &batch).unwrap();
         assert_ne!(col_f64_opt(&std, "agg_value"), col_f64_opt(&var, "agg_value"), "vacuity control");
-        let err = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "geomean"), &batch).unwrap_err();
+        let expected = AggFn::accepted_values();
+        let wire = serde_json::from_str::<BinSpec>(r#"{"field":"x","agg_field":"w","agg":"geomean"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(wire.starts_with(&format!("stat_bin: unknown agg 'geomean'; expected {expected}")), "{wire}");
+        let unpaired: BinSpec = serde_json::from_str(r#"{"field":"x","agg":"mean"}"#).unwrap();
         pyo3::Python::attach(|py| {
+            let err = PyBin::new(
+                "x", None, None, None, None, true, false, false, None,
+                Some("w".into()), Some("geomean".into()), None,
+            )
+            .unwrap_err();
             assert_eq!(
                 err.value(py).to_string(),
-                format!("stat_bin: unknown agg 'geomean'; expected {}", AggFn::accepted_values())
+                format!("Bin: unknown agg 'geomean'; expected {expected}")
+            );
+            let err = apply(&unpaired, &batch).unwrap_err();
+            assert_eq!(
+                err.value(py).to_string(),
+                "stat_bin: agg_field and agg must both be set, or both omitted"
             );
         });
     }

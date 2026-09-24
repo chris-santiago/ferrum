@@ -24,14 +24,17 @@ use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
+use crate::transform::vocabulary::{require_field, FieldOperand, Vocabulary};
 
-/// `Raster`'s aggregate vocabulary: the single source for both enforcement
-/// sites (`apply` and [`PyRaster::new`]), their refusal text, and
-/// `registry::entry_for_kind("raster")`'s `methods`/`methods_needing_field`.
-/// Same shape as `AggFn`: `as_str` and `needs_field` are exhaustive, so a
-/// variant without a spelling or a field decision fails to compile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Raster`'s aggregate vocabulary: `RasterSpec.aggregate` stores it typed,
+/// and `registry::entry_for_kind("raster")` derives `methods`/
+/// `methods_needing_field` from it. `spellings` and `needs_field` are
+/// exhaustive, so a variant without a spelling or a field decision fails to
+/// compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
 pub(crate) enum RasterAggregate {
+    #[default]
     Count,
     Density,
     Mean,
@@ -39,39 +42,24 @@ pub(crate) enum RasterAggregate {
     Any,
 }
 
-impl RasterAggregate {
-    /// Every variant, in the order the refusal message lists them.
-    pub(crate) const ALL: [Self; 5] =
-        [Self::Count, Self::Density, Self::Mean, Self::Sum, Self::Any];
+impl Vocabulary for RasterAggregate {
+    const ALL: &'static [Self] = &[Self::Count, Self::Density, Self::Mean, Self::Sum, Self::Any];
 
-    /// The spelling `aggregate=` accepts. Exhaustive, no wildcard arm.
-    pub(crate) const fn as_str(self) -> &'static str {
+    fn spellings(self) -> &'static [&'static str] {
         match self {
-            Self::Count => "count",
-            Self::Density => "density",
-            Self::Mean => "mean",
-            Self::Sum => "sum",
-            Self::Any => "any",
+            Self::Count => &["count"],
+            Self::Density => &["density"],
+            Self::Mean => &["mean"],
+            Self::Sum => &["sum"],
+            Self::Any => &["any"],
         }
     }
+}
 
-    /// Every accepted spelling, in [`RasterAggregate::ALL`] order.
-    pub(crate) fn all() -> Vec<&'static str> {
-        Self::ALL.iter().map(|a| a.as_str()).collect()
-    }
-
-    pub(crate) fn parse(s: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|a| a.as_str() == s)
-    }
-
-    /// The `a|b|c` rendering of [`RasterAggregate::all`] used by both refusals.
-    pub(crate) fn accepted_values() -> String {
-        Self::all().join("|")
-    }
-
-    /// Whether this aggregate reads a `field`; the rest count rows.
-    /// Exhaustive, no wildcard arm.
-    pub(crate) const fn needs_field(self) -> bool {
+impl FieldOperand for RasterAggregate {
+    /// Mean and sum read the field; the rest count rows. Exhaustive, no
+    /// wildcard arm.
+    fn needs_field(self) -> bool {
         match self {
             Self::Mean | Self::Sum => true,
             Self::Count | Self::Density | Self::Any => false,
@@ -79,8 +67,18 @@ impl RasterAggregate {
     }
 }
 
-fn default_aggregate() -> String {
-    "count".into()
+impl TryFrom<String> for RasterAggregate {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse_or_refuse("aggregate", &s)
+    }
+}
+
+impl From<RasterAggregate> for &'static str {
+    fn from(a: RasterAggregate) -> Self {
+        a.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,10 +103,8 @@ impl Default for ResolutionSpec {
 pub(crate) struct RasterSpec {
     pub x: String,
     pub y: String,
-    #[serde(default = "default_aggregate")]
-    /// One of [`RasterAggregate::all`]'s spellings, which both enforcement
-    /// sites parse.
-    pub aggregate: String,
+    #[serde(default)]
+    pub aggregate: RasterAggregate,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
     #[serde(default)]
@@ -188,21 +184,12 @@ pub(crate) fn apply_with_context(
         .index_of(&spec.y)
         .map_err(|_| PyValueError::new_err(format!("stat_raster: column '{}' not found", spec.y)))?;
 
-    // 2. Validate aggregate.
-    let Some(agg) = RasterAggregate::parse(&spec.aggregate) else {
-        return Err(PyValueError::new_err(format!(
-            "stat_raster: unknown aggregate '{}'; expected {}",
-            spec.aggregate,
-            RasterAggregate::accepted_values(),
-        )));
-    };
+    // 2. The aggregate is typed; only its field requirement is checked here,
+    // for a wire-built spec that never passed the constructor.
+    let agg = spec.aggregate;
     let needs_field = agg.needs_field();
-    if needs_field && spec.field.is_none() {
-        return Err(PyValueError::new_err(format!(
-            "stat_raster: aggregate='{}' requires `field`",
-            spec.aggregate
-        )));
-    }
+    require_field(agg, agg.as_str(), spec.field.as_deref())
+        .map_err(|e| PyValueError::new_err(format!("stat_raster: {e}")))?;
 
     // 3. Validate the field column if Some (any numeric dtype, coerced to Float64).
     let field_arr: Option<Float64Array> = match &spec.field {
@@ -570,17 +557,9 @@ impl PyRaster {
         if y.is_empty() {
             return Err(PyValueError::new_err("Raster: y must be non-empty"));
         }
-        let Some(agg) = RasterAggregate::parse(aggregate) else {
-            return Err(PyValueError::new_err(format!(
-                "Raster: unknown aggregate '{aggregate}'; expected {}",
-                RasterAggregate::accepted_values(),
-            )));
-        };
-        if agg.needs_field() && field.is_none() {
-            return Err(PyValueError::new_err(format!(
-                "Raster: aggregate='{aggregate}' requires `field`"
-            )));
-        }
+        let raster_err = |e: String| PyValueError::new_err(format!("Raster: {e}"));
+        let agg = RasterAggregate::parse_or_refuse("aggregate", aggregate).map_err(raster_err)?;
+        require_field(agg, aggregate, field.as_deref()).map_err(raster_err)?;
 
         let resolution = match resolution {
             None => ResolutionSpec::Named("screen".into()),
@@ -619,7 +598,7 @@ impl PyRaster {
         Ok(PyRaster(TransformSpec::Raster(RasterSpec {
             x: x.to_string(),
             y: y.to_string(),
-            aggregate: aggregate.to_string(),
+            aggregate: agg,
             field,
             resolution,
             min_count,
@@ -634,7 +613,7 @@ impl PyRaster {
         match &self.0 {
             TransformSpec::Raster(s) => format!(
                 "Raster(x='{}', y='{}', aggregate='{}', field={:?}, resolution={:?}, min_count={:?}, log_scale={}, name={:?})",
-                s.x, s.y, s.aggregate, s.field, s.resolution, s.min_count, s.log_scale, s.name
+                s.x, s.y, s.aggregate.as_str(), s.field, s.resolution, s.min_count, s.log_scale, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -726,7 +705,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -769,7 +748,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -806,7 +785,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "density".into(),
+            aggregate: RasterAggregate::Density,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -864,7 +843,7 @@ mod tests {
         let spec_mean = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "mean".into(),
+            aggregate: RasterAggregate::Mean,
             field: Some("f".into()),
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -883,7 +862,7 @@ mod tests {
         let spec_sum = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "sum".into(),
+            aggregate: RasterAggregate::Sum,
             field: Some("f".into()),
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -910,7 +889,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "any".into(),
+            aggregate: RasterAggregate::Any,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -943,7 +922,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: Some(10),
@@ -974,7 +953,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None,
@@ -1000,7 +979,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Named("screen".into()),
             min_count: None,
@@ -1041,7 +1020,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None,
@@ -1067,7 +1046,7 @@ mod tests {
         let spec = RasterSpec {
             x: "x".into(),
             y: "y".into(),
-            aggregate: "count".into(),
+            aggregate: RasterAggregate::Count,
             field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None,
@@ -1092,7 +1071,7 @@ mod tests {
 
         let spec_unpinned = RasterSpec {
             x: "x".into(), y: "y".into(),
-            aggregate: "count".into(), field: None,
+            aggregate: RasterAggregate::Count, field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None, log_scale: false, name: None,
             extent_x: None, extent_y: None,
@@ -1116,7 +1095,7 @@ mod tests {
         // With pinned extent [0,10] × [0,10]:
         let spec_pinned = RasterSpec {
             x: "x".into(), y: "y".into(),
-            aggregate: "count".into(), field: None,
+            aggregate: RasterAggregate::Count, field: None,
             resolution: ResolutionSpec::Fixed(2),
             min_count: None, log_scale: false, name: None,
             extent_x: Some((0.0, 10.0)),
@@ -1141,7 +1120,7 @@ mod tests {
     fn raster_non_faceted_spec_serializes_without_extent_fields() {
         let spec = RasterSpec {
             x: "xc".into(), y: "yc".into(),
-            aggregate: "count".into(), field: None,
+            aggregate: RasterAggregate::Count, field: None,
             resolution: ResolutionSpec::Fixed(4),
             min_count: None, log_scale: false, name: None,
             extent_x: None, extent_y: None,
@@ -1151,35 +1130,32 @@ mod tests {
         assert!(!json.contains("extent_y"), "extent_y must not appear when None: {json}");
     }
 
-    /// wave 6B T9: both raster doors refuse with the `a|b|c` rendering (was
-    /// `'a' | 'b'`), accept every `RasterAggregate` spelling, and refuse the
-    /// `needs_field` set without a field.
+    /// Every raster door refuses an unknown aggregate with the `a|b|c`
+    /// rendering and a field-needing aggregate without a field, in one text
+    /// per refusal: the constructor names `Raster`, the wire refuses at
+    /// deserialize, and `apply` (the only check a wire-built spec meets for
+    /// its field) names `stat_raster`.
     #[test]
     fn raster_doors_refuse_with_the_accepted_values_rendering() {
         pyo3::Python::initialize();
         assert_eq!(RasterAggregate::accepted_values(), "count|density|mean|sum|any");
-        let needing: Vec<_> =
-            RasterAggregate::ALL.iter().filter(|a| a.needs_field()).map(|a| a.as_str()).collect();
-        assert_eq!(needing, vec!["mean", "sum"]);
+        assert_eq!(RasterAggregate::all_where(RasterAggregate::needs_field), vec!["mean", "sum"]);
         let new = |aggregate: &str, field: Option<&str>| {
             PyRaster::new("x", "y", aggregate, field.map(str::to_string), None, None, false, None)
         };
-        for a in RasterAggregate::ALL {
+        for &a in RasterAggregate::ALL {
             assert!(new(a.as_str(), Some("v")).is_ok(), "{a:?} with a field");
             assert_eq!(new(a.as_str(), None).is_err(), a.needs_field(), "{a:?} without a field");
         }
-        let spec = RasterSpec {
-            x: "x".into(),
-            y: "y".into(),
-            aggregate: "stdev".into(),
-            field: None,
-            resolution: ResolutionSpec::Fixed(2),
-            min_count: None,
-            log_scale: false,
-            name: None,
-            extent_x: None,
-            extent_y: None,
-        };
+        let wire = serde_json::from_str::<RasterSpec>(r#"{"x":"x","y":"y","aggregate":"stdev"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wire.starts_with("unknown aggregate 'stdev'; expected count|density|mean|sum|any"),
+            "{wire}"
+        );
+        let fieldless: RasterSpec =
+            serde_json::from_str(r#"{"x":"x","y":"y","aggregate":"mean"}"#).unwrap();
         let b = make_xy_batch(vec![0.0, 1.0], vec![0.0, 1.0]);
         pyo3::Python::attach(|py| {
             let e = new("stdev", Some("v")).unwrap_err();
@@ -1187,11 +1163,10 @@ mod tests {
                 e.value(py).to_string(),
                 "Raster: unknown aggregate 'stdev'; expected count|density|mean|sum|any"
             );
-            let e = apply(&spec, &b).unwrap_err();
-            assert_eq!(
-                e.value(py).to_string(),
-                "stat_raster: unknown aggregate 'stdev'; expected count|density|mean|sum|any"
-            );
+            let e = new("mean", None).unwrap_err();
+            assert_eq!(e.value(py).to_string(), "Raster: aggregate='mean' requires field");
+            let e = apply(&fieldless, &b).unwrap_err();
+            assert_eq!(e.value(py).to_string(), "stat_raster: aggregate='mean' requires field");
         });
     }
 }

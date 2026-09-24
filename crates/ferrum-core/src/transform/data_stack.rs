@@ -64,6 +64,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    crate::transform::vocabulary::check_declared(OFFSETS, "data_stack", "offset", &spec.offset)?;
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 
