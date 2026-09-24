@@ -46,6 +46,7 @@
 //! byte-deterministic.
 
 use ferrum_scene::PathCmd;
+use pyo3::prelude::*;
 
 use crate::render::RenderError;
 
@@ -105,14 +106,15 @@ impl Interpolate {
             .ok_or_else(|| RenderError::UnknownInterpolate { value: value.to_string() })
     }
 
-    /// `"linear, step, step-before, step-after, monotone, basis, cardinal"` —
-    /// the accepted set as it appears in the refusal message.
+    /// `"linear|step|step-before|step-after|monotone|basis|cardinal"` — the
+    /// accepted set as it appears in the refusal message, rendered the same
+    /// `a|b|c` way as every aggregate vocabulary's `accepted_values()`.
     pub(crate) fn accepted_values() -> String {
         Self::ALL
             .iter()
             .map(|method| method.as_str())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join("|")
     }
 
     /// Whether this method traces straight segments between consecutive
@@ -140,6 +142,15 @@ impl Interpolate {
             other => other,
         }
     }
+}
+
+/// `ferrum._core.interpolate_accepted_values()`: every `interpolate=`
+/// spelling, in [`Interpolate::ALL`] order, so Python's declaration-time gate
+/// reads the vocabulary dispatch uses instead of mirroring it. Registered in
+/// `lib.rs`, typed in `src/ferrum/_core.pyi`; mirrors `scale_accepted_keys`.
+#[pyfunction]
+pub(crate) fn interpolate_accepted_values() -> Vec<String> {
+    Interpolate::ALL.iter().map(|method| method.as_str().to_string()).collect()
 }
 
 /// Which screen coordinate a traced series is parameterized by — the
@@ -641,8 +652,22 @@ mod tests {
     fn accepted_values_lists_the_whole_vocabulary_in_order() {
         assert_eq!(
             Interpolate::accepted_values(),
-            "linear, step, step-before, step-after, monotone, basis, cardinal"
+            "linear|step|step-before|step-after|monotone|basis|cardinal"
         );
+    }
+
+    /// Two-sided: the published list is exactly `Interpolate::ALL`'s
+    /// spellings, in order, and every published value is one `parse` accepts.
+    #[test]
+    fn interpolate_accepted_values_pyfunction_equals_interpolate_all() {
+        let published = interpolate_accepted_values();
+        let expected: Vec<String> =
+            Interpolate::ALL.iter().map(|m| m.as_str().to_string()).collect();
+        assert_eq!(published, expected);
+        for value in &published {
+            assert!(Interpolate::parse(value).is_ok(), "published '{value}' must parse");
+        }
+        assert_eq!(published.join("|"), Interpolate::accepted_values());
     }
 
     #[test]

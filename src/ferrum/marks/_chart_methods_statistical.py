@@ -382,6 +382,7 @@ class StatisticalMarksMixin:
         Chart(mark='line', encoding=['x', 'y'])
         """
         from ferrum._desugar import validate_layer_kwargs
+        from ferrum.marks.base import validate_x_estimator_kwarg
 
         # Declared in this signature rather than left to `**kwargs` because
         # it is the mark whose layered shape most needs it, and a named
@@ -390,6 +391,12 @@ class StatisticalMarksMixin:
         # layer name refuses at the `mark_smooth(...)` call that wrote it
         # rather than at the eventual `.to_svg()`.
         validate_layer_kwargs("smooth", layer_kwargs, where="mark_smooth")
+        # x_estimator= eager gate (same sibling-timing fix as mark_ribbon's
+        # interpolate= gate, #137/#176): Smooth and lmplot already refuse a
+        # bad x_estimator at their own call; mark_smooth used to defer to
+        # .to_svg() because the transform is only actually built once
+        # .encode() is known. Shared with lmplot's own gate.
+        validate_x_estimator_kwarg("mark_smooth", kwargs.get("x_estimator"))
         if layer_kwargs is not None:
             kwargs["layer_kwargs"] = layer_kwargs
         _pm = self._mark if self._mark in _PRIMITIVE_MARKS else None
@@ -774,9 +781,9 @@ class StatisticalMarksMixin:
         opacity : float, optional
             Fill opacity of the ribbon.  Default is ``0.3``.
         interpolate : str, optional
-            Boundary interpolation: ``"linear"``, ``"monotone"``, ``"step"``,
-            ``"step-before"``, ``"step-after"``, ``"basis"``, ``"cardinal"``.
-            Default is ``"linear"``.
+            Boundary interpolation, validated against the live
+            ``ferrum._core.interpolate_accepted_values()`` vocabulary (spec
+            §4.6). Default is ``"linear"``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -795,7 +802,16 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_ribbon().encode(x="x", y="y_lo", y2="y_hi")
         Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
         """
+        from ferrum.marks.base import validate_interpolate_kwarg
         from ferrum.marks.composite import desugar_ribbon
+
+        # #137/#176: validated eagerly, at mark_ribbon() call time, like
+        # mark_raster()'s aggregate=/field= gate (#136) -- ribbon's
+        # interpolate= is a composite-mark constructor parameter, not
+        # forwarded through MarkBase, so it shares MarkBase's own gate
+        # function directly rather than inheriting the class or hand-copying
+        # the check.
+        validate_interpolate_kwarg("mark_ribbon", interpolate)
 
         return self._set_composite_mark(
             "ribbon",
@@ -1056,18 +1072,21 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        aggregate : {"count", "density", "mean", "sum", "any"}, optional
-            Aggregate function applied to each pixel bin.  Default ``"count"``.
-            ``"mean"`` and ``"sum"`` require ``field`` (the column to
-            aggregate); ``"count"``, ``"density"``, and ``"any"`` need none.
+        aggregate : str, optional
+            Aggregate function applied to each pixel bin, validated against
+            the live ``transform_registry("raster")["methods"]`` vocabulary
+            (spec §4.6); default ``"count"``. Aggregates in
+            ``transform_registry("raster")["methods_needing_field"]``
+            require ``field`` (the column to aggregate); the rest need none.
             Both the choice itself and the field requirement are validated
             eagerly, at this call, rather than deferred to render time
             (#136).
         field : str or None, optional
-            Column name to aggregate.  Required when ``aggregate`` is
-            ``"mean"`` or ``"sum"``; ignored otherwise. Must be numeric --
-            integer columns are coerced to ``Float64`` automatically; a
-            non-numeric column raises at render time.
+            Column name to aggregate.  Required when ``aggregate`` is in
+            ``transform_registry("raster")["methods_needing_field"]``;
+            ignored otherwise. Must be numeric -- integer columns are
+            coerced to ``Float64`` automatically; a non-numeric column
+            raises at render time.
         scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.
@@ -1104,9 +1123,11 @@ class StatisticalMarksMixin:
         Raises
         ------
         ValueError
-            If ``aggregate`` is not one of the accepted values, or if
-            ``aggregate`` is ``"mean"``/``"sum"`` and ``field`` is not
-            given -- both checked eagerly at this call (#136).
+            If ``aggregate`` is not one of
+            ``transform_registry("raster")["methods"]``, or if ``aggregate``
+            is in ``transform_registry("raster")["methods_needing_field"]``
+            and ``field`` is not given -- both checked eagerly at this call
+            (#136).
 
         Examples
         --------
@@ -1116,22 +1137,25 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y")
         Chart(mark='image', encoding=['x', 'y'])
         """
+        from ferrum._core import transform_registry
         from ferrum.marks.heavy_stat import desugar_raster
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
-        from ferrum.render_config import _RASTER_AGGREGATES, _RASTER_AGGREGATES_NEEDING_FIELD
+        from ferrum.render_config import _raster_no_field_hint
 
         # #136: validate the aggregate/field combination eagerly, at
-        # mark_raster() call time -- reusing RenderConfig's own consts (no
-        # fourth hand-copy of the Rust Raster transform's accepted set) --
-        # rather than deferring to desugar_raster's resolution-time check
-        # (which only fires once .encode(x=,y=) is set) or, for aggregate
-        # validity, all the way to a Rust ValueError at render time.
-        validate_choice("mark_raster", "aggregate", aggregate, _RASTER_AGGREGATES)
-        if aggregate in _RASTER_AGGREGATES_NEEDING_FIELD and field is None:
+        # mark_raster() call time -- reading the live registry (spec §4.6,
+        # #137/#176) rather than a hand-copy of the Rust Raster transform's
+        # accepted set -- rather than deferring to desugar_raster's
+        # resolution-time check (which only fires once .encode(x=,y=) is
+        # set) or, for aggregate validity, all the way to a Rust ValueError
+        # at render time.
+        raster_entry = transform_registry("raster")
+        validate_choice("mark_raster", "aggregate", aggregate, raster_entry["methods"])
+        if aggregate in raster_entry["methods_needing_field"] and field is None:
             raise ValueError(
                 f"mark_raster: aggregate={aggregate!r} requires field=... (the "
                 f"column to aggregate); pass field=... or use "
-                f"aggregate='count'|'density'|'any', which need no field."
+                f"aggregate={_raster_no_field_hint(raster_entry)}, which need no field."
             )
 
         # #136 (close-remediation): when the Chart already carries data
@@ -1139,10 +1163,11 @@ class StatisticalMarksMixin:
         # is a real column reference for `aggregate` values that consume
         # it -- its existence and numeric-ness are answerable right now,
         # not just at .to_svg() render time when the Rust `stat_raster`
-        # transform runs. `aggregate="count"/"density"/"any"` leave field=
-        # inert (unchanged, pre-existing behavior; see the docstring), so
-        # this only fires for the same "needs field" set the check above
-        # already gates on. Deferred-data charts (self._data is None,
+        # transform runs. An aggregate outside
+        # transform_registry("raster")["methods_needing_field"] leaves
+        # field= inert (unchanged, pre-existing behavior; see the
+        # docstring), so this only fires for the same "needs field" set the
+        # check above already gates on. Deferred-data charts (self._data is None,
         # e.g. Chart().mark_raster(...) before any data is attached) skip
         # gracefully -- there is nothing to check yet. `_mark_raster_field_schema`
         # answers the schema question only -- it must never materialize a
@@ -1152,7 +1177,7 @@ class StatisticalMarksMixin:
         # this eager check is skipped and render time surfaces whatever
         # error applies, exactly as it did before this check existed.
         if (
-            aggregate in _RASTER_AGGREGATES_NEEDING_FIELD
+            aggregate in raster_entry["methods_needing_field"]
             and field is not None
             and self._data is not None
         ):
@@ -1211,10 +1236,12 @@ class StatisticalMarksMixin:
             Hexagon radius in data units.  ``None`` (default) chooses a size
             automatically from the data range and chart dimensions.
         aggregate : str, optional
-            Aggregate function: ``"count"`` (default), ``"sum"``, ``"mean"``,
-            ``"min"``, ``"max"``.
+            Aggregate function, validated against the live
+            ``transform_registry("hex")["methods"]`` vocabulary (spec §4.6);
+            default ``"count"``.
         field : str or None, optional
-            Column to aggregate.  Required unless ``aggregate="count"``.
+            Column to aggregate; required for every aggregate in
+            ``transform_registry("hex")["methods_needing_field"]``.
         scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.

@@ -27,18 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::aggregate::HexAggregate;
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
-
-/// The single source of truth for `Hex`'s free-string `aggregate`
-/// vocabulary. Read by BOTH enforcement sites (`apply`'s validation and
-/// [`PyHex::new`]'s), both of their error messages, and
-/// `registry::entry_for_kind("hex")`'s `methods` list — R1 design finding 1,
-/// mirroring the `smooth::METHODS` precedent.
-pub(crate) const AGGREGATES: &[&str] =
-    &["count", "mean", "sum", "min", "max", "median", "std", "var"];
-
-/// The one aggregate that needs no `field`: it counts rows.
-const AGGREGATE_WITHOUT_FIELD: &str = "count";
 
 fn default_aggregate() -> String {
     "count".into()
@@ -52,7 +42,9 @@ pub(crate) struct HexSpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bin_size: Option<f64>,
     #[serde(default = "default_aggregate")]
-    /// One of [`AGGREGATES`], which both enforcement sites validate against.
+    /// One of [`HexAggregate::all`]'s spellings, which both enforcement
+    /// sites parse. Kept as the caller's spelling so the wire and `repr`
+    /// round-trip what was passed.
     pub aggregate: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
@@ -123,19 +115,18 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .map_err(|_| PyValueError::new_err(format!("stat_hex: column '{}' not found", spec.y)))?;
 
     // Validate aggregate.
-    let agg = spec.aggregate.as_str();
-    if !AGGREGATES.contains(&agg) {
+    let Some(agg) = HexAggregate::parse(&spec.aggregate) else {
         return Err(PyValueError::new_err(format!(
-            "stat_hex: unknown aggregate '{}'; expected one of {}",
-            agg,
-            AGGREGATES.join("/"),
+            "stat_hex: unknown aggregate '{}'; expected {}",
+            spec.aggregate,
+            HexAggregate::accepted_values(),
         )));
-    }
-    let needs_field = agg != AGGREGATE_WITHOUT_FIELD;
+    };
+    let needs_field = agg.needs_field();
     if needs_field && spec.field.is_none() {
         return Err(PyValueError::new_err(format!(
             "stat_hex: aggregate='{}' requires `field`",
-            agg
+            spec.aggregate
         )));
     }
 
@@ -256,13 +247,13 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         let (q, r) = cube_round(q_frac, r_frac);
         let entry = hexes.entry((q, r)).or_default();
         entry.count += 1;
-        if !matches!(agg, "count") {
+        if needs_field {
             let v = fs[i];
             entry.sum += v;
             entry.sum_sq += v * v;
             if v < entry.min { entry.min = v; }
             if v > entry.max { entry.max = v; }
-            if matches!(agg, "median") {
+            if agg == HexAggregate::Median {
                 entry.values.get_or_insert_with(Vec::new).push(v);
             }
         }
@@ -286,12 +277,12 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         // Aggregated value.
         let n = agg_state.count as f64;
         let value = match agg {
-            "count"  => n,
-            "sum"    => agg_state.sum,
-            "mean"   => if agg_state.count == 0 { f64::NAN } else { agg_state.sum / n },
-            "min"    => if agg_state.count == 0 { f64::NAN } else { agg_state.min },
-            "max"    => if agg_state.count == 0 { f64::NAN } else { agg_state.max },
-            "median" => {
+            HexAggregate::Count  => n,
+            HexAggregate::Sum    => agg_state.sum,
+            HexAggregate::Mean   => if agg_state.count == 0 { f64::NAN } else { agg_state.sum / n },
+            HexAggregate::Min    => if agg_state.count == 0 { f64::NAN } else { agg_state.min },
+            HexAggregate::Max    => if agg_state.count == 0 { f64::NAN } else { agg_state.max },
+            HexAggregate::Median => {
                 if agg_state.count == 0 { f64::NAN } else {
                     let vs = agg_state.values.get_or_insert_default();
                     vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -299,15 +290,14 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
                     if vs.len() % 2 == 0 { (vs[mid - 1] + vs[mid]) / 2.0 } else { vs[mid] }
                 }
             }
-            "std" | "var" => {
+            HexAggregate::Stdev | HexAggregate::Variance => {
                 if agg_state.count < 2 { f64::NAN } else {
                     let mean = agg_state.sum / n;
                     let variance = (agg_state.sum_sq - n * mean * mean) / (n - 1.0);
                     let variance = variance.max(0.0); // clamp floating-point noise
-                    if agg == "std" { variance.sqrt() } else { variance }
+                    if agg == HexAggregate::Stdev { variance.sqrt() } else { variance }
                 }
             }
-            _ => unreachable!(),
         };
 
         // Pointy-top vertex angles: 30°, 90°, 150°, 210°, 270°, 330°.
@@ -408,11 +398,12 @@ use crate::transform::core::TransformSpec;
 /// bin_size : float, optional
 ///     Hex cell radius in data units. When omitted, a reasonable default
 ///     is chosen automatically from the data range.
-/// aggregate : {"count", "mean", "sum"}, default "count"
-///     Aggregation to apply per cell. ``"mean"`` and ``"sum"`` require
-///     ``field``.
+/// aggregate : {"count", "mean", "sum", "min", "max", "median", "stdev", "std", "variance", "var"}, default "count"
+///     Aggregation to apply per cell; the declared subset of ``AggregateOp``'s
+///     vocabulary, with ``"std"``/``"var"`` aliases of ``"stdev"``/
+///     ``"variance"``. Every aggregate but ``"count"`` requires ``field``.
 /// field : str, optional
-///     Column to aggregate when ``aggregate`` is ``"mean"`` or ``"sum"``.
+///     Column to aggregate; required unless ``aggregate`` is ``"count"``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -447,13 +438,13 @@ impl PyHex {
                 "Hex: x and y fields must be non-empty",
             ));
         }
-        if !AGGREGATES.contains(&aggregate) {
+        let Some(agg) = HexAggregate::parse(aggregate) else {
             return Err(PyValueError::new_err(format!(
                 "Hex: unknown aggregate '{aggregate}'; expected {}",
-                AGGREGATES.join("|"),
+                HexAggregate::accepted_values(),
             )));
-        }
-        if aggregate != AGGREGATE_WITHOUT_FIELD && field.is_none() {
+        };
+        if agg.needs_field() && field.is_none() {
             return Err(PyValueError::new_err(format!(
                 "Hex: aggregate='{aggregate}' requires field"
             )));
@@ -988,5 +979,50 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("extent_x"), "extent_x must not appear when None: {json}");
         assert!(!json.contains("extent_y"), "extent_y must not appear when None: {json}");
+    }
+
+    /// wave 6B T9 (Q4): hex accepts `stdev`/`variance` canonically and
+    /// `std`/`var` as aliases; the alias aggregates byte-identically to its
+    /// canonical spelling at `apply`, and both doors refuse an aggregate
+    /// outside the declared `AggFn` subset with the `a|b|c` rendering.
+    #[test]
+    fn hex_alias_matches_canonical_and_both_doors_refuse_with_one_rendering() {
+        pyo3::Python::initialize();
+        let b = make_xyf_batch(
+            vec![0.0, 0.1, 0.2, 3.0, 3.1, 3.2],
+            vec![0.0, 0.1, 0.2, 3.0, 3.1, 3.2],
+            vec![1.0, 5.0, 2.0, 9.0, 4.0, 7.0],
+        );
+        let spec = |aggregate: &str| HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: Some(1.0),
+            aggregate: aggregate.into(),
+            field: Some("v".into()),
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        for (alias, canonical) in [("std", "stdev"), ("var", "variance")] {
+            let a = apply(&spec(alias), &b).unwrap();
+            let c = apply(&spec(canonical), &b).unwrap();
+            assert_eq!(a, c, "Hex(aggregate='{alias}') must equal Hex(aggregate='{canonical}')");
+            for door in [alias, canonical] {
+                assert!(PyHex::new("x", "y", None, door, Some("v".into()), None).is_ok());
+            }
+        }
+        assert_ne!(apply(&spec("std"), &b).unwrap(), apply(&spec("var"), &b).unwrap());
+        let expected = HexAggregate::accepted_values();
+        pyo3::Python::attach(|py| {
+            let e = PyHex::new("x", "y", None, "q1", Some("v".into()), None).unwrap_err();
+            assert_eq!(e.value(py).to_string(), format!("Hex: unknown aggregate 'q1'; expected {expected}"));
+            let e = apply(&spec("q1"), &b).unwrap_err();
+            assert_eq!(
+                e.value(py).to_string(),
+                format!("stat_hex: unknown aggregate 'q1'; expected {expected}")
+            );
+            let e = PyHex::new("x", "y", None, "var", None, None).unwrap_err();
+            assert_eq!(e.value(py).to_string(), "Hex: aggregate='var' requires field");
+        });
     }
 }

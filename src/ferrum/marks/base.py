@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ferrum._core import interpolate_accepted_values, x_estimator_accepted_values
 from ferrum._validate import is_none_color_sentinel, validate_choice, validate_color_value
 
 # Marks whose primary visual channel is stroke rather than fill.
@@ -201,6 +202,71 @@ _VALID_POINT_SHAPES: frozenset[str] = frozenset(
         "hline",
     ]
 )
+
+
+def validate_interpolate_kwarg(door: str, value: Any) -> None:
+    """Refuse an ``interpolate=`` value at declaration if it is set and unknown.
+
+    One gate for every door that accepts ``interpolate=`` (spec §4.6,
+    `#137`/`#176`): :class:`MarkBase` (``mark_line``/``mark_area``, via
+    ``_MARK_KWARG_HONORED``) and ``mark_ribbon``
+    (``marks/_chart_methods_statistical.py``), which is a composite-mark
+    constructor parameter never routed through :class:`MarkBase`. Sharing
+    this one function is what keeps the two call sites from drifting: there
+    is exactly one place the ``None``-skip or the vocabulary lookup could
+    diverge, and every door imports it rather than copying it.
+
+    ``None`` means "not set" on every door and always passes -- it is never
+    a member of :func:`ferrum._core.interpolate_accepted_values`'s vocabulary,
+    so this is a genuine skip, not a hand-added exception to the accepted
+    set. No ``isinstance(str)`` guard: a non-string value
+    (``mark_line(interpolate=5)``) must also refuse here by name (REFUSE
+    MALFORMED), not pass through to a Rust serde type-mismatch message that
+    never names the door the caller called.
+
+    Parameters
+    ----------
+    door : str
+        The public entry the caller invoked (``"mark_line"``, ``"mark_ribbon"``, ...).
+    value : Any
+        The ``interpolate=`` value as received, or ``None`` if unset.
+    """
+    if value is None:
+        return
+    validate_choice(door, "interpolate", value, interpolate_accepted_values())
+
+
+def validate_x_estimator_kwarg(door: str, value: Any) -> None:
+    """Refuse a ``Smooth``-routed ``x_estimator=`` value at declaration.
+
+    One gate for the two Python doors that accept ``x_estimator=``:
+    ``mark_smooth`` (``marks/_chart_methods_statistical.py``) and ``lmplot``
+    (``plots/regression.py``), both of which forward the value into a
+    ``Smooth`` transform built later. ``fm.Smooth`` itself is the raw PyO3
+    pyclass with no Python wrapper -- its own Rust constructor is the third
+    door's gate, and it cannot be edited from here, so this function does
+    not run for it.
+
+    ``None`` means "not set" and always passes, matching
+    :func:`validate_interpolate_kwarg`. Every other value, string or not,
+    refuses through :func:`ferrum._validate.validate_choice` naming *door*
+    (REFUSE MALFORMED): the wave constraint that every new refusal names the
+    public entry the caller invoked outranks matching ``Smooth``'s own
+    wording, so ``mark_smooth``/``lmplot`` render their own text rather than
+    a copy of ``Smooth``'s -- the same shape :func:`validate_interpolate_kwarg`
+    already uses, letting the raw Rust door keep its own text undisturbed.
+
+    Parameters
+    ----------
+    door : str
+        The public entry the caller invoked (``"mark_smooth"``, ``"lmplot"``).
+    value : Any
+        The ``x_estimator=`` value as received, or ``None`` if unset.
+    """
+    if value is None:
+        return
+    validate_choice(door, "x_estimator", value, x_estimator_accepted_values())
+
 
 # Core style fields honored by every mark (Phase 8a: "covers all kwargs
 # accepted by the 8 primitive mark_*() Python methods" —
@@ -440,6 +506,10 @@ class MarkBase:
         shape_val = resolved.get("shape")
         if shape_val is not None and isinstance(shape_val, str):
             validate_choice(f"mark_{mark_name}", "shape", shape_val, _VALID_POINT_SHAPES)
+        # Validate interpolate= at declaration (spec §4.6, #137/#176). Shared
+        # with mark_ribbon's own gate (marks/_chart_methods_statistical.py),
+        # which is not routed through MarkBase -- see validate_interpolate_kwarg.
+        validate_interpolate_kwarg(f"mark_{mark_name}", resolved.get("interpolate"))
         # Validate literal fill/stroke color strings at construction time via
         # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
         # colors fail immediately rather than silently at render time. The

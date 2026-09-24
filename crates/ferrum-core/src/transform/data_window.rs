@@ -64,6 +64,14 @@ pub(crate) const OPS: &[&str] = &[
     "max",
 ];
 
+/// The [`OPS`] that run without a `field`: `row_number`, and the ranks, which
+/// key on the `sort` columns when no field is given. Every other op reads its
+/// field through `numeric_field` and refuses without one. Read by the
+/// registry's `methods_needing_field`; the two-sided registry guard
+/// (`methods_needing_field_is_a_subset_of_declared_methods`) proves it against
+/// `compute_window_op`.
+pub(crate) const OPS_WITHOUT_FIELD: &[&str] = &["row_number", "rank", "dense_rank"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WindowOp {

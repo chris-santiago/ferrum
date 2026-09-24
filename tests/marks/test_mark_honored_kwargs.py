@@ -314,14 +314,35 @@ class TestMarkRasterEagerValidation:
     def test_count_aggregate_needs_no_field(self):
         fm.Chart(None).mark_raster(aggregate="count")
 
-    def test_reuses_render_config_consts(self):
-        """No fourth hand-copy of the Rust Raster transform's accepted set
-        (decision D §136): mark_raster's eager check and RenderConfig's
-        auto-raster check both import the same consts."""
-        from ferrum.render_config import _RASTER_AGGREGATES, _RASTER_AGGREGATES_NEEDING_FIELD
+    def test_accepts_every_declared_method_with_or_without_field(self):
+        """Behavioral pin (#137/#176): mark_raster's eager check reads live
+        from ``transform_registry("raster")`` -- not a hand-copied literal
+        that could silently outlive a new Rust raster aggregate (the #137
+        latent bug: a stale Python literal stayed green while a sixth Rust
+        aggregate would have been refused by the stale set). Every declared
+        method is exercised with and without field=; a bogus spelling is
+        refused using the registry's own accepted set, not a hardcoded
+        string, so this test cannot pass by comparing one literal to
+        another."""
+        from ferrum._core import transform_registry
 
-        assert _RASTER_AGGREGATES == frozenset({"count", "density", "mean", "sum", "any"})
-        assert _RASTER_AGGREGATES_NEEDING_FIELD == frozenset({"mean", "sum"})
+        entry = transform_registry("raster")
+        for method in entry["methods"]:
+            if method in entry["methods_needing_field"]:
+                with pytest.raises(ValueError, match="requires field"):
+                    fm.Chart(None).mark_raster(aggregate=method)
+                fm.Chart(None).mark_raster(aggregate=method, field="v")
+            else:
+                fm.Chart(None).mark_raster(aggregate=method)
+                fm.Chart(None).mark_raster(aggregate=method, field="v")
+
+        bogus = "geomean"
+        assert bogus not in entry["methods"]
+        with pytest.raises(ValueError) as exc:
+            fm.Chart(None).mark_raster(aggregate=bogus)
+        assert str(exc.value) == (
+            f"mark_raster: aggregate must be one of {sorted(entry['methods'])}; got {bogus!r}"
+        )
 
 
 class TestMarkRasterFloat64Probe:

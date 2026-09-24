@@ -755,13 +755,16 @@ def desugar_raster(
         Numeric x field. Required.
     y_field : str or None
         Numeric y field. Required.
-    aggregate : {"count", "density", "mean", "sum", "any"}, default "count"
-        Aggregation function applied in each pixel cell.  ``"mean"`` and
-        ``"sum"`` require ``field``; ``"count"``, ``"density"``, and
-        ``"any"`` need none.
+    aggregate : str, default "count"
+        Aggregation function applied in each pixel cell, validated against
+        the live ``transform_registry("raster")["methods"]`` vocabulary
+        (spec §4.6). Aggregates in
+        ``transform_registry("raster")["methods_needing_field"]`` require
+        ``field``; the rest need none.
     field : str or None, default None
-        Column to aggregate for ``mean`` or ``sum``; required when
-        ``aggregate`` is ``"mean"`` or ``"sum"``, ignored otherwise.
+        Column to aggregate; required when ``aggregate`` is one of
+        ``transform_registry("raster")["methods_needing_field"]``, ignored
+        otherwise.
     cmap : str or None, default None
         Colormap applied to the image layer.  ``None`` defers to the theme's
         sequential scheme.
@@ -788,8 +791,9 @@ def desugar_raster(
     Raises
     ------
     ValueError
-        If either ``x_field`` or ``y_field`` is ``None``, or if
-        ``aggregate`` is ``"mean"`` or ``"sum"`` and ``field`` is ``None``.
+        If either ``x_field`` or ``y_field`` is ``None``, or if ``aggregate``
+        is in ``transform_registry("raster")["methods_needing_field"]`` and
+        ``field`` is ``None``.
 
     Examples
     --------
@@ -799,7 +803,7 @@ def desugar_raster(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
-    if aggregate in ("mean", "sum") and field is None:
+    if aggregate in transform_registry("raster")["methods_needing_field"] and field is None:
         raise ValueError(f"mark_raster aggregate={aggregate!r} requires field=...")
 
     # Default to log-scale for count/density aggregates to improve contrast
@@ -884,11 +888,11 @@ def desugar_hex(
     aggregate : str, default "count"
         Aggregation function applied per hex cell, validated against the
         live ``transform_registry("hex")["methods"]`` vocabulary (spec
-        §4.6) -- currently ``"count"``, ``"mean"``, ``"sum"``, ``"min"``,
-        ``"max"``, ``"median"``, ``"std"``, or ``"var"``.
+        §4.6); ``"std"``/``"var"`` are declared aliases of
+        ``"stdev"``/``"variance"``.
     field : str or None, default None
-        Column to aggregate for ``mean`` or ``sum``; required when
-        ``aggregate`` is not ``"count"``.
+        Column to aggregate; required for every aggregate in
+        ``transform_registry("hex")["methods_needing_field"]``.
     cmap : str or None, default None
         Colormap name applied to the polygon layer.  ``None`` defers to the
         theme's sequential scheme.
@@ -913,8 +917,10 @@ def desugar_hex(
     ------
     ValueError
         If either ``x_field`` or ``y_field`` is ``None``; if ``aggregate`` is
-        not one of the eight valid functions; or if ``aggregate`` is not
-        ``"count"`` and ``field`` is ``None``.
+        not one of the declared ``transform_registry("hex")["methods"]``; or
+        if ``aggregate`` is in
+        ``transform_registry("hex")["methods_needing_field"]`` and ``field``
+        is ``None``.
 
     Examples
     --------
@@ -924,8 +930,9 @@ def desugar_hex(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
-    validate_choice("mark_hex", "aggregate", aggregate, transform_registry("hex")["methods"])
-    if aggregate != "count" and field is None:
+    hex_entry = transform_registry("hex")
+    validate_choice("mark_hex", "aggregate", aggregate, hex_entry["methods"])
+    if aggregate in hex_entry["methods_needing_field"] and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     from ferrum.encoding import X, Y
 

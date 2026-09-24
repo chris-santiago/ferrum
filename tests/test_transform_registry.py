@@ -3,17 +3,25 @@
 Three concerns:
 
 1. **Contract shape** -- `transform_registry(kind)` returns the documented
-   four-key dict (`methods`/`outputs`/`secondary_outputs`/`params`) with the
-   documented types, and an unknown kind raises `ValueError` listing known
-   kinds. The Rust side (`crates/ferrum-core/src/transform/registry/`) owns
-   the exhaustiveness proof against real `apply()` output for every kind;
-   this file only proves the *Python-visible* binding contract.
+   five-key dict (`methods`/`methods_needing_field`/`outputs`/
+   `secondary_outputs`/`params`) with the documented types, and an unknown
+   kind raises `ValueError` listing known kinds. `methods_needing_field`
+   joined the wire in wave 6B (`#137`/`#176`); it is `[]` for a kind whose
+   declared methods split no field requirement. The Rust side
+   (`crates/ferrum-core/src/transform/registry/`) owns the exhaustiveness
+   proof against real `apply()` output for every kind; this file only proves
+   the *Python-visible* binding contract.
 
-2. **Mirror deletion is grep-clean** -- the three Python module constants
-   this round deleted (`_VALID_KERNELS`, `_VALID_QQ_DISTRIBUTIONS`, the
-   local `_VALID_AGGREGATES` in `desugar_hex`) do not reappear anywhere in
-   `src/ferrum/`, proving the registry adoption is complete rather than
-   leaving a second, unreferenced copy behind.
+2. **Mirror deletion is grep-clean** -- the Python module constants this and
+   later rounds deleted (`_VALID_KERNELS`, `_VALID_QQ_DISTRIBUTIONS`, the
+   local `_VALID_AGGREGATES` in `desugar_hex`, `_AUX_LEGEND_CHANNELS`,
+   `_RASTER_AGGREGATES`/`_RASTER_AGGREGATES_NEEDING_FIELD`) do not reappear
+   anywhere in `src/ferrum/`, proving the registry adoption is complete
+   rather than leaving a second, unreferenced copy behind. `_DELETED_MIRROR_LITERALS`
+   also carries one hand-typed message fragment, not a symbol name
+   (`'count'|'density'|'any'`, wave 6B T9 cycle 4) -- a raster no-field hint
+   that was typed directly into two f-strings rather than named as a
+   constant, so the same grep-for-reintroduction guard covers it too.
 
 3. **The output-column lookup helpers** -- `ferrum._registry`'s
    `registry_output_columns` (primary batch) and `registry_secondary_columns`
@@ -47,11 +55,24 @@ _SRC = Path(__file__).parent.parent / "src" / "ferrum"
 # ---------------------------------------------------------------------------
 
 
-def test_returns_documented_four_key_shape():
+def test_returns_documented_five_key_shape():
+    """spec §4.6 / #137: `methods_needing_field` is the fifth wire key,
+    published for every kind (empty for a kind whose methods split no
+    field-requirement, e.g. `smooth`; non-empty for raster/hex/aggregate/
+    join_aggregate)."""
     entry = _core.transform_registry("smooth")
-    assert set(entry.keys()) == {"methods", "outputs", "secondary_outputs", "params"}
+    assert set(entry.keys()) == {
+        "methods",
+        "methods_needing_field",
+        "outputs",
+        "secondary_outputs",
+        "params",
+    }
     assert isinstance(entry["methods"], list)
     assert all(isinstance(m, str) for m in entry["methods"])
+    assert isinstance(entry["methods_needing_field"], list)
+    assert all(isinstance(m, str) for m in entry["methods_needing_field"])
+    assert set(entry["methods_needing_field"]) <= set(entry["methods"])
     assert isinstance(entry["outputs"], list)
     for item in entry["outputs"]:
         assert isinstance(item, tuple)
@@ -123,6 +144,15 @@ _DELETED_MIRROR_LITERALS = (
     "_VALID_AGGREGATES",
     # #123, wave 6B, cycle 2: replaced by ferrum._core.aux_legend_channels().
     "_AUX_LEGEND_CHANNELS",
+    # #137/#176, wave 6B T9: replaced by transform_registry("raster")'s
+    # "methods"/"methods_needing_field" keys.
+    "_RASTER_AGGREGATES",
+    "_RASTER_AGGREGATES_NEEDING_FIELD",
+    # #137/#176, wave 6B T9 cycle 4 (spec-review finding): the hand-typed
+    # raster no-field hint in RenderConfig's and mark_raster's needs-field
+    # messages, replaced by render_config._raster_no_field_hint(), computed
+    # from transform_registry("raster") rather than mirrored as a literal.
+    "'count'|'density'|'any'",
 )
 
 

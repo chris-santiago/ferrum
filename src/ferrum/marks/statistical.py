@@ -546,7 +546,8 @@ def desugar_smooth(
     x_bins : int or None, default None
         Optional number of x bins for aggregated scatter smoothing.
     x_estimator : str or None, default None
-        Aggregation function per x bin (e.g. ``"mean"``).
+        Aggregation function per x bin, validated against the same declared
+        vocabulary ``fm.Smooth(x_estimator=...)`` accepts (e.g. ``"mean"``).
     show_metrics : bool, default False
         When ``True``, emit a ``"metrics"`` layer annotating the fit with
         regression statistics (e.g. R²).

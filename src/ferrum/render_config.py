@@ -5,14 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-# The true accepted set for the substituted mark_raster's aggregate, per the
-# Rust Raster transform (crates/ferrum-core/src/transform/raster.rs). "max" /
-# "min" / "median" are NOT valid raster aggregates despite once being
-# undocumented-but-reachable at render time (F-L07-10) -- construction now
-# refuses them instead of deferring to a confusing runtime ValueError.
-_RASTER_AGGREGATES = frozenset({"count", "density", "mean", "sum", "any"})
-# Aggregates that need a value column to aggregate over.
-_RASTER_AGGREGATES_NEEDING_FIELD = frozenset({"mean", "sum"})
+from ferrum._core import transform_registry
+
+
+def _raster_no_field_hint(entry: dict) -> str:
+    """Return the quoted, pipe-joined raster aggregates that need no ``field=``.
+
+    Read live from *entry* (``transform_registry("raster")``) -- the same
+    door-refusal wording pattern every declared vocabulary's message uses
+    (spec §4.6, #137/#176) -- rather than a hand-typed literal that would go
+    stale the moment a new no-field Rust raster aggregate ships. Shared by
+    ``RenderConfig.__post_init__`` and ``Chart.mark_raster``'s eager
+    needs-field message, the two doors that state this hint in prose.
+    """
+    needing = set(entry["methods_needing_field"])
+    no_field = [m for m in entry["methods"] if m not in needing]
+    return "|".join(f"'{m}'" for m in no_field)
 
 
 @dataclass(frozen=True)
@@ -38,12 +46,15 @@ class RenderConfig:
         ``"warn"`` emits a ``UserWarning`` when auto-raster substitutes.
         ``"silent"`` substitutes without warning.
         ``"error"`` raises ``ValueError`` instead of substituting.
-    raster_aggregate : {"count", "density", "mean", "sum", "any"}, default "count"
-        Aggregation function for the substituted ``mark_raster``.
-        ``"mean"`` and ``"sum"`` require ``raster_field`` to also be set,
-        since they aggregate a value column rather than counting rows.
-        Any other value (e.g. ``"max"``/``"min"``/``"median"``, which are
-        not valid raster aggregates) raises ``ValueError`` at construction.
+    raster_aggregate : str, default "count"
+        Aggregation function for the substituted ``mark_raster``, validated
+        against the live ``transform_registry("raster")["methods"]``
+        vocabulary (spec §4.6). Aggregates in
+        ``transform_registry("raster")["methods_needing_field"]`` require
+        ``raster_field`` to also be set, since they aggregate a value column
+        rather than counting rows. Any other value (e.g. ``"max"``/``"min"``/
+        ``"median"``, which are not valid raster aggregates) raises
+        ``ValueError`` at construction.
 
         **Quantitative color and auto-raster.** An over-threshold chart with
         a *quantitative* ``color`` encoding is eligible for auto-raster: the
@@ -68,10 +79,10 @@ class RenderConfig:
         Back-compat alias for ``raster_scheme``.  Pass at most one of the two;
         after construction it reads back as the resolved ``raster_scheme``.
     raster_field : str or None, default None
-        Column name to aggregate when ``raster_aggregate`` is ``"mean"``
-        or ``"sum"``.  Not required for ``"count"``, ``"density"``, and
-        ``"any"`` -- and genuinely ignored for them: it is dropped before
-        the substitution, so it is never resolved as a column name and an
+        Column name to aggregate when ``raster_aggregate`` is one of
+        ``transform_registry("raster")["methods_needing_field"]``.  Genuinely
+        ignored for every other aggregate: it is dropped before the
+        substitution, so it is never resolved as a column name and an
         unrelated or nonexistent value here has no effect and never raises.
         The column must be numeric; integer columns are coerced to
         ``Float64`` automatically (batch-D T2 numeric coercion), so an
@@ -96,14 +107,19 @@ class RenderConfig:
         from ferrum._validate import validate_choice
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
+        raster_entry = transform_registry("raster")
         validate_choice(
-            "RenderConfig", "raster_aggregate", self.raster_aggregate, _RASTER_AGGREGATES
+            "RenderConfig", "raster_aggregate", self.raster_aggregate, raster_entry["methods"]
         )
-        if self.raster_aggregate in _RASTER_AGGREGATES_NEEDING_FIELD and self.raster_field is None:
+        if (
+            self.raster_aggregate in raster_entry["methods_needing_field"]
+            and self.raster_field is None
+        ):
             raise ValueError(
                 f"RenderConfig: raster_aggregate={self.raster_aggregate!r} requires "
                 f"raster_field=... (the column to aggregate); pass raster_field= or "
-                f"use raster_aggregate='count'|'density'|'any', which need no field."
+                f"use raster_aggregate={_raster_no_field_hint(raster_entry)}, which "
+                f"need no field."
             )
 
         resolved = resolve_cmap_alias(

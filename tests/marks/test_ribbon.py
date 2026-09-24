@@ -110,9 +110,11 @@ def test_ribbon_default_renders_identically_to_prefix_spec_without_interpolate(d
 
 
 def test_ribbon_unknown_interpolate_raises_value_error(df):
-    """An out-of-vocabulary interpolate= value must surface Rust's typed
-    RenderError::UnknownInterpolate as a Python ValueError — desugar_ribbon
-    must NOT duplicate the vocabulary check in Python."""
-    chart = fe.Chart(df).mark_ribbon(interpolate="smooth").encode(x="t", y="lo", y2="hi")
+    """An out-of-vocabulary interpolate= value now refuses at declaration,
+    through ``mark_ribbon``'s own ``validate_choice`` gate (wave 6B,
+    #137/#176) — not deferred to Rust's ``RenderError::UnknownInterpolate``
+    at render time, which this test previously pinned. ``mark_ribbon`` is a
+    composite-mark constructor parameter, not forwarded through ``MarkBase``,
+    so it needed its own gate rather than inheriting one."""
     with pytest.raises(ValueError, match="smooth"):
-        chart.to_svg()
+        fe.Chart(df).mark_ribbon(interpolate="smooth")

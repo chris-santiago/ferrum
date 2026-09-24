@@ -1113,8 +1113,10 @@ class Chart(
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         interpolate : str, optional
-            Line interpolation: ``"linear"``, ``"monotone"``, ``"step"``,
-            ``"step-before"``, ``"step-after"``, ``"basis"``, ``"cardinal"``.
+            Line interpolation, validated against the live
+            ``ferrum._core.interpolate_accepted_values()`` vocabulary (spec
+            §4.6). An unrecognized value is refused at declaration
+            (construction time), not at render.
         stroke_cap : str, optional
             Line cap: ``"butt"``, ``"round"``, ``"square"``.
         stroke_join : str, optional
@@ -1251,9 +1253,10 @@ class Chart(
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         interpolate : str, optional
-            Area boundary interpolation: ``"linear"``, ``"monotone"``,
-            ``"step"``, ``"step-before"``, ``"step-after"``, ``"basis"``,
-            ``"cardinal"``.
+            Area boundary interpolation, validated against the live
+            ``ferrum._core.interpolate_accepted_values()`` vocabulary (spec
+            §4.6). An unrecognized value is refused at declaration
+            (construction time), not at render.
         line : bool, optional
             Whether to draw the top boundary as a line.  Default is ``False``.
         position : Position, optional

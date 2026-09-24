@@ -25,11 +25,27 @@ from ferrum import _core
 
 
 def test_mark_hex_accepts_every_registry_aggregate():
+    """Wave 6B (`#137`/`#176`, Q4): hex is a declared subset of `AggFn`, so
+    `stdev`/`variance` are now accepted canonical spellings alongside
+    `std`/`var` (their declared aliases) -- ten spellings, not eight."""
     df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0, 4.0], "y": [0.0, 1.0, 2.0, 1.0, 0.0]})
-    aggregates = _core.transform_registry("hex")["methods"]
-    assert set(aggregates) == {"count", "mean", "sum", "min", "max", "median", "std", "var"}
+    entry = _core.transform_registry("hex")
+    aggregates = entry["methods"]
+    assert set(aggregates) == {
+        "count",
+        "mean",
+        "sum",
+        "min",
+        "max",
+        "median",
+        "stdev",
+        "std",
+        "variance",
+        "var",
+    }
+    needs_field = set(entry["methods_needing_field"])
     for aggregate in aggregates:
-        field = None if aggregate == "count" else "y"
+        field = "y" if aggregate in needs_field else None
         svg = fm.Chart(df).mark_hex(aggregate=aggregate, field=field).encode(x="x", y="y").to_svg()
         assert svg.startswith("<svg")
 

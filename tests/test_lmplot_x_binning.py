@@ -106,6 +106,11 @@ def test_the_dedicated_fit_methods_refuse_binning(method, kwargs):
         fm.lmplot(frame, x="x", y=y, method=method, **kwargs)
 
 
-def test_an_unknown_x_estimator_is_refused_by_the_engine():
-    with pytest.raises(ValueError, match="unknown x_estimator"):
-        fm.lmplot(_frame(), x="x", y="y", method="loess", x_bins=4, x_estimator="bogus").to_svg()
+def test_an_unknown_x_estimator_is_refused_at_the_call():
+    """`x_estimator=` is validated at the `lmplot(...)` call itself through
+    `validate_x_estimator_kwarg` (the sibling of `validate_interpolate_kwarg`,
+    which gates `interpolate=`), not deferred to `.to_svg()` and the `Smooth`
+    transform's own refusal. The refusal names `lmplot`, the public entry the
+    caller invoked, not `Smooth`."""
+    with pytest.raises(ValueError, match=r"^lmplot: x_estimator must be one of .*; got 'bogus'$"):
+        fm.lmplot(_frame(), x="x", y="y", method="loess", x_bins=4, x_estimator="bogus")

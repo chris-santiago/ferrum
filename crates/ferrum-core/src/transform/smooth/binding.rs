@@ -312,20 +312,17 @@ impl PySmooth {
             _ => 1,
         };
         let method = resolved_method;
-        use crate::transform::aggregate::AggFn;
-        let x_estimator_parsed: Option<AggFn> = match x_estimator {
-            None => None,
-            Some(s) => Some(match s {
-                "mean" => AggFn::Mean,
-                "median" => AggFn::Median,
-                "sum" => AggFn::Sum,
-                "min" => AggFn::Min,
-                "max" => AggFn::Max,
-                other => return Err(PyValueError::new_err(format!(
-                    "Smooth: unknown x_estimator '{other}'; expected 'mean'|'median'|'sum'|'min'|'max'"
-                ))),
-            }),
-        };
+        use crate::transform::aggregate::XEstimator;
+        let x_estimator_parsed = x_estimator
+            .map(|s| {
+                XEstimator::parse(s).map(XEstimator::agg_fn).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Smooth: unknown x_estimator '{s}'; expected {}",
+                        XEstimator::accepted_values()
+                    ))
+                })
+            })
+            .transpose()?;
         let output_parsed = match output {
             "fitted" => SmoothOutput::Fitted,
             "residuals" => SmoothOutput::Residuals,

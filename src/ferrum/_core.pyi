@@ -955,6 +955,16 @@ def theme_color_keys() -> list[str]: ...
 # list instead of hand-mirroring it as a Python literal.
 def aux_legend_channels() -> list[str]: ...
 
+# #176 item (wave 6B T9): the ``interpolate=`` vocabulary, published from
+# Rust's ``Interpolate::ALL`` (in its order) so ``marks/base.py`` gates it at
+# declaration instead of mirroring the list as a Python literal.
+def interpolate_accepted_values() -> list[str]: ...
+
+# wave 6B T9 cycle 6: the ``Smooth(x_estimator=)`` vocabulary, published from
+# Rust's ``XEstimator`` (a declared subset of the aggregate vocabulary, in its
+# refusal-message order) so Python reads it instead of mirroring it.
+def x_estimator_accepted_values() -> list[str]: ...
+
 # Batch C task 4 round 4 (#95): the raw-dict scale key gate's own per-type
 # accepted-key table, published for Python to filter against instead of
 # hand-mirroring a subset of it. Raises ValueError naming the type on an
@@ -1174,6 +1184,7 @@ def prf_at_thresholds(
 
 class _TransformRegistryEntry(TypedDict):
     methods: list[str]
+    methods_needing_field: list[str]
     outputs: list[tuple[str, str]]
     secondary_outputs: list[tuple[str, list[tuple[str, str]]]]
     params: list[str]
@@ -1182,7 +1193,8 @@ def transform_registry(kind: str) -> _TransformRegistryEntry:
     """
     ``ferrum._core.transform_registry(kind)`` — spec §4.6, batch-D task 1.
 
-    Returns ``{"methods": [...], "outputs": [(name, dtype), ...],
+    Returns ``{"methods": [...], "methods_needing_field": [...],
+    "outputs": [(name, dtype), ...],
     "secondary_outputs": [(key, [(name, dtype), ...]), ...], "params": [...]}``
     for a known transform kind (module name — see the module doc); raises
     ``ValueError`` listing every known kind otherwise.

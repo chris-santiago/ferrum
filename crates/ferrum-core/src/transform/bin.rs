@@ -2586,4 +2586,32 @@ mod tests {
         assert!(warnings[0].to_string().contains("Bin"), "{:?}", warnings[0]);
     }
 
+
+    /// wave 6B T9 (Q4): `std`/`var` are declared aliases on `Bin(agg=)`: the
+    /// alias bins byte-identically to its canonical spelling, and a bogus
+    /// agg is refused with the `AggFn::accepted_values()` rendering.
+    #[test]
+    fn bin_agg_alias_matches_canonical_and_bogus_is_refused() {
+        pyo3::Python::initialize();
+        let batch = batch_with_agg(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![Some(1.0), Some(4.0), Some(2.0), Some(8.0), Some(3.0), Some(9.0)],
+        );
+        let mode = || BinMode::Fixed { n: 2 };
+        for (alias, canonical) in [("std", "stdev"), ("var", "variance")] {
+            let a = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", alias), &batch).unwrap();
+            let c = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", canonical), &batch).unwrap();
+            assert_eq!(a, c, "Bin(agg='{alias}') must equal Bin(agg='{canonical}')");
+        }
+        let std = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "std"), &batch).unwrap();
+        let var = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "var"), &batch).unwrap();
+        assert_ne!(col_f64_opt(&std, "agg_value"), col_f64_opt(&var, "agg_value"), "vacuity control");
+        let err = apply(&agg_spec("x", mode(), Some((1.0, 6.0)), "w", "geomean"), &batch).unwrap_err();
+        pyo3::Python::attach(|py| {
+            assert_eq!(
+                err.value(py).to_string(),
+                format!("stat_bin: unknown agg 'geomean'; expected {}", AggFn::accepted_values())
+            );
+        });
+    }
 }

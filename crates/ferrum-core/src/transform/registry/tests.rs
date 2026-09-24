@@ -760,6 +760,10 @@ fn transform_registry_covers_every_kind() {
                 .unwrap_or_else(|e| panic!("transform_registry('{kind}') failed: {e}"));
             let dict = dict.bind(py);
             assert!(dict.get_item("methods").unwrap().is_some(), "{kind}: missing 'methods' key");
+            assert!(
+                dict.get_item("methods_needing_field").unwrap().is_some(),
+                "{kind}: missing 'methods_needing_field' key"
+            );
             assert!(dict.get_item("outputs").unwrap().is_some(), "{kind}: missing 'outputs' key");
             assert!(dict.get_item("params").unwrap().is_some(), "{kind}: missing 'params' key");
         }
@@ -1373,6 +1377,9 @@ fn density_data_methods_accepted_and_bogus_kernel_rejected() {
 /// the registry by `methods_drift_guard_covers_every_declared_vocabulary`.
 const KINDS_WITH_METHODS_GUARD: &[&str] = &[
     "bin",
+    "aggregate",
+    "join_aggregate",
+    "data_aggregate",
     "kde",
     "smooth",
     "error_extent",
@@ -1388,6 +1395,291 @@ const KINDS_WITH_METHODS_GUARD: &[&str] = &[
     "top_k",
     "data_stack",
 ];
+
+/// wave 6B T9: `aggregate` publishes `AggFn`'s vocabulary, aliases
+/// included. Its hard refusal site is `AggregateOp`'s PyO3 constructor
+/// (`Aggregate` itself only holds already-parsed ops).
+#[test]
+fn aggregate_methods_accepted_and_bogus_fn_rejected() {
+    attach(|py| {
+        let ty = py.get_type::<crate::transform::aggregate::PyAggregateOp>();
+        for &fn_ in &entry_for_kind("aggregate").unwrap().methods {
+            let res = ty.call(("v", fn_, "out"), None);
+            assert!(res.is_ok(), "declared aggregate fn '{fn_}' rejected by AggregateOp(): {:?}", res.err());
+        }
+        let res = ty.call(("v", "not_a_real_fn", "out"), None);
+        assert!(res.is_err(), "bogus aggregate fn must be rejected by AggregateOp()");
+    });
+}
+
+/// wave 6B T9: `join_aggregate` publishes `AggFn`'s vocabulary. It has no
+/// PyO3 constructor; its refusal site is the wire (`AggFn`'s serde goes
+/// through `AggFn::parse`), so every declared spelling must deserialize AND
+/// apply, and a bogus one must be refused at deserialization.
+#[test]
+fn join_aggregate_methods_accepted_and_bogus_fn_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::join_aggregate::JoinAggregateSpec;
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0])]);
+    let spec_json = |fn_: &str| {
+        format!(r#"{{"aggregates":[{{"field":"v","fn":"{fn_}","as":"out"}}]}}"#)
+    };
+    for &fn_ in &entry_for_kind("join_aggregate").unwrap().methods {
+        let spec: JoinAggregateSpec = serde_json::from_str(&spec_json(fn_))
+            .unwrap_or_else(|e| panic!("declared join_aggregate fn '{fn_}' refused by the wire: {e}"));
+        let res = crate::transform::join_aggregate::apply(&spec, &batch);
+        assert!(res.is_ok(), "declared join_aggregate fn '{fn_}' rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        serde_json::from_str::<JoinAggregateSpec>(&spec_json("not_a_real_fn")).is_err(),
+        "bogus join_aggregate fn must be refused by the wire"
+    );
+}
+
+/// The fixture every field probe applies to: numeric `x`/`y`/`v` (20 rows,
+/// enough for every smoother) and a string group column `g`.
+fn field_probe_batch() -> RecordBatch {
+    let n = 20;
+    let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + ((i * 7) % 5) as f64).collect();
+    let v: Vec<f64> = (0..n).map(|i| ((i * 13) % 11) as f64 + 1.0).collect();
+    let g: Vec<&str> = (0..n).map(|i| if i % 2 == 0 { "a" } else { "b" }).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("y", DataType::Float64, true),
+        Field::new("v", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(Float64Array::from(v)),
+            Arc::new(StringArray::from(g)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build `kind` with `method` through its real door (the PyO3 constructor
+/// where one exists, the spec struct / wire otherwise), with or without its
+/// field operand, and apply it to [`field_probe_batch`]. `Err` carries the
+/// refusal from whichever stage refused. "Without a field" means: the
+/// optional operand omitted (`raster`/`hex` `field`, `bin` `agg_field`,
+/// `data_window` op `field`); `""` where the door's field is a required
+/// string (`aggregate`'s `count()` shorthand shape, the others'
+/// column); nothing to omit for `smooth`/`linkage`/`regression_data`.
+fn field_probe(py: Python<'_>, kind: &str, method: &str, with_field: bool) -> Result<(), String> {
+    use crate::transform::core::TransformSpec;
+    let batch = field_probe_batch();
+    let msg = |e: PyErr| e.value(py).to_string();
+    let field = if with_field { "v" } else { "" };
+    let kw = |pairs: &[(&str, &str)]| {
+        let d = pyo3::types::PyDict::new(py);
+        for (k, v) in pairs {
+            d.set_item(*k, *v).unwrap();
+        }
+        d
+    };
+    macro_rules! door {
+        ($ty:ty, $args:expr, $kwargs:expr) => {{
+            let obj = py.get_type::<$ty>().call($args, Some(&$kwargs)).map_err(msg)?;
+            let spec: TransformSpec = obj.extract::<PyRef<'_, $ty>>().unwrap().0.clone();
+            spec
+        }};
+    }
+    use crate::transform as t;
+    let spec: TransformSpec = match kind {
+        "bin" => {
+            let k = kw(&[("agg", method)]);
+            if with_field {
+                k.set_item("agg_field", "v").unwrap();
+            }
+            door!(t::bin::PyBin, ("x",), k)
+        }
+        "raster" | "hex" => {
+            let k = kw(&[("aggregate", method)]);
+            if with_field {
+                k.set_item("field", "v").unwrap();
+            }
+            if kind == "raster" {
+                k.set_item("resolution", 4).unwrap();
+                door!(t::raster::PyRaster, ("x", "y"), k)
+            } else {
+                door!(t::hex::PyHex, ("x", "y"), k)
+            }
+        }
+        "kde" => door!(t::kde::PyKde, (field,), kw(&[("kernel", method)])),
+        "error_extent" => door!(t::error_extent::PyErrorExtent, (field,), kw(&[("method", method)])),
+        "qq" => door!(t::qq::PyQq, (field,), kw(&[("distribution", method)])),
+        "smooth" => door!(t::smooth::PySmooth, ("x", "y"), kw(&[("method", method)])),
+        "linkage" => {
+            let only_numeric = f64_batch(&[("x", &[0.0, 1.0, 5.0, 6.0]), ("y", &[0.0, 1.0, 5.0, 7.0])]);
+            let spec = door!(t::linkage::PyLinkage, (), kw(&[("method", method)]));
+            return spec.apply(&only_numeric).map(|_| ()).map_err(msg);
+        }
+        "aggregate" => {
+            let obj = py
+                .get_type::<t::aggregate::PyAggregateOp>()
+                .call((field, method, "out"), None)
+                .map_err(msg)?;
+            let op = obj.extract::<PyRef<'_, t::aggregate::PyAggregateOp>>().unwrap().0.clone();
+            TransformSpec::Aggregate(t::aggregate::AggregateSpec { ops: vec![op], groupby: vec![], name: None })
+        }
+        "join_aggregate" | "data_aggregate" => {
+            let json = format!(
+                r#"{{"type":"{kind}","aggregates":[{{"field":"{field}","fn":"{method}","as":"out"}}]}}"#
+            );
+            serde_json::from_str(&json).map_err(|e| e.to_string())?
+        }
+        "pivot" => TransformSpec::Pivot(t::pivot::PivotSpec {
+            field: if with_field { "g".into() } else { String::new() },
+            value: "v".into(),
+            groupby: None,
+            limit: None,
+            op: method.to_string(),
+            name: None,
+        }),
+        "data_window" => TransformSpec::DataWindow(t::data_window::DataWindowSpec {
+            ops: vec![t::data_window::WindowOp {
+                op: method.to_string(),
+                field: with_field.then(|| "v".to_string()),
+                as_: "out".into(),
+                param: None,
+            }],
+            sort: None,
+            groupby: None,
+            frame: None,
+            ignore_peers: false,
+            name: None,
+        }),
+        "density_data" => TransformSpec::DensityData(t::density_data::DensityDataSpec {
+            field: field.into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: None,
+            cumulative: false,
+            kernel: method.to_string(),
+            as_: ("value".into(), "density".into()),
+            name: None,
+        }),
+        "regression_data" => TransformSpec::RegressionData(t::regression_data::RegressionDataSpec {
+            x: "x".into(),
+            y: "y".into(),
+            method: method.to_string(),
+            order: 1,
+            groupby: None,
+            as_: ("x".into(), "y".into()),
+            name: None,
+        }),
+        "impute" => TransformSpec::Impute(t::impute::ImputeSpec {
+            field: field.into(),
+            method: method.to_string(),
+            value: Some(0.0),
+            groupby: None,
+            key: None,
+            keyvals: None,
+            name: None,
+        }),
+        "top_k" => TransformSpec::TopK(t::top_k::TopKSpec {
+            n: 2,
+            field: field.into(),
+            op: method.to_string(),
+            sort: "descending".into(),
+            groupby: None,
+            name: None,
+        }),
+        "data_stack" => TransformSpec::DataStack(t::data_stack::DataStackSpec {
+            field: field.into(),
+            groupby: vec!["g".into()],
+            sort: None,
+            as_: ("y0".into(), "y1".into()),
+            offset: method.to_string(),
+            name: None,
+        }),
+        other => panic!("{other} declares `methods` but has no field probe here"),
+    };
+    spec.apply(&batch).map(|_| ()).map_err(msg)
+}
+
+/// wave 6B T9, two-sided, orchestrator ruling cycle 3: `methods_needing_field`
+/// is "the spellings this kind's door refuses without a field". For EVERY
+/// kind that declares `methods` (an empty needs-field set is proved, never
+/// assumed), each declared method is probed through [`field_probe`]:
+/// - with its field it must be accepted (the control: a refusal below is
+///   about the field, not a broken fixture);
+/// - without its field it must be refused iff `methods_needing_field` lists
+///   it, so over- and under-declaration both fail.
+///
+/// A kind with no `methods` must declare no needs-field set either.
+#[test]
+fn methods_needing_field_is_a_subset_of_declared_methods() {
+    attach(|py| {
+        for kind in all_transform_kinds() {
+            let entry = entry_for_kind(kind).unwrap();
+            for m in &entry.methods_needing_field {
+                assert!(
+                    entry.methods.contains(m),
+                    "{kind}: methods_needing_field lists '{m}', which `methods` does not declare"
+                );
+            }
+            for &m in &entry.methods {
+                if let Err(e) = field_probe(py, kind, m, true) {
+                    panic!("{kind}: control failed, '{m}' refused WITH a field: {e}");
+                }
+                let declared_needing = entry.methods_needing_field.contains(&m);
+                match field_probe(py, kind, m, false) {
+                    Ok(()) => assert!(
+                        !declared_needing,
+                        "{kind}: '{m}' is declared as needing a field but is accepted without one"
+                    ),
+                    Err(e) => assert!(
+                        declared_needing,
+                        "{kind}: '{m}' is refused without a field but not declared as needing one: {e}"
+                    ),
+                }
+            }
+        }
+        assert_eq!(entry_for_kind("raster").unwrap().methods_needing_field, vec!["mean", "sum"]);
+    });
+}
+
+/// Orchestrator ruling (T9 cycle 2): `aggregate`'s declared needs-field set
+/// equals the set of `AggFn` spellings `AggregateOp("", fn_)` refuses,
+/// computed by calling the door over every spelling, not hand-listed.
+#[test]
+fn aggregate_methods_needing_field_equal_the_spellings_aggregate_op_refuses_field_less() {
+    attach(|py| {
+        let refused: std::collections::BTreeSet<&str> = crate::transform::aggregate::AggFn::all()
+            .into_iter()
+            .filter(|m| field_probe(py, "aggregate", m, false).is_err())
+            .collect();
+        let declared: std::collections::BTreeSet<&str> =
+            entry_for_kind("aggregate").unwrap().methods_needing_field.into_iter().collect();
+        assert_eq!(declared, refused);
+        assert!(!refused.contains("count") && refused.contains("distinct") && refused.contains("std"));
+    });
+}
+
+/// wave 6B T9 cycle 3: `data_aggregate` publishes `AggFn`'s vocabulary like
+/// its `join_aggregate` sibling; its refusal site is the wire (`AggFn`'s
+/// serde goes through `AggFn::parse`) and `apply()`.
+#[test]
+fn data_aggregate_methods_accepted_and_bogus_fn_rejected() {
+    attach(|py| {
+        for &fn_ in &entry_for_kind("data_aggregate").unwrap().methods {
+            if let Err(e) = field_probe(py, "data_aggregate", fn_, true) {
+                panic!("declared data_aggregate fn '{fn_}' refused: {e}");
+            }
+        }
+        assert!(
+            field_probe(py, "data_aggregate", "not_a_real_fn", true).is_err(),
+            "bogus data_aggregate fn must be refused by the wire"
+        );
+    });
+}
 
 #[test]
 fn methods_drift_guard_covers_every_declared_vocabulary() {

@@ -81,6 +81,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // (`render/prepare/legend.rs::AUX_LEGEND_CHANNEL_NAMES`), published so
     // `ferrum.encoding.base` reads the list instead of hand-mirroring it.
     m.add_function(wrap_pyfunction!(render::prepare::aux_legend_channels, m)?)?;
+    // #176 item (wave 6B T9): the `interpolate=` vocabulary
+    // (`render/marks/curve.rs::Interpolate::ALL`), published so `marks/base.py`
+    // gates it at declaration instead of the renderer refusing it.
+    m.add_function(wrap_pyfunction!(render::marks::curve::interpolate_accepted_values, m)?)?;
+    // wave 6B T9 cycle 6: `Smooth(x_estimator=)`'s vocabulary
+    // (`transform/aggregate.rs::XEstimator`), published the same way.
+    m.add_function(wrap_pyfunction!(transform::aggregate::x_estimator_accepted_values, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

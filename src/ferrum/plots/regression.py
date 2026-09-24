@@ -43,6 +43,7 @@ from ferrum.encoding import Color, X, Y
 from ferrum.encoding._aliases import resolve_color_alias
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._fit_layers import build_fit_layers
+from ferrum.marks.base import validate_x_estimator_kwarg
 from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
     _color_field_for,
@@ -979,9 +980,11 @@ def lmplot(
         take no binning parameters at all; passing ``x_bins=`` (or
         ``x_estimator=``) with one of those three raises ``ValueError``.
     x_estimator : str or None, optional
-        The aggregate applied within each ``x_bins`` bin (``"mean"``,
-        ``"median"``, ``"sum"``, ``"min"``, ``"max"``; defaults to the
-        transform's own ``"mean"``). Forwarded on the same terms as
+        The aggregate applied within each ``x_bins`` bin, validated against
+        the same declared vocabulary ``fm.Smooth(x_estimator=...)`` accepts
+        (a subset of the shared aggregate vocabulary -- see ``fm.Smooth``'s
+        own ``x_estimator`` parameter for the accepted spellings); defaults
+        to the transform's own ``"mean"``. Forwarded on the same terms as
         ``x_bins``, and only meaningful alongside it. Same
         ``"logistic"``/``"glm"``/``"robust"`` refusal as ``x_bins`` above
         applies on its own, even without ``x_bins=`` set.
@@ -1056,6 +1059,11 @@ def lmplot(
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
     validate_choice("lmplot", "method", method, _VALID_METHODS)
+    # x_estimator= eager gate, shared with mark_smooth's own (#137/#176):
+    # names `lmplot` for any unrecognized value, string or not, instead of
+    # letting a bad string reach `Smooth`'s own Rust text (which does not
+    # name lmplot) or a non-string reach a raw PyO3 TypeError.
+    validate_x_estimator_kwarg("lmplot", x_estimator)
 
     # x_bins/x_estimator: `Logistic`/`Glm`/`Robust` expose no binning
     # parameters at all (`transform_registry` lists none for any of the
