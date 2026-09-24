@@ -30,7 +30,7 @@ from ferrum._facet import (
 from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._layer_transforms import _infer_agg_groupby, _lower_bin_encoding
+from ferrum._encode_lowering import _infer_agg_groupby, _lower_bin_encoding
 from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
 
 
@@ -810,7 +810,7 @@ class SpecBuildMixin:
         the single-chart path keeps the Bin unnamed so it chains through the
         pipeline as before.
 
-        The encoding rewrite is the shared :func:`~ferrum._layer_transforms.
+        The encoding rewrite is the shared :func:`~ferrum._encode_lowering.
         _lower_bin_encoding` the layered path uses (spec §6.6): a ``Bin``
         replaces its input batch's schema with its own columns, so the binned
         channel, its span channel and any opposing ``aggregate=`` channel must

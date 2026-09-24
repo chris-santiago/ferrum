@@ -53,7 +53,6 @@ type FacetPartitionKey = (String, Option<String>);
 pub struct LayerPrepared {
     pub mark: crate::spec::mark::Mark,
     pub encoding: crate::spec::encoding::Encoding,
-    pub transforms: Vec<crate::transform::core::TransformSpec>,
     pub mark_style: Option<crate::spec::mark_style::MarkKwargsSpec>,
     /// Name of the chart-level transform output this layer reads from.
     /// `None` ⇒ pipeline final output (resolved via [`FINAL_OUTPUT_KEY`]).
@@ -145,7 +144,6 @@ impl LayerPrepared {
         Self {
             mark: spec.mark,
             encoding: spec.encoding.clone(),
-            transforms: spec.transforms.clone(),
             mark_style: spec.mark_style.clone(),
             data_source: None,
             position: spec.position.clone(),
@@ -197,7 +195,6 @@ impl LayerPrepared {
         Self {
             mark: layer.mark,
             encoding,
-            transforms: layer.transforms.clone(),
             mark_style,
             data_source: layer.data_source.clone(),
             position: layer.position.clone().or_else(|| spec.position.clone()),
@@ -1376,17 +1373,31 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// the channel the user wrote at chart level).
 ///
 /// A layered spec that also sets a chart-level `mark_style` is refused
-/// ([`RenderError::LayeredChartMarkStyle`]): no layer reads it.
+/// ([`RenderError::LayeredChartMarkStyle`]): no layer reads it. So is a
+/// layer with its own non-empty `transforms`
+/// ([`RenderError::LayerTransformsUnsupported`]): no layer runs them.
 fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
     let raw: Vec<LayerPrepared> = match &spec.layers {
         None => vec![LayerPrepared::from_chart_only(spec)],
         Some(layer_vec) if spec.mark_style.is_some() => {
             return Err(RenderError::LayeredChartMarkStyle { layers: layer_vec.len() });
         }
-        Some(layer_vec) => layer_vec
-            .iter()
-            .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
-            .collect(),
+        Some(layer_vec) => {
+            if let Some((layer, l)) = layer_vec
+                .iter()
+                .enumerate()
+                .find(|(_, l)| !l.transforms.is_empty())
+            {
+                return Err(RenderError::LayerTransformsUnsupported {
+                    layer,
+                    count: l.transforms.len(),
+                });
+            }
+            layer_vec
+                .iter()
+                .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
+                .collect()
+        }
     };
     Ok(raw
         .into_iter()
@@ -6228,6 +6239,66 @@ mod tests {
         );
         // And — proving the change — the named output and __final__ schemas differ.
         assert_ne!(named.schema(), fin.schema());
+    }
+
+    /// A hand-built layered spec whose layer carries its own non-empty
+    /// `transforms` is refused naming that layer; an empty list prepares.
+    #[test]
+    fn layer_own_transforms_refused_naming_the_layer() {
+        pyo3::Python::initialize();
+        use crate::spec::layer::Layer;
+        let layer = |transforms| Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms,
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        };
+        let prepare = |spec: &ChartSpec| {
+            prepare_render_inputs(
+                spec,
+                &price_weight_batch(),
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport {
+                    width: 600.0,
+                    height: 400.0,
+                },
+                &crate::render::chart_config::ChartConfig::default(),
+                None,
+            )
+        };
+
+        let mut spec = spec_with_one_bin(None);
+        let bin = spec.transforms.clone();
+        spec.layers = Some(vec![layer(vec![]), layer(bin)]);
+        let err = prepare(&spec)
+            .err()
+            .expect("layer 1's own transforms must refuse");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerTransformsUnsupported { layer: 1, count: 1 }
+            ),
+            "wrong variant: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "layer 1: layers[1].transforms carries 1 transform(s), but a layer does not run its \
+             own transforms. Give the layer its own chart with .transform(...) and compose it \
+             with +, which routes the transform to that layer alone."
+        );
+
+        // Vacuity control: the same spec with every layer's list empty prepares.
+        spec.layers = Some(vec![layer(vec![]), layer(vec![])]);
+        assert!(
+            prepare(&spec).is_ok(),
+            "empty layer transforms must stay accepted"
+        );
     }
 
     #[test]

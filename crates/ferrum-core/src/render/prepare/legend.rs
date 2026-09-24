@@ -1565,7 +1565,6 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             mark_style: None,
             data_source: None,
             position: None,

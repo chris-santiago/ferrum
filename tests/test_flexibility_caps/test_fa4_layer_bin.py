@@ -23,7 +23,7 @@ pre-FA4 behavior for the single-chart path was already broken, so *every*
 standalone ``bin=`` idiom raised at render time (F-L01-01) while this file's
 own docstring below claimed the standard histogram pattern "produces valid
 output". Both paths now share one lowering
-(``_layer_transforms._lower_bin_encoding``), so this suite covers the layered
+(``_encode_lowering._lower_bin_encoding``), so this suite covers the layered
 half and ``tests/test_encode_bin_lowering.py`` covers the single-chart half.
 Two behavior changes land here, both disclosed: a binning layer's encoding
 gains the ``x2``/``y2`` span bound to ``bin_end`` (so layered bin bars span

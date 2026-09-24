@@ -11,6 +11,11 @@ pub struct Layer {
     pub mark: Mark,
     #[serde(default)]
     pub encoding: Encoding,
+    /// A layer does not run its own transforms: it reads the chart's pipeline
+    /// output, or a named chart-level output via `data_source`. This field is
+    /// read only to refuse a non-empty list at render
+    /// ([`RenderError::LayerTransformsUnsupported`](crate::render::RenderError::LayerTransformsUnsupported));
+    /// an empty or absent list is accepted and omitted when serializing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<TransformSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

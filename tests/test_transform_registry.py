@@ -283,7 +283,7 @@ def test_registry_secondary_columns_refuses_the_primary_schema():
 # from `statistical.py`'s and `regression.py`'s dedicated-fit dispatch), so
 # it is pinned once per real kind below -- 27 total pinned invocations.
 _PRIMARY_CALL_SITES = [
-    ("bin", ["bin_start", "bin_end", "count", "agg_value"]),  # _layer_transforms.py:434
+    ("bin", ["bin_start", "bin_end", "count", "agg_value"]),  # _encode_lowering.py:296
     (
         "contour",
         ["contour_x", "contour_y", "contour_x2", "contour_y2", "level_id", "level_value"],

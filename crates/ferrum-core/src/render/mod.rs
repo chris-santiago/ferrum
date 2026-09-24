@@ -525,6 +525,13 @@ pub enum RenderError {
     /// `layer.mark_style > theme`), so the chart-level value could only be
     /// ignored; it refuses instead. `layers` is the layer count.
     LayeredChartMarkStyle { layers: usize },
+    /// A layer carries its own non-empty `transforms` (`layers[layer]`, the
+    /// first such layer; `count` is its transform count). A layer never runs
+    /// transforms of its own: it reads the chart's pipeline output, or a
+    /// named chart-level output via `data_source`, so the list could only be
+    /// ignored; it refuses instead. Python's `Layer` refuses the same input at
+    /// construction; this refuses a hand-built spec that carries one.
+    LayerTransformsUnsupported { layer: usize, count: usize },
     /// A time-typed format (`label_format="%b %Y"`, a preset like
     /// `"date_iso"` that resolves to one, or a `%`-free spec declared
     /// `format_type="time"`) was applied where the value it formats is not
@@ -754,7 +761,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::ShapeRangeEntryUnrecognized { .. }
         | RenderError::StrokeDashRangeUnsupported { .. }
         // A layer count, no channel token.
-        | RenderError::LayeredChartMarkStyle { .. }) => other,
+        | RenderError::LayeredChartMarkStyle { .. }
+        // A layer index and a transform count, no channel token.
+        | RenderError::LayerTransformsUnsupported { .. }) => other,
     }
 }
 
@@ -975,6 +984,13 @@ impl std::fmt::Display for RenderError {
                 "ChartSpec.mark_style is set on a layered chart ({layers} layers), where it has no \
                  effect: a layered chart is styled per layer. Move the style onto each layer's \
                  own mark_style."
+            ),
+            Self::LayerTransformsUnsupported { layer, count } => write!(
+                f,
+                "layer {layer}: layers[{layer}].transforms carries {count} transform(s), but a \
+                 layer does not run its own transforms. Give the layer its own chart with \
+                 .transform(...) and compose it with +, which routes the transform to that layer \
+                 alone."
             ),
             Self::ShapeRangeEntryUnrecognized { entry } => write!(
                 f,

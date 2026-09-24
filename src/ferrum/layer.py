@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+_LAYER_TRANSFORMS_REFUSAL = (
+    "Layer(transforms=[...]): a layer does not run its own transforms. Give the layer "
+    "its own chart with .transform(...) and compose it with +, which routes the "
+    "transform to that layer alone."
+)
+
 
 class Layer:
     """Single rendering layer inside a multi-layer ``Chart``.
@@ -32,8 +38,12 @@ class Layer:
         (``stroke``, ``shape``, ``x``, ``y``) raises the same typed
         ``ValueError`` (2026-09-11, batch-H close cycle 3).
     transforms : list, optional
-        Sequence of transform objects applied to this layer's data before
-        rendering.  Defaults to an empty list when omitted.
+        Must be omitted, ``None``, ``[]`` or ``()``. A layer does not run
+        its own transforms: it reads either the chart's final batch or a
+        *named* chart-level transform's output through its data source. Any
+        other value raises ``ValueError``. To transform one layer's data, give
+        that layer its own chart with ``.transform(...)`` and compose it with
+        ``+``, which routes the transform to that layer alone.
     mark_kwargs : dict, optional
         Extra keyword arguments forwarded to the mark renderer (e.g.
         ``{"dx": 5, "opacity": 0.7}``).
@@ -47,11 +57,18 @@ class Layer:
     def __init__(
         self, data=None, mark=None, *, name=None, encoding=None, transforms=None, mark_kwargs=None
     ):
+        # Only "no transforms" is accepted; any other value (a non-empty
+        # sequence, a falsy non-sequence, an array whose truth is ambiguous)
+        # gets the refusal rather than being dropped or tripping a raw error.
+        if transforms is not None and not (
+            isinstance(transforms, (list, tuple)) and len(transforms) == 0
+        ):
+            raise ValueError(_LAYER_TRANSFORMS_REFUSAL)
         self.data = data
         self.mark = mark
         self.name = name
         self.encoding = encoding or {}
-        self.transforms = transforms or []
+        self.transforms = []
         self.mark_kwargs = mark_kwargs or {}
 
     def __repr__(self) -> str:

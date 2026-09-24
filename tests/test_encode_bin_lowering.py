@@ -456,7 +456,8 @@ def test_unhonored_bin_on_color_fails_with_unknown_column():
     design S2): ``to_implicit_transforms()`` emits a ``_PendingBin`` for
     ANY channel's ``bin=``, honored or not, so an unhonored ``Color(bin=True)``
     still puts a Bin transform on the chart's pipeline and re-points the
-    color channel at the Bin's own output column (``_lower_bin_encoding``'s
+    color channel at the Bin's own output column
+    (``_encode_lowering._lower_bin_encoding``'s
     ``bin_axes`` scan is deliberately not honored-gated either -- see its
     docstring). The Bin then replaces the WHOLE batch schema with its own
     columns, dropping the ``x``/``y`` columns the rest of the chart still
@@ -476,7 +477,7 @@ def test_unhonored_bin_on_color_fails_with_unknown_column():
 def test_unhonored_aggregate_on_color_beside_a_bin_fails_with_column_not_found():
     """The other half of the same gate asymmetry: an unhonored
     ``Color(aggregate=...)`` beside a real ``bin=`` on x is excluded from
-    ``_lower_bin_encoding``'s fold (Color does not honor ``aggregate=``), so
+    ``_encode_lowering._lower_bin_encoding``'s fold (Color does not honor ``aggregate=``), so
     it is never absorbed into the Bin -- but its ``_PendingAggregate``
     sentinel still reaches the transform list unconditionally (same root
     cause as the bin case above: ``to_implicit_transforms()`` does not
