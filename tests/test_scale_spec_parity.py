@@ -516,7 +516,7 @@ class TestAppearanceScaleWireGate:
 
     def test_stroke_opacity_title_is_refused(self, opacity_df: pl.DataFrame):
         """StrokeOpacity(title=...) refuses (#123): no legend exists to label."""
-        with pytest.raises(ValueError, match=r"StrokeOpacity\(title='Opacity'\) is not supported"):
+        with pytest.raises(ValueError, match=r"StrokeOpacity\(title='Opacity'\) is not honored"):
             fr.StrokeOpacity("sw", title="Opacity")
 
     def test_stroke_dash_scale_serializes(self, opacity_df: pl.DataFrame):

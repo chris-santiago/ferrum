@@ -148,7 +148,6 @@ impl HexAggregate {
             Self::Variance => AggFn::Variance,
         }
     }
-
 }
 
 impl FieldOperand for HexAggregate {

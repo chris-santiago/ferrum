@@ -1040,7 +1040,10 @@ def test_row2_clip_false_does_not_escape_sibling_points():
     )
 
 
-def test_row3_detail_does_not_split_siblings_own_line():
+def test_row3_detail_is_a_shared_encoding_like_color():
+    """`detail` is an encoding, not layer style: the combined chart's encoding is
+    shared by every layer, exactly as `color` is (spec §4.8 row 3, amended
+    2026-09-24). Both layers split into three groups."""
     df = pl.DataFrame(
         {
             "x": [1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
@@ -1048,13 +1051,15 @@ def test_row3_detail_does_not_split_siblings_own_line():
             "g": ["p", "p", "q", "q", "r", "r"],
         }
     )
-    chart = fm.Chart(df).mark_line().encode(x="x", y="y", detail="g") + fm.Chart(
-        df
-    ).mark_line().encode(x="x", y="y")
-    n_polylines = len(re.findall(r"<polyline[^>]*/>", _svg(chart)))
-    assert n_polylines == 4, (
-        f"expected 3 (LHS's own detail split) + 1 (RHS's own, no split), got {n_polylines}"
-    )
+
+    def count(channel: str) -> int:
+        chart = fm.Chart(df).mark_line().encode(x="x", y="y", **{channel: "g"}) + fm.Chart(
+            df
+        ).mark_line().encode(x="x", y="y")
+        return len(re.findall(r"<polyline[^>]*/>", _svg(chart)))
+
+    assert count("detail") == 6
+    assert count("color") == 6
 
 
 def _area_closing_axis(path_d: str) -> str:

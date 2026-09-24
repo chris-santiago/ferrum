@@ -94,7 +94,7 @@ from ferrum._facet import (
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
-from ferrum.encoding._aliases import set_layers_detail
+from ferrum.encoding._aliases import layered_chart_detail
 from ferrum.selection import ConditionalSpec
 
 
@@ -1817,11 +1817,6 @@ class Chart(
             declare=lambda n: f"encode({n}=...)",
         )
 
-        # `detail` is mark style on the wire and a layered chart's style is
-        # its own, so on a layered chart it is written into the layers.
-        if new._layers and "detail" in channels:
-            new._layers = set_layers_detail(new._layers, new._encoding["detail"])
-
         # Synthesize _facet whenever facet encoding channels are passed in this
         # call. This wires encode(facet_col=...) / encode(facet_row=...) /
         # encode(facet=...) to the same _facet path that .facet() uses.
@@ -3099,17 +3094,20 @@ class Chart(
 
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
+        layer_detail = None
         if resolved._layers is None:
             mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         else:
             # `#119`: a layered chart's style is its own (spec §4.8). Its
             # `_mark_kwargs` is layer 0's, copied up by the clone that built
-            # it, and a chart-level `detail` is either layer 0's (a flat chart
-            # that became that layer) or already written into the layers by
-            # `encode()`. Neither is chart-wide, so neither reaches the wire
-            # here; each layer serializes its own in `_build_layers_list`.
+            # it, so it never reaches the wire. A chart-level `detail` is an
+            # encoding shared by every layer, like `color`; it is mark style on
+            # the wire, so it is handed to the layers (`_build_layers_list`)
+            # rather than routed into a chart-level `mark_style`.
             mk = {}
-            enc.pop("detail", None)
+            layer_detail = layered_chart_detail(
+                enc.pop("detail", None), [layer.mark for layer in resolved._layers]
+            )
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
         # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
@@ -3214,7 +3212,9 @@ class Chart(
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:
-            kw["layers"] = resolved._build_layers_list(serialized_layers)
+            kw["layers"] = resolved._build_layers_list(
+                serialized_layers, inherited_detail=layer_detail
+            )
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()
         if resolved._title is not None:

@@ -1747,8 +1747,8 @@ fn derived_serde_vocabularies_write_their_declared_spellings() {
     check::<crate::transform::error_extent::ErrorMethod>();
 }
 
-/// Two-sided: `methods_needing_field`
-/// is "the spellings this kind's door refuses without a field". For EVERY
+/// Two-sided, equality: `methods_needing_field` is exactly "the spellings
+/// this kind's door refuses without a field", and a subset of `methods`. For EVERY
 /// kind that declares `methods` (an empty needs-field set is proved, never
 /// assumed), each declared method is probed through [`field_probe`]:
 /// - with its field it must be accepted (the control: a refusal below is
@@ -1758,7 +1758,7 @@ fn derived_serde_vocabularies_write_their_declared_spellings() {
 ///
 /// A kind with no `methods` must declare no needs-field set either.
 #[test]
-fn methods_needing_field_is_a_subset_of_declared_methods() {
+fn methods_needing_field_matches_each_doors_field_refusals() {
     attach(|py| {
         for kind in all_transform_kinds() {
             let entry = entry_for_kind(kind).unwrap();

@@ -1018,8 +1018,10 @@ def _resolve_encoding_value(
         ``color`` accepts a color string; ``stroke_dash`` a name, comma
         string, number, or list; the six plain-numeric channels a number.
         ``None`` (a direct call with no channel) takes the channel the
-        literal names (:func:`_resolve_channel`). A channel no conditional
-        can target is refused by name.
+        literal names (:func:`_resolve_channel`). The channel is resolved
+        through the conditional vocabulary first, so an alias (``fill``)
+        types as its target and a channel no conditional can target is
+        refused with the vocabulary's own message.
     params:
         The chart's registered-parameter registry, forwarded to
         :func:`_resolve_param_ref` when *enc* is a ``Parameter.ref()``
@@ -1029,15 +1031,13 @@ def _resolve_encoding_value(
     if ref_name is not None:
         return _resolve_param_ref(ref_name, channel=channel, params=params)
     if isinstance(enc, _LiteralValue):
-        if channel is None:
-            channel = _resolve_channel(enc)
-        handler = _CONDITIONAL_LITERAL_HANDLERS.get(channel)
-        if handler is None:
-            raise ValueError(
-                f"fm.value({enc.val!r}) for channel={channel!r}: no selection conditional "
-                f"can target {channel!r}"
-            )
-        return handler(enc.val, channel=channel)
+        from ferrum.encoding._channel_policy import conditional_wire_channel
+
+        # The literal is typed by the wire channel: an alias (`fill`) resolves
+        # to its target, and a channel no conditional can target is refused by
+        # the conditional vocabulary itself.
+        wire = conditional_wire_channel(channel if channel is not None else _resolve_channel(enc))
+        return _CONDITIONAL_LITERAL_HANDLERS[wire](enc.val, channel=wire)
     if isinstance(enc, str):
         # A bare string means a FIELD everywhere in ferrum -- literals require
         # fm.value() (encode()'s own rule; see H10). Parse via the same

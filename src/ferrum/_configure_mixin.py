@@ -298,9 +298,8 @@ class ConfigureMixin:
         # `.x`/`.y` off a config `configure_axis` produced, and forwarding
         # them would make AxisConfig's own identical check re-fire on the
         # same input one frame deeper than a direct AxisConfig(...) call —
-        # a different call depth needing a different stacklevel, and no
-        # single constant on AxisConfig can serve both shapes (LB-149-b's
-        # fix showed the same thing for the band alias). Deliberately does
+        # a different call depth needing a different stacklevel for the same
+        # warning. Deliberately does
         # not use the warnings module's own scoped-suppression context
         # manager either (mutates process-global filter state, not
         # thread-safe, resets every module's warning dedup registry on

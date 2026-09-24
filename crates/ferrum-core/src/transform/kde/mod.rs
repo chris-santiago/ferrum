@@ -14,7 +14,6 @@ use crate::transform::group_key::{
     NullKeyPolicy,
 };
 use crate::transform::numeric_util::resolve_shared_extent;
-use crate::transform::vocabulary::check_declared;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -232,7 +231,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
+    crate::transform::vocabulary::check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
     validate_count_scale_extent(spec)?;
     if !spec.groupby.is_empty() {
         // `count_scale`'s bin-edge sharing mirrors `Bin::apply_grouped`'s own
@@ -832,7 +831,7 @@ impl PyKde {
                 ));
             }
         }
-        check_declared(KERNELS, "Kde", "kernel", kernel)?;
+        crate::transform::vocabulary::check_declared(KERNELS, "Kde", "kernel", kernel)?;
         let kernel_str = kernel.to_string();
         let groupby = parse_groupby_pyany(groupby)?;
         let count_scale = count_scale.map(|obj| parse_bin_axis(obj, "stat_kde")).transpose()?;

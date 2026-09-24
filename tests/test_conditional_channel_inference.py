@@ -59,11 +59,37 @@ def test_channel_no_conditional_can_target_is_refused_at_declaration():
         _chart().add_selection(sel).conditional(sel.when(fm.X("x")).otherwise(value(1.0)))
 
 
-def test_literal_for_an_unknown_channel_is_refused_by_name():
-    with pytest.raises(ValueError) as exc:
+def test_literal_for_a_non_conditional_channel_gets_the_vocabulary_refusal():
+    with pytest.raises(
+        ValueError, match=r"^condition= is not supported on the 'x' encoding channel"
+    ):
         _resolve_encoding_value(value(1.0), channel="x")
-    assert str(exc.value) == (
-        "fm.value(1.0) for channel='x': no selection conditional can target 'x'"
+
+
+def test_literal_on_an_alias_channel_types_as_its_target():
+    assert _resolve_encoding_value(value("red"), channel="fill") == {
+        "kind": "color",
+        "value": {"r": 255, "g": 0, "b": 0, "a": 255},
+    }
+
+
+def test_unstamped_spec_to_spec_dict_resolves_an_alias_branch_to_its_wire_channel():
+    """A spec built by `sel.when(...)` and serialized directly (no chart to stamp
+    it) infers its channel through the conditional vocabulary: `Fill` -> `color`."""
+    sel = selection_point(name="s_fill")
+    spec = sel.when(fm.Fill("g")).otherwise(value("#cccccc")).to_spec_dict()
+    assert spec["channel"] == "color"
+    assert spec["if_not"] == {"kind": "color", "value": {"r": 204, "g": 204, "b": 204, "a": 255}}
+
+
+def test_unstamped_spec_to_spec_dict_refuses_a_non_conditional_branch():
+    sel = selection_point(name="s_shape")
+    with pytest.raises(ValueError) as exc:
+        sel.when(fm.Shape("g")).otherwise(fm.Shape("h")).to_spec_dict()
+    assert str(exc.value).startswith(
+        "condition= is not supported on the 'shape' encoding channel; a selection "
+        "conditional can target only: angle, color, fill_opacity, opacity, size, "
+        "stroke_dash, stroke_opacity, stroke_width, fill (-> color)."
     )
 
 

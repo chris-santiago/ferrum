@@ -80,7 +80,7 @@ def test_works_or_refuses(cls, cell):
             # `cascade` (X/Y) and `none`: nothing of its own to suppress.
             assert "legend" not in wire
     else:
-        with pytest.raises(ValueError, match=rf"^{cls.__name__}\({key}="):
+        with pytest.raises(ValueError, match=rf"^{cls.__name__}\({key}=.*\) is not "):
             _construct(cls, kwargs)
 
 
@@ -102,8 +102,8 @@ def test_title_refusal_text_names_channel_and_value():
     with pytest.raises(ValueError) as exc:
         _construct(fm.StrokeWidth, {"title": "T"})
     assert str(exc.value) == (
-        "StrokeWidth(title='T') is not supported: StrokeWidth draws no legend or "
-        "axis title of its own, so there is nothing for title= to label."
+        "StrokeWidth(title='T') is not honored: StrokeWidth draws no legend, and "
+        "title= is not supported on this channel."
     )
 
 

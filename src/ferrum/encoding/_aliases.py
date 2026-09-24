@@ -14,8 +14,6 @@ that already populated the target wins over a later one (the later one then sees
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 # The alias TABLE itself lives in the sibling routing module
 # (``_channel_policy``, the zero-import leaf that owns every other
 # per-channel-name disposition) and is re-exported here, where the loop that
@@ -218,26 +216,20 @@ def _warn_detail_ignored(mark: str | None) -> None:
     )
 
 
-def set_layers_detail(layers: list, detail_ch: object) -> list:
-    """Return *layers* with *detail_ch* as the ``detail`` of every layer whose mark reads it.
+def layered_chart_detail(detail_ch: object, layer_marks: list) -> object | None:
+    """Return the chart-level ``detail`` a layered chart's layers inherit, or ``None``.
 
-    ``encode(detail=...)`` on an already-layered chart. A layered chart emits no
-    chart-level ``mark_style`` (a layer's style is its own), and ``detail`` is
-    not a wire encoding channel a layer could inherit, so the channel is written
-    into each consuming layer's own encoding, replacing any ``detail`` the layer
-    had: the latest declaration wins on every layer. Layers whose mark ignores
-    ``detail`` are left alone; when no layer reads it, the flat chart's
-    "accepted but ignored" warning fires once.
-
-    A ``detail`` declared on a flat chart before it became a layer is not
-    routed here: it is already in that layer's own encoding.
+    A layered chart's chart-level encoding is shared by every layer at
+    serialization (``color`` is inherited the same way, by Rust). ``detail`` is
+    mark style on the wire, not an encoding Rust inherits, so Python hands it
+    to each layer: every line/area/polygon layer without a ``detail`` of its
+    own gets this one (``_build_layers_list``). When no layer's mark reads
+    ``detail``, the flat chart's "accepted but ignored" warning fires once and
+    nothing is inherited.
     """
-    if not any(layer.mark in _DETAIL_CONSUMING_MARKS for layer in layers):
-        _warn_detail_ignored(layers[0].mark if layers else None)
-        return layers
-    return [
-        replace(layer, encoding={**layer.encoding, "detail": detail_ch})
-        if layer.mark in _DETAIL_CONSUMING_MARKS
-        else layer
-        for layer in layers
-    ]
+    if _channel_field(detail_ch) is None:
+        return None
+    if not any(mark in _DETAIL_CONSUMING_MARKS for mark in layer_marks):
+        _warn_detail_ignored(layer_marks[0] if layer_marks else None)
+        return None
+    return detail_ch

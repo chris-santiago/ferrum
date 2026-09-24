@@ -164,7 +164,7 @@
 //! `density_data`, `impute`, `top_k`, `data_stack`); empty for kinds with no
 //! field operand (`smooth`, `linkage`, `regression_data`). Proved for every
 //! kind with a `methods` vocabulary, empty sets included, by
-//! `methods_needing_field_is_a_subset_of_declared_methods` (`tests.rs`).
+//! `methods_needing_field_matches_each_doors_field_refusals` (`tests.rs`).
 //!
 //! **`params`** is the spec struct's real WIRE-accepted field set — the set
 //! `params_match_spec_struct_serde_fields` (`tests.rs`) proves by mining

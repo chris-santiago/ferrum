@@ -958,7 +958,7 @@ class TestGridStyleValueRefusals:
     `GridConfig` gained shape validation last cycle while its `width`/`opacity`
     kept passing silently, and `GridAxisConfig` had neither — leaving the
     family uneven in a way it had not been before. `width` takes the spec §4.7
-    pixel contract (the same `validate_pixel_value` `PaddingConfig` uses);
+    pixel contract (the same `coerce_pixel_value` `PaddingConfig` uses);
     `opacity` takes its numeric/finite halves plus a `[0, 1]` bound.
     """
 

@@ -226,7 +226,12 @@ fn compute_theoretical(
 }
 
 pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    check_declared(DISTRIBUTIONS, "stat_qq", "distribution", &spec.distribution)?;
+    crate::transform::vocabulary::check_declared(
+        DISTRIBUTIONS,
+        "stat_qq",
+        "distribution",
+        &spec.distribution,
+    )?;
     let schema = batch.schema();
     let v_idx = schema
         .index_of(&spec.field)
@@ -382,7 +387,6 @@ pub(crate) fn secondary_outputs(
 }
 
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
-use crate::transform::vocabulary::check_declared;
 
 // ---------- PyO3 wrapper ----------
 
@@ -453,7 +457,12 @@ impl PyQq {
         if field.is_empty() {
             return Err(PyValueError::new_err("QQ: field must be non-empty"));
         }
-        check_declared(DISTRIBUTIONS, "QQ", "distribution", distribution)?;
+        crate::transform::vocabulary::check_declared(
+            DISTRIBUTIONS,
+            "QQ",
+            "distribution",
+            distribution,
+        )?;
         Ok(PyQq(TransformSpec::Qq(QQSpec {
             field: field.to_string(),
             distribution: distribution.to_string(),

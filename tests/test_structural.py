@@ -967,7 +967,7 @@ class TestInsetBoundClassifierShapes:
     # non-__float__ code path -- bytes/bytearray parse as numeric strings.
     # These pin the allowlist fix under both bound kinds: norm (bare) and px
     # (wrapped in PixelCoord, since PixelCoord.value bypasses the bare-branch
-    # coercion entirely and reaches validate_pixel_value raw either way).
+    # coercion entirely and reaches coerce_pixel_value raw either way).
     # The numpy-specific rows that used to live here (np.bool_, np.int64) are
     # cycle 3's "hand list of refused numpy shapes" the coordinator asked to
     # replace -- superseded by TestInsetBoundNumpyScalarMatrix below, which

@@ -14,8 +14,8 @@ from ferrum._title_sentinel import _UNSET, TitleParam, is_unspecified, serialize
 from ferrum._validate import (
     validate_choice,
     validate_color_value,
-    validate_fraction_value,
-    validate_pixel_value,
+    coerce_fraction_value,
+    coerce_pixel_value,
 )
 from ferrum.axis import validate_label_overlap
 from ferrum.legend import validate_legend_direction, validate_legend_orient
@@ -552,20 +552,20 @@ def _normalize_grid_style(owner: str, width: Any, opacity: Any) -> dict[str, flo
 
     Both halves delegate to :mod:`ferrum._validate`, which owns these leaf
     predicates: ``width`` carries the spec §4.7 pixel contract via
-    :func:`~ferrum._validate.validate_pixel_value` (the same single authority
+    :func:`~ferrum._validate.coerce_pixel_value` (the same single authority
     ``PaddingConfig`` uses), and ``opacity`` carries the bounded-fraction
-    contract via its sibling :func:`~ferrum._validate.validate_fraction_value`.
+    contract via its sibling :func:`~ferrum._validate.coerce_fraction_value`.
     The fraction check was briefly hand-rolled here, which put the identical
     numeric-and-finite predicate in two places inside one function body — the
-    shape ``validate_pixel_value`` was consolidated to remove.
+    shape ``coerce_pixel_value`` was consolidated to remove.
 
     ``color`` is validated by each caller via :func:`_validate_config_color`
     (#107), not here — this function only owns the ``width``/``opacity`` pair
     the two grid classes share.
     """
     return {
-        "width": validate_pixel_value(f"{owner}.width", width),
-        "opacity": validate_fraction_value(f"{owner}.opacity", opacity),
+        "width": coerce_pixel_value(f"{owner}.width", width),
+        "opacity": coerce_fraction_value(f"{owner}.opacity", opacity),
     }
 
 
@@ -767,7 +767,7 @@ class PaddingConfig:
         # Validate at construction time (NF-B5/B6/B7): each side must be a
         # finite, non-negative pixel value (spec §4.7's pixel contract).
         for side in ("top", "right", "bottom", "left"):
-            value = validate_pixel_value(f"padding.{side}", getattr(self, side))
+            value = coerce_pixel_value(f"padding.{side}", getattr(self, side))
             object.__setattr__(self, side, value)
 
     def to_dict(self) -> dict[str, Any]:

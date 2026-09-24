@@ -83,8 +83,8 @@ _FACET_COLUMNS_MESSAGE = (
 )
 
 _NO_TITLE_MESSAGE = (
-    "{channel}(title={value!r}) is not supported: {channel} draws no legend or "
-    "axis title of its own, so there is nothing for title= to label."
+    "{channel}(title={value!r}) is not honored: {channel} draws no legend, and "
+    "title= is not supported on this channel."
 )
 
 _NO_LEGEND_MESSAGE = (

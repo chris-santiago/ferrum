@@ -71,7 +71,7 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, NamedTuple
 
-from ferrum._validate import validate_pixel_value
+from ferrum._validate import coerce_pixel_value
 from ferrum.configure import (
     AxisConfig,
     ColorConfig,
@@ -598,7 +598,7 @@ def validate(overrides: dict[str, Any]) -> None:
 
     Also validates the numeric PaddingConfig leaves (``top``/``right``/
     ``bottom``/``left``): they must be finite, non-negative pixel values per
-    spec §4.7's pixel contract (:func:`ferrum._validate.validate_pixel_value`,
+    spec §4.7's pixel contract (:func:`ferrum._validate.coerce_pixel_value`,
     the same predicate ``PaddingConfig.__post_init__`` runs). ``padding_auto``
     (a bool leaf) is not part of the pixel contract and passes through
     unvalidated here.
@@ -634,7 +634,7 @@ def validate(overrides: dict[str, Any]) -> None:
             resolved.location.target_key == "padding"
             and resolved.location.leaf in _PADDING_NUMERIC_LEAVES
         ):
-            validate_pixel_value(f"override {path!r}", value)
+            coerce_pixel_value(f"override {path!r}", value)
 
 
 def _chart_config_wire_fragment(config_cls: type | None, leaves: dict[str, Any]) -> dict[str, Any]:

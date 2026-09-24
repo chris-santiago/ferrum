@@ -27,7 +27,8 @@ Independent predicates live here:
   ``resolve_paint_color`` (``crates/ferrum-core/src/render/draw.rs``); see
   the function docstring below.
 
-- ``validate_pixel_value`` is the single definition of the "pixel contract"
+- ``coerce_pixel_value`` (and its bounded sibling ``coerce_fraction_value``)
+  is the single definition of the "pixel contract"
   (spec §4.7): a value must be numeric (``bool`` excluded), finite, and
   non-negative. It is shared by ``configure.PaddingConfig.__post_init__``
   (construction-time validation) and ``_override_apply.validate``'s padding
@@ -37,8 +38,8 @@ Independent predicates live here:
 
 - ``validate_positive_int`` (#238) is the "wrap-count contract": a value
   must be a genuine ``int`` (``bool`` excluded, same reasoning as
-  ``validate_pixel_value``) and ``>= 1``. ``None`` passes as the caller's
-  "unset, let inference decide" sentinel, following ``validate_pixel_value``'s
+  ``coerce_pixel_value``) and ``>= 1``. ``None`` passes as the caller's
+  "unset, let inference decide" sentinel, following ``coerce_pixel_value``'s
   convention. Shared by ``_Facet.__post_init__`` for both ``ncols`` and
   ``nrows``, which in turn covers both of #238's entries
   (``Chart.facet(ncols=)`` and ``encode(facet=fm.Facet(columns=))``) from
@@ -49,7 +50,7 @@ Independent predicates live here:
   (no NaN/±inf), and ``start`` must be strictly less than ``end``. Shared by
   ``BreakAxis.__post_init__``, which validates every ``(start, end)`` pair in
   ``gap`` (a single pair or a list of pairs) — the numeric-pair analog of
-  ``validate_fraction_value``'s single-value contract.
+  ``coerce_fraction_value``'s single-value contract.
 
 - ``validate_color_value`` (close-remediation, batch F) is the "literal
   color contract": a color-bearing value must be parseable by the caller's
@@ -185,8 +186,11 @@ def validate_optional_choice(
         validate_choice(func_name, param, value, choices)
 
 
-def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
-    """Raise ``ValueError`` when *value* violates the pixel contract (spec §4.7).
+def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
+    """Return *value* as a ``float`` pixel value, or raise ``ValueError`` if it violates the pixel contract (spec §4.7).
+
+    Callers store the return, not *value*: a numpy scalar that passes the check
+    must reach the JSON wire as a plain ``float``.
 
     A valid pixel value is a real number (:func:`is_real_number`: ``bool``
     excluded, numpy scalars accepted), finite (not NaN/±inf), and non-negative.
@@ -231,31 +235,31 @@ def validate_pixel_value(label: str, value: Any, *, required: bool = False) -> f
     return float(value)
 
 
-def validate_fraction_value(label: str, value: Any, *, required: bool = False) -> float | None:
-    """Raise ``ValueError`` when *value* is not a fraction in ``[0, 1]``.
+def coerce_fraction_value(label: str, value: Any, *, required: bool = False) -> float | None:
+    """Return *value* as a ``float`` fraction in ``[0, 1]``, or raise ``ValueError``.
 
-    The bounded-fraction sibling of :func:`validate_pixel_value`, and it lives
+    The bounded-fraction sibling of :func:`coerce_pixel_value`, and it lives
     here for the same reason that one does: the numeric-and-finite half of the
     two contracts is identical, so expressing it twice is how the two drift.
     (It was briefly expressed twice — ``configure._normalize_grid_style``
-    called ``validate_pixel_value`` for ``width`` and hand-rolled the same
+    called ``coerce_pixel_value`` for ``width`` and hand-rolled the same
     numeric/finite check for ``opacity`` one line below.)
 
     A valid fraction is a real number (:func:`is_real_number`), finite, and within ``[0, 1]`` inclusive. ``None`` is the
     caller's "unset" sentinel and always passes — unless *required* is set,
-    matching :func:`validate_pixel_value`'s convention: it stops the early
+    matching :func:`coerce_pixel_value`'s convention: it stops the early
     return rather than adding a second message, so ``None`` is reported by
     the same ``not {type(value).__name__}`` branch every other wrong type
     already raises from.
 
     *label* is a pre-composed field description, matching
-    :func:`validate_pixel_value`'s convention.
+    :func:`coerce_pixel_value`'s convention.
 
     Returns
     -------
     float or None
         *value* as a ``float``, or ``None`` when unset (see
-        :func:`validate_pixel_value`).
+        :func:`coerce_pixel_value`).
 
     Raises
     ------
@@ -281,10 +285,10 @@ def validate_positive_int(label: str, value: Any) -> None:
     A valid value is a genuine ``int`` (``bool`` excluded, since ``bool`` is
     an ``int`` subclass) and ``>= 1``. ``None`` is the caller's "unset, let
     inference decide" sentinel and always passes, matching
-    :func:`validate_pixel_value`'s convention.
+    :func:`coerce_pixel_value`'s convention.
 
     *label* is a pre-composed field description (e.g. ``"_Facet.ncols"``),
-    matching :func:`validate_pixel_value`'s convention.
+    matching :func:`coerce_pixel_value`'s convention.
 
     Raises
     ------
@@ -309,7 +313,7 @@ def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> None:
     *end*.
 
     *label* is a pre-composed description of the pair being checked (e.g.
-    ``"BreakAxis.gap[0]"``), matching :func:`validate_pixel_value`'s
+    ``"BreakAxis.gap[0]"``), matching :func:`coerce_pixel_value`'s
     convention.
 
     Raises

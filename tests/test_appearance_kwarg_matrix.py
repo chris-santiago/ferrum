@@ -551,7 +551,7 @@ def test_title_works(channel_cls: type) -> None:
 )
 def test_title_refused(channel_cls: type) -> None:
     name = channel_cls.__name__
-    with pytest.raises(ValueError, match=rf"{name}\(title='MyProbeTitle'\) is not supported"):
+    with pytest.raises(ValueError, match=rf"{name}\(title='MyProbeTitle'\) is not honored"):
         channel_cls(_field_for(channel_cls._channel_name), title="MyProbeTitle")
 
 

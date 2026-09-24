@@ -1,25 +1,24 @@
-"""An encoding channel that aliases into mark style reaches every layer that asked for it.
+"""An encoding channel that aliases into mark style reaches every layer, like `color`.
 
 `apply_channel_aliases` routes some encoding channels (today only `detail`) into
 the mark-style bag rather than the wire encoding. On a flat chart that bag is the
 chart's own `mark_style`. A layered chart emits no chart-level `mark_style`
-(`#119`, spec §4.8: a layer's style is its own), so an alias-derived key declared
-on the layered chart must reach each layer through that layer's own encoding;
-otherwise it is accepted and silently dropped.
+(`#119`, spec §4.8: a layer's style is its own), but `detail` is an ENCODING, not
+style: user ruling Q3 settles that a combined chart's encoding is shared by every
+layer, and `color` is the model. So every line/area/polygon layer without a
+`detail` of its own inherits the chart-level one at serialization, by the same
+lazy mechanism `color` uses: whenever it was declared, and whatever layers are
+added afterwards.
 
-The rule the matrix pins:
+The matrix pins every shape against `color` as the control (same counts, static
+and interactive). The population is derived by running `apply_channel_aliases`
+over every encoding channel and keeping the keys it writes into the mark-style
+bag.
 
-- a channel declared on a flat chart that later becomes a layer belongs to that
-  layer only (`mark_line().encode(detail="g") + mark_line()` splits only the
-  first line, spec §4.8 row 3);
-- a channel declared on an already-layered chart (`(a + b).encode(detail=...)`,
-  `mark_line(point=True).encode(detail=...)`) is set on every layer whose mark
-  reads it, replacing that layer's own value, so a later `.encode()` wins;
-- static and interactive output agree, and a `LayerChart` member keeps its
-  channel inside its own layers on both paths.
-
-The population is derived by running `apply_channel_aliases` over every encoding
-channel and keeping the keys it writes into the mark-style bag.
+One cell is a known divergence shared by `color`: an interactive `LayerChart`
+merges its members with `+`, so a layered member's chart-level encoding reaches
+the members after it (6 polylines), while the static overlay renders each member
+alone (5). It is pinned as a strict xfail for both channels.
 """
 
 from __future__ import annotations
@@ -106,8 +105,11 @@ SHAPES = {
         lambda k: fm.LayerChart(_line(**{k: "g"}), _line(**{k: "g"})),
         4,
     ),
-    # Vacuity control: a flat chart's channel stays with the layer it became.
-    "plus_declared_before_on_lhs": (lambda k: _line(**{k: "g"}) + _line(), 3),
+    "plus_declared_after_then_plus": (
+        lambda k: (_line() + _line()).encode(**{k: "g"}) + _line(),
+        6,
+    ),
+    "declared_before_any_plus": (lambda k: _line(**{k: "g"}) + _line(), 4),
     # A later declaration replaces the earlier one on every layer.
     "plus_redeclared": (
         lambda k: (_line() + _line()).encode(**{k: "g"}).encode(**{k: "one"}),
@@ -117,10 +119,31 @@ SHAPES = {
 COUNTERS = {"static": _static_count, "interactive": _interactive_count}
 
 
+def _xfail_layerchart_interactive(request, shape: str, output: str) -> None:
+    if shape == "layerchart_layered_member" and output == "interactive":
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                reason="interactive LayerChart merges members with `+`, so a layered "
+                "member's chart-level encoding reaches later members (color and detail alike)",
+            )
+        )
+
+
+@pytest.mark.parametrize("output", sorted(COUNTERS))
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_color_control_has_the_same_counts(request, shape, output):
+    """`color` is the model: a combined chart's encoding is shared by every layer."""
+    _xfail_layerchart_interactive(request, shape, output)
+    build, expected = SHAPES[shape]
+    assert COUNTERS[output](build("color")) == expected
+
+
 @pytest.mark.parametrize("output", sorted(COUNTERS))
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("key", ALIAS_KEYS)
-def test_alias_channel_reaches_every_layer(key, shape, output):
+def test_alias_channel_reaches_every_layer(request, key, shape, output):
+    _xfail_layerchart_interactive(request, shape, output)
     build, expected = SHAPES[shape]
     assert COUNTERS[output](build(key)) == expected
 
@@ -134,9 +157,10 @@ def test_layered_wire_carries_the_key_per_layer_not_chart_level(key):
 
 def test_layered_detail_on_non_consuming_marks_warns_once():
     chart = fm.Chart(DF).mark_point().encode(**XY) + fm.Chart(DF).mark_point().encode(**XY)
+    chart = chart.encode(detail="g")
     reset_warnings()
     with pytest.warns(UserWarning, match=r"encode\(detail=\.\.\.\) is accepted but ignored"):
-        chart.encode(detail="g")
+        chart.to_spec()
 
 
 def test_layered_detail_with_a_consuming_layer_does_not_warn():
@@ -172,3 +196,15 @@ def test_smooth_on_a_layered_chart_keeps_every_existing_layer_and_its_style():
     assert [layer["mark"] for layer in spec["layers"]] == ["point", "line", "line"]
     assert [layer.get("mark_style") for layer in spec["layers"][:2]] == [{"opacity": 0.3}, None]
     assert _static_count(chart) == 2
+
+
+def test_layered_smooth_with_a_ci_band_keeps_every_prior_layer_and_its_style():
+    """The layered desugar branch (`ci=` adds a ribbon) keeps every existing layer too."""
+    point = fm.Chart(DF).mark_point(fill="red").encode(**XY)
+    line = fm.Chart(DF).mark_line(stroke="blue").encode(**XY)
+    spec = json.loads((point + line).mark_smooth(ci=0.95).to_spec().to_json())
+    assert [layer["mark"] for layer in spec["layers"]] == ["point", "line", "ribbon", "line"]
+    assert [layer.get("mark_style") for layer in spec["layers"][:2]] == [
+        {"fill": "red"},
+        {"stroke": "blue"},
+    ]

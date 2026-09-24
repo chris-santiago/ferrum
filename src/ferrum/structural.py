@@ -10,8 +10,8 @@ from ferrum._validate import (
     is_real_number,
     validate_choice,
     validate_finite_ordered_pair,
-    validate_fraction_value,
-    validate_pixel_value,
+    coerce_fraction_value,
+    coerce_pixel_value,
 )
 
 _VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
@@ -343,9 +343,9 @@ def _validate_inset_bounds(bounds: tuple) -> None:
     Each of the four ``bounds`` entries (``left``, ``top``, ``right``,
     ``bottom``) is classified via :func:`_inset_bound_kind_and_value`, then
     checked against its own kind's contract: a normalized entry must be a
-    finite fraction in ``[0, 1]`` (:func:`ferrum._validate.validate_fraction_value`);
+    finite fraction in ``[0, 1]`` (:func:`ferrum._validate.coerce_fraction_value`);
     a pixel entry must be a finite, non-negative pixel value
-    (:func:`ferrum._validate.validate_pixel_value`). Both are called with
+    (:func:`ferrum._validate.coerce_pixel_value`). Both are called with
     ``required=True`` — a bound entry has no optional-unset case the way an
     optional padding/opacity field does, so a ``None`` entry (bare, or
     ``PixelCoord(None)``/``NormCoord(None)``'s unwrapped ``.value``) is
@@ -368,9 +368,9 @@ def _validate_inset_bounds(bounds: tuple) -> None:
         kind, value = _inset_bound_kind_and_value(entry)
         label = f"Inset.bounds[{i}] ({_INSET_BOUNDS_NAMES[i]})"
         if kind == "norm":
-            validate_fraction_value(label, value, required=True)
+            coerce_fraction_value(label, value, required=True)
         else:
-            validate_pixel_value(label, value, required=True)
+            coerce_pixel_value(label, value, required=True)
         kinds.append(kind)
         values.append(value)
 

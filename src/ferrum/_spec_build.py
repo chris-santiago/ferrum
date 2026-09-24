@@ -486,7 +486,9 @@ class SpecBuildMixin:
             kw[axis] = _EncodingSpec(field, **d)
         return kw
 
-    def _build_layers_list(self, layers: list | None = None) -> list:
+    def _build_layers_list(
+        self, layers: list | None = None, *, inherited_detail: object = None
+    ) -> list:
         """Convert ``_layers`` to a list of JSON-serializable dicts for Rust.
 
         ``coerce_layers`` in Rust runs ``json.dumps()`` on each dict, so every
@@ -498,9 +500,13 @@ class SpecBuildMixin:
             Override layer list to serialize.  Defaults to ``self._layers``;
             ``to_spec`` passes the aggregate-resolved layers so the originating
             chart object is never mutated.
+        inherited_detail :
+            The chart-level ``detail`` channel every line/area/polygon layer
+            without its own inherits (see
+            :func:`ferrum.encoding._aliases.layered_chart_detail`), or ``None``.
         """
         from ferrum.chart import _apply_inferred_type, _strip_unstackable
-        from ferrum.encoding._aliases import apply_channel_aliases
+        from ferrum.encoding._aliases import _DETAIL_CONSUMING_MARKS, apply_channel_aliases
         from ferrum._layer_transforms import _transforms_to_json_list
 
         out = []
@@ -515,6 +521,8 @@ class SpecBuildMixin:
             # set e.g. `mark_kwargs={"detail": ...}` directly is not
             # clobbered (`alias_detail_channel` uses `setdefault`).
             layer_enc = dict(layer.encoding)
+            if inherited_detail is not None and layer.mark in _DETAIL_CONSUMING_MARKS:
+                layer_enc.setdefault("detail", inherited_detail)
             layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
             layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
             # Per-layer polar remap (`#172`(1)): a layer under a CoordPolar gets
