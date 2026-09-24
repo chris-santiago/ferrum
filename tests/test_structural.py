@@ -173,12 +173,12 @@ class TestBreakAxis:
 class TestBreakAxisGapValidation:
     @pytest.mark.parametrize("bad_end", [float("nan"), float("inf"), float("-inf")])
     def test_single_gap_non_finite_end_raises(self, bad_end):
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: end must be finite"):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: end must be a finite number"):
             BreakAxis(axis="y", gap=(10, bad_end))
 
     @pytest.mark.parametrize("bad_start", [float("nan"), float("inf"), float("-inf")])
     def test_single_gap_non_finite_start_raises(self, bad_start):
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be finite"):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a finite number"):
             BreakAxis(axis="y", gap=(bad_start, 90))
 
     def test_single_gap_reversed_raises(self):
@@ -194,7 +194,7 @@ class TestBreakAxisGapValidation:
             BreakAxis(axis="y", gap=(50, 50))
 
     def test_multiple_gaps_one_bad_entry_names_its_index(self):
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[1\]: end must be finite"):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[1\]: end must be a finite number"):
             BreakAxis(axis="y", gap=[(10, 20), (50, float("nan"))])
 
     def test_multiple_gaps_reversed_entry_raises(self):
@@ -229,7 +229,7 @@ class TestBreakAxisGapValidation:
     def test_non_numeric_non_temporal_gap_raises(self):
         """A bound that is neither numeric nor temporal-shaped (a dict, here)
         still raises the original numeric-type message unchanged."""
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a real number"):
             BreakAxis(axis="y", gap=({"not": "numeric"}, 10))
 
     def test_non_iterable_gap_raises(self):
@@ -304,7 +304,7 @@ class TestBreakAxisGapValidation:
         """``bool`` is excluded from the numeric kinds (a boolean is not a
         break region), and widening to numpy numerics must not smuggle
         ``np.bool_`` in: it is neither ``np.integer`` nor ``np.floating``."""
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a real number"):
             BreakAxis(axis="y", gap=(np.bool_(True), 90))
 
 

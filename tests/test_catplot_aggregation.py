@@ -889,10 +889,21 @@ class TestEdgesAndRefusals:
         assert "<svg" in fm.catplot(cat_df, x="cat", y="val", kind="point", ci=1, n_boot=1).to_svg()
 
     @pytest.mark.parametrize("kind", ["strip", "swarm", "box", "violin", "boxen"])
-    def test_ci_is_inert_on_the_non_estimating_kinds(self, cat_df, kind):
-        """The six kinds that draw no interval never consumed ci=/n_boot=, so
-        a value they ignore must not newly raise."""
-        assert "<svg" in fm.catplot(cat_df, x="cat", y="val", kind=kind, ci=0, n_boot=0).to_svg()
+    def test_ci_and_n_boot_refuse_on_the_non_estimating_kinds(self, cat_df, kind):
+        """The kinds that draw no interval never consume ci=/n_boot=, so a
+        non-default value would be accepted and ignored: it refuses instead,
+        naming the argument, the value and the kind. The defaults stay silent."""
+        with pytest.raises(
+            ValueError, match=rf"^catplot\(ci=0\) is not supported with kind='{kind}'"
+        ):
+            fm.catplot(cat_df, x="cat", y="val", kind=kind, ci=0)
+        with pytest.raises(
+            ValueError, match=rf"^catplot\(n_boot=0\) is not supported with kind='{kind}'"
+        ):
+            fm.catplot(cat_df, x="cat", y="val", kind=kind, n_boot=0)
+        assert fm.catplot(cat_df, x="cat", y="val", kind=kind, ci=95, n_boot=1000).to_svg() == (
+            fm.catplot(cat_df, x="cat", y="val", kind=kind).to_svg()
+        )
 
     @pytest.mark.parametrize("kind", ["point", "bar"])
     def test_missing_value_channel_refuses(self, cat_df, kind):

@@ -36,7 +36,7 @@ from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repea
 from ferrum._coerce import to_polars
 from ferrum._core import secondary_key
 from ferrum._registry import registry_output_columns, registry_secondary_columns
-from ferrum._validate import validate_choice
+from ferrum._validate import coerce_finite_real, validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.plots._helpers import (
     _field_name,
@@ -497,7 +497,8 @@ def heatmap(
     ------
     ValueError
         If ``data`` has no numeric columns, or if ``vmin``/``vmax``/``center``
-        is given a non-finite value (``inf``, ``-inf``, or ``NaN``).
+        is given a value that is not a real number (``bool`` included) or is
+        non-finite (``inf``, ``-inf``, or ``NaN``).
 
     Examples
     --------
@@ -508,24 +509,15 @@ def heatmap(
 
     >>> fm.heatmap(wide_df, annot=False, vmin=0, vmax=1, cmap="greens")
     """
-    import math
-
     from ferrum._coerce import to_arrow_table
     from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
-    # Refuse a non-finite vmin/vmax/center up front, before any table work
-    # or wire emission: a finite-looking kwarg that is actually inf/-inf/NaN
-    # would otherwise reach scale_kwargs["domain"]/"domainMid" unchecked and
-    # serialize as JSON Infinity/-Infinity/NaN, which the Rust spec parser
-    # rejects with an opaque `ValueError: scale: expected value ...` that
-    # names neither the kwarg nor the reason.
-    for kwarg_name, kwarg_value in (("vmin", vmin), ("vmax", vmax), ("center", center)):
-        if kwarg_value is not None and not math.isfinite(kwarg_value):
-            raise ValueError(
-                f"heatmap: {kwarg_name}={kwarg_value!r} must be finite; "
-                "non-finite bounds (inf, -inf, NaN) cannot be represented in "
-                "the color scale domain"
-            )
+    # Validate the bounds up front, before any table work or wire emission.
+    # A non-finite bound would serialize as JSON Infinity/NaN, which the Rust
+    # spec parser refuses in words naming neither the kwarg nor the reason.
+    vmin = coerce_finite_real("heatmap(vmin=...)", vmin)
+    vmax = coerce_finite_real("heatmap(vmax=...)", vmax)
+    center = coerce_finite_real("heatmap(center=...)", center)
 
     tbl = to_arrow_table(data)
     # Identify id column (first non-numeric) and value columns (numeric).

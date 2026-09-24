@@ -205,9 +205,11 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
 
     - ``"numeric"``: a real number (:func:`ferrum._validate.is_real_number`:
       builtins, numpy scalars such as the ``np.int64`` a
-      ``DataFrame[col].max()`` hands back, ``Decimal``), coerced to ``float``.
-      ``bool`` is excluded: a boolean gap bound is a mistake, not a 0/1
-      break region.
+      ``DataFrame[col].max()`` hands back, ``Decimal``), returned unchanged
+      for :func:`ferrum._validate.validate_finite_ordered_pair` to check and
+      coerce to ``float`` (so a bound a float cannot hold, e.g. ``10**400``,
+      refuses there in the ``BreakAxis.gap[i]`` voice). ``bool`` is
+      excluded: a boolean gap bound is a mistake, not a 0/1 break region.
     - ``"temporal"``: ``str``/``datetime.date``/``datetime.datetime``/
       ``numpy.datetime64`` (``pandas.Timestamp`` included via the
       ``datetime.datetime`` subclass check), coerced to epoch-ms UTC via
@@ -226,7 +228,7 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
     strings, so a bad one must be diagnosed as a bad date, not a bad number.
     """
     if is_real_number(value):
-        return "numeric", float(value)
+        return "numeric", value
     if isinstance(value, (_dt.date, _dt.datetime, str)):
         return "temporal", _coerce_temporal_gap_bound(label, value)
 
@@ -294,8 +296,7 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
                 f"{label}: mixes a numeric bound ({numeric_val!r}) with a temporal "
                 f"bound ({temporal_val!r}); both bounds of one gap must be the same kind"
             )
-        validate_finite_ordered_pair(label, start, end)
-        coerced_pairs.append((start, end))
+        coerced_pairs.append(validate_finite_ordered_pair(label, start, end))
 
     # Derive the return shape from `pairs` itself rather than re-running the
     # single-pair-vs-list classification: `_normalize_break_gaps` is that

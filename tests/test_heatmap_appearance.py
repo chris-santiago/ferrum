@@ -565,7 +565,10 @@ def test_heatmap_non_finite_kwarg_raises_value_error_naming_kwarg_and_value(kwar
     ValueError whose message names both the offending kwarg and its value,
     not the opaque Rust serde error."""
     df = _wide_df()
-    with pytest.raises(ValueError, match=rf"heatmap: {kwarg}={value!r} must be finite"):
+    with pytest.raises(
+        ValueError,
+        match=rf"heatmap\({kwarg}=\.\.\.\) must be a finite number a float can hold; received {value!r}",
+    ):
         fr.heatmap(df, annot=False, **{kwarg: value})
 
 
@@ -573,7 +576,10 @@ def test_heatmap_two_sided_inf_bounds_raises_value_error():
     """Both vmin and vmax non-finite at once (the reviewer's named sibling
     crash) also raises a typed refusal rather than reaching the wire."""
     df = _wide_df()
-    with pytest.raises(ValueError, match=r"heatmap: vmin=inf must be finite"):
+    with pytest.raises(
+        ValueError,
+        match=r"heatmap\(vmin=\.\.\.\) must be a finite number a float can hold; received inf",
+    ):
         fr.heatmap(df, annot=False, vmin=float("inf"), vmax=float("-inf"))
 
 
@@ -582,7 +588,10 @@ def test_heatmap_robust_with_non_finite_vmin_still_raises():
     non-finite vmin= combined with robust= must still be refused -- it must
     not be silently overwritten by the percentile fill."""
     df = _wide_df()
-    with pytest.raises(ValueError, match=r"heatmap: vmin=inf must be finite"):
+    with pytest.raises(
+        ValueError,
+        match=r"heatmap\(vmin=\.\.\.\) must be a finite number a float can hold; received inf",
+    ):
         fr.heatmap(df, annot=False, vmin=float("inf"), robust=True)
 
 
@@ -599,7 +608,10 @@ def test_heatmap_non_finite_vmin_raises_before_touching_data(monkeypatch):
 
     monkeypatch.setattr(_coerce, "to_arrow_table", _boom)
     df = _wide_df()
-    with pytest.raises(ValueError, match=r"heatmap: vmin=inf must be finite"):
+    with pytest.raises(
+        ValueError,
+        match=r"heatmap\(vmin=\.\.\.\) must be a finite number a float can hold; received inf",
+    ):
         fr.heatmap(df, annot=False, vmin=float("inf"))
 
 

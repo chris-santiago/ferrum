@@ -292,9 +292,13 @@ def test_embeddings_tsne_perplexity_non_finite_refuses_no_panic():
     pytest.raises asserts on is itself the regression pin: a PanicException
     would fail this test even though it 'raises something'."""
     source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
-    with pytest.raises(ValueError, match=r"perplexity must be a finite number.*n_samples=20"):
+    with pytest.raises(
+        ValueError, match=r"perplexity=\.\.\.\) must be a finite number a float can hold"
+    ):
         source.embeddings(method="tsne", perplexity=float("nan"))
-    with pytest.raises(ValueError, match=r"perplexity must be a finite number.*n_samples=20"):
+    with pytest.raises(
+        ValueError, match=r"perplexity=\.\.\.\) must be a finite number a float can hold"
+    ):
         source.embeddings(method="tsne", perplexity=float("inf"))
 
 

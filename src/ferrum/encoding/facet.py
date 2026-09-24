@@ -7,6 +7,7 @@ kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 
 from __future__ import annotations
 
+from ferrum._validate import validate_positive_int
 from ferrum.encoding._honored import FACET, FACET_WRAP
 from ferrum.encoding.base import _FACET_COLUMNS_MESSAGE, ChannelBase
 
@@ -44,6 +45,10 @@ class Facet(ChannelBase):
 
     _channel_name = "facet"
     _honored_kwargs = FACET_WRAP
+
+    def _validate(self) -> None:
+        super()._validate()
+        validate_positive_int("Facet(columns=...)", self._kwargs.get("columns"))
 
 
 class FacetRow(ChannelBase):

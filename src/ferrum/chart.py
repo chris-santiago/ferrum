@@ -88,6 +88,7 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
 _logger = logging.getLogger(__name__)
 
 
+from ferrum._validate import validate_positive_int
 from ferrum._facet import (
     _Facet,
     build_facet_dict as _build_facet_dict_fn,
@@ -2532,6 +2533,8 @@ class Chart(
                     "`col=` for a genuine grid facet."
                 )
 
+        validate_positive_int("Chart.facet(ncols=...)", ncols)
+        validate_positive_int("Chart.facet(nrows=...)", nrows)
         new = self._clone()
         if field is not None:
             _refuse_row_title_on_wrap("field=")

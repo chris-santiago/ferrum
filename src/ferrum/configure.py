@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-import numbers
 import warnings
 from collections.abc import Mapping
 from dataclasses import InitVar, dataclass, fields
@@ -15,6 +13,7 @@ from ferrum._validate import (
     validate_choice,
     validate_color_value,
     coerce_fraction_value,
+    coerce_finite_real,
     coerce_pixel_value,
 )
 from ferrum.axis import validate_label_overlap
@@ -51,8 +50,10 @@ def _to_dict_omit_none(obj: Any) -> dict[str, Any]:
     return result
 
 
-def _validate_domain_bounds(domain_min: float | None, domain_max: float | None) -> None:
-    """Refuse a scale-domain pair the scale constructors would refuse.
+def _validate_domain_bounds(
+    domain_min: Any, domain_max: Any
+) -> tuple[int | float | None, int | float | None]:
+    """Return the scale-domain pair in its wire form, refusing one the scale constructors would refuse.
 
     ``AxisConfig(domain_min=, domain_max=)`` asks for the same thing
     ``LinearScale(domain=[lo, hi])`` asks for, so it must refuse the same
@@ -71,22 +72,16 @@ def _validate_domain_bounds(domain_min: float | None, domain_max: float | None) 
 
     ``lo > hi`` is deliberately NOT refused: ``LinearScale(domain=[50, 0])``
     is an accepted reversed axis, and this surface matches it.
+
+    Each bound passes :func:`ferrum._validate.coerce_finite_real` (``bool``
+    refused, since ``domain_min=True`` is a mistake, not a bound of 1) and is
+    returned in the wire form it gives.
     """
-    for name, value in (("domain_min", domain_min), ("domain_max", domain_max)):
-        if value is None:
-            continue
-        # `isinstance` first: `math.isfinite` raises a bare
-        # `TypeError: must be real number, not str` on a non-numeric bound,
-        # which escapes the ferrum voice this same function raises two lines
-        # below. All three bad shapes (non-numeric, non-finite, degenerate)
-        # now read alike. `bool` is excluded deliberately — it is a `Real`
-        # subclass, and `domain_min=True` is a mistake, not a bound of 1.
-        if isinstance(value, bool) or not isinstance(value, numbers.Real):
-            raise ValueError(f"AxisConfig: {name}={value!r} must be a finite number.")
-        if not math.isfinite(value):
-            raise ValueError(f"AxisConfig: {name}={value!r} must be a finite number.")
-    if domain_min is not None and domain_max is not None and domain_min == domain_max:
+    lo = coerce_finite_real("AxisConfig(domain_min=...)", domain_min)
+    hi = coerce_finite_real("AxisConfig(domain_max=...)", domain_max)
+    if lo is not None and hi is not None and lo == hi:
         raise ValueError(f"AxisConfig: domain_min/domain_max: {_DEGENERATE_DOMAIN_MESSAGE}")
+    return lo, hi
 
 
 #: Rust's ``scale::core::DEGENERATE_DOMAIN_MESSAGE``, quoted verbatim so the
@@ -363,7 +358,9 @@ class AxisConfig:
 
             resolve_format(self.label_format)
 
-        _validate_domain_bounds(self.domain_min, self.domain_max)
+        domain_min, domain_max = _validate_domain_bounds(self.domain_min, self.domain_max)
+        object.__setattr__(self, "domain_min", domain_min)
+        object.__setattr__(self, "domain_max", domain_max)
 
         if self.label_overlap is not None:
             validate_label_overlap("AxisConfig.label_overlap", self.label_overlap)

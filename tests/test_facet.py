@@ -511,13 +511,13 @@ def test_encode_facet_columns_zero_still_overrides_prior_facet_ncols():
     earlier `.facet(ncols=3)` value, which would hand the user a 3-column
     wrap they never asked for.
 
-    The precedence test is `columns is not None`, not truthiness. #238
-    (wave-1 hardening) moved the "0 is not a valid wrap count" refusal to
-    `_Facet.__post_init__` construction time, so the override still reaches
-    the sink -- it just refuses there instead of being silently accepted.
+    The precedence test is `columns is not None`, not truthiness. The
+    "0 is not a valid wrap count" refusal fires when `Facet(columns=0)` is
+    constructed, in that door's own voice, instead of being silently
+    accepted.
     """
     _, df = _facet_columns_test_data()
-    with pytest.raises(ValueError, match=r"_Facet\.ncols must be >= 1"):
+    with pytest.raises(ValueError, match=r"^Facet\(columns=\.\.\.\) must be >= 1; received 0$"):
         (
             Chart(df)
             .mark_point()
@@ -623,7 +623,7 @@ def test_facet_method_ncols_refuses_non_positive_int(bad):
     at construction, instead of silently accepting it (#238)."""
     df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
     chart = Chart(df).mark_point().encode(x="x", y="x")
-    with pytest.raises(ValueError, match=r"_Facet\.ncols"):
+    with pytest.raises(ValueError, match=r"^Chart\.facet\(ncols=\.\.\.\) must be "):
         chart.facet(field="g", ncols=bad)
 
 
@@ -632,16 +632,16 @@ def test_facet_method_nrows_refuses_non_positive_int(bad):
     """Chart.facet(nrows=...) refuses the same shapes as ncols= (#238)."""
     df = pl.DataFrame({"x": [1, 2, 3], "r": ["a", "b", "a"], "c": ["x", "y", "x"]})
     chart = Chart(df).mark_point().encode(x="x", y="x")
-    with pytest.raises(ValueError, match=r"_Facet\.nrows"):
+    with pytest.raises(ValueError, match=r"^Chart\.facet\(nrows=\.\.\.\) must be "):
         chart.facet(row="r", col="c", nrows=bad)
 
 
 @pytest.mark.parametrize("bad", _BAD_WRAP_COUNTS)
 def test_encode_facet_columns_refuses_non_positive_int(bad):
     """encode(facet=fm.Facet(columns=...)) refuses the same shapes as
-    Chart.facet(ncols=...) -- one sink, one check, both entries (#238)."""
+    Chart.facet(ncols=...) -- one check, each door in its own voice (#238)."""
     df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
-    with pytest.raises(ValueError, match=r"_Facet\.ncols"):
+    with pytest.raises(ValueError, match=r"^Facet\(columns=\.\.\.\) must be "):
         Chart(df).mark_point().encode(x="x", y="x", facet=fm.Facet("g", columns=bad))
 
 

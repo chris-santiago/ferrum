@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -10,7 +9,7 @@ import pyarrow as pa
 import polars as pl
 
 from ferrum import _core
-from ferrum._validate import validate_choice
+from ferrum._validate import coerce_finite_real, validate_choice
 
 if TYPE_CHECKING:
     from ._protocols import _SourceState as _MixinBase
@@ -101,17 +100,9 @@ def _resolve_tsne_perplexity(n_samples: int, requested: float | None) -> float:
     bound = _tsne_perplexity_bound(n_samples)
     if requested is None:
         return max(_TSNE_MIN_PERPLEXITY, min(_TSNE_DEFAULT_PERPLEXITY, float(bound)))
-    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
-        raise ValueError(
-            f"ModelSource.embeddings(method='tsne'): perplexity must be a "
-            f"finite number, got {requested!r} (n_samples={n_samples})."
-        )
-    value = float(requested)
-    if not math.isfinite(value):
-        raise ValueError(
-            f"ModelSource.embeddings(method='tsne'): perplexity must be a "
-            f"finite number, got {requested!r} (n_samples={n_samples})."
-        )
+    value = float(
+        coerce_finite_real("ModelSource.embeddings(method='tsne', perplexity=...)", requested)
+    )
     if value <= 0:
         raise ValueError(
             f"ModelSource.embeddings(method='tsne'): perplexity must be "

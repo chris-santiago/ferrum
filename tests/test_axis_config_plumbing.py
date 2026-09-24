@@ -531,13 +531,17 @@ class TestScaleDomainRefusals:
     )
     def test_non_numeric_bounds_refused_in_the_ferrum_voice(self, bad):
         """Was a bare `TypeError: must be real number, not str` out of
-        `math.isfinite` — no `AxisConfig:` prefix, no field name. All three bad
+        `math.isfinite`, naming neither the door nor the field. All three bad
         shapes on this refusal now read alike. `bool` is refused too: it is a
         `Real` subclass, and `domain_min=True` is a mistake, not a bound of 1.
         """
-        with pytest.raises(ValueError, match=r"AxisConfig: domain_min=.* must be a finite number"):
+        with pytest.raises(
+            ValueError, match=r"^AxisConfig\(domain_min=\.\.\.\) must be a real number "
+        ):
             fm.AxisConfig(domain_min=bad)
-        with pytest.raises(ValueError, match=r"AxisConfig: domain_max=.* must be a finite number"):
+        with pytest.raises(
+            ValueError, match=r"^AxisConfig\(domain_max=\.\.\.\) must be a real number "
+        ):
             fm.AxisConfig(domain_max=bad)
 
     def test_degenerate_domain_refused_at_the_override_construction_seam(self, chart):

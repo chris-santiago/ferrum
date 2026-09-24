@@ -4,8 +4,10 @@ Independent predicates live here:
 
 - ``is_real_number`` is the one answer to "is this a real number" for every
   numeric parameter: any ``numbers.Real`` or ``decimal.Decimal``, never
-  ``bool``. The pixel/fraction validators, ``Inset.bounds``, dash lengths and
-  the transform literal serializers all ask it.
+  ``bool``. The pixel/fraction validators, ``Inset.bounds``, dash lengths,
+  the transform literal serializers and every other numeric door ask it.
+  ``is_integer_number`` is its integer sibling (``numbers.Integral``, never
+  ``bool``), asked by every integer door.
 
 - ``validate_choice`` is the canonical way to reject a value that is not a
   member of a documented closed vocabulary (a ``kind=``/``method=``/``order=``
@@ -36,18 +38,23 @@ Independent predicates live here:
   same values with the same reasoning instead of maintaining two hand-copied
   isinstance/range checks that can drift.
 
-- ``validate_positive_int`` (#238) is the "wrap-count contract": a value
-  must be a genuine ``int`` (``bool`` excluded, same reasoning as
-  ``coerce_pixel_value``) and ``>= 1``. ``None`` passes as the caller's
-  "unset, let inference decide" sentinel, following ``coerce_pixel_value``'s
-  convention. Shared by ``_Facet.__post_init__`` for both ``ncols`` and
-  ``nrows``, which in turn covers both of #238's entries
-  (``Chart.facet(ncols=)`` and ``encode(facet=fm.Facet(columns=))``) from
-  the single sink they both write.
+- ``coerce_finite_real`` is their unbounded sibling: a real number whose
+  ``float`` is finite, returned in its wire form (builtin ``int``/``float``).
+  Every numeric door without a narrower range stores what it returns
+  (``heatmap`` bounds, ``AxisConfig`` domain bounds, t-SNE ``perplexity``,
+  ``catplot(ci=)``, and each ``BreakAxis.gap`` bound via
+  ``validate_finite_ordered_pair``).
+
+- ``validate_positive_int`` (#238) is the "count contract": a value
+  must be an integer (``is_integer_number``: ``bool`` excluded, same
+  reasoning as ``coerce_pixel_value``), ``>= 1`` and at most ``2**53``.
+  ``None`` passes as the caller's "unset, let inference decide" sentinel
+  unless the caller requires a value. Asked by each public door with the
+  label the caller invoked: ``Chart.facet(ncols=/nrows=)``,
+  ``Facet(columns=)`` and ``catplot(n_boot=)``.
 
 - ``validate_finite_ordered_pair`` (#92) is the "break-gap contract": both
-  ``start`` and ``end`` must be numeric (``bool`` excluded) and finite
-  (no NaN/±inf), and ``start`` must be strictly less than ``end``. Shared by
+  ``start`` and ``end`` must pass ``coerce_finite_real``, and ``start`` must be strictly less than ``end``. Shared by
   ``BreakAxis.__post_init__``, which validates every ``(start, end)`` pair in
   ``gap`` (a single pair or a list of pairs) — the numeric-pair analog of
   ``coerce_fraction_value``'s single-value contract.
@@ -95,6 +102,7 @@ from __future__ import annotations
 import decimal
 import math
 import numbers
+import operator
 from typing import Any, Callable
 
 
@@ -118,6 +126,17 @@ def is_real_number(value: Any) -> bool:
     import numpy as np
 
     return not isinstance(value, np.timedelta64)
+
+
+def is_integer_number(value: Any) -> bool:
+    """Return whether *value* is an integer an integer parameter accepts.
+
+    The integer sibling of :func:`is_real_number`: every
+    :class:`numbers.Integral` it accepts (``int``, numpy integer scalars).
+    ``bool``, ``numpy.timedelta64`` and ``decimal.Decimal`` (not integral,
+    whatever its value) are rejected.
+    """
+    return is_real_number(value) and isinstance(value, numbers.Integral)
 
 
 def is_none_color_sentinel(value: str) -> bool:
@@ -279,38 +298,100 @@ def coerce_fraction_value(label: str, value: Any, *, required: bool = False) -> 
     return float(value)
 
 
-def validate_positive_int(label: str, value: Any) -> None:
-    """Raise ``ValueError`` when *value* is not a positive ``int`` (``>= 1``).
+def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int | float | None:
+    """Return *value* in its wire form, or raise ``ValueError`` if it is not a finite real number.
 
-    A valid value is a genuine ``int`` (``bool`` excluded, since ``bool`` is
-    an ``int`` subclass) and ``>= 1``. ``None`` is the caller's "unset, let
-    inference decide" sentinel and always passes, matching
-    :func:`coerce_pixel_value`'s convention.
+    The unbounded sibling of :func:`coerce_pixel_value` and
+    :func:`coerce_fraction_value`: the one finite-real check every numeric
+    door without a narrower range asks. Callers store the return, not *value*.
 
-    *label* is a pre-composed field description (e.g. ``"_Facet.ncols"``),
-    matching :func:`coerce_pixel_value`'s convention.
+    A valid value is a real number (:func:`is_real_number`: numpy scalars and
+    ``decimal.Decimal`` accepted, ``bool`` refused) whose ``float`` is finite.
+    Finiteness is tested on the converted ``float``, so an integer too large
+    for a float (``10**400``), a ``Decimal`` beyond float range
+    (``Decimal("1e400")``) and a signaling NaN (``Decimal("sNaN")``) all
+    refuse in the caller's voice instead of escaping as a raw
+    ``OverflowError``, a bare ``ValueError``, or an ``inf`` on the wire.
+    ``None`` is the caller's "unset" sentinel and passes unless *required* is
+    set, matching :func:`coerce_pixel_value`.
+
+    *label* is the pre-composed public door (e.g. ``"heatmap(vmin=...)"``).
+
+    Returns
+    -------
+    int or float or None
+        An integer as a builtin ``int`` (so ``np.int64(2)`` serializes exactly
+        as ``2`` does), anything else as a builtin ``float``; ``None`` when
+        unset.
 
     Raises
     ------
     ValueError
-        If *value* is not an ``int``, or is less than 1.
+        If *value* is not a real number, or its ``float`` cannot be formed or
+        is not finite -- or, when *required* is set, if *value* is ``None``.
     """
-    if value is None:
+    if value is None and not required:
+        return None
+    if not is_real_number(value):
+        raise ValueError(
+            f"{label} must be a real number (int, float, numpy scalar, or Decimal), "
+            f"not {type(value).__name__}; received {value!r}"
+        )
+    try:
+        as_float = float(value)
+    except (OverflowError, ValueError):
+        as_float = math.nan
+    if not math.isfinite(as_float):
+        raise ValueError(f"{label} must be a finite number a float can hold; received {value!r}")
+    return operator.index(value) if is_integer_number(value) else as_float
+
+
+#: The largest integer a float holds exactly; a count above it cannot cross
+#: the JSON wire or a native integer argument intact.
+_MAX_EXACT_INT = 2**53
+
+
+def validate_positive_int(label: str, value: Any, *, required: bool = False) -> None:
+    """Raise ``ValueError`` when *value* is not a positive integer no larger than ``2**53``.
+
+    A valid value is an integer (:func:`is_integer_number`: ``int`` or a
+    numpy integer scalar, never ``bool``), ``>= 1``, and at most ``2**53``,
+    the largest integer a float holds exactly, so no count reaches the wire
+    or a native integer argument as a raw ``OverflowError``. ``None`` is the
+    caller's "unset, let inference decide" sentinel and passes unless
+    *required* is set, matching :func:`coerce_pixel_value`'s convention.
+
+    *label* is the pre-composed public door (e.g.
+    ``"Chart.facet(ncols=...)"``), matching :func:`coerce_pixel_value`'s
+    convention.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not an integer, is less than 1, or exceeds ``2**53`` --
+        or, when *required* is set, if *value* is ``None``.
+    """
+    if value is None and not required:
         return
-    if not isinstance(value, int) or isinstance(value, bool):
+    if not is_integer_number(value):
         raise ValueError(
             f"{label} must be a positive int, not {type(value).__name__}; received {value!r}"
         )
     if value < 1:
         raise ValueError(f"{label} must be >= 1; received {value!r}")
+    if value > _MAX_EXACT_INT:
+        raise ValueError(
+            f"{label} must be at most 2**53, the largest integer a float holds exactly; "
+            f"received {value!r}"
+        )
 
 
-def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> None:
-    """Raise ``ValueError`` unless ``(start, end)`` is a finite, ordered numeric pair.
+def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> tuple[float, float]:
+    """Return ``(start, end)`` as floats, or raise ``ValueError`` unless it is a finite, ordered pair.
 
-    Each of *start*/*end* must be numeric (``int``/``float``, ``bool``
-    excluded) and finite (not NaN/±inf); *start* must be strictly less than
-    *end*.
+    Each of *start*/*end* must pass :func:`coerce_finite_real` (refused as
+    ``"{label}: start"`` / ``"{label}: end"``); *start* must be strictly less
+    than *end*.
 
     *label* is a pre-composed description of the pair being checked (e.g.
     ``"BreakAxis.gap[0]"``), matching :func:`coerce_pixel_value`'s
@@ -319,21 +400,16 @@ def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> None:
     Raises
     ------
     ValueError
-        If either endpoint is not numeric, is NaN/±inf, or if
+        If either endpoint is not a real number or is not finite, or if
         ``start >= end``.
     """
-    for name, value in (("start", start), ("end", end)):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ValueError(
-                f"{label}: {name} must be a numeric value (int or float), "
-                f"not {type(value).__name__}; received {value!r}"
-            )
-        if not math.isfinite(value):
-            raise ValueError(f"{label}: {name} must be finite; received {value}")
-    if start >= end:
+    lo = float(coerce_finite_real(f"{label}: start", start, required=True))
+    hi = float(coerce_finite_real(f"{label}: end", end, required=True))
+    if lo >= hi:
         raise ValueError(
-            f"{label}: start ({start!r}) must be less than end ({end!r}); got ({start!r}, {end!r})"
+            f"{label}: start ({lo!r}) must be less than end ({hi!r}); got ({lo!r}, {hi!r})"
         )
+    return lo, hi
 
 
 def validate_color_value(

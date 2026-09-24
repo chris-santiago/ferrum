@@ -34,7 +34,7 @@ from ferrum._desugar import (
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
-from ferrum._validate import validate_choice
+from ferrum._validate import coerce_finite_real, validate_choice, validate_positive_int
 from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
@@ -74,6 +74,11 @@ _RELPLOT_VALID_KINDS = {"scatter", "line"}
 # The two catplot kinds that draw an ESTIMATE (one mark per category group)
 # rather than one mark per row, and therefore consume ``ci=``/``n_boot=``.
 _CATPLOT_AGGREGATING_KINDS = frozenset({"point", "bar"})
+
+# ``catplot``'s ``ci=``/``n_boot=`` defaults: on a kind outside
+# ``_CATPLOT_AGGREGATING_KINDS`` only these values pass silently.
+_CATPLOT_DEFAULT_CI = 95
+_CATPLOT_DEFAULT_N_BOOT = 1000
 
 # Encoding channels that assert a PER-OBSERVATION visual mapping, refused by
 # ``_CATPLOT_AGGREGATING_KINDS`` (see ``_reject_per_row_appearance_channels``
@@ -967,6 +972,36 @@ def _displot_build(
 # ---------------------------------------------------------------------------
 
 
+def _is_default_value(value: Any, default: Any) -> bool:
+    """Return whether *value* equals *default*, treating an incomparable value as different."""
+    try:
+        return bool(value == default)
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+
+
+def _refuse_interval_args_on_non_aggregating_kind(kind: str, ci: Any, n_boot: Any) -> None:
+    """Refuse an explicit ``ci=``/``n_boot=`` on a kind that draws no interval.
+
+    Only the kinds in :data:`_CATPLOT_AGGREGATING_KINDS` compute a bootstrap
+    interval; on any other kind a non-default ``ci=`` or ``n_boot=`` would be
+    accepted and silently ignored. The default values pass, since a caller
+    who never wrote the argument cannot be told apart from one who wrote the
+    default.
+    """
+    estimating = ", ".join(repr(k) for k in sorted(_CATPLOT_AGGREGATING_KINDS))
+    for name, value, default in (
+        ("ci", ci, _CATPLOT_DEFAULT_CI),
+        ("n_boot", n_boot, _CATPLOT_DEFAULT_N_BOOT),
+    ):
+        if not _is_default_value(value, default):
+            raise ValueError(
+                f"catplot({name}={value!r}) is not supported with kind={kind!r} -- "
+                f"that kind draws no confidence interval, so {name}= would be ignored. "
+                f"Drop {name}=, or use one of the estimating kinds ({estimating})."
+            )
+
+
 def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     """Validate ``ci``/``n_boot`` and return the CI as a level in ``(0, 1)``.
 
@@ -977,35 +1012,39 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     estimable from a finite resample.
 
     Called only for the kinds that actually consume these arguments
-    (:data:`_CATPLOT_AGGREGATING_KINDS`) -- on the other six kinds ``ci`` and
-    ``n_boot`` are inert, and refusing a value there would reject calls that
-    have always been accepted.
+    (:data:`_CATPLOT_AGGREGATING_KINDS`); the other six kinds refuse any
+    non-default value through
+    :func:`_refuse_interval_args_on_non_aggregating_kind`.
 
-    ``bool`` is refused for both, explicitly: it subclasses ``int`` and
-    converts to a float, so ``n_boot=True`` would otherwise mean "1 resample"
-    and ``ci=True`` "a 1 % interval" -- silently answering a call no one
-    intended rather than naming the accepted range. ``ci=1`` and ``n_boot=1``
-    stay accepted; only the boolean spelling is rejected.
+    Whether each is a number is decided by the shared predicates
+    (:func:`ferrum._validate.coerce_finite_real`,
+    :func:`ferrum._validate.validate_positive_int`): ``bool`` is refused for
+    both (it subclasses ``int``, so ``n_boot=True`` would otherwise mean
+    "1 resample" and ``ci=True`` "a 1 % interval"), and so is a numeric
+    string (``ci="95"``). ``ci=1`` and ``n_boot=1`` stay accepted, as do
+    numpy scalars.
     """
     # Message shape follows this family's house form -- `func(param=value) is
     # not supported -- <why>. <alternative>` -- the same one
     # `_reject_per_row_appearance_channels` and `lmplot`'s refusals use. The
     # bare `catplot: ci= ...` prefix these three carried was the file's one
     # outlier (design review, cycle 1 S1 / cycle 2 carried).
-    if isinstance(ci, bool):
-        raise ValueError(_CI_REFUSAL.format(ci=ci))
+    # The shared predicates decide "is this a number"; a refusal is re-raised
+    # in the house form, which also states the accepted range.
     try:
-        ci_percent = float(ci)
-    except (TypeError, ValueError) as exc:
+        ci_percent = float(coerce_finite_real("catplot(ci=...)", ci, required=True))
+    except ValueError as exc:
         raise ValueError(_CI_REFUSAL.format(ci=ci)) from exc
     if not 0.0 < ci_percent < 100.0:
         raise ValueError(_CI_REFUSAL.format(ci=ci))
-    if not isinstance(n_boot, int) or isinstance(n_boot, bool) or n_boot < 1:
+    try:
+        validate_positive_int("catplot(n_boot=...)", n_boot, required=True)
+    except ValueError as exc:
         raise ValueError(
             f"catplot(n_boot={n_boot!r}) is not supported -- n_boot is the bootstrap "
-            "resample count and must be an integer >= 1. Pass n_boot=1000 (the default) "
+            "resample count and must be an integer >= 1 and at most 2**53. Pass n_boot=1000 (the default) "
             "or any positive count."
-        )
+        ) from exc
     return ci_percent / 100.0
 
 
@@ -1535,8 +1574,8 @@ def catplot(
     dodge: bool = False,
     jitter: bool = True,
     native_scale: bool = False,
-    ci: Any = 95,
-    n_boot: int = 1000,
+    ci: Any = _CATPLOT_DEFAULT_CI,
+    n_boot: int = _CATPLOT_DEFAULT_N_BOOT,
     seed: int | None = None,
     height: float | None = None,
     aspect: float | None = None,
@@ -1649,11 +1688,12 @@ def catplot(
     ci : int or float, default 95
         Bootstrap confidence-interval width, as a percent in the open
         interval ``(0, 100)``, for the estimating kinds ``"point"`` and
-        ``"bar"``.  Inert (and unvalidated) for the other six kinds, which
-        draw no interval.
+        ``"bar"``.  The other six kinds draw no interval and refuse any
+        value but the default with ``ValueError``.
     n_boot : int, default 1000
         Bootstrap resample count used to compute ``ci``; must be ``>= 1``.
-        Inert for the non-estimating kinds, as ``ci`` is.
+        Refused, like ``ci``, when set to anything but the default on a
+        non-estimating kind.
     seed : int or None, optional
         Random seed for reproducible output: ``Jitter``'s strip positions
         (``kind="strip"``) and the ``"point"``/``"bar"`` bootstrap.  ``None``
@@ -1707,6 +1747,9 @@ def catplot(
         interval ``(0, 100)``, ``n_boot`` is below 1, or either the category
         or the value channel is unbound.
     ValueError
+        If ``kind`` is any other kind and ``ci`` or ``n_boot`` is set to
+        anything but its default: those kinds draw no interval.
+    ValueError
         If ``kind`` is ``"point"`` or ``"bar"`` and a per-observation
         appearance channel is bound -- ``size``, ``shape``, ``opacity``,
         ``fill_opacity``, ``stroke_opacity``, ``stroke_width``,
@@ -1742,7 +1785,11 @@ def catplot(
     """
     validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
 
-    ci_level = _catplot_ci_level(ci, n_boot) if kind in _CATPLOT_AGGREGATING_KINDS else None
+    if kind in _CATPLOT_AGGREGATING_KINDS:
+        ci_level = _catplot_ci_level(ci, n_boot)
+    else:
+        _refuse_interval_args_on_non_aggregating_kind(kind, ci, n_boot)
+        ci_level = None
 
     return _catplot_build(
         data,
