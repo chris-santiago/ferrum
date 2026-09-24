@@ -27,6 +27,13 @@ from ferrum._validate import validate_choice
 # or explicit PixelCoord/NormCoord wrapper.
 _AnnotationCoord = CoordValue
 
+# Default arrow-head size for `annotate_arrow`'s two attachment paths (the
+# `mark_segment(arrow_size=...)` merge and the `AnnotationArrow(head_size=...)`
+# primitive) -- one Python constant so they cannot drift apart; paired with
+# the Rust triangle-geometry constant in `render/annotation/mod.rs` and
+# `render/marks/segment.rs`, which draw the same arrowhead shape.
+_DEFAULT_ARROW_HEAD_SIZE = 8.0
+
 
 @dataclass(frozen=True)
 class _LineStyle:
@@ -664,10 +671,7 @@ def annotate_arrow(
     x2_num = _coerce_coord_to_numeric(x2_coord)
     y2_num = _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_y1": [y1_num], "_x2": [x2_num], "_y2": [y2_num]})
-    # `arrow=True, arrow_size=8` matches AnnotationArrow's own head_size
-    # default below, so the mark path and the primitive path grow the same
-    # arrowhead (batch H Task 1 landed the shared Rust triangle geometry).
-    seg_kwargs: dict = {"arrow": True, "arrow_size": 8}
+    seg_kwargs: dict = {"arrow": True, "arrow_size": _DEFAULT_ARROW_HEAD_SIZE}
     if stroke is not None:
         seg_kwargs["stroke"] = stroke
     arrow_chart = (
@@ -701,7 +705,7 @@ def annotate_arrow(
         y2=y2_coord,
         stroke=stroke or "#333",
         stroke_width=1.5,
-        head_size=8.0,
+        head_size=_DEFAULT_ARROW_HEAD_SIZE,
     )
     return _attach_primitive_with_label(
         arrow_chart,

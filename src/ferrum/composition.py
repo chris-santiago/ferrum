@@ -328,19 +328,145 @@ def _chrome_title_value(value: object) -> Optional[dict]:
     return Title(text=str(value)).to_spec_dict()
 
 
+def _is_leaf_chart(node) -> bool:
+    """Return True when *node* is a single ``Chart`` that lowers to a tree leaf.
+
+    A ``Chart`` (plain or layered via ``+``) exposes ``_render_inputs`` and is
+    not a composition wrapper, so it compiles to one ``ChartSpec`` + payload.
+    Composition wrappers (:class:`_ChartLike`) are never leaves.
+    """
+    return not isinstance(node, _ChartLike) and hasattr(node, "_render_inputs")
+
+
 def _is_chart_or_composite(obj) -> bool:
     """Return True when *obj* is a valid composition operand or child.
 
-    A plain ``Chart`` (including one already merged via ``+``) is
-    duck-typed via ``_render_inputs`` -- the same test :func:`_is_leaf_chart`
-    uses to identify a leaf.  Any composition wrapper (``HConcatChart``,
-    ``VConcatChart``, ``ConcatChart``, ``LayerChart``, ``JointChart``,
-    ``RepeatChart``, ``ClusterMapChart``) is an instance of
-    :class:`_ChartLike`.  Shared by the composite constructors'
+    Any composition wrapper (``HConcatChart``, ``VConcatChart``,
+    ``ConcatChart``, ``LayerChart``, ``JointChart``, ``RepeatChart``,
+    ``ClusterMapChart``) is an instance of :class:`_ChartLike`; a plain
+    ``Chart`` (including one already merged via ``+``) is the
+    :func:`_is_leaf_chart` case. Shared by the composite constructors'
     construction-time child validation and by ``__or__``/``__and__`` on both
     ``Chart`` and ``_ChartLike`` (batch H, H17).
     """
-    return isinstance(obj, _ChartLike) or hasattr(obj, "_render_inputs")
+    return isinstance(obj, _ChartLike) or _is_leaf_chart(obj)
+
+
+class _ChartOperatorMixin:
+    """``pipe``/``__or__``/``__and__``, shared by ``Chart`` and ``_ChartLike``.
+
+    One body for the three operators used identically on both sides of the
+    Chart / composition split (ferrum-spec §3.16): ``pipe`` applies a
+    function to ``self``; ``__or__``/``__and__`` build an
+    ``HConcatChart``/``VConcatChart`` from ``[self, other]``, returning
+    ``NotImplemented`` for a non-chart, non-composition *other* so Python
+    raises its own operator ``TypeError`` instead of constructing a
+    composite around an invalid child. Defined here (not in ``chart.py``)
+    so ``_ChartLike`` uses it directly and ``Chart`` inherits it through the
+    existing ``chart.py -> composition.py`` import direction, with no new
+    import cycle.
+    """
+
+    def pipe(self, fn, *args, **kwargs) -> Any:
+        """Apply *fn* to this chart/composition and return its result.
+
+        Equivalent to ``fn(self, *args, **kwargs)`` -- lets a chart or
+        composition participate in a fluent pipeline (e.g. a third-party
+        post-processing function) without breaking method chaining
+        (ferrum-spec §3.16).
+
+        Parameters
+        ----------
+        fn : Callable[..., Any]
+            Function to apply; receives this chart/composition as its first
+            argument.
+        *args, **kwargs
+            Additional arguments forwarded to *fn*.
+
+        Returns
+        -------
+        Any
+            Whatever *fn* returns.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1], "y": [2]})
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> chart.pipe(lambda c: type(c).__name__)
+        'Chart'
+        """
+        return fn(self, *args, **kwargs)
+
+    def __or__(self, other) -> "HConcatChart":
+        """Place two charts side-by-side (horizontal concatenation).
+
+        Produces an ``HConcatChart`` that renders both charts at the same
+        height in adjacent columns. Use ``|`` to build multi-panel layouts.
+
+        Parameters
+        ----------
+        other : Chart or composition object
+            The chart or composition to place to the right.
+
+        Returns
+        -------
+        HConcatChart
+            Horizontally concatenated composite chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> left = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> right = fm.Chart(df).mark_bar().encode(x="x", y="y")
+        >>> left | right
+        HConcatChart(n=2)
+
+        Returns ``NotImplemented`` for a non-chart, non-composition *other*
+        so ``chart | 3`` raises Python's own operator ``TypeError`` rather
+        than constructing an ``HConcatChart`` around an invalid child.
+        """
+        if not _is_chart_or_composite(other):
+            return NotImplemented
+        return HConcatChart([self, other])
+
+    def __and__(self, other) -> "VConcatChart":
+        """Stack two charts vertically (vertical concatenation).
+
+        Produces a ``VConcatChart`` that renders both charts stacked on top
+        of each other in the same column. Use ``&`` to build vertically-
+        stacked panel layouts.
+
+        Parameters
+        ----------
+        other : Chart or composition object
+            The chart or composition to place below.
+
+        Returns
+        -------
+        VConcatChart
+            Vertically concatenated composite chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> top = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> bottom = fm.Chart(df).mark_bar().encode(x="x", y="y")
+        >>> top & bottom
+        VConcatChart(n=2)
+
+        Returns ``NotImplemented`` for a non-chart, non-composition *other*
+        so ``chart & 3`` raises Python's own operator ``TypeError`` rather
+        than constructing a ``VConcatChart`` around an invalid child.
+        """
+        if not _is_chart_or_composite(other):
+            return NotImplemented
+        return VConcatChart([self, other])
 
 
 def _validate_composite_children(children, cls_name: str) -> None:
@@ -820,16 +946,6 @@ class _LoweredTree:
         )
 
 
-def _is_leaf_chart(node) -> bool:
-    """Return True when *node* is a single ``Chart`` that lowers to a tree leaf.
-
-    A ``Chart`` (plain or layered via ``+``) exposes ``_render_inputs`` and is
-    not a composition wrapper, so it compiles to one ``ChartSpec`` + payload.
-    Composition wrappers (:class:`_ChartLike`) are never leaves.
-    """
-    return not isinstance(node, _ChartLike) and hasattr(node, "_render_inputs")
-
-
 _COMPOSITE_RESOLVE_CHANNELS = ("x", "y", "color", "size")
 
 
@@ -1182,13 +1298,14 @@ def _lower_any(
     only the true tree root finalizes the call-level ``viewport``/``theme``/
     ``chart_config`` default via :func:`_apply_leaf_binding_overrides`.
 
-    ``allow_hole`` mirrors the parent layout's hole support: every non-overlay
-    layout (hconcat/vconcat/wrap/grid) accepts a ``{"kind": "hole"}`` cell for
-    an empty-data leaf (sized under hconcat/vconcat per Task 10-rust; ignored
-    by grid/wrap cell math per spec/Task 8a). Only ``LayerChart``'s overlay
-    lowering (which does not route through this generic composite branch)
-    excludes empty layers instead of holing them, since a hole is illegal
-    under overlay.
+    Every non-overlay layout (hconcat/vconcat/wrap/grid) reaches an empty-data
+    leaf through :func:`_lower_leaf_node`, which lowers it to a
+    ``{"kind": "hole"}`` cell (sized under hconcat/vconcat per Task 10-rust;
+    ignored by grid/wrap cell math per spec/Task 8a). Only ``LayerChart``'s
+    overlay lowering (which does not route through this generic composite
+    branch) reaches :func:`_lower_overlay_leaf_node` instead, which excludes
+    an empty layer rather than holing it, since a hole is illegal under
+    overlay.
 
     Raises
     ------
@@ -1204,16 +1321,13 @@ def _lower_any(
         path remains to defer to).
     """
     if _is_leaf_chart(node):
-        leaf = _lower_leaf_node(
+        return _lower_leaf_node(
             node,
             auto_tooltips=auto_tooltips,
             payloads=payloads,
             leaf_inputs=leaf_inputs,
             leaf_nodes=leaf_nodes,
-            allow_hole=True,
         )
-        assert leaf is not None  # allow_hole=True: empty data lowers to a sized hole
-        return leaf
 
     if isinstance(node, LayerChart) and node._y_independent():
         # An independent-y (dual-axis) LayerChart nested inside a composite
@@ -1225,16 +1339,13 @@ def _lower_any(
         # independent_y flags, resolved leaf-locally by Rust. The leaf does
         # not participate in cross-panel y sharing -- see the resolve="y":
         # "shared" conflict check below.
-        leaf = _lower_leaf_node(
+        return _lower_leaf_node(
             node._build_merged(),
             auto_tooltips=auto_tooltips,
             payloads=payloads,
             leaf_inputs=leaf_inputs,
             leaf_nodes=leaf_nodes,
-            allow_hole=True,
         )
-        assert leaf is not None  # allow_hole=True: empty data lowers to a sized hole
-        return leaf
 
     if isinstance(node, (JointChart, ClusterMapChart, RepeatChart, LayerChart)):
         sub = node._composite_tree(auto_tooltips=auto_tooltips, is_root=is_root)
@@ -1369,6 +1480,32 @@ def _apply_leaf_binding_overrides(leaf_nodes: list, leaf_inputs: list) -> tuple:
     return first
 
 
+def _append_leaf_wire_node(
+    spec,
+    data,
+    viewport,
+    theme,
+    chart_config,
+    *,
+    payloads: list,
+    leaf_inputs: list,
+    leaf_nodes: list,
+) -> dict:
+    """Append one non-empty leaf's rendering inputs and return its wire node.
+
+    The shared tail of both :func:`_lower_leaf_node` and
+    :func:`_lower_overlay_leaf_node`: appending to the parallel accumulator
+    lists so payload indices stay globally unique across nesting depth (see
+    :func:`_lower_any`'s docstring).
+    """
+    index = len(payloads)
+    payloads.append(data)
+    leaf_inputs.append((viewport, theme, chart_config))
+    leaf_node = {"kind": "leaf", "spec": spec, "data": index}
+    leaf_nodes.append(leaf_node)
+    return leaf_node
+
+
 def _lower_leaf_node(
     chart,
     *,
@@ -1376,33 +1513,63 @@ def _lower_leaf_node(
     payloads: list,
     leaf_inputs: list,
     leaf_nodes: list,
-    allow_hole: bool = True,
-) -> Optional[dict]:
+) -> dict:
     """Lower one leaf chart to its wire node, appending to the parallel lists.
 
     The single source of truth for leaf lowering, shared (via :func:`_lower_any`)
-    by every composite form. An empty-data leaf (``num_rows == 0``) lowers to a
-    ``{"kind": "hole"}`` placeholder when *allow_hole* is set, sized from the
-    viewport the leaf would otherwise have rendered at (matching the space its
-    flat ``Chart.to_svg()`` empty-dataset placeholder would have occupied) --
+    by every composite form except ``LayerChart``'s overlay (see
+    :func:`_lower_overlay_leaf_node`). An empty-data leaf (``num_rows == 0``)
+    lowers to a ``{"kind": "hole"}`` placeholder, sized from the viewport the
+    leaf would otherwise have rendered at (matching the space its flat
+    ``Chart.to_svg()`` empty-dataset placeholder would have occupied) --
     required under hconcat/vconcat (Task 10-rust's ``HoleSizeRequired``) and
-    harmlessly ignored by grid/wrap cell math.  ``allow_hole=False`` is used
-    only by :meth:`LayerChart._composite_tree`, whose overlay layout has no
-    hole placeholder at all: a ``None`` return there signals the caller to
-    SKIP this layer (an empty layer draws no marks either way — matches the
-    legacy ``Chart + Chart`` merge behavior), not an error.
+    harmlessly ignored by grid/wrap cell math.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
     if data.num_rows == 0:
-        if allow_hole:
-            return {"kind": "hole", "width": viewport[0], "height": viewport[1]}
+        return {"kind": "hole", "width": viewport[0], "height": viewport[1]}
+    return _append_leaf_wire_node(
+        spec,
+        data,
+        viewport,
+        theme,
+        chart_config,
+        payloads=payloads,
+        leaf_inputs=leaf_inputs,
+        leaf_nodes=leaf_nodes,
+    )
+
+
+def _lower_overlay_leaf_node(
+    chart,
+    *,
+    auto_tooltips: bool,
+    payloads: list,
+    leaf_inputs: list,
+    leaf_nodes: list,
+) -> Optional[dict]:
+    """Lower one leaf chart for an overlay panel, or ``None`` to skip it.
+
+    Used only by :meth:`LayerChart._composite_tree`, whose overlay layout has
+    no hole placeholder at all (a hole is illegal under overlay): an
+    empty-data leaf (``num_rows == 0``) returns ``None`` to signal the caller
+    to SKIP this layer -- an empty layer draws no marks either way, matching
+    the legacy ``Chart + Chart`` merge behavior -- instead of the
+    ``{"kind": "hole"}`` :func:`_lower_leaf_node` produces everywhere else.
+    """
+    spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
+    if data.num_rows == 0:
         return None  # overlay: caller skips this empty-data layer
-    index = len(payloads)
-    payloads.append(data)
-    leaf_inputs.append((viewport, theme, chart_config))
-    leaf_node = {"kind": "leaf", "spec": spec, "data": index}
-    leaf_nodes.append(leaf_node)
-    return leaf_node
+    return _append_leaf_wire_node(
+        spec,
+        data,
+        viewport,
+        theme,
+        chart_config,
+        payloads=payloads,
+        leaf_inputs=leaf_inputs,
+        leaf_nodes=leaf_nodes,
+    )
 
 
 def _extent_alignment(follower: int, leader: int, axis: str) -> dict:
@@ -1580,7 +1747,7 @@ def _build_grid_tree(
     )
 
 
-class _ChartLike(ConfigureMixin):
+class _ChartLike(ConfigureMixin, _ChartOperatorMixin):
     """Common rendering plumbing shared by every composition wrapper.
 
     Concrete subclasses must implement ``to_svg``, ``charts``,
@@ -1642,37 +1809,8 @@ class _ChartLike(ConfigureMixin):
         """
         return _json.dumps(self.to_dict(), indent=indent)
 
-    def pipe(self, fn, *args, **kwargs) -> Any:
-        """Apply *fn* to this composition and return its result.
-
-        Equivalent to ``fn(self, *args, **kwargs)`` -- lets a composition
-        participate in a fluent pipeline without breaking method chaining
-        (ferrum-spec §3.16, batch H F-L14-02).
-
-        Parameters
-        ----------
-        fn : Callable[..., Any]
-            Function to apply; receives this composition as its first
-            argument.
-        *args, **kwargs
-            Additional arguments forwarded to *fn*.
-
-        Returns
-        -------
-        Any
-            Whatever *fn* returns.
-        """
-        return fn(self, *args, **kwargs)
-
-    def __or__(self, other):
-        if not _is_chart_or_composite(other):
-            return NotImplemented
-        return HConcatChart([self, other])
-
-    def __and__(self, other):
-        if not _is_chart_or_composite(other):
-            return NotImplemented
-        return VConcatChart([self, other])
+    # pipe()/__or__()/__and__() are inherited from _ChartOperatorMixin,
+    # shared with Chart (#245(5)).
 
     def interactive(self, *, toolbar: bool = True):
         """Return an interactive rendering of this composition.
@@ -3803,13 +3941,12 @@ class LayerChart(_ChartLike):
         leaf_nodes: list = []
         children: list = []
         for layer in layers:
-            node = _lower_leaf_node(
+            node = _lower_overlay_leaf_node(
                 layer,
                 auto_tooltips=auto_tooltips,
                 payloads=payloads,
                 leaf_inputs=leaf_inputs,
                 leaf_nodes=leaf_nodes,
-                allow_hole=False,
             )
             if node is None:
                 continue  # empty-data layer: draws no marks; skip it

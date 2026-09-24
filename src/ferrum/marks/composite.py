@@ -278,12 +278,15 @@ def desugar_boxplot(
         # definition, so no observation lies beyond them, and Outliers'
         # `extent` has no "min-max" spelling of its own -- unlike
         # `_extent_to_box`, which BoxStats' `whisker_extent` does accept).
-        # The assert makes that ordering coupling explicit here rather than
-        # leaving `float(whisker_mult)` to rely silently on a gate 20 lines
-        # up never being reordered or loosened.
-        assert whisker_mult != "min-max", (
-            "the `outliers` gate above must exclude whisker_mult == 'min-max' before this line runs"
-        )
+        # This names that ordering coupling explicitly rather than leaving
+        # `float(whisker_mult)` to rely silently on a gate above never being
+        # reordered or loosened.
+        if whisker_mult == "min-max":
+            raise RuntimeError(
+                "mark_boxplot(): internal ordering coupling broken -- the `outliers` "
+                "gate above must exclude whisker_mult == 'min-max' before this "
+                "Outliers layer is built"
+            )
         transforms.append(
             Outliers(
                 field=val,

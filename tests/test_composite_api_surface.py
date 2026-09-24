@@ -682,3 +682,57 @@ class TestOperatorNotImplemented:
         result = c1 | composite
         assert isinstance(result, HConcatChart)
         assert len(result.charts) == 2
+
+
+# ---------------------------------------------------------------------------
+# Chart / composite taxonomy (#245(5)) -- pipe/__or__/__and__ moved to a
+# shared mixin, and _is_chart_or_composite now delegates to _is_leaf_chart;
+# this table pins that neither refactor changed which predicate answers
+# which kind of object true or false.
+# ---------------------------------------------------------------------------
+
+
+class TestChartTaxonomy:
+    """One row per Chart/composite kind, one column per taxonomy predicate."""
+
+    @pytest.fixture
+    def kinds(self, df, c1, c2):
+        template = fm.Chart(df).encode(x=fm.Repeat.column, y="y").mark_point()
+        return {
+            "Chart": c1,
+            "HConcatChart": c1 | c2,
+            "VConcatChart": c1 & c2,
+            "ConcatChart": ConcatChart(c1, c2),
+            "LayerChart": LayerChart(c1, c2),
+            "JointChart": JointChart(c1, top=c2),
+            "RepeatChart": RepeatChart(template, column=["x", "y"]),
+            "ClusterMapChart": ClusterMapChart(c1),
+            "not_a_chart": 42,
+        }
+
+    # (isinstance _ChartLike, hasattr _render_inputs, _is_leaf_chart, _is_chart_or_composite)
+    _EXPECTED = {
+        "Chart": (False, True, True, True),
+        "HConcatChart": (True, False, False, True),
+        "VConcatChart": (True, False, False, True),
+        "ConcatChart": (True, False, False, True),
+        "LayerChart": (True, False, False, True),
+        "JointChart": (True, False, False, True),
+        "RepeatChart": (True, False, False, True),
+        "ClusterMapChart": (True, False, False, True),
+        "not_a_chart": (False, False, False, False),
+    }
+
+    def test_taxonomy_table(self, kinds):
+        from ferrum.composition import _ChartLike, _is_chart_or_composite, _is_leaf_chart
+
+        actual = {
+            name: (
+                isinstance(obj, _ChartLike),
+                hasattr(obj, "_render_inputs"),
+                _is_leaf_chart(obj),
+                _is_chart_or_composite(obj),
+            )
+            for name, obj in kinds.items()
+        }
+        assert actual == self._EXPECTED

@@ -889,6 +889,8 @@ Encoding channels are typed objects passed as keyword arguments to `.encode()`. 
 > channel now raises where it previously built (with undefined
 > last-writer-wins runtime behavior); see the changelog.
 >
+> **Dated note (2026-09-24, `#245`(3)): the collision message names both colliding declarations.** The four one-conditional-per-wire-channel refusals above (`encode()`, `Chart.conditional()`, `Chart + Chart`, and `Chart.layer(Layer(encoding=...))`) now share one message builder that names the public entry that raised, the wire channel, and both declarations — an `encode(<key>=...)` or `Layer(encoding={<key>: ...})` parameter when the collision is against a same-call spelling, else the selection driving the conditional (`sel.when(...).otherwise(...)`) — so a chained `(a + b) + c` names the two original declarations (e.g. `selection 'b' and selection 'c'`) instead of only reporting that the channel already carries one. Message text only; which calls raise and when is unchanged.
+>
 > **Alias base-field-vs-own-conditional collision refused (2026-09-11,
 > batch-H close cycle 3, H3-2; corrected in cycle 4).** The
 > one-conditional-per-channel rule above covers two conditionals colliding

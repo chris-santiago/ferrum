@@ -487,6 +487,39 @@ class TestAutoRaster:
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb > 10, f"Expected full SVG >10MB; got {size_mb:.1f}MB"
 
+    def test_auto_raster_color_field_named_with_colon_q_routes_by_declared_type(self):
+        """A color channel field literally named with a ':Q' substring is
+        classified by its declared type, never by matching the field name
+        (#245(4)): `fm.Color("val:Qty", type="N")` stays excluded as
+        categorical -- the auto-raster gate reads `.field`/
+        `._kwargs["type"]` through the channel object, never a raw-string
+        substring match against the field name. ``"val:Qty"`` (not
+        ``"val:Q"``) because a trailing single-letter suffix IS the
+        shorthand grammar and gets parsed off at channel construction --
+        this field name intentionally isn't valid shorthand, so it survives
+        construction unmangled while still containing the ':Q' substring."""
+        n = 2_000
+        df = _df_quant_valued(n).rename({"val": "val:Qty"})
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color=fm.Color("val:Qty", type="N"))
+            .properties(
+                width=400,
+                height=300,
+                render_config=fm.RenderConfig(raster_threshold=0),
+            )
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.to_svg()
+        assert "<image" not in svg, (
+            "a field named 'val:Qty' declared Nominal must not substitute as if quantitative"
+        )
+        guidance_warnings = [w for w in caught if "mark_raster" in str(w.message)]
+        assert guidance_warnings, "Expected the categorical-exclusion guidance warning"
+        assert "categorical" in str(guidance_warnings[0].message)
+
     def test_auto_raster_substitutes_quantitative_color(self):
         """Charts with a quantitative color encoding DO get auto-raster:
         the substitution uses aggregate='mean', field=<color field>, so the

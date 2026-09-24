@@ -583,7 +583,7 @@ def _suggestion(path: str) -> str:
     return ""
 
 
-def validate(overrides: dict[str, Any]) -> None:
+def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     """Validate a whole override dict, raising on the first unresolvable path.
 
     Each key is resolved through the registry.  An unknown prefix, or a known
@@ -608,6 +608,14 @@ def validate(overrides: dict[str, Any]) -> None:
     overrides:
         The flat override dict stored by ``Chart.override``.
 
+    Returns
+    -------
+    dict[str, ResolvedPath]
+        Every path's resolution, in *overrides*' iteration order --
+        :func:`build_payload` reuses this instead of calling :func:`resolve`
+        a second time, so a validated path never needs re-resolving (and
+        re-narrowing) to build the payload.
+
     Raises
     ------
     FerrumOverrideError
@@ -615,6 +623,7 @@ def validate(overrides: dict[str, Any]) -> None:
     ValueError
         When a padding side value violates the pixel contract.
     """
+    resolved_paths: dict[str, ResolvedPath] = {}
     for path, value in overrides.items():
         resolved = resolve(path)
         if resolved is None:
@@ -635,6 +644,27 @@ def validate(overrides: dict[str, Any]) -> None:
             and resolved.location.leaf in _PADDING_NUMERIC_LEAVES
         ):
             coerce_pixel_value(f"override {path!r}", value)
+
+        resolved_paths[path] = resolved
+    return resolved_paths
+
+
+def _target_key(loc: SpecLocation, *, path: str) -> str:
+    """Return *loc*'s target key, narrowed to the two registry targets that carry one.
+
+    ``CHART_CONFIG`` and ``ENCODING_SCALE`` prefix rules always set a
+    ``target_key`` (only the mark-target rule leaves it ``None`` -- see
+    :class:`_PrefixRule`'s docstring); this makes that registry invariant
+    explicit at the two call sites that rely on it instead of assuming it
+    silently. *path* is the override path being folded, for the error text
+    on the invariant's failure.
+    """
+    if loc.target_key is None:
+        raise RuntimeError(
+            f"override {path!r}: resolved with no target key; the registry rule for a "
+            "CHART_CONFIG/ENCODING_SCALE path must always set SpecLocation.target_key"
+        )
+    return loc.target_key
 
 
 def _chart_config_wire_fragment(config_cls: type | None, leaves: dict[str, Any]) -> dict[str, Any]:
@@ -735,7 +765,7 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
     FerrumOverrideError
         When any path does not resolve (propagated from :func:`validate`).
     """
-    validate(overrides)
+    resolved_paths = validate(overrides)
 
     chart_config_leaves: dict[str, dict[str, Any]] = {}
     chart_config_classes: dict[str, type | None] = {}
@@ -746,21 +776,18 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
     deprecations: list[tuple[str, str]] = []
 
     for path, value in overrides.items():
-        resolved = resolve(path)
-        # validate() guarantees resolve() is non-None here.
-        assert resolved is not None
+        resolved = resolved_paths[path]
         loc = resolved.location
 
         if resolved.target is Target.CHART_CONFIG:
-            assert loc.target_key is not None
+            target_key = _target_key(loc, path=path)
             # Collect every leaf for this section first; the owning
             # dataclass is constructed once, from the whole section, after
             # the loop (see `_chart_config_wire_fragment`).
-            chart_config_leaves.setdefault(loc.target_key, {})[loc.leaf] = value
-            chart_config_classes[loc.target_key] = resolved.config_cls
+            chart_config_leaves.setdefault(target_key, {})[loc.leaf] = value
+            chart_config_classes[target_key] = resolved.config_cls
         elif resolved.target is Target.ENCODING_SCALE:
-            assert loc.target_key is not None
-            channel = encoding.setdefault(loc.target_key, {})
+            channel = encoding.setdefault(_target_key(loc, path=path), {})
             # Emit the WIRE spelling: the scale-key gate accepts
             # ``paddingInner``, the flat override surface reads
             # ``padding_inner``, and both must land on the same wire key.

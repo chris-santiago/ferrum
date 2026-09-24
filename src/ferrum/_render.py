@@ -69,7 +69,7 @@ _SCALE_KIND_TYPE_KINDS: dict[str, _ColorTypeKind] = {
 }
 
 
-def _color_type_kind(enc, data) -> _ColorTypeKind:
+def _color_type_kind(enc: ChannelBase, data) -> _ColorTypeKind:
     """Resolve the type kind of the auto-raster ``color`` channel.
 
     An explicit annotation always wins -- ``color="z:N"`` on a numeric
@@ -83,8 +83,10 @@ def _color_type_kind(enc, data) -> _ColorTypeKind:
     Parameters
     ----------
     enc :
-        The ``color`` encoding value -- a ``ChannelBase`` (the ``encode()``
-        path, always) or a plain string shorthand (the layered path).
+        The ``color`` encoding value: always a ``ChannelBase`` (every writer
+        of a chart's own ``_encoding`` constructs or copies one, never a raw
+        string; a composite mark's own per-layer encoding never reaches this
+        function -- see ``_apply_auto_raster``'s ``_composite_kind`` gate).
     data :
         The chart's data. **The dtype fallback applies to polars-backed data
         only; pandas / PyArrow / dict sources stay annotation-only** and yield
@@ -102,13 +104,8 @@ def _color_type_kind(enc, data) -> _ColorTypeKind:
     """
     import polars as pl
 
-    from ferrum._shorthand import parse_shorthand
-
-    if isinstance(enc, ChannelBase):
-        field = enc.field
-        declared = enc._kwargs.get("type")
-    else:
-        field, declared, _agg = parse_shorthand(enc)
+    field = enc.field
+    declared = enc._kwargs.get("type")
 
     if declared is not None:
         # An unrecognized annotation is not silently reinterpreted as a
@@ -297,17 +294,18 @@ class _RenderMixin:
             return self
 
         # Determine if a POSITIONAL encoding channel is quantitative
-        # (explicit `:Q` / type="quantitative"). The x/y gate keeps this
-        # annotation-only rule; the color gate resolves its type through
-        # `_color_type_kind`, which falls back to the column dtype.
-        def _is_quantitative(enc) -> bool:
-            if isinstance(enc, ChannelBase):
-                t = enc._kwargs.get("type")
-                return t in ("Q", "quantitative")
-            # Raw string shorthand -- check for :Q suffix.
-            if isinstance(enc, str) and ":Q" in enc:
-                return True
-            return False
+        # (explicit `:Q` / type="quantitative"). Every writer of a chart's
+        # own `_encoding` (encode()'s shorthand parse, a composite-mark
+        # desugar's remap, RepeatChart's placeholder resolution, LayerChart's
+        # color promotion) constructs or copies a ChannelBase, never a raw
+        # string, so this reads the channel's declared type directly --
+        # never a substring match against the field name, which would
+        # misclassify a field literally named with a ":Q" substring
+        # (#245(4)). The x/y gate keeps this annotation-only rule; the color
+        # gate resolves its type through `_color_type_kind`, which falls
+        # back to the column dtype.
+        def _is_quantitative(enc: ChannelBase) -> bool:
+            return enc._kwargs.get("type") in ("Q", "quantitative")
 
         # Active color encoding: categorical/ordinal/temporal color keeps the
         # permanent exclusion. Quantitative color is eligible -- it drives
@@ -319,8 +317,7 @@ class _RenderMixin:
         color_kind = _color_type_kind(color_enc, self._data) if color_enc is not None else "unknown"
         color_is_quantitative = color_kind == "quantitative"
         if color_enc is not None and not color_is_quantitative:
-            color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
-            _warn_categorical_color_excluded(mark_count, color_field, color_kind)
+            _warn_categorical_color_excluded(mark_count, color_enc.field, color_kind)
             return self
 
         # Check x and y are both present and quantitative.
@@ -342,8 +339,8 @@ class _RenderMixin:
             )
 
         # Perform the substitution via mark_raster.
-        x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-        y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
+        x_field = x_enc.field
+        y_field = y_enc.field
 
         substituted = self._clone()
         # Apply mark_raster by going through the composite mark path.
@@ -357,12 +354,9 @@ class _RenderMixin:
         # above for the explicitness rule and its documented edge case.
         user_set_raster_config = cfg.raster_aggregate != "count" or cfg.raster_field is not None
         if color_is_quantitative and not user_set_raster_config:
-            color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
             aggregate = "mean"
-            field = color_field
-            color_scheme = (
-                color_enc._kwargs.get("scheme") if isinstance(color_enc, ChannelBase) else None
-            )
+            field = color_enc.field
+            color_scheme = color_enc._kwargs.get("scheme")
             cmap = color_scheme if color_scheme is not None else cfg.raster_scheme
         else:
             aggregate = cfg.raster_aggregate

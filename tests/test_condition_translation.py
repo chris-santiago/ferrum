@@ -595,40 +595,67 @@ def test_channelless_shorthand_branch_warns_as_color():
 
 
 def test_two_conditionals_on_one_wire_channel_refused_same_call(df):
-    """`encode(color=condA, fill=condB)` refuses, naming both spellings."""
+    """`encode(color=condA, fill=condB)` refuses, naming both spellings, the
+    `encode()` voice and the fill->color alias detail (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_collide")
     with pytest.raises(ValueError) as excinfo:
         fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color=_cond(sel), fill=_cond(sel))
-    msg = str(excinfo.value)
-    assert "encode(color=...)" in msg and "encode(fill=...)" in msg, msg
-    assert "'color' wire channel" in msg, msg
+    assert str(excinfo.value) == (
+        "encode(): encode(color=...) and encode(fill=...) both declare a "
+        "conditional on the 'color' wire channel (fill carries its "
+        "conditional onto color); a channel can carry only one conditional. "
+        "Drop one of the two declarations, or move one to a different channel."
+    )
 
 
 def test_two_conditionals_on_one_wire_channel_refused_across_calls(df):
-    """The rule holds across chained `encode()` calls, not just within one."""
+    """The rule holds across chained `encode()` calls, not just within one --
+    and names the earlier declaration's selection, the new encode() key, and
+    the fill->color alias detail (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_collide_2")
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color=_cond(sel))
-    with pytest.raises(ValueError, match="already carries one on this chart"):
+    with pytest.raises(ValueError) as excinfo:
         chart.encode(fill=_cond(sel))
+    assert str(excinfo.value) == (
+        "encode(): selection 'sel_collide_2' and encode(fill=...) both "
+        "declare a conditional on the 'color' wire channel (fill carries "
+        "its conditional onto color); a channel can carry only one "
+        "conditional. Drop one of the two declarations, or move one to a "
+        "different channel."
+    )
 
 
 def test_collision_rule_covers_the_channel_carried_spelling(df):
     """A channel-carried `condition=` collides with a bare one the same way --
-    the check lives at the single append site both spellings go through."""
+    the check lives at the single append site both spellings go through
+    (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_collide_3")
-    with pytest.raises(ValueError, match="both declare a conditional"):
+    with pytest.raises(ValueError) as excinfo:
         fm.Chart(df).mark_point().encode(
             x="x:Q", y="y:Q", color=_cond(sel), fill=fm.Fill("category", condition=_cond(sel))
         )
+    assert str(excinfo.value) == (
+        "encode(): encode(color=...) and encode(fill=...) both declare a "
+        "conditional on the 'color' wire channel (fill carries its "
+        "conditional onto color); a channel can carry only one conditional. "
+        "Drop one of the two declarations, or move one to a different channel."
+    )
 
 
 def test_chart_conditional_refuses_a_second_conditional_on_one_channel(df):
     """`Chart.conditional()` enforces the same rule, resolving the channel it
-    will serialize under even when the spec carries none."""
+    will serialize under even when the spec carries none, and names the
+    context and both colliding selections (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_collide_4")
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color=_cond(sel))
-    with pytest.raises(ValueError, match="already carries a conditional"):
+    with pytest.raises(ValueError) as excinfo:
         chart.conditional(_cond(sel))
+    assert str(excinfo.value) == (
+        "Chart.conditional(): selection 'sel_collide_4' and selection "
+        "'sel_collide_4' both declare a conditional on the 'color' wire "
+        "channel; a channel can carry only one conditional. Drop one of "
+        "the two declarations, or move one to a different channel."
+    )
 
 
 def test_conditionals_on_different_wire_channels_still_compose(df):
@@ -689,6 +716,27 @@ def test_chained_layer_merge_checks_against_everything_merged_so_far(df):
     c = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color=_cond(sel))
     with pytest.raises(ValueError, match="chart \\+ chart"):
         (a + b) + c
+
+
+def test_chained_layer_merge_names_the_two_colliding_declarations(df):
+    """`(a + b) + c` names `b` and `c`'s own selections, not just the fact
+    that some earlier declaration collides (#245(3))."""
+    sel_b = selection_point(fields=["category"], name="b")
+    sel_c = selection_point(fields=["category"], name="c")
+    a = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    b = fm.Chart(df).mark_line().encode(x="x:Q", y="y:Q", color=_cond(sel_b))
+    c = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color=_cond(sel_c))
+    with pytest.raises(ValueError) as excinfo:
+        (a + b) + c
+    msg = str(excinfo.value)
+    assert msg == (
+        "chart + chart: selection 'b' and selection 'c' both declare a "
+        "conditional on the 'color' wire channel -- after the marks merge "
+        "onto one panel, every conditional on the merged wire applies to "
+        "every layer's marks, so there is no per-layer scope to keep the "
+        "two apart; a channel can carry only one conditional. Drop one of "
+        "the two declarations, or move one to a different channel."
+    )
 
 
 def test_stroke_dropped_by_color_warning_no_longer_fires_with_a_kept_conditional(df):
@@ -854,13 +902,23 @@ def test_layer_encoding_condition_on_refused_channel_raises(df, channel_name, ch
 
 def test_layer_encoding_condition_collides_with_existing_chart_conditional(df):
     """A layer-declared conditional colliding with an already-claimed wire
-    channel refuses, the same as two `encode()` calls colliding."""
+    channel refuses in the `Chart.layer()` voice (not `encode()`'s, even
+    though the shared append function's default used to say so), naming the
+    earlier declaration's selection and the layer's own declaration text
+    (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_layer_collide")
     chart = fm.Chart(df).mark_bar().encode(x="x:Q", y="y:Q", color=_cond(sel))
-    with pytest.raises(ValueError, match="already carries one on this chart"):
+    with pytest.raises(ValueError) as excinfo:
         chart.layer(
             fm.Layer(mark="point", encoding={"fill": fm.Fill("category", condition=_cond(sel))})
         )
+    assert str(excinfo.value) == (
+        "Chart.layer(): selection 'sel_layer_collide' and "
+        "Layer(encoding={'fill': ...}) both declare a conditional on the "
+        "'color' wire channel (fill carries its conditional onto color); a "
+        "channel can carry only one conditional. Drop one of the two "
+        "declarations, or move one to a different channel."
+    )
 
 
 # ── H3-1's bare-spelling half: Layer(encoding={<channel>: <bare ConditionalSpec>}) ──
@@ -924,11 +982,20 @@ def test_layer_encoding_bare_condition_auto_registers_selection(df):
 
 def test_layer_encoding_bare_condition_collides_with_existing_chart_conditional(df):
     """A bare layer-declared conditional colliding with an already-claimed
-    wire channel refuses, the same as the channel-carried layer spelling."""
+    wire channel refuses in the `Chart.layer()` voice, the same as the
+    channel-carried layer spelling, naming the earlier declaration's
+    selection and the layer's own declaration text (#245(3), exact text)."""
     sel = selection_point(fields=["category"], name="sel_layer_bare_collide")
     chart = fm.Chart(df).mark_bar().encode(x="x:Q", y="y:Q", color=_cond(sel))
-    with pytest.raises(ValueError, match="already carries one on this chart"):
+    with pytest.raises(ValueError) as excinfo:
         chart.layer(fm.Layer(mark="point", encoding={"fill": _cond(sel)}))
+    assert str(excinfo.value) == (
+        "Chart.layer(): selection 'sel_layer_bare_collide' and "
+        "Layer(encoding={'fill': ...}) both declare a conditional on the "
+        "'color' wire channel (fill carries its conditional onto color); a "
+        "channel can carry only one conditional. Drop one of the two "
+        "declarations, or move one to a different channel."
+    )
 
 
 def test_layer_encoding_fieldless_alias_conditional_beside_base_color_still_builds(df):

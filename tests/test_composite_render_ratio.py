@@ -288,11 +288,11 @@ class TestEmptyDataLeafLowersToHole:
 
     Task 10-pre-a sub-task 2: ``_build_grid_tree``'s cells support the ``grid``
     layout's ``{"kind": "hole"}`` placeholder (Task 8a), so
-    ``_lower_leaf_node(..., allow_hole=True)`` now turns a zero-row marginal/
-    dendrogram into a hole -- a faithful match for the legacy per-child path's
-    blank-render behavior for an empty chart -- instead of declining the whole
-    tree to the legacy path. RED before this task (``_composite_tree`` returned
-    ``None`` for any empty-data marginal/dendrogram); GREEN after.
+    ``_lower_leaf_node`` now turns a zero-row marginal/dendrogram into a hole
+    -- a faithful match for the legacy per-child path's blank-render behavior
+    for an empty chart -- instead of declining the whole tree to the legacy
+    path. RED before this task (``_composite_tree`` returned ``None`` for any
+    empty-data marginal/dendrogram); GREEN after.
     """
 
     def test_joint_chart_empty_marginal_lowers_to_hole(self):

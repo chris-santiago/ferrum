@@ -215,9 +215,9 @@ def test_repeat_1d_wrap_trailing_hole_shared_color_one_legend(df_p):
 
 def test_empty_leaf_hole_does_not_disqualify_shared_legend(chart_p, chart_q):
     """An empty-data middle child lowers to a sized hole under hconcat
-    (_lower_leaf_node allow_hole=True).  The two real leaves must still
-    union and produce one figure legend, and the hole must contribute
-    nothing (no crash, no NaN geometry).
+    (_lower_leaf_node).  The two real leaves must still union and produce
+    one figure legend, and the hole must contribute nothing (no crash, no
+    NaN geometry).
     """
     svg = fm.hconcat(chart_p, _empty_chart(), chart_q, resolve={"color": "shared"}).to_svg()
     texts = _legend_texts(svg)
