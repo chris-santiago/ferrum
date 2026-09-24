@@ -31,9 +31,12 @@ visualizer's new ``compare=`` matches the public function's.
 from __future__ import annotations
 
 import inspect
+import sys
+import warnings
 from typing import Any, Callable, NamedTuple
 
 import pytest
+from sklearn.cluster import KMeans
 from sklearn.dummy import DummyClassifier
 from sklearn.linear_model import LogisticRegression
 
@@ -151,6 +154,12 @@ class ParityCase(NamedTuple):
     # wrapper that starts re-defaulting tomorrow is caught by construction,
     # not when someone remembers to add a row here.
     default_target: Callable[..., Any] | None = None
+    # The function `_build_chart` (or `fit`) actually calls, when it is not
+    # `target` -- only CalibrationVisualizer, whose `target` is the public
+    # `calibration_chart` for the signature diffs while it builds through
+    # the private `_calibration_chart_from_source`. The forwarding check
+    # records calls on this function.
+    call_target: Callable[..., Any] | None = None
 
 
 _PARITY_REGISTRY: list[ParityCase] = [
@@ -169,6 +178,7 @@ _PARITY_REGISTRY: list[ParityCase] = [
         CalibrationVisualizer,
         calibration_chart,
         exclude=frozenset({"y_true", "y_pred"}),
+        call_target=_calibration_chart_from_source,
     ),
     ParityCase(ClassificationReportVisualizer, _classification_report_chart),
     ParityCase(ClassBalanceVisualizer, _class_balance_chart_from_dataframe),
@@ -594,6 +604,369 @@ def test_skip_map_entries_are_not_stale() -> None:
     assert not stale, "Stale skip-map entries:\n" + "\n".join(f"  {f}" for f in stale)
 
 
+# ---------------------------------------------------------------------------
+# Forwarding (#221)
+# ---------------------------------------------------------------------------
+#
+# The name and defaults diffs prove a visualizer *accepts* each builder
+# kwarg; neither proves `_build_chart` *passes it on*. This check does, by
+# behavior: construct each visualizer with one distinct sentinel per
+# keyword-only `__init__` parameter, replace the builder it calls with a
+# recorder, build, and require every sentinel to arrive under its own name.
+
+
+class _Sentinel:
+    """An opaque value exactly one parameter holds; equality is identity."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"<sentinel {self.name}>"
+
+
+#: Params the visualizer validates, coerces or computes with before the
+#: builder call, where an opaque sentinel would fail first. Each value is a
+#: distinct non-default value the visualizer accepts, and it must still
+#: arrive at the builder equal to what was passed.
+_VALUE_SENTINELS: dict[tuple[type[FerrumVisualizer], str], Any] = {
+    # `_resolve_residuals_panels` translates the vocabulary words; a list
+    # passes through it, so the list is the value that can arrive intact.
+    (ResidualsVisualizer, "panels"): ["qq", "residuals_vs_leverage"],
+    (CooksDistanceVisualizer, "panels"): ["qq", "residuals_vs_fitted"],
+    (InterclusterDistanceVisualizer, "k"): 7,
+    (SHAPVisualizer, "sample_idx"): 3,
+    (SHAPWaterfallVisualizer, "sample_idx"): 3,
+    (ElbowVisualizer, "ks"): [2, 3],
+    (ElbowVisualizer, "metric"): "silhouette",
+    (ElbowVisualizer, "random_state"): 11,
+    (Rank1DVisualizer, "algorithm"): "variance",
+    (Rank2DVisualizer, "algorithm"): "spearman",
+    (ParallelCoordinatesVisualizer, "features"): ["f0", "f1"],
+}
+
+#: Per-row values for a param that selects which builder runs, so each of
+#: the visualizer's registry rows reaches its own target.
+_ROW_VALUES: dict[tuple[type[FerrumVisualizer], Callable[..., Any]], dict[str, Any]] = {
+    (SHAPVisualizer, _shap_beeswarm_chart_from_source): {"kind": "beeswarm"},
+    (SHAPVisualizer, _shap_bar_chart_from_source): {"kind": "bar"},
+    (SHAPVisualizer, _shap_waterfall_chart_from_source): {"kind": "waterfall"},
+}
+
+#: Positional inputs `fit` computes with before the builder call; every
+#: other positional input is an opaque placeholder.
+_POSITIONAL_OVERRIDES: dict[type[FerrumVisualizer], tuple[Any, ...]] = {
+    ElbowVisualizer: (KMeans,),
+}
+
+
+class ForwardingException(NamedTuple):
+    visualizer: type[FerrumVisualizer]
+    param: str
+    rationale: str
+    # The builder kwarg the param is translated into when the value itself
+    # survives the translation; checked to arrive there instead.
+    arrives_as: str | None = None
+
+
+_FORWARDING_EXCEPTIONS: list[ForwardingException] = [
+    ForwardingException(
+        ROCVisualizer,
+        "micro",
+        "micro=/macro= booleans are translated into the builder's single "
+        "average= before the call (the adjudicated shape drift in "
+        "_SKIP_ENTRIES), so neither value reaches the builder by name.",
+    ),
+    ForwardingException(
+        ROCVisualizer,
+        "macro",
+        "Translated into average= together with micro= (see that entry).",
+    ),
+    ForwardingException(
+        CooksDistanceVisualizer,
+        "threshold",
+        "Kept as threshold= for back-compat and passed as the builder's "
+        "cook_threshold= (the adjudicated shape drift in _SKIP_ENTRIES).",
+        arrives_as="cook_threshold",
+    ),
+    ForwardingException(
+        SHAPVisualizer,
+        "kind",
+        "Selects which of the three SHAP builders runs; none of them takes "
+        "a kind=. Each registry row runs its own kind via _ROW_VALUES.",
+    ),
+    ForwardingException(
+        ElbowVisualizer,
+        "ks",
+        "Consumed by the per-k model fits (_elbow_scores) that produce the "
+        "score frame the builder draws; the builder takes only that frame.",
+    ),
+    ForwardingException(
+        ElbowVisualizer,
+        "metric",
+        "Consumed by _elbow_scores, like ks=; the frame it returns carries the scores.",
+    ),
+    ForwardingException(
+        ElbowVisualizer,
+        "random_state",
+        "Seeds the per-k model fits in _elbow_scores; the builder takes only the score frame.",
+    ),
+    *(
+        ForwardingException(
+            visualizer,
+            "random_state",
+            "Inert by documentation: this no-model visualizer's docstring declares "
+            "random_state= accepted for signature symmetry and never consumed, so "
+            "it reaches no computation and no builder. F29: decide whether the "
+            "no-model visualizers refuse or drop random_state=.",
+        )
+        for visualizer in (
+            Rank1DVisualizer,
+            Rank2DVisualizer,
+            ParallelCoordinatesVisualizer,
+            ClassBalanceVisualizer,
+        )
+    ),
+]
+
+#: Params the inherited `FerrumVisualizer.fit` consumes while building the
+#: ModelSource, before the builder runs. Exempt only for a visualizer that
+#: inherits that `fit` and whose called builder has no parameter of that
+#: name, so a builder that does take it (FeatureImportancesVisualizer's
+#: random_state=) must still receive it, and a visualizer with its own `fit`
+#: needs its own `_FORWARDING_EXCEPTIONS` entry saying where the value goes.
+_PRE_BUILDER_PARAMS: dict[str, str] = {
+    "random_state": "Seeds the ModelSource the inherited fit builds before the "
+    "chart; the builder reads the seeded source.",
+    "compare": "Resolved into a ComparedModelSource by _build_source before "
+    "the chart is built; the builder reads the compared source.",
+}
+
+_FORWARDING_EXCEPTION_MAP: dict[tuple[type, str], ForwardingException] = {
+    (entry.visualizer, entry.param): entry for entry in _FORWARDING_EXCEPTIONS
+}
+
+
+def _call_target(case: ParityCase) -> Callable[..., Any]:
+    return case.call_target or case.target
+
+
+def _builds_model_source(visualizer: type[FerrumVisualizer]) -> bool:
+    """Whether `visualizer` inherits the base `fit` that builds a ModelSource."""
+    return "fit" not in vars(visualizer)
+
+
+def _placeholder_positional(visualizer: type[FerrumVisualizer]) -> tuple[Any, ...]:
+    """One opaque placeholder per required positional `__init__` input."""
+    signature = inspect.signature(visualizer.__init__)
+    return tuple(
+        object()
+        for param in signature.parameters.values()
+        if param.name != "self"
+        and (
+            param.kind is inspect.Parameter.VAR_POSITIONAL
+            or (
+                param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and param.default is inspect.Parameter.empty
+            )
+        )
+    )
+
+
+def _forwarding_kwargs(case: ParityCase) -> dict[str, Any]:
+    """One distinct, non-default value per keyword-only `__init__` param."""
+    row_values = _ROW_VALUES.get((case.visualizer, case.target), {})
+    kwargs = {
+        name: row_values.get(name, _VALUE_SENTINELS.get((case.visualizer, name), _Sentinel(name)))
+        for name in sorted(_own_param_names(case.visualizer))
+    }
+    values = list(kwargs.values())
+    for i, value in enumerate(values):
+        assert all(value != other for other in values[i + 1 :]), (
+            f"{case.visualizer.__name__}: two params share the value {value!r}"
+        )
+    return kwargs
+
+
+def _record_builder_call(
+    case: ParityCase,
+    kwargs: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    positional: tuple[Any, ...] | None = None,
+) -> dict[str, Any]:
+    """Build `case.visualizer(*positional, **kwargs)` with its builder
+    replaced by a recorder, and return the keyword arguments the builder
+    received. `positional` defaults to the visualizer's
+    `_POSITIONAL_OVERRIDES` entry, else to placeholders.
+
+    The builder is patched in its own module and in the visualizer's
+    module, which covers both a module-level import and one made inside
+    the method at call time.
+    """
+    target = _call_target(case)
+    calls: list[dict[str, Any]] = []
+
+    def recorder(*_args: Any, **received: Any) -> None:
+        calls.append(received)
+
+    for module_name in {target.__module__, case.visualizer.__module__}:
+        module = sys.modules[module_name]
+        if getattr(module, target.__name__, None) is target:
+            monkeypatch.setattr(module, target.__name__, recorder)
+
+    if positional is None:
+        positional = _POSITIONAL_OVERRIDES.get(case.visualizer) or _placeholder_positional(
+            case.visualizer
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        visualizer = case.visualizer(*positional, **kwargs)
+    if not _builds_model_source(case.visualizer):
+        # No-model visualizers build inside their own `fit`.
+        df = load_dataset("regression")
+        visualizer.fit(df.select(["f0", "f1", "f2", "f3", "f4"]))
+    else:
+        visualizer._source = object()
+        visualizer._build_chart()
+
+    assert len(calls) == 1, (
+        f"{case.visualizer.__name__} called {target.__qualname__} {len(calls)} times, not once"
+    )
+    return calls[0]
+
+
+def _forwarding_exempt(visualizer: type[FerrumVisualizer]) -> set[str]:
+    """Params `visualizer` is allowed not to pass to its builder by name."""
+    per_visualizer = {param for (cls, param) in _FORWARDING_EXCEPTION_MAP if cls is visualizer}
+    return per_visualizer | _family_exempt(visualizer)
+
+
+def _family_exempt(visualizer: type[FerrumVisualizer]) -> set[str]:
+    """The `_PRE_BUILDER_PARAMS` that exempt `visualizer` (see that table)."""
+    if not _builds_model_source(visualizer):
+        return set()
+    builder_params = set().union(
+        *(
+            _keyword_only_param_names(_call_target(case))
+            for case in _PARITY_REGISTRY
+            if case.visualizer is visualizer
+        )
+    )
+    return set(_PRE_BUILDER_PARAMS) - builder_params
+
+
+def _forwarding_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[type[FerrumVisualizer], tuple[set[str], list[str]]]:
+    """Per visualizer: the params whose value reached a builder under their
+    own name (unioned over its registry rows), and the translated params
+    (`arrives_as`) whose value did not reach the builder kwarg they claim.
+    """
+    results: dict[type[FerrumVisualizer], tuple[set[str], list[str]]] = {}
+    for case in _PARITY_REGISTRY:
+        kwargs = _forwarding_kwargs(case)
+        with monkeypatch.context() as patch:
+            received = _record_builder_call(case, kwargs, patch)
+        arrived, mistranslated = results.setdefault(case.visualizer, (set(), []))
+        arrived.update(
+            name for name, value in kwargs.items() if name in received and received[name] == value
+        )
+        for name, value in kwargs.items():
+            entry = _FORWARDING_EXCEPTION_MAP.get((case.visualizer, name))
+            if entry and entry.arrives_as and received.get(entry.arrives_as) != value:
+                mistranslated.append(
+                    f"{case.visualizer.__name__}.{name} did not arrive as {entry.arrives_as}="
+                )
+    return results
+
+
+def test_visualizer_forwards_every_keyword_only_param(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every keyword-only `__init__` param reaches the builder the visualizer
+    calls, with the value the caller passed -- or carries a rationale in
+    `_FORWARDING_EXCEPTIONS` / `_PRE_BUILDER_PARAMS`.
+    """
+    failures: list[str] = []
+    for visualizer, (arrived, mistranslated) in _forwarding_results(monkeypatch).items():
+        failures.extend(mistranslated)
+        missing = _own_param_names(visualizer) - _forwarding_exempt(visualizer) - arrived
+        failures.extend(
+            f"{visualizer.__name__}.{name} never reaches its chart builder"
+            for name in sorted(missing)
+        )
+    assert not failures, "Visualizer forwarding gaps:\n" + "\n".join(f"  {f}" for f in failures)
+
+
+def test_forwarding_exceptions_are_not_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every forwarding exception carries a rationale and still describes a
+    param the visualizer has and does not forward by name, and that no
+    family-wide rule already covers; every family-wide pre-builder param
+    still exempts some visualizer; every value sentinel still names a real
+    param with a non-default value; every row value still names a registry
+    row and a real param; every positional override is still needed.
+    """
+    stale: list[str] = []
+    results = _forwarding_results(monkeypatch)
+    for entry in _FORWARDING_EXCEPTIONS:
+        label = f"{entry.visualizer.__name__}.{entry.param}"
+        assert entry.rationale.strip(), f"{label} forwarding exception has an empty rationale."
+        if entry.param not in _own_param_names(entry.visualizer):
+            stale.append(f"{label} is stale -- the visualizer no longer has {entry.param!r}.")
+        elif entry.param in results[entry.visualizer][0]:
+            stale.append(f"{label} is stale -- it now reaches the builder by name.")
+        elif entry.param in _family_exempt(entry.visualizer):
+            stale.append(f"{label} is redundant -- _PRE_BUILDER_PARAMS already exempts it.")
+
+    for param, rationale in _PRE_BUILDER_PARAMS.items():
+        assert rationale.strip(), f"pre-builder param {param!r} has an empty rationale."
+        exempted = [
+            visualizer
+            for visualizer in results
+            if param in _own_param_names(visualizer)
+            and param in _forwarding_exempt(visualizer)
+            and param not in results[visualizer][0]
+        ]
+        if not exempted:
+            stale.append(f"pre-builder param {param!r} is stale -- no visualizer relies on it.")
+
+    for (visualizer, param), value in _VALUE_SENTINELS.items():
+        defaults = _keyword_only_defaults(visualizer.__init__)
+        if param not in _own_param_names(visualizer):
+            stale.append(f"value sentinel {visualizer.__name__}.{param} names no param.")
+        elif param in defaults and defaults[param] == value:
+            stale.append(f"value sentinel {visualizer.__name__}.{param} equals the default.")
+
+    registry_rows = {(case.visualizer, case.target) for case in _PARITY_REGISTRY}
+    for (visualizer, target), values in _ROW_VALUES.items():
+        label = f"row value {visualizer.__name__}/{target.__name__}"
+        if (visualizer, target) not in registry_rows:
+            stale.append(f"{label} names no _PARITY_REGISTRY row.")
+        for param in sorted(set(values) - _own_param_names(visualizer)):
+            stale.append(f"{label} sets {param!r}, which the visualizer no longer has.")
+
+    for visualizer in _POSITIONAL_OVERRIDES:
+        for case in (case for case in _PARITY_REGISTRY if case.visualizer is visualizer):
+            try:
+                with monkeypatch.context() as patch:
+                    _record_builder_call(
+                        case,
+                        _forwarding_kwargs(case),
+                        patch,
+                        positional=_placeholder_positional(visualizer),
+                    )
+            except TypeError:
+                # The placeholder is not callable, so the fit that calls it
+                # as a model class (`_elbow_scores`) raises TypeError: the
+                # override is still needed. Anything else, including the
+                # recorder's called-once assertion, propagates.
+                continue
+            stale.append(
+                f"positional override for {visualizer.__name__} is stale -- "
+                "placeholders now build it."
+            )
+    assert not stale, "Stale forwarding entries:\n" + "\n".join(f"  {f}" for f in stale)
+
+
 def test_compare_capable_visualizers_accept_compare() -> None:
     """checkpoint decision 3 (full parity incl. the override quartet) plus
     the G5 drift map name `compare=` explicitly for the curve-family
@@ -619,14 +992,14 @@ def test_unknown_kwarg_raises_type_error() -> None:
     ``FerrumVisualizer(...)`` construction actually exercised the base's
     former ``**_extra`` swallow.
     """
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'aggregate'"):
         FerrumVisualizer(model=None, aggregate="micro")
     # Subclass-level regression coverage: every visualizer's own signature
     # rejects an unrecognized kwarg too (not specific to the base-class
     # fix, but a real, useful invariant for the family).
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'pnaels'"):
         ferrum.ResidualsVisualizer(load_fixture("regression_ridge"), pnaels="auto")
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'aggregate'"):
         ferrum.ROCVisualizer(load_fixture("binary_logistic"), aggregate="micro")
 
 

@@ -13,13 +13,11 @@ from ferrum.plots.regression import (
 )
 from ._base import FerrumVisualizer
 
-# CooksDistanceVisualizer's historical default -- exactly the leverage panel,
-# regardless of what `_resolve_residuals_panels` would do with `None`/"single"
-# (which mean "just residuals_vs_fitted" for `ResidualsVisualizer`). Kept as
-# an immutable sentinel so a caller who explicitly passes `panels=` (e.g.
-# `panels="auto"` or an explicit list) still routes through the shared
-# expansion helper, while the unset default stays byte-identical to the
-# pre-batch-G behavior.
+# CooksDistanceVisualizer's default panel list. It differs from both
+# `residuals_chart`'s default (the 4-panel grid) and `ResidualsVisualizer`'s
+# (`None`, the single residuals-vs-fitted panel) because this class exists to
+# show the leverage view. A tuple so the shared default cannot be mutated;
+# `_resolve_residuals_panels` turns it into the list the builder takes.
 _COOKS_DEFAULT_PANELS: tuple[str, ...] = ("residuals_vs_leverage",)
 
 
@@ -240,11 +238,12 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         unified (batch G decision doc, G5).
     kind : {"studentized", "raw", "scaled"}, default "studentized"
         Residual variant underlying the leverage panel's y axis.
-    panels : "auto", None, "single", or list of str, default the leverage panel alone
-        Panel selection, matching ``residuals_chart(panels=...)``. The
-        default renders just ``residuals_vs_leverage`` (this
-        visualizer's historical behavior); pass ``"auto"`` for the
-        canonical 4-panel grid or an explicit list to customize it.
+    panels : "auto", None, "single", or list of str, default ("residuals_vs_leverage",)
+        Panel selection, with ``residuals_chart(panels=...)``'s vocabulary.
+        The default renders just the ``residuals_vs_leverage`` panel;
+        ``"auto"`` renders the canonical 4-panel grid; an explicit list
+        renders those panels. ``None`` and ``"single"`` render the single
+        residuals-vs-fitted panel, which has no leverage view.
     annotate_metrics : bool, default True
         Overlay a top-right corner annotation showing R^2/RMSE/MAE on
         the residuals-vs-fitted panel, when present.
@@ -302,15 +301,11 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         self._metrics["max_studentized"] = float(stud.abs().max())
 
     def _build_chart(self) -> Any:
-        panels = self.panels
-        panel_list = (
-            list(panels) if isinstance(panels, (list, tuple)) else _resolve_residuals_panels(panels)
-        )
         return _residuals_chart_from_source(
             self._source,
             kind=self.kind,
             cook_threshold=self.threshold,
-            panels=panel_list,
+            panels=_resolve_residuals_panels(self.panels),
             annotate_metrics=self.annotate_metrics,
             subtitle=self.subtitle,
             mark=self.mark,
