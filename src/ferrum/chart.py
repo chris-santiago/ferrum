@@ -1943,11 +1943,12 @@ class Chart(
                     field=facet_enc.field,
                     title=facet_enc.option("title"),
                     ncols=facet_enc.option("columns"),
+                    sort=facet_enc.option("sort"),
                 )
             elif col_enc is not None and row_enc is not None:
-                # Grid mode: col drives the column/wrap strip (title), row
-                # drives the row-header strip (row_title) -- both are real,
-                # independent strips here.
+                # Grid mode: col drives the column/wrap strip (title, sort),
+                # row drives the row-header strip (row_title, row_sort) --
+                # both are real, independent strips here.
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet_col={col_enc!r}, facet_row={row_enc!r})",
@@ -1956,6 +1957,8 @@ class Chart(
                     row=row_enc.field,
                     title=col_enc.option("title"),
                     row_title=row_enc.option("title"),
+                    sort=col_enc.option("sort"),
+                    row_sort=row_enc.option("sort"),
                 )
             elif col_enc is not None:
                 new._facet = _Facet.merged_with(
@@ -1964,21 +1967,24 @@ class Chart(
                     kind="col",
                     col=col_enc.field,
                     title=col_enc.option("title"),
+                    sort=col_enc.option("sort"),
                 )
             elif row_enc is not None:
                 # CRITICAL: a row-only facet lowers to WRAP mode (row unset on
                 # FacetSpec), where the column/wrap strip renders and reads
                 # `title`, not `row_title` (FacetSpec::column_strip_title /
-                # row_strip_title). Routing FacetRow(title=...) to `row_title`
-                # here would silently have no effect on the rendered strip --
-                # merged_with's "row" kind routes it correctly for whichever
-                # mode this declaration resolves to.
+                # row_strip_title). Routing FacetRow(title=...)/(sort=...) to
+                # `row_title`/`row_sort` here would silently have no effect
+                # on the rendered strip -- merged_with's "row" kind routes
+                # each correctly for whichever mode this declaration
+                # resolves to.
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet_row={row_enc!r})",
                     kind="row",
                     row=row_enc.field,
                     row_title=row_enc.option("title"),
+                    row_sort=row_enc.option("sort"),
                 )
 
         return new

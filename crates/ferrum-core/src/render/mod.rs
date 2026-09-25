@@ -532,6 +532,42 @@ pub enum RenderError {
     /// ignored; it refuses instead. Python's `Layer` refuses the same input at
     /// construction; this refuses a hand-built spec that carries one.
     LayerTransformsUnsupported { layer: usize, count: usize },
+    /// A sort-field object (`{"field": ..., "op": ..., "order": ...}`)
+    /// reaches render without a string `"field"`, or naming an `"op"`/
+    /// `"order"` outside [`scale_resolve::sort_op_accepted_values`]/
+    /// [`scale_resolve::sort_order_accepted_values`]. Python's
+    /// construction-time gate (`EncodingSpec.__new__`, every sort-accepting
+    /// channel) refuses this shape before a spec can exist; this refuses a
+    /// hand-built spec that bypasses it — `ChartSpec.from_json`,
+    /// `ChartSpec(facet=dict)`, a layer's own `encoding` (`coerce_layers`,
+    /// which deserializes through raw serde, never through
+    /// `EncodingSpec::new`), and the `FacetSpec` `sort`/`row_sort` fields all
+    /// reach render without passing through that gate. `location` names
+    /// where the sort sits: a chart channel's wire name (`"x"`, `"color"`,
+    /// ...), a layer channel (`"layers[{i}].{channel}"`), or a facet
+    /// dimension (`"facet.sort"`/`"facet.row_sort"`). `reason` is
+    /// [`scale_resolve::validate_sort_field_object`]'s own refusal text —
+    /// the SAME validator `EncodingSpec::new` calls, so a shape refused at
+    /// construction and a shape refused here can never disagree. `value` is
+    /// the malformed value, verbatim. Mirrors [`Self::LayerTransformsUnsupported`]:
+    /// an accepted-but-inert wire shape refuses rather than being silently
+    /// dropped.
+    ///
+    /// A second, structurally distinct malformation shares this variant
+    /// rather than adding a third one: `FacetSpec.row_sort` set while
+    /// `FacetSpec.row` is absent (wrap mode) has no row dimension to order,
+    /// so it refuses too — `location` is `"facet.row_sort"`, `value` is the
+    /// (possibly well-formed) row_sort value verbatim, and `reason` states
+    /// the missing dimension rather than an object-shape complaint.
+    SortSpecMalformed {
+        location: String,
+        reason: String,
+        // Boxed (`clippy::result_large_err`): `serde_json::Value` is
+        // wide enough that carrying it by value here pushed
+        // `CompositeRenderError::LeafRender`'s wrapped `RenderError` past
+        // clippy's 128-byte `Result` err-size threshold.
+        value: Box<serde_json::Value>,
+    },
     /// A time-typed format (`label_format="%b %Y"`, a preset like
     /// `"date_iso"` that resolves to one, or a `%`-free spec declared
     /// `format_type="time"`) was applied where the value it formats is not
@@ -763,7 +799,14 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // A layer count, no channel token.
         | RenderError::LayeredChartMarkStyle { .. }
         // A layer index and a transform count, no channel token.
-        | RenderError::LayerTransformsUnsupported { .. }) => other,
+        | RenderError::LayerTransformsUnsupported { .. }
+        // `location` is a WIRE channel name (or "layers[i].{channel}"/
+        // "facet.sort"/"facet.row_sort"), the authored key the check walked
+        // `spec.encoding`/`spec.layers`/`spec.facet` under directly — same
+        // AUTHORED-token discipline as `RenderWarning::SortSpecIgnored`'s
+        // channel-shorthand family (never the resolved/post-flip slot), so
+        // nothing here needs an un-flip correction.
+        | RenderError::SortSpecMalformed { .. }) => other,
     }
 }
 
@@ -996,6 +1039,10 @@ impl std::fmt::Display for RenderError {
                 f,
                 "Shape(scale=...) range entry '{entry}' is not a recognized shape name"
             ),
+            Self::SortSpecMalformed { location, reason, value } => write!(
+                f,
+                "{location}: sort={value} is malformed ({reason})"
+            ),
             Self::TimeFormatOnNonTemporalScale { channel, surface, format, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 // The sole constructor (`prepare::refuse_format_temporality_mismatch`)
@@ -1128,6 +1175,29 @@ pub enum RenderWarning {
     /// batch, has an unsupported dtype, or the spec is otherwise malformed. The
     /// categorical domain falls back to insertion order; `reason` explains why.
     SortSpecIgnored { reason: String },
+    /// The facet-dimension sibling of [`Self::SortSpecIgnored`]: `Facet`/
+    /// `FacetRow`/`FacetCol(sort=)` named a well-formed sort (a channel
+    /// reference, or a sort-field object naming a field absent from the
+    /// batch) that the facet partition could not resolve. Facet panels fall
+    /// back to data first-appearance order; `reason` explains why, in the
+    /// SAME words [`Self::SortSpecIgnored`] would use for the identical
+    /// underlying failure (both are produced by
+    /// `scale_resolve::apply_sort_to_domain`, the one ordinal-domain sort
+    /// resolver).
+    ///
+    /// A distinct variant from `SortSpecIgnored`, not a reuse of it, because
+    /// [`prepare::provisional_scale_warning_superseded_by_panel_pass`]
+    /// depends on the variant to decide whether a warning produced before
+    /// `scene_build::build_scene`'s panel loop gets restated (and so can be
+    /// de-duplicated) once a panel resolves: every `SortSpecIgnored` IS
+    /// restated, because it comes from POSITIONAL/color scale resolution,
+    /// which the panel-real pass re-runs; a facet's own sort resolution runs
+    /// exactly ONCE, in `prepare::prepare_render_inputs`, before any panel
+    /// loop exists to restate it — collapsing the two variants would silently
+    /// drop this warning on every render with at least one non-empty panel
+    /// (which is nearly every render), since the shared predicate would
+    /// strip it as an assumed duplicate that was never actually re-derived.
+    FacetSortSpecIgnored { reason: String },
     /// A position adjustment was requested with a grouping channel that could
     /// not yield categories — the named `by`/color column is absent from the
     /// data, or its dtype cannot be turned into category keys (e.g. timestamp /
@@ -1518,6 +1588,11 @@ impl std::fmt::Display for RenderWarning {
                 "sort spec could not be applied ({reason}); categories fall back \
                  to insertion order"
             ),
+            RenderWarning::FacetSortSpecIgnored { reason } => write!(
+                f,
+                "facet sort spec could not be applied ({reason}); panels fall back \
+                 to insertion order"
+            ),
             RenderWarning::PositionAdjustSkipped { adjustment, reason } => write!(
                 f,
                 "{adjustment} could not be applied ({reason}); marks were not offset"
@@ -1692,6 +1767,7 @@ mod tests {
             RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
             RenderWarning::ColorDomainOmitsCategories { categories: vec!["c".into()] },
             RenderWarning::SortSpecIgnored { reason: "missing field".into() },
+            RenderWarning::FacetSortSpecIgnored { reason: "missing field".into() },
             RenderWarning::PositionAdjustSkipped {
                 adjustment: "dodge".into(),
                 reason: "by-column 'grp' not found in data".into(),
@@ -1781,6 +1857,17 @@ mod tests {
         assert!(text.contains("missing field"), "Display text was: {text}");
         // Display must NOT leak the variant name (the old Debug behavior did).
         assert!(!text.contains("SortSpecIgnored"), "Display leaked Debug: {text}");
+
+        let facet_sort = RenderWarning::FacetSortSpecIgnored {
+            reason: "missing field".into(),
+        };
+        let facet_text = format!("{facet_sort}");
+        assert!(
+            facet_text.contains("facet sort spec could not be applied"),
+            "Display text was: {facet_text}"
+        );
+        assert!(facet_text.contains("missing field"), "Display text was: {facet_text}");
+        assert!(!facet_text.contains("FacetSortSpecIgnored"), "Display leaked Debug: {facet_text}");
 
         let empty = RenderWarning::EmptyPanel { panel_index: 2 };
         assert!(format!("{empty}").contains("too small to render"));
@@ -4330,6 +4417,8 @@ mod orchestration_tests {
                 row: None,
                 title: None,
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -4406,6 +4495,8 @@ mod orchestration_tests {
                 row: None,
                 title: None,
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve {
@@ -4603,6 +4694,8 @@ mod orchestration_tests {
                 row: None,
                 title: None,
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve {
@@ -4681,6 +4774,8 @@ mod orchestration_tests {
                 row: None,
                 title: Some("Species".into()),
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -5594,6 +5689,8 @@ mod golden_tests {
                 row: None,
                 title: None,
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),

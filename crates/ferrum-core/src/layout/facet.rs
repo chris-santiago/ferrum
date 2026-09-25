@@ -91,6 +91,21 @@ pub struct FacetSpec {
     /// Set `{"y": "independent"}` to give each panel its own y-axis domain.
     #[serde(default, skip_serializing_if = "FacetResolve::is_all_shared")]
     pub resolve: FacetResolve,
+    /// Sort order for the column/wrap-dimension's distinct facet values, in
+    /// the same vocabulary `EncodingSpec.sort` accepts (a direction string,
+    /// an explicit ordered list, or a sort-field object). Applied where the
+    /// facet partition computes its values (`group_rows_by_field` /
+    /// `group_rows_by_two_fields`), via the ordinal domain's own sort
+    /// resolution (`apply_sort_to_domain`) -- there is no facet-local
+    /// sorter. Absent by default so an existing facet spec deserializes and
+    /// re-serializes byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<serde_json::Value>,
+    /// Sort order for the row dimension in grid mode. Has an effect ONLY
+    /// when `row` is set (`FacetMode::Grid` with a row dimension) -- the
+    /// same scoping rule as `row_title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_sort: Option<serde_json::Value>,
 }
 
 impl FacetSpec {
@@ -269,6 +284,8 @@ mod tests {
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -289,6 +306,8 @@ mod tests {
             mode: FacetMode::Grid { nrows: 2, ncols: 3 },
             spacing: Some(12.0),
             resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -306,6 +325,8 @@ mod tests {
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("spacing"));
@@ -324,6 +345,8 @@ mod tests {
                 x: ResolveMode::Shared,
                 y: ResolveMode::Independent,
             },
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -346,6 +369,8 @@ mod tests {
                 x: ResolveMode::Shared,
                 y: ResolveMode::Shared,
             },
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("resolve"), "all-shared resolve must be omitted: {json}");
@@ -364,6 +389,8 @@ mod tests {
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("title"), "absent title/row_title must be omitted: {json}");
@@ -383,6 +410,8 @@ mod tests {
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""title":"Species""#), "title must serialize: {json}");
@@ -638,5 +667,76 @@ mod tests {
         let zero = FacetGrid::compute_wrap(1, 3, origin, 0.0, 0.0);
         assert_eq!(neg.cell_w, zero.cell_w, "ncols=1: negative spacing clamped to 0 = same as zero spacing");
         assert_eq!(pos.cell_w, zero.cell_w, "ncols=1: positive spacing also zero-effect because 0 gutters");
+    }
+
+    // ── `#176`(11) + N3: `FacetSpec.sort`/`.row_sort` wire shape ─────────────
+
+    fn facet_spec_no_sort() -> FacetSpec {
+        FacetSpec {
+            field: "species".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            mode: FacetMode::Wrap { ncols: 3 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+            sort: None,
+            row_sort: None,
+        }
+    }
+
+    /// A control matrix cell: an existing facet spec with no `sort`
+    /// serializes with no `sort`/`row_sort` key at all, so every pre-existing
+    /// facet dict stays byte-identical.
+    #[test]
+    fn facet_spec_omits_sort_and_row_sort_when_absent() {
+        let s = facet_spec_no_sort();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("sort"), "absent sort/row_sort must be omitted: {json}");
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    /// A pre-existing serialized facet dict (no `sort`/`row_sort` key)
+    /// deserializes with both `None` -- the legacy-JSON round-trip precedent
+    /// this file already pins for `resolve`.
+    #[test]
+    fn facet_spec_legacy_json_without_sort_deserializes_as_none() {
+        let json = r#"{"field":"species","mode":{"kind":"wrap","ncols":3}}"#;
+        let parsed: FacetSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.sort, None);
+        assert_eq!(parsed.row_sort, None);
+    }
+
+    /// `sort` (direction string, explicit list, or a sort-field object) and
+    /// `row_sort` round-trip independently through the wire when set, each
+    /// in the same shape the positional `EncodingSpec.sort` uses.
+    #[test]
+    fn facet_spec_sort_and_row_sort_round_trip_when_set() {
+        let s = FacetSpec {
+            field: "col_cat".into(),
+            row: Some("row_cat".into()),
+            title: None,
+            row_title: None,
+            mode: FacetMode::Grid { nrows: 2, ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+            sort: Some(serde_json::json!("descending")),
+            row_sort: Some(serde_json::json!({"field": "v", "op": "mean"})),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""sort":"descending""#), "sort must serialize: {json}");
+        assert!(json.contains(r#""row_sort":{"field":"v","op":"mean"}"#), "row_sort must serialize: {json}");
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn facet_spec_sort_accepts_an_explicit_list() {
+        let mut s = facet_spec_no_sort();
+        s.sort = Some(serde_json::json!(["b", "a", "c"]));
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
     }
 }

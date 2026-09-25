@@ -73,6 +73,11 @@ class PriorSpec(NamedTuple):
     ncols: Optional[int]
     nrows: Optional[int]
     resolve: Optional[dict]
+    # #176(11) + N3 (spec §6.4): carried exactly like title/row_title --
+    # trailing defaults so the "none" prior (nothing to carry) need not
+    # restate them.
+    sort: Optional[Any] = None
+    row_sort: Optional[Any] = None
 
 
 # Each non-"none" state is built two ways -- through `.facet()`, which never
@@ -85,22 +90,10 @@ class PriorSpec(NamedTuple):
 PRIORS: dict[str, PriorSpec] = {
     "none": PriorSpec(_base_chart, None, None, None, None, None, None, None, None, None, None),
     "wrap": PriorSpec(
-        lambda: _base_chart().facet(field="g", title="WT", ncols=4).share_scale(x="independent"),
-        "wrap",
-        "g",
-        None,
-        None,
-        None,
-        "WT",
-        None,
-        4,
-        None,
-        {"x": "independent"},
-    ),
-    "wrap_enc": PriorSpec(
         lambda: (
             _base_chart()
-            .encode(facet=fm.Facet("g", title="WT", columns=4))
+            .facet(field="g", title="WT", ncols=4)
+            .encode(facet=fm.Facet("g", sort="WS"))
             .share_scale(x="independent")
         ),
         "wrap",
@@ -113,11 +106,36 @@ PRIORS: dict[str, PriorSpec] = {
         4,
         None,
         {"x": "independent"},
+        "WS",
+        None,
+    ),
+    "wrap_enc": PriorSpec(
+        lambda: (
+            _base_chart()
+            .encode(facet=fm.Facet("g", title="WT", columns=4, sort="WS"))
+            .share_scale(x="independent")
+        ),
+        "wrap",
+        "g",
+        None,
+        None,
+        None,
+        "WT",
+        None,
+        4,
+        None,
+        {"x": "independent"},
+        "WS",
+        None,
     ),
     "grid": PriorSpec(
         lambda: (
             _base_chart()
             .facet(row="h", col="g", title="GCT", row_title="GRT", ncols=3, nrows=2)
+            .encode(
+                facet_col=fm.FacetCol("g", sort="CS"),
+                facet_row=fm.FacetRow("h", sort="RS"),
+            )
             .share_scale(y="independent")
         ),
         "grid",
@@ -130,6 +148,8 @@ PRIORS: dict[str, PriorSpec] = {
         3,
         2,
         {"y": "independent"},
+        "CS",
+        "RS",
     ),
     "grid_enc": PriorSpec(
         lambda: (
@@ -137,8 +157,8 @@ PRIORS: dict[str, PriorSpec] = {
             .facet(row="h", col="g", ncols=3, nrows=2)
             .share_scale(y="independent")
             .encode(
-                facet_col=fm.FacetCol("g", title="GCT"),
-                facet_row=fm.FacetRow("h", title="GRT"),
+                facet_col=fm.FacetCol("g", title="GCT", sort="CS"),
+                facet_row=fm.FacetRow("h", title="GRT", sort="RS"),
             )
         ),
         "grid",
@@ -151,24 +171,14 @@ PRIORS: dict[str, PriorSpec] = {
         3,
         2,
         {"y": "independent"},
+        "CS",
+        "RS",
     ),
     "row_only": PriorSpec(
-        lambda: _base_chart().facet(row="h", title="RT").share_scale(x="independent"),
-        "wrap",
-        "h",
-        None,
-        None,
-        "row",
-        "RT",
-        None,
-        None,
-        None,
-        {"x": "independent"},
-    ),
-    "row_only_enc": PriorSpec(
         lambda: (
             _base_chart()
-            .encode(facet_row=fm.FacetRow("h", title="RT"))
+            .facet(row="h", title="RT")
+            .encode(facet_row=fm.FacetRow("h", sort="RO_S"))
             .share_scale(x="independent")
         ),
         "wrap",
@@ -181,26 +191,34 @@ PRIORS: dict[str, PriorSpec] = {
         None,
         None,
         {"x": "independent"},
+        "RO_S",
+        None,
     ),
-    "col_only": PriorSpec(
-        lambda: _base_chart().facet(col="g", title="CT", ncols=5).share_scale(y="independent"),
-        "wrap",
-        "g",
-        None,
-        None,
-        "col",
-        "CT",
-        None,
-        5,
-        None,
-        {"y": "independent"},
-    ),
-    "col_only_enc": PriorSpec(
+    "row_only_enc": PriorSpec(
         lambda: (
             _base_chart()
-            .facet(col="g", ncols=5)
+            .encode(facet_row=fm.FacetRow("h", title="RT", sort="RO_S"))
+            .share_scale(x="independent")
+        ),
+        "wrap",
+        "h",
+        None,
+        None,
+        "row",
+        "RT",
+        None,
+        None,
+        None,
+        {"x": "independent"},
+        "RO_S",
+        None,
+    ),
+    "col_only": PriorSpec(
+        lambda: (
+            _base_chart()
+            .facet(col="g", title="CT", ncols=5)
+            .encode(facet_col=fm.FacetCol("g", sort="CO_S"))
             .share_scale(y="independent")
-            .encode(facet_col=fm.FacetCol("g", title="CT"))
         ),
         "wrap",
         "g",
@@ -212,6 +230,28 @@ PRIORS: dict[str, PriorSpec] = {
         5,
         None,
         {"y": "independent"},
+        "CO_S",
+        None,
+    ),
+    "col_only_enc": PriorSpec(
+        lambda: (
+            _base_chart()
+            .facet(col="g", ncols=5)
+            .share_scale(y="independent")
+            .encode(facet_col=fm.FacetCol("g", title="CT", sort="CO_S"))
+        ),
+        "wrap",
+        "g",
+        None,
+        None,
+        "col",
+        "CT",
+        None,
+        5,
+        None,
+        {"y": "independent"},
+        "CO_S",
+        None,
     ),
 }
 
@@ -260,6 +300,12 @@ class Expected(NamedTuple):
     ncols: Optional[int]
     nrows: Optional[int]
     resolve: Optional[dict]
+    # #176(11) + N3 (spec §6.4): carried exactly like title/row_title -- no
+    # main-matrix door restates a sort of its own, so every branch below
+    # carries/moves `prior.sort`/`prior.row_sort` at exactly the positions
+    # its title/row_title counterpart already does.
+    sort: Optional[Any] = None
+    row_sort: Optional[Any] = None
 
 
 def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
@@ -290,6 +336,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             ncols,
             nrows,
             resolve,
+            prior.sort,
+            prior.row_sort,
         )
 
     if door.kind in ("generic", "facet_field"):
@@ -312,6 +360,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
                 ncols,
                 nrows,
                 resolve,
+                prior.sort,
+                None,
             )
         return Expected(
             "wrap",
@@ -324,6 +374,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             ncols,
             nrows,
             resolve,
+            prior.sort,
+            None,
         )
 
     if door.kind == "col":
@@ -339,6 +391,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
                 ncols,
                 nrows,
                 resolve,
+                prior.sort,
+                prior.row_sort,
             )
         if prior.mode == "wrap" and prior.wrap_orient == "col":
             return Expected(
@@ -352,6 +406,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
                 ncols,
                 nrows,
                 resolve,
+                prior.sort,
+                None,
             )
         if prior.mode == "wrap":
             # Promotion moves the prior's field to the row axis, and its
@@ -359,7 +415,9 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             # with it, landing in `row_title`, not `title`. `title` (the new
             # col strip) holds only what THIS door states; no main-matrix
             # col door restates a title in these "carry" cells, so it is
-            # `None` here, not `prior.title`.
+            # `None` here, not `prior.title`. `sort`/`row_sort` mirror
+            # exactly: the prior's `sort` moves to `row_sort` with the field,
+            # and the new col strip's own `sort` is `None`.
             return Expected(
                 "grid",
                 None,
@@ -371,6 +429,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
                 ncols,
                 nrows,
                 resolve,
+                None,
+                prior.sort,
             )
         return Expected(
             "wrap", door.new_field, None, None, "col", None, None, ncols, nrows, resolve
@@ -389,6 +449,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             ncols,
             nrows,
             resolve,
+            prior.sort,
+            prior.row_sort,
         )
     if prior.mode == "wrap" and prior.wrap_orient == "row":
         return Expected(
@@ -402,6 +464,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             ncols,
             nrows,
             resolve,
+            prior.sort,
+            None,
         )
     if prior.mode == "wrap":
         return Expected(
@@ -415,6 +479,8 @@ def _expected(prior: PriorSpec, door: DoorSpec) -> Union[Expected, str]:
             ncols,
             nrows,
             resolve,
+            prior.sort,
+            prior.row_sort,
         )
     return Expected("wrap", door.new_field, None, None, "row", None, None, ncols, nrows, resolve)
 
@@ -455,6 +521,8 @@ def test_facet_merge_cell(prior_name: str, door_name: str) -> None:
     assert facet.ncols == expected.ncols
     assert facet.nrows == expected.nrows
     assert facet.resolve == expected.resolve
+    assert facet.sort == expected.sort
+    assert facet.row_sort == expected.row_sort
 
 
 # Pinned from the pre-T7 code (commit 9a78f029) by file-copy revert: neither

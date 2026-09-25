@@ -16,7 +16,7 @@ mod gate;
 #[cfg(test)]
 mod tests;
 
-pub use gate::{scale_accepted_keys, validate_scale_dict};
+pub use gate::{scale_accepted_keys, sort_accepted_vocabulary, validate_scale_dict};
 use gate::deserialize_scale_value;
 
 use serde::{Deserialize, Serialize};
@@ -609,8 +609,10 @@ fn default_band_align() -> f64 {
 ///     …). Unknown keys fail loud.
 /// sort : dict or str, optional
 ///     Sort order for ordinal/nominal scales. Accepts ``"ascending"``,
-///     ``"descending"``, or an explicit array of domain values. Honored
-///     by the renderer.
+///     ``"descending"``, an explicit array of domain values, or a sort-field
+///     object (``{"field": ..., "op": ..., "order": ...}``). Honored by the
+///     renderer. A sort-field object missing a string ``"field"``, or naming
+///     an unrecognized ``"op"``/``"order"``, raises ``ValueError`` here.
 /// stack : str, optional
 ///     Stack method for bar/area marks. Accepts ``"zero"``,
 ///     ``"normalize"``, or ``"center"``. Honored by the renderer.
@@ -794,6 +796,18 @@ impl EncodingSpec {
             ))
         }
 
+        let sort: Option<serde_json::Value> = json_round(py, sort, "sort")?;
+        if let Some(serde_json::Value::Object(obj)) = &sort {
+            crate::render::scale_resolve::validate_sort_field_object(obj).map_err(
+                |reason| {
+                    PyValueError::new_err(format!(
+                        "EncodingSpec(sort=...): {reason}; received {}",
+                        serde_json::Value::Object(obj.clone())
+                    ))
+                },
+            )?;
+        }
+
         Ok(EncodingSpec {
             field: field.to_string(),
             type_,
@@ -801,7 +815,7 @@ impl EncodingSpec {
             title,
             axis: json_round(py, axis, "axis")?,
             legend: json_round(py, legend, "legend")?,
-            sort: json_round(py, sort, "sort")?,
+            sort,
             stack,
             condition: json_round(py, condition, "condition")?,
             impute: json_round(py, impute, "impute")?,
@@ -1121,6 +1135,68 @@ impl Encoding {
         }
         ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
             stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity);
+    }
+
+    /// Every populated channel as `(wire name, &EncodingSpec)`, in
+    /// declaration order. `tooltip_fields` (the one list-valued channel) is
+    /// expanded to `tooltip_fields[i]` per entry rather than a single
+    /// `(name, EncodingSpec)` pair, since its `EncodingSpec`s are indexed,
+    /// not singular.
+    ///
+    /// Destructures `Encoding` exhaustively (no `..`), so a field added to
+    /// the struct is a compile error here until this function names it, and
+    /// clippy's `-D warnings` (which includes `unused_variables`) then
+    /// forces that named binding to actually reach `push!` or the
+    /// `tooltip_fields` loop below -- coverage is compiler- and
+    /// lint-enforced, not a second hand-typed list kept in sync by
+    /// convention.
+    ///
+    /// Used by the render-time sort-object gate
+    /// ([`crate::render::RenderError::SortSpecMalformed`]) to walk every
+    /// channel a hand-built spec could carry a malformed `sort` on.
+    pub(crate) fn channels(&self) -> Vec<(String, &EncodingSpec)> {
+        let Encoding {
+            x,
+            y,
+            color,
+            size,
+            shape,
+            opacity,
+            x2,
+            y2,
+            text,
+            tooltip,
+            tooltip_fields,
+            href,
+            description,
+            key,
+            url,
+            stroke_width,
+            stroke_opacity,
+            stroke_dash,
+            angle,
+            fill_opacity,
+        } = self;
+        let mut out = Vec::new();
+        macro_rules! push {
+            ($($name:literal => $ch:expr),* $(,)?) => {
+                $( if let Some(e) = $ch { out.push(($name.to_string(), e)); } )*
+            };
+        }
+        push!(
+            "x" => x, "y" => y, "color" => color, "size" => size, "shape" => shape,
+            "opacity" => opacity, "x2" => x2, "y2" => y2, "text" => text,
+            "tooltip" => tooltip, "href" => href, "description" => description,
+            "key" => key, "url" => url, "stroke_width" => stroke_width,
+            "stroke_opacity" => stroke_opacity, "stroke_dash" => stroke_dash,
+            "angle" => angle, "fill_opacity" => fill_opacity,
+        );
+        if let Some(fields) = tooltip_fields {
+            for (i, e) in fields.iter().enumerate() {
+                out.push((format!("tooltip_fields[{i}]"), e));
+            }
+        }
+        out
     }
 
     /// Swap the positional channels between the x and y roles (`CoordFlip`).

@@ -189,6 +189,23 @@ pub fn scale_accepted_keys(scale_type: &str) -> PyResult<Vec<String>> {
         .ok_or_else(|| PyValueError::new_err(format!("unknown scale type '{scale_type}'")))
 }
 
+/// The `sort`-field-object vocabulary (`#176`(11) + N3): keys `"op"` and
+/// `"order"`, each the accepted string spellings for that key, sourced from
+/// `render::scale_resolve::{sort_op_accepted_values,
+/// sort_order_accepted_values}` -- the same values
+/// `validate_sort_field_object`/`EncodingSpec::new` accept. Published on the
+/// `scale_accepted_keys` precedent so Python's sort-accepting channels
+/// (`X`/`Y`/`Facet`/... and every other honored-`sort` door) validate
+/// against these instead of holding a second copy of the vocabulary.
+#[pyfunction]
+pub fn sort_accepted_vocabulary() -> std::collections::BTreeMap<&'static str, Vec<String>> {
+    use crate::render::scale_resolve::{sort_op_accepted_values, sort_order_accepted_values};
+    std::collections::BTreeMap::from([
+        ("op", sort_op_accepted_values().iter().map(|s| s.to_string()).collect()),
+        ("order", sort_order_accepted_values().iter().map(|s| s.to_string()).collect()),
+    ])
+}
+
 /// Wire refusal for the scale-key gate (F-L04-07, spec §6). Pinned shape,
 /// mirroring `binding.rs::chart_config_unknown_key_err`: names the unknown
 /// key, the scale type, and the sorted accepted keys.

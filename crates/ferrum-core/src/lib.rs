@@ -26,6 +26,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // for the side effect of its exception (rust-design recommendation 5 /
     // python-design S2, converged).
     m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_dict, m)?)?;
+    // `#176`(11) + N3: the sort-field-object vocabulary
+    // (`validate_sort_field_object`/`EncodingSpec::new` enforce), published so
+    // every sort-accepting Python channel (`X`/`Y`/`Facet`/...) validates
+    // against the SAME `op`/`order` spellings instead of holding a copy.
+    m.add_function(wrap_pyfunction!(spec::encoding::sort_accepted_vocabulary, m)?)?;
     m.add_class::<scale::linear::LinearScale>()?;
     m.add_class::<scale::log::LogScale>()?;
     m.add_class::<scale::symlog::SymlogScale>()?;

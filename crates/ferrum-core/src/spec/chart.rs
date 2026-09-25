@@ -836,6 +836,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),

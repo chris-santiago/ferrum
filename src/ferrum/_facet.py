@@ -131,6 +131,17 @@ class _Facet:
     # not `row_title`, or it silently has no effect on the rendered strip.
     title: Optional[str] = None
     row_title: Optional[str] = None
+    # #176(11) + N3 (spec §6.4): panel order for whichever dimension the
+    # column/wrap strip renders -- mirrors `title`'s routing exactly (the
+    # ONLY sort that has any effect in wrap mode, including a row-only facet
+    # lowered to wrap). `row_sort` only has an effect once the facet is
+    # genuinely grid mode -- mirrors `row_title`. Either value is the raw
+    # sort spec (a direction string, an explicit list, or a sort-field
+    # object), already validated at channel construction
+    # (`encoding.base._validate_sort_object`); this module does not
+    # re-validate it.
+    sort: Optional[Any] = None
+    row_sort: Optional[Any] = None
 
     def __post_init__(self) -> None:
         # Coerce string inputs to enums (frozen → use object.__setattr__) so the
@@ -164,6 +175,8 @@ class _Facet:
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
         resolve: Optional[dict] = None,
+        sort: Optional[Any] = None,
+        row_sort: Optional[Any] = None,
     ) -> "_Facet":
         """The one writer of facet state (#176(10b) + N5, spec §6.3).
 
@@ -181,9 +194,8 @@ class _Facet:
         changes only ``resolve`` and requires *existing*). A field this call
         does not state survives from *existing*; a field it does state wins
         (last writer). Carrying is by wire field, not by dimension: any
-        field this method's branches do not explicitly list --
-        including ``resolve`` today and a later per-facet field such as a
-        future ``sort`` -- rides through :func:`dataclasses.replace`
+        field this method's branches do not explicitly list -- including
+        ``resolve`` -- rides through :func:`dataclasses.replace`
         automatically, so a branch that does not yet know about a field
         cannot silently drop it.
 
@@ -205,6 +217,15 @@ class _Facet:
         replaces the grid with a wrap on the stated field (unmentioned
         fields survive; ``row_title`` has no home in wrap mode and is
         dropped, not carried).
+
+        *sort*/*row_sort* (#176(11) + N3, spec §6.4) route exactly like
+        *title*/*row_title*: *sort* is "this call's own value for whichever
+        dimension its own kwarg represents" (the ``col`` dimension for a
+        ``"col"`` door, the row-or-lowered-to-wrap dimension for a ``"row"``
+        door), and each branch below decides -- exactly as it already does
+        for title -- whether that value lands in the built ``_Facet``'s
+        ``sort`` or ``row_sort`` slot, moving with a promoted field the same
+        way its title does.
         """
 
         def carry(attr: str, value):
@@ -215,11 +236,43 @@ class _Facet:
         def build(**structural) -> "_Facet":
             # `existing is None`: nothing to carry, construct fresh.
             # Otherwise `dataclasses.replace` copies every field this call
-            # doesn't list here (currently just `resolve`, and any later
-            # per-facet field) from `existing` automatically.
+            # doesn't list here (currently just `resolve`) from `existing`
+            # automatically.
             if existing is None:
                 return _Facet(**structural)
             return dataclasses.replace(existing, **structural)
+
+        def wrap_call(wrap_field: Optional[str], *, wrap_orient, wrap_title, wrap_sort) -> "_Facet":
+            return build(
+                mode_kind="wrap",
+                field=wrap_field,
+                row=None,
+                col=None,
+                wrap_orient=wrap_orient,
+                title=wrap_title,
+                row_title=None,
+                sort=wrap_sort,
+                row_sort=None,
+                ncols=ncols_v,
+                nrows=nrows_v,
+            )
+
+        def grid_call(
+            *, grid_row, grid_col, grid_title, grid_row_title, grid_sort, grid_row_sort
+        ) -> "_Facet":
+            return build(
+                mode_kind="grid",
+                field=None,
+                row=grid_row,
+                col=grid_col,
+                wrap_orient=None,
+                title=grid_title,
+                row_title=grid_row_title,
+                sort=grid_sort,
+                row_sort=grid_row_sort,
+                ncols=ncols_v,
+                nrows=nrows_v,
+            )
 
         if kind == "resolve":
             return build(resolve=resolve)
@@ -230,16 +283,13 @@ class _Facet:
         on_wrap = existing is not None and existing.mode_kind == FacetMode.WRAP
 
         if kind == "grid":
-            return build(
-                mode_kind="grid",
-                field=None,
-                row=row,
-                col=col,
-                wrap_orient=None,
-                title=carry("title", title),
-                row_title=carry("row_title", row_title),
-                ncols=ncols_v,
-                nrows=nrows_v,
+            return grid_call(
+                grid_row=row,
+                grid_col=col,
+                grid_title=carry("title", title),
+                grid_row_title=carry("row_title", row_title),
+                grid_sort=carry("sort", sort),
+                grid_row_sort=carry("row_sort", row_sort),
             )
 
         if kind in ("generic", "facet_field"):
@@ -253,13 +303,10 @@ class _Facet:
                     )
                 # "facet_field": `.facet(field=...)` is the redeclaration door
                 # the refusal above names -- falls through to the shared
-                # wrap-building return below, dropping row_title (no home in
-                # wrap mode) rather than carrying it.
-            return build(
-                mode_kind="wrap",
-                field=field,
-                row=None,
-                col=None,
+                # wrap-building return below, dropping row_title/row_sort (no
+                # home in wrap mode) rather than carrying them.
+            return wrap_call(
+                field,
                 # A wrap-only declaration states no orientation of its own
                 # (`Facet`/`.facet(field=...)` have no orientation
                 # parameter), so `wrap_orient` is a field this call does not
@@ -270,125 +317,83 @@ class _Facet:
                 # always `None` already when `existing` is a grid (the
                 # redeclare case), so this needs no on_grid special case.
                 wrap_orient=carry("wrap_orient", None),
-                title=carry("title", title),
-                row_title=None,
-                ncols=ncols_v,
-                nrows=nrows_v,
+                wrap_title=carry("title", title),
+                wrap_sort=carry("sort", sort),
             )
 
         if kind == "col":
             if on_grid:
-                return build(
-                    mode_kind="grid",
-                    field=None,
-                    row=existing.row,
-                    col=col,
-                    wrap_orient=None,
-                    title=carry("title", title),
-                    row_title=carry("row_title", row_title),
-                    ncols=ncols_v,
-                    nrows=nrows_v,
+                return grid_call(
+                    grid_row=existing.row,
+                    grid_col=col,
+                    grid_title=carry("title", title),
+                    grid_row_title=carry("row_title", row_title),
+                    grid_sort=carry("sort", sort),
+                    grid_row_sort=carry("row_sort", row_sort),
                 )
             if on_wrap and existing.wrap_orient == WrapOrient.COL:
                 # same orientation: replace the field, stay wrap.
-                return build(
-                    mode_kind="wrap",
-                    field=col,
-                    row=None,
-                    col=None,
+                return wrap_call(
+                    col,
                     wrap_orient="col",
-                    title=carry("title", title),
-                    row_title=None,
-                    ncols=ncols_v,
-                    nrows=nrows_v,
+                    wrap_title=carry("title", title),
+                    wrap_sort=carry("sort", sort),
                 )
             if on_wrap:
                 # other orientation: promote, keeping the prior field on its
-                # own (row) axis -- and its title with it. The prior wrap's
-                # title labeled its own single strip; now that field is the
-                # row, so its title moves to `row_title`, not `title`.
-                # `title` (the new col strip) holds only what THIS call
-                # states about the col field it is declaring; nothing
-                # carries into it from the prior wrap, whose title belongs
-                # to a different axis now.
-                return build(
-                    mode_kind="grid",
-                    field=None,
-                    row=existing.field,
-                    col=col,
-                    wrap_orient=None,
-                    title=title,
-                    row_title=row_title if row_title is not None else existing.title,
-                    ncols=ncols_v,
-                    nrows=nrows_v,
+                # own (row) axis -- and its title/sort with it. The prior
+                # wrap's title/sort labeled its own single strip; now that
+                # field is the row, so they move to `row_title`/`row_sort`,
+                # not `title`/`sort`. `title`/`sort` (the new col strip) hold
+                # only what THIS call states about the col field it is
+                # declaring; nothing carries into them from the prior wrap,
+                # whose title/sort belong to a different axis now.
+                return grid_call(
+                    grid_row=existing.field,
+                    grid_col=col,
+                    grid_title=title,
+                    grid_row_title=row_title if row_title is not None else existing.title,
+                    grid_sort=sort,
+                    grid_row_sort=row_sort if row_sort is not None else existing.sort,
                 )
-            return build(
-                mode_kind="wrap",
-                field=col,
-                row=None,
-                col=None,
+            return wrap_call(
+                col,
                 wrap_orient="col",
-                title=carry("title", title),
-                row_title=None,
-                ncols=ncols_v,
-                nrows=nrows_v,
+                wrap_title=carry("title", title),
+                wrap_sort=carry("sort", sort),
             )
 
         # kind == "row"
         if on_grid:
-            return build(
-                mode_kind="grid",
-                field=None,
-                row=row,
-                col=existing.col,
-                wrap_orient=None,
-                title=carry("title", title),
-                row_title=carry("row_title", row_title),
-                ncols=ncols_v,
-                nrows=nrows_v,
+            return grid_call(
+                grid_row=row,
+                grid_col=existing.col,
+                grid_title=carry("title", title),
+                grid_row_title=carry("row_title", row_title),
+                grid_sort=carry("sort", sort),
+                grid_row_sort=carry("row_sort", row_sort),
             )
         if on_wrap and existing.wrap_orient == WrapOrient.ROW:
             # same orientation: replace the field, stay wrap. The row door's
-            # own title arrives via `row_title` (F-L01-04: a row-alone wrap
-            # reads the wire's `title` key, not `row_title`), so it -- not
-            # `title` -- is this call's stated value here.
+            # own title/sort arrive via `row_title`/`row_sort` (F-L01-04: a
+            # row-alone wrap reads the wire's `title` key, not `row_title`),
+            # so those -- not `title`/`sort` -- are this call's stated
+            # values here.
             wrap_title = row_title if row_title is not None else existing.title
-            return build(
-                mode_kind="wrap",
-                field=row,
-                row=None,
-                col=None,
-                wrap_orient="row",
-                title=wrap_title,
-                row_title=None,
-                ncols=ncols_v,
-                nrows=nrows_v,
-            )
+            wrap_sort = row_sort if row_sort is not None else existing.sort
+            return wrap_call(row, wrap_orient="row", wrap_title=wrap_title, wrap_sort=wrap_sort)
         if on_wrap:
             # other orientation: promote, keeping the prior field on its own
             # (col) axis.
-            return build(
-                mode_kind="grid",
-                field=None,
-                row=row,
-                col=existing.field,
-                wrap_orient=None,
-                title=carry("title", title),
-                row_title=carry("row_title", row_title),
-                ncols=ncols_v,
-                nrows=nrows_v,
+            return grid_call(
+                grid_row=row,
+                grid_col=existing.field,
+                grid_title=carry("title", title),
+                grid_row_title=carry("row_title", row_title),
+                grid_sort=carry("sort", sort),
+                grid_row_sort=carry("row_sort", row_sort),
             )
-        return build(
-            mode_kind="wrap",
-            field=row,
-            row=None,
-            col=None,
-            wrap_orient="row",
-            title=row_title,
-            row_title=None,
-            ncols=ncols_v,
-            nrows=nrows_v,
-        )
+        return wrap_call(row, wrap_orient="row", wrap_title=row_title, wrap_sort=row_sort)
 
 
 def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
@@ -476,4 +481,12 @@ def build_facet_dict(facet: _Facet, data: Any) -> dict:
         d["title"] = f.title
     if f.row_title is not None:
         d["row_title"] = f.row_title
+    # #176(11) + N3 (spec §6.4): sort (column/wrap-strip panel order) and
+    # row_sort (grid row-strip panel order) mirror title/row_title exactly --
+    # both top-level FacetSpec keys, independent of mode, emitted only when
+    # set, so a facet with no sort declared stays byte-identical.
+    if f.sort is not None:
+        d["sort"] = f.sort
+    if f.row_sort is not None:
+        d["row_sort"] = f.row_sort
     return d

@@ -21,6 +21,7 @@ use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 
+use super::scale_resolve::{apply_sort_to_domain, SortContext};
 use super::scale_resolve::ResolvedScales;
 use super::{RenderError, RenderWarning};
 
@@ -893,6 +894,17 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 /// `RenderWarning::multiplicity()` classifier), not executed here as out of
 /// scope for this remediation.
 ///
+/// `RenderWarning::FacetSortSpecIgnored` (`#176`(11) + N3) is the negative
+/// case worth naming explicitly: it looks like `SortSpecIgnored`'s sibling
+/// (same reason text, same "resolver could not honor a sort" story) and it
+/// is tempting to add here, but it must NOT be — the facet partition that
+/// produces it runs exactly ONCE, in `prepare_render_inputs`, before any
+/// panel loop exists; `resolve_panel_scales` never re-derives a facet's own
+/// panel ordering per panel, so there is no panel-real restatement for this
+/// predicate to treat the provisional copy as a duplicate of. Adding it here
+/// would silently drop the ONLY report of a bad `Facet(sort=)` on every
+/// render with at least one non-empty panel.
+///
 /// `scene_build::build_scene` calls this to strip the provisional prefix of
 /// its warnings vec once it has confirmed at least one panel actually
 /// reached `resolve_panel_scales` — see that function's own doc for why the
@@ -962,6 +974,7 @@ pub fn prepare_render_inputs(
     // whose own effective coord flips — `#172`(1)).
     let coord_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
     let layers = build_layers(spec)?;
+    refuse_malformed_sort_specs(spec)?;
 
     // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
     // ONCE here from the layers' `independent_y` flags, then hand it to every
@@ -1080,15 +1093,35 @@ pub fn prepare_render_inputs(
     )?;
 
     let facet_groups = if let Some(fspec) = &spec.facet {
+        let axes = FacetSortAxes {
+            x_field: rendering_encoding.x.as_ref().map(|e| e.field.as_str()),
+            y_field: rendering_encoding.y.as_ref().map(|e| e.field.as_str()),
+            coord_flipped,
+        };
         if let Some(row_field) = &fspec.row {
             // Grid mode: produce one FacetGroup per (row_val, col_val) pair in
             // row-major order. Each group's `key` is the col dimension (drives the
             // column-header strip title); `row_key` is the row dimension (drives the
-            // row-header strip title and secondary batch filter).
-            group_rows_by_two_fields(&transformed, &fspec.field, row_field)?
+            // row-header strip title and secondary batch filter). `sort`/`row_sort`
+            // order each dimension independently (Facet/FacetRow/FacetCol(sort=)).
+            group_rows_by_two_fields(
+                &transformed,
+                &fspec.field,
+                row_field,
+                fspec.sort.as_ref(),
+                fspec.row_sort.as_ref(),
+                axes,
+                &mut scale_warnings,
+            )?
         } else {
-            // Wrap mode: single-field grouping — behavior unchanged.
-            group_rows_by_field(&transformed, &fspec.field)?
+            // Wrap mode: single-field grouping, ordered by `fspec.sort` when set.
+            group_rows_by_field(
+                &transformed,
+                &fspec.field,
+                fspec.sort.as_ref(),
+                axes,
+                &mut scale_warnings,
+            )?
         }
     } else {
         Vec::new()
@@ -1408,6 +1441,77 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
             lp
         })
         .collect())
+}
+
+/// Refuse a malformed sort-field object anywhere it could reach render
+/// without passing through Python's construction-time gate
+/// (`EncodingSpec.__new__`, `validate_sort_field_object`): a chart-level
+/// encoding channel, a layer's own encoding channel, or a facet dimension's
+/// `sort`/`row_sort`. Reachable only from a hand-built `ChartSpec` --
+/// `ChartSpec.from_json`, `ChartSpec(facet=dict)`, `layers[i].encoding`
+/// (`coerce_layers`, raw serde `Deserialize`), and `FacetSpec.sort`/
+/// `.row_sort` -- none of which call `EncodingSpec::new`. Reuses
+/// `validate_sort_field_object`, the SAME validator `EncodingSpec::new`
+/// calls, so a shape refused at construction and a shape refused here can
+/// never disagree ([`RenderError::LayerTransformsUnsupported`] precedent: an
+/// accepted-but-inert wire shape refuses rather than silently degrading).
+///
+/// Walks `spec.encoding`'s channels via [`crate::spec::encoding::Encoding::channels`]
+/// (compiler-enforced coverage over every `Encoding` field, not a hand-typed
+/// list -- see that function's own doc), then every `spec.layers[i]`'s own
+/// channels, then `spec.facet`'s two sort slots. A non-object sort value
+/// (string, list, or anything else `validate_sort_field_object` does not
+/// inspect) is out of this check's scope, matching `EncodingSpec::new`'s own
+/// narrowing to the object form.
+fn refuse_malformed_sort_specs(spec: &ChartSpec) -> Result<(), RenderError> {
+    fn check(location: String, sort: &serde_json::Value) -> Result<(), RenderError> {
+        let serde_json::Value::Object(obj) = sort else {
+            return Ok(());
+        };
+        crate::render::scale_resolve::validate_sort_field_object(obj).map_err(|reason| {
+            RenderError::SortSpecMalformed { location, reason, value: Box::new(sort.clone()) }
+        })
+    }
+
+    for (name, enc) in spec.encoding.channels() {
+        if let Some(sort) = &enc.sort {
+            check(name, sort)?;
+        }
+    }
+    if let Some(layer_vec) = &spec.layers {
+        for (i, layer) in layer_vec.iter().enumerate() {
+            for (name, enc) in layer.encoding.channels() {
+                if let Some(sort) = &enc.sort {
+                    check(format!("layers[{i}].{name}"), sort)?;
+                }
+            }
+        }
+    }
+    if let Some(fspec) = &spec.facet {
+        if let Some(sort) = &fspec.sort {
+            check("facet.sort".to_string(), sort)?;
+        }
+        if let Some(sort) = &fspec.row_sort {
+            if fspec.row.is_none() {
+                // A structurally distinct malformation from an invalid
+                // sort-field OBJECT (the value itself may be perfectly
+                // well-formed, e.g. "descending"): `row_sort` names a
+                // dimension this facet does not have. Wrap mode's `row_sort`
+                // is otherwise a silent no-op (mirroring `row_title`'s
+                // documented scoping), which the sort vocabulary should not
+                // be -- an ordering the caller declared and that never
+                // applies is malformed input, not inert-by-design chrome.
+                return Err(RenderError::SortSpecMalformed {
+                    location: "facet.row_sort".to_string(),
+                    reason: "the facet has no row dimension (row=) for row_sort to order"
+                        .to_string(),
+                    value: Box::new(sort.clone()),
+                });
+            }
+            check("facet.row_sort".to_string(), sort)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build both positional [`AxisInput`]s and their tick counts (SPINE-08/12).
@@ -3432,7 +3536,53 @@ fn inject_facet_column(batch: &RecordBatch, field: &str, value: &str) -> RecordB
         .expect("inject_facet_column: schema + columns must be consistent")
 }
 
-fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGroup>, RenderError> {
+/// Facet grouping's own `SortContext` inputs beyond the category field
+/// itself: the fields bound to the rendered x/y channels (for the channel-
+/// shorthand sort forms) and whether the chart is `CoordFlip`ped. Shared by
+/// [`group_rows_by_field`] and [`group_rows_by_two_fields`] so both read the
+/// same rendering-encoding facts `prepare_render_inputs` already resolved,
+/// rather than each re-deriving them.
+#[derive(Clone, Copy)]
+struct FacetSortAxes<'a> {
+    x_field: Option<&'a str>,
+    y_field: Option<&'a str>,
+    coord_flipped: bool,
+}
+
+/// [`apply_sort_to_domain`] for a facet dimension: identical resolution, but
+/// every [`RenderWarning::SortSpecIgnored`] it would have pushed becomes
+/// [`RenderWarning::FacetSortSpecIgnored`] instead before reaching the
+/// caller's `warnings` sink.
+///
+/// A translating wrapper rather than a facet-aware parameter on
+/// `apply_sort_to_domain` itself: the resolver is shared verbatim with
+/// positional/color axis sort (SortOp/SortOrder parsing, the channel-
+/// shorthand and sort-field-object logic all stay in ONE place), and the
+/// choice of WHICH `RenderWarning` variant a failure becomes is a fact about
+/// the CALLER's own supersession semantics
+/// ([`provisional_scale_warning_superseded_by_panel_pass`]'s doc), not about
+/// how the sort itself resolves.
+fn apply_facet_sort_to_domain(
+    domain: &mut Vec<String>,
+    sort: Option<&serde_json::Value>,
+    ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let mut scratch = Vec::new();
+    apply_sort_to_domain(domain, sort, ctx, &mut scratch);
+    warnings.extend(scratch.into_iter().map(|w| match w {
+        RenderWarning::SortSpecIgnored { reason } => RenderWarning::FacetSortSpecIgnored { reason },
+        other => other,
+    }));
+}
+
+fn group_rows_by_field(
+    batch: &RecordBatch,
+    field: &str,
+    sort: Option<&serde_json::Value>,
+    axes: FacetSortAxes<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Vec<FacetGroup>, RenderError> {
     let arr = facet_str_arr(batch, field)?;
     let mut order: Vec<String> = Vec::new();
     let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
@@ -3443,6 +3593,17 @@ fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGrou
         }
         *counts.entry(s).or_insert(0) += 1;
     }
+    // Facet(sort=): order the distinct values via the SAME ordinal domain
+    // sort resolution positional/color axes use -- there is no facet-local
+    // sorter (`#176`(11) + N3).
+    let sort_ctx = SortContext {
+        category_field: field,
+        batch,
+        x_field: axes.x_field,
+        y_field: axes.y_field,
+        coord_flipped: axes.coord_flipped,
+    };
+    apply_facet_sort_to_domain(&mut order, sort, &sort_ctx, warnings);
     Ok(order
         .into_iter()
         .map(|v| FacetGroup {
@@ -3463,10 +3624,17 @@ fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGrou
 /// each row the col values appear in first-appearance order. `key` carries the
 /// col dimension (drives the column-header strip); `row_key` carries the row
 /// dimension (drives the row-header strip and secondary batch filter).
+/// `col_sort`/`row_sort` (`FacetSpec.sort`/`.row_sort`) each reorder their own
+/// dimension before the row-major cartesian product is built, via the same
+/// ordinal domain sort resolution `group_rows_by_field` uses.
 fn group_rows_by_two_fields(
     batch: &RecordBatch,
     col_field: &str,
     row_field: &str,
+    col_sort: Option<&serde_json::Value>,
+    row_sort: Option<&serde_json::Value>,
+    axes: FacetSortAxes<'_>,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<FacetGroup>, RenderError> {
     let col_arr = facet_str_arr(batch, col_field)?;
     let row_arr = facet_str_arr(batch, row_field)?;
@@ -3497,6 +3665,23 @@ fn group_rows_by_two_fields(
         }
         *counts.entry((row_v, col_v)).or_insert(0) += 1;
     }
+
+    let col_ctx = SortContext {
+        category_field: col_field,
+        batch,
+        x_field: axes.x_field,
+        y_field: axes.y_field,
+        coord_flipped: axes.coord_flipped,
+    };
+    apply_facet_sort_to_domain(&mut col_order, col_sort, &col_ctx, warnings);
+    let row_ctx = SortContext {
+        category_field: row_field,
+        batch,
+        x_field: axes.x_field,
+        y_field: axes.y_field,
+        coord_flipped: axes.coord_flipped,
+    };
+    apply_facet_sort_to_domain(&mut row_order, row_sort, &row_ctx, warnings);
 
     // Emit groups in row-major order: (r0,c0), (r0,c1), ..., (r1,c0), ...
     let mut groups = Vec::with_capacity(row_order.len() * col_order.len());
@@ -4860,6 +5045,8 @@ mod tests {
                 row: None,
                 title: None,
                 row_title: None,
+                sort: None,
+                row_sort: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -4902,6 +5089,164 @@ mod tests {
         assert_eq!(prep.facet_groups[1].n_rows, 1);
         assert_eq!(prep.legend_entries.len(), 2);
         assert_eq!(prep.legend_entries[0].label, "a");
+    }
+
+    // ── `#176`(11) + N3: `Facet(sort=)` orders the facet partition ───────────
+
+    fn facet_group_values(prep: &PreparedInputs) -> Vec<String> {
+        prep.facet_groups.iter().map(|g| g.key.value.clone()).collect()
+    }
+
+    /// Control cell of the door × sort-form matrix: no `sort` set, panel
+    /// order is data first-appearance order, byte-identical to the unsorted case.
+    #[test]
+    fn facet_sort_absent_is_first_appearance_order() {
+        let spec = spec_color_facet();
+        let batch = batch3();
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(facet_group_values(&prep), vec!["a", "b"]);
+        assert!(
+            prep.warnings.iter().all(|w| !matches!(w, RenderWarning::SortSpecIgnored { .. })),
+            "no sort spec means no sort warning: {:?}",
+            prep.warnings
+        );
+    }
+
+    /// `Facet(sort="descending")`: alphabetical descending reverses the
+    /// batch's `["a", "b"]` first-appearance order to `["b", "a"]`.
+    #[test]
+    fn facet_sort_descending_orders_wrap_panels() {
+        let mut spec = spec_color_facet();
+        spec.facet.as_mut().unwrap().sort = Some(serde_json::json!("descending"));
+        let batch = batch3();
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(facet_group_values(&prep), vec!["b", "a"]);
+    }
+
+    /// `Facet(sort=[...])`: an explicit list wins for the values it names;
+    /// a domain value the list omits (`"a"`) is appended after, so no facet
+    /// panel is dropped for want of a listed value.
+    #[test]
+    fn facet_sort_explicit_list_orders_wrap_panels() {
+        let mut spec = spec_color_facet();
+        spec.facet.as_mut().unwrap().sort = Some(serde_json::json!(["b"]));
+        let batch = batch3();
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(facet_group_values(&prep), vec!["b", "a"]);
+    }
+
+    /// `Facet(sort={"field": "x", "op": "sum"})`: orders by the aggregate,
+    /// the same ordinal-domain sort resolution `X(sort=)` uses. `batch3`'s
+    /// species "a" sums x=1.0+3.0=4.0, "b" sums x=2.0; ascending (the
+    /// object form's default order) puts "b" first.
+    #[test]
+    fn facet_sort_field_object_orders_wrap_panels_by_aggregate() {
+        let mut spec = spec_color_facet();
+        spec.facet.as_mut().unwrap().sort = Some(serde_json::json!({"field": "x", "op": "sum"}));
+        let batch = batch3();
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(facet_group_values(&prep), vec!["b", "a"]);
+    }
+
+    /// A two-way grid: `FacetCol`'s `sort` (the aggregate object form) and
+    /// `FacetRow`'s `sort` (`"descending"`) each order their own dimension
+    /// independently, and the row-major panel order reflects both.
+    #[test]
+    fn facet_sort_orders_row_and_col_dimensions_independently_in_grid_mode() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+            Field::new("col_cat", DataType::Utf8, false),
+            Field::new("row_cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "a", "a"])),
+                Arc::new(StringArray::from(vec!["c1", "c2", "c1", "c2"])),
+                Arc::new(StringArray::from(vec!["r1", "r1", "r2", "r2"])),
+                // col_cat sum: c1 = 100+200 = 300, c2 = 1+2 = 3 -- ascending
+                // by sum reverses the c1-first data order to [c2, c1].
+                Arc::new(Float64Array::from(vec![100.0, 1.0, 200.0, 2.0])),
+            ],
+        )
+        .unwrap();
+
+        let mut spec = spec_color_facet();
+        spec.facet = Some(crate::layout::FacetSpec {
+            field: "col_cat".into(),
+            row: Some("row_cat".into()),
+            title: None,
+            row_title: None,
+            sort: Some(serde_json::json!({"field": "v", "op": "sum"})),
+            row_sort: Some(serde_json::json!("descending")),
+            mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        });
+
+        let prep = prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        let pairs: Vec<(String, String)> = prep
+            .facet_groups
+            .iter()
+            .map(|g| (g.row_key.as_ref().unwrap().value.clone(), g.key.value.clone()))
+            .collect();
+        // row_sort="descending" reverses ["r1", "r2"] -> ["r2", "r1"];
+        // sort={"field":"v","op":"sum"} orders columns ["c2", "c1"];
+        // row-major: (r2,c2), (r2,c1), (r1,c2), (r1,c1).
+        assert_eq!(
+            pairs,
+            vec![
+                ("r2".to_string(), "c2".to_string()),
+                ("r2".to_string(), "c1".to_string()),
+                ("r1".to_string(), "c2".to_string()),
+                ("r1".to_string(), "c1".to_string()),
+            ]
+        );
     }
 
     // ── Multivariate B1: size / shape / merged legends ───────────────────
@@ -5148,6 +5493,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 1 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -5348,6 +5695,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -5652,6 +6001,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -5704,6 +6055,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -6298,6 +6651,323 @@ mod tests {
         assert!(
             prepare(&spec).is_ok(),
             "empty layer transforms must stay accepted"
+        );
+    }
+
+    // ── `#176`(11) + N3: malformed sort refuses at render ─────────────────────
+    //
+    // Python's construction-time gate (`EncodingSpec.__new__`,
+    // `validate_sort_field_object`) refuses every malformed sort-field object
+    // built through `fm.X`/`fm.Facet`/etc. before a spec can exist. These four
+    // routes bypass that gate entirely -- `refuse_malformed_sort_specs`'s
+    // reason for existing -- so each gets its own test against the SAME
+    // deserialization/construction machinery the real bypass uses, not a
+    // hand-built `RenderError` or a shape the production path never emits.
+
+    fn prepare_with(spec: &ChartSpec, batch: &RecordBatch) -> Result<PreparedInputs, RenderError> {
+        prepare_render_inputs(
+            spec,
+            batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+    }
+
+    /// Route 1: `ChartSpec.from_json`. `EncodingSpec`'s derived `Deserialize`
+    /// (unlike its PyO3 `#[new]` constructor) does not validate `sort` at
+    /// all, so a malformed chart-channel sort object deserializes cleanly and
+    /// only meets a check at render. `ChartSpec::from_json` itself is a thin
+    /// `serde_json::from_str::<ChartSpec>` wrapper around a PyO3 classmethod;
+    /// parsing the identical JSON string exercises the identical
+    /// deserialization path without needing a GIL `PyType` object.
+    #[test]
+    fn refuse_malformed_sort_specs_chart_channel_via_from_json() {
+        pyo3::Python::initialize();
+        let json = r#"{"mark":"point","encoding":{"x":{"field":"price"},"y":{"field":"weight","sort":{"op":"mean"}}}}"#;
+        let spec: ChartSpec = serde_json::from_str(json)
+            .expect("a malformed sort object still deserializes: EncodingSpec's derived Deserialize does not validate it");
+        let err = prepare_with(&spec, &price_weight_batch())
+            .expect_err("a malformed chart-channel sort object must refuse");
+        assert!(
+            matches!(&err, RenderError::SortSpecMalformed { location, .. } if location == "y"),
+            "wrong variant/location: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "y: sort={\"op\":\"mean\"} is malformed (sort object missing string \"field\")"
+        );
+    }
+
+    /// Route 2: a layer's own `encoding` (`coerce_layers`, raw serde
+    /// `Deserialize`, never `EncodingSpec::new`). Mirrors
+    /// `layer_own_transforms_refused_naming_the_layer`'s fixture shape.
+    #[test]
+    fn refuse_malformed_sort_specs_layer_channel_names_the_layer() {
+        pyo3::Python::initialize();
+        use crate::spec::layer::Layer;
+        let layer = |y_sort: Option<serde_json::Value>| Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "weight".into(), sort: y_sort, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: vec![],
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        };
+        let mut spec = single_layer_spec();
+        spec.layers = Some(vec![layer(None), layer(Some(serde_json::json!({"field": 1})))]);
+        let err = prepare_with(&spec, &price_weight_batch())
+            .expect_err("layer 1's own malformed sort must refuse");
+        assert_eq!(
+            err.to_string(),
+            "layers[1].y: sort={\"field\":1} is malformed (sort \"field\" must be a string, got 1)"
+        );
+
+        // Vacuity control: the same spec with a well-formed sort on layer 1 prepares.
+        spec.layers = Some(vec![layer(None), layer(Some(serde_json::json!({"field": "weight"})))]);
+        assert!(
+            prepare_with(&spec, &price_weight_batch()).is_ok(),
+            "a well-formed layer sort must not refuse"
+        );
+    }
+
+    /// A 2-row batch with two categorical facet dimensions (`col_cat`,
+    /// `row_cat`) alongside `x`/`y`, for the facet-sort test routes below.
+    fn facet_grid_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("col_cat", DataType::Utf8, false),
+            Field::new("row_cat", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(StringArray::from(vec!["r1", "r2"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Route 3: `FacetSpec.sort`, reached via `ChartSpec(facet=dict)`'s
+    /// `pyo3_serde::from_py` path -- which, like `from_json`, deserializes
+    /// `FacetSpec` through its plain derived `Deserialize` with no validation
+    /// step of its own. Exercised here via the same underlying
+    /// `serde_json::from_str::<ChartSpec>` deserialization `from_json` uses
+    /// (both routes deserialize the identical `FacetSpec` type through the
+    /// identical derive; there is no second `FacetSpec` parser to diverge).
+    #[test]
+    fn refuse_malformed_sort_specs_facet_sort_via_wire_dict() {
+        pyo3::Python::initialize();
+        let json = r#"{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y"}},
+            "facet":{"field":"col_cat","mode":{"kind":"wrap","ncols":2},"sort":{"op":"mean"}}}"#;
+        let spec: ChartSpec = serde_json::from_str(json).expect("malformed facet sort still deserializes");
+        let err = prepare_with(&spec, &facet_grid_batch())
+            .expect_err("a malformed facet.sort must refuse");
+        assert_eq!(
+            err.to_string(),
+            "facet.sort: sort={\"op\":\"mean\"} is malformed (sort object missing string \"field\")"
+        );
+    }
+
+    /// A `null` `"op"` (JSON `{"field": "v", "op": null}`) is its own
+    /// malformed shape, distinct from a missing key: `serde_json::Map::get`
+    /// returns `Some(Value::Null)` for an explicit `null`, which is neither
+    /// the `None` (absent) nor `Some(Value::String(_))` arms
+    /// `parse_sort_field_object` treats as valid, so it refuses too. Exercised
+    /// via the facet door specifically because Python's own construction-time
+    /// gate has a known, separate gap for exactly this shape
+    /// (`validate_optional_choice` treats an explicit `op=None` as unset) --
+    /// this render-time check is the backstop that still refuses it rather
+    /// than silently rendering the wrong panel order.
+    #[test]
+    fn refuse_malformed_sort_specs_facet_sort_null_op_refuses() {
+        pyo3::Python::initialize();
+        let json = r#"{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y"}},
+            "facet":{"field":"col_cat","mode":{"kind":"wrap","ncols":2},"sort":{"field":"y","op":null}}}"#;
+        let spec: ChartSpec = serde_json::from_str(json).expect("a null op still deserializes");
+        let err = prepare_with(&spec, &facet_grid_batch())
+            .expect_err("a null op must refuse, not silently render in insertion order");
+        assert_eq!(
+            err.to_string(),
+            "facet.sort: sort={\"field\":\"y\",\"op\":null} is malformed (sort \"op\" must be \
+             a string, got null)"
+        );
+    }
+
+    /// Route 4: `FacetSpec.row_sort` set while `FacetSpec.row` is absent
+    /// (wrap mode) -- a structurally distinct malformation from an invalid
+    /// sort-field object (the value here, `"descending"`, is itself
+    /// well-formed): there is no row dimension for it to order. Mirrors
+    /// `row_title`'s documented wrap-mode no-op scoping, EXCEPT this refuses
+    /// rather than silently doing nothing, since an ordering the caller
+    /// declared and that can never apply is malformed input.
+    #[test]
+    fn refuse_malformed_sort_specs_facet_row_sort_without_row() {
+        pyo3::Python::initialize();
+        let json = r#"{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y"}},
+            "facet":{"field":"col_cat","mode":{"kind":"wrap","ncols":2},"row_sort":"descending"}}"#;
+        let spec: ChartSpec = serde_json::from_str(json).expect("row_sort without row still deserializes");
+        let err = prepare_with(&spec, &facet_grid_batch())
+            .expect_err("row_sort with no row dimension must refuse");
+        assert_eq!(
+            err.to_string(),
+            "facet.row_sort: sort=\"descending\" is malformed (the facet has no row dimension \
+             (row=) for row_sort to order)"
+        );
+    }
+
+    /// Route 5, the valid control: a well-formed sort at every location this
+    /// check walks -- a chart channel, a layer channel, `facet.sort`, and
+    /// `facet.row_sort` (with `row` set, in grid mode) -- prepares without
+    /// error. Proves the check is not simply refusing every sort it sees.
+    #[test]
+    fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
+        pyo3::Python::initialize();
+        use crate::spec::layer::Layer;
+        let mut spec = ChartSpec {
+            data: crate::spec::data_ref::DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: None,
+                    sort: Some(serde_json::json!("ascending")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "col_cat".into(),
+                row: Some("row_cat".into()),
+                title: None,
+                row_title: None,
+                sort: Some(serde_json::json!({"field": "y", "op": "mean"})),
+                row_sort: Some(serde_json::json!("descending")),
+                mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            layers: Some(vec![Layer {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    y: Some(EncodingSpec {
+                        field: "y".into(),
+                        sort: Some(serde_json::json!(["b", "a"])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                transforms: vec![],
+                mark_style: None,
+                data_source: None,
+                position: None,
+                blend: None,
+                name: None,
+                independent_y: false,
+                coord: None,
+            }]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        assert!(
+            prepare_with(&spec, &facet_grid_batch()).is_ok(),
+            "well-formed sort at every location must not refuse"
+        );
+        // A sanity check that the fixture was not vacuously well-formed by
+        // never actually reaching the check: flipping one location back to
+        // malformed still refuses.
+        spec.facet.as_mut().unwrap().sort = Some(serde_json::json!({"op": "mean"}));
+        assert!(prepare_with(&spec, &facet_grid_batch()).is_err());
+    }
+
+    /// The predicate itself, directly: `SortSpecIgnored` (positional/color
+    /// axis sort, re-derived per panel by `resolve_panel_scales`) IS treated
+    /// as a provisional-pass duplicate once a panel resolves;
+    /// `FacetSortSpecIgnored` (the facet partition's own sort, resolved
+    /// exactly once, before any panel loop) is NOT -- collapsing the two
+    /// would silently drop the facet warning on every render with a
+    /// non-empty panel, which is what
+    /// `facet_sort_unresolvable_well_formed_object_warns_and_survives_the_panel_dedup`
+    /// (below) proves end-to-end; this pins the same fact at the predicate.
+    #[test]
+    fn provisional_scale_warning_superseded_by_panel_pass_excludes_the_facet_variant() {
+        assert!(provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::SortSpecIgnored { reason: "x".into() }
+        ));
+        assert!(!provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::FacetSortSpecIgnored { reason: "x".into() }
+        ));
+    }
+
+    /// A well-formed sort the facet partition cannot resolve (here: a
+    /// sort-field object naming a field absent from the batch) warns exactly
+    /// as `X(sort=)` does on an ordinary axis, with `FacetSortSpecIgnored`
+    /// rather than `SortSpecIgnored` -- and, unlike the axis case, it must
+    /// SURVIVE `scene_build::build_scene`'s provisional-warning dedup step
+    /// even though this chart's panels resolve (the bug this variant split
+    /// exists to fix: `SortSpecIgnored` would have been stripped as an
+    /// assumed panel-real duplicate that a facet's one-shot partition never
+    /// actually produces).
+    #[test]
+    fn facet_sort_unresolvable_well_formed_object_warns_and_survives_the_panel_dedup() {
+        let mut spec = spec_color_facet();
+        spec.facet.as_mut().unwrap().sort = Some(serde_json::json!({"field": "does_not_exist"}));
+        let out = crate::render::render_svg(
+            &spec,
+            &batch3(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("the fixture renders with at least one non-empty panel");
+        let facet_sort_warnings: Vec<&RenderWarning> = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::FacetSortSpecIgnored { .. }))
+            .collect();
+        assert_eq!(
+            facet_sort_warnings.len(),
+            1,
+            "one unresolvable facet sort is one fact, and it must survive: {:?}",
+            out.warnings
+        );
+        assert_eq!(
+            facet_sort_warnings[0].to_string(),
+            "facet sort spec could not be applied (cannot read sort value field \
+             \"does_not_exist\": unknown column 'does_not_exist' referenced by an encoding); \
+             panels fall back to insertion order"
+        );
+        // The plain axis variant never fires for this fact -- a regression
+        // that silently widened `provisional_scale_warning_superseded_by_panel_pass`
+        // to also match `FacetSortSpecIgnored` would still pass a `.len() == 1`
+        // assertion on the wrong variant, so check the type explicitly too.
+        assert!(
+            out.warnings.iter().all(|w| !matches!(w, RenderWarning::SortSpecIgnored { .. })),
+            "a facet-partition failure must never produce the axis variant: {:?}",
+            out.warnings
         );
     }
 
@@ -9038,7 +9708,11 @@ mod grid_partition_tests {
     #[test]
     fn group_rows_by_two_fields_produces_correct_count_and_row_keys() {
         let batch = grid_3x3_batch();
-        let groups = group_rows_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        let axes = FacetSortAxes { x_field: None, y_field: None, coord_flipped: false };
+        let mut warnings = Vec::new();
+        let groups =
+            group_rows_by_two_fields(&batch, "col_cat", "row_cat", None, None, axes, &mut warnings)
+                .unwrap();
         assert_eq!(
             groups.len(),
             9,
@@ -9070,7 +9744,9 @@ mod grid_partition_tests {
     fn wrap_mode_groups_have_no_row_key() {
         // Single-field (wrap mode) grouping must leave row_key = None.
         let batch = grid_3x3_batch();
-        let groups = group_rows_by_field(&batch, "col_cat").unwrap();
+        let axes = FacetSortAxes { x_field: None, y_field: None, coord_flipped: false };
+        let mut warnings = Vec::new();
+        let groups = group_rows_by_field(&batch, "col_cat", None, axes, &mut warnings).unwrap();
         for g in &groups {
             assert!(
                 g.row_key.is_none(),

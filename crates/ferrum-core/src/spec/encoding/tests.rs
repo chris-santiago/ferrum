@@ -1038,3 +1038,254 @@ fn overlay_from_covers_all_12_channels() {
     assert_eq!(base.y.as_ref().unwrap().field, "by");
     assert_eq!(base.color.as_ref().unwrap().field, "bc");
 }
+
+// ── `#176`(11) + N3: `EncodingSpec(sort=)` construction-time gate ──────────
+
+fn attach<F, T>(build: F) -> T
+where
+    F: for<'py> FnOnce(Python<'py>) -> T,
+{
+    pyo3::Python::initialize();
+    Python::attach(build)
+}
+
+/// Build an `EncodingSpec` via its real PyO3 constructor (not the bare
+/// struct literal every other test in this file uses), so `sort`'s
+/// construction-time validation actually runs. Every parameter besides
+/// `field` and `sort` is `None`, matching `EncodingSpec(field="a", sort=...)`.
+fn new_encoding_spec_with_sort<'py>(
+    py: Python<'py>,
+    sort: Option<&pyo3::Bound<'py, pyo3::PyAny>>,
+) -> PyResult<EncodingSpec> {
+    EncodingSpec::new(py, "a", None, None, None, None, None, sort, None, None, None, None, None, None)
+}
+
+/// Matrix control: valid `EncodingSpec(sort=)` forms (a direction string, an
+/// explicit list, and a well-formed sort-field object) construct without
+/// error, byte-identically to before this gate existed.
+#[test]
+fn encoding_spec_sort_valid_forms_construct() {
+    attach(|py| {
+        for sort_json in [
+            serde_json::json!("ascending"),
+            serde_json::json!("descending"),
+            serde_json::json!(["b", "a"]),
+            serde_json::json!({"field": "v"}),
+            serde_json::json!({"field": "v", "op": "mean", "order": "descending"}),
+        ] {
+            let json_module = py.import("json").unwrap();
+            let s = serde_json::to_string(&sort_json).unwrap();
+            let obj = json_module.call_method1("loads", (s,)).unwrap();
+            let spec = new_encoding_spec_with_sort(py, Some(&obj))
+                .unwrap_or_else(|e| panic!("valid sort {sort_json} must construct: {e}"));
+            assert_eq!(spec.sort, Some(sort_json));
+        }
+    });
+}
+
+/// `EncodingSpec(sort=None)` (the common case, no sort declared) constructs
+/// with `sort: None` -- unaffected by the gate.
+#[test]
+fn encoding_spec_sort_absent_constructs() {
+    attach(|py| {
+        let spec = new_encoding_spec_with_sort(py, None).unwrap();
+        assert_eq!(spec.sort, None);
+    });
+}
+
+/// A sort object missing `"field"` entirely refuses with the exact text,
+/// naming the public entry (`EncodingSpec(sort=...)`) and the value
+/// received. `serde_json::Map` sorts keys (no `preserve_order` feature), so
+/// the echoed value's key order is deterministic.
+#[test]
+fn encoding_spec_sort_object_missing_field_refuses() {
+    attach(|py| {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("op", "mean").unwrap();
+        let err = new_encoding_spec_with_sort(py, Some(&d.into_any())).unwrap_err();
+        let msg = err.value(py).to_string();
+        assert_eq!(
+            msg,
+            "EncodingSpec(sort=...): sort object missing string \"field\"; received {\"op\":\"mean\"}"
+        );
+        assert!(err.is_instance_of::<PyValueError>(py), "expected ValueError, got {err:?}");
+    });
+}
+
+/// A sort object whose `"field"` is not a string refuses with the exact text.
+#[test]
+fn encoding_spec_sort_object_non_string_field_refuses() {
+    attach(|py| {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("field", 1).unwrap();
+        let err = new_encoding_spec_with_sort(py, Some(&d.into_any())).unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        let msg = err.value(py).to_string();
+        assert_eq!(
+            msg,
+            "EncodingSpec(sort=...): sort \"field\" must be a string, got 1; received {\"field\":1}"
+        );
+    });
+}
+
+/// A sort object naming an unknown `"op"` refuses with the exact text.
+#[test]
+fn encoding_spec_sort_object_unknown_op_refuses() {
+    attach(|py| {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("field", "v").unwrap();
+        d.set_item("op", "not-a-real-op").unwrap();
+        let err = new_encoding_spec_with_sort(py, Some(&d.into_any())).unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        let msg = err.value(py).to_string();
+        assert_eq!(
+            msg,
+            "EncodingSpec(sort=...): unsupported sort op \"not-a-real-op\"; \
+             received {\"field\":\"v\",\"op\":\"not-a-real-op\"}"
+        );
+    });
+}
+
+/// A sort object naming an unknown `"order"` refuses with the exact text --
+/// this shape had NO warning arm at all before this gate (any
+/// non-`"descending"` order silently became ascending), so this is new
+/// refusal behavior, not a relocated warning.
+#[test]
+fn encoding_spec_sort_object_unknown_order_refuses() {
+    attach(|py| {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("field", "v").unwrap();
+        d.set_item("order", "not-a-real-order").unwrap();
+        let err = new_encoding_spec_with_sort(py, Some(&d.into_any())).unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        let msg = err.value(py).to_string();
+        assert_eq!(
+            msg,
+            "EncodingSpec(sort=...): unsupported sort order \"not-a-real-order\"; \
+             received {\"field\":\"v\",\"order\":\"not-a-real-order\"}"
+        );
+    });
+}
+
+/// N3's own reproduction: `sort={"x": 1}` (no `"field"` key at all) refuses,
+/// where it previously constructed and only degraded at render.
+#[test]
+fn encoding_spec_sort_n3_reproduction_refuses() {
+    attach(|py| {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("x", 1).unwrap();
+        let err = new_encoding_spec_with_sort(py, Some(&d.into_any())).unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+    });
+}
+
+/// A non-object malformed sort (e.g. a bare unrecognized string) is
+/// untouched by this gate -- it still constructs and degrades at render via
+/// `RenderWarning::SortSpecIgnored`'s other, un-deleted arm.
+#[test]
+fn encoding_spec_sort_non_object_form_is_not_validated_at_construction() {
+    attach(|py| {
+        let spec = new_encoding_spec_with_sort(py, Some(&"not-a-keyword".into_pyobject(py).unwrap().into_any()))
+            .expect("a non-object sort form is out of this gate's scope");
+        assert_eq!(spec.sort, Some(serde_json::json!("not-a-keyword")));
+    });
+}
+
+/// `sort_accepted_vocabulary()` publishes the same `op`/`order` spellings
+/// `validate_sort_field_object` accepts -- the two-sided check the
+/// `scale_accepted_keys`/`interpolate_accepted_values` precedents both pin,
+/// so Python's channels validate against the real vocabulary rather than a
+/// hand-copied one.
+#[test]
+fn sort_accepted_vocabulary_matches_validate_sort_field_object() {
+    let vocab = sort_accepted_vocabulary();
+    let ops = vocab.get("op").expect("vocabulary must carry an 'op' key");
+    let orders = vocab.get("order").expect("vocabulary must carry an 'order' key");
+    for op in ops {
+        let obj = serde_json::json!({"field": "v", "op": op});
+        let serde_json::Value::Object(map) = &obj else { unreachable!() };
+        assert!(
+            crate::render::scale_resolve::validate_sort_field_object(map).is_ok(),
+            "published op {op:?} must validate"
+        );
+    }
+    for order in orders {
+        let obj = serde_json::json!({"field": "v", "order": order});
+        let serde_json::Value::Object(map) = &obj else { unreachable!() };
+        assert!(
+            crate::render::scale_resolve::validate_sort_field_object(map).is_ok(),
+            "published order {order:?} must validate"
+        );
+    }
+    // An op/order this vocabulary does NOT list must refuse -- the negative
+    // control proving the two sides are actually the same set, not both
+    // accidentally permissive. Both keys get their own negative control:
+    // the op side alone would not catch an order-side drift (or vice versa).
+    let bad_op = serde_json::json!({"field": "v", "op": "not-in-vocabulary"});
+    let serde_json::Value::Object(map) = &bad_op else { unreachable!() };
+    assert!(crate::render::scale_resolve::validate_sort_field_object(map).is_err());
+
+    let bad_order = serde_json::json!({"field": "v", "order": "not-in-vocabulary"});
+    let serde_json::Value::Object(map) = &bad_order else { unreachable!() };
+    assert!(crate::render::scale_resolve::validate_sort_field_object(map).is_err());
+}
+
+/// [`Encoding::channels`] on a struct literal populating every field (this
+/// literal is itself exhaustive -- no `..Default::default()` -- so a field
+/// added to `Encoding` breaks it too, an independent compile-time signal
+/// alongside `channels`' own destructuring) returns exactly one entry per
+/// single-value channel plus one per `tooltip_fields` entry, in declaration
+/// order, each paired with the `EncodingSpec` that channel actually carries
+/// (never a copy of some other channel's).
+#[test]
+fn channels_enumerates_every_populated_field_with_the_right_spec() {
+    let spec = |f: &str| Some(EncodingSpec { field: f.into(), ..Default::default() });
+    let e = Encoding {
+        x: spec("x"),
+        y: spec("y"),
+        color: spec("color"),
+        size: spec("size"),
+        shape: spec("shape"),
+        opacity: spec("opacity"),
+        x2: spec("x2"),
+        y2: spec("y2"),
+        text: spec("text"),
+        tooltip: spec("tooltip"),
+        tooltip_fields: Some(vec![
+            EncodingSpec { field: "tf0".into(), ..Default::default() },
+            EncodingSpec { field: "tf1".into(), ..Default::default() },
+        ]),
+        href: spec("href"),
+        description: spec("description"),
+        key: spec("key"),
+        url: spec("url"),
+        stroke_width: spec("stroke_width"),
+        stroke_opacity: spec("stroke_opacity"),
+        stroke_dash: spec("stroke_dash"),
+        angle: spec("angle"),
+        fill_opacity: spec("fill_opacity"),
+    };
+    let channels = e.channels();
+    let names: Vec<&str> = channels.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "x", "y", "color", "size", "shape", "opacity", "x2", "y2", "text", "tooltip", "href",
+            "description", "key", "url", "stroke_width", "stroke_opacity", "stroke_dash", "angle",
+            "fill_opacity", "tooltip_fields[0]", "tooltip_fields[1]",
+        ]
+    );
+    // Every returned EncodingSpec is the one this channel actually carries,
+    // not a copy of some other channel's.
+    for (name, enc) in e.channels() {
+        let expected = if let Some(idx) = name
+            .strip_prefix("tooltip_fields[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            format!("tf{idx}")
+        } else {
+            name.clone()
+        };
+        assert_eq!(enc.field, expected, "channel {name} carries the wrong EncodingSpec");
+    }
+}

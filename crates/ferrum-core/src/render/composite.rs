@@ -1792,6 +1792,8 @@ mod tests {
             row: None,
             title: None,
             row_title: None,
+            sort: None,
+            row_sort: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },

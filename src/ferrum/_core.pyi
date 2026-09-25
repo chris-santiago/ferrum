@@ -969,6 +969,16 @@ def interpolate_accepted_values() -> list[str]: ...
 # refusal-message order) so Python reads it instead of mirroring it.
 def x_estimator_accepted_values() -> list[str]: ...
 
+# #176(11) + N3: the ``sort=`` object-form vocabulary (``{"field": ...,
+# "op": ..., "order": ...}``), published from the same ordinal-domain sort
+# resolution Rust uses to order a category axis, so every Python channel
+# whose honored set contains ``sort`` (X, Y, Color, Shape, StrokeDash,
+# Facet, FacetRow, FacetCol) and ``EncodingSpec`` gate an object-form sort
+# against it at construction instead of mirroring the list as a Python
+# literal. Keys are ``"op"`` (e.g. ``"sum"``, ``"mean"``, ``"count"``) and
+# ``"order"`` (``"ascending"``, ``"descending"``).
+def sort_accepted_vocabulary() -> dict[str, list[str]]: ...
+
 # #165(1): the one home of the ``"{name}_{key}"`` secondary-
 # output naming rule (``qq``, ``letter_value``, ``linkage``).
 # ``secondary_key(None, k)`` returns ``k`` unprefixed;

@@ -185,8 +185,12 @@ TEXT_FORMATTED = frozenset({"type", "format", "format_type", "formatType"})
 #: A formatted text field that also carries its own label (TooltipField).
 TEXT_FORMATTED_TITLED = TEXT_FORMATTED | {"title"}
 
-#: Facet channels (Facet, FacetRow, FacetCol): data type + panel title.
-FACET = frozenset({"type", "title"})
+#: Facet channels (Facet, FacetRow, FacetCol): data type, panel title, and
+#: panel order. ``sort`` accepts the same vocabulary the positional channels
+#: accept (direction string, explicit list, sort-field object) and is
+#: honored by the ordinal domain's sort resolution, reused at the facet
+#: partition (#176(11) + N3, spec §6.4).
+FACET = frozenset({"type", "title", "sort"})
 
 #: Facet only (wrap mode via ``encode(facet=...)``): adds ``columns``, the
 #: wrap-count sink also written by ``Chart.facet(ncols=N)`` (F-L06-02).

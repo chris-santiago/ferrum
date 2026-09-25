@@ -53,7 +53,19 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    locate_field, numeric_domain_union, positional_category_union,
+    apply_sort_to_domain, locate_field, numeric_domain_union, positional_category_union,
+    SortContext,
+};
+
+// The sort-field-object validator and its published `op`/`order`
+// vocabulary reach outside `render`'s own tree: `spec::encoding::EncodingSpec::new`
+// (construction-time) and `spec::encoding::gate::sort_accepted_vocabulary`
+// (the `#[pyfunction]`) both call these. `domain` stays a private submodule
+// (only these three items need to leave `render::scale_resolve` at all) --
+// its other items (`LocatedColumn`, `SortOp`, `parse_sort_field_object`, ...)
+// keep their narrower visibility.
+pub(crate) use self::domain::{
+    sort_op_accepted_values, sort_order_accepted_values, validate_sort_field_object,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see

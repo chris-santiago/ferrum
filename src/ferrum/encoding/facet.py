@@ -34,6 +34,14 @@ class Facet(ChannelBase):
         Maximum number of panels per row (wrap-count).  Writes the same
         sink as ``Chart.facet(ncols=N)``; when both are used, whichever is
         called last wins.  ``None`` lets the renderer choose.
+    sort : optional
+        Panel order — the same sort vocabulary the positional channels
+        accept: ``"ascending"``/``"descending"``, an explicit list of
+        values, or a sort-field object (``{"field": ..., "op": ...,
+        "order": ...}``) ordering by another field's aggregate. A sort
+        object without a string ``"field"``, or with an unrecognized
+        ``"op"``/``"order"``, raises ``ValueError`` at construction naming
+        ``Facet(sort=...)`` and the value.
 
     Examples
     --------
@@ -72,6 +80,10 @@ class FacetRow(ChannelBase):
         strip is the one rendered, so ``title`` here drives THAT strip; in
         grid mode (used together with ``facet_col``), ``title`` drives the
         row-header strip.
+    sort : optional
+        Row order — same vocabulary and construction-time validation as
+        ``Facet(sort=...)``; ordered by the same strip ``title`` follows
+        (the wrap/column strip alone, or the row-header strip in grid mode).
 
     Notes
     -----
@@ -110,6 +122,9 @@ class FacetCol(ChannelBase):
         Column/wrap-strip title.  When set, the strip text renders
         ``"{title}: {value}"``; when omitted, the strip shows the bare
         value (not the field name).
+    sort : optional
+        Column order — same vocabulary and construction-time validation as
+        ``Facet(sort=...)``; ordered on the column/wrap strip.
 
     Notes
     -----

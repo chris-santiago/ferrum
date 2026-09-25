@@ -217,7 +217,7 @@ _ROLE_CONTRACT = [
         },
     ),
     (fm.Detail, BARE, {"field", "type_"}),
-    (fm.Facet, FACET, {"field", "type_", "title"}),
+    (fm.Facet, FACET, {"field", "type_", "title", "sort"}),
 ]
 
 

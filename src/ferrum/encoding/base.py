@@ -92,6 +92,55 @@ _NO_LEGEND_MESSAGE = (
     "its own, so there is nothing for {kwarg}= to customize."
 )
 
+# #176(11) + N3 (spec §6.4): a sort-field object's "field" must be a string
+# naming a column. The string/array/channel-shorthand sort forms are
+# unvalidated here -- only the object form is malformed-checkable at
+# construction; the others still resolve (or warn) at render.
+_SORT_FIELD_MESSAGE = (
+    '{channel}(sort={value!r}) is not a valid sort object: "field" must be a '
+    "string naming a column; got {field!r}"
+)
+
+
+def _validate_sort_object(channel: str, value: Any) -> None:
+    """Refuse a malformed sort-field object (#176(11) + N3, spec §6.4).
+
+    Only the object form ``{"field": ..., "op": ..., "order": ...}`` is
+    checked here -- a bare string, an explicit list, or a channel-shorthand
+    string (``"-y"``) pass through unvalidated and keep resolving (or
+    warning) at render, as before. An object without a string ``field``, or
+    with an ``op``/``order`` outside the accepted vocabulary, raises
+    ``ValueError`` naming *channel* and the value received.
+
+    An *absent* ``"op"``/``"order"`` key means "use the default" (Rust's
+    ``parse_sort_field_object`` defaults ``op`` to ``sum`` and ``order`` to
+    ``ascending``) and is not checked here; a key that is *present* with an
+    explicit ``None`` is a malformed value, not an absence, and is checked
+    like any other value -- ``validate_choice``, not
+    ``validate_optional_choice``, whose "``None`` means unset" convention
+    would otherwise let an explicit ``sort={"field": "v", "op": None}``
+    construct silently and only refuse later, in ``EncodingSpec``'s voice,
+    when Rust's own null refusal is finally reached.
+
+    The op/order vocabulary is read from ``ferrum._core.sort_accepted_vocabulary()``
+    (the ``scale_accepted_keys`` precedent) rather than mirrored here as a
+    Python literal, and read lazily (inside this function, not at module
+    import time) so importing ``ferrum.encoding.base`` never requires the
+    compiled extension to already export it.
+    """
+    if not isinstance(value, dict):
+        return
+    field = value.get("field")
+    if not isinstance(field, str):
+        raise ValueError(_SORT_FIELD_MESSAGE.format(channel=channel, value=value, field=field))
+    from ferrum._core import sort_accepted_vocabulary
+
+    vocab = sort_accepted_vocabulary()
+    if "op" in value:
+        validate_choice(f"{channel}(sort=...)", "op", value["op"], vocab["op"])
+    if "order" in value:
+        validate_choice(f"{channel}(sort=...)", "order", value["order"], vocab["order"])
+
 
 @lru_cache(maxsize=None)
 def _derive_honored(
@@ -522,6 +571,9 @@ class ChannelBase:
             stack = self._kwargs.get("stack")
             if stack is not None:
                 self._kwargs["stack"] = self._normalize_stack(stack)
+        sort = self._kwargs.get("sort")
+        if sort is not None and "sort" in self._honored_kwargs:
+            _validate_sort_object(self.__class__.__name__, sort)
         self._validate_legend_value()
 
     def _explicit_scale_range(self) -> Any:
