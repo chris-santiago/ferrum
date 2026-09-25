@@ -298,6 +298,34 @@ pub struct MarkBatch {
     pub clip: bool,
 }
 
+/// Hand-written, not derived: a derived `Default` gives `clip: false`, which
+/// would silently flip clipping at every site written as
+/// `..MarkBatch::default()`. Every field here matches its own serde default
+/// — `clip: true`, `y_slot: 0`, `blend: Normal`, every `Option` `None`,
+/// every `Vec` empty — proven against a deserialize of the minimal wire JSON
+/// by `mark_batch_default_equals_deserialized_minimal_wire_json` below.
+impl Default for MarkBatch {
+    fn default() -> Self {
+        Self {
+            kind: MarkBatchKind::Point,
+            nodes: Vec::new(),
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            glyph_anchors: None,
+            clip: true,
+        }
+    }
+}
+
 pub(crate) fn is_zero_usize(v: &usize) -> bool {
     *v == 0
 }
@@ -336,6 +364,29 @@ pub enum MarkBatchKind {
 }
 
 impl MarkBatchKind {
+    /// Every variant, in declared order — the `ferrum-core` `Vocabulary::ALL`
+    /// shape, re-stated locally because this crate cannot depend on that
+    /// trait. Completeness is guarded by
+    /// `mark_batch_kind_all_is_complete`'s exhaustive match, not by this
+    /// array's own length: a 15th variant added above fails that test's
+    /// compile, not a runtime assertion here.
+    pub const ALL: &'static [Self] = &[
+        Self::Point,
+        Self::Line,
+        Self::Bar,
+        Self::Area,
+        Self::Rule,
+        Self::Text,
+        Self::Label,
+        Self::Tick,
+        Self::Rect,
+        Self::Polygon,
+        Self::Image,
+        Self::Ribbon,
+        Self::Segment,
+        Self::Arc,
+    ];
+
     /// This kind's canonical wire spelling — the same string
     /// `#[serde(rename_all = "snake_case")]` serializes it as.
     ///
@@ -774,48 +825,73 @@ pub enum GeoProjection {
 
 #[cfg(test)]
 mod tests {
-    use super::MarkBatchKind;
+    use super::{MarkBatch, MarkBatchKind};
 
-    /// `wire_name` must be the serde spelling, for every variant listed in
-    /// `all` below — the property that lets user-facing text use it instead
-    /// of a `Debug` string.
-    ///
-    /// This is weaker than it may read: `wire_name`'s own `match` is
-    /// exhaustive (no wildcard arm), so the COMPILER forces an answer for a
-    /// new `MarkBatchKind` variant there. This test does not get that for
-    /// free — `all` is a hand-written array whose only integrity check is
-    /// its own length (`assert_eq!(all.len(), 14, …)`), so a 15th variant
-    /// added to the enum simply goes untested here until someone remembers
-    /// to append it; the test itself stays green either way. Same shape as
-    /// `BreakPlacement::for_kind`'s table, which asserts its own length the
-    /// same way — consistent with the crate's existing convention, not a
-    /// coupling this test enforces on its own.
+    /// `wire_name` must be the serde spelling, for every variant in `ALL` —
+    /// the property that lets user-facing text use it instead of a `Debug`
+    /// string. `wire_name`'s own `match` is exhaustive (no wildcard arm), so
+    /// the compiler forces an answer for a new `MarkBatchKind` variant
+    /// there; `ALL`'s own completeness is `mark_batch_kind_all_is_complete`'s
+    /// job below, not this test's.
     #[test]
     fn mark_batch_kind_wire_name_matches_serde() {
-        let all = [
-            MarkBatchKind::Point,
-            MarkBatchKind::Line,
-            MarkBatchKind::Bar,
-            MarkBatchKind::Area,
-            MarkBatchKind::Rule,
-            MarkBatchKind::Text,
-            MarkBatchKind::Label,
-            MarkBatchKind::Tick,
-            MarkBatchKind::Rect,
-            MarkBatchKind::Polygon,
-            MarkBatchKind::Image,
-            MarkBatchKind::Ribbon,
-            MarkBatchKind::Segment,
-            MarkBatchKind::Arc,
-        ];
-        assert_eq!(all.len(), 14, "every MarkBatchKind variant must be listed");
-        for kind in all {
-            let serialized = serde_json::to_string(&kind).unwrap();
+        for kind in MarkBatchKind::ALL {
+            let serialized = serde_json::to_string(kind).unwrap();
             assert_eq!(
                 serialized,
                 format!("\"{}\"", kind.wire_name()),
                 "wire_name disagrees with serde for {kind:?}"
             );
         }
+    }
+
+    /// `ALL`'s only integrity check: every variant maps to its own position
+    /// through an exhaustive match with no wildcard arm, so a 15th variant
+    /// added to the enum fails to compile here until `ALL` names it too.
+    #[test]
+    fn mark_batch_kind_all_is_complete() {
+        for (i, kind) in MarkBatchKind::ALL.iter().enumerate() {
+            let expected_index = match kind {
+                MarkBatchKind::Point => 0,
+                MarkBatchKind::Line => 1,
+                MarkBatchKind::Bar => 2,
+                MarkBatchKind::Area => 3,
+                MarkBatchKind::Rule => 4,
+                MarkBatchKind::Text => 5,
+                MarkBatchKind::Label => 6,
+                MarkBatchKind::Tick => 7,
+                MarkBatchKind::Rect => 8,
+                MarkBatchKind::Polygon => 9,
+                MarkBatchKind::Image => 10,
+                MarkBatchKind::Ribbon => 11,
+                MarkBatchKind::Segment => 12,
+                MarkBatchKind::Arc => 13,
+            };
+            assert_eq!(i, expected_index, "kind {kind:?} at the wrong ALL index");
+        }
+    }
+
+    /// The Rust default and the wire default cannot disagree: this
+    /// deserializes the minimal wire JSON (every field the serde
+    /// representation actually requires — the ones with no
+    /// `#[serde(default)]` — set to its own default value; every
+    /// `#[serde(default)]` field omitted) and checks it against
+    /// `MarkBatch::default()`.
+    #[test]
+    fn mark_batch_default_equals_deserialized_minimal_wire_json() {
+        let minimal = r#"{
+            "kind": "point",
+            "nodes": [],
+            "data_indices": null,
+            "tooltips": null,
+            "hrefs": null,
+            "descriptions": null,
+            "keys": null,
+            "blend": "normal",
+            "stroke_cap": null,
+            "stroke_join": null
+        }"#;
+        let from_wire: MarkBatch = serde_json::from_str(minimal).unwrap();
+        assert_eq!(from_wire, MarkBatch::default());
     }
 }

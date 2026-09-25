@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn r4_point_selection_shift_click_toggle() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let specs = vec![shift_toggle_point_spec("sel")];
         let mut state = InteractionState::new(&specs);
@@ -874,9 +874,6 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -885,15 +882,7 @@ mod tests {
                     style: style.clone(),
                 }],
                 data_indices: Some(vec![0]),
-                tooltips: None,
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -1579,7 +1568,7 @@ mod tests {
     #[test]
     fn handle_click_with_fields_populates_field_values() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
         let style = FillStroke {
@@ -1621,9 +1610,6 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -1638,14 +1624,7 @@ mod tests {
                         value: "a".to_string(),
                     }],
                 }]),
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -1718,7 +1697,7 @@ mod tests {
     #[test]
     fn click_selection_42_dot_0_coselects_42_typed() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
 
@@ -1765,9 +1744,6 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {
@@ -1822,14 +1798,7 @@ mod tests {
                         }],
                     },
                 ]),
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -1891,7 +1860,7 @@ mod tests {
     #[test]
     fn click_selection_string_whitespace_distinct() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
 
@@ -1937,9 +1906,6 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {
@@ -1982,14 +1948,7 @@ mod tests {
                         }],
                     },
                 ]),
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],

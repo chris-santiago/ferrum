@@ -1205,31 +1205,32 @@ fn group_children_are_clipped_without_changing_the_batch_s_node_count() {
 
 // ── Placement model per batch kind (quality review F1/F4) ────────────────
 
-/// All 14 `MarkBatchKind` variants, so no kind's placement is decided by
-/// omission — the cycle-2 miss was exactly the three kinds this list did
-/// not name (`Polygon`, `Arc`, `Image`).
+/// Every `MarkBatchKind` variant in `ALL`, so no kind's placement is decided
+/// by omission — a hand-listed table can silently omit a variant (as this
+/// one once omitted `Polygon`, `Arc`, and `Image`) and stay green. The
+/// exhaustive match below (no wildcard arm) is the completeness guard now: a
+/// variant `ALL` carries without an arm here fails to compile.
 #[test]
 fn placement_model_is_assigned_for_every_mark_kind() {
     use BreakPlacement::*;
-    let table = [
-        (MarkBatchKind::Bar, ClipExtent),
-        (MarkBatchKind::Area, ClipExtent),
-        (MarkBatchKind::Rect, ClipExtent),
-        (MarkBatchKind::Ribbon, ClipExtent),
-        (MarkBatchKind::Polygon, ClipExtent),
-        (MarkBatchKind::Point, MoveGlyph),
-        (MarkBatchKind::Tick, MoveGlyph),
-        (MarkBatchKind::Text, MoveGlyph),
-        (MarkBatchKind::Image, MoveGlyph),
-        (MarkBatchKind::Label, MoveGlyphAndConnector),
-        (MarkBatchKind::Line, MoveVertices),
-        (MarkBatchKind::Rule, MoveVertices),
-        (MarkBatchKind::Segment, MoveVerticesAndGlyph),
-        (MarkBatchKind::Arc, MoveVertices),
-    ];
-    assert_eq!(table.len(), 14, "every MarkBatchKind variant must be listed");
-    for (kind, want) in table {
-        assert_eq!(BreakPlacement::for_kind(kind), want, "kind {kind:?}");
+    for kind in MarkBatchKind::ALL {
+        let want = match kind {
+            MarkBatchKind::Bar => ClipExtent,
+            MarkBatchKind::Area => ClipExtent,
+            MarkBatchKind::Rect => ClipExtent,
+            MarkBatchKind::Ribbon => ClipExtent,
+            MarkBatchKind::Polygon => ClipExtent,
+            MarkBatchKind::Point => MoveGlyph,
+            MarkBatchKind::Tick => MoveGlyph,
+            MarkBatchKind::Text => MoveGlyph,
+            MarkBatchKind::Image => MoveGlyph,
+            MarkBatchKind::Label => MoveGlyphAndConnector,
+            MarkBatchKind::Line => MoveVertices,
+            MarkBatchKind::Rule => MoveVertices,
+            MarkBatchKind::Segment => MoveVerticesAndGlyph,
+            MarkBatchKind::Arc => MoveVertices,
+        };
+        assert_eq!(BreakPlacement::for_kind(*kind), want, "kind {kind:?}");
     }
 }
 

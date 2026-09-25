@@ -245,17 +245,17 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: None,
-        kind: MarkBatchKind::Polygon,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Polygon,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    })
+        None,
+        None,
+        None,
+    ))
 }
 
 #[cfg(test)]

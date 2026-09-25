@@ -121,9 +121,6 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
-                    clip: true,
-                    polar_spans: None,
-                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![
                         SceneNode::Circle {
@@ -160,15 +157,7 @@ mod tests {
                         },
                     ],
                     data_indices: Some(vec![0, 1]),
-                    tooltips: None,
-                    hrefs: None,
-                    descriptions: None,
-                    keys: None,
-                    blend: BlendMode::Normal,
-                    stroke_cap: None,
-                    stroke_join: None,
-                    packed_instances: None,
-                    y_slot: 0,
+                    ..MarkBatch::default()
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -493,21 +482,8 @@ mod tests {
     /// those two fields.
     fn minimal_mark_batch(clip: bool) -> MarkBatch {
         MarkBatch {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: None,
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
-            glyph_anchors: None,
             clip,
+            ..MarkBatch::default()
         }
     }
 

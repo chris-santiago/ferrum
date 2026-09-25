@@ -1030,7 +1030,7 @@ mod keyed_pairing_tests {
     use super::*;
     use crate::scene_load::MarkDrawTarget;
     use ferrum_scene::{
-        BlendMode, Color, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Rect,
+        Color, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Rect,
         SceneNode,
     };
 
@@ -1061,21 +1061,10 @@ mod keyed_pairing_tests {
     /// the right quantity.
     fn circle_batch(n: usize, keys: Option<&[&str]>) -> MarkBatch {
         MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Point,
             nodes: (0..n).map(|_| circle_node()).collect(),
-            data_indices: None,
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
             keys: keys.map(|k| k.iter().map(|s| s.to_string()).collect()),
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         }
     }
 

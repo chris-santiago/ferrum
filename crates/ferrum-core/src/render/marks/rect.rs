@@ -168,17 +168,17 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: None,
-        kind: MarkBatchKind::Rect,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    })
+        None,
+        None,
+        None,
+    ))
 }
 
 fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
@@ -436,17 +436,17 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        polar_spans: None,
-        glyph_anchors: None,
-        kind: MarkBatchKind::Rect,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        empty_reason: None,
-    })
+        None,
+        None,
+        None,
+    ))
 }
 
 fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
@@ -645,17 +645,17 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: None,
-        kind: MarkBatchKind::Rect,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    })
+        None,
+        None,
+        None,
+    ))
 }
 
 #[cfg(test)]

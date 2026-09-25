@@ -579,7 +579,7 @@ fn geometry_contains(entry: &MarkEntry, x: f64, y: f64, tolerance: f64) -> bool 
 mod tests {
     use super::*;
     use ferrum_scene::{
-        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         SceneNode,
     };
     use rstar::PointDistance;
@@ -659,61 +659,28 @@ mod tests {
 
     fn point_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Point,
             nodes,
             data_indices,
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         }
     }
 
     fn bar_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Bar,
             nodes,
             data_indices,
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         }
     }
 
     fn rect_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Rect,
             nodes,
             data_indices,
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         }
     }
 
@@ -1193,9 +1160,6 @@ mod tests {
             stroke_join: None,
         };
         let line_batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Line,
             nodes: vec![SceneNode::Line {
                 x1: 0.0,
@@ -1205,15 +1169,7 @@ mod tests {
                 style: line_style,
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         let panels = make_panels(vec![line_batch]);
         let idx = SpatialIndex::build(&panels);

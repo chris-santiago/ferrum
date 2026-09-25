@@ -517,7 +517,7 @@ fn emit_text(svg: &mut SvgBuffer, x: f64, y: f64, content: &str, s: &FsText) {
 mod tests {
     use super::*;
     use ferrum_scene::{
-        BlendMode, Color, CoordKind, FillStroke, InteractionConfig, LayoutScale, MarkBatch,
+        Color, CoordKind, FillStroke, InteractionConfig, LayoutScale, MarkBatch,
         MarkBatchKind, Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
     };
 
@@ -558,9 +558,6 @@ mod tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
-                    polar_spans: None,
-                    glyph_anchors: None,
-                    clip: true,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -577,16 +574,7 @@ mod tests {
                             angle: 0.0,
                         },
                     }],
-                    data_indices: None,
-                    tooltips: None,
-                    hrefs: None,
-                    descriptions: None,
-                    keys: None,
-                    blend: BlendMode::Normal,
-                    stroke_cap: None,
-                    stroke_join: None,
-                    packed_instances: None,
-                    y_slot: 0,
+                    ..MarkBatch::default()
                 }],
                 annotations,
                 below_marks: Vec::new(),
@@ -838,8 +826,6 @@ mod tests {
             },
         }];
         scene.panels[0].marks.push(MarkBatch {
-            polar_spans: None,
-            glyph_anchors: None,
             clip: false,
             kind: MarkBatchKind::Rect,
             nodes: vec![SceneNode::Rect {
@@ -859,21 +845,9 @@ mod tests {
                 },
                 corner_radius: 0.0,
             }],
-            data_indices: None,
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         });
         scene.panels[0].marks.push(MarkBatch {
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {
                 x: 1.0,
@@ -891,16 +865,7 @@ mod tests {
                     font_family: "sans-serif".to_string(),
                 },
             }],
-            data_indices: None,
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         });
         scene
     }

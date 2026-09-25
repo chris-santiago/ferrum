@@ -224,13 +224,17 @@ fn build_geometry(
                 }
                 let (nodes, data_indices) = acc.finalize();
                 let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-                return MarkBuildResult {
-                    empty_reason: None,
-                    polar_spans: None,
-                    glyph_anchors: Some(anchors),
-                    kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
-                    tooltips, hrefs, descriptions,
-                };
+                return MarkBuildResult::new(
+                    MarkBatchKind::Tick,
+                    nodes,
+                    Some(data_indices),
+                    tooltips,
+                    hrefs,
+                    descriptions,
+                    None,
+                    Some(anchors),
+                    None,
+                );
             }
 
             // Quantitative y only → y-rug: horizontal ticks at left axis edge.
@@ -269,13 +273,17 @@ fn build_geometry(
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult {
-                empty_reason: None,
-                polar_spans: None,
-                glyph_anchors: Some(anchors),
-                kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
-                tooltips, hrefs, descriptions,
-            };
+            return MarkBuildResult::new(
+                MarkBatchKind::Tick,
+                nodes,
+                Some(data_indices),
+                tooltips,
+                hrefs,
+                descriptions,
+                None,
+                Some(anchors),
+                None,
+            );
         }
         // No x and no y: return empty.
         return empty();
@@ -345,17 +353,17 @@ fn build_geometry(
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult {
-                empty_reason: None,
-                polar_spans: None,
-                glyph_anchors: Some(anchors),
-                kind: MarkBatchKind::Tick,
+            return MarkBuildResult::new(
+                MarkBatchKind::Tick,
                 nodes,
-                data_indices: Some(data_indices),
+                Some(data_indices),
                 tooltips,
                 hrefs,
                 descriptions,
-            };
+                None,
+                Some(anchors),
+                None,
+            );
         }
     }
 
@@ -406,17 +414,17 @@ fn build_geometry(
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult {
-                empty_reason: None,
-                polar_spans: None,
-                glyph_anchors: Some(anchors),
-                kind: MarkBatchKind::Tick,
+            return MarkBuildResult::new(
+                MarkBatchKind::Tick,
                 nodes,
-                data_indices: Some(data_indices),
+                Some(data_indices),
                 tooltips,
                 hrefs,
                 descriptions,
-            };
+                None,
+                Some(anchors),
+                None,
+            );
         }
     }
 
@@ -477,13 +485,17 @@ fn build_geometry(
         }
         let (nodes, data_indices) = acc.finalize();
         let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-        return MarkBuildResult {
-            empty_reason: None,
-            polar_spans: None,
-            glyph_anchors: Some(anchors),
-            kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
-            tooltips, hrefs, descriptions,
-        };
+        return MarkBuildResult::new(
+            MarkBatchKind::Tick,
+            nodes,
+            Some(data_indices),
+            tooltips,
+            hrefs,
+            descriptions,
+            None,
+            Some(anchors),
+            None,
+        );
     }
 
     // Quantitative x → rug-style vertical tick at panel baseline.
@@ -553,17 +565,17 @@ fn build_geometry(
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: Some(anchors),
-        kind: MarkBatchKind::Tick,
+    MarkBuildResult::new(
+        MarkBatchKind::Tick,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    }
+        None,
+        Some(anchors),
+        None,
+    )
 }
 
 #[cfg(test)]

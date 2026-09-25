@@ -626,9 +626,6 @@ fn panel_one_pixel_plot_area_round_trips() {
         },
         grid: vec![],
         marks: vec![MarkBatch {
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
             kind: MarkBatchKind::Point,
             nodes: vec![SceneNode::Circle {
                 cx: 0.5,
@@ -636,16 +633,7 @@ fn panel_one_pixel_plot_area_round_trips() {
                 r: 0.1,
                 style: default_fill_stroke(),
             }],
-            data_indices: None,
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         }],
         axes: vec![],
         annotations: vec![],
@@ -665,9 +653,6 @@ fn panel_one_pixel_plot_area_round_trips() {
 #[test]
 fn mark_batch_tooltips_without_nodes_round_trips() {
     let batch = MarkBatch {
-        polar_spans: None,
-        glyph_anchors: None,
-        clip: true,
         kind: MarkBatchKind::Point,
         nodes: vec![],
         data_indices: Some(vec![]),
@@ -675,11 +660,7 @@ fn mark_batch_tooltips_without_nodes_round_trips() {
         hrefs: Some(vec![]),
         descriptions: Some(vec![]),
         keys: Some(vec![]),
-        blend: BlendMode::Normal,
-        stroke_cap: None,
-        stroke_join: None,
-        packed_instances: None,
-        y_slot: 0,
+        ..MarkBatch::default()
     };
     let json = serde_json::to_string(&batch).expect("serialize tooltips-without-nodes");
     let back: MarkBatch = serde_json::from_str(&json).expect("deserialize");
@@ -992,21 +973,10 @@ fn panel_zero_marks_round_trips() {
 #[test]
 fn mark_batch_empty_nodes_round_trips() {
     let batch = MarkBatch {
-        polar_spans: None,
-        glyph_anchors: None,
-        clip: true,
         kind: MarkBatchKind::Point,
         nodes: vec![],
         data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-        keys: None,
-        blend: BlendMode::Normal,
-        stroke_cap: None,
-        stroke_join: None,
-        packed_instances: None,
-        y_slot: 0,
+        ..MarkBatch::default()
     };
     let json = serde_json::to_string(&batch).expect("serialize empty batch");
     let back: MarkBatch = serde_json::from_str(&json).expect("deserialize");

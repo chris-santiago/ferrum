@@ -629,7 +629,7 @@ fn rect_contains(r: &ferrum_scene::Rect, x: f64, y: f64) -> bool {
 mod bug_hunt_interactive_slots {
     use super::*;
     use ferrum_scene::{
-        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         TooltipContent, TooltipField,
     };
 
@@ -671,21 +671,12 @@ mod bug_hunt_interactive_slots {
 
     fn slot_batch(nodes: Vec<SceneNode>, y_slot: usize, tip: TooltipContent) -> MarkBatch {
         MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Point,
             data_indices: Some((0..nodes.len()).collect()),
             tooltips: Some(vec![tip; nodes.len()]),
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
             y_slot,
             nodes,
+            ..MarkBatch::default()
         }
     }
 
@@ -1178,7 +1169,7 @@ mod bug_hunt_tests {
 
     fn make_panel_two_circles(c1: (f64, f64), c2: (f64, f64)) -> Vec<ferrum_scene::Panel> {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color {
@@ -1218,9 +1209,6 @@ mod bug_hunt_tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1237,15 +1225,7 @@ mod bug_hunt_tests {
                     },
                 ],
                 data_indices: Some(vec![0, 1]),
-                tooltips: None,
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -1451,7 +1431,7 @@ mod bug_hunt_tests {
     fn bug_hunt_hit_test_multi_panel_zoom_independence() {
         // Two panels, only panel 0 zoomed. Click should use correct zoom per panel.
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color {
@@ -1496,9 +1476,6 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
-                    clip: true,
-                    polar_spans: None,
-                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -1507,15 +1484,7 @@ mod bug_hunt_tests {
                         style: style.clone(),
                     }],
                     data_indices: Some(vec![0]),
-                    tooltips: None,
-                    hrefs: None,
-                    keys: None,
-                    blend: BlendMode::Normal,
-                    descriptions: None,
-                    stroke_cap: None,
-                    stroke_join: None,
-                    packed_instances: None,
-                    y_slot: 0,
+                    ..MarkBatch::default()
                 }],
                 below_marks: Vec::new(),
                 chrome_above: Vec::new(),
@@ -1547,9 +1516,6 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
-                    clip: true,
-                    polar_spans: None,
-                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 350.0,
@@ -1558,15 +1524,7 @@ mod bug_hunt_tests {
                         style: style.clone(),
                     }],
                     data_indices: Some(vec![10]),
-                    tooltips: None,
-                    hrefs: None,
-                    keys: None,
-                    blend: BlendMode::Normal,
-                    descriptions: None,
-                    stroke_cap: None,
-                    stroke_join: None,
-                    packed_instances: None,
-                    y_slot: 0,
+                    ..MarkBatch::default()
                 }],
                 below_marks: Vec::new(),
                 chrome_above: Vec::new(),
@@ -1670,7 +1628,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_tick_batch_routes_correctly() {
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let panel = Panel {
             id: 0,
@@ -1703,9 +1661,6 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Tick,
             nodes: vec![SceneNode::Line {
                 x1: 50.0,
@@ -1715,15 +1670,7 @@ mod bug_hunt_tests {
                 style: stroke_style(),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         assert!(
             hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
@@ -1771,7 +1718,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_text_batch_routes_correctly() {
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let panel = Panel {
             id: 0,
@@ -1804,9 +1751,6 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {
                 x: 100.0,
@@ -1816,15 +1760,7 @@ mod bug_hunt_tests {
                 style: text_style(14.0),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         assert!(
             hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
@@ -1900,7 +1836,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_ribbon_batch_routes_correctly() {
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let panel = Panel {
             id: 0,
@@ -1940,9 +1876,6 @@ mod bug_hunt_tests {
             ferrum_scene::PathCmd::Close,
         ];
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Ribbon,
             nodes: vec![SceneNode::Path {
                 commands,
@@ -1950,15 +1883,7 @@ mod bug_hunt_tests {
                 closed: true,
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         assert!(
             hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
@@ -1991,7 +1916,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_segment_batch_routes_correctly() {
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let panel = Panel {
             id: 0,
@@ -2024,9 +1949,6 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Segment,
             nodes: vec![SceneNode::Line {
                 x1: 10.0,
@@ -2036,15 +1958,7 @@ mod bug_hunt_tests {
                 style: stroke_style(),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         assert!(
             hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
@@ -2105,7 +2019,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_image_batch_routes_correctly() {
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let panel = Panel {
             id: 0,
@@ -2138,9 +2052,6 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Image,
             nodes: vec![SceneNode::Image {
                 x: 50.0,
@@ -2152,15 +2063,7 @@ mod bug_hunt_tests {
                 },
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         assert!(
             hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
@@ -2178,7 +2081,7 @@ mod tests {
     use super::*;
     use crate::zoom_pan::{Affine2, ZoomPanState};
     use ferrum_scene::{
-        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
     };
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -2236,21 +2139,11 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(cx, cy, r)],
                 data_indices: Some(vec![0]),
-                tooltips: None,
-                hrefs: None,
-                keys: None,
                 blend: ferrum_scene::BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -2333,21 +2226,11 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
-                    clip: true,
-                    polar_spans: None,
-                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![circle_node(350.0, 250.0, 10.0)],
                     data_indices: Some(vec![42]),
-                    tooltips: None,
-                    hrefs: None,
-                    keys: None,
                     blend: ferrum_scene::BlendMode::Normal,
-                    descriptions: None,
-                    stroke_cap: None,
-                    stroke_join: None,
-                    packed_instances: None,
-                    y_slot: 0,
+                    ..MarkBatch::default()
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -2578,9 +2461,6 @@ mod tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
-            clip: true,
-            polar_spans: None,
-            glyph_anchors: None,
             kind: MarkBatchKind::Label,
             nodes: vec![SceneNode::Text {
                 x: 100.0,
@@ -2590,15 +2470,8 @@ mod tests {
                 style: text_style_small(),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
             blend: ferrum_scene::BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
+            ..MarkBatch::default()
         };
         // Click on the label anchor — must hit (routes to hit_test_texts).
         assert!(
@@ -2638,21 +2511,11 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(50.0, 50.0, 5.0)],
                 data_indices,
-                tooltips: None,
-                hrefs: None,
-                keys: None,
                 blend: ferrum_scene::BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -2767,21 +2630,11 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(3.0, 4.0, 2.0)],
                 data_indices: Some(vec![7]),
-                tooltips: None,
-                hrefs: None,
-                keys: None,
                 blend: ferrum_scene::BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],
@@ -2984,21 +2837,11 @@ mod tests {
     /// to exercise the "no carried data" fallback.
     fn spans_batch(n: usize, spans: Option<Vec<(f64, f64)>>) -> MarkBatch {
         MarkBatch {
-            clip: true,
             kind: MarkBatchKind::Arc,
             nodes: (0..n).map(|_| dummy_wedge_node()).collect(),
             data_indices: Some((0..n).collect()),
-            tooltips: None,
-            hrefs: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            descriptions: None,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
             polar_spans: spans,
-            glyph_anchors: None,
+            ..MarkBatch::default()
         }
     }
 

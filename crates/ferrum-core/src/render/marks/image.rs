@@ -179,17 +179,17 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: Some(anchors),
-        kind: MarkBatchKind::Image,
+    MarkBuildResult::new(
+        MarkBatchKind::Image,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    }
+        None,
+        Some(anchors),
+        None,
+    )
 }
 
 /// Raster path: single-row Raster transform output → one colormap-rendered PNG.
@@ -329,10 +329,24 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&raster_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        // #230-3: unlike the URL-tile path above (whose anchor IS the true
+    MarkBuildResult::new(
+        MarkBatchKind::Image,
+        vec![SceneNode::Image {
+            x: svg_x,
+            y: svg_y_top,
+            w: svg_w,
+            h: svg_h,
+            data: ImageData::Inline {
+                bytes: png_bytes,
+                mime: ImageMime::Png,
+            },
+        }],
+        Some(vec![0]),
+        tooltips,
+        hrefs,
+        descriptions,
+        None,
+        // Unlike the URL-tile path above (whose anchor IS the true
         // center `(px, py)`), this value is NOT a correct data-position
         // anchor — it is the raster extent's drawn top-left corner
         // (`svg_x, svg_y_top`), the same value `SceneNode::Image.x/y` gets.
@@ -344,27 +358,13 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // contract's shape (one anchor per node) rather than being a silent
         // exception a debug build has to special-case; it is inert today
         // because `for_each_along` no-ops `Image` nodes unconditionally
-        // (quality-review cycle-3 note — reviewed, not required to fix,
-        // since nothing reads it). If that no-op is ever lifted for `Image`,
-        // this field must be corrected to the extent's center FIRST, or a
-        // raster tile will move by half its own width/height under a break.
-        glyph_anchors: Some(vec![(svg_x, svg_y_top)]),
-        kind: MarkBatchKind::Image,
-        nodes: vec![SceneNode::Image {
-            x: svg_x,
-            y: svg_y_top,
-            w: svg_w,
-            h: svg_h,
-            data: ImageData::Inline {
-                bytes: png_bytes,
-                mime: ImageMime::Png,
-            },
-        }],
-        data_indices: Some(vec![0]),
-        tooltips,
-        hrefs,
-        descriptions,
-    }
+        // (reviewed, not required to fix, since nothing reads it). If that
+        // no-op is ever lifted for `Image`, this field must be corrected to
+        // the extent's center FIRST, or a raster tile will move by half its
+        // own width/height under a break.
+        Some(vec![(svg_x, svg_y_top)]),
+        None,
+    )
 }
 
 #[cfg(test)]

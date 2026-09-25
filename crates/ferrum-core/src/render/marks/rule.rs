@@ -276,17 +276,17 @@ fn finalize_rule_build(
     use ferrum_scene::MarkBatchKind;
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-    MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: None,
-        kind: MarkBatchKind::Rule,
+    MarkBuildResult::new(
+        MarkBatchKind::Rule,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    }
+        None,
+        None,
+        None,
+    )
 }
 
 /// Emit one `Line` node per row whose `endpoints` resolve, keeping node and

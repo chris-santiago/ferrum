@@ -505,17 +505,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: Some(anchors),
-        kind: MarkBatchKind::Point,
+    MarkBuildResult::new(
+        MarkBatchKind::Point,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    }
+        None,
+        Some(anchors),
+        None,
+    )
 }
 
 #[cfg(test)]

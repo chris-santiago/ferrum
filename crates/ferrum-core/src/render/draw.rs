@@ -853,6 +853,35 @@ pub struct MarkBuildResult {
 pub struct EmptyReason(pub String);
 
 impl MarkBuildResult {
+    /// The populated case, beside [`empty`](Self::empty) and
+    /// [`empty_because`](Self::empty_because): every field a mark builder
+    /// produces, in the struct's own declared order, so a call site reads
+    /// the same order it would from a literal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        kind: MarkBatchKind,
+        nodes: Vec<FsSceneNode>,
+        data_indices: Option<Vec<usize>>,
+        tooltips: Option<Vec<FsTooltipContent>>,
+        hrefs: Option<Vec<Option<String>>>,
+        descriptions: Option<Vec<Option<String>>>,
+        polar_spans: Option<Vec<(f64, f64)>>,
+        glyph_anchors: Option<Vec<(f64, f64)>>,
+        empty_reason: Option<EmptyReason>,
+    ) -> Self {
+        Self {
+            kind,
+            nodes,
+            data_indices,
+            tooltips,
+            hrefs,
+            descriptions,
+            polar_spans,
+            glyph_anchors,
+            empty_reason,
+        }
+    }
+
     pub fn empty(kind: MarkBatchKind) -> Self {
         Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, empty_reason: None }
     }

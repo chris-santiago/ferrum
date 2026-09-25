@@ -278,17 +278,17 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        empty_reason: None,
-        kind: MarkBatchKind::Arc,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Arc,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: Some(spans),
-        glyph_anchors: None,
-    })
+        Some(spans),
+        None,
+        None,
+    ))
 }
 
 /// Build arc wedges for a nominal/ordinal theta channel.
@@ -401,17 +401,17 @@ fn build_nominal_theta(
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        kind: MarkBatchKind::Arc,
+    MarkBuildResult::new(
+        MarkBatchKind::Arc,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: Some(spans),
-        glyph_anchors: None,
-    }
+        Some(spans),
+        None,
+        None,
+    )
 }
 
 /// Build annular-wedge nodes from per-row angular and radial extents.
@@ -507,17 +507,17 @@ fn build_annular(
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        kind: MarkBatchKind::Arc,
+    MarkBuildResult::new(
+        MarkBatchKind::Arc,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: Some(spans),
-        glyph_anchors: None,
-    }
+        Some(spans),
+        None,
+        None,
+    )
 }
 
 /// SVG path commands for an arc wedge from `angle_start` to `angle_end`.

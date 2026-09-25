@@ -338,17 +338,17 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
-        empty_reason: None,
-        kind: MarkBatchKind::Arc,
+    MarkBuildResult::new(
+        MarkBatchKind::Arc,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: Some(spans),
-        glyph_anchors: None,
-    }
+        Some(spans),
+        None,
+        None,
+    )
 }
 
 fn empty_result() -> crate::render::draw::MarkBuildResult {
@@ -479,18 +479,19 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult {
-        empty_reason: zero_extent_empty_reason(zero_extent_drops, nodes.len()),
-        kind: MarkBatchKind::Bar,
+    MarkBuildResult::new(
+        MarkBatchKind::Bar,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: None,
-        glyph_anchors: None,
-    }
+        None,
+        None,
+        empty_reason,
+    )
 }
 
 fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -644,18 +645,19 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult {
-        empty_reason: zero_extent_empty_reason(zero_extent_drops, nodes.len()),
-        kind: MarkBatchKind::Bar,
+    MarkBuildResult::new(
+        MarkBatchKind::Bar,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: None,
-        glyph_anchors: None,
-    }
+        None,
+        None,
+        empty_reason,
+    )
 }
 
 fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -827,18 +829,19 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult {
-        empty_reason: zero_extent_empty_reason(zero_extent_drops, nodes.len()),
-        kind: MarkBatchKind::Bar,
+    MarkBuildResult::new(
+        MarkBatchKind::Bar,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: None,
-        glyph_anchors: None,
-    }
+        None,
+        None,
+        empty_reason,
+    )
 }
 
 fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -952,18 +955,19 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult {
-        empty_reason: zero_extent_empty_reason(zero_extent_drops, nodes.len()),
-        kind: MarkBatchKind::Bar,
+    MarkBuildResult::new(
+        MarkBatchKind::Bar,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-        polar_spans: None,
-        glyph_anchors: None,
-    }
+        None,
+        None,
+        empty_reason,
+    )
 }
 
 #[cfg(test)]

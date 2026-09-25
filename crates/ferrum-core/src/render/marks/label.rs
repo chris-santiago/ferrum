@@ -240,17 +240,17 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult {
-        empty_reason: None,
-        polar_spans: None,
-        glyph_anchors: Some(anchors),
-        kind: MarkBatchKind::Label,
+    Ok(MarkBuildResult::new(
+        MarkBatchKind::Label,
         nodes,
-        data_indices: Some(data_indices),
+        Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    })
+        None,
+        Some(anchors),
+        None,
+    ))
 }
 
 #[cfg(test)]

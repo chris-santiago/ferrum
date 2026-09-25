@@ -1171,7 +1171,7 @@ mod tests {
         use crate::scene_load::{CircleInstance, DrawKind, PackedBatchMeta, SceneData};
         use crate::spatial_index::SpatialIndex;
         use ferrum_scene::{
-            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+            CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         use lyon::tessellation::VertexBuffers;
         use std::collections::HashMap;
@@ -1200,21 +1200,10 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
-                clip: true,
-                polar_spans: None,
-                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,
-                tooltips: None,
-                hrefs: None,
-                keys: None,
-                blend: BlendMode::Normal,
-                descriptions: None,
-                stroke_cap: None,
-                stroke_join: None,
-                packed_instances: None,
-                y_slot: 0,
+                ..MarkBatch::default()
             }],
             axes: vec![],
             annotations: vec![],

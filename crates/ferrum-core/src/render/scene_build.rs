@@ -11531,18 +11531,7 @@ mod tests {
             nodes: vec![bar],
             // One node in, TWO entries here: the builder bug this reports.
             data_indices: Some(vec![0, 1]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
+            ..MarkBatch::default()
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
@@ -11592,18 +11581,7 @@ mod tests {
             kind: ferrum_scene::MarkBatchKind::Bar,
             nodes: vec![bar],
             data_indices: Some(vec![7]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
+            ..MarkBatch::default()
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
@@ -11773,15 +11751,9 @@ mod tests {
             tooltips: result.tooltips,
             hrefs: result.hrefs,
             descriptions: result.descriptions,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
             polar_spans: result.polar_spans,
             glyph_anchors: result.glyph_anchors,
-            clip: true,
+            ..MarkBatch::default()
         };
         let br = anchor_fixture_break(&scales.y);
         let remap = anchor_fixture_remap(&scales.y, &br);
@@ -11991,15 +11963,9 @@ mod tests {
             tooltips: result.tooltips,
             hrefs: result.hrefs,
             descriptions: result.descriptions,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
             polar_spans: result.polar_spans,
             glyph_anchors: result.glyph_anchors,
-            clip: true,
+            ..MarkBatch::default()
         };
         let br = anchor_fixture_break(&scales.y);
         let remap = anchor_fixture_remap(&scales.y, &br);
@@ -12105,20 +12071,10 @@ mod tests {
                 },
             }],
             data_indices: Some(vec![0]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
             // A real producer bug: one node, but no anchor recorded for it
             // (a short/missing sidecar) — this must still refuse loudly.
             glyph_anchors: None,
-            clip: true,
+            ..MarkBatch::default()
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
@@ -12140,18 +12096,7 @@ mod tests {
             kind: ferrum_scene::MarkBatchKind::Point,
             nodes: vec![],
             data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
+            ..MarkBatch::default()
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
@@ -12174,18 +12119,7 @@ mod tests {
             kind: ferrum_scene::MarkBatchKind::Label,
             nodes: vec![],
             data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-            keys: None,
-            blend: BlendMode::Normal,
-            stroke_cap: None,
-            stroke_join: None,
-            packed_instances: None,
-            y_slot: 0,
-            polar_spans: None,
-            glyph_anchors: None,
-            clip: true,
+            ..MarkBatch::default()
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
         remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
