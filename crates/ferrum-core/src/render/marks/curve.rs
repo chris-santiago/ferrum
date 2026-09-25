@@ -268,14 +268,6 @@ impl Trace {
         cmds
     }
 
-    /// Continue an already-open subpath FORWARD into `points`: a `LineTo` to
-    /// `points[0]` followed by the same segments [`subpath`](Self::subpath)
-    /// would emit.
-    #[cfg(test)]
-    pub(crate) fn extend(self, cmds: &mut Vec<PathCmd>, points: &[(f64, f64)]) {
-        self.push(cmds, points, Lead::Line);
-    }
-
     /// Continue an already-open subpath BACKWARDS along `forward_points`,
     /// tracing the same function of the independent coordinate that
     /// [`subpath`](Self::subpath) would trace forwards.
@@ -954,27 +946,6 @@ mod tests {
         }
     }
 
-    // ── extend_subpath ───────────────────────────────────────────────────
-
-    #[test]
-    fn extend_subpath_joins_the_ring_with_a_lineto_then_traces_identically() {
-        for method in Interpolate::ALL {
-            let mut extended = vec![PathCmd::MoveTo { x: -1.0, y: -1.0 }];
-            trace(method, StepSpelling::Vertices).extend(&mut extended, &SAMPLE);
-            let fresh = trace(method, StepSpelling::Vertices).subpath(&SAMPLE);
-            assert_eq!(
-                extended[1],
-                PathCmd::LineTo { x: SAMPLE[0].0, y: SAMPLE[0].1 },
-                "{method:?}: the joined edge must NOT start a new subpath"
-            );
-            assert_eq!(
-                extended[2..],
-                fresh[1..],
-                "{method:?}: everything after the join must match a fresh trace"
-            );
-        }
-    }
-
     // ── extend_reversed: same function of the independent coordinate ─────
 
     /// Every vertex a reversed edge emits, read back-to-front, must equal the
@@ -1001,6 +972,17 @@ mod tests {
             let t = trace(method, StepSpelling::Vertices);
             let mut ring = vec![PathCmd::MoveTo { x: -1.0, y: -1.0 }];
             t.extend_reversed(&mut ring, &SAMPLE);
+
+            // The joined edge continues the already-open ring with a `LineTo`
+            // to the reversed sequence's first point — it must NOT start a
+            // new subpath. This is `Trace::push`'s `Lead::Line` branch,
+            // reached here through `extend_reversed`'s own `Lead::Line` call
+            // — the only production caller of that branch.
+            assert_eq!(
+                ring[1],
+                PathCmd::LineTo { x: SAMPLE[3].0, y: SAMPLE[3].1 },
+                "{method:?}: the joined edge must NOT start a new subpath"
+            );
 
             let mut walked_back = vertices(&ring[1..]);
             walked_back.reverse();

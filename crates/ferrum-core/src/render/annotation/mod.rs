@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::break_axis;
 use super::color::parse_color as parse_color_str;
 use super::draw::to_scene_color;
-use super::marks::arrowhead::{arrowhead_path, arrowhead_triangle};
+use super::marks::arrowhead::{arrowhead_path, arrowhead_triangle, DEFAULT_ARROW_HEAD_SIZE};
 use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
 use super::RenderWarning;
 use crate::layout::geometry::Rect;
@@ -271,7 +271,7 @@ fn default_stroke_width() -> f64 {
     1.5
 }
 fn default_head_size() -> f64 {
-    8.0
+    DEFAULT_ARROW_HEAD_SIZE
 }
 fn default_fill_str() -> String {
     "#cccccc".to_string()

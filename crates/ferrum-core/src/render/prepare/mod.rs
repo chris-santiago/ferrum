@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, LargeStringArray, StringArray, StringViewArray};
+use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
@@ -295,60 +295,46 @@ impl LayerPrepared {
 /// (`LargeStringArray`) depending on version. The rest of the render pipeline
 /// (scale_resolve, draw, mark renderers) downcasts to `StringArray`. Converting
 /// once here keeps every consumer simple and avoids per-site downcast forks.
-fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
+///
+/// Casts through `arrow::compute::cast` — the crate's precedent
+/// (`transform::flatten::cast_to_utf8`). The buffer-level cast has no
+/// `i32`-offset-overflow panic past 2 GiB of string data; a cast refusal or
+/// a normalized-schema rebuild failure surfaces as a typed
+/// [`RenderError::StringNormalizationFailed`].
+fn normalize_string_views(batch: &RecordBatch) -> Result<RecordBatch, RenderError> {
     let schema = batch.schema();
     let mut new_fields: Vec<Arc<Field>> = Vec::with_capacity(schema.fields().len());
     let mut new_cols: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
     let mut changed = false;
     for (i, field) in schema.fields().iter().enumerate() {
         let col = batch.column(i);
-        match field.data_type() {
-            DataType::Utf8View => {
-                if let Some(view) = col.as_any().downcast_ref::<StringViewArray>() {
-                    let owned: StringArray = view
-                        .iter()
-                        .map(|opt| opt.map(|s| s.to_string()))
-                        .collect::<Vec<Option<String>>>()
-                        .into();
-                    new_cols.push(Arc::new(owned));
-                    new_fields.push(Arc::new(Field::new(
-                        field.name(),
-                        DataType::Utf8,
-                        field.is_nullable(),
-                    )));
-                    changed = true;
-                    continue;
+        if matches!(field.data_type(), DataType::Utf8View | DataType::LargeUtf8) {
+            let casted = arrow::compute::cast(col, &DataType::Utf8).map_err(|e| {
+                RenderError::StringNormalizationFailed {
+                    field: field.name().clone(),
+                    reason: e.to_string(),
                 }
-            }
-            DataType::LargeUtf8 => {
-                // Polars produces LargeUtf8 (LargeStringArray) for string columns.
-                if let Some(large) = col.as_any().downcast_ref::<LargeStringArray>() {
-                    let owned: StringArray = large
-                        .iter()
-                        .map(|opt| opt.map(|s| s.to_string()))
-                        .collect::<Vec<Option<String>>>()
-                        .into();
-                    new_cols.push(Arc::new(owned));
-                    new_fields.push(Arc::new(Field::new(
-                        field.name(),
-                        DataType::Utf8,
-                        field.is_nullable(),
-                    )));
-                    changed = true;
-                    continue;
-                }
-            }
-            _ => {}
+            })?;
+            new_cols.push(casted);
+            new_fields.push(Arc::new(Field::new(
+                field.name(),
+                DataType::Utf8,
+                field.is_nullable(),
+            )));
+            changed = true;
+            continue;
         }
         new_cols.push(col.clone());
         new_fields.push(field.clone());
     }
     if !changed {
-        return batch.clone();
+        return Ok(batch.clone());
     }
     let new_schema = Arc::new(Schema::new(new_fields));
-    RecordBatch::try_new(new_schema, new_cols)
-        .expect("normalized batch must construct: same row count + matched dtypes")
+    RecordBatch::try_new(new_schema, new_cols).map_err(|e| RenderError::StringNormalizationFailed {
+        field: String::new(),
+        reason: e.to_string(),
+    })
 }
 
 /// Re-apply the Utf8 string-normalization invariant to every named transform
@@ -380,10 +366,10 @@ fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
 /// found live.
 fn normalize_transform_outputs(
     outputs: HashMap<String, RecordBatch>,
-) -> HashMap<String, RecordBatch> {
+) -> Result<HashMap<String, RecordBatch>, RenderError> {
     outputs
         .into_iter()
-        .map(|(key, batch)| (key, normalize_string_views(&batch)))
+        .map(|(key, batch)| Ok((key, normalize_string_views(&batch)?)))
         .collect()
 }
 
@@ -1028,7 +1014,7 @@ pub fn prepare_render_inputs(
 
     // Normalize Utf8View columns (e.g. from polars) to Utf8 so downstream
     // downcasts to StringArray succeed uniformly.
-    let normalized = normalize_string_views(batch);
+    let normalized = normalize_string_views(batch)?;
 
     // Run the Phase 5 transform pipeline, applying the facet-aware partition →
     // per-panel transforms → inject → concat path when a facet is present and
@@ -1323,7 +1309,7 @@ fn run_transforms_with_facet(
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
         // `ctx.clone()` in `apply_transforms_named`.
         let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-        return Ok((normalize_transform_outputs(outputs), warnings));
+        return Ok((normalize_transform_outputs(outputs)?, warnings));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1430,7 +1416,7 @@ fn run_transforms_with_facet(
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
     let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-    Ok((normalize_transform_outputs(combined), warnings))
+    Ok((normalize_transform_outputs(combined)?, warnings))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
@@ -9779,6 +9765,212 @@ mod tests {
             1,
             "the provisional copy is the only report this render can make: {:?}",
             out.warnings
+        );
+    }
+
+    // ── Utf8View/LargeUtf8 normalization via arrow::compute::cast ──
+
+    /// A raw input batch carrying the SAME string column at `Utf8`,
+    /// `Utf8View`, and `LargeUtf8` normalizes all three to byte-identical
+    /// `Utf8` output (values and nulls), so a polars frame (which may export
+    /// either non-`Utf8` string physical type depending on version) renders
+    /// exactly like the `Utf8` frame it is logically equal to.
+    #[test]
+    fn normalize_string_views_casts_utf8view_and_large_utf8_to_byte_identical_utf8() {
+        use arrow::array::{LargeStringArray, StringViewArray};
+
+        let values: Vec<Option<&str>> = vec![Some("alpha"), None, Some("beta"), Some("")];
+
+        let utf8_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(values.clone())) as ArrayRef],
+        )
+        .unwrap();
+        let utf8view_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8View, true)])),
+            vec![Arc::new(StringViewArray::from(values.clone())) as ArrayRef],
+        )
+        .unwrap();
+        let large_utf8_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("s", DataType::LargeUtf8, true)])),
+            vec![Arc::new(LargeStringArray::from(values.clone())) as ArrayRef],
+        )
+        .unwrap();
+
+        let want = normalize_string_views(&utf8_batch).expect("Utf8 passes through");
+        let from_view = normalize_string_views(&utf8view_batch).expect("Utf8View normalizes");
+        let from_large = normalize_string_views(&large_utf8_batch).expect("LargeUtf8 normalizes");
+
+        for got in [&from_view, &from_large] {
+            assert_eq!(got.schema(), want.schema(), "normalized schema must be Utf8");
+            let want_col = want.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let got_col = got.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let want_values: Vec<Option<&str>> =
+                (0..want_col.len()).map(|i| (!want_col.is_null(i)).then_some(want_col.value(i))).collect();
+            let got_values: Vec<Option<&str>> =
+                (0..got_col.len()).map(|i| (!got_col.is_null(i)).then_some(got_col.value(i))).collect();
+            assert_eq!(
+                want_values, got_values,
+                "normalized Utf8View/LargeUtf8 must render byte-identical to the Utf8 original"
+            );
+        }
+    }
+
+    /// A raw batch's `Utf8View`/`LargeUtf8` category column renders
+    /// byte-identical SVG to the same chart over the `Utf8` column — the
+    /// category axis's tick labels are the string content itself, so any
+    /// normalization gap would draw different (or missing) label text
+    /// rather than merely differ at the batch level.
+    #[test]
+    fn utf8view_and_large_utf8_raw_input_render_byte_identical_svg_to_utf8() {
+        use arrow::array::{LargeStringArray, StringViewArray};
+
+        fn bar_spec_over(field: &str) -> ChartSpec {
+            ChartSpec {
+                data: DataRef::default(),
+                mark: Mark::Bar,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                transforms: Vec::new(),
+                facet: None,
+                layers: None,
+                coord: None,
+                mark_style: None,
+                position: None,
+                title: None,
+                axis_x: None,
+                axis_y: None,
+                selections: Vec::new(),
+                conditionals: Vec::new(),
+                chart_description: None,
+                params: Vec::new(),
+            }
+        }
+
+        fn render(batch: &RecordBatch) -> String {
+            crate::render::render_svg(
+                &bar_spec_over("cat"),
+                batch,
+                &crate::layout::ThemeInputs::default(),
+                crate::layout::Viewport { width: 600.0, height: 400.0 },
+                &crate::render::config::RenderConfig::default(),
+                &crate::render::chart_config::ChartConfig::default(),
+            )
+            .expect("the fixture renders")
+            .bytes
+        }
+
+        let cats = vec!["alpha", "beta", "gamma"];
+        let vals = vec![3.0, 1.0, 2.0];
+        let val_field = Field::new("val", DataType::Float64, false);
+
+        let utf8_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("cat", DataType::Utf8, false), val_field.clone()])),
+            vec![
+                Arc::new(StringArray::from(cats.clone())) as ArrayRef,
+                Arc::new(Float64Array::from(vals.clone())) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let view_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("cat", DataType::Utf8View, false), val_field.clone()])),
+            vec![
+                Arc::new(StringViewArray::from(cats.clone())) as ArrayRef,
+                Arc::new(Float64Array::from(vals.clone())) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let large_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("cat", DataType::LargeUtf8, false), val_field])),
+            vec![
+                Arc::new(LargeStringArray::from(cats)) as ArrayRef,
+                Arc::new(Float64Array::from(vals)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let want = render(&utf8_batch);
+        assert_eq!(
+            render(&view_batch), want,
+            "Utf8View raw input must render byte-identical SVG to Utf8"
+        );
+        assert_eq!(
+            render(&large_batch), want,
+            "LargeUtf8 raw input must render byte-identical SVG to Utf8"
+        );
+    }
+
+    /// `stat_bin`'s grouped path echoes its `groupby` column back at ITS OWN
+    /// dtype (`group_key::materialize_groupby_col`): this fixture confirms
+    /// `large_out`'s `g` column is genuinely `LargeUtf8` before normalizing,
+    /// then proves `normalize_transform_outputs` casts that real `stat_bin`
+    /// output to `Utf8` with the same values a `Utf8`-groupby run produces.
+    #[test]
+    fn normalize_transform_outputs_casts_a_real_transforms_large_utf8_groupby_echo() {
+        use crate::transform::bin::{apply as bin_apply, BinSpec};
+        use crate::transform::bin_mode::BinMode;
+        use arrow::array::LargeStringArray;
+
+        fn batch_with_group_dtype(group_dtype: DataType) -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("g", group_dtype.clone(), false),
+            ]));
+            let g_col: ArrayRef = match group_dtype {
+                DataType::Utf8 => Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+                DataType::LargeUtf8 => Arc::new(LargeStringArray::from(vec!["p", "q", "p", "q"])),
+                other => unreachable!("test only constructs Utf8/LargeUtf8 batches, got {other:?}"),
+            };
+            RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![1.0, 9.0, 1.0, 9.0])) as ArrayRef, g_col],
+            )
+            .unwrap()
+        }
+
+        fn grouped_bin_spec() -> BinSpec {
+            BinSpec {
+                field: "x".into(),
+                mode: BinMode::Fixed { n: 2 },
+                extent: Some((0.0, 10.0)),
+                nice: false,
+                cumulative: false,
+                shared_extent: false,
+                groupby: vec!["g".into()],
+                agg_field: None,
+                agg: None,
+                name: None,
+            }
+        }
+
+        let utf8_out = bin_apply(&grouped_bin_spec(), &batch_with_group_dtype(DataType::Utf8)).unwrap();
+        let large_out = bin_apply(&grouped_bin_spec(), &batch_with_group_dtype(DataType::LargeUtf8)).unwrap();
+        let g_idx = large_out.schema().index_of("g").unwrap();
+        assert_eq!(
+            large_out.schema().field(g_idx).data_type(), &DataType::LargeUtf8,
+            "stat_bin must echo the groupby column's own dtype before normalization, \
+             or this fixture is not exercising a real transform's LargeUtf8 output"
+        );
+
+        let mut outputs = HashMap::new();
+        outputs.insert("binned".to_string(), large_out);
+        let normalized = normalize_transform_outputs(outputs)
+            .expect("a real transform's LargeUtf8 groupby echo normalizes");
+        let got = &normalized["binned"];
+        let got_idx = got.schema().index_of("g").unwrap();
+        assert_eq!(got.schema().field(got_idx).data_type(), &DataType::Utf8);
+
+        let want_idx = utf8_out.schema().index_of("g").unwrap();
+        let want_g = utf8_out.column(want_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        let got_g = got.column(got_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        let want_values: Vec<&str> = (0..want_g.len()).map(|i| want_g.value(i)).collect();
+        let got_values: Vec<&str> = (0..got_g.len()).map(|i| got_g.value(i)).collect();
+        assert_eq!(
+            got_values, want_values,
+            "the normalized LargeUtf8 groupby echo must match the Utf8 baseline byte-for-byte"
         );
     }
 }

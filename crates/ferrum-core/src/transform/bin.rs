@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt64Array};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -358,6 +358,21 @@ fn apply_one_group(
     only_indices: Option<&[usize]>,
     agg_col: Option<&AggColumn>,
 ) -> PyResult<RecordBatch> {
+    build_bin_batch(compute_one_group(spec, batch, only_indices, agg_col)?)
+}
+
+/// This transform's per-group compute: resolve the column, clean/bin the
+/// values, and return the four (or five, with `agg`) output columns as plain
+/// `Vec`s — no `RecordBatch` built here. [`apply_one_group`] wraps this with
+/// [`build_bin_batch`] for the ungrouped entry point; [`apply_grouped`] calls
+/// this directly per partition and extends its own accumulator `Vec`s from
+/// the typed result.
+fn compute_one_group(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+    agg_col: Option<&AggColumn>,
+) -> PyResult<BinColumns> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!(
@@ -378,7 +393,7 @@ fn apply_one_group(
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
     if clean.is_empty() {
-        return empty_bin_output(agg_col.is_some());
+        return Ok(empty_bin_columns(agg_col.is_some()));
     }
 
     let (lo, hi) = match spec.extent {
@@ -395,7 +410,7 @@ fn apply_one_group(
                 // clean row falls in this one bin, so its agg_value (when
                 // requested) aggregates the full `row_idx` set.
                 let agg_value = agg_col.map(|ac| ac.aggregate_rows(&row_idx));
-                return single_unit_bin(lo, clean.len() as u64, agg_value);
+                return Ok(single_unit_bin_columns(lo, clean.len() as u64, agg_value));
             }
             (lo, hi)
         }
@@ -473,7 +488,7 @@ fn apply_one_group(
         (counts, densities)
     };
 
-    build_bin_batch(BinColumns {
+    Ok(BinColumns {
         starts: bin_starts,
         ends: bin_ends,
         counts: final_counts,
@@ -482,9 +497,9 @@ fn apply_one_group(
     })
 }
 
-/// Partition input batch by the groupby columns, call apply_one_group per
-/// partition, then stack the results into a single batch with the group
-/// columns appended after the 4th field.
+/// Partition input batch by the groupby columns, call `compute_one_group` per
+/// partition, and concatenate the typed columns into a single batch with the
+/// group columns appended after the 4th field.
 ///
 /// When `spec.shared_extent` is `true` and `spec.extent` is `None`, a global
 /// extent is computed across all rows of the field before per-group binning so
@@ -521,7 +536,7 @@ fn apply_grouped(
         };
     let spec_ref: &BinSpec = &effective_spec;
 
-    // Per-group output, then stack.
+    // Per-group typed columns are extended directly into these accumulators.
     let mut all_starts: Vec<f64> = Vec::new();
     let mut all_ends: Vec<f64> = Vec::new();
     let mut all_counts: Vec<u64> = Vec::new();
@@ -529,33 +544,16 @@ fn apply_grouped(
     let mut all_agg_values: Vec<Option<f64>> = Vec::new();
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for (g, ixs) in &partition.groups {
-        let out = apply_one_group(spec_ref, batch, Some(ixs), agg_col)?;
-        let n = out.num_rows();
-        let starts = out.column(0).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for bin_start"))?;
-        let ends = out.column(1).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for bin_end"))?;
-        let counts = out.column(2).as_any().downcast_ref::<UInt64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_bin: expected UInt64Array for count"))?;
-        let densities = out.column(3).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for density"))?;
-        let agg_arr = if agg_col.is_some() {
-            Some(out.column(4).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                PyValueError::new_err("stat_bin: expected Float64Array for agg_value")
-            })?)
-        } else {
-            None
-        };
-        for i in 0..n {
-            all_starts.push(starts.value(i));
-            all_ends.push(ends.value(i));
-            all_counts.push(counts.value(i));
-            all_densities.push(densities.value(i));
-            if let Some(agg_arr) = agg_arr {
-                all_agg_values.push(if agg_arr.is_null(i) { None } else { Some(agg_arr.value(i)) });
-            }
-            group_keys_out.push(g.clone());
+        let cols = compute_one_group(spec_ref, batch, Some(ixs), agg_col)?;
+        let n = cols.starts.len();
+        all_starts.extend(cols.starts);
+        all_ends.extend(cols.ends);
+        all_counts.extend(cols.counts);
+        all_densities.extend(cols.densities);
+        if let Some(agg_values) = cols.agg_values {
+            all_agg_values.extend(agg_values);
         }
+        group_keys_out.extend(std::iter::repeat_n(g.clone(), n));
     }
 
     build_bin_batch_grouped(
@@ -662,27 +660,27 @@ fn build_bin_batch_grouped(
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
 }
 
-fn empty_bin_output(with_agg: bool) -> PyResult<RecordBatch> {
-    build_bin_batch(BinColumns {
+fn empty_bin_columns(with_agg: bool) -> BinColumns {
+    BinColumns {
         starts: Vec::new(),
         ends: Vec::new(),
         counts: Vec::new(),
         densities: Vec::new(),
         agg_values: with_agg.then_some(Vec::new()),
-    })
+    }
 }
 
-fn single_unit_bin(v: f64, count: u64, agg_value: Option<f64>) -> PyResult<RecordBatch> {
+fn single_unit_bin_columns(v: f64, count: u64, agg_value: Option<f64>) -> BinColumns {
     let start = v - 0.5;
     let end   = v + 0.5;
     let density = (count as f64) / ((count as f64) * (end - start));
-    build_bin_batch(BinColumns {
+    BinColumns {
         starts: vec![start],
         ends: vec![end],
         counts: vec![count],
         densities: vec![density],
         agg_values: agg_value.map(|v| vec![Some(v)]),
-    })
+    }
 }
 
 use pyo3::prelude::*;
@@ -880,7 +878,7 @@ impl PyBin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, UInt64Array, RecordBatch};
+    use arrow::array::{Array, Float64Array, UInt64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -2373,17 +2371,16 @@ mod tests {
         assert_eq!(agg[b_idx], Some(150.0), "group B's own bin0 mean, not global");
     }
 
-    /// RED-proof (cycle-2 review) for `apply_grouped`'s null-preservation
-    /// branch (`if agg_arr.is_null(i) { None } else { Some(agg_arr.value(i)) }`,
-    /// bin.rs). `bin_agg_grouped_computes_per_group_bin_cell` above uses a
-    /// single bin per group, so every group-bin cell is non-empty and never
-    /// exercises the `is_null` arm — a mutant that unconditionally pushed
-    /// `Some(agg_arr.value(i))` (dropping the null check) would pass that
-    /// test but read Arrow's null-slot placeholder (0.0 for `Float64Array`)
-    /// instead of propagating the null. This fixture gives group "A" a
-    /// structurally empty second bin (group "B" does not), so a null must
-    /// survive the per-group `apply_one_group` call AND the grouped
-    /// re-stacking loop's positional re-read of column 4.
+    /// Null-preservation proof: a structurally empty group-bin's `agg_value`
+    /// must reach the final output as a real Arrow null, never `0.0` (the
+    /// `Float64Array` null-slot placeholder) and never `Aggregate`'s own
+    /// all-null convention. `bin_agg_grouped_computes_per_group_bin_cell`
+    /// above uses a single bin per group, so every group-bin cell is
+    /// non-empty and never exercises a structurally-empty bin. This fixture
+    /// gives group "A" a structurally empty second bin (group "B" does not),
+    /// so the `None` `compute_one_group` emits for that bin must survive
+    /// `apply_grouped`'s typed `Vec` accumulation into the row `build_bin_batch_grouped`
+    /// places it at.
     #[test]
     fn bin_agg_grouped_preserves_null_for_structurally_empty_group_bin() {
         use arrow::array::StringArray;

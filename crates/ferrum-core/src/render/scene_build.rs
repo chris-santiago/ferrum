@@ -1585,6 +1585,127 @@ fn route_panel_axes_and_grid(
     }
 }
 
+/// The ownership facts [`layer_geometry_encoding`] needs to decide its two
+/// normalizations, bundled rather than read off `LayerPrepared` and
+/// `mark_style` directly inside that function: `has_own_literal_paint` is
+/// derived from `mark_style` (a `DrawCtx`-local value this function does not
+/// otherwise need), so the caller computes it once and hands over the
+/// finished facts.
+struct LayerGeometryFlags {
+    /// Whether this layer declared its own `color` channel — see
+    /// [`LayerPrepared::color_is_own`].
+    color_is_own: bool,
+    /// Whether this layer's OWN `stroke=`/`fill=` mark kwarg names a real
+    /// color (not a clear like `stroke="none"`) — see the own-color doc
+    /// below for why a clear does not count.
+    has_own_literal_paint: bool,
+    /// Whether this layer declared its own `x` channel — see
+    /// [`LayerPrepared::x_is_own`].
+    x_is_own: bool,
+    /// Whether this layer declared its own `y` channel — see
+    /// [`LayerPrepared::y_is_own`].
+    y_is_own: bool,
+}
+
+/// The two DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
+/// needs before a mark builder sees its encoding: the own-color exemption and
+/// the own-span-axis normalization for rule/tick. Neither ever touches
+/// `layer.encoding` itself — both apply to a clone, so scale domains, axis
+/// chrome, position grouping, and the legend keep reading the merged
+/// encoding unchanged, while the geometry sees only the shape THIS layer
+/// actually declared.
+///
+/// **Own-color exemption** (spec §4.4): a layer whose `color` channel came
+/// purely from chart-level inheritance (`!flags.color_is_own`) must not have
+/// it reach the mark builder's per-row color read when doing so would
+/// override that layer's own declared paint — only the layer's OWN declared
+/// `color=` may drive per-row/per-group color variation. Applies
+/// unconditionally to `Mark::Text` (the `heatmap(annot=True)` colored-cells +
+/// colorless-labels shape, where an un-colored label must NEVER borrow the
+/// cells' hue), and to any OTHER mark only when that layer ALSO carries its
+/// own literal `stroke=`/`fill=` override that names a real
+/// color (`flags.has_own_literal_paint` — a *cleared* paint like
+/// `fill="none"`/`stroke="transparent"` does NOT count, because
+/// `desugar_ribbon`/`desugar_errorband` always pass `stroke="none"`, and
+/// reading that as "own paint" would strip the color channel those layers
+/// group their bands by) — a chart-level `color` set
+/// for one layer's legend (e.g. a diagnostic chart's per-class curve)
+/// silently repainted a sibling layer's own literal stroke override with the
+/// categorical palette's first color whenever that sibling declared no color
+/// of its own (`fm.roc_chart`'s grey dashed chance-diagonal `reference` line
+/// flipping to the first class's blue, fanning out into one duplicate
+/// polyline per class). The literal-override gate is deliberately narrower
+/// than "any non-owning mark": a layer with NO literal paint override that
+/// relies on a genuinely shared chart-level `color` to vary ITS OWN
+/// per-row/per-group fill — e.g. `catplot(kind="box", hue=x)`'s IQR
+/// `rect`/tick-cap/outlier-`point` layers, none of which declare their own
+/// `color=` because the desugar treats the shared x-axis category as the hue
+/// and lets every layer inherit it — must keep inheriting; an unconditional
+/// strip (mirroring the Text rule) would flatten every box to the first
+/// category's color instead of one color per box.
+///
+/// For a GROUPING mark (line/area/ribbon — `marks/line.rs`'s
+/// `build_color_detail_groups`), the cleared channel is not just a paint
+/// input: it is also the per-group split key, so clearing it collapses
+/// whatever per-color groups that layer's OWN batch would otherwise fan out
+/// into back down to a single merged node/polyline over every row — the
+/// desired effect for a literal-stroke layer that is conceptually ONE curve
+/// (the `roc_chart` chance-diagonal is collinear, so the merge is invisible),
+/// but a real topology change in general.
+///
+/// **Own-span-axis normalization for rule and tick** (spec §4.4). A
+/// reference-line layer, or a rug tick, declares the
+/// axis it belongs to by declaring exactly one positional channel — the
+/// diagnostic desugars all do this (`{"x": "_ref_zero"}` for a vertical zero
+/// line, `{"y": "_ref_zero"}` for a horizontal one; a bare
+/// `mark_tick().encode(x=...)` rug the same way). When the chart ALSO sets a
+/// chart-level `x`/`y`, `Encoding::inherit_from` fills in the opposite
+/// channel, and the mark's shape derivation would then see a two-channel
+/// pattern that is not the layer's own shape: `shap_chart(kind="beeswarm")`'s
+/// vertical zero line inherited the chart's ordinal `y="feature"` and
+/// rendered as one full-width HORIZONTAL span per row; a rug tick layered
+/// under a scatter (`fm.layer(scatter, mark_tick(band_size=...).encode(x=...))`)
+/// inherited the scatter's `y` and could no longer tell, from its own
+/// DrawCtx, that it was a bare rug rather than a composite tick layer that
+/// declares its own `y` — silently dropping `band_size` in the interactive
+/// merged-flat assembly while the static composite path (no cross-layer
+/// inheritance there) rendered it correctly, a static-vs-interactive
+/// divergence on the SAME spec.
+///
+/// Deliberately narrow: only when the layer declared exactly one of `x`/`y`
+/// and the merged encoding binds neither `x2` nor `y2`. A rule whose
+/// ranged/diagonal shape is assembled partly from inherited channels keeps
+/// assembling it, and a layer that declares both channels itself — including
+/// a composite tick layer such as a boxplot median/whisker-cap or errorbar
+/// cap, which sets its own `x` AND `y` explicitly in its desugar — keeps its
+/// own shape (and, for tick, `tick::build`'s fallthrough arm keeps reading
+/// that OWN `y` as present, so those composite ticks are unaffected and keep
+/// the fixed `tick_size*2.0` length regardless of the `band_size` they set on
+/// themselves).
+fn layer_geometry_encoding(
+    merged: crate::spec::encoding::Encoding,
+    mark: crate::spec::mark::Mark,
+    flags: LayerGeometryFlags,
+) -> crate::spec::encoding::Encoding {
+    let mut encoding = merged;
+    if !flags.color_is_own
+        && (mark == crate::spec::mark::Mark::Text || flags.has_own_literal_paint)
+    {
+        encoding.color = None;
+    }
+    if matches!(mark, crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick)
+        && encoding.x2.is_none()
+        && encoding.y2.is_none()
+    {
+        match (flags.x_is_own, flags.y_is_own) {
+            (true, false) => encoding.y = None,
+            (false, true) => encoding.x = None,
+            _ => {}
+        }
+    }
+    encoding
+}
+
 /// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
 /// mark-batch loop). Pure extraction — same position adjustment, same synthetic
 /// per-layer ChartSpec, same polar node transform, same alignment guard, same
@@ -1701,139 +1822,19 @@ fn build_panel_mark_batches(
         // discipline as `validate_mark_encoding` below.
         let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)?;
 
-        // Own-color exemption (spec §4.4, 2026-08-28 T4 amendment; widened
-        // batch-A T5d, 2026-08-28): a layer whose `color` channel came purely
-        // from chart-level inheritance (`!layer.color_is_own`) must not have
-        // it reach the mark builder's per-row color read when doing so would
-        // override that layer's own declared paint — only the layer's OWN
-        // declared `color=` may drive per-row/per-group color variation.
-        // Originally scoped to `Mark::Text` unconditionally (the
-        // `heatmap(annot=True)` colored-cells + colorless-labels shape,
-        // where an un-colored label must NEVER borrow the cells' hue).
-        // Widened here to any OTHER mark, but only when that layer ALSO
-        // carries its own literal `stroke=`/`fill=` override that names a
-        // real color (`*_is_user_set && !*_cleared` — see the clear carve-out
-        // at the predicate below) — a chart-level
-        // `color` set for one layer's legend (e.g. a diagnostic chart's
-        // per-class curve) silently repainted a sibling layer's own literal
-        // stroke override with the categorical palette's first color
-        // whenever that sibling declared no color of its own (`fm.roc_chart`'s
-        // grey dashed chance-diagonal `reference` line flipping to the first
-        // class's blue, and fanning out into one duplicate polyline per
-        // class). The literal-override gate is deliberately narrower than
-        // "any non-owning mark": a layer with NO literal paint override that
-        // relies on a genuinely shared chart-level `color` to vary ITS OWN
-        // per-row/per-group fill — e.g. `catplot(kind="box", hue=x)`'s IQR
-        // `rect`/tick-cap/outlier-`point` layers, none of which declare their
-        // own `color=` because the desugar treats the shared x-axis category
-        // as the hue and lets every layer inherit it — must keep inheriting;
-        // an unconditional strip (mirroring the Text rule) silently flattened
-        // every box to the first category's color instead of one color per
-        // box. Clearing `color` on this DrawCtx-local copy (not on
-        // `layer.encoding` itself) is what makes `resolve_fill_color`/
-        // `resolve_stroke_color`/each mark's own per-row lookup fall through
-        // to that mark's fill/stroke/theme-default precedence, without
-        // starving the legend or dodge/stack position grouping the way an
-        // earlier revision did by deleting the channel from
-        // `LayerPrepared.encoding` itself (see `Encoding::inherit_from`'s doc
-        // comment for the full history).
-        //
-        // For a GROUPING mark (line/area/ribbon — `marks/line.rs`'s
-        // `build_color_detail_groups`), the cleared channel is not just a
-        // paint input: it is also the per-group split key. Clearing it
-        // therefore collapses whatever per-color groups that layer's OWN
-        // batch would otherwise have fanned out into back down to a single
-        // merged node/polyline over every row. This is exactly the desired
-        // effect for a literal-stroke layer that is conceptually ONE curve
-        // (the `roc_chart` chance-diagonal is collinear — `y = x` — so the
-        // merge is invisible), but it is a real topology change in general:
-        // a literal-stroke line layer drawn over a batch with real per-group
-        // discontinuities would render one polyline with spurious connecting
-        // segments between what used to be separate groups, not N separate
-        // ones. There is no route back to per-group splitting for such a
-        // layer without giving it its own `color=`/`detail=`, since the
-        // exemption's whole point is that this layer's color channel was
-        // never its own to group by.
-        let mut layer_spec_encoding = layer.encoding.clone();
-        if !layer.color_is_own {
-            // A *cleared* paint (`fill="none"` / `stroke="transparent"`) is not
-            // an own literal paint for this purpose (NF-A3 ribbon half, intent
-            // gate). The exemption protects a color the layer declared from
-            // being overwritten by an inherited one; a clear declares no color
-            // at all — it declares the channel unpainted, and the mark builders
-            // carry that intent separately in
-            // `MarkPaint::{fill,stroke}_source`, which survive the color scale.
-            // Reading a clear as "own paint" is what made
-            // `mark_ribbon().encode(color=…)` draw ONE merged band in the theme
-            // default fill under a full multi-category legend: `desugar_ribbon`
-            // (and `desugar_errorband`) always pass `stroke="none"`, so every
-            // ribbon layer tripped the exemption and lost the color channel it
-            // groups its bands by — while `mark_area`, whose lowering is flat
-            // and never reaches this seam, partitioned correctly from the same
-            // data. The layers that motivated the widening (e.g. `roc_chart`'s
-            // grey dashed chance diagonal, `stroke="#9ca3af"`) declare a real
-            // color and are unaffected, as is a layer that clears one channel
-            // and paints the other.
-            let has_own_literal_paint = mark_style.paint.stroke_source
-                == crate::render::draw::PaintSource::UserColor
-                || mark_style.paint.fill_source == crate::render::draw::PaintSource::UserColor;
-            if layer.mark == crate::spec::mark::Mark::Text || has_own_literal_paint {
-                layer_spec_encoding.color = None;
-            }
-        }
-        // Own-span-axis normalization for rule and tick (spec §4.4, batch-A
-        // Task 13 spec c3, 2026-09-01; extended to tick in the batch-E task-3
-        // review-gate cycle 3, 2026-09-06). A reference-line layer, or a rug
-        // tick, declares the axis it belongs to by declaring exactly one
-        // positional channel — the diagnostic desugars all do this (`{"x":
-        // "_ref_zero"}` for a vertical zero line, `{"y": "_ref_zero"}` for a
-        // horizontal one; a bare `mark_tick().encode(x=...)` rug the same
-        // way). When the chart ALSO sets a chart-level `x`/`y`,
-        // `Encoding::inherit_from` fills in the opposite channel, and the
-        // mark's shape derivation would then see a two-channel pattern that
-        // is not the layer's own shape: `shap_chart(kind="beeswarm")`'s
-        // vertical zero line inherited the chart's ordinal `y="feature"` and
-        // rendered as one full-width HORIZONTAL span per row;
-        // `alpha_selection_chart`'s and `pca_scree_chart`'s vertical markers
-        // did the same; a rug tick layered under a scatter (`fm.layer(scatter,
-        // mark_tick(band_size=...).encode(x=...))`) inherited the scatter's
-        // `y` and could no longer tell, from its own DrawCtx, that it was a
-        // bare rug rather than a composite tick layer that declares its own
-        // `y` — silently dropping `band_size` in the interactive merged-flat
-        // assembly while the static composite path (no cross-layer
-        // inheritance there) rendered it correctly, a static-vs-interactive
-        // divergence on the SAME spec. Clearing the inherited-only channel on
-        // this DrawCtx-LOCAL copy (never on `layer.encoding`, exactly as the
-        // own-color exemption above) keeps every other consumer — scale
-        // domains, axis chrome, position grouping, the legend — reading the
-        // merged encoding unchanged, while the geometry sees the shape the
-        // layer actually declared, in EVERY assembly path that routes through
-        // this function (both the static composite leaves and the interactive
-        // merged-flat chart share it).
-        //
-        // Deliberately narrow: only when the layer declared exactly one of
-        // `x`/`y` and the merged encoding binds neither `x2` nor `y2`. A rule
-        // whose ranged/diagonal shape is assembled partly from inherited
-        // channels keeps assembling it, and a layer that declares both
-        // channels itself — including a composite tick layer such as a
-        // boxplot median/whisker-cap or errorbar cap, which sets its own `x`
-        // AND `y` explicitly in its desugar — keeps its own shape (and, for
-        // tick, `tick::build`'s fallthrough arm keeps reading that OWN `y` as
-        // present, so those composite ticks are unaffected by this
-        // normalization and keep the fixed `tick_size*2.0` length regardless
-        // of the `band_size` they set on themselves).
-        if matches!(
+        let has_own_literal_paint = mark_style.paint.stroke_source
+            == crate::render::draw::PaintSource::UserColor
+            || mark_style.paint.fill_source == crate::render::draw::PaintSource::UserColor;
+        let layer_spec_encoding = layer_geometry_encoding(
+            layer.encoding.clone(),
             layer.mark,
-            crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick
-        ) && layer_spec_encoding.x2.is_none()
-            && layer_spec_encoding.y2.is_none()
-        {
-            match (layer.x_is_own, layer.y_is_own) {
-                (true, false) => layer_spec_encoding.y = None,
-                (false, true) => layer_spec_encoding.x = None,
-                _ => {}
-            }
-        }
+            LayerGeometryFlags {
+                color_is_own: layer.color_is_own,
+                has_own_literal_paint,
+                x_is_own: layer.x_is_own,
+                y_is_own: layer.y_is_own,
+            },
+        );
         // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
         // Stamped onto the synthetic spec so every mark builder that asks
         // `ctx.spec.coord` — `arc::polar_geom`, `bar::build_polar`,
@@ -3239,7 +3240,13 @@ fn build_panel_breaks(
             // width. Dropping the entry makes this render exactly the unbroken
             // chart, which is what the warning below promises. Disclosed
             // behavior change — see ferrum-spec.md's batch-H dated note.
-            let (lo, hi) = data_domain;
+            // Named low-to-high regardless of the scale's own storage order:
+            // `data_domain()` returns the domain pair verbatim (a reversed
+            // axis stores `[hi, lo]`), and this message is read by a user
+            // who wrote a gap in data space, not by anything that cares
+            // which end the scale calls first.
+            let (d0, d1) = data_domain;
+            let (lo, hi) = (d0.min(d1), d0.max(d1));
             ledger.note_panel_fact(group.axis, BreakFact::NoOverlap, panel_idx, || {
                 RenderWarning::BreakAxisIneffective {
                     axis: group.axis,
@@ -9477,6 +9484,110 @@ mod tests {
         );
     }
 
+    // ── `layer_geometry_encoding`, one unit test per rule ────────────────
+
+    fn geometry_flags(
+        color_is_own: bool,
+        has_own_literal_paint: bool,
+        x_is_own: bool,
+        y_is_own: bool,
+    ) -> LayerGeometryFlags {
+        LayerGeometryFlags { color_is_own, has_own_literal_paint, x_is_own, y_is_own }
+    }
+
+    fn xy_encoding() -> crate::spec::encoding::Encoding {
+        crate::spec::encoding::Encoding {
+            x: Some(EncodingSpec { field: "x0".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "c0".into(), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    /// Own-color rule 1: a `Mark::Text` layer whose `color` is purely
+    /// inherited (`!color_is_own`) loses it, regardless of literal paint —
+    /// the `heatmap(annot=True)` colorless-labels shape.
+    #[test]
+    fn own_color_exemption_clears_inherited_color_on_text() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(false, false, true, true));
+        assert!(out.color.is_none(), "an inherited color must not reach a Text layer's own read");
+    }
+
+    /// Own-color rule 2: a non-Text layer with an inherited `color` ALSO
+    /// loses it when the layer carries its own literal `stroke=`/`fill=`
+    /// override — the `roc_chart` chance-diagonal shape.
+    #[test]
+    fn own_color_exemption_clears_inherited_color_on_a_literal_stroke_layer() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(false, true, true, true));
+        assert!(out.color.is_none(), "a literal-stroke layer must not read an inherited color");
+    }
+
+    /// Vacuity control for both own-color rules: a layer that declared its
+    /// own `color` (`color_is_own`) keeps it, even on `Mark::Text` with a
+    /// literal paint override — the exemption only ever strips an INHERITED
+    /// color.
+    #[test]
+    fn own_color_exemption_leaves_an_own_declared_color_alone() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Text, geometry_flags(true, true, true, true));
+        assert!(out.color.is_some(), "a layer's OWN color must never be stripped");
+    }
+
+    /// Own-color negative: a non-Text layer with an inherited `color` and NO
+    /// literal paint override keeps it — the `catplot(kind="box", hue=x)` IQR
+    /// shape, which relies on the inherited color to group its own rows.
+    #[test]
+    fn own_color_exemption_leaves_inherited_color_alone_with_no_literal_paint() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Rect, geometry_flags(false, false, true, true));
+        assert!(out.color.is_some(), "no literal override means the inherited color still drives grouping");
+    }
+
+    /// Own-span rule 1: a `Rule` layer that declared only `x` of its own
+    /// loses the inherited `y` — a vertical zero-line shape.
+    #[test]
+    fn own_span_normalization_clears_inherited_y_when_only_x_is_own() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Rule, geometry_flags(true, false, true, false));
+        assert!(out.x.is_some(), "the layer's own x survives");
+        assert!(out.y.is_none(), "the inherited y must be cleared");
+    }
+
+    /// Own-span rule 2: the `Tick` mirror, declaring only `y` of its own —
+    /// the bare rug-tick shape.
+    #[test]
+    fn own_span_normalization_clears_inherited_x_when_only_y_is_own() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Tick, geometry_flags(true, false, false, true));
+        assert!(out.x.is_none(), "the inherited x must be cleared");
+        assert!(out.y.is_some(), "the layer's own y survives");
+    }
+
+    /// Own-span negative 1: a layer that declared BOTH `x` and `y` itself —
+    /// a composite tick's boxplot whisker-cap shape — keeps both.
+    #[test]
+    fn own_span_normalization_leaves_a_layer_that_owns_both_channels_alone() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Tick, geometry_flags(true, false, true, true));
+        assert!(out.x.is_some() && out.y.is_some(), "a layer owning both channels keeps both");
+    }
+
+    /// Own-span negative 2: a ranged rule (`x2` bound) is a two-endpoint
+    /// shape assembled partly from inherited channels — the normalization
+    /// must not touch it even though only `x` is own.
+    #[test]
+    fn own_span_normalization_leaves_a_ranged_rule_alone() {
+        let ranged = crate::spec::encoding::Encoding {
+            x2: Some(EncodingSpec { field: "x1".into(), ..Default::default() }),
+            ..xy_encoding()
+        };
+        let out = layer_geometry_encoding(ranged, Mark::Rule, geometry_flags(true, false, true, false));
+        assert!(out.x.is_some() && out.y.is_some(), "a ranged rule's inherited y must survive");
+    }
+
+    /// Own-span negative 3: a mark neither rule nor tick (e.g. `Point`) is
+    /// never touched by this normalization, even with only one own channel.
+    #[test]
+    fn own_span_normalization_leaves_a_non_rule_tick_mark_alone() {
+        let out = layer_geometry_encoding(xy_encoding(), Mark::Point, geometry_flags(true, false, true, false));
+        assert!(out.x.is_some() && out.y.is_some(), "only Rule/Tick are subject to this normalization");
+    }
+
     /// The other side of that boundary, and the guard against over-narrowing
     /// the cycle-2 fix to "own-declared channels only": the SAME inherited,
     /// absent `x` on a mark nothing normalizes — `mark_point` genuinely reads
@@ -10226,6 +10337,32 @@ mod tests {
                 assert_eq!(*axis, AlignAxis::Y);
                 assert!(reason.contains("domain"), "{reason}");
                 assert!(reason.contains("100"), "the domain is named: {reason}");
+            }
+            other => panic!("expected BreakAxisIneffective, got {other:?}"),
+        }
+    }
+
+    /// A REVERSED axis (`reverse=true`, domain stored `[hi, lo]`) whose gaps
+    /// miss the domain must still name it low-to-high — `(10, 100)`, not
+    /// `(100, 10)`. The scale's own `data_domain()` returns the domain pair
+    /// verbatim in whatever orientation it was constructed, so the message
+    /// must order it explicitly rather than trust that orientation.
+    #[test]
+    fn a_break_whose_gaps_miss_the_domain_on_a_reversed_axis_names_it_low_to_high() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([100.0, 10.0], [320.0, 20.0]),
+        );
+        let warnings = structural_warnings(&[break_spec(AlignAxis::Y, vec![[150.0, 850.0]])], &scales);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::BreakAxisIneffective { axis, reason } => {
+                assert_eq!(*axis, AlignAxis::Y);
+                assert_eq!(
+                    reason, "no gap overlaps the axis domain (10, 100)",
+                    "the domain must read low-to-high regardless of the scale's own \
+                     reversed storage order"
+                );
             }
             other => panic!("expected BreakAxisIneffective, got {other:?}"),
         }

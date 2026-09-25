@@ -3,7 +3,9 @@
 
 use crate::render::draw::{col_as_f64, resolve_stroke_paint, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::arrowhead::{arrowhead_path_with_opacity, arrowhead_triangle};
+use crate::render::marks::arrowhead::{
+    arrowhead_path_with_opacity, arrowhead_triangle, DEFAULT_ARROW_HEAD_SIZE,
+};
 use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::RenderError;
@@ -82,7 +84,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // `annotate_arrow`'s `head_size`. `None`/unset `arrow` is `false` —
     // byte-identical to every segment rendered before this field existed.
     let arrow_enabled = ctx.mark_style.segment.arrow.unwrap_or(false);
-    let arrow_size = ctx.mark_style.segment.arrow_size.unwrap_or(8.0);
+    let arrow_size = ctx.mark_style.segment.arrow_size.unwrap_or(DEFAULT_ARROW_HEAD_SIZE);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
@@ -938,7 +940,7 @@ mod tests {
         let p1y = scales.y.to_pixel_f64(0.0).unwrap();
         let p2x = scales.x.to_pixel_f64(50.0).unwrap();
         let p2y = scales.y.to_pixel_f64(0.0).unwrap();
-        let expected = arrowhead_triangle(p1x, p1y, p2x, p2y, 8.0)
+        let expected = arrowhead_triangle(p1x, p1y, p2x, p2y, DEFAULT_ARROW_HEAD_SIZE)
             .expect("non-degenerate segment must yield a triangle");
         let got: Vec<(f64, f64)> = path.iter().filter_map(|c| match c {
             ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),

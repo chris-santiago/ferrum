@@ -753,6 +753,16 @@ pub enum RenderError {
     /// therefore refuses per-leaf, exactly like every other per-leaf
     /// render error.
     BreakAxisIncompatibleCoord { coord: &'static str, axis: AlignAxis },
+    /// A `Utf8View`/`LargeUtf8` string column (raw input, or a transform
+    /// output that materializes one — `data_flatten` on a polars
+    /// `LargeList<LargeUtf8>`, a `LargeUtf8` groupby column
+    /// `group_key::materialize_groupby_col` echoes back) could not be
+    /// normalized to `Utf8` by `prepare::normalize_string_views`. `field`
+    /// names the offending column for an `arrow::compute::cast` failure
+    /// (e.g. more than `i32::MAX` bytes of string data — `LargeUtf8`'s
+    /// reason for existing); empty for a normalized-schema `RecordBatch`
+    /// rebuild failure, which is not about any one column.
+    StringNormalizationFailed { field: String, reason: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -873,7 +883,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // AUTHORED-token discipline as `RenderWarning::SortSpecIgnored`'s
         // channel-shorthand family (never the resolved/post-flip slot), so
         // nothing here needs an un-flip correction.
-        | RenderError::SortSpecMalformed { .. }) => other,
+        | RenderError::SortSpecMalformed { .. }
+        // Carries a column name (or none, for the schema-rebuild case), not
+        // a positional encoding channel token — nothing here to un-flip.
+        | RenderError::StringNormalizationFailed { .. }) => other,
     }
 }
 
@@ -1175,6 +1188,13 @@ impl std::fmt::Display for RenderError {
                  remove the break or render this chart under Cartesian coords",
                 axis.wire_name()
             ),
+            Self::StringNormalizationFailed { field, reason } => {
+                if field.is_empty() {
+                    write!(f, "could not normalize string columns to Utf8: {reason}")
+                } else {
+                    write!(f, "could not normalize column '{field}' to Utf8: {reason}")
+                }
+            }
         }
     }
 }

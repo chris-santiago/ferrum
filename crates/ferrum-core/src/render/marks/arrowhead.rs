@@ -7,6 +7,11 @@
 //! three consumers across three subsystems, not `draw.rs`'s size, is the
 //! reason this geometry needed a dedicated module.
 
+/// The default arrowhead size in pixels, shared by every consumer that draws
+/// one without an explicit override: `annotate_arrow`'s `head_size=` default
+/// and `mark_segment(arrow=True)`'s `arrow_size=` default.
+pub(crate) const DEFAULT_ARROW_HEAD_SIZE: f64 = 8.0;
+
 /// Compute the three vertices of a directed arrowhead triangle whose tip
 /// sits at `(x2, y2)`, pointing away from `(x1, y1)`. This is the geometry
 /// source of truth extracted from `annotation::emit_arrow` (spec §4 H1) —

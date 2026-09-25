@@ -148,18 +148,11 @@ fn apply_grouped(
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
 
     for (group_key, rows) in &partition.groups {
-        let result = apply_one_group(spec, batch, field_idx, Some(rows))?;
-        let x_col = result.column(0).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-            PyValueError::new_err("data_density: expected Float64Array for the value column")
-        })?;
-        let y_col = result.column(1).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-            PyValueError::new_err("data_density: expected Float64Array for the density column")
-        })?;
-        for i in 0..result.num_rows() {
-            all_x.push(x_col.value(i));
-            all_y.push(y_col.value(i));
-            group_keys_out.push(group_key.clone());
-        }
+        let (x, y) = compute_one_group(spec, batch, field_idx, Some(rows))?;
+        let n = x.len();
+        all_x.extend(x);
+        all_y.extend(y);
+        group_keys_out.extend(std::iter::repeat_n(group_key.clone(), n));
     }
 
     let mut out_fields = vec![
@@ -186,6 +179,28 @@ fn apply_one_group(
     field_idx: usize,
     only_rows: Option<&[usize]>,
 ) -> PyResult<RecordBatch> {
+    let (x_grid, density) = compute_one_group(spec, batch, field_idx, only_rows)?;
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new(&spec.as_.0, DataType::Float64, false),
+        Field::new(&spec.as_.1, DataType::Float64, false),
+    ]));
+    let cols: Vec<ArrayRef> =
+        vec![Arc::new(Float64Array::from(x_grid)), Arc::new(Float64Array::from(density))];
+    RecordBatch::try_new(out_schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("data_density: {e}")))
+}
+
+/// This transform's per-group compute: resolve the column, fit the kernel,
+/// and return the x-grid/density `Vec`s directly — no `RecordBatch` built
+/// here. [`apply_one_group`] wraps this with a schema for the ungrouped
+/// entry point; [`apply_grouped`] calls this directly per partition and
+/// extends its own accumulator `Vec`s from the typed result.
+fn compute_one_group(
+    spec: &DensityDataSpec,
+    batch: &RecordBatch,
+    field_idx: usize,
+    only_rows: Option<&[usize]>,
+) -> PyResult<(Vec<f64>, Vec<f64>)> {
     let col = crate::transform::numeric_util::coerce_to_float64(
         batch.column(field_idx),
         "data_density",
@@ -218,16 +233,7 @@ fn apply_one_group(
     }
 
     if data.is_empty() {
-        let out_schema = Arc::new(Schema::new(vec![
-            Field::new(&spec.as_.0, DataType::Float64, false),
-            Field::new(&spec.as_.1, DataType::Float64, false),
-        ]));
-        let cols: Vec<ArrayRef> = vec![
-            Arc::new(Float64Array::from(Vec::<f64>::new())),
-            Arc::new(Float64Array::from(Vec::<f64>::new())),
-        ];
-        return RecordBatch::try_new(out_schema, cols)
-            .map_err(|e| PyValueError::new_err(format!("data_density: {e}")));
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let n = data.len() as f64;
@@ -267,16 +273,7 @@ fn apply_one_group(
         }
     }
 
-    let out_schema = Arc::new(Schema::new(vec![
-        Field::new(&spec.as_.0, DataType::Float64, false),
-        Field::new(&spec.as_.1, DataType::Float64, false),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(x_grid)),
-        Arc::new(Float64Array::from(density)),
-    ];
-    RecordBatch::try_new(out_schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("data_density: {e}")))
+    Ok((x_grid, density))
 }
 
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────
@@ -777,5 +774,4 @@ mod tests {
         let a = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(a.value(0), "q", "first-appearance order, not sorted");
     }
-
 }

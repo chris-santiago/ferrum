@@ -525,22 +525,26 @@ pub(in crate::render) fn build_from_scale_spec(
         // reaches here it resolves identically whoever wrote it (#247A).
         ScaleSpec::Linear { common, nice, zero, system_injected: _ } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, *zero, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, zero: *zero, reverse: common.reverse };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, *nice))
         }
         ScaleSpec::Time { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -564,17 +568,20 @@ pub(in crate::render) fn build_from_scale_spec(
         }
         ScaleSpec::Pow { exponent, common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
-            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, data_extent, pr, false, common.reverse)?;
+            let adjust = DomainAdjust { padding: common.padding, reverse: common.reverse, ..Default::default() };
+            let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, data_extent, pr, adjust)?;
             // F-L04-06: `utc=true` survives resolution — the wire tag no
             // longer collapses into an indistinguishable `TimeScale` once
             // resolved (`new_internal` used to default it away here).
@@ -661,7 +668,7 @@ pub(in crate::render) fn build_from_scale_spec(
             // completely separate resolution path — `scale_resolve::color`),
             // so both are hard-coded `false` rather than threading a value
             // that could never mean anything else here.
-            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, None, data_extent, pr, false, false)?;
+            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, data_extent, pr, DomainAdjust::default())?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }
     })
@@ -805,35 +812,44 @@ pub(in crate::render) fn extend_extent_to_zero(lo: f64, hi: f64) -> (f64, f64) {
     (if lo > 0.0 { 0.0 } else { lo }, if hi < 0.0 { 0.0 } else { hi })
 }
 
+/// The three domain-resolution knobs [`resolve_continuous_domain_and_range`]
+/// needs, named instead of three positional parameters: `padding` (an
+/// explicit override, else the auto-derived inset fraction), `zero` (widen
+/// the resolved extent to include zero — `ScaleSpec::Linear`'s own field,
+/// the only continuous variant that carries one), and `reverse` (swap the
+/// resolved domain pair — `ContinuousScaleCommon::reverse`).
+///
+/// `Default` is every OTHER continuous variant's answer: no padding
+/// override, no zero-extension, no reversal.
+#[derive(Debug, Clone, Copy, Default)]
+struct DomainAdjust {
+    padding: Option<f64>,
+    zero: bool,
+    reverse: bool,
+}
+
 /// Resolve `(domain, range)` for a continuous ScaleSpec variant, then apply
-/// `zero`'s zero-extension and `reverse`'s domain-swap sugar, in that order,
-/// as the LAST two steps (rust-design review S3-1 / refactor 4).
+/// `adjust.zero`'s zero-extension and `adjust.reverse`'s domain-swap sugar,
+/// in that order, as the LAST two steps.
 ///
-/// This is now the ONE call every continuous variant's arm in
-/// `build_from_scale_spec` makes — replacing seven call sites that each
-/// separately restated `apply_domain_reverse(d, common.reverse)` after
-/// calling this function, a duplication nothing enforced (an eighth
-/// continuous variant could have called this function, resolved fine, and
-/// silently never reversed). `zero`/`reverse` are required parameters here,
-/// not optional ones a future call site could omit: a variant that means
-/// neither passes `false, false` explicitly (see the continuous-degrading
-/// arm below), so forgetting to decide is a missing-argument compile error,
-/// not a runtime gap.
+/// This is the ONE call every continuous variant's arm in
+/// `build_from_scale_spec` makes. `adjust` is a required parameter, not
+/// optional: a variant that means neither `zero` nor `reverse` passes
+/// `DomainAdjust::default()` explicitly (see the continuous-degrading arm
+/// below), so omitting a decision is a missing-argument compile error, not a
+/// runtime gap.
 ///
-/// `zero` is `ScaleSpec::Linear`'s own field — the only continuous variant
-/// that carries one — applied BEFORE the swap: `apply_domain_reverse`'s doc
-/// explains why reversing first would corrupt `zero`'s ascending-pair
-/// assumption rather than merely fail to match a hand-written descending
-/// domain. Every other variant passes `false`, a guaranteed no-op (the
-/// `d.len() == 2` guard below).
+/// `adjust.zero` is applied BEFORE the swap: `apply_domain_reverse`'s doc
+/// explains why reversing first corrupts `zero`'s ascending-pair assumption
+/// on any domain, not only a hand-written descending one. Every variant but
+/// Linear passes `zero: false`, a guaranteed no-op (the `d.len() == 2` guard
+/// below).
 fn resolve_continuous_domain_and_range(
     domain: &Option<Vec<f64>>,
     range: &Option<Vec<f64>>,
-    padding: Option<f64>,
     data_extent: &dyn Fn() -> Result<(f64, f64), RenderError>,
     pr: (f64, f64),
-    zero: bool,
-    reverse: bool,
+    adjust: DomainAdjust,
 ) -> Result<(Vec<f64>, Vec<f64>), RenderError> {
     let mut d = match domain {
         Some(d) => d.clone(),
@@ -845,16 +861,16 @@ fn resolve_continuous_domain_and_range(
     let r = if let Some(r) = range {
         r.clone()
     } else {
-        let frac = resolve_padding_fraction(padding, domain.is_some());
+        let frac = resolve_padding_fraction(adjust.padding, domain.is_some());
         let inset = inset_pixel_range(pr, frac);
         vec![inset.0, inset.1]
     };
-    if zero && d.len() == 2 {
+    if adjust.zero && d.len() == 2 {
         let (lo, hi) = extend_extent_to_zero(d[0], d[1]);
         d[0] = lo;
         d[1] = hi;
     }
-    let d = apply_domain_reverse(d, reverse);
+    let d = apply_domain_reverse(d, adjust.reverse);
     Ok((d, r))
 }
 

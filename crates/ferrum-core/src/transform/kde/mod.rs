@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -319,6 +319,37 @@ fn apply_one_group(
     warn_ctx: &TransformContext,
     group: Option<&str>,
 ) -> PyResult<RecordBatch> {
+    let (grid, density) =
+        compute_one_group(spec, batch, only_indices, count_scale_pinned_extent, warn_ctx, group)?;
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Float64, false),
+        Field::new("density", DataType::Float64, true),
+    ]));
+    let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(grid)), Arc::new(Float64Array::from(density))];
+    RecordBatch::try_new(out_schema, cols).map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
+}
+
+/// This transform's per-group compute: resolve the column, fit the kernel,
+/// and return the grid/density `Vec`s directly — no `RecordBatch` built
+/// here. [`apply_one_group`] wraps this with a schema for the ungrouped
+/// entry point; [`apply_grouped`] calls this directly per partition and
+/// extends its own accumulator `Vec`s from the typed result.
+///
+/// **Null-to-NaN rule:** `density` never carries an Arrow null — a
+/// degenerate fit (fewer than 2 clean values, or a non-positive/non-finite
+/// bandwidth) reports a [`TransformWarning::DegenerateFit`] and fills every
+/// grid point with `f64::NAN`, the real float value, not an absent one. This
+/// is decided HERE, at the compute step, once; nothing downstream (the
+/// schema, the grouped accumulator, or a caller) needs to translate between
+/// an Arrow null and a NaN sentinel for this transform's output.
+fn compute_one_group(
+    spec: &KdeSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+    count_scale_pinned_extent: Option<(f64, f64)>,
+    warn_ctx: &TransformContext,
+    group: Option<&str>,
+) -> PyResult<(Vec<f64>, Vec<f64>)> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_kde: column '{}' not found", spec.field))
@@ -398,21 +429,12 @@ fn apply_one_group(
         }
     }
 
-    let out_schema = Arc::new(Schema::new(vec![
-        Field::new("value", DataType::Float64, false),
-        Field::new("density", DataType::Float64, true),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(grid)),
-        Arc::new(Float64Array::from(density)),
-    ];
-    RecordBatch::try_new(out_schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
+    Ok((grid, density))
 }
 
-/// Partition input batch by the groupby columns, call apply_one_group per
-/// partition, then stack the results into a single batch with the group
-/// columns appended after the 2nd field.
+/// Partition input batch by the groupby columns, call `compute_one_group`
+/// per partition, and concatenate the typed columns into a single batch with
+/// the group columns appended after the 2nd field.
 fn apply_grouped(
     spec: &KdeSpec,
     batch: &RecordBatch,
@@ -449,19 +471,13 @@ fn apply_grouped(
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for (g, ixs) in &partition.groups {
         let label = describe_group_keys(group_cols, g);
-        let out = apply_one_group(
+        let (values, density) = compute_one_group(
             &shared_spec, batch, Some(ixs), count_scale_pinned_extent, warn_ctx, Some(&label),
         )?;
-        let n = out.num_rows();
-        let values = out.column(0).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'value' output column"))?;
-        let density = out.column(1).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'density' output column"))?;
-        for i in 0..n {
-            all_values.push(values.value(i));
-            all_density.push(if density.is_null(i) { f64::NAN } else { density.value(i) });
-            group_keys_out.push(g.clone());
-        }
+        let n = values.len();
+        all_values.extend(values);
+        all_density.extend(density);
+        group_keys_out.extend(std::iter::repeat_n(g.clone(), n));
     }
 
     let mut fields = vec![
