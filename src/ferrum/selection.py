@@ -95,9 +95,9 @@ class SelectionMark:
             "stroke_width": self.stroke_width,
         }
         if self.fill is not None:
-            d["fill"] = _hex_to_color_dict(self.fill, context=f"SelectionMark: fill={self.fill!r}")
+            d["fill"] = _color_to_wire_dict(self.fill, context=f"SelectionMark: fill={self.fill!r}")
         if self.stroke is not None:
-            d["stroke"] = _hex_to_color_dict(
+            d["stroke"] = _color_to_wire_dict(
                 self.stroke, context=f"SelectionMark: stroke={self.stroke!r}"
             )
         if self.stroke_dash is not None:
@@ -742,40 +742,55 @@ def _to_event_expr(s: str) -> str | dict[str, str]:
     return {"custom": s}
 
 
-def _hex_to_color_dict(color_str: str, *, context: str) -> dict[str, int]:
-    """Parse a color string into the wire color dict via the one Rust parser.
-
-    Routes through :func:`ferrum.color.to_hex`, so this accepts the exact
-    vocabulary every other ferrum color boundary accepts (CSS names, hex,
-    ``rgb()``/``rgba()``) — not just hex. Raises ``ValueError`` on anything
-    unparseable; there is no silent fallback.
+def _color_to_wire_dict(color_str: str, *, context: str) -> dict[str, int]:
+    """Parse a color string into the selection wire's ``{r, g, b, a}`` dict.
 
     Parameters
     ----------
-    context:
+    color_str : str
+        The color to parse: a CSS name, hex (``#rgb``/``#rgba``/``#rrggbb``/
+        ``#rrggbbaa``), or a functional ``rgb()``/``rgba()`` form — the exact
+        vocabulary every other ferrum color boundary accepts, via the one
+        Rust parser (:func:`ferrum._core.parse_color_to_rgba`). There is no
+        Python-side re-parsing: the byte tuple it returns becomes the dict
+        directly.
+    context : str
         Human-readable description of the failing call site (e.g.
         ``"SelectionMark: fill='nonsense'"`` or
         ``"fm.value('nonsense') for channel='color'"``), prefixed onto any
         raised message. Mirrors ``marks/base.py``'s
         ``_validate_literal_color`` prefix shape, so a bad literal raised
-        several frames inside ``.to_svg()`` (this is a construction-time
-        surface, not a construction-time gate — the failure only surfaces
-        when the conditional/mark is serialized) is traceable back to the
-        call that produced it.
+        several frames inside ``.to_svg()`` — the failure surfaces at
+        serialization, not at construction — is traceable back to the call
+        that produced it.
 
+    Returns
+    -------
+    dict[str, int]
+        ``{"r": ..., "g": ..., "b": ..., "a": ...}``, each an ``int`` in
+        ``[0, 255]``.
+
+    Raises
+    ------
+    ValueError
+        If *color_str* is a paint-clearing sentinel (``"none"``/
+        ``"transparent"``, trimmed and case-insensitive) or is not a
+        recognized CSS color name, hex literal, or ``rgb()``/``rgba()``
+        form.
+
+    Notes
+    -----
     ``"none"``/``"transparent"`` are refusals here, not the paint-clear they
-    are on the mark-style surface (spec §4.1, amended 2026-09-01, extended to
-    ``"transparent"`` in the 2026-09-01 T8 quality-review supersession): the
-    selection wire's ``{r, g, b, a}`` color dict has no representation for a
-    cleared paint, so a bound selection value can't express either spelling
-    (logged follow-up). Both spellings get the same dedicated message rather
-    than the generic accepted-forms text, since neither is a typo or an
-    unrecognized vocabulary item — each is a real color-clearing request
-    this surface can't fulfil yet. The match is trimmed and case-insensitive
-    (``"None"``, ``"NONE"``, ``" none "``, ``"Transparent"``, ``" transparent "``
-    all count) via the shared ``ferrum._validate.is_none_color_sentinel``
-    predicate — the same one ``marks/base.py``'s ``_is_paint_sentinel``
-    composes from, matching Rust's
+    are on the mark-style surface: the selection wire's ``{r, g, b, a}``
+    color dict has no representation for a cleared paint, so a bound
+    selection value can't express either spelling. Both spellings get the
+    same dedicated message rather than the generic accepted-forms text,
+    since neither is a typo or an unrecognized vocabulary item — each is a
+    real color-clearing request this surface can't fulfil. The match is
+    trimmed and case-insensitive (``"None"``, ``"NONE"``, ``" none "``,
+    ``"Transparent"``, ``" transparent "`` all count) via the shared
+    ``ferrum._validate.is_none_color_sentinel`` predicate — the same one
+    ``marks/base.py``'s ``_is_paint_sentinel`` composes from, matching Rust's
     ``trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("transparent")``
     (``draw.rs``). This does not extend to ``"theme:label"``, an unrelated
     sentinel with its own refusal path.
@@ -786,25 +801,13 @@ def _hex_to_color_dict(color_str: str, *, context: str) -> dict[str, int]:
             "('none'/'transparent'); provide a color"
         )
 
-    from ferrum.color import to_hex
+    from ferrum._core import parse_color_to_rgba
 
     try:
-        h = to_hex(color_str).lstrip("#")
+        r, g, b, a = parse_color_to_rgba(color_str)
     except ValueError as exc:
         raise ValueError(f"{context} is not a valid color ({exc})") from exc
-    if len(h) == 8:
-        return {
-            "r": int(h[0:2], 16),
-            "g": int(h[2:4], 16),
-            "b": int(h[4:6], 16),
-            "a": int(h[6:8], 16),
-        }
-    return {
-        "r": int(h[0:2], 16),
-        "g": int(h[2:4], 16),
-        "b": int(h[4:6], 16),
-        "a": 255,
-    }
+    return {"r": r, "g": g, "b": b, "a": a}
 
 
 def _resolve_channel(enc: Any) -> str | None:
@@ -938,13 +941,13 @@ _DASH_PATTERN_NEEDS = (
 
 
 def _literal_color(v: str, *, channel: str | None) -> dict:
-    """Parse a color string via the one Rust color parser (``ferrum.color.to_hex``).
+    """Parse a color string via :func:`_color_to_wire_dict`.
 
     A parseable string is a color; an unparseable one raises ``ValueError``
     naming the accepted forms -- no silent fallback.
     """
     context = f"fm.value({v!r}) for channel={channel!r}"
-    return {"kind": "color", "value": _hex_to_color_dict(v, context=context)}
+    return {"kind": "color", "value": _color_to_wire_dict(v, context=context)}
 
 
 def _literal_color_only(v: Any, *, channel: str) -> dict:

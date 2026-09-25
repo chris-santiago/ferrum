@@ -64,8 +64,9 @@ def _parse_fill_rgb(fill_str: str) -> tuple[int, int, int] | None:
     # #rrggbb or #rrggbbaa
     m = re.match(r"#([0-9a-f]{6})", s)
     if m:
-        h = m.group(1)
-        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        from ferrum._core import parse_color_to_rgba
+
+        return parse_color_to_rgba(f"#{m.group(1)}")[:3]
     return None
 
 

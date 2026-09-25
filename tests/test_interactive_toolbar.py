@@ -240,25 +240,25 @@ def test_composition_interactive_toolbar_default_true():
 
 def test_hex_shorthand_3char():
     """#ccc should expand to r=204,g=204,b=204 — not black (r=0,g=0,b=0)."""
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
-    result = _hex_to_color_dict("#ccc", context="test")
+    result = _color_to_wire_dict("#ccc", context="test")
     assert result == {"r": 204, "g": 204, "b": 204, "a": 255}, f"got {result}"
 
 
 def test_hex_shorthand_4char():
     """#abcd should expand to r=170,g=187,b=204,a=221."""
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
-    result = _hex_to_color_dict("#abcd", context="test")
+    result = _color_to_wire_dict("#abcd", context="test")
     assert result == {"r": 170, "g": 187, "b": 204, "a": 221}, f"got {result}"
 
 
 def test_hex_full_6char_unchanged():
     """Full 6-char hex should work as before."""
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
-    assert _hex_to_color_dict("#ff0000", context="test") == {"r": 255, "g": 0, "b": 0, "a": 255}
+    assert _color_to_wire_dict("#ff0000", context="test") == {"r": 255, "g": 0, "b": 0, "a": 255}
 
 
 def test_auto_tooltips_injected_for_interactive():

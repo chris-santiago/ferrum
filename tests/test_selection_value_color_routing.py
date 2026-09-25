@@ -2,13 +2,15 @@
 
 ``fm.value(...)`` and ``SelectionMark(fill=..., stroke=...)`` used to parse
 colors through two hand-rolled hex-only parsers in ``ferrum/selection.py``:
-``_hex_to_color_dict`` warned and silently fell back to black on anything
-that wasn't a 6/8-digit hex string, and ``_resolve_encoding_value`` silently
-treated any non-``#``-prefixed string as opacity 1.0. Both parsers now route
-through ``ferrum.color.to_hex`` (the single Rust color parser): a parseable
-string (CSS name, hex, ``rgb()``/``rgba()``) resolves to a color dict, a
-number still resolves to the appropriate numeric wire kind (opacity by
-default), and an unparseable string raises ``ValueError`` naming the
+the pre-rename color-dict helper (today's ``_color_to_wire_dict``) warned
+and silently fell back to black on anything that wasn't a 6/8-digit hex
+string, and ``_resolve_encoding_value`` silently treated any non-``#``-
+prefixed string as opacity 1.0. Both now route through
+``ferrum._core.parse_color_to_rgba`` (the single Rust color parser, in its
+raw-byte-tuple form — no hex round-trip and re-slicing in Python): a
+parseable string (CSS name, hex, ``rgb()``/``rgba()``) resolves to a color
+dict, a number still resolves to the appropriate numeric wire kind (opacity
+by default), and an unparseable string raises ``ValueError`` naming the
 accepted forms — no warn-and-fallback anywhere in this path.
 
 See ``.claude/output/specs/2026-08-28-batch-a-appearance-resolution-design.md``
@@ -26,7 +28,7 @@ import ferrum as fm
 from ferrum._core import render_interactive
 from ferrum.selection import (
     SelectionMark,
-    _hex_to_color_dict,
+    _color_to_wire_dict,
     _resolve_encoding_value,
     selection_point,
     value,
@@ -44,12 +46,12 @@ def df():
     )
 
 
-# ── _hex_to_color_dict: named colors resolve, hex stays byte-identical ────────
+# ── _color_to_wire_dict: named colors resolve, hex stays byte-identical ────────
 
 
-def test_hex_to_color_dict_named_css_color_resolves():
+def test_color_to_wire_dict_named_css_color_resolves():
     """A CSS name (previously silently warned-and-black'd) now resolves for real."""
-    assert _hex_to_color_dict("lightgray", context="test") == {
+    assert _color_to_wire_dict("lightgray", context="test") == {
         "r": 211,
         "g": 211,
         "b": 211,
@@ -57,21 +59,21 @@ def test_hex_to_color_dict_named_css_color_resolves():
     }
 
 
-def test_hex_to_color_dict_hex_byte_identical():
+def test_color_to_wire_dict_hex_byte_identical():
     """Hex input still resolves to the exact rgb the old hand-rolled parser gave."""
-    assert _hex_to_color_dict("#d3d3d3", context="test") == {
+    assert _color_to_wire_dict("#d3d3d3", context="test") == {
         "r": 211,
         "g": 211,
         "b": 211,
         "a": 255,
     }
-    assert _hex_to_color_dict("#fff", context="test") == {
+    assert _color_to_wire_dict("#fff", context="test") == {
         "r": 255,
         "g": 255,
         "b": 255,
         "a": 255,
     }
-    assert _hex_to_color_dict("#d3d3d3ff", context="test") == {
+    assert _color_to_wire_dict("#d3d3d3ff", context="test") == {
         "r": 211,
         "g": 211,
         "b": 211,
@@ -79,8 +81,8 @@ def test_hex_to_color_dict_hex_byte_identical():
     }
 
 
-def test_hex_to_color_dict_rgba_alpha_preserved():
-    assert _hex_to_color_dict("rgba(211, 211, 211, 0.5)", context="test") == {
+def test_color_to_wire_dict_rgba_alpha_preserved():
+    assert _color_to_wire_dict("rgba(211, 211, 211, 0.5)", context="test") == {
         "r": 211,
         "g": 211,
         "b": 211,
@@ -88,21 +90,54 @@ def test_hex_to_color_dict_rgba_alpha_preserved():
     }
 
 
-def test_hex_to_color_dict_unparseable_raises_naming_accepted_forms():
-    with pytest.raises(ValueError, match="expected a CSS color name"):
-        _hex_to_color_dict("nonsense", context="test")
+def test_color_to_wire_dict_rgb_functional_form_byte_identical():
+    """``rgb()`` (no alpha) resolves the same byte-identical dict as hex."""
+    assert _color_to_wire_dict("rgb(211, 211, 211)", context="test") == {
+        "r": 211,
+        "g": 211,
+        "b": 211,
+        "a": 255,
+    }
 
 
-def test_hex_to_color_dict_unparseable_message_carries_caller_context():
+def test_color_to_wire_dict_calls_rust_parse_color_to_rgba(monkeypatch):
+    """The wire dict is built directly from
+    ``ferrum._core.parse_color_to_rgba``'s byte tuple, not by round-tripping
+    through ``ferrum.color.to_hex`` and re-slicing hex digits in Python
+    (#120(1)(2)(4)). Monkeypatching the Rust entry point to raise, and
+    asserting the raise propagates wrapped in the function's own context
+    message, proves the call site."""
+    from ferrum import _core
+
+    def _raise(_s):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(_core, "parse_color_to_rgba", _raise)
+    with pytest.raises(ValueError, match=r"test is not a valid color \(boom\)"):
+        _color_to_wire_dict("lightgray", context="test")
+
+
+def test_color_to_wire_dict_unparseable_raises_naming_accepted_forms():
+    with pytest.raises(ValueError) as excinfo:
+        _color_to_wire_dict("nonsense", context="test")
+    assert str(excinfo.value) == (
+        "test is not a valid color (invalid color 'nonsense': expected a CSS "
+        "color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba())"
+    )
+
+
+def test_color_to_wire_dict_unparseable_message_carries_caller_context():
     """The generic accepted-forms message is prefixed with the caller's
     *context* (mirrors marks/base.py's _validate_literal_color prefix shape),
     so a bad literal several frames inside .to_svg() is traceable back to the
     call that produced it — not just an anonymous 'invalid color' message."""
-    with pytest.raises(
-        ValueError,
-        match=r"SelectionMark: fill='nonsense' is not a valid color \(invalid color 'nonsense'",
-    ):
-        _hex_to_color_dict("nonsense", context="SelectionMark: fill='nonsense'")
+    with pytest.raises(ValueError) as excinfo:
+        _color_to_wire_dict("nonsense", context="SelectionMark: fill='nonsense'")
+    assert str(excinfo.value) == (
+        "SelectionMark: fill='nonsense' is not a valid color (invalid color "
+        "'nonsense': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+        "rgb()/rgba())"
+    )
 
 
 @pytest.mark.parametrize(
@@ -118,7 +153,7 @@ def test_hex_to_color_dict_unparseable_message_carries_caller_context():
         " transparent ",
     ],
 )
-def test_hex_to_color_dict_none_gets_dedicated_refusal_message(spelling):
+def test_color_to_wire_dict_none_gets_dedicated_refusal_message(spelling):
     """Spec §4.1 amendment (2026-09-01): 'none' stays a refusal on the
     selection surface (the wire {r,g,b,a} dict has no cleared-paint
     representation), but it gets its own message rather than the generic
@@ -134,19 +169,27 @@ def test_hex_to_color_dict_none_gets_dedicated_refusal_message(spelling):
     ``is_none_color_sentinel`` predicate, so it hits the same dedicated
     refusal on this surface (the selection wire still can't express a
     cleared paint), trimmed and case-insensitive identically to 'none'."""
-    with pytest.raises(ValueError, match="test: selection styling cannot express a cleared paint"):
-        _hex_to_color_dict(spelling, context="test")
+    with pytest.raises(ValueError) as excinfo:
+        _color_to_wire_dict(spelling, context="test")
+    assert str(excinfo.value) == (
+        "test: selection styling cannot express a cleared paint "
+        "('none'/'transparent'); provide a color"
+    )
 
 
-def test_hex_to_color_dict_other_unparseable_strings_keep_generic_message():
+def test_color_to_wire_dict_other_unparseable_strings_keep_generic_message():
     """Only a string matching the paint-clear sentinel predicate
     (``ferrum._validate.is_none_color_sentinel`` — currently 'none'/
     'transparent', trimmed and case-folded) gets the dedicated message;
-    every other unparseable string, including any spelling the predicate
-    doesn't match, still gets the generic accepted-forms text."""
-    with pytest.raises(ValueError, match="expected a CSS color name") as excinfo:
-        _hex_to_color_dict("nonsense", context="test")
-    assert "cannot express" not in str(excinfo.value)
+    every other unparseable string, including a near-sentinel spelling the
+    predicate doesn't match (``"nones"`` is not ``"none"``), still gets the
+    generic accepted-forms text."""
+    with pytest.raises(ValueError) as excinfo:
+        _color_to_wire_dict("nones", context="test")
+    assert str(excinfo.value) == (
+        "test is not a valid color (invalid color 'nones': expected a CSS "
+        "color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba())"
+    )
 
 
 # ── value(): string -> color, number -> opacity (unchanged), else raises ──────

@@ -330,6 +330,21 @@ pub fn parse_color_to_hex(s: &str) -> PyResult<String> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Parse any color string in ferrum's accepted vocabulary and return its
+/// `(r, g, b, a)` byte tuple. The selection wire helper's Python-visible
+/// entry point: rather than round-tripping through [`parse_color_to_hex`]
+/// and slicing the hex string back into bytes, a caller that needs the raw
+/// channels gets them directly from the same parse. Shares [`parse_color`]
+/// with `parse_color_to_hex`, so the two never drift on what they accept or
+/// on the bytes they produce for a given input; an opaque color's alpha is
+/// always 255.
+#[pyfunction]
+pub fn parse_color_to_rgba(s: &str) -> PyResult<(u8, u8, u8, u8)> {
+    parse_color(s)
+        .map(|c| (c.red, c.green, c.blue, c.alpha))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,5 +848,63 @@ mod tests {
     fn fmt_svg_translucent_uses_rgba() {
         let c = from_rgba(0x1f, 0x77, 0xb4, 0x80);
         assert_eq!(fmt_svg(c), "rgba(31,119,180,0.502)");
+    }
+
+    // --- parse_color_to_rgba tests: every accepted form must yield the exact
+    // byte tuple parse_color_to_hex would have encoded for the same input. ---
+
+    #[test]
+    fn test_parse_color_to_rgba_pinned_tuples_for_every_accepted_form() {
+        let cases: &[(&str, (u8, u8, u8, u8))] = &[
+            ("#abc", (170, 187, 204, 255)),     // 3-digit hex shorthand
+            ("#abcd", (170, 187, 204, 221)),    // 4-digit hex shorthand
+            ("#4682b4", (70, 130, 180, 255)),   // 6-digit hex
+            ("#4682b480", (70, 130, 180, 128)), // 8-digit hex
+            ("steelblue", (70, 130, 180, 255)), // named
+            ("rgb(70, 130, 180)", (70, 130, 180, 255)),
+            ("rgba(70, 130, 180, 0.5)", (70, 130, 180, 128)), // 0.5 * 255 = 127.5, rounds to 128
+        ];
+        for &(input, expected) in cases {
+            let actual = parse_color_to_rgba(input).unwrap();
+            assert_eq!(actual, expected, "{input:?} tuple mismatch");
+        }
+    }
+
+    #[test]
+    fn test_parse_color_to_rgba_opaque_forms_alpha_255() {
+        for input in ["#abc", "#4682b4", "steelblue", "rgb(70, 130, 180)"] {
+            let (_, _, _, a) = parse_color_to_rgba(input).unwrap();
+            assert_eq!(a, 255, "{input:?} should be fully opaque");
+        }
+    }
+
+    /// `PyErr::value`/`to_string` need an initialized interpreter; a bare
+    /// `err.to_string()` panics with "The Python interpreter is not
+    /// initialized" when this test runs standalone.
+    #[test]
+    fn test_parse_color_to_rgba_and_to_hex_refuse_with_pinned_identical_text() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let cases = [
+                (
+                    "not-a-color",
+                    "invalid color 'not-a-color': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba()",
+                ),
+                (
+                    "rgb(1,2)",
+                    "invalid color 'rgb(1,2)': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba()",
+                ),
+                (
+                    "#xy",
+                    "invalid color '#xy': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba()",
+                ),
+            ];
+            for (input, expected) in cases {
+                let hex_msg = parse_color_to_hex(input).unwrap_err().value(py).to_string();
+                let rgba_msg = parse_color_to_rgba(input).unwrap_err().value(py).to_string();
+                assert_eq!(hex_msg, expected, "{input:?} parse_color_to_hex refusal text");
+                assert_eq!(rgba_msg, expected, "{input:?} parse_color_to_rgba refusal text");
+            }
+        });
     }
 }

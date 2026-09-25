@@ -112,6 +112,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // to Python — `ferrum.color.to_hex`'s string path routes through this
     // instead of hand-rolling a second color vocabulary in Python.
     m.add_function(wrap_pyfunction!(render::color::primitive::parse_color_to_hex, m)?)?;
+    // Returns the raw (r, g, b, a) byte tuple from the same parse
+    // `parse_color_to_hex` uses, so a caller that needs channel bytes (the
+    // selection wire helper) reads them directly instead of decoding hex.
+    m.add_function(wrap_pyfunction!(render::color::primitive::parse_color_to_rgba, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     // Classification diagnostic curve kernels (sklearn-parity).

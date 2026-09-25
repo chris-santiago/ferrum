@@ -52,8 +52,9 @@ def _mark_fills(svg: str) -> set[str]:
 
 def _rgb(hex6: str) -> tuple[int, int, int]:
     """Parse a 6-char hex string (no leading #) into an (R, G, B) tuple."""
-    h = hex6.lower()
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    from ferrum._core import parse_color_to_rgba
+
+    return parse_color_to_rgba(f"#{hex6}")[:3]
 
 
 # ---------------------------------------------------------------------------

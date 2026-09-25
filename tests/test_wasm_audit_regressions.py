@@ -40,35 +40,35 @@ def test_html_title_escapes_ampersand(tmp_path):
 # ── R5 -> Batch A task 10: malformed hex now raises, not warns ────────────────
 
 
-def test_hex_to_color_dict_raises_on_malformed():
+def test_color_to_wire_dict_raises_on_malformed():
     """Regression: R5 -> Batch A task 10 (NF-A4) superseded this — the
     warn-and-return-black soft path died. Malformed input now raises
     ``ValueError`` (from the one Rust color parser) naming the accepted
     forms; it neither warns nor silently returns black."""
     import pytest
 
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         with pytest.raises(ValueError, match="expected a CSS color name"):
-            _hex_to_color_dict("#xyz", context="test: fill='#xyz'")
+            _color_to_wire_dict("#xyz", context="test: fill='#xyz'")
         assert len(w) == 0
 
 
-def test_hex_to_color_dict_3char_expands():
+def test_color_to_wire_dict_3char_expands():
     """Regression: 3-char hex shorthand correctly expands."""
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
-    result = _hex_to_color_dict("#abc", context="test: fill='#abc'")
+    result = _color_to_wire_dict("#abc", context="test: fill='#abc'")
     assert result == {"r": 0xAA, "g": 0xBB, "b": 0xCC, "a": 255}
 
 
-def test_hex_to_color_dict_4char_expands():
+def test_color_to_wire_dict_4char_expands():
     """Regression: 4-char hex shorthand correctly expands."""
-    from ferrum.selection import _hex_to_color_dict
+    from ferrum.selection import _color_to_wire_dict
 
-    result = _hex_to_color_dict("#abcd", context="test: fill='#abcd'")
+    result = _color_to_wire_dict("#abcd", context="test: fill='#abcd'")
     assert result == {"r": 0xAA, "g": 0xBB, "b": 0xCC, "a": 0xDD}
 
 

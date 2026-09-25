@@ -508,7 +508,9 @@ def test_violin_quartile_ticks_render_per_hue_stroke_color():
         f"rule.rs does (T11r cycle 3), not a single flat stroke computed "
         f"once outside the per-row loop"
     )
-    tick_rgb = {tuple(int(hexcolor[i : i + 2], 16) for i in (1, 3, 5)) for hexcolor in tick_strokes}
+    from ferrum._core import parse_color_to_rgba
+
+    tick_rgb = {parse_color_to_rgba(hexcolor)[:3] for hexcolor in tick_strokes}
     assert tick_rgb == body_colors, (
         f"quartile tick stroke colors {tick_rgb} must match the violin body's "
         f"per-hue fill colors {body_colors}"

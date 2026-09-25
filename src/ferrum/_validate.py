@@ -22,7 +22,7 @@ Independent predicates live here:
 
 - ``is_none_color_sentinel`` is the single Python definition of the
   paint-clear sentinel test, shared by ``marks/base.py``'s
-  ``_is_paint_sentinel`` and ``selection.py``'s ``_hex_to_color_dict`` so
+  ``_is_paint_sentinel`` and ``selection.py``'s ``_color_to_wire_dict`` so
   the two color-parsing surfaces test the identical predicate even though
   they handle a match differently. It matches two invisible spellings —
   ``"none"`` and ``"transparent"`` — kept in sync with Rust's
@@ -156,7 +156,7 @@ def is_none_color_sentinel(value: str) -> bool:
 
     This is the single Python definition of the sentinel predicate:
     ``marks/base.py``'s ``_is_paint_sentinel`` (which treats a match as an
-    explicit paint-clear) and ``selection.py``'s ``_hex_to_color_dict``
+    explicit paint-clear) and ``selection.py``'s ``_color_to_wire_dict``
     (which treats a match as a refusal — the selection wire has no
     cleared-paint representation) both compose from it, so the two surfaces
     differ only in how they *handle* a match, never in what counts as one.

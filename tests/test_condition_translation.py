@@ -46,7 +46,7 @@ from ferrum.encoding._channel_policy import (
 )
 from ferrum.marks.base import _LINETYPE_MAP
 from ferrum.selection import (
-    _hex_to_color_dict,
+    _color_to_wire_dict,
     _resolve_encoding_value,
     selection_interval,
     selection_point,
@@ -1231,14 +1231,14 @@ def _needs_text(form_value: Any, channel: str, needs: str) -> str:
 
 def _color_parse_refusal_text(form_value: str, channel: str) -> str:
     """Derive the exact "not a valid color" refusal text by calling the
-    real color parser (`_hex_to_color_dict`) with the exact context
+    real color parser (`_color_to_wire_dict`) with the exact context
     `_literal_color` builds. Deriving rather than hand-copying pins the
     context prefix #128 requires (`fm.value(<repr>) for channel=<repr>`)
     without hard-coding the Rust color parser's own wording, which is
     outside this task's control and not what #128 changed."""
     context = f"fm.value({form_value!r}) for channel={channel!r}"
     try:
-        _hex_to_color_dict(form_value, context=context)
+        _color_to_wire_dict(form_value, context=context)
     except ValueError as exc:
         return str(exc)
     raise AssertionError(f"{form_value!r} unexpectedly parsed as a color")  # pragma: no cover
