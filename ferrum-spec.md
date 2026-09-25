@@ -3072,6 +3072,8 @@ Sets the minimum pixel padding on each of the plot's four sides, independent of 
 
 > **Dated note (2026-09-03, batch B task 9 — `padding.auto` is implemented):** `auto` did not exist before this task; the field, its opt-in default, the tick-label/title expansion passes, the `max_band` interaction, and the honest `PaddingExceedsViewport` reporting are all new in this batch (closes `F-L07-08`/`NF-B6`). No golden output changes for any chart that does not pass `auto=True`.
 
+> **Dated note (2026-09-25, wave 6C, `#139`(2)(3)(4) — `padding.auto` hardening):** `auto=False` output stays byte-identical; at `auto=True`, per-axis infeasibility is now decided before the tick-label contributions are assembled (a suppressed axis's tick contribution is zeroed too, not just its title's), the title pass solves against that already-suppressed geometry, and an explicit side's own extras are zeroed before the viewport cap rather than charged against the auto budget.
+
 ---
 
 ### 3.8 Coordinate Systems

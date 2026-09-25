@@ -304,6 +304,40 @@ class TestPaddingByteIdentity:
         ).to_svg()
         assert svg_auto_true == svg_auto_false
 
+        # Anti-vacuity control: leaving the right side unset on this SAME
+        # fixture lets `auto` actually reserve its edge-tick-overhang
+        # cushion there, proving the equality above reflects the
+        # explicit-side-wins rule and not `auto` being a no-op on this
+        # fixture/viewport. Pinned on the plot's right gridline (a
+        # horizontal grid line's `x2`, its right endpoint), not a bare
+        # whole-SVG diff, so the control proves the RIGHT side specifically
+        # moved rather than merely that something, somewhere, changed.
+        svg_partial_auto_true = base.configure_padding(
+            top=20, bottom=10, left=5, auto=True
+        ).to_svg()
+        svg_partial_auto_false = base.configure_padding(
+            top=20, bottom=10, left=5, auto=False
+        ).to_svg()
+        assert svg_partial_auto_true != svg_partial_auto_false
+
+        right_edge_auto_true = self._right_gridline_x2(svg_partial_auto_true)
+        right_edge_auto_false = self._right_gridline_x2(svg_partial_auto_false)
+        assert right_edge_auto_false == pytest.approx(384.0, abs=1e-6)
+        assert right_edge_auto_true == pytest.approx(342.502, abs=1e-3), (
+            "leaving the right side unset should let `auto` narrow the "
+            f"plot's right edge to reserve its tick-overhang cushion "
+            f"({right_edge_auto_true} vs {right_edge_auto_false})"
+        )
+
+    @staticmethod
+    def _right_gridline_x2(svg: str) -> float:
+        """The plot's right edge: a horizontal grid line's `x2` (its
+        right endpoint, `y1 == y2`). The first horizontal grid line in
+        document order shares the same right edge as every other."""
+        m = re.search(r'<line x1="[^"]+" y1="([^"]+)" x2="([^"]+)" y2="\1"', svg)
+        assert m is not None, f"expected at least one horizontal grid line in the SVG: {svg}"
+        return float(m.group(2))
+
 
 class TestPaddingAutoEdgeTickOverhang:
     """F-L07-08, D10, spec §4.7: `padding.auto` actually does something now.
@@ -638,6 +672,7 @@ class TestPaddingAutoTitleAndTickComposition:
         )
 
     INFEASIBLE_TITLE = "X" * 120
+    SHORT_TITLE = "Revenue"
 
     def test_never_worse_than_auto_false_when_the_title_is_infeasible(self):
         """The composed sibling of `TestPaddingAutoAxisTitleRecentering`'s
@@ -674,6 +709,147 @@ class TestPaddingAutoTitleAndTickComposition:
             "auto=False — the tick pass's own correction must be suppressed "
             "too, not just the title's, once the title cannot be recentered "
             "into the viewport at all"
+        )
+
+        # Anti-vacuity control: the SAME fixture with a short (feasible)
+        # title at the same W=280 is NOT byte-identical between
+        # `auto=True` and `auto=False` — the tick pass's own left
+        # correction still fires here (the title is short enough that
+        # nothing suppresses it), proving the byte-identity above reflects
+        # genuine suppression of an infeasible title's own correction, not
+        # the tick/title machinery being globally inert on this
+        # fixture/viewport. Pinned on the class's own `_first_x_tick_x`
+        # (and the title anchor `_title_x`), not a bare whole-SVG diff, so
+        # a regression that made the tick pass inert while the title still
+        # recentered could not leave this control green.
+        short_chart = self._repro_chart(self.SHORT_TITLE)
+        short_auto_false = short_chart.configure_padding(auto=False)
+        short_auto_true = short_chart.configure_padding(auto=True)
+
+        short_tick_auto_false = self._first_x_tick_x(short_auto_false, 280, 200)
+        short_tick_auto_true = self._first_x_tick_x(short_auto_true, 280, 200)
+        assert short_tick_auto_false == pytest.approx(34.0, abs=1e-6)
+        assert short_tick_auto_true == pytest.approx(68.027, abs=1e-3), (
+            "the tick pass must still fire on this short-title fixture "
+            f"({short_tick_auto_true} vs {short_tick_auto_false})"
+        )
+
+        short_title_auto_false = self._title_x(short_auto_false, 280, 200, self.SHORT_TITLE)
+        short_title_auto_true = self._title_x(short_auto_true, 280, 200, self.SHORT_TITLE)
+        assert short_title_auto_false == pytest.approx(145.0, abs=1e-6)
+        assert short_title_auto_true == pytest.approx(162.014, abs=1e-3), (
+            "the title pass must still recenter this short (feasible) "
+            f"title too ({short_title_auto_true} vs {short_title_auto_false})"
+        )
+
+
+class TestPaddingAutoCrossAxisTitleInfeasibility:
+    """A composed case with two titles, on different axes, in different
+    feasibility regimes: this class's fixture puts an infeasible
+    (too-wide) title on the x-axis and an independently genuine (feasible,
+    needs a real recenter) title on the y-axis in the SAME chart, and pins
+    both fates at once — which side's correction is suppressed (x, whose
+    own title cannot fit the viewport no matter what) and which title's
+    correction survives (y, whose own recenter is unrelated to x's
+    infeasibility and must still fire). `x_infeasible`/`y_infeasible` are
+    decided from title measurement and viewport alone
+    (`recentering_is_feasible`), independently per axis, so a regression
+    that let one axis's suppression leak into the other axis's solve would
+    show up here as either the x title moving (wrongly un-suppressed) or
+    the y title staying put (wrongly suppressed too).
+    """
+
+    INFEASIBLE_X_TITLE = "X" * 120
+    FEASIBLE_X_TITLE = "A moderately long horizontal axis title here"
+    NEEDS_CORRECTION_Y_TITLE = "A moderately long vertical axis title here"
+
+    @classmethod
+    def _repro_chart(cls, x_title: str | None = None):
+        if x_title is None:
+            x_title = cls.INFEASIBLE_X_TITLE
+        df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+        return (
+            fr.Chart(df)
+            .mark_point()
+            .encode(
+                x=fr.X("x", title=x_title),
+                y=fr.Y("y", title=cls.NEEDS_CORRECTION_Y_TITLE),
+            )
+            .properties(width=280, height=250)
+        )
+
+    @staticmethod
+    def _x_title_x(chart, title: str) -> float:
+        svg = chart.to_svg()
+        m = re.search(
+            r'<text[^>]*x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>'
+            + re.escape(title)
+            + r"</text>",
+            svg,
+        )
+        assert m is not None, f"expected the x-axis title text in the SVG: {svg}"
+        return float(m.group(1))
+
+    @classmethod
+    def _y_title_y(cls, chart) -> float:
+        svg = chart.to_svg()
+        m = re.search(
+            r'<text[^>]*y="(-?[\d.]+)"[^>]*transform="rotate\(-90[^"]*"[^>]*>'
+            + re.escape(cls.NEEDS_CORRECTION_Y_TITLE)
+            + r"</text>",
+            svg,
+        )
+        if m is None:
+            m = re.search(
+                r'<text[^>]*transform="rotate\(-90[^"]*"[^>]*y="(-?[\d.]+)"[^>]*>'
+                + re.escape(cls.NEEDS_CORRECTION_Y_TITLE)
+                + r"</text>",
+                svg,
+            )
+        assert m is not None, f"expected the y-axis title text in the SVG: {svg}"
+        return float(m.group(1))
+
+    def test_x_title_suppressed_while_y_title_still_recenters(self):
+        base = self._repro_chart()
+        auto_false = base.configure_padding(auto=False)
+        auto_true = base.configure_padding(auto=True)
+
+        x_title_auto_false = self._x_title_x(auto_false, self.INFEASIBLE_X_TITLE)
+        x_title_auto_true = self._x_title_x(auto_true, self.INFEASIBLE_X_TITLE)
+        assert x_title_auto_false == pytest.approx(163.472, abs=1e-3)
+        assert x_title_auto_true == pytest.approx(x_title_auto_false, abs=1e-9), (
+            "the x title is wider than the viewport itself (the genuine "
+            "residual) — its own correction must stay suppressed regardless "
+            f"of the unrelated y title's fate ({x_title_auto_true} vs "
+            f"{x_title_auto_false})"
+        )
+
+        y_title_auto_false = self._y_title_y(auto_false)
+        y_title_auto_true = self._y_title_y(auto_true)
+        assert y_title_auto_false == pytest.approx(96.028, abs=1e-3)
+        assert y_title_auto_true == pytest.approx(123.145, abs=1e-3), (
+            "the y title is no wider than the viewport (a genuine, feasible "
+            "recenter) and must still move under auto=True even though the "
+            f"x axis's own title is infeasible ({y_title_auto_true} vs "
+            f"{y_title_auto_false})"
+        )
+
+        # Anti-vacuity control: the SAME fixture (same y title, same
+        # width/height) but with a FEASIBLE x title — its own anchor DOES
+        # move under `auto=True`, proving the equality pin above is x's
+        # genuine infeasibility residual and not `auto` being inert on x
+        # for this fixture/viewport.
+        feasible_base = self._repro_chart(self.FEASIBLE_X_TITLE)
+        feasible_auto_false = feasible_base.configure_padding(auto=False)
+        feasible_auto_true = feasible_base.configure_padding(auto=True)
+
+        feasible_x_title_auto_false = self._x_title_x(feasible_auto_false, self.FEASIBLE_X_TITLE)
+        feasible_x_title_auto_true = self._x_title_x(feasible_auto_true, self.FEASIBLE_X_TITLE)
+        assert feasible_x_title_auto_false == pytest.approx(163.472, abs=1e-3)
+        assert feasible_x_title_auto_true == pytest.approx(148.943, abs=1e-3), (
+            "a feasible x title on this same fixture must still recenter "
+            f"under auto=True ({feasible_x_title_auto_true} vs "
+            f"{feasible_x_title_auto_false})"
         )
 
 
