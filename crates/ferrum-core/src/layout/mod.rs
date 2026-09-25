@@ -1693,12 +1693,14 @@ fn split_panels(
 }
 
 /// Formats facet strip text: `"{title}: {value}"` when a dimension title is
-/// set, bare `"{value}"` otherwise (spec §6.2). Shared by the column-strip and
-/// row-strip builders below so the two dimensions' prefix behavior cannot
-/// drift apart. `title` absent (the default) reproduces the pre-existing bare
-/// value, keeping untitled facets byte-identical.
+/// set and non-blank, bare `"{value}"` otherwise (spec §6.2). Shared by the
+/// column-strip and row-strip builders below so the two dimensions' prefix
+/// behavior cannot drift apart. `title` absent or trim-empty reproduces the
+/// pre-existing bare value, keeping untitled facets byte-identical. Trimming
+/// only decides absence: a non-blank title is rendered verbatim, whitespace
+/// and all.
 fn facet_strip_text(title: Option<&str>, value: &str) -> String {
-    match title {
+    match title.filter(|t| !t.trim().is_empty()) {
         Some(t) => format!("{t}: {value}"),
         None => value.to_string(),
     }
@@ -2504,6 +2506,20 @@ mod tests {
             facet_strip_text(Some("Species"), "setosa"),
             "Species: setosa"
         );
+    }
+
+    /// #176(10a): an empty or whitespace-only title is treated as absent, on
+    /// both the column-strip and row-strip call sites of the shared function.
+    #[test]
+    fn facet_strip_text_is_bare_when_title_trim_empty() {
+        assert_eq!(facet_strip_text(Some(""), "p"), "p");
+        assert_eq!(facet_strip_text(Some("   "), "p"), "p");
+        assert_eq!(facet_strip_text(Some("\t\n"), "q"), "q");
+        // control: a non-empty title still prefixes.
+        assert_eq!(facet_strip_text(Some("Species"), "q"), "Species: q");
+        // control: trim only decides absence, never alters the rendered
+        // text of a non-blank title.
+        assert_eq!(facet_strip_text(Some(" Species "), "q"), " Species : q");
     }
 
     fn minimal_chart_spec() -> ChartSpec {

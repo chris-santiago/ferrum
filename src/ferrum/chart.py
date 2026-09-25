@@ -1915,14 +1915,20 @@ class Chart(
         # Synthesize _facet whenever facet encoding channels are passed in this
         # call. This wires encode(facet_col=...) / encode(facet_row=...) /
         # encode(facet=...) to the same _facet path that .facet() uses.
+        # _Facet.merged_with is the only facet-state writer (#176(10b) + N5,
+        # spec §6.3): what a prior .facet()/encode() call set and this call
+        # does not restate (title, row_title, resolve, ncols/nrows, the grid's
+        # other dimension) survives; what this call states wins. The
+        # declaration kind is read from `channels` (the keys THIS call
+        # passed), never from `new._encoding`: `_encoding` persists across
+        # chained `.encode()` calls, so a facet channel from an EARLIER call
+        # would otherwise still be sitting there and get misread as part of
+        # THIS call's declaration.
         if any(name in _FACET_CHANNELS for name in channels):
-            facet_enc = new._encoding.get("facet")
-            col_enc = new._encoding.get("facet_col")
-            row_enc = new._encoding.get("facet_row")
-            # Preserve ncols/nrows from any existing _facet (e.g. a prior .facet() call).
+            facet_enc = new._encoding.get("facet") if "facet" in channels else None
+            col_enc = new._encoding.get("facet_col") if "facet_col" in channels else None
+            row_enc = new._encoding.get("facet_row") if "facet_row" in channels else None
             existing = new._facet
-            ncols = existing.ncols if existing is not None else None
-            nrows = existing.nrows if existing is not None else None
             if facet_enc is not None:
                 # F-L06-02: Facet(field, columns=N) writes the same ncols
                 # sink Chart.facet(ncols=N) honors. Precedence is last-writer-
@@ -1930,34 +1936,33 @@ class Chart(
                 # ncols carried over from an earlier .facet() call. Scoped to
                 # Facet only -- FacetRow/FacetCol (grid mode, below) don't
                 # honor `columns` (not in their `_honored_kwargs`).
-                facet_columns = facet_enc.option("columns")
-                new._facet = _Facet(
-                    mode_kind="wrap",
+                new._facet = _Facet.merged_with(
+                    existing,
+                    declare=f"encode(facet={facet_enc!r})",
+                    kind="generic",
                     field=facet_enc.field,
-                    ncols=facet_columns if facet_columns is not None else ncols,
-                    nrows=nrows,
                     title=facet_enc.option("title"),
+                    ncols=facet_enc.option("columns"),
                 )
             elif col_enc is not None and row_enc is not None:
                 # Grid mode: col drives the column/wrap strip (title), row
                 # drives the row-header strip (row_title) -- both are real,
                 # independent strips here.
-                new._facet = _Facet(
-                    mode_kind="grid",
+                new._facet = _Facet.merged_with(
+                    existing,
+                    declare=f"encode(facet_col={col_enc!r}, facet_row={row_enc!r})",
+                    kind="grid",
                     col=col_enc.field,
                     row=row_enc.field,
-                    ncols=ncols,
-                    nrows=nrows,
                     title=col_enc.option("title"),
                     row_title=row_enc.option("title"),
                 )
             elif col_enc is not None:
-                new._facet = _Facet(
-                    mode_kind="wrap",
-                    field=col_enc.field,
-                    ncols=ncols,
-                    nrows=nrows,
-                    wrap_orient="col",
+                new._facet = _Facet.merged_with(
+                    existing,
+                    declare=f"encode(facet_col={col_enc!r})",
+                    kind="col",
+                    col=col_enc.field,
                     title=col_enc.option("title"),
                 )
             elif row_enc is not None:
@@ -1965,14 +1970,15 @@ class Chart(
                 # FacetSpec), where the column/wrap strip renders and reads
                 # `title`, not `row_title` (FacetSpec::column_strip_title /
                 # row_strip_title). Routing FacetRow(title=...) to `row_title`
-                # here would silently have no effect on the rendered strip.
-                new._facet = _Facet(
-                    mode_kind="wrap",
-                    field=row_enc.field,
-                    ncols=ncols,
-                    nrows=nrows,
-                    wrap_orient="row",
-                    title=row_enc.option("title"),
+                # here would silently have no effect on the rendered strip --
+                # merged_with's "row" kind routes it correctly for whichever
+                # mode this declaration resolves to.
+                new._facet = _Facet.merged_with(
+                    existing,
+                    declare=f"encode(facet_row={row_enc!r})",
+                    kind="row",
+                    row=row_enc.field,
+                    row_title=row_enc.option("title"),
                 )
 
         return new
@@ -2503,12 +2509,23 @@ class Chart(
         ----------
         field : str, optional
             Column name used for wrap-mode faceting.  Mutually exclusive with
-            using both ``row`` and ``col`` together.
+            using both ``row`` and ``col`` together. A prior facet declaration
+            (from an earlier ``.facet()`` or ``encode(facet...)`` call) is
+            merged, not discarded: a field this call does not restate
+            (``title``, ``ncols``, ``nrows``, the ``share_scale()`` resolution)
+            survives, and ``field=`` replaces an existing **grid** facet with
+            a wrap on this field (its ``row_title``, which has no home in
+            wrap mode, is dropped).
         row : str, optional
             Column name for the row dimension (grid mode).  When used alone,
-            behaves as wrap mode on the row axis.
+            behaves as wrap mode on the row axis, UNLESS it merges onto a
+            prior facet with a different, column-role dimension (a column
+            wrap, or a grid), in which case it promotes to/updates a grid
+            (row=this field, col=the prior's), keeping the prior's field on
+            its own axis.
         col : str, optional
-            Column name for the column dimension (wrap or grid mode).
+            Column name for the column dimension (wrap or grid mode). Used
+            alone, the same merge rule applies with the roles reversed.
         ncols : int or None, optional
             Maximum number of columns in wrap mode.  ``None`` lets the renderer
             choose.
@@ -2523,14 +2540,13 @@ class Chart(
             Title for the row strip in **grid** mode only (``row=`` and
             ``col=`` both given) -- equivalent to
             ``encode(facet_row=fm.FacetRow(field, title=...))`` alongside a
-            titled ``facet_col=``. A row-only facet (``row=`` alone) lowers
-            to wrap mode, where the column/wrap strip renders and reads
-            ``title``, not ``row_title``; passing ``row_title=`` there
-            raises rather than silently having no effect -- put the title on
-            ``title=`` instead. This is NOT equivalent to
-            ``encode(facet_row=fm.FacetRow(field, title=...))`` used alone:
-            that spelling silently redirects the title into ``title=`` and
-            renders it, it does not raise.
+            titled ``facet_col=``. A single-dimension declaration (``field=``,
+            ``col=`` alone, or ``row=`` alone) has only one title, which
+            ``title=`` already sets -- ``row_title=`` has no separate meaning
+            there and raises, even when merging with a prior facet would
+            produce a grid, since ``title=`` already covers that one
+            dimension's title regardless of which mode the merge resolves
+            to.
 
         Returns
         -------
@@ -2541,7 +2557,7 @@ class Chart(
         ------
         ValueError
             If neither ``field``, ``row``, nor ``col`` is provided, or if
-            ``row_title=`` is given for a facet that lowers to wrap mode
+            ``row_title=`` is given alongside a single-dimension declaration
             (``field=``, ``col=`` alone, or ``row=`` alone).
 
         Examples
@@ -2554,58 +2570,66 @@ class Chart(
         Chart(mark='point', encoding=['x', 'y'])
         """
 
-        def _refuse_row_title_on_wrap(wrap_lowering: str) -> None:
+        def _refuse_row_title_on_wrap(declared_as: str) -> None:
             if row_title is not None:
                 raise ValueError(
-                    f"facet(row_title=...) has no effect on a facet that lowers "
-                    f"to wrap mode ({wrap_lowering}): wrap mode renders only the "
-                    "column/wrap strip, which reads `title`, not `row_title`. "
-                    "Pass the title via `title=` instead, or use both `row=` and "
-                    "`col=` for a genuine grid facet."
+                    f"facet(row_title=...) has no effect on a facet declared via "
+                    f"{declared_as}: a single-dimension declaration has only one "
+                    "title, which `title=` already sets; `row_title=` names a "
+                    "second, distinct row-strip title that only a genuine "
+                    "two-dimension facet (`row=` and `col=` together) has. Pass "
+                    "the title via `title=` instead, or use both `row=` and "
+                    "`col=` for a grid facet."
                 )
 
         validate_positive_int("Chart.facet(ncols=...)", ncols)
         validate_positive_int("Chart.facet(nrows=...)", nrows)
         new = self._clone()
+        existing = self._facet
         if field is not None:
             _refuse_row_title_on_wrap("field=")
-            new._facet = _Facet(
-                mode_kind="wrap",
+            new._facet = _Facet.merged_with(
+                existing,
+                declare=f"Chart.facet(field={field!r})",
+                kind="facet_field",
                 field=field,
+                title=title,
                 ncols=ncols,
                 nrows=nrows,
-                wrap_orient=None,
-                title=title,
             )
         elif row is not None and col is not None:
-            new._facet = _Facet(
-                mode_kind="grid",
+            new._facet = _Facet.merged_with(
+                existing,
+                declare=f"Chart.facet(row={row!r}, col={col!r})",
+                kind="grid",
                 row=row,
                 col=col,
-                nrows=nrows,
-                ncols=ncols,
                 title=title,
                 row_title=row_title,
+                ncols=ncols,
+                nrows=nrows,
             )
         elif col is not None:
             _refuse_row_title_on_wrap("col= alone")
-            new._facet = _Facet(
-                mode_kind="wrap",
-                field=col,
+            new._facet = _Facet.merged_with(
+                existing,
+                declare=f"Chart.facet(col={col!r})",
+                kind="col",
+                col=col,
+                title=title,
                 ncols=ncols,
                 nrows=nrows,
-                wrap_orient="col",
-                title=title,
             )
         elif row is not None:
             _refuse_row_title_on_wrap("row= alone")
-            new._facet = _Facet(
-                mode_kind="wrap",
-                field=row,
-                nrows=nrows,
+            new._facet = _Facet.merged_with(
+                existing,
+                declare=f"Chart.facet(row={row!r})",
+                kind="row",
+                row=row,
+                row_title=title,
                 ncols=ncols,
-                wrap_orient="row",
-                title=title,
+                nrows=nrows,
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
@@ -2673,7 +2697,16 @@ class Chart(
         if y is not None:
             new_resolve["y"] = y
         new = self._clone()
-        new._facet = replace(self._facet, resolve=new_resolve if new_resolve else None)
+        # _Facet.merged_with is the only facet-state writer (spec §6.3):
+        # share_scale() states only `resolve`, so every other field --
+        # mode, field/row/col, title, row_title, ncols, nrows -- carries
+        # through `merged_with`'s "resolve" kind unchanged.
+        new._facet = _Facet.merged_with(
+            self._facet,
+            declare="Chart.share_scale(...)",
+            kind="resolve",
+            resolve=new_resolve if new_resolve else None,
+        )
         return new
 
     def theme(self, theme: Any) -> "Chart":
