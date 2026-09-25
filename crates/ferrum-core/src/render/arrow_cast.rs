@@ -76,6 +76,36 @@ pub(crate) fn is_numeric(dtype: &DataType) -> bool {
     supported_numeric_dtype(dtype)
 }
 
+/// A present column joining a continuous shared positional axis must be
+/// numeric or temporal (`#120`(9), N1; spec §6.8) — the one predicate and
+/// [`RenderError::LayerAxisColumnUnplaceable`] text every site that
+/// reconciles a layer/leaf column against a continuous shared axis reads,
+/// so the rule and its message exist in exactly one place rather than a
+/// copy per site. `layer` is the offending member's index (in `spec.layers`
+/// for a single leaf's own internal layer union, or in the leaf span for a
+/// composite Overlay group's cross-leaf union); `channel` the RESOLVED
+/// axis token; `field`/`dtype` the offending column and its pre-formatted
+/// Arrow dtype.
+pub(crate) fn require_placeable_on_continuous_axis(
+    layer: usize,
+    channel: &str,
+    field: &str,
+    dtype: &DataType,
+) -> Result<(), RenderError> {
+    if supported_numeric_dtype(dtype) {
+        Ok(())
+    } else {
+        Err(RenderError::LayerAxisColumnUnplaceable {
+            layer,
+            detail: Box::new(super::LayerAxisColumnDetail {
+                channel: channel.to_string(),
+                field: field.to_string(),
+                dtype: format!("{dtype:?}"),
+            }),
+        })
+    }
+}
+
 /// Read any supported numeric Arrow column as `Vec<Option<f64>>`, preserving
 /// null positions. Returns `Err(ScaleResolutionFailed)` for unsupported
 /// dtypes — matches the prior `draw::col_as_f64` semantics exactly.

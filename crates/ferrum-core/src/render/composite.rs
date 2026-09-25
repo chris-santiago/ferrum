@@ -50,7 +50,7 @@ use crate::render::scale_resolve::{
 };
 use crate::render::RenderError;
 use crate::spec::chart::ChartSpec;
-use crate::spec::composite::CompositeNode;
+use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::{DataType as SpecDataType, Encoding};
 use crate::layout::facet::ResolveMode;
 
@@ -349,7 +349,7 @@ fn resolve_channel(
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
 ) -> Result<(), CompositeResolveError> {
-    let CompositeNode::Composite { children, resolve, .. } = node else {
+    let CompositeNode::Composite { layout, children, resolve, .. } = node else {
         return Ok(()); // Leaf: assignment is decided by its parent.
     };
 
@@ -386,6 +386,9 @@ fn resolve_channel(
                 .filter(|s| pos < s.len())
                 .map(|s| s[pos])
                 .collect();
+            if *layout == CompositeLayout::Overlay {
+                refuse_unplaceable_overlay_members(&group, channel, leaves)?;
+            }
             resolve_group(&group, channel, leaves, out)?;
         }
         Ok(())
@@ -548,10 +551,21 @@ fn resolve_group(
         // categorical) has no meaningful union. Spec §6's "Resolve
         // semantics" only spells out the skip for a *non-congruent* tree
         // shape ("non-congruent → skip that channel for the group"), but the
-        // same skip-not-error philosophy applies here: there is no
-        // semantically right domain for mismatched types any more than
-        // there is for mismatched tree shapes, and erroring would reject a
-        // hand-built heterogeneous concat that renders fine standalone.
+        // same skip-not-error philosophy applies here for a Hconcat/Vconcat/
+        // Grid/Wrap group: there is no semantically right domain for
+        // mismatched types any more than there is for mismatched tree
+        // shapes, and erroring would reject a hand-built heterogeneous
+        // concat that renders fine standalone — each sibling keeps its own
+        // physical panel either way.
+        //
+        // An `Overlay` group is different (`#120`(9), N1): every member draws
+        // onto the ONE panel the group shares, so a member that cannot serve
+        // the axis type the group establishes has nowhere else to draw. That
+        // refusal is asked by [`refuse_unplaceable_overlay_members`], from
+        // `resolve_channel` — positional-only and layout-aware, unlike this
+        // function, which stays generic over every layout and both the
+        // positional and non-positional channels it serves.
+        //
         // Skip sharing for this group; each participating leaf falls back to
         // its own standalone resolution (rendering is otherwise normal).
         // Reachable only via a hand-built tree with heterogeneous leaf dtypes
@@ -563,6 +577,108 @@ fn resolve_group(
 
     for (idx, _) in &domains {
         out[*idx].set(channel, unified.clone());
+    }
+    Ok(())
+}
+
+/// The Overlay-only half of `#120`(9)/N1: a member of an `Overlay` group
+/// whose own column cannot serve the CONTINUOUS axis the group's first
+/// member establishes has nowhere else to draw, since every member of an
+/// `Overlay` shares one panel. Called from [`resolve_channel`] (the one
+/// caller that knows the node's `layout`, and resolves positional channels
+/// only) immediately before [`resolve_group`], so `resolve_group` itself
+/// stays generic over every layout and both callers it serves — a
+/// `resolve_nonpositional` (color/size) call never reaches this question at
+/// all, rather than carrying an unused parameter through the shared
+/// function.
+///
+/// The panel's own axis type AND its own flip state are BOTH decided by the
+/// group's first member, the same "Layer 0 is exempt... the panel's axes
+/// are resolved from its own post-flip encoding" precedent
+/// [`crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable`]
+/// already states: a mixed group whose first member is categorical is not
+/// this defect at all (a categorical panel already accepts a numeric
+/// sibling's column as a category key, `ensure_category_keyable`), and a
+/// later member whose own coord differs from the first member's is judged
+/// by the coord-exchange gate the merged-flat routes already carry
+/// (`scene_build::validate_layer_coord_exchange_is_servable`), not by this
+/// one — the composite-leaves route this function serves keeps such a
+/// member its own leaf with its own scale instead.
+///
+/// Checked directly against each member's own encoding and column, not
+/// against a `SharedDomain` [`resolve_group`] would separately compute: a
+/// member whose `SharedDomain` is `Ordinal` because of an explicit
+/// categorical type annotation over an otherwise-numeric dtype is not this
+/// defect either (that column COULD serve a continuous axis, so the
+/// group's mismatch is a rendering choice, not a malformed input) —
+/// [`crate::render::arrow_cast::require_placeable_on_continuous_axis`]
+/// draws exactly that distinction, the same predicate a single leaf's own
+/// internal `spec.layers` union reads.
+///
+/// Only `group[0]`'s own domain is resolved here (`resolve_group`, called
+/// right after this returns, resolves every member's on its own): reading
+/// a domain this function never uses would let a LATER member's unrelated
+/// resolution failure pre-empt an EARLIER member's typed refusal below,
+/// whichever came first in `leaf_channel_domain`'s own iteration rather
+/// than in the caller's own member order.
+fn refuse_unplaceable_overlay_members(
+    group: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+) -> Result<(), CompositeResolveError> {
+    let panel_wants_continuous = matches!(
+        leaf_channel_domain(&leaves[group[0]], channel)?,
+        Some(SharedDomain::Numeric { .. })
+    );
+    if !panel_wants_continuous {
+        return Ok(());
+    }
+    let panel_flipped = crate::spec::coord::flips_positional_channels(
+        leaves[group[0]].spec.coord.as_ref(),
+    );
+    for (position, &idx) in group.iter().enumerate() {
+        if idx == group[0] {
+            continue; // the establishing member; trivially placeable
+        }
+        let leaf = &leaves[idx];
+        let member_flipped =
+            crate::spec::coord::flips_positional_channels(leaf.spec.coord.as_ref());
+        if member_flipped != panel_flipped {
+            continue; // deferred to the coord-exchange gate on the merged-flat routes
+        }
+        // `resolve_channel`, the only caller, resolves positional channels
+        // only, so this arm never runs in practice — a graceful no-op
+        // rather than a panic if that guard is ever loosened.
+        let enc = match channel {
+            Channel::X => leaf.encoding.x.as_ref(),
+            Channel::Y => leaf.encoding.y.as_ref(),
+            _ => return Ok(()),
+        };
+        let Some(enc) = enc else { continue };
+        let Some(located) = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
+        else {
+            continue;
+        };
+        // `coord_flipped: false`, unconditionally: `channel` here already
+        // names the panel's own resolved axis, the same deliberate choice
+        // [`crate::render::arrow_cast::require_placeable_on_continuous_axis`]'s
+        // own text makes (it is what a caller writes into `resolve=`, a
+        // property of the shared panel, not of this member's own authored
+        // encoding) — un-flipping only the OUTER wrapper's copy of the same
+        // token would make one message disagree with itself about which
+        // axis it means.
+        crate::render::arrow_cast::require_placeable_on_continuous_axis(
+            position,
+            channel.as_str(),
+            &enc.field,
+            located.col.data_type(),
+        )
+        .map_err(|source| CompositeResolveError::DomainResolve {
+            channel: channel.as_str(),
+            field: enc.field.clone(),
+            source,
+            coord_flipped: false,
+        })?;
     }
     Ok(())
 }
@@ -821,9 +937,10 @@ fn numeric_extent_domain(col: &dyn arrow::array::Array) -> SharedDomain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::composite::{CompositeLayout, CompositeResolve};
+    use crate::spec::composite::CompositeResolve;
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::EncodingSpec;
+    use crate::spec::layer::Layer;
     use crate::spec::mark::Mark;
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
     use crate::transform::core::FINAL_OUTPUT_KEY;
@@ -1963,6 +2080,413 @@ mod tests {
             spec,
             batch: final_batch,
             outputs: outs,
+        }
+    }
+
+    // -- #120(9) + N1: a layer column that cannot serve the shared numeric
+    // axis is refused, at this module's own shared-scale site ---------------
+
+    /// One leaf, `fm.layer(point(y="a"), line(y="s"))` lowered: chart-level
+    /// `y` reads `a`, the second layer's own `y` reads `s`, a `Utf8` column.
+    /// `leaf_positional_domain` is the static overlay route's own call into
+    /// `numeric_domain_union` (see this function's doc above), so this is
+    /// that route's own site, not a mirror of it.
+    fn layer_utf8_y_leaf() -> LeafOwned {
+        let mut chart_enc = Encoding::default();
+        chart_enc.x = Some(enc("b"));
+        chart_enc.y = Some(enc("a"));
+        let mut point_layer_enc = Encoding::default();
+        point_layer_enc.x = Some(enc("b"));
+        point_layer_enc.y = Some(enc("a"));
+        let mut line_layer_enc = Encoding::default();
+        line_layer_enc.y = Some(enc("s"));
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: point_layer_enc,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        };
+        let line_layer = Layer {
+            mark: Mark::Line,
+            encoding: line_layer_enc,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        };
+        let spec = ChartSpec {
+            encoding: chart_enc,
+            layers: Some(vec![point_layer, line_layer]),
+            ..base_spec()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+            Field::new("s", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["p", "q"])),
+            ],
+        )
+        .unwrap();
+        owned(spec, batch)
+    }
+
+    #[test]
+    fn leaf_positional_domain_refuses_a_layer_utf8_column_on_the_shared_y_axis() {
+        let leaf = layer_utf8_y_leaf();
+        let err = leaf_positional_domain(&input(&leaf), Channel::Y)
+            .expect_err("a Utf8 layer column must refuse the static overlay route too");
+        match err {
+            CompositeResolveError::DomainResolve { source, channel, field, .. } => {
+                assert_eq!(channel, "y");
+                assert_eq!(field, "a", "the LEAF's own chart-level field names the failure site");
+                assert_eq!(
+                    source,
+                    RenderError::LayerAxisColumnUnplaceable {
+                        layer: 1,
+                        detail: Box::new(crate::render::LayerAxisColumnDetail {
+                            channel: "y".to_string(),
+                            field: "s".to_string(),
+                            dtype: "Utf8".to_string(),
+                        }),
+                    },
+                    "the wrapped source must be the LayerAxisColumnUnplaceable refusal, not a \
+                     generic scale-resolution failure"
+                );
+            }
+            other => panic!("expected CompositeResolveError::DomainResolve, got {other:?}"),
+        }
+    }
+
+    // -- #120(9) + N1: two SEPARATE Overlay leaves, not one leaf's
+    // own internal `layers` -----------------------------------------------
+    //
+    // `fm.layer(point_chart, line_chart)` (`LayerChart._composite_tree`,
+    // `src/ferrum/composition.py`) lowers each member to its OWN leaf via
+    // `_lower_overlay_leaf_node` — neither leaf's `ChartSpec` carries an
+    // internal `layers` array, so `leaf_positional_domain_refuses_a_layer_
+    // utf8_column_on_the_shared_y_axis` above (which pins a single leaf
+    // whose OWN spec carries one) never exercises this shape. The real
+    // cross-leaf reconciliation for two separate Overlay leaves is
+    // `resolve_group`'s mixed-domain branch, reached through
+    // `resolve_composite_scales` → `resolve_channel` → `resolve_group`.
+
+    fn overlay_leaf(x_field: &str, y_field: &str, batch: RecordBatch) -> LeafOwned {
+        let mut e = Encoding::default();
+        e.x = Some(enc(x_field));
+        e.y = Some(enc(y_field));
+        owned(spec_with(e), batch)
+    }
+
+    #[test]
+    fn overlay_of_two_leaves_refuses_a_utf8_column_on_the_shared_y_axis() {
+        let numeric_leaf = overlay_leaf(
+            "b",
+            "a",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("a", DataType::Float64, false),
+                    Field::new("b", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                ],
+            )
+            .unwrap(),
+        );
+        let utf8_leaf = overlay_leaf(
+            "b",
+            "s",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("b", DataType::Float64, false),
+                    Field::new("s", DataType::Utf8, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                    Arc::new(StringArray::from(vec!["p", "q"])),
+                ],
+            )
+            .unwrap(),
+        );
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("b"), Some("a")), leaf_node(Some("b"), Some("s"))],
+            shared_both(),
+        );
+        let inputs = [input(&numeric_leaf), input(&utf8_leaf)];
+        let err = resolve_composite_scales(&tree, &inputs).expect_err(
+            "a Utf8 y column beside a numeric y column on ONE shared Overlay panel must refuse",
+        );
+        match err {
+            CompositeResolveError::DomainResolve { source, channel, field, .. } => {
+                assert_eq!(channel, "y");
+                assert_eq!(field, "s", "the offending member's own field names the failure site");
+                assert_eq!(
+                    source,
+                    RenderError::LayerAxisColumnUnplaceable {
+                        layer: 1,
+                        detail: Box::new(crate::render::LayerAxisColumnDetail {
+                            channel: "y".to_string(),
+                            field: "s".to_string(),
+                            dtype: "Utf8".to_string(),
+                        }),
+                    },
+                    "layer 1 is this member's POSITION among the fm.layer(...) members, the same \
+                     naming `numeric_domain_union_over`'s internal-layers gate uses"
+                );
+            }
+            other => panic!("expected CompositeResolveError::DomainResolve, got {other:?}"),
+        }
+    }
+
+    /// Control: two numeric leaves in an Overlay group still union normally
+    /// — the new check only fires on a genuine mismatch.
+    #[test]
+    fn overlay_of_two_numeric_leaves_still_unions() {
+        let mut e = Encoding::default();
+        e.y = Some(enc("a"));
+        let l0 = owned(spec_with(e.clone()), num_batch("a", &[0.0, 10.0]));
+        let l1 = owned(spec_with(e), num_batch("a", &[5.0, 30.0]));
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(None, Some("a")), leaf_node(None, Some("a"))],
+            shared_both(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
+        assert_eq!(ctx[0].y, expect);
+        assert_eq!(ctx[1].y, expect);
+    }
+
+    /// `leaf.spec` carries the AUTHORED `CoordFlip` (`LeafResolveInput::spec`'s
+    /// own doc: the leaf's ORIGINAL `ChartSpec`, untouched); `encoding` is the
+    /// already-swapped RENDERING encoding (`LeafResolveInput::encoding`'s own
+    /// doc: "rendering (post-CoordFlip...) encoding") — the shape this
+    /// function's real caller (`prepare::build_layers`'s per-leaf swap) hands
+    /// it, x/y exchanged from what `spec.encoding` authored.
+    fn overlay_flipped_leaf(x_field: &str, y_field: &str, batch: RecordBatch) -> LeafOwned {
+        let mut authored = Encoding::default();
+        authored.x = Some(enc(x_field));
+        authored.y = Some(enc(y_field));
+        let spec = ChartSpec {
+            encoding: authored,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            ..base_spec()
+        };
+        let mut rendering = Encoding::default();
+        rendering.x = Some(enc(y_field));
+        rendering.y = Some(enc(x_field));
+        let outs = outputs(&batch);
+        LeafOwned { spec, encoding: rendering, batch, outputs: outs }
+    }
+
+    /// `fm.layer(_shared_bar(), _shared_point_flipped())`
+    /// (`tests/test_layer_coord.py`'s own fixture and control) keeps
+    /// every member its own composite leaf with its own scale when the flip
+    /// exchange, not a malformed column, is why sharing cannot reconcile —
+    /// `test_the_routes_that_can_hold_the_flipped_member_still_render_it` pins
+    /// this at the Python level; this is the same shape at the Rust boundary
+    /// `resolve_group` owns.
+    #[test]
+    fn overlay_of_a_flipped_member_beside_an_unflipped_one_still_resolves() {
+        fn shared_frame() -> RecordBatch {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("cat", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                    Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0])),
+                ],
+            )
+            .unwrap()
+        }
+        let bar = overlay_leaf("cat", "v", shared_frame());
+        let point_flipped = overlay_flipped_leaf("cat", "v", shared_frame());
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("cat"), Some("v"))],
+            shared_both(),
+        );
+        let inputs = [input(&bar), input(&point_flipped)];
+        let ctx = resolve_composite_scales(&tree, &inputs)
+            .expect("a flip-caused mismatch on the composite-leaves route must not refuse");
+        // Sharing is skipped on both channels (the mismatch is the flip
+        // exchange, not a malformed column), so each leaf falls back to its
+        // own standalone resolution — the same non-participation shape
+        // `mixed_numeric_ordinal_group_skips_sharing` already pins for the
+        // Hconcat sibling of this defect.
+        assert_eq!(ctx[0].x, None);
+        assert_eq!(ctx[1].x, None);
+        assert_eq!(ctx[0].y, None);
+        assert_eq!(ctx[1].y, None);
+    }
+
+    /// Two members BOTH flipped the same way: the establishing member's
+    /// (group[0]'s) own flip state decides the panel's, so a second member
+    /// flipped identically is not deferred and its own genuinely non-placeable
+    /// column still refuses. The refusal must name the RESOLVED axis
+    /// consistently everywhere in the message — the outer composite envelope's
+    /// `channel`, the inner text's "shared {channel} axis", and the
+    /// `resolve={"{channel}": ...}` hint all name the same token, the one a
+    /// caller would actually write into `resolve=` (a property of the shared
+    /// panel, verified against `_composite_resolve_field`'s pass-through
+    /// lowering: a `resolve=` key is never adjusted for any one member's own
+    /// coord).
+    #[test]
+    fn overlay_refusal_on_a_flipped_panel_names_the_resolved_key_consistently() {
+        let leaf0_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, false),
+                Field::new("cat", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let leaf1_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, false),
+                Field::new("w", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["p", "q"])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        // Both flipped: leaf0's authored (x="cat", y="v") renders x="v"
+        // (numeric, establishing a continuous axis); leaf1's authored
+        // (x="w", y="s") renders x="s" (Utf8, genuinely non-placeable).
+        let leaf0 = overlay_flipped_leaf("cat", "v", leaf0_batch);
+        let leaf1 = overlay_flipped_leaf("w", "s", leaf1_batch);
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("w"), Some("s"))],
+            shared_both(),
+        );
+        let inputs = [input(&leaf0), input(&leaf1)];
+        let err = resolve_composite_scales(&tree, &inputs)
+            .expect_err("a flip-matching sibling's genuinely non-placeable column must refuse");
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to resolve shared x domain for field 's'"),
+            "the outer envelope must name the resolved x slot, not un-flip it: {message}"
+        );
+        assert!(
+            message.contains("cannot be drawn on the shared x axis"),
+            "the inner text must agree with the outer envelope: {message}"
+        );
+        assert!(
+            message.contains("resolve={\"x\": \"independent\"}"),
+            "the hint must name the resolved x slot, the key a caller writes into resolve=: {message}"
+        );
+        assert!(!message.contains("shared y"), "no y token may leak in: {message}");
+    }
+
+    /// A later group member's own, unrelated resolution defect (its
+    /// `y` field absent from its own batch entirely) must not pre-empt the
+    /// typed shared-axis refusal an EARLIER member's genuinely non-placeable
+    /// column already owns. Only `group[0]`'s domain may be resolved before
+    /// the refusal loop runs; resolving every member's (as `resolve_group`
+    /// itself does) would let `leaf2`'s `UnknownField` surface first, purely
+    /// because it happens to be resolved in the same pass, not because it
+    /// comes first in the caller's own member order.
+    #[test]
+    fn an_unrelated_later_member_defect_does_not_preempt_the_shared_axis_refusal() {
+        let leaf0 = overlay_leaf(
+            "b",
+            "a",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("b", DataType::Float64, false),
+                    Field::new("a", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                ],
+            )
+            .unwrap(),
+        );
+        let leaf1 = overlay_leaf(
+            "b",
+            "s",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("b", DataType::Float64, false),
+                    Field::new("s", DataType::Utf8, false),
+                ])),
+                vec![
+                    Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                    Arc::new(StringArray::from(vec!["p", "q"])),
+                ],
+            )
+            .unwrap(),
+        );
+        // leaf2's OWN batch carries no "y2" column at all -- an unrelated
+        // resolution defect, distinct from N1's dtype refusal.
+        let leaf2 = overlay_leaf(
+            "b",
+            "y2",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("b", DataType::Float64, false)])),
+                vec![Arc::new(Float64Array::from(vec![3.0, 4.0]))],
+            )
+            .unwrap(),
+        );
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![
+                leaf_node(Some("b"), Some("a")),
+                leaf_node(Some("b"), Some("s")),
+                leaf_node(Some("b"), Some("y2")),
+            ],
+            shared_both(),
+        );
+        let inputs = [input(&leaf0), input(&leaf1), input(&leaf2)];
+        let err = resolve_composite_scales(&tree, &inputs)
+            .expect_err("leaf1's Utf8 column must still refuse the shared y axis");
+        match err {
+            CompositeResolveError::DomainResolve { source, .. } => {
+                assert_eq!(
+                    source,
+                    RenderError::LayerAxisColumnUnplaceable {
+                        layer: 1,
+                        detail: Box::new(crate::render::LayerAxisColumnDetail {
+                            channel: "y".to_string(),
+                            field: "s".to_string(),
+                            dtype: "Utf8".to_string(),
+                        }),
+                    },
+                    "leaf2's unrelated UnknownField must not win the race"
+                );
+            }
+            other => panic!(
+                "expected the typed shared-axis refusal, got {other:?} \
+                 (leaf2's unrelated defect pre-empted it)"
+            ),
         }
     }
 }

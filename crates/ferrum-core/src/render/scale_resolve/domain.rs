@@ -855,10 +855,36 @@ pub(in crate::render) fn numeric_domain_union_over(
         //
         // Flipping the layer's encoding costs a clone, so it is skipped for the
         // (overwhelmingly common) unflipped layer exactly as before.
-        for layer in layers {
+        //
+        // The panel's own flip state (spec.coord alone, not any layer's
+        // effective one) — needed below to tell a layer whose OWN coord
+        // exchanges its channels relative to the panel from every other
+        // layer, the same distinction
+        // `scene_build::validate_layer_coord_exchange_is_servable` draws
+        // between its `chart_flipped`/`layer_flipped` parameters.
+        let chart_flipped =
+            crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+        for (layer_index, layer) in layers.iter().enumerate() {
             let coord_flipped = crate::spec::coord::flips_positional_channels(
                 layer.effective_coord(spec.coord.as_ref()),
             );
+            // A layer beyond the first whose own flip state DIFFERS from the
+            // panel's exchanges its positional channels relative to the axes
+            // every layer shares (`#172`(1)). That is a distinct question
+            // from "is this column numeric or temporal" — the column may be
+            // perfectly fine on the axis it was AUTHORED for, just not on the
+            // one it lands on post-exchange — and it already has its own
+            // answer, asked once the scales this union produces are in hand
+            // (`scene_build::validate_layer_coord_exchange_is_servable`,
+            // `LayerCoordUnplaceableReason::ExchangedChannelUnservable`). This
+            // union defers to it rather than reaching the same verdict first
+            // with a message that does not name the coord: a swallowed
+            // contribution from an exchanging layer is exactly the pre-#172
+            // reading (a categorical column on this layer's own authored
+            // channel says nothing about whether it fits the axis it lands
+            // on here), and letting the later gate answer first is what keeps
+            // its message reachable at all.
+            let layer_exchanges_channels = layer_index != 0 && coord_flipped != chart_flipped;
             // An `independent_y` layer resolves its own y-slot (secondary-y-axis,
             // GH #52) and must not widen the primary/shared y domain — that would
             // couple the left axis to a scale it does not own. Its x stays shared,
@@ -911,10 +937,36 @@ pub(in crate::render) fn numeric_domain_union_over(
                 let Some(lf) = lf else { continue };
                 let contributed = if lf == field {
                     field_found
-                } else {
-                    // Ignore errors — the field may not exist in all batches
-                    // (e.g. when it lives in a named output that isn't loaded yet).
+                } else if layer_exchanges_channels {
+                    // An exchanging layer's field is judged by
+                    // `validate_layer_coord_exchange_is_servable` (see this
+                    // loop's own doc above), not by this union: a failure to
+                    // find or read it here belongs to that gate, not this one.
                     union_field(lf).unwrap_or(false)
+                } else {
+                    match locate_field(lf, primary_batch, transform_outputs) {
+                        // Absent from every batch is the ordinary "wrong
+                        // `data_source` / not loaded yet" outcome, not an
+                        // error — the same reading the ordinal sibling below
+                        // gives a layer field it cannot find.
+                        None => false,
+                        Some(located) => {
+                            // A present column must be numeric or temporal
+                            // before it can widen a continuous shared axis —
+                            // asked as a positive question before the read,
+                            // mirroring the ordinal sibling's
+                            // `ensure_category_keyable` gate later in this
+                            // file. Every OTHER `union_field` failure
+                            // propagates with `?`.
+                            crate::render::arrow_cast::require_placeable_on_continuous_axis(
+                                layer_index,
+                                channel,
+                                lf,
+                                located.col.data_type(),
+                            )?;
+                            union_field(lf)?
+                        }
+                    }
                 };
                 if i == 0 {
                     value_field_contributed = contributed;
@@ -1769,6 +1821,177 @@ mod tests {
             (3.0, 4.0),
             "under CoordFlip the y axis holds the authored x field; an authored \
              y/y2 must not widen it"
+        );
+    }
+
+    // ── #120(9) + N1: a layer column that cannot serve the shared numeric
+    // axis is refused ─────────────────────────────────────────────────────
+    //
+    // `numeric_domain_union_over`'s per-layer loop reads every OTHER layer's
+    // own field for this channel (`lf != field`) through `union_field`. The
+    // dtype gate below asks, before that read, whether the located column can
+    // serve a continuous axis at all — the numeric counterpart of the ordinal
+    // union's `ensure_category_keyable` gate further down this file.
+
+    /// `fm.layer(point(y="a"), line(y="s"))`: `s` is `Utf8`. Reaches this
+    /// function exactly as `scale_resolve::positional`'s merged-flat prepare
+    /// path and `composite::leaf_positional_domain`'s static overlay path
+    /// both call it.
+    const LAYER_UTF8_Y_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "line", "encoding": {"y": {"field": "s"}}}]}"#;
+
+    /// The same shape with the second layer's `y` naming a field present in
+    /// no batch at all — the ordinary "not loaded here" outcome, unaffected
+    /// by the gate above.
+    const LAYER_ABSENT_Y_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "line", "encoding": {"y": {"field": "missing"}}}]}"#;
+
+    /// The same shape with the second layer's `y` naming `t`, a `Timestamp`
+    /// column — the positive control proving the gate admits temporal
+    /// columns rather than only numeric ones.
+    const LAYER_TEMPORAL_Y_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "line", "encoding": {"y": {"field": "t"}}}]}"#;
+
+    /// `a`/`b` numeric, `s` a string column disjoint in name from either.
+    fn ab_s_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+            Field::new("s", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["p", "q"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// `a`/`b` numeric, `t` a millisecond `Timestamp` column well past `a`'s
+    /// own extent, so a widened union is only explainable by `t` joining it.
+    fn ab_t_batch() -> RecordBatch {
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::TimeUnit;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+            Field::new("t", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![500, 9000])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A non-numeric, non-temporal layer column refuses rather than joining
+    /// the union at arbitrary coerced heights.
+    #[test]
+    fn layer_utf8_column_on_shared_axis_refuses() {
+        let spec: ChartSpec =
+            serde_json::from_str(LAYER_UTF8_Y_SPEC_JSON).expect("spec JSON must deserialize");
+        let batch = ab_s_batch();
+        let err = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+            .expect_err("a Utf8 layer column must refuse the shared numeric axis");
+        assert_eq!(
+            err,
+            RenderError::LayerAxisColumnUnplaceable {
+                layer: 1,
+                detail: Box::new(crate::render::LayerAxisColumnDetail {
+                    channel: "y".to_string(),
+                    field: "s".to_string(),
+                    dtype: "Utf8".to_string(),
+                }),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "layer 1: column 's' (Utf8) cannot be drawn on the shared y axis, which is \
+             continuous — a layered chart (fm.layer(...) / chart + chart) merges its members \
+             onto one panel. Cast the column, or give the layer its own scale with \
+             resolve={\"y\": \"independent\"}."
+        );
+    }
+
+    /// Control: a layer field present in no batch at all contributes
+    /// nothing and does not refuse — the same reading the ordinal union
+    /// gives the identical case (`a_layer_field_in_no_batch_is_skipped_not_raised`
+    /// below).
+    #[test]
+    fn layer_field_absent_from_every_batch_is_skipped_not_refused() {
+        let spec: ChartSpec =
+            serde_json::from_str(LAYER_ABSENT_Y_SPEC_JSON).expect("spec JSON must deserialize");
+        let batch = ab_s_batch();
+        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+            .expect("an absent layer field must not refuse");
+        assert_eq!(extent, (1.0, 2.0), "the absent field must not widen or shrink the union");
+    }
+
+    /// Control: a layer's own `Timestamp` column still joins the union —
+    /// the gate admits numeric OR temporal, not numeric alone.
+    #[test]
+    fn layer_temporal_column_still_widens_the_shared_axis() {
+        let spec: ChartSpec = serde_json::from_str(LAYER_TEMPORAL_Y_SPEC_JSON)
+            .expect("spec JSON must deserialize");
+        let batch = ab_t_batch();
+        let extent = numeric_domain_union("y", "a", None, &batch, &HashMap::new(), &spec, false)
+            .expect("a Timestamp layer column must be admitted, not refused");
+        assert_eq!(
+            extent,
+            (1.0, 9000.0),
+            "the layer's Timestamp column must widen the union past a's own extent"
+        );
+    }
+
+    /// A layer field can be located as numeric in `primary_batch` (passing
+    /// the gate) yet still fail downstream when the SAME field also lives,
+    /// with an unsupported dtype, in the facet-shared global batch
+    /// (`include_final`). That failure is a genuinely different
+    /// `union_field` outcome from the gate's own refusal and must still
+    /// reach the caller via `?`, never be swallowed back to `Ok(false)`.
+    #[test]
+    fn a_non_gate_union_field_error_still_propagates() {
+        use arrow::array::Float64Array;
+        let spec_json = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "line", "encoding": {"y": {"field": "z"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(spec_json).expect("spec JSON must deserialize");
+        let primary_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+            Field::new("z", DataType::Float64, false),
+        ]));
+        let primary = RecordBatch::try_new(
+            primary_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![5.0, 6.0])),
+            ],
+        )
+        .unwrap();
+        let final_schema = Arc::new(Schema::new(vec![Field::new("z", DataType::Utf8, false)]));
+        let final_batch = RecordBatch::try_new(
+            final_schema,
+            vec![Arc::new(StringArray::from(vec!["x", "y"]))],
+        )
+        .unwrap();
+        let mut outputs = HashMap::new();
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), final_batch);
+        let err = numeric_domain_union("y", "a", None, &primary, &outputs, &spec, true)
+            .expect_err("z's Utf8 copy in the global batch must still refuse the render");
+        assert_eq!(
+            err,
+            RenderError::UnsupportedDtype {
+                field: "z".to_string(),
+                dtype: format!("{:?}", DataType::Utf8),
+                context: None,
+            },
+            "the propagated error must be union_field's own UnsupportedDtype, not the gate's \
+             LayerAxisColumnUnplaceable — the gate saw only z's Float64 copy in primary_batch"
         );
     }
 

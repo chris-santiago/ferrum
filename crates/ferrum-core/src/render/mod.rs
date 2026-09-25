@@ -136,6 +136,16 @@ pub(crate) enum LayerCoordUnplaceableReason {
     },
 }
 
+/// The boxed payload of [`RenderError::LayerAxisColumnUnplaceable`]. `channel`
+/// is the RESOLVED (post-`CoordFlip`) axis token the union acted on, `field`
+/// the offending column's name, `dtype` its pre-formatted Arrow dtype.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LayerAxisColumnDetail {
+    pub(crate) channel: String,
+    pub(crate) field: String,
+    pub(crate) dtype: String,
+}
+
 /// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`],
 /// [`RenderError::OrdinalFormatOnTemporalScale`] or
 /// [`RenderError::NumberFormatOnTemporalScale`] refusal names: where the
@@ -396,6 +406,57 @@ pub enum RenderError {
         /// `Result` in those modules for a variant constructed at most once per
         /// failed render. Sibling reasons stay unboxed because they are small.
         reason: Box<LayerCoordUnplaceableReason>,
+    },
+    /// A layer or Overlay-group member's column bound to a continuous shared
+    /// positional axis is neither numeric nor temporal, so the union that
+    /// computes the shared domain cannot place it (`#120`(9), N1; spec
+    /// §6.8). `layer` names the offending member's position; what it is a
+    /// position IN depends on which of the two sites raised this:
+    ///
+    /// - `scale_resolve::domain::numeric_domain_union_over`'s per-layer loop
+    ///   (a single `ChartSpec`'s own `layers` — the merged-flat chart,
+    ///   `+`/`.interactive()`, and a hand-built spec whose `layers` is
+    ///   `Some`): `layer` is the index in `spec.layers`.
+    /// - `composite::refuse_unplaceable_overlay_members` (a bare
+    ///   `fm.layer(a, b, ...)`, each member its own composite leaf — the
+    ///   shape `LayerChart._composite_tree` actually lowers to): `layer` is
+    ///   the member's position among the Overlay group's own leaves, and the
+    ///   error reaches Python wrapped in `CompositeResolveError::
+    ///   DomainResolve`'s envelope (spec §6.8's amended note) rather than
+    ///   raised bare.
+    ///
+    /// Both sites read the same [`crate::render::arrow_cast::
+    /// require_placeable_on_continuous_axis`] predicate and construct this
+    /// variant identically, so the check and its text are one rule with two
+    /// call sites, not two copies of it.
+    ///
+    /// `detail.channel` is deliberately left un-flipped for `Display`, for
+    /// the same reason
+    /// [`LayerCoordUnplaceableReason::ExchangedChannelUnservable`] leaves its
+    /// own `channel` alone: it names the panel's axis and the `resolve=` key
+    /// a caller would write for it, neither of which is an encoding key the
+    /// caller authored on any one member.
+    ///
+    /// REFUSE MALFORMED: a column that cannot be placed on a continuous axis
+    /// has no honest degraded render, the same policy
+    /// [`Self::LayerCoordUnplaceable`] states for its own two reasons. A
+    /// member whose field is simply absent from its batch is unaffected —
+    /// the ordinary "not loaded here" outcome — a member whose own coord
+    /// exchanges its channels relative to the establishing member is judged
+    /// by the coord-exchange gate instead (`LayerCoordUnplaceableReason::
+    /// ExchangedChannelUnservable` on the merged-flat routes;
+    /// `refuse_unplaceable_overlay_members`'s own flip-state guard on the
+    /// composite route), and `resolve={"<channel>": "independent"}` gives a
+    /// member its own scale instead of refusing.
+    LayerAxisColumnUnplaceable {
+        layer: usize,
+        /// Boxed, for `clippy::result_large_err` and nothing else — the same
+        /// reason [`Self::LayerCoordUnplaceable`]'s own `reason` field is
+        /// boxed: three owned strings here would widen `RenderError` past
+        /// the point where the composite wrappers that embed it
+        /// (`CompositeResolveError`, `CompositeRenderError`) exceed the
+        /// 128-byte threshold.
+        detail: Box<LayerAxisColumnDetail>,
     },
     /// A layer beyond the first bound a positional channel (`x`/`y`/`x2`/`y2`)
     /// to a column that is absent from **that layer's own resolved batch** —
@@ -791,6 +852,12 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // `#172`(1): carries a layer index, a coord constructor and the
         // panel-scoped property it declared — no channel token either.
         | RenderError::LayerCoordUnplaceable { .. }
+        // `#120`(9)/N1: carries a `channel` field, but like
+        // `LayerCoordUnplaceable`'s own `ExchangedChannelUnservable` reason,
+        // it deliberately stays RESOLVED (post-flip) for `Display` — it
+        // names the panel's axis, not an encoding key the caller wrote —
+        // so there is nothing here to un-flip.
+        | RenderError::LayerAxisColumnUnplaceable { .. }
         // #123: neither variant carries a positional coordinate channel
         // token (an entry string, or a list of them) — nothing here to
         // un-flip, same as `ColorRangeParseFailure` above.
@@ -989,6 +1056,16 @@ impl std::fmt::Display for RenderError {
                      merges its members onto one panel, so this coord cannot be placed on one \
                      of them. {remedy} Move it to the first member (whose coord IS the \
                      panel's), or drop it."
+                )
+            }
+            Self::LayerAxisColumnUnplaceable { layer, detail } => {
+                let LayerAxisColumnDetail { channel, field, dtype } = &**detail;
+                write!(
+                    f,
+                    "layer {layer}: column '{field}' ({dtype}) cannot be drawn on the shared \
+                     {channel} axis, which is continuous — a layered chart (fm.layer(...) / \
+                     chart + chart) merges its members onto one panel. Cast the column, or give \
+                     the layer its own scale with resolve={{\"{channel}\": \"independent\"}}."
                 )
             }
             Self::LayerUnknownColumn { layer, channel, name, coord_flipped } => {
