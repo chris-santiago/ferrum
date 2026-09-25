@@ -403,13 +403,42 @@ class TestOverrideRegistryParity:
         # three names a wire key of any scale type.
         assert {"num_bins", "quantiles", "utc"}.isdisjoint(rule.valid_leaves)
 
+    def test_every_camelcase_gate_key_has_a_snake_alias_or_is_system_only(self):
+        """Guard the reverse direction of :data:`_SCALE_LEAF_WIRE_ALIASES`:
+        every wire key the gate accepts that is not all-lowercase (a
+        camelCase spelling) must either have a snake_case override alias or
+        be excluded as :data:`_SCALE_LEAF_SYSTEM_ONLY`. Otherwise that wire
+        key has no ``.override()`` spelling that reads like the rest of the
+        flat snake_case surface — the same class of gap
+        :data:`_SCALE_LEAF_WIRE_ALIASES`'s forward direction closes for the
+        keys it does list, just unchecked for a key nobody added an alias
+        for.
+        """
+        wire_union = set()
+        for scale_type in oa._SCALE_TYPE_TAGS:
+            wire_union.update(scale_accepted_keys(scale_type))
+
+        camel_case_keys = {key for key in wire_union if key != key.lower()}
+        aliased = set(oa._SCALE_LEAF_WIRE_ALIASES.values())
+        # Vacuity control: the keys this test accounts for must actually be
+        # camelCase gate keys, so a change that emptied `camel_case_keys`
+        # (e.g. the gate stopped serving any camelCase key, or the
+        # lowercase-comparison heuristic above stopped matching) fails here
+        # instead of letting `unaccounted` below pass on an empty set.
+        assert aliased | oa._SCALE_LEAF_SYSTEM_ONLY <= camel_case_keys
+        unaccounted = camel_case_keys - aliased - oa._SCALE_LEAF_SYSTEM_ONLY
+        assert not unaccounted
+
     def test_scale_type_tags_cover_every_tag_the_scale_classes_emit(self):
-        """``_SCALE_TYPE_TAGS`` is the one hand-listed thing left in the scale
-        registry (each tag's KEYS are asked of the gate). Guard it from both
-        sides: every listed tag must be a real variant the gate answers for,
-        and every tag ferrum's own scale classes can serialise must be listed —
-        a Rust-side variant with no entry here would silently withhold its
-        variant-specific keys from the whole override surface.
+        """``_SCALE_TYPE_TAGS`` is published from Rust's ``ScaleSpec::TAGS``
+        (``ferrum._core.scale_type_tags()``), not hand-listed, so its
+        validity against the gate is a Rust-test-enforced fact rather than
+        something this test needs to re-prove. What is still worth guarding
+        on the Python side is one direction only: every tag ferrum's own
+        scale classes can actually serialise must be a member of the
+        published set — a Python scale class emitting a tag the publication
+        forgot would silently withhold that tag's variant-specific keys from
+        the whole override surface.
         """
         from ferrum._core import (
             BandScale,
@@ -428,9 +457,6 @@ class TestOverrideRegistryParity:
             ThresholdScale,
             TimeScale,
         )
-
-        for scale_type in oa._SCALE_TYPE_TAGS:
-            assert scale_accepted_keys(scale_type), scale_type
 
         instances = [
             LinearScale(),

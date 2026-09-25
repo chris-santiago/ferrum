@@ -31,6 +31,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // every sort-accepting Python channel (`X`/`Y`/`Facet`/...) validates
     // against the SAME `op`/`order` spellings instead of holding a copy.
     m.add_function(wrap_pyfunction!(spec::encoding::sort_accepted_vocabulary, m)?)?;
+    // `#159`: the published scale-tag vocabulary (the 16 `ScaleSpec` wire
+    // `"type"` tags, and the `time`/`utc` temporal subset), so
+    // `_override_apply.py`/`_scale.py` read this instead of holding their
+    // own literal copies.
+    m.add_function(wrap_pyfunction!(spec::encoding::scale_type_tags, m)?)?;
+    m.add_function(wrap_pyfunction!(spec::encoding::scale_temporal_type_tags, m)?)?;
     m.add_class::<scale::linear::LinearScale>()?;
     m.add_class::<scale::log::LogScale>()?;
     m.add_class::<scale::symlog::SymlogScale>()?;

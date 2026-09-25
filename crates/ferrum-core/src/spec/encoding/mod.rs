@@ -16,7 +16,10 @@ mod gate;
 #[cfg(test)]
 mod tests;
 
-pub use gate::{scale_accepted_keys, sort_accepted_vocabulary, validate_scale_dict};
+pub use gate::{
+    scale_accepted_keys, scale_temporal_type_tags, scale_type_tags, sort_accepted_vocabulary,
+    validate_scale_dict,
+};
 use gate::deserialize_scale_value;
 
 use serde::{Deserialize, Serialize};
@@ -225,6 +228,19 @@ pub struct ContinuousScaleCommon {
 /// typo'd `"reverse"` (e.g. `"reveres"`) now refuses naming the real key
 /// among the accepted set, instead of vanishing with no error and no
 /// visible effect.
+///
+/// **What a new 17th variant still grows by hand (`#159`).** `ScaleSpec::tag()`
+/// below is compiler-enforced against this enum's own shape (its match has
+/// no wildcard arm, so a new variant fails to compile there).
+/// `ScaleSpec::TAGS` is weaker: a plain array, verified against `tag()` only
+/// by a runtime test (`gate.rs`'s `tags_equals_the_image_of_tag_over_maximal_instances`),
+/// not by the compiler — a variant missing from both `TAGS` and
+/// `maximal_instances()` would pass that test undetected. Three further
+/// things a new variant needs are enforced by neither: a `maximal_instances()`
+/// entry and an `accepted_keys_for_scale_type` match arm (both `gate.rs`),
+/// and a `ScaleKind` resolution row in the table above. A temporal variant
+/// additionally needs an entry in
+/// `ScaleSpec::TEMPORAL_TAGS`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase", remote = "Self")]
 pub enum ScaleSpec {
@@ -559,6 +575,71 @@ impl ScaleSpec {
     pub(crate) fn anchors_zero(&self) -> bool {
         matches!(self, ScaleSpec::Linear { zero: true, .. })
     }
+
+    /// The wire `"type"` tag this instance serializes under. Exhaustive —
+    /// no wildcard arm — so a 17th variant fails to compile here before any
+    /// consumer (`ScaleSpec::TAGS`, `gate.rs`'s drift tests) could silently
+    /// under-cover it. Hand-spells this enum's own `#[serde(tag = "type",
+    /// rename_all = "lowercase")]` mapping because serde does not expose a
+    /// variant's resolved tag string at runtime.
+    pub(crate) fn tag(&self) -> &'static str {
+        match self {
+            ScaleSpec::Linear { .. } => "linear",
+            ScaleSpec::Log { .. } => "log",
+            ScaleSpec::Time { .. } => "time",
+            ScaleSpec::Symlog { .. } => "symlog",
+            ScaleSpec::Ordinal { .. } => "ordinal",
+            ScaleSpec::Pow { .. } => "pow",
+            ScaleSpec::Sqrt { .. } => "sqrt",
+            ScaleSpec::Utc { .. } => "utc",
+            ScaleSpec::Band { .. } => "band",
+            ScaleSpec::Point { .. } => "point",
+            ScaleSpec::Sequential { .. } => "sequential",
+            ScaleSpec::Diverging { .. } => "diverging",
+            ScaleSpec::Quantize { .. } => "quantize",
+            ScaleSpec::Quantile { .. } => "quantile",
+            ScaleSpec::Threshold { .. } => "threshold",
+            ScaleSpec::BinOrdinal { .. } => "bin-ordinal",
+            // No `_` arm: a new variant must be added here before this
+            // module compiles at all.
+        }
+    }
+
+    /// The complete, wildcard-free set of 16 wire `"type"` tags, one per
+    /// variant — the single published home for the scale-tag vocabulary
+    /// (`#159`), read by `gate.rs`'s `scale_type_tags` pyfunction and by
+    /// Python's `_SCALE_TYPE_TAGS` through that binding, replacing what used
+    /// to be three independently hand-maintained copies (a test-only
+    /// `ALL_TAGS` list here, and two Python literals). Declaration order,
+    /// not sorted: `scale_type_tags()`'s documented return order.
+    pub(crate) const TAGS: [&'static str; 16] = [
+        "linear",
+        "log",
+        "time",
+        "symlog",
+        "ordinal",
+        "pow",
+        "sqrt",
+        "utc",
+        "band",
+        "point",
+        "sequential",
+        "diverging",
+        "quantize",
+        "quantile",
+        "threshold",
+        "bin-ordinal",
+    ];
+
+    /// The temporal subset of [`ScaleSpec::TAGS`]: the two variants
+    /// (`Time`, `Utc`) whose `domain` accepts date/datetime elements
+    /// (`convert_raw_dict_temporal_domain`, this module's `gate.rs`
+    /// sibling) and whose PyO3 siblings (`TimeScale`, `UtcScale`) both parse
+    /// date/datetime constructor arguments. Read by `gate.rs`'s
+    /// `scale_temporal_type_tags` pyfunction, published so Python's
+    /// `_TEMPORAL_SCALE_TYPES` reads this set instead of holding its own
+    /// `{"time", "utc"}` literal.
+    pub(crate) const TEMPORAL_TAGS: [&'static str; 2] = ["time", "utc"];
 }
 
 fn default_log_base() -> f64 {

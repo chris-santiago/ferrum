@@ -991,6 +991,16 @@ def secondary_key(name: str | None, key: str) -> str: ...
 # unknown ``scale_type`` tag.
 def scale_accepted_keys(scale_type: str) -> list[str]: ...
 
+# #159: ``ScaleSpec::TAGS`` -- the full set of ``ScaleSpec`` "type" tags (the
+# image of ``ScaleSpec::tag()`` over every variant, kept in step with it by a
+# Rust test), in ``TAGS`` order. Published so Python's override registry
+# holds no hand-listed mirror of it.
+def scale_type_tags() -> list[str]: ...
+
+# The temporal subset of ``scale_type_tags()`` -- the wire tags whose
+# ``domain`` is temporal (``"time"``, ``"utc"``).
+def scale_temporal_type_tags() -> list[str]: ...
+
 # Batch C close remediation: the same wire gate ``EncodingSpec(field,
 # scale={...})`` enforces, callable for validation only. Raises the gate's own
 # ValueError (byte-identical to the EncodingSpec route's message, since both

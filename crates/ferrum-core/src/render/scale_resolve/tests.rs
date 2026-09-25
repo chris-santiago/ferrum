@@ -6982,6 +6982,29 @@ fn non_linear_opacity_scale_warns_and_falls_back_to_linear_default() {
     );
 }
 
+/// Same warning, a `BinOrdinal` scale: `scale_kind` must be the `ScaleSpec`
+/// wire tag spelling (`"bin-ordinal"`, hyphen), the same spelling every
+/// other tag-producing site in the crate uses, since `scale_spec_kind_name`
+/// delegates to `ScaleSpec::tag()`.
+#[test]
+fn non_linear_bin_ordinal_opacity_scale_warns_with_the_wire_tag_spelling() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "bin-ordinal", "bins": [0.0, 50.0, 100.0]},
+        },
+    }));
+    let (_scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(
+        warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
+            channel: "opacity".into(),
+            scale_kind: "bin-ordinal".into(),
+        }),
+        "expected the hyphenated wire tag spelling; got {warns:?}"
+    );
+}
+
 // ── to_pixel_f64_extrapolated (batch-E T13, mark_function(clip=False)) ──────
 
 /// RED-proven: an out-of-domain input must map PAST the pixel range, not

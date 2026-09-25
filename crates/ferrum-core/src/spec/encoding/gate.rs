@@ -29,6 +29,18 @@
 //! `spec/encoding/mod.rs`'s doc comment for where the remaining
 //! `DataType`/`EncodingSpec`/`Encoding` round-trip tests (unrelated to the
 //! gate) landed instead.
+//!
+//! **Known blind spot: `#[serde(alias = ...)]` (`#159`).**
+//! `accepted_keys_for_scale_type` is derived from each variant's WIRE-spelled
+//! field names (the `#[serde(rename = ...)]` destination, where present) —
+//! it has no notion of a field also carrying `#[serde(alias = ...)]`. If a
+//! future field grows one, `validate_scale_spec_keys` would refuse the alias
+//! spelling as an "unknown key" even though the derived `Deserialize` this
+//! gate wraps would happily accept it: the gate and the type it guards would
+//! silently disagree on what a valid dict looks like. No `ScaleSpec` field
+//! carries `#[serde(alias)]` today, and `no_scale_spec_field_carries_a_serde_alias`
+//! below pins that so the gap stays theoretical rather than a live
+//! over-refusal.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -189,6 +201,26 @@ pub fn scale_accepted_keys(scale_type: &str) -> PyResult<Vec<String>> {
         .ok_or_else(|| PyValueError::new_err(format!("unknown scale type '{scale_type}'")))
 }
 
+/// Python-visible mirror of [`ScaleSpec::TAGS`] (`#159`): the complete,
+/// wildcard-free set of 16 wire `"type"` tags, in `TAGS` declaration order —
+/// the single published home for the scale-tag vocabulary. Exists so
+/// `_override_apply.py`'s `_SCALE_TYPE_TAGS` reads this binding instead of
+/// holding its own literal tuple a new `ScaleSpec` variant would not touch,
+/// on the `scale_accepted_keys`/`sort_accepted_vocabulary` precedent.
+#[pyfunction]
+pub fn scale_type_tags() -> Vec<&'static str> {
+    ScaleSpec::TAGS.to_vec()
+}
+
+/// Python-visible mirror of [`ScaleSpec::TEMPORAL_TAGS`]: the subset of
+/// `scale_type_tags()` (`time`, `utc`) whose `domain` accepts date/datetime
+/// elements. Replaces `_scale.py`'s hand-maintained `{"time", "utc"}`
+/// literal.
+#[pyfunction]
+pub fn scale_temporal_type_tags() -> Vec<&'static str> {
+    ScaleSpec::TEMPORAL_TAGS.to_vec()
+}
+
 /// The `sort`-field-object vocabulary (`#176`(11) + N3): keys `"op"` and
 /// `"order"`, each the accepted string spellings for that key, sourced from
 /// `render::scale_resolve::{sort_op_accepted_values,
@@ -311,10 +343,9 @@ fn convert_raw_dict_temporal_domain<'py>(
     let Ok(d) = obj.cast::<PyDict>() else {
         return Ok(Some(obj.clone()));
     };
-    let is_temporal = matches!(
-        d.get_item("type")?.and_then(|t| t.extract::<String>().ok()).as_deref(),
-        Some("time") | Some("utc")
-    );
+    let type_str = d.get_item("type")?.and_then(|t| t.extract::<String>().ok());
+    let is_temporal =
+        type_str.as_deref().is_some_and(|t| ScaleSpec::TEMPORAL_TAGS.contains(&t));
     if !is_temporal {
         return Ok(Some(obj.clone()));
     }
@@ -419,10 +450,10 @@ mod tests {
     /// each type accepts.
     ///
     /// Deliberately returns bare instances, not `(tag, instance)` pairs: the
-    /// tag comes from `scale_spec_tag_exhaustive` below, the ONE place a
-    /// variant maps to its wire tag under compiler-enforced exhaustiveness,
-    /// rather than a second, hand-typed label here that could silently
-    /// mislabel an entry (spec review cycle-2 ❌3 / rs-quality S3+2).
+    /// tag comes from `ScaleSpec::tag()`, the ONE place (production code,
+    /// not a test-local duplicate) a variant maps to its wire tag under
+    /// compiler-enforced exhaustiveness, rather than a second, hand-typed
+    /// label here that could silently mislabel an entry.
     fn maximal_instances() -> Vec<ScaleSpec> {
         vec![
             ScaleSpec::Linear { common: maximal_common(), nice: true, zero: true, system_injected: true },
@@ -476,64 +507,139 @@ mod tests {
         ]
     }
 
-    /// Variant-coverage guard (spec review cycle-2 ❌3; rs-quality S3+2):
-    /// an EXHAUSTIVE match over `&ScaleSpec` — no wildcard arm — mapping
-    /// every variant to its wire `"type"` tag. This is the compiler-enforced
-    /// equivalent, for a closed Rust enum, of `chart_config.rs`'s
-    /// `accepted_keys_for_section_covers_every_gated_section` (which has to
-    /// iterate a string list, `CHART_CONFIG_SECTIONS`, because
-    /// `ChartConfig`'s "sections" aren't a Rust enum the compiler can check
-    /// this way): a future 17th `ScaleSpec` variant added anywhere in this
-    /// crate makes THIS match fail to compile (E0004, non-exhaustive
-    /// patterns) the moment `spec/encoding.rs`'s tests are built — before
-    /// `accepted_keys_for_scale_type` or `maximal_instances()` even get a
-    /// chance to silently under-cover it. RED-proofed by commenting out the
-    /// `Threshold` arm and confirming `cargo build --tests -p ferrum-core`
-    /// fails with "non-exhaustive patterns: `ScaleSpec::Threshold { .. }`
-    /// not covered", then restoring it.
-    fn scale_spec_tag_exhaustive(spec: &ScaleSpec) -> &'static str {
-        match spec {
-            ScaleSpec::Linear { .. } => "linear",
-            ScaleSpec::Log { .. } => "log",
-            ScaleSpec::Time { .. } => "time",
-            ScaleSpec::Symlog { .. } => "symlog",
-            ScaleSpec::Ordinal { .. } => "ordinal",
-            ScaleSpec::Pow { .. } => "pow",
-            ScaleSpec::Sqrt { .. } => "sqrt",
-            ScaleSpec::Utc { .. } => "utc",
-            ScaleSpec::Band { .. } => "band",
-            ScaleSpec::Point { .. } => "point",
-            ScaleSpec::Sequential { .. } => "sequential",
-            ScaleSpec::Diverging { .. } => "diverging",
-            ScaleSpec::Quantize { .. } => "quantize",
-            ScaleSpec::Quantile { .. } => "quantile",
-            ScaleSpec::Threshold { .. } => "threshold",
-            ScaleSpec::BinOrdinal { .. } => "bin-ordinal",
-            // No `_` arm: a new variant must be added here before this
-            // module compiles at all.
+    /// `ScaleSpec::TAGS` = the image of `ScaleSpec::tag()` over
+    /// `maximal_instances()` (`#159`): `ScaleSpec::tag()` is a
+    /// compiler-enforced EXHAUSTIVE match (no wildcard arm — a future 17th
+    /// variant fails to compile there before this test would even run), so
+    /// this test proves the two OTHER hand-maintained enumerations —
+    /// `ScaleSpec::TAGS` and `maximal_instances()`'s hand-built `Vec` — both
+    /// still agree with it: in length (no duplicate or missing tag) and in
+    /// identity (every tag `tag()` produces is one `TAGS` lists, and vice
+    /// versa). 16 variants today.
+    #[test]
+    fn tags_equals_the_image_of_tag_over_maximal_instances() {
+        use std::collections::HashSet;
+        let produced: HashSet<&str> = maximal_instances().iter().map(ScaleSpec::tag).collect();
+        let published: HashSet<&str> = ScaleSpec::TAGS.iter().copied().collect();
+        assert_eq!(
+            produced.len(),
+            maximal_instances().len(),
+            "maximal_instances() has a duplicate tag"
+        );
+        assert_eq!(published.len(), ScaleSpec::TAGS.len(), "ScaleSpec::TAGS has a duplicate tag");
+        assert_eq!(
+            produced, published,
+            "ScaleSpec::TAGS has drifted from the tags maximal_instances() actually produces"
+        );
+    }
+
+    /// Every published tag has a non-`None` accepted-key set (`#159`): a tag
+    /// `ScaleSpec::TAGS` lists but `accepted_keys_for_scale_type` does not
+    /// recognize would silently fall through the wire-key gate
+    /// (`validate_scale_spec_keys`'s "unrecognized type, leave unvalidated"
+    /// branch) for every scale of that type.
+    #[test]
+    fn every_published_tag_has_an_accepted_key_set() {
+        for tag in ScaleSpec::TAGS {
+            assert!(
+                accepted_keys_for_scale_type(tag).is_some(),
+                "ScaleSpec::TAGS lists '{tag}' but accepted_keys_for_scale_type does not cover it"
+            );
         }
     }
 
-    /// `maximal_instances()` itself must stay exhaustive too — the tag match
-    /// above only proves the ENUM-to-tag mapping is complete; it says
-    /// nothing about whether `maximal_instances()`'s hand-built `Vec`
-    /// actually contains one of every variant. Assert the two enumerations
-    /// agree in length and (via `scale_spec_tag_exhaustive`) in tag identity
-    /// — 16 variants today (corrected from the brief/reports' "15": `Band`
-    /// was omitted from that count everywhere it appears, though it was
-    /// always covered).
+    /// Every `#[serde(flatten)]`-embedded type name inside a source span
+    /// (e.g. `common: ContinuousScaleCommon,` under a `#[serde(flatten)]`
+    /// attribute) — derived from the real field declarations rather than
+    /// hand-listed, so a future flattened type is picked up automatically.
+    fn flattened_type_names(body: &str) -> Vec<String> {
+        const MARKER: &str = "#[serde(flatten)]";
+        let mut names = std::collections::BTreeSet::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = body[cursor..].find(MARKER) {
+            let after_marker = cursor + rel + MARKER.len();
+            let tail = &body[after_marker..];
+            let colon = tail.find(':').expect("a #[serde(flatten)] field must have `name: Type`");
+            let ty_start = colon + 1;
+            let ty_end = tail[ty_start..]
+                .find(|c: char| c == ',' || c == '\n')
+                .map(|i| ty_start + i)
+                .unwrap_or(tail.len());
+            names.insert(tail[ty_start..ty_end].trim().to_string());
+            cursor = after_marker;
+        }
+        names.into_iter().collect()
+    }
+
+    /// The full text of `struct {type_name} { ... }`'s body in `source`,
+    /// found by brace-depth counting from the struct's opening `{` (every
+    /// `{`/`}` pair inside this crate's doc-comment JSON examples closes on
+    /// the same line it opens on, so naive depth counting does not
+    /// mis-close early on them).
+    fn struct_body<'a>(source: &'a str, type_name: &str) -> &'a str {
+        let needle = format!("struct {type_name} {{");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("definition of struct {type_name} not found"));
+        let body_start = start + needle.len() - 1;
+        let mut depth = 0i32;
+        for (i, c) in source[body_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("struct {type_name}'s opening brace never closes");
+    }
+
+    /// Whether `text` contains a `#[serde(alias = ...)]`-shaped attribute
+    /// key, tolerant of `alias="x"`/`alias  =  "x"` spacing (not just a
+    /// fixed `"alias ="` substring, which an unspaced spelling — this crate
+    /// is not rustfmt-clean, so one could land — would slip past) and not
+    /// fooled by an unrelated identifier merely prefixed with `alias`
+    /// (e.g. `alias_name`, whose next non-whitespace character is `_`, not
+    /// `=`).
+    fn contains_alias_attribute(text: &str) -> bool {
+        text.match_indices("alias").any(|(idx, _)| {
+            text[idx + "alias".len()..].trim_start().starts_with('=')
+        })
+    }
+
+    /// The gate's serde-alias blind spot (this file's module doc) stays
+    /// theoretical: no field of `ScaleSpec` itself, nor of any type
+    /// `#[serde(flatten)]`-embedded into it (`ContinuousScaleCommon` today,
+    /// derived rather than hand-listed so a future flattened type is
+    /// covered automatically), carries `#[serde(alias = ...)]`. Reads the
+    /// real source file rather than re-deriving the field list by hand, so
+    /// a future field growing an alias fails this test the moment it
+    /// lands, not only when someone remembers to check.
     #[test]
-    fn maximal_instances_covers_every_scale_spec_variant() {
-        use std::collections::HashSet;
-        let tags: HashSet<&str> =
-            maximal_instances().iter().map(scale_spec_tag_exhaustive).collect();
-        const ALL_TAGS: &[&str] = &[
-            "linear", "log", "time", "symlog", "ordinal", "pow", "sqrt", "utc", "band", "point",
-            "sequential", "diverging", "quantize", "quantile", "threshold", "bin-ordinal",
-        ];
-        assert_eq!(tags.len(), ALL_TAGS.len(), "maximal_instances() has a duplicate or missing tag");
-        for tag in ALL_TAGS {
-            assert!(tags.contains(tag), "maximal_instances() is missing a '{tag}' instance");
+    fn no_scale_spec_field_carries_a_serde_alias() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/spec/encoding/mod.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let start = source.find("pub enum ScaleSpec {").expect("ScaleSpec enum definition");
+        let end = source[start..]
+            .find("\nimpl ScaleSpec {")
+            .map(|i| start + i)
+            .expect("ScaleSpec impl block");
+        let enum_body = &source[start..end];
+        assert!(
+            !contains_alias_attribute(enum_body),
+            "a ScaleSpec field carries #[serde(alias = ...)] — see this file's module doc for the gate blind spot that creates"
+        );
+        for type_name in flattened_type_names(enum_body) {
+            let body = struct_body(&source, &type_name);
+            assert!(
+                !contains_alias_attribute(body),
+                "{type_name} (flattened into ScaleSpec) carries #[serde(alias = ...)] — see this file's module doc for the gate blind spot that creates"
+            );
         }
     }
 
@@ -548,13 +654,13 @@ mod tests {
     fn accepted_keys_for_scale_type_matches_every_variants_serialized_keys() {
         use std::collections::HashSet;
         for instance in maximal_instances() {
-            let tag = scale_spec_tag_exhaustive(&instance);
+            let tag = instance.tag();
             let value = serde_json::to_value(&instance).unwrap();
             let obj = value.as_object().unwrap();
             assert_eq!(
                 obj.get("type").and_then(|v| v.as_str()),
                 Some(tag),
-                "scale_spec_tag_exhaustive disagrees with the real serialized \"type\" tag"
+                "ScaleSpec::tag() disagrees with the real serialized \"type\" tag"
             );
             let actual: HashSet<&str> =
                 obj.keys().map(|k| k.as_str()).filter(|k| *k != "type").collect();
@@ -709,14 +815,14 @@ mod tests {
 
     /// `scale_accepted_keys` must agree with `accepted_keys_for_scale_type`
     /// — the function it delegates to — for every one of the 16 `ScaleSpec`
-    /// tags, exhaustively (reuses `maximal_instances()` +
-    /// `scale_spec_tag_exhaustive` rather than a second hand-typed tag list,
-    /// so this test tracks the same compiler-enforced coverage as
-    /// `maximal_instances_covers_every_scale_spec_variant` above).
+    /// tags, exhaustively (reuses `maximal_instances()` + `ScaleSpec::tag()`
+    /// rather than a second hand-typed tag list, so this test tracks the
+    /// same compiler-enforced coverage as
+    /// `tags_equals_the_image_of_tag_over_maximal_instances` above).
     #[test]
     fn scale_accepted_keys_matches_accepted_keys_for_scale_type_for_every_tag() {
         for instance in maximal_instances() {
-            let tag = scale_spec_tag_exhaustive(&instance);
+            let tag = instance.tag();
             let mut expected: Vec<&str> = accepted_keys_for_scale_type(tag).unwrap();
             expected.sort_unstable();
             let mut actual: Vec<String> = scale_accepted_keys(tag).unwrap();
@@ -740,6 +846,15 @@ mod tests {
             // deserialize gate's own richer message.
             assert!(err.is_instance_of::<PyValueError>(py), "expected ValueError, got {err:?}");
         });
+    }
+
+    /// `scale_type_tags()`/`scale_temporal_type_tags()` return exactly the
+    /// published Rust constants they mirror, in the same order — the
+    /// binding contract `_override_apply.py`/`_scale.py` read against.
+    #[test]
+    fn scale_type_tags_and_temporal_tags_mirror_the_published_constants() {
+        assert_eq!(scale_type_tags(), ScaleSpec::TAGS.to_vec());
+        assert_eq!(scale_temporal_type_tags(), ScaleSpec::TEMPORAL_TAGS.to_vec());
     }
 
     // ── Raw-dict temporal domain conversion (F-L04-10, spec §4D) ────────────

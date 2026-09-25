@@ -35,16 +35,17 @@ from typing import Any
 def _temporal_scale_types() -> frozenset[str]:
     """Return the ``ScaleSpec`` ``"type"`` tags whose ``domain`` is temporal.
 
-    Asked of the live schema rather than hand-listed: ``TimeScale`` is the one
-    scale class carrying a temporal domain, and its ``utc=`` flag selects which
-    of its two wire tags it serialises as, so the tags it can emit ARE the
-    temporal tag set.  ``ferrum._core.scale_accepted_keys`` cannot answer this
-    one — it publishes key NAMES, and a temporal ``domain`` is spelled
-    ``domain`` exactly like every other continuous type's.
+    Published from Rust's ``ScaleSpec::TAGS`` temporal subset via
+    ``ferrum._core.scale_temporal_type_tags()`` (the ``scale_accepted_keys``
+    precedent), rather than hand-listed. ``scale_accepted_keys`` cannot
+    answer this one on its own — it publishes key NAMES, and a temporal
+    ``domain`` is spelled ``domain`` exactly like every other continuous
+    type's — so the temporal subset is its own published fact, holding no
+    Python literal.
     """
-    from ferrum._core import TimeScale  # type: ignore[attr-defined]
+    from ferrum._core import scale_temporal_type_tags  # type: ignore[attr-defined]
 
-    return frozenset(TimeScale(utc=utc)._to_scale_spec_dict()["type"] for utc in (False, True))
+    return frozenset(scale_temporal_type_tags())
 
 
 # ScaleSpec "type" tags whose `domain` is temporal (epoch-ms based).

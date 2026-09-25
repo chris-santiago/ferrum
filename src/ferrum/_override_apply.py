@@ -227,31 +227,26 @@ def _coord_leaves() -> frozenset[str]:
     return frozenset(leaves)
 
 
-# Every ``ScaleSpec`` ``"type"`` tag, i.e. every argument
-# ``ferrum._core.scale_accepted_keys`` answers for. Only the TAGS are listed
-# here; each tag's accepted-key set is asked of the gate, never mirrored. A tag
-# that stopped being a real variant fails ``_scale_leaves()`` loudly at import
-# (``scale_accepted_keys`` raises for an unknown tag), and a tag missing from
-# this tuple is caught by ``tests/test_override.py``'s drift test, which checks
-# it against the scale classes' own emitted tags.
-_SCALE_TYPE_TAGS: tuple[str, ...] = (
-    "linear",
-    "log",
-    "time",
-    "symlog",
-    "pow",
-    "sqrt",
-    "utc",
-    "ordinal",
-    "band",
-    "point",
-    "sequential",
-    "diverging",
-    "quantize",
-    "quantile",
-    "threshold",
-    "bin-ordinal",
-)
+def _scale_type_tags() -> tuple[str, ...]:
+    """Return every ``ScaleSpec`` ``"type"`` tag, published from Rust.
+
+    ``ScaleSpec::TAGS`` (``crates/ferrum-core/src/spec/encoding/mod.rs``) is
+    the image of ``ScaleSpec::tag()`` over every variant: ``tag()``'s match
+    is exhaustive (a 17th variant fails to *compile* there), and a Rust test
+    keeps ``TAGS`` in step with that match. This holds no Python-side
+    literal; each tag's accepted-key set is still asked of the gate via
+    ``scale_accepted_keys``, never mirrored, and a tag ferrum's own scale
+    classes emit that somehow fell out of the published set is caught by
+    ``tests/test_override.py``'s one-directional coverage test.
+    """
+    from ferrum._core import scale_type_tags  # type: ignore[attr-defined]
+
+    return tuple(scale_type_tags())
+
+
+# Every ``ScaleSpec`` ``"type"`` tag, published from Rust's ``ScaleSpec::TAGS``
+# (see :func:`_scale_type_tags`).
+_SCALE_TYPE_TAGS: tuple[str, ...] = _scale_type_tags()
 
 #: snake_case override spellings for the camelCase wire keys, so
 #: ``.override(x_scale_padding_inner=0.3)`` reads like every other flat

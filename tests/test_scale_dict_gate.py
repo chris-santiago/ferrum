@@ -905,15 +905,12 @@ def test_scale_to_dict_temporal_membership_check_tolerates_nonstring_type() -> N
 
 
 def test_temporal_scale_types_are_derived_from_the_live_scale_class() -> None:
-    """``_TEMPORAL_SCALE_TYPES`` is asked of ``TimeScale`` -- the one scale
-    class with a temporal domain -- rather than hand-listed, so a renamed or
-    added temporal wire tag cannot leave the Python conversion seam behind.
-
-    ``scale_accepted_keys`` cannot answer this question (it publishes key
-    NAMES, and a temporal ``domain`` is spelled ``domain`` like every other
-    continuous type's), so this is the derivation that replaces the literal
-    ``frozenset({"time", "utc"})``. Pinned against the tags the class actually
-    emits, both directions, so the derivation cannot silently return a subset.
+    """``_TEMPORAL_SCALE_TYPES`` is published from Rust (``scale_temporal_type_tags()``)
+    rather than hand-listed, so a renamed or added temporal wire tag cannot
+    leave the Python conversion seam behind. Pinned here against the tags
+    ``TimeScale`` -- the one scale class with a temporal domain -- actually
+    emits, both directions, so the published set cannot silently diverge
+    from what the live class produces.
     """
     from ferrum._core import TimeScale
     from ferrum.encoding._scale import _TEMPORAL_SCALE_TYPES

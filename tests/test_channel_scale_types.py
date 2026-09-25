@@ -196,6 +196,29 @@ class TestOpacityOrdinal:
                 .encode(x="x:Q", y="y:Q", opacity=fm.Opacity("cat", type_="N"))
             )
 
+    def test_opacity_bin_ordinal_scale_warns_with_hyphenated_wire_tag(self, df):
+        """A non-linear opacity scale (``BinOrdinalScale``) warns and falls back
+        to the default linear resolution. The warning's scale-kind name is the
+        ``ScaleSpec`` wire tag (``"bin-ordinal"``, hyphenated), matching every
+        other tag-producing site in the crate, not a hand-spelled variant name.
+        """
+        with pytest.warns(UserWarning) as record:
+            _render(
+                fm.Chart(df)
+                .mark_point()
+                .encode(
+                    x="x:Q",
+                    y="y:Q",
+                    opacity=fm.Opacity("op", scale=fm.BinOrdinalScale(bins=[0.0, 0.5, 1.0])),
+                )
+            )
+        messages = {str(w.message) for w in record.list}
+        assert (
+            "opacity: bin-ordinal scale is not supported on opacity-family channels; "
+            "the curve, domain, and range were ignored in favor of the default linear "
+            "resolution"
+        ) in messages
+
 
 # ---------------------------------------------------------------------------
 # StrokeWidth channel + quantitative (continuous width)

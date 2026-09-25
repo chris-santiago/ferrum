@@ -48,26 +48,13 @@ fn endpoints(values: &Option<Vec<f64>>) -> Option<(f64, f64)> {
 
 /// A short kind name for a `ScaleSpec` variant, used to name the dropped scale
 /// type in [`crate::render::RenderWarning::UnsupportedOpacityScale`] when an
-/// opacity-family channel's `scale=` is not `Linear`.
+/// opacity-family channel's `scale=` is not `Linear`. Always the `ScaleSpec`
+/// wire `"type"` tag spelling ([`ScaleSpec::tag()`]), the same spelling
+/// every other tag-producing site in the crate uses — pinned by
+/// `non_linear_bin_ordinal_opacity_scale_warns_with_the_wire_tag_spelling`
+/// in `render/scale_resolve/tests.rs`.
 fn scale_spec_kind_name(spec: &ScaleSpec) -> &'static str {
-    match spec {
-        ScaleSpec::Linear { .. } => "linear",
-        ScaleSpec::Log { .. } => "log",
-        ScaleSpec::Time { .. } => "time",
-        ScaleSpec::Symlog { .. } => "symlog",
-        ScaleSpec::Ordinal { .. } => "ordinal",
-        ScaleSpec::Pow { .. } => "pow",
-        ScaleSpec::Sqrt { .. } => "sqrt",
-        ScaleSpec::Utc { .. } => "utc",
-        ScaleSpec::Band { .. } => "band",
-        ScaleSpec::Point { .. } => "point",
-        ScaleSpec::Sequential { .. } => "sequential",
-        ScaleSpec::Diverging { .. } => "diverging",
-        ScaleSpec::Quantize { .. } => "quantize",
-        ScaleSpec::Quantile { .. } => "quantile",
-        ScaleSpec::Threshold { .. } => "threshold",
-        ScaleSpec::BinOrdinal { .. } => "bin_ordinal",
-    }
+    spec.tag()
 }
 
 /// Shared prelude for a *sorted categorical domain*: resolve the (possibly
