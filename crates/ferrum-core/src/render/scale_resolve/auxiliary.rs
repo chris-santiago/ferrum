@@ -346,10 +346,16 @@ impl OpacityChannel {
 /// *(Amended 2026-09-01, spec §4.3, T6 quality review — ruling 2):* a
 /// `scale=` whose spec is present but not `Linear` (`Log`/`Pow`/`Sqrt`/…)
 /// pushes a [`crate::render::RenderWarning::UnsupportedOpacityScale`] naming
-/// the channel and the dropped scale kind, then falls back to the default
-/// (data-extent-or-domain-override → theme-band-or-range-override) linear
-/// resolution — never silent, and full non-linear opacity-curve support
+/// the channel, the dropped scale kind, and which fallback the channel
+/// actually took — never silent, and full non-linear opacity-curve support
 /// stays a logged campaign follow-up.
+///
+/// *(Amended 2026-09-24, spec §4.2):* the fallback named in that warning is
+/// decided at the SAME point the constant-column early return below decides
+/// it, so a constant `fill_opacity`/`stroke_opacity` column is reported as
+/// [`OpacityScaleFallback::LiteralAlpha`](crate::render::OpacityScaleFallback::LiteralAlpha)
+/// rather than always claiming the default (data-extent-or-domain-override →
+/// theme-band-or-range-override) linear resolution.
 pub fn build_opacity_channel_scale(
     channel: OpacityChannel,
     encoding: &Encoding,
@@ -377,20 +383,28 @@ pub fn build_opacity_channel_scale(
         (min, max)
     };
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
-    if let Some(spec) = &op_enc.scale {
-        if !matches!(spec, ScaleSpec::Linear { .. }) {
-            warnings.push(crate::render::RenderWarning::UnsupportedOpacityScale {
-                channel: channel.context().to_string(),
-                scale_kind: scale_spec_kind_name(spec).to_string(),
-            });
-        }
-    }
     let overrides = linear_overrides(&op_enc.scale);
     // A constant column has no spread to lay across a band; for the two
     // channels whose values are literal alphas that means no scale at all, so
     // each row keeps its own value. An explicit `scale=` domain is a real
     // domain even over a constant column, so it takes precedence over this.
-    if overrides.domain.is_none() && min == max && channel.constant_column_is_a_literal_alpha() {
+    let is_literal_alpha =
+        overrides.domain.is_none() && min == max && channel.constant_column_is_a_literal_alpha();
+    if let Some(spec) = &op_enc.scale {
+        if !matches!(spec, ScaleSpec::Linear { .. }) {
+            let fallback = if is_literal_alpha {
+                crate::render::OpacityScaleFallback::LiteralAlpha
+            } else {
+                crate::render::OpacityScaleFallback::Linear
+            };
+            warnings.push(crate::render::RenderWarning::UnsupportedOpacityScale {
+                channel: channel.context().to_string(),
+                scale_kind: scale_spec_kind_name(spec).to_string(),
+                fallback,
+            });
+        }
+    }
+    if is_literal_alpha {
         return Ok((None, warnings));
     }
     let (min, max) = overrides.domain.unwrap_or((min, max));

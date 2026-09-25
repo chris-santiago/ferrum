@@ -862,9 +862,10 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 /// pixel range) but which is a whole-chart fact, not a per-panel one — so
 /// once a real panel exists to judge it again, the provisional copy is a
 /// pure restatement, not an independent finding. This is the opposite shape
-/// from `GroupCardinalityDegenerate`/`ColorPaletteOverflowed`, which ARE
-/// per-panel facts and must keep fanning out one warning per panel
-/// (adjudicated boundary, wave-1 close remediation).
+/// from `GroupCardinalityDegenerate`, which stays a genuine per-panel fact
+/// and is never in this list at all (it is dropped from the provisional
+/// pass entirely, by [`drop_placeholder_only_warnings`] above, because the
+/// placeholder pixel range cannot honestly judge it even once).
 ///
 /// Members share one shape: the warning answers a question about the SPEC (a
 /// scheme name, a stops list, a sort spec), never about this panel's data or
@@ -885,6 +886,30 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
 ///   member is NOT produced by the color resolver like the two above — the
 ///   shared property is "restated per panel, not re-measured per panel", which
 ///   is what this predicate has always actually meant.
+/// - `UnsupportedOpacityScale`, `ShapePaletteOverflowed`,
+///   `StrokeDashPaletteOverflowed` — every `RenderWarning`
+///   `scale_resolve::auxiliary` pushes (`#120`(7) + N2). These three are
+///   whole-chart facts even though they look data-dependent (a
+///   distinct-category count, a dropped scale kind): `build_auxiliary_scales`
+///   resolves every one of these channels with `facet_aux_shared(spec)` —
+///   `spec.facet.is_some()` — which reads the SAME batch on every resolution
+///   regardless of which pass or which panel asks (a non-faceted chart's one
+///   panel is that batch; a faceted chart's per-panel resolution unions the
+///   shared global batch), so the panel-real pass re-derives the identical
+///   answer every time, exactly like the color-scheme members above. Their
+///   restatement does not stop at the provisional/panel-real boundary this
+///   predicate polices: a faceted chart's panel LOOP restates them again,
+///   once per panel — [`panel_pass_warning_restated_by_every_panel`] below is
+///   the second, narrower predicate that collapses those.
+/// - `ColorPaletteOverflowed` (`scale_resolve::color::build_color_scale`,
+///   pushed from the same `build_auxiliary_scales` pass, `#120`(7) + N2) is
+///   HERE for the same provisional-vs-panel-real reason as the three above —
+///   its provisional copy is a pure restatement once any panel resolves — but
+///   it is deliberately NOT a member of
+///   [`panel_pass_warning_restated_by_every_panel`]: unlike the three
+///   auxiliary channels, a panel's OWN color scale can legitimately overflow
+///   the palette differently from its siblings, so every panel's real copy
+///   stays a distinct fact, not a restatement of the first panel's.
 ///
 /// A future member must be added here explicitly — there is no compile-time
 /// forcing function for this list (unlike `apply_with_context`'s exhaustive
@@ -922,7 +947,62 @@ pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarni
         RenderWarning::UnknownColorScheme { .. }
             | RenderWarning::GradientTooFewStops { .. }
             | RenderWarning::SortSpecIgnored { .. }
+            | RenderWarning::UnsupportedOpacityScale { .. }
+            | RenderWarning::ShapePaletteOverflowed { .. }
+            | RenderWarning::StrokeDashPaletteOverflowed { .. }
+            | RenderWarning::ColorPaletteOverflowed { .. }
     )
+}
+
+/// True for a warning `resolve_panel_scales` restates once per panel of a
+/// faceted chart even though it answers a whole-chart question, not a
+/// per-panel one — the panel-LOOP counterpart to
+/// [`provisional_scale_warning_superseded_by_panel_pass`] above (`#120`(7) +
+/// N2, faceted extension). That predicate polices the boundary between the
+/// provisional pass and the panel loop; this one polices repetition WITHIN
+/// the panel loop itself, once it has already run once per panel.
+///
+/// `UnsupportedOpacityScale`/`ShapePaletteOverflowed`/`StrokeDashPaletteOverflowed`
+/// qualify for the reason given in this module's other predicate's doc:
+/// `build_auxiliary_scales` resolves all three with `facet_aux_shared(spec)`,
+/// which reads the SAME shared global batch for every panel of a faceted
+/// chart, so `resolve_panel_scales` re-derives an identical answer at each
+/// one — beyond the first panel, every later copy is a pure restatement.
+///
+/// `ColorPaletteOverflowed` is deliberately excluded — see
+/// [`provisional_scale_warning_superseded_by_panel_pass`]'s doc: a panel
+/// with an independently-resolved color scale can legitimately overflow the
+/// palette differently from its siblings, so every panel's own copy is a
+/// distinct fact and must survive.
+///
+/// [`collapse_panel_restated_duplicates`] is the collapsing step this
+/// predicate feeds; `scene_build::build_scene` runs it over the panel loop's
+/// own appended segment only, never the pre-panel prefix (which the OTHER
+/// predicate already handles).
+pub(crate) fn panel_pass_warning_restated_by_every_panel(w: &RenderWarning) -> bool {
+    matches!(
+        w,
+        RenderWarning::UnsupportedOpacityScale { .. }
+            | RenderWarning::ShapePaletteOverflowed { .. }
+            | RenderWarning::StrokeDashPaletteOverflowed { .. }
+    )
+}
+
+/// Keep only the FIRST copy of any warning
+/// [`panel_pass_warning_restated_by_every_panel`] names; every later copy in
+/// `warnings` is a pure restatement the panel loop produced once per panel of
+/// a faceted chart (see that predicate's doc). Every other warning — an
+/// unrelated variant, or a repeated `ColorPaletteOverflowed` (deliberately
+/// excluded above) — passes through untouched, in its original order.
+pub(crate) fn collapse_panel_restated_duplicates(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    let mut kept: Vec<RenderWarning> = Vec::with_capacity(warnings.len());
+    for w in warnings {
+        if panel_pass_warning_restated_by_every_panel(&w) && kept.contains(&w) {
+            continue;
+        }
+        kept.push(w);
+    }
+    kept
 }
 
 /// Prepare a single leaf's render inputs (transforms, per-layer encodings,
@@ -6919,6 +6999,85 @@ mod tests {
         assert!(!provisional_scale_warning_superseded_by_panel_pass(
             &RenderWarning::FacetSortSpecIgnored { reason: "x".into() }
         ));
+    }
+
+    /// `#120`(7) + N2: every `RenderWarning` `scale_resolve::auxiliary`
+    /// pushes is a provisional-pass duplicate too, alongside the color-scheme
+    /// and sort members above — see the predicate's doc for why these three,
+    /// plus `ColorPaletteOverflowed`, are whole-chart facts at the
+    /// provisional/panel-real boundary despite looking data-dependent.
+    #[test]
+    fn provisional_scale_warning_superseded_by_panel_pass_includes_every_auxiliary_warning() {
+        assert!(provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::UnsupportedOpacityScale {
+                channel: "fill_opacity".into(),
+                scale_kind: "log".into(),
+                fallback: crate::render::OpacityScaleFallback::Linear,
+            }
+        ));
+        assert!(provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::ShapePaletteOverflowed { categories: 9 }
+        ));
+        assert!(provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::StrokeDashPaletteOverflowed { categories: 9 }
+        ));
+        assert!(provisional_scale_warning_superseded_by_panel_pass(
+            &RenderWarning::ColorPaletteOverflowed { categories: 12 }
+        ));
+    }
+
+    /// `#120`(7) + N2, faceted extension: the panel-loop predicate includes
+    /// exactly the three auxiliary variants, and — the asymmetry the whole
+    /// mechanism exists to preserve — excludes `ColorPaletteOverflowed`,
+    /// whose own per-panel copies must survive.
+    #[test]
+    fn panel_pass_warning_restated_by_every_panel_excludes_color() {
+        assert!(panel_pass_warning_restated_by_every_panel(
+            &RenderWarning::UnsupportedOpacityScale {
+                channel: "fill_opacity".into(),
+                scale_kind: "log".into(),
+                fallback: crate::render::OpacityScaleFallback::Linear,
+            }
+        ));
+        assert!(panel_pass_warning_restated_by_every_panel(
+            &RenderWarning::ShapePaletteOverflowed { categories: 9 }
+        ));
+        assert!(panel_pass_warning_restated_by_every_panel(
+            &RenderWarning::StrokeDashPaletteOverflowed { categories: 9 }
+        ));
+        assert!(!panel_pass_warning_restated_by_every_panel(
+            &RenderWarning::ColorPaletteOverflowed { categories: 12 }
+        ));
+    }
+
+    /// `collapse_panel_restated_duplicates` keeps the first copy of a
+    /// restated whole-chart fact and drops the rest, keeps every copy of an
+    /// excluded variant (`ColorPaletteOverflowed`), and leaves every other
+    /// warning's relative order untouched.
+    #[test]
+    fn collapse_panel_restated_duplicates_keeps_first_copy_and_every_color_copy() {
+        let opacity = RenderWarning::UnsupportedOpacityScale {
+            channel: "fill_opacity".into(),
+            scale_kind: "log".into(),
+            fallback: crate::render::OpacityScaleFallback::Linear,
+        };
+        let color = RenderWarning::ColorPaletteOverflowed { categories: 12 };
+        let sort = RenderWarning::SortSpecIgnored { reason: "x".into() };
+        let input = vec![
+            opacity.clone(),
+            color.clone(),
+            sort.clone(),
+            opacity.clone(),
+            color.clone(),
+            opacity.clone(),
+            color.clone(),
+        ];
+        let collapsed = collapse_panel_restated_duplicates(input);
+        assert_eq!(
+            collapsed,
+            vec![opacity, color.clone(), sort, color.clone(), color],
+            "one opacity copy survives (the first), every color copy survives, order is preserved"
+        );
     }
 
     /// A well-formed sort the facet partition cannot resolve (here: a

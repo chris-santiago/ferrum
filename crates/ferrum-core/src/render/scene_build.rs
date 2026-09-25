@@ -687,18 +687,25 @@ pub fn build_scene(
     // held on only some of them can say so.
     break_ledger.flush(warnings);
 
-    // Wave-1 close remediation (S3-1): once at least one panel actually
-    // resolved its own scales, the panel-real pass has already re-reported
-    // every `provisional_scale_warning_superseded_by_panel_pass` fact that
+    // `#120`(7) + N2: once at least one panel actually resolved its own
+    // scales, the panel-real pass has already re-reported every
+    // `provisional_scale_warning_superseded_by_panel_pass` fact that
     // survived into `warnings` before this call — strip those duplicates
-    // from the pre-panel prefix only (never from what the panel loop itself
-    // just appended, which is the one copy this render keeps). When NO panel
-    // resolved (every panel_batch was empty — the T11 empty-after-transform
-    // case), the provisional copy is the ONLY report this render will ever
-    // make of that fact, so it stays.
+    // from the pre-panel prefix only. When NO panel resolved (every
+    // panel_batch was empty — the T11 empty-after-transform case), the
+    // provisional copy is the ONLY report this render will ever make of
+    // that fact, so it stays. The panel loop's OWN appended segment then
+    // gets a second, narrower pass: `collapse_panel_restated_duplicates`
+    // keeps only the first panel's copy of the three warnings
+    // `panel_pass_warning_restated_by_every_panel` names (every later panel
+    // of a faceted chart re-derives an identical answer for those three);
+    // every other warning the panel loop appended — including
+    // `ColorPaletteOverflowed`'s genuine per-panel copies — passes through
+    // unchanged.
     if any_panel_resolved {
-        let mut panel_and_later = warnings.split_off(pre_panel_warning_count);
+        let panel_and_later = warnings.split_off(pre_panel_warning_count);
         warnings.retain(|w| !super::prepare::provisional_scale_warning_superseded_by_panel_pass(w));
+        let mut panel_and_later = super::prepare::collapse_panel_restated_duplicates(panel_and_later);
         warnings.append(&mut panel_and_later);
     }
 

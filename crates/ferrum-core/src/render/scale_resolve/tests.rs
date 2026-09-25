@@ -6964,6 +6964,7 @@ fn non_linear_opacity_scale_warns_and_falls_back_to_linear_default() {
         warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
             channel: "fill_opacity".into(),
             scale_kind: "log".into(),
+            fallback: crate::render::OpacityScaleFallback::Linear,
         }),
         "a non-Linear scale must warn, naming the channel and dropped kind; got {warns:?}"
     );
@@ -7000,9 +7001,359 @@ fn non_linear_bin_ordinal_opacity_scale_warns_with_the_wire_tag_spelling() {
         warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
             channel: "opacity".into(),
             scale_kind: "bin-ordinal".into(),
+            fallback: crate::render::OpacityScaleFallback::Linear,
         }),
         "expected the hyphenated wire tag spelling; got {warns:?}"
     );
+}
+
+/// `appearance_batch`'s "v" column with every row equal, so `fill_opacity`
+/// takes the literal-alpha path (`OpacityChannel::constant_column_is_a_literal_alpha`)
+/// instead of the linear one.
+fn appearance_batch_constant_v(value: f64) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("v", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(Float64Array::from(vec![value, value, value])),
+        ],
+    )
+    .unwrap()
+}
+
+/// Render `spec`/`batch` through the FULL pipeline (`render_svg`, not
+/// `resolve_scales`): `auxiliary.rs`'s warnings are pushed from both the
+/// provisional pass (`prepare_render_inputs`) and the per-panel pass
+/// (`scene_build`), so only the full pipeline exercises the count rule the
+/// tests below assert.
+fn render_appearance(spec: &ChartSpec, batch: &RecordBatch) -> crate::render::RenderOutput<String> {
+    crate::render::render_svg(
+        spec,
+        batch,
+        &ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::config::RenderConfig::default(),
+        &crate::render::chart_config::ChartConfig::default(),
+    )
+    .expect("render must succeed")
+}
+
+/// Attach a 3-panel Wrap facet on `field` to `spec` — shared by the three
+/// faceted whole-chart-fact tests below.
+fn n2_with_facet(mut spec: ChartSpec, field: &str) -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    spec.facet = Some(FacetSpec {
+        field: field.into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        mode: FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: FacetResolve::default(),
+    });
+    spec
+}
+
+/// x/y/`v` (quantitative, varying) plus a 3-value `grp` facet column — the
+/// faceted counterpart of `appearance_batch`, 3 rows per panel.
+fn n2_faceted_opacity_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("grp", ArrowDataType::Utf8, false),
+        Field::new("v", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0])),
+            Arc::new(StringArray::from(vec![
+                "p1", "p1", "p1", "p2", "p2", "p2", "p3", "p3", "p3",
+            ])),
+            Arc::new(Float64Array::from(vec![0.2, 0.4, 0.6, 0.3, 0.5, 0.7, 0.25, 0.55, 0.9])),
+        ],
+    )
+    .unwrap()
+}
+
+/// x/y/`cat` (one row per entry of `categories`, repeated identically in
+/// each of 3 panels) plus a 3-value `grp` facet column — shared by the
+/// faceted shape and color palette-overflow tests, which differ only in how
+/// many categories overflow which palette.
+fn n2_faceted_categorical_batch(categories: &[&str]) -> RecordBatch {
+    let mut x = Vec::new();
+    let mut y = Vec::new();
+    let mut grp = Vec::new();
+    let mut cat = Vec::new();
+    let mut n = 0.0;
+    for panel in ["p1", "p2", "p3"] {
+        for c in categories {
+            n += 1.0;
+            x.push(n);
+            y.push(n * 10.0);
+            grp.push(panel);
+            cat.push((*c).to_string());
+        }
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("grp", ArrowDataType::Utf8, false),
+        Field::new("cat", ArrowDataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(StringArray::from(grp)),
+            Arc::new(StringArray::from(cat)),
+        ],
+    )
+    .unwrap()
+}
+
+/// The exact `Display` text for `UnsupportedOpacityScale`'s `Linear` arm at
+/// `channel="fill_opacity"`, `scale_kind="log"` — every test below that
+/// triggers this arm asserts against this verbatim, not a substring.
+const LINEAR_OPACITY_TEXT: &str = "fill_opacity: log scale is not supported on opacity-family \
+     channels; the curve, domain, and range were ignored in favor of the default linear \
+     resolution";
+
+/// The exact `Display` text for the `LiteralAlpha` arm, same channel/kind.
+const LITERAL_ALPHA_OPACITY_TEXT: &str = "fill_opacity: log scale is not supported on \
+     opacity-family channels; the column is constant, so its values were used as literal \
+     alphas instead of a scale";
+
+/// `UnsupportedOpacityScale` is a whole-chart fact: `facet_aux_shared` reads
+/// the same batch — the single panel's own, or, when faceted, the shared
+/// global one — on every resolution auxiliary.rs's warning-producing pass
+/// runs, so it must be recorded exactly once per render.
+#[test]
+fn opacity_warning_is_recorded_once_per_render_not_once_per_resolution_pass() {
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
+        },
+    }));
+    let out = render_appearance(&spec, &appearance_batch());
+    let matches: Vec<_> = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
+        .collect();
+    assert_eq!(
+        matches.len(), 1,
+        "UnsupportedOpacityScale must be recorded exactly once per render, got {}: {:?}",
+        matches.len(), out.warnings
+    );
+    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
+}
+
+/// Same rule as the opacity test above, for `ShapePaletteOverflowed`: also
+/// pushed from `auxiliary.rs`, also a whole-chart fact.
+#[test]
+fn shape_palette_overflow_warning_is_recorded_once_per_render_not_once_per_resolution_pass() {
+    let mut spec = make_spec_with_color();
+    spec.encoding.shape = spec.encoding.color.clone();
+    spec.encoding.color = None;
+    // SHAPE_PALETTE has 8 entries; 9 distinct categories overflow it.
+    let batch = {
+        let schema = make_batch_q_q_n().schema();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from((1..=9).map(f64::from).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from((1..=9).map(|v| v as f64 * 10.0).collect::<Vec<_>>())),
+                Arc::new(StringArray::from((1..=9).map(|i| format!("c{i}")).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    };
+    let out = render_appearance(&spec, &batch);
+    let count = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::ShapePaletteOverflowed { .. }))
+        .count();
+    assert_eq!(
+        count, 1,
+        "ShapePaletteOverflowed must be recorded exactly once per render, got {count}: {:?}",
+        out.warnings
+    );
+}
+
+/// A constant `fill_opacity` column under a non-`Linear` `scale=` takes the
+/// literal-alpha path (`build_opacity_channel_scale`'s early return), so the
+/// warning must say so — not claim the linear fallback it never took — and
+/// the rendered `fill-opacity` must be the raw per-row value (`0.3`),
+/// unscaled, on every row.
+#[test]
+fn opacity_scale_over_a_constant_column_warns_literal_alpha_and_renders_the_raw_value() {
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
+        },
+    }));
+    let batch = appearance_batch_constant_v(0.3);
+    let out = render_appearance(&spec, &batch);
+    let matches: Vec<_> = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
+        .collect();
+    assert_eq!(
+        matches.len(), 1,
+        "expected exactly one warning, got {}: {:?}", matches.len(), out.warnings
+    );
+    assert_eq!(
+        matches[0],
+        &crate::render::RenderWarning::UnsupportedOpacityScale {
+            channel: "fill_opacity".into(),
+            scale_kind: "log".into(),
+            fallback: crate::render::OpacityScaleFallback::LiteralAlpha,
+        },
+    );
+    assert_eq!(matches[0].to_string(), LITERAL_ALPHA_OPACITY_TEXT);
+    let row_count = batch.num_rows();
+    let occurrences = out.bytes.matches(r#"fill-opacity="0.3""#).count();
+    assert_eq!(
+        occurrences, row_count,
+        "every one of the {row_count} rows must carry the raw literal alpha, not just one; \
+         got {occurrences} occurrences"
+    );
+}
+
+/// Same shape as the constant-column test, over a VARYING column: the
+/// linear-fallback text applies, and it is still recorded once.
+#[test]
+fn opacity_scale_over_a_varying_column_still_warns_linear_once() {
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
+        },
+    }));
+    let out = render_appearance(&spec, &appearance_batch());
+    let matches: Vec<_> = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
+        .collect();
+    assert_eq!(
+        matches.len(), 1,
+        "expected exactly one warning, got {}: {:?}", matches.len(), out.warnings
+    );
+    assert_eq!(
+        matches[0],
+        &crate::render::RenderWarning::UnsupportedOpacityScale {
+            channel: "fill_opacity".into(),
+            scale_kind: "log".into(),
+            fallback: crate::render::OpacityScaleFallback::Linear,
+        },
+    );
+    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
+}
+
+/// `#120`(7) + N2, faceted extension: `resolve_panel_scales` runs once per
+/// panel and, for this whole-chart fact, re-derives an identical answer each
+/// time (`facet_aux_shared` reads the same shared global batch for every
+/// panel of a faceted chart), so a 3-panel facet must still record
+/// `UnsupportedOpacityScale` exactly once, not once per panel.
+#[test]
+fn opacity_warning_is_recorded_once_per_render_across_a_faceted_panel_loop() {
+    let out = render_appearance(&n2_faceted_opacity_spec(), &n2_faceted_opacity_batch());
+    let matches: Vec<_> = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::UnsupportedOpacityScale { .. }))
+        .collect();
+    assert_eq!(
+        matches.len(), 1,
+        "UnsupportedOpacityScale must be recorded exactly once per render across a 3-panel \
+         facet, got {}: {:?}", matches.len(), out.warnings
+    );
+    assert_eq!(matches[0].to_string(), LINEAR_OPACITY_TEXT);
+}
+
+fn n2_faceted_opacity_spec() -> ChartSpec {
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
+        },
+    }));
+    n2_with_facet(spec, "grp")
+}
+
+/// Same rule as the opacity facet test above, for `ShapePaletteOverflowed`.
+#[test]
+fn shape_palette_overflow_warning_is_recorded_once_per_render_across_a_faceted_panel_loop() {
+    let categories: Vec<String> = (1..=9).map(|i| format!("c{i}")).collect();
+    let categories: Vec<&str> = categories.iter().map(String::as_str).collect();
+    let batch = n2_faceted_categorical_batch(&categories);
+    let out = render_appearance(&n2_faceted_shape_spec(), &batch);
+    let count = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::ShapePaletteOverflowed { .. }))
+        .count();
+    assert_eq!(
+        count, 1,
+        "ShapePaletteOverflowed must be recorded exactly once per render across a 3-panel \
+         facet, got {count}: {:?}", out.warnings
+    );
+}
+
+fn n2_faceted_shape_spec() -> ChartSpec {
+    let mut spec = make_spec_with_color();
+    spec.encoding.shape = spec.encoding.color.take();
+    spec.encoding.shape.as_mut().unwrap().field = "cat".into();
+    n2_with_facet(spec, "grp")
+}
+
+/// `ColorPaletteOverflowed` is the deliberate asymmetry (see
+/// `panel_pass_warning_restated_by_every_panel`'s doc): its provisional-pass
+/// copy is superseded exactly like the three auxiliary warnings above, but
+/// each panel's OWN copy survives, since a panel with an
+/// independently-resolved color scale can legitimately overflow differently
+/// from its siblings. Exactly 3 (one per panel), not 4 (the provisional
+/// pass's extra copy) and not 1 (which would silently drop 2 real per-panel
+/// facts).
+#[test]
+fn color_palette_overflow_drops_its_provisional_copy_but_keeps_every_panel_copy() {
+    // paper_ink (the default theme scheme) has 8 entries; 12 categories overflow it.
+    let categories: Vec<String> = (1..=12).map(|i| format!("c{i}")).collect();
+    let categories: Vec<&str> = categories.iter().map(String::as_str).collect();
+    let batch = n2_faceted_categorical_batch(&categories);
+    let out = render_appearance(&n2_faceted_color_spec(), &batch);
+    let count = out
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::ColorPaletteOverflowed { .. }))
+        .count();
+    assert_eq!(
+        count, 3,
+        "ColorPaletteOverflowed must keep one copy per panel (3), not the provisional pass's \
+         extra copy (4) or a collapsed single copy (1); got {count}: {:?}", out.warnings
+    );
+}
+
+fn n2_faceted_color_spec() -> ChartSpec {
+    let mut spec = make_spec_with_color();
+    spec.encoding.color.as_mut().unwrap().field = "cat".into();
+    n2_with_facet(spec, "grp")
 }
 
 // ── to_pixel_f64_extrapolated (batch-E T13, mark_function(clip=False)) ──────
