@@ -912,6 +912,8 @@ class StatisticalMarksMixin:
         orient=None,
         horizontal=False,
         position=None,
+        _door="mark_violin(inner=...)",
+        _door_recourse="",
         **mark_kwargs,
     ) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
@@ -925,19 +927,22 @@ class StatisticalMarksMixin:
         ----------
         bandwidth : float or "scott" or "silverman", optional
             KDE bandwidth.  Default is ``"scott"``.
-        inner : {"box", "quartile", "point", "none"}, default "box"
+        inner : {"box", "quartile", "point", "none"} or None, default "box"
             Inner mark drawn on top of each violin:
             ``"box"`` -- IQR box + median rule,
             ``"quartile"`` -- three confined crossbars (q1/median/q3,
-            q1/q3 dashed) sized to the violin's own body width when there
-            is no hue split. With a hue split (``color=`` distinct from the
-            categorical axis), the crossbars are NOT per-hue dodged --
-            nothing under ``inner=`` is -- so they span the shared category
-            band rather than each narrower per-hue violin body (a known
-            gap, tracked as a follow-up; the full-panel-width bug this
-            replaced is fixed in both cases),
+            q1/q3 dashed) sized to the violin's own body width,
             ``"point"`` -- individual data points (strip),
-            ``"none"`` -- no inner mark.
+            ``"none"`` (or ``None``, kept for backward compatibility) --
+            no inner mark. With a hue split (``color=`` distinct from the
+            categorical axis), no ``inner`` variant dodges per hue -- see
+            ``heavy_stat.py``'s ``_VIOLIN_QUARTILE_BAND_SIZE`` comment for
+            the limitation this shares across variants. Each render with
+            ``inner`` other than ``"none"``/``None`` under a hue split
+            warns once, naming what is dropped -- ``catplot(kind="violin",
+            hue=...)`` voices this same warning under its own name, since
+            it drives this method with its own fixed ``inner`` default and
+            exposes no ``inner=`` of its own for the message to point at.
         shared_extent : bool, default False
             When ``True``, all groups share the same KDE evaluation range
             (cross-group global min/max), making the value axis directly
@@ -984,6 +989,8 @@ class StatisticalMarksMixin:
                 "inner": inner,
                 "shared_extent": shared_extent,
                 "horizontal": effective_horizontal,
+                "door": _door,
+                "door_recourse": _door_recourse,
                 **mark_kwargs,
             },
             placeholder="polygon",
@@ -1323,9 +1330,8 @@ class StatisticalMarksMixin:
             ``orient="horizontal"``.  Ignored when ``orient`` is also given;
             prefer ``orient`` in new code.
         spacing : float, optional
-            Minimum spacing between point centres as a fraction of ``size``.
-            Default is ``1.0``.  Subject to the same value-axis-dependent
-            spread as ``size`` above.
+            Additive pixel gap between point edges.  Default is ``1.0`` (1px).
+            Subject to the same value-axis-dependent spread as ``size`` above.
         side : {"both", "left", "right"}, default "both"
             Side of the axis on which points can be placed.
         dodge : str or None, optional

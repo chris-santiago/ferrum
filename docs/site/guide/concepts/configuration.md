@@ -346,13 +346,7 @@ chart.configure_grid(x=False, y=True, dash=[4, 4], color="#ddd")
 
 ## PaddingConfig
 
-Controls plot-area margins. `auto` is opt-in (default `False`). When `auto=True`, a
-side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis
-title from clipping past the rendered viewport edge — it does not cover annotations
-or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis
-capped tight enough via `max_band` can still leave its own label or title outside the
-canvas on that axis. Use `PaddingConfig` to supply exact margins, optionally combined
-with `auto=True` for the sides you don't set.
+Controls plot-area margins. `auto` is opt-in (default `False`). When `auto=True`, a side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis title from clipping past the rendered viewport edge — it does not cover annotations or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. It also does not help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included. Use `PaddingConfig` to supply exact margins, optionally combined with `auto=True` for the sides you don't set.
 
 ```python
 from ferrum import PaddingConfig

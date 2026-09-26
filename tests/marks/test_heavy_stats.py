@@ -8,6 +8,7 @@ Each mark gets:
 """
 
 import re
+import warnings
 
 import polars as pl
 import pyarrow as pa  # noqa: F401
@@ -514,6 +515,87 @@ def test_violin_quartile_ticks_render_per_hue_stroke_color():
     assert tick_rgb == body_colors, (
         f"quartile tick stroke colors {tick_rgb} must match the violin body's "
         f"per-hue fill colors {body_colors}"
+    )
+
+
+_VIOLIN_HUE_INNER_WARNING = (
+    "mark_violin(inner=...): inner marks are drawn at each category's center "
+    "and are not dodged per hue group"
+)
+
+
+def _violin_hue_df():
+    return pl.DataFrame(
+        {
+            "g": ["a"] * 20 + ["b"] * 20,
+            "h": (["x"] * 10 + ["y"] * 10) * 2,
+            "v": [float(i) for i in range(20)] + [50.0 + i * 0.2 for i in range(20)],
+        }
+    )
+
+
+@pytest.mark.parametrize("inner", ["box", "quartile", "point"])
+def test_violin_hue_inner_warns_once_per_render(inner):
+    """An inner mark other than ``"none"``/``None`` under a hue split
+    renders undodged (see the tests above, and
+    ``_VIOLIN_QUARTILE_BAND_SIZE``'s comment). Each render must warn
+    exactly once, with exact text naming the door and what is dropped.
+    """
+    df = _violin_hue_df()
+    with pytest.warns(UserWarning, match=re.escape(_VIOLIN_HUE_INNER_WARNING)) as record:
+        fe.Chart(df).mark_violin(inner=inner).encode(x="g", y="v", color="h").to_svg()
+    matching = [w for w in record if str(w.message) == _VIOLIN_HUE_INNER_WARNING]
+    assert len(matching) == 1, f"expected exactly 1 warning, got {len(matching)}: {matching}"
+
+    # A second, independent render warns again -- not a warn-once-per-process.
+    with pytest.warns(UserWarning, match=re.escape(_VIOLIN_HUE_INNER_WARNING)) as record2:
+        fe.Chart(df).mark_violin(inner=inner).encode(x="g", y="v", color="h").to_svg()
+    matching2 = [w for w in record2 if str(w.message) == _VIOLIN_HUE_INNER_WARNING]
+    assert len(matching2) == 1, (
+        f"expected exactly 1 warning on the second render, got {len(matching2)}"
+    )
+
+
+def test_violin_no_hue_inner_never_warns(df_xy):
+    """No hue split -- the inner mark IS drawn at the (single) body's own
+    position, so nothing is dropped and no warning fires."""
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        fe.Chart(df_xy).mark_violin(inner="box").encode(x="x", y="y").to_svg()
+    matching = [w for w in record if str(w.message) == _VIOLIN_HUE_INNER_WARNING]
+    assert matching == [], f"expected no hue-inner warning without a hue split, got {matching}"
+
+
+@pytest.mark.parametrize("inner", ["none", None])
+def test_violin_hue_inner_none_never_warns(inner):
+    """``inner="none"`` or ``inner=None`` draws no inner mark at all, so
+    there is nothing to warn about being undodged. Both spellings are
+    accepted at the door (``None`` normalizes to ``"none"`` for backward
+    compatibility with every existing ``inner=None`` call site)."""
+    df = _violin_hue_df()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        fe.Chart(df).mark_violin(inner=inner).encode(x="g", y="v", color="h").to_svg()
+    matching = [w for w in record if str(w.message) == _VIOLIN_HUE_INNER_WARNING]
+    assert matching == [], f"expected no hue-inner warning for inner={inner!r}, got {matching}"
+
+
+def test_violin_inner_none_and_bare_none_render_byte_identically():
+    """``inner="none"`` and ``inner=None`` are the same accepted value, not
+    two vocabularies -- pin byte-identical SVG output for both spellings,
+    with and without a hue split."""
+    df = _violin_hue_df()
+    svg_none_str = fe.Chart(df).mark_violin(inner="none").encode(x="g", y="v", color="h").to_svg()
+    svg_none_obj = fe.Chart(df).mark_violin(inner=None).encode(x="g", y="v", color="h").to_svg()
+    assert svg_none_str == svg_none_obj, (
+        "inner='none' and inner=None must render byte-identically under a hue split"
+    )
+
+    df_xy = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    svg_flat_str = fe.Chart(df_xy).mark_violin(inner="none").encode(x="x", y="y").to_svg()
+    svg_flat_obj = fe.Chart(df_xy).mark_violin(inner=None).encode(x="x", y="y").to_svg()
+    assert svg_flat_str == svg_flat_obj, (
+        "inner='none' and inner=None must render byte-identically with no hue split"
     )
 
 

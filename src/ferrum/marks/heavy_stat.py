@@ -5,6 +5,7 @@ Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
 """
 
 from __future__ import annotations
+import warnings
 from typing import Any, Optional
 
 from ferrum import (
@@ -258,11 +259,11 @@ register_layer_names(
 #: cannot know the per-band hue-group count the Rust transform resolves
 #: later, so this is documented as the honest current behavior rather than
 #: silently claimed correct: under a hue split, the ticks span the category
-#: band, overshooting each individual per-hue violin. Per-hue dodged inner
-#: marks (ticks that narrow and offset like the bodies do) are a real fix
-#: but a different feature -- violin has no per-hue dodge for ANY inner
-#: variant today (`box`/`point` have the same non-dodged-ness) -- filed as
-#: a follow-up (#151), not attempted here.
+#: band, overshooting each individual per-hue violin. No inner variant
+#: dodges per hue today (`box`/`point` have the same non-dodged-ness as
+#: `quartile`), a limitation that stands until a per-hue quartile band is
+#: implemented. Each render with ``inner`` other than ``"none"`` under a hue
+#: split warns once, naming what is dropped.
 _VIOLIN_QUARTILE_BAND_SIZE = 0.8
 
 
@@ -271,7 +272,7 @@ def desugar_violin(
     y_field: str | None,
     *,
     bandwidth: str | float = "scott",
-    inner: Optional[str] = "box",
+    inner: str | None = "box",
     x_sort: Any = None,
     y_sort: Any = None,
     x_type: str | None = None,
@@ -280,6 +281,8 @@ def desugar_violin(
     color_sort: Any = None,
     shared_extent: bool = False,
     horizontal: bool = False,
+    door: str = "mark_violin(inner=...)",
+    door_recourse: str = "",
 ) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
@@ -303,18 +306,15 @@ def desugar_violin(
 
     Inner variants
     --------------
-    * ``inner=None``         — polygon only.
+    * ``inner="none"`` (or ``None``, kept for backward compatibility) —
+      polygon only.
     * ``inner="point"``      — raw points overlaid at the original
       ``(x_field, y_field)`` positions.
     * ``inner="quartile"``   — ``BoxStats`` transform (named ``"quart"``)
       adds three ``tick`` layers at ``q1``, ``median``, ``q3``, confined to
       the violin's own body width (``band_size=0.8``, see
-      ``_VIOLIN_QUARTILE_BAND_SIZE``) rather than spanning the full panel --
-      this holds when there is no hue split. With a hue split
-      (``color_field`` distinct from the categorical axis) the ticks are
-      NOT per-hue dodged (nothing in ``inner=`` is); they span the
-      category band rather than each narrower per-hue body -- see
-      ``_VIOLIN_QUARTILE_BAND_SIZE``'s comment. q1/q3 keep dashed strokes.
+      ``_VIOLIN_QUARTILE_BAND_SIZE`` for the hue-split limitation this
+      shares with every other ``inner`` variant). q1/q3 keep dashed strokes.
     * ``inner="box"`` (default) — full ``desugar_boxplot`` overlay with
       ``whisker_mult=1.5``, ``outliers=False``, ``size=0.1``.
 
@@ -326,8 +326,9 @@ def desugar_violin(
         Numeric value field. Required.
     bandwidth : str or float, default "scott"
         KDE bandwidth rule or numeric value.
-    inner : {"box", "quartile", "point", None}, default "box"
-        Style of inner mark drawn inside the violin body.
+    inner : {"box", "quartile", "point", "none"} or None, default "box"
+        Style of inner mark drawn inside the violin body. ``None``
+        normalizes to ``"none"`` at the door, so both spellings work.
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
@@ -368,6 +369,17 @@ def desugar_violin(
         emits ``__pos_y_offset__`` (scaled by panel height) instead of
         ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
         expands along the category band on the ``y`` axis.
+    door : str, default "mark_violin(inner=...)"
+        Names the public entry that invoked this desugar, voiced by the
+        hue-inner warning below. A caller that has no ``inner=`` kwarg of
+        its own (e.g. ``catplot``, whose ``kind="violin"`` never exposes
+        one) passes its own entry, e.g. ``"catplot(kind='violin')"``.
+    door_recourse : str, default ""
+        Appended verbatim to the end of the hue-inner warning. Empty for
+        the default door, which already names its own ``inner=`` kwarg; a
+        caller with no ``inner=`` of its own passes a working recourse
+        instead, e.g. ``'; use Chart.mark_violin(inner="none") to drop
+        the inner mark'``.
 
     Returns
     -------
@@ -390,7 +402,9 @@ def desugar_violin(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_violin() requires .encode(x=..., y=...)")
-    validate_choice("mark_violin", "inner", inner, ("box", "quartile", "point", None))
+    if inner is None:
+        inner = "none"
+    validate_choice("mark_violin", "inner", inner, ("box", "quartile", "point", "none"))
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of either column raises here instead of silently
     # reading a stale name.
@@ -469,8 +483,24 @@ def desugar_violin(
         mark_kwargs={"detail": _violin_cols["group_id"], "fill_opacity": 0.5},
         data_source="violin",
     )
-    if inner is None:
+    if inner == "none":
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
+    if split_hue:
+        # WARN DEGRADED: every inner variant draws at the category's own
+        # position, undodged per hue -- see _VIOLIN_QUARTILE_BAND_SIZE's
+        # comment above. Warns once per render (this desugar runs exactly
+        # once per to_svg()/to_png() call); does not warn without a hue
+        # split, where the inner mark IS drawn at its (single) own position.
+        # `door` names the public entry that was actually called, since a
+        # caller with no `inner=` of its own (e.g. catplot) cannot act on
+        # a message naming a kwarg it does not expose; `door_recourse`
+        # (empty by default) lets such a caller append a working recourse
+        # of its own instead.
+        warnings.warn(
+            f"{door}: inner marks are drawn at each category's center and "
+            f"are not dodged per hue group{door_recourse}",
+            stacklevel=2,
+        )
     if inner == "point":
         # Raw points on the original data (not the violin batch).
         if horizontal:
@@ -1035,8 +1065,8 @@ def desugar_swarm(
     orient : {"vertical", "horizontal"}, default "vertical"
         Swarm orientation.  ``"vertical"`` means the value axis is y.
     spacing : float, default 1.0
-        Minimum spacing multiplier between adjacent points.  Subject to the
-        same value-axis-dependent spread as ``size`` above.
+        Additive pixel gap between point edges (1px by default).  Subject
+        to the same value-axis-dependent spread as ``size`` above.
     side : {"both", "left", "right"}, default "both"
         Which side(s) of the category axis to spread points onto.
     dodge : str or None, default None

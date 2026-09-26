@@ -2159,10 +2159,19 @@ def _catplot_build(
         else:
             chart = chart.mark_boxplot()
     elif kind == "violin":
+        # `_door` re-voices the hue-inner warning as catplot's own entry:
+        # catplot fixes `inner=` at its own default and never exposes it,
+        # so a message pointing at `mark_violin(inner=...)` would send the
+        # caller looking for a kwarg catplot does not have; `_door_recourse`
+        # gives that caller a working alternative instead.
+        violin_door = f"catplot(kind={kind!r})"
+        violin_door_recourse = '; use Chart.mark_violin(inner="none") to drop the inner mark'
         if position is not None:
-            chart = chart.mark_violin(position=position)
+            chart = chart.mark_violin(
+                position=position, _door=violin_door, _door_recourse=violin_door_recourse
+            )
         else:
-            chart = chart.mark_violin()
+            chart = chart.mark_violin(_door=violin_door, _door_recourse=violin_door_recourse)
     elif kind == "boxen":
         if position is not None:
             chart = chart.mark_boxen(position=position)

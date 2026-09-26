@@ -59,14 +59,25 @@ impl BandScaleData {
 ///
 /// Every parameter below moves rendered geometry: a ``BandScale`` passed to an
 /// encoding resolves through the same band model this class computes with, so
-/// ``scale()``/``bandwidth()`` here describe what the chart draws. ``scale(v)``
-/// is the band's *leading* edge, so for an ascending range the band spans
-/// ``[scale(v), scale(v) + bandwidth()]`` and a mark for ``v`` is drawn at
-/// ``scale(v) + bandwidth() / 2``. For a descending ``range=[hi, lo]`` the
-/// bands run the other way: subtract instead of adding (the general form is
-/// ``scale(v) + bandwidth() / 2 * sign``, with ``sign`` the sign of
-/// ``range[1] - range[0]``). The inner gap follows each band, so the bands
-/// always stay inside the declared range.
+/// ``scale()``/``bandwidth()`` here describe the category's *slot*, not what a
+/// mark draws inside it. ``scale(v)`` is the slot's *leading* edge, so for an
+/// ascending range the slot spans ``[scale(v), scale(v) + bandwidth()]`` and
+/// its center sits at ``scale(v) + bandwidth() / 2``. For a descending
+/// ``range=[hi, lo]`` the slot runs the other way: subtract instead of adding
+/// (the general form is ``scale(v) + bandwidth() / 2 * sign``, with ``sign``
+/// the sign of ``range[1] - range[0]``). The inner gap follows each slot, so
+/// slots always stay inside the declared range.
+///
+/// A mark never draws the full slot: each mark family scales `bandwidth()` by
+/// its own fraction to get the geometry it actually paints — bar's vertical
+/// and horizontal paths (`build_ordinal`, `build_ordinal_y` in
+/// `render/marks/bar.rs`) at a fixed 0.8, box/tick's crossbar and rug paths
+/// (`build_ordinal_range` in `render/marks/rect.rs`; `build_geometry` and
+/// `rug_tick_len` in `render/marks/tick.rs`) at their configurable
+/// `band_size` (default 0.6), and heatmap cells (`build_heatmap` in
+/// `render/marks/rect.rs`) at 1.0 (they tile the slot with no gap). The scale
+/// itself knows nothing about any of these fractions; it only ever reports
+/// the slot.
 ///
 /// Parameters
 /// ----------
@@ -185,22 +196,23 @@ impl BandScale {
         })
     }
 
-    /// Map a category label to the leading pixel edge of its band.
+    /// Map a category label to the leading pixel edge of its slot.
     ///
     /// Changed in the batch-C scale unification (F-L04-03): for
-    /// ``padding_inner > 0`` this returns d3's band edge, half an inner gap
+    /// ``padding_inner > 0`` this returns d3's slot edge, half an inner gap
     /// lower than earlier releases reported (for
     /// ``BandScale(domain=list("abcd"), range=[40, 260])`` — default
     /// ``padding=0.1`` — ``scale("a")`` is 45.366, was 48.049). The old value
-    /// placed the band block so that the last band ran past ``range[1]``.
+    /// placed the slot block so that the last slot ran past ``range[1]``.
     ///
-    /// This is d3's ``band(x)``. For an ascending range it is the band's
-    /// low-coordinate edge: the band spans ``[scale(v), scale(v) + bandwidth()]``
-    /// and the pixel a mark for ``v`` is drawn at is
-    /// ``scale(v) + bandwidth() / 2``. For a descending ``range=[hi, lo]`` the
-    /// band runs back from this edge instead, so the mark sits at
-    /// ``scale(v) - bandwidth() / 2``. Returns ``NaN`` for labels not in
-    /// the domain.
+    /// This is d3's ``band(x)``. For an ascending range it is the slot's
+    /// low-coordinate edge: the slot spans ``[scale(v), scale(v) + bandwidth()]``
+    /// and its center sits at ``scale(v) + bandwidth() / 2``. For a
+    /// descending ``range=[hi, lo]`` the slot runs back from this edge
+    /// instead, so the center sits at ``scale(v) - bandwidth() / 2``. Returns
+    /// ``NaN`` for labels not in the domain. A mark drawn for ``v`` does not
+    /// fill this slot — see the struct-level doc above for how each mark
+    /// family scales ``bandwidth()`` down to its own drawn fraction.
     fn scale(&self, value: &str) -> f64 {
         let [r0, r1] = self.range.unwrap_or([0.0, 1.0]);
         self.data.scale_str(value, r0, r1)

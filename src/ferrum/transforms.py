@@ -906,7 +906,9 @@ def transform_regression(
     y : str
         Dependent variable column.
     method : str, default "linear"
-        Regression method (e.g. "linear", "poly", "exp", "log", "pow").
+        Regression method; see
+        ``transform_registry("regression_data")["methods"]`` for the
+        accepted vocabulary.
     order : int, default 1
         Polynomial order (for method="poly").
     groupby : list of str, optional
@@ -1066,7 +1068,8 @@ def transform_impute(
     field : str
         Column to impute.
     method : str, default "value"
-        Imputation method: "value", "mean", "median", "min", "max".
+        Imputation method; see ``transform_registry("impute")["methods"]``
+        for the accepted vocabulary.
     value : float, optional
         Constant value for method="value".
     groupby : list of str, optional
@@ -1218,7 +1221,8 @@ def transform_top_k(
     field : str
         Field to aggregate for ranking.
     op : str, default "sum"
-        Aggregation operation: "sum", "mean", "count", "min", "max".
+        Aggregation operation; see ``transform_registry("top_k")["methods"]``
+        for the accepted vocabulary.
     sort : str, default "descending"
         Sort direction: "descending" or "ascending".
     groupby : list of str, optional

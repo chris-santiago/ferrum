@@ -241,13 +241,7 @@ chart.configure_grid(
 
 ### `.configure_padding()`
 
-Controls plot-area margins. `auto` is opt-in (default `False`); pass
-`auto=True` to expand a side left unset here when a continuous axis's
-edge-tick label or axis title would otherwise clip past the rendered
-viewport edge. A side you set explicitly is never touched by `auto`. It
-does not cover ordinal/nominal axis labels (which never overhang the plot
-edge) or annotations, and a y-axis capped tight enough via `max_band` can
-still leave its own label or title outside the canvas on that axis.
+Controls plot-area margins. `auto` is opt-in (default `False`); pass `auto=True` to expand a side left unset here when a continuous axis's edge-tick label or axis title would otherwise clip past the rendered viewport edge. A side you set explicitly is never touched by `auto`. It does not cover ordinal/nominal axis labels (which never overhang the plot edge) or annotations, and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. Nor does it help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included.
 
 ```python
 # All four sides are set here, so auto has nothing left to expand.

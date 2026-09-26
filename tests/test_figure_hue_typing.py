@@ -45,6 +45,8 @@ rendered behavior that guard exists to protect.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import polars as pl
 import pytest
@@ -99,13 +101,15 @@ def _contour_twin(dtype: pl.DataType) -> pl.DataFrame:
     ).with_columns(pl.col("grp").cast(dtype))
 
 
-def _assert_dtype_parity(build, *, frame=_twin) -> str:
+def _assert_dtype_parity(build, *, frame=_twin, expected_warnings=()) -> str:
     """Render *build* over the Int64 and Utf8 twins and require agreement.
 
     Returns the Int64 render so a caller can add case-specific structural
     assertions on top. Asserts three independent things, so a partial
     regression stays distinguishable: no colorbar, the same legend labels,
-    and the same set of painted colors.
+    and the same set of painted colors. ``expected_warnings`` names any
+    warning the render is known to emit independent of hue typing (e.g.
+    ``mark_violin``'s hue-inner warning); anything else still fails.
     """
     int_svg, int_warnings = render(build(frame(pl.Int64)))
     utf8_svg, _ = render(build(frame(pl.Utf8)))
@@ -116,7 +120,7 @@ def _assert_dtype_parity(build, *, frame=_twin) -> str:
     )
     assert legend_labels(int_svg) == legend_labels(utf8_svg)
     assert paint_colors(int_svg) == paint_colors(utf8_svg)
-    assert int_warnings == []
+    assert int_warnings == list(expected_warnings)
     return int_svg
 
 
@@ -150,7 +154,73 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
             return fm.catplot(df, x="cat", hue="grp", kind=kind)
         return fm.catplot(df, x="cat", y="y", hue="grp", kind=kind)
 
-    _assert_dtype_parity(build)
+    # violin's default inner="box" under this hue split (color distinct
+    # from the categorical x axis) draws its inner mark undodged per hue,
+    # which now warns once per render (see heavy_stat.py's
+    # _VIOLIN_QUARTILE_BAND_SIZE) -- an intentional exception to the
+    # otherwise-uniform zero-warning answer this test pins. Voiced as
+    # catplot's own entry, not mark_violin's: catplot fixes inner="box"
+    # itself and exposes no inner= of its own for a mark_violin-voiced
+    # message to point at.
+    expected_warnings = (
+        [
+            "catplot(kind='violin'): inner marks are drawn at each "
+            "category's center and are not dodged per hue group; use "
+            'Chart.mark_violin(inner="none") to drop the inner mark'
+        ]
+        if kind == "violin"
+        else []
+    )
+    _assert_dtype_parity(build, expected_warnings=expected_warnings)
+
+
+_CATPLOT_VIOLIN_HUE_WARNING = (
+    "catplot(kind='violin'): inner marks are drawn at each category's "
+    "center and are not dodged per hue group; use "
+    'Chart.mark_violin(inner="none") to drop the inner mark'
+)
+
+
+def test_catplot_violin_hue_warning_names_catplot_not_mark_violin() -> None:
+    """``catplot(kind="violin", hue=...)`` voices the hue-inner warning as
+    its own entry, not ``mark_violin``'s -- catplot fixes ``inner="box"``
+    itself (see the ``mark_violin`` door-threading in
+    ``src/ferrum/marks/heavy_stat.py`` and ``_chart_methods_statistical.py``)
+    and exposes no ``inner=`` of its own, so a message naming
+    ``mark_violin(inner=...)`` would send a catplot caller looking for a
+    kwarg catplot does not have.
+
+    catplot has no per-kind option-forwarding channel for any kind's
+    desugar-time options (`_catplot_build` only ever forwards `position=`
+    to `mark_boxplot()`/`mark_violin()`/`mark_boxen()`; there is no
+    existing mechanism to mirror for an `inner=` door, so none is added
+    here -- a caller who needs a non-default `inner` uses `fm.Chart(...).
+    mark_violin(inner=...)` directly instead of `catplot`).
+    """
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b"] * 6,
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] * 2,
+            "grp": ["x", "y"] * 6,
+        }
+    )
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        fm.catplot(df, x="cat", y="y", hue="grp", kind="violin").to_svg()
+    matching = [w for w in record if str(w.message) == _CATPLOT_VIOLIN_HUE_WARNING]
+    assert len(matching) == 1, f"expected exactly 1 catplot-voiced warning, got {matching}"
+
+
+def test_catplot_violin_no_hue_never_warns() -> None:
+    """With no ``hue=`` at all, the inner mark IS drawn at the (single)
+    body's own position, so nothing is dropped and catplot's violin kind
+    does not warn -- the negative control for the warning above."""
+    df = pl.DataFrame({"cat": ["a", "b"] * 6, "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] * 2})
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        fm.catplot(df, x="cat", y="y", kind="violin").to_svg()
+    matching = [w for w in record if str(w.message) == _CATPLOT_VIOLIN_HUE_WARNING]
+    assert matching == [], f"expected no hue-inner warning with no hue=, got {matching}"
 
 
 def test_catplot_hue_order_types_the_color_channel_too() -> None:

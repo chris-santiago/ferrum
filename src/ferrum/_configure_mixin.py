@@ -588,7 +588,10 @@ class ConfigureMixin:
             ordinal/nominal axis labels (which never overhang the plot
             edge) or annotations; a y-axis capped tight enough via
             `max_band` can still leave its own label or title outside the
-            canvas on that axis.
+            canvas on that axis. A title wider than the viewport itself
+            can never be recentered into view, so `auto` disables itself
+            entirely on that axis, tick-label rescue included, instead of
+            reserving margin that cannot help.
 
         Returns
         -------
