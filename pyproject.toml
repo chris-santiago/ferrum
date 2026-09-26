@@ -64,8 +64,9 @@ include = [
 pythonpath = ["src", "."]
 markers = [
     "slow: scale/performance tests (10k–50k rows) — skipped by default, run with: pytest -m slow",
+    "wasm_pixels: headless-Chrome pixel harness for WASM conditional encodings — skipped by default, run with: pytest -m wasm_pixels",
 ]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow and not wasm_pixels'"
 
 [dependency-groups]
 dev = [
@@ -76,6 +77,7 @@ dev = [
     "scipy>=1.10",
     "skops>=0.9",
     "resvg-py>=0.3",
+    "playwright>=1.40",
     "zensical>=0.0.40",
     "mkdocstrings>=1.0",
     "mkdocstrings-python>=2.0",

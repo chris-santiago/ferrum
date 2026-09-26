@@ -2247,6 +2247,217 @@ mod tests {
         }
     }
 
+    /// Field names where `before` and `after` differ, in struct declaration
+    /// order. Every untouched field is copied verbatim rather than
+    /// recomputed, so a bit-exact comparison needs no tolerance. Both sides
+    /// are destructured with every field named (no `..`), so a field added
+    /// to `CircleInstance` is a compile error here until this diff names it.
+    fn changed_circle_fields(before: &CircleInstance, after: &CircleInstance) -> Vec<&'static str> {
+        let CircleInstance {
+            center: before_center,
+            radius: before_radius,
+            fill_color: before_fill_color,
+            stroke_color: before_stroke_color,
+            stroke_width: before_stroke_width,
+            opacity: before_opacity,
+            stroke_opacity: before_stroke_opacity,
+            stroke_dash: before_stroke_dash,
+            angle: before_angle,
+        } = *before;
+        let CircleInstance {
+            center: after_center,
+            radius: after_radius,
+            fill_color: after_fill_color,
+            stroke_color: after_stroke_color,
+            stroke_width: after_stroke_width,
+            opacity: after_opacity,
+            stroke_opacity: after_stroke_opacity,
+            stroke_dash: after_stroke_dash,
+            angle: after_angle,
+        } = *after;
+
+        let mut changed = Vec::new();
+        if before_center != after_center {
+            changed.push("center");
+        }
+        if before_radius != after_radius {
+            changed.push("radius");
+        }
+        if before_fill_color != after_fill_color {
+            changed.push("fill_color");
+        }
+        if before_stroke_color != after_stroke_color {
+            changed.push("stroke_color");
+        }
+        if before_stroke_width != after_stroke_width {
+            changed.push("stroke_width");
+        }
+        if before_opacity != after_opacity {
+            changed.push("opacity");
+        }
+        if before_stroke_opacity != after_stroke_opacity {
+            changed.push("stroke_opacity");
+        }
+        if before_stroke_dash != after_stroke_dash {
+            changed.push("stroke_dash");
+        }
+        if before_angle != after_angle {
+            changed.push("angle");
+        }
+        changed
+    }
+
+    /// The rect sibling of [`changed_circle_fields`], same field-order and
+    /// exhaustive-destructure convention.
+    fn changed_rect_fields(before: &RectInstance, after: &RectInstance) -> Vec<&'static str> {
+        let RectInstance {
+            position: before_position,
+            size: before_size,
+            corner_radius: before_corner_radius,
+            fill_color: before_fill_color,
+            stroke_color: before_stroke_color,
+            stroke_width: before_stroke_width,
+            opacity: before_opacity,
+            stroke_opacity: before_stroke_opacity,
+            stroke_dash: before_stroke_dash,
+            angle: before_angle,
+        } = *before;
+        let RectInstance {
+            position: after_position,
+            size: after_size,
+            corner_radius: after_corner_radius,
+            fill_color: after_fill_color,
+            stroke_color: after_stroke_color,
+            stroke_width: after_stroke_width,
+            opacity: after_opacity,
+            stroke_opacity: after_stroke_opacity,
+            stroke_dash: after_stroke_dash,
+            angle: after_angle,
+        } = *after;
+
+        let mut changed = Vec::new();
+        if before_position != after_position {
+            changed.push("position");
+        }
+        if before_size != after_size {
+            changed.push("size");
+        }
+        if before_corner_radius != after_corner_radius {
+            changed.push("corner_radius");
+        }
+        if before_fill_color != after_fill_color {
+            changed.push("fill_color");
+        }
+        if before_stroke_color != after_stroke_color {
+            changed.push("stroke_color");
+        }
+        if before_stroke_width != after_stroke_width {
+            changed.push("stroke_width");
+        }
+        if before_opacity != after_opacity {
+            changed.push("opacity");
+        }
+        if before_stroke_opacity != after_stroke_opacity {
+            changed.push("stroke_opacity");
+        }
+        if before_stroke_dash != after_stroke_dash {
+            changed.push("stroke_dash");
+        }
+        if before_angle != after_angle {
+            changed.push("angle");
+        }
+        changed
+    }
+
+    /// The value-to-field table: every `EncodingValue` variant, applied to a
+    /// default circle and rect instance, changes exactly the field set the
+    /// pixel-harness oracle predicts. The `match` choosing each variant's
+    /// expected fields carries no wildcard arm, so a variant added to
+    /// `EncodingValue` fails to compile here rather than reaching the
+    /// shaders with no mapped field — the same guard the codebase already
+    /// uses for `MarkBatchKind::ALL`.
+    #[test]
+    fn value_to_field_table_covers_every_encoding_value_variant() {
+        let circle_base = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [0.1, 0.2, 0.3, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        let rect_base = RectInstance {
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+            corner_radius: 0.0,
+            fill_color: [0.1, 0.2, 0.3, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+
+        let samples = [
+            EncodingValue::Color {
+                value: Color {
+                    r: 200,
+                    g: 100,
+                    b: 50,
+                    a: 255,
+                },
+            },
+            EncodingValue::Opacity { value: 0.42 },
+            EncodingValue::Size { value: 40.0 },
+            EncodingValue::StrokeWidth { value: 3.0 },
+            EncodingValue::StrokeDash {
+                value: vec![6.0, 3.0],
+            },
+            EncodingValue::StrokeOpacity { value: 0.33 },
+            EncodingValue::FillOpacity { value: 0.66 },
+            EncodingValue::Angle { value: 30.0 },
+            EncodingValue::Field {
+                name: "x".to_string(),
+            },
+        ];
+
+        for value in &samples {
+            let (expected_circle, expected_rect): (&[&str], &[&str]) = match value {
+                EncodingValue::Color { .. } => (&["fill_color"], &["fill_color"]),
+                EncodingValue::Opacity { .. } => (&["opacity"], &["opacity"]),
+                EncodingValue::Size { .. } => (&["radius"], &["size"]),
+                EncodingValue::StrokeWidth { .. } => (&["stroke_width"], &["stroke_width"]),
+                EncodingValue::StrokeDash { .. } => (&["stroke_dash"], &["stroke_dash"]),
+                EncodingValue::StrokeOpacity { .. } => (&["stroke_opacity"], &["stroke_opacity"]),
+                EncodingValue::FillOpacity { .. } => (&["fill_color"], &["fill_color"]),
+                EncodingValue::Angle { .. } => (&["angle"], &["angle"]),
+                // Field carries no rendered field: the vacuity control that
+                // every other row's non-empty set is compared against.
+                EncodingValue::Field { .. } => (&[], &[]),
+            };
+
+            let mut circle = circle_base;
+            apply_value_to_circle(&mut circle, value);
+            assert_eq!(
+                changed_circle_fields(&circle_base, &circle),
+                expected_circle,
+                "circle fields changed by {value:?}"
+            );
+
+            let mut rect = rect_base;
+            apply_value_to_rect(&mut rect, value);
+            assert_eq!(
+                changed_rect_fields(&rect_base, &rect),
+                expected_rect,
+                "rect fields changed by {value:?}"
+            );
+        }
+    }
+
     #[test]
     fn bug_hunt_interval_selection_rect_center_containment() {
         // Rect mark containment uses center (x + w/2, y + h/2).
