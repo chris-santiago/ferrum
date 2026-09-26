@@ -1,8 +1,10 @@
+pub mod dash;
 pub mod error;
 pub mod parameter;
 pub mod selection;
 pub mod types;
 
+pub use dash::*;
 pub use error::*;
 pub use parameter::*;
 pub use selection::*;

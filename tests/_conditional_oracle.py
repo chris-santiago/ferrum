@@ -171,15 +171,11 @@ def synthetic_dash_classes(
 ) -> list[str]:
     """Classify `n` evenly-angle-spaced ring samples against a *perimeter* dash pattern.
 
-    This is a positive control, not a model of the renderer under test: it
-    walks the pattern by arc length around the ring's own circumference
-    (the correct, non-radial convention F19/F19b's fix would need to
-    produce), independent of `classify_ring`'s pixel-color logic. Used to
-    prove `ring_is_alternating` can register a genuine short-gap dash at
-    the harness's actual sampling density and ring geometry, so a future
-    fix to the renderer's dash phase (currently radial, not perimeter) is
-    guaranteed to flip a currently-xfailed row rather than read as another
-    solid ring.
+    A positive control, not a model of the renderer under test: it walks
+    the pattern by arc length around the ring's own circumference,
+    independent of `classify_ring`'s pixel-color logic. Used to prove
+    `ring_is_alternating` can register a genuine short-gap dash at a given
+    sampling density and ring geometry.
     """
     period = sum(pattern)
     out: list[str] = []
@@ -195,3 +191,54 @@ def synthetic_dash_classes(
             acc += seg
         out.append("S" if on else ".")
     return out
+
+
+# A fixed sample count that resolves a small mark's dash pattern can
+# under-resolve a much larger mark's copy of the same pattern: the sample
+# stride (perimeter / n) must stay well under the pattern's own SHORTEST
+# on/off segment, or that segment falls entirely between two consecutive
+# probes (a beat/aliasing false negative, not a rendering defect). Measured
+# directly: a `[6, 3]` pattern, shortest segment 3, on a 959.6px-perimeter
+# rect reads as one solid arc at a fixed 128-sample stride of 7.5px, then
+# correctly alternating at any density with at least 4 samples per
+# segment. Keying on the pattern's own *period* instead of its shortest
+# segment under-resolves a pattern whose "off" gap is much shorter than its
+# "on" dash (e.g. `[6, 3]`'s 3px gap needs the same density as `[3, 3]`'s,
+# not the coarser density its 9px period alone would suggest).
+_MIN_RING_SAMPLES = 128
+_MIN_SAMPLES_PER_SEGMENT = 4
+# The largest sample count any real (mark, pattern) combination in this
+# harness's own matrix computes is 1920 (an unpacked rect's ~960px
+# perimeter against the named `[4, 2]` pattern's 2px shortest segment,
+# `ceil(4 * 960 / 2)`); this cap sits comfortably above that so no row in
+# the current matrix is ever refused, while `ring_sample_count` below fails
+# loudly rather than silently under-sampling anything that does cross it.
+_MAX_RING_SAMPLES = 4096
+
+
+def ring_sample_count(perimeter: float, min_segment: float | None) -> int:
+    """How many ring samples resolve a dash pattern whose shortest segment is *min_segment*.
+
+    `perimeter / min_segment` scales with the mark's own size, so this
+    derives the count from both rather than using one fixed density for
+    every mark. Floored at `_MIN_RING_SAMPLES` (enough for every
+    packed-grid mark's small perimeter). A solid pattern (`min_segment` is
+    `None` or non-positive) never aliases: there is no on/off boundary to
+    under-resolve, so it always uses the floor.
+
+    Raises `ValueError` naming *perimeter* and the density it would take,
+    rather than silently clamping to `_MAX_RING_SAMPLES`: a silent clamp
+    below the required density could under-sample a genuinely alternating
+    pattern into misreading as solid.
+    """
+    if min_segment is None or min_segment <= 0:
+        return _MIN_RING_SAMPLES
+    needed = math.ceil(_MIN_SAMPLES_PER_SEGMENT * perimeter / min_segment)
+    if needed > _MAX_RING_SAMPLES:
+        raise ValueError(
+            f"ring_sample_count: a ring of perimeter {perimeter:.1f} against a "
+            f"{min_segment:.1f}px minimum dash segment needs {needed} samples, "
+            f"over the {_MAX_RING_SAMPLES} cap -- raise the cap rather than "
+            "silently under-sampling a pattern this harness could then misread."
+        )
+    return max(_MIN_RING_SAMPLES, needed)

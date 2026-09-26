@@ -8,7 +8,8 @@ use arrow::record_batch::RecordBatch;
 use crate::layout::ThemeInputs;
 use crate::scale::linear::LinearScale;
 
-use crate::render::draw::{resolve_stroke_dash, DASH_PALETTE};
+use ferrum_scene::{resolve_stroke_dash, STROKE_DASH_LEGACY_SLOTS};
+
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
@@ -431,10 +432,13 @@ pub fn build_opacity_channel_scale(
 /// *categorical* field.
 ///
 /// A quantitative `stroke_dash` field keeps the numeric palette-index contract
-/// (`resolve_stroke_dash`: 0 solid, 1–3 patterns) and resolves NO scale — this
-/// returns `None` for it, which is what tells mark builders to read the column
-/// as indices. A nominal/ordinal field (including a numeric column the user
-/// typed `"N"`) resolves here instead. See [`StrokeDashScale`] for the contract.
+/// (`channels::resolve_row_stroke_dash`'s own legacy clamp: 0 solid, 1–3
+/// patterns — `resolve_stroke_dash` itself resolves the full 0..=7 palette;
+/// the legacy range is that one caller's own clamp, not a limit of the
+/// function) and resolves NO scale — this returns `None` for it, which is
+/// what tells mark builders to read the column as indices. A nominal/ordinal
+/// field (including a numeric column the user typed `"N"`) resolves here
+/// instead. See [`StrokeDashScale`] for the contract.
 ///
 /// `facet_shared`: when `true`, resolves the domain from the global
 /// `FINAL_OUTPUT_KEY` batch so every panel assigns the same dash to the same
@@ -452,10 +456,11 @@ pub fn build_stroke_dash_scale(
         return Ok((None, Vec::new()));
     };
     // #123: an explicit `scale.range` is refused outright, regardless of the
-    // field's dtype: `stroke_dash`'s output is the fixed 4-slot GPU dash
-    // palette ([`DASH_PALETTE`]), not a value a scale can redeclare, so there
-    // is no entry-by-entry parse (unlike `shape`'s range, above); the
-    // refusal echoes the received range. Python's `StrokeDash._validate`
+    // field's dtype: `stroke_dash`'s output is the categorical scale's own
+    // fixed legacy dash-index range (`STROKE_DASH_LEGACY_SLOTS`, not the
+    // full, longer `DASH_PALETTE` table), not a value a scale can redeclare,
+    // so there is no entry-by-entry parse (unlike `shape`'s range, above);
+    // the refusal echoes the received range. Python's `StrokeDash._validate`
     // refuses `range=` at construction, so only a hand-built spec
     // (`ChartSpec::from_json` and similar) reaches this.
     if let Some(range) = explicit_ordinal_range(dash_enc) {
@@ -486,10 +491,12 @@ pub fn build_stroke_dash_scale(
         coord_flipped,
     )?;
 
-    // The dash index space is the solid entry (0) plus every DASH_PALETTE
-    // pattern, so it is derived from that one canonical table rather than
-    // re-stated here.
-    let slots = DASH_PALETTE.len() + 1;
+    // The categorical scale's cycling slot count is pinned to the legacy
+    // 4-slot span (solid plus the three pre-append patterns), independent of
+    // `DASH_PALETTE`'s full length: see `STROKE_DASH_LEGACY_SLOTS`'s doc
+    // comment for why appending the named linetypes must not move which
+    // pattern an existing categorical domain gets.
+    let slots = STROKE_DASH_LEGACY_SLOTS;
     if distinct.len() > slots {
         warnings.push(crate::render::RenderWarning::StrokeDashPaletteOverflowed {
             categories: distinct.len() as u32,

@@ -22,8 +22,6 @@
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
-use super::draw::DASH_PALETTE;
-
 // ── Wire-format stride constants ────────────────────────────────────────────
 //
 // These are the single authoritative definition of the packed GPU-instance
@@ -361,32 +359,21 @@ fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
 
 /// Map a stroke-dash pattern to the palette index used by the WASM renderer.
 ///
-/// Derives from [`super::draw::DASH_PALETTE`] (the single canonical source) so
-/// this direction (pattern→index) cannot drift from `resolve_stroke_dash`
-/// (index→pattern). The mapping is:
-///   - `None` or empty vec → `0` (solid)
-///   - `[6, 3]`       → `1`
-///   - `[2, 3]`       → `2`
-///   - `[6, 3, 2, 3]` → `3`
-///   - unknown pattern → `0` (solid fallback)
+/// Reads [`ferrum_scene::stroke_dash_index`] (the single canonical source, an
+/// exact-value match) so this direction (pattern→index) cannot drift from
+/// `resolve_stroke_dash` (index→pattern) or from the WASM scene-loader's copy.
+///
+/// **Behavior change**: this packed (>=1000-mark) path previously matched by
+/// truncating each pattern component to `u64` before comparing, so a
+/// non-integer-valued pattern like `[6.5, 3.5]` truncated to `[6, 3]` and
+/// matched index 1. The canonical exact-value match maps it to solid
+/// instead, unifying this path with `scene_load.rs`'s JSON-instance path,
+/// which already matched exactly.
 ///
 /// Exposed as `pub(crate)` so the `draw` module's round-trip tests can call it
 /// without a `#[cfg(test)]` re-export.
 pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    let Some(v) = dash else { return 0.0 };
-    if v.is_empty() {
-        return 0.0;
-    }
-    // Compare by truncating to u64 so fractional noise (e.g. 6.0 vs 6) is ignored,
-    // matching the original implementation's cast semantics exactly.
-    let pattern: Vec<u64> = v.iter().map(|&x| x as u64).collect();
-    for (i, palette_entry) in DASH_PALETTE.iter().enumerate() {
-        let entry_as_u64: Vec<u64> = palette_entry.iter().map(|&x| x as u64).collect();
-        if pattern == entry_as_u64 {
-            return (i + 1) as f32;
-        }
-    }
-    0.0
+    ferrum_scene::stroke_dash_index(dash) as f32
 }
 
 #[cfg(test)]
@@ -802,6 +789,18 @@ mod tests {
         assert!((stroke_dash_index(&Some(vec![2.0, 3.0])) - 2.0).abs() < 1e-6);
         assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
         assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
+    }
+
+    /// This packed (>=1000-mark) path used to match a non-integer-valued pattern by
+    /// truncating each component to `u64` (dropping the fraction), so
+    /// `[6.5, 3.5]` truncated to `[6, 3]` and matched index 1 (dashed).
+    /// Reading `ferrum_scene::stroke_dash_index` now matches by exact value
+    /// (within `1e-6`), the same rule `scene_load.rs`'s JSON-instance path
+    /// already used, so a non-integer pattern now maps to solid on BOTH
+    /// interactive paths instead of only one.
+    #[test]
+    fn stroke_dash_index_non_integer_valued_pattern_maps_to_solid_not_truncated() {
+        assert!((stroke_dash_index(&Some(vec![6.5, 3.5])) - 0.0).abs() < 1e-6);
     }
 
     // ── B1/B3: opacity semantics regression tests ─────────────────────

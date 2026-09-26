@@ -35,6 +35,7 @@ import ferrum as fm
 import ferrum._core as _core
 from ferrum import value
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
+from ferrum.marks.base import _LINETYPE_MAP
 
 import _pixel_capture as pc
 from _conditional_oracle import (
@@ -44,6 +45,7 @@ from _conditional_oracle import (
     predicted_fill_edge,
     ring_is_alternating,
     ring_is_solid,
+    ring_sample_count,
     rgb_distance3,
 )
 
@@ -677,22 +679,55 @@ def _check_angle_point_identical(
         )
 
 
+def _ring_perimeter(fx: Fixture, stroke_w: float) -> float:
+    """The target's own stroke-ring perimeter, in SVG-space units.
+
+    Circle: the circumference of the (inward-inset) stroke ring. Rect: the
+    outer perimeter (the stroke inset only moves each sample a fixed
+    distance inward, not the ring's total length). Fed to
+    `ring_sample_count` so the sampling density scales with the mark's own
+    size rather than a single fixed count.
+    """
+    if len(fx.target) == 3:
+        _cx, _cy, r = fx.target
+        return 2 * math.pi * (r - stroke_w / 2)
+    _x, _y, w, h = fx.target
+    return 2 * (w + h)
+
+
+def _dash_min_segment(row: Row) -> float | None:
+    """The row's own dash pattern's shortest on/off segment, or `None` if it renders solid.
+
+    Only `named`/`palette` forms actually alternate on the renderer;
+    `nonpalette` falls back to solid regardless of its literal pattern
+    (`stroke_dash_index`'s non-palette fallback), so it needs no density
+    beyond the floor. `named` rows carry a linetype name (resolved through
+    `_LINETYPE_MAP`); `palette` rows already carry the lengths directly.
+    """
+    if row.form_id not in _DASH_EXPECTED_FORMS:
+        return None
+    if row.form_id == "named":
+        return min(_LINETYPE_MAP[row.form_value])
+    return min(row.form_value)
+
+
 def _ring_samples(
-    page: Any, fx: Fixture, rect: pc.CanvasRect, png: bytes, stroke_w: float, n: int = 128
+    page: Any, fx: Fixture, rect: pc.CanvasRect, png: bytes, stroke_w: float, n: int
 ) -> list[tuple[int, ...]]:
     """Sample `n` points around the target's stroke ring, in perimeter order.
 
-    128 device-px-scale samples so the shortest segment of a real `[6, 3]`
+    `n` must be dense enough that the shortest segment of the row's own
     dash pattern spans several samples instead of at most one —
     `denoise_ring` only ever collapses an isolated single sample, so a
-    segment that dense survives it (see
-    `tests/test_conditional_oracle.py`'s positive control). Rect samples
-    walk the perimeter continuously (top left-to-right, right
-    top-to-bottom, bottom right-to-left, left bottom-to-top) rather than
-    interleaving the four sides per iteration: `ring_transitions` and
-    `denoise_ring` treat the list as a circular perimeter sequence, so an
-    interleaved order compares points on different sides of the rect as if
-    they were adjacent.
+    segment that dense survives it (see `ring_sample_count`, which the
+    caller uses to compute `n` from the target's own perimeter and the
+    pattern's shortest segment). Rect samples walk the perimeter
+    continuously (top left-to-right, right top-to-bottom, bottom
+    right-to-left, left bottom-to-top) rather than interleaving the four
+    sides per iteration: `ring_transitions` and `denoise_ring` treat the
+    list as a circular perimeter sequence, so an interleaved order
+    compares points on different sides of the rect as if they were
+    adjacent.
     """
     pts: list[tuple[float, float]] = []
     if len(fx.target) == 3:
@@ -741,10 +776,12 @@ def _check_stroke_width(
 
 
 def _check_stroke_dash(
-    page: Any, fx: Fixture, rect: pc.CanvasRect, after: bytes, *, expect_dashed: bool
+    page: Any, fx: Fixture, rect: pc.CanvasRect, after: bytes, row: Row, *, expect_dashed: bool
 ) -> None:
     stroke_rgb = _core.parse_color_to_rgba(BASE_STROKE)[:3]
-    samples = _ring_samples(page, fx, rect, after, DASH_STROKE_W)
+    perimeter = _ring_perimeter(fx, DASH_STROKE_W)
+    n = ring_sample_count(perimeter, _dash_min_segment(row))
+    samples = _ring_samples(page, fx, rect, after, DASH_STROKE_W, n)
     classes = classify_ring(samples, stroke_rgb)
     if expect_dashed:
         assert ring_is_alternating(classes), (
@@ -835,19 +872,17 @@ def _check_isolation(
     )
 
 
-# ── xfail scoping ────────────────────────────────────────────────────────────
+# ── stroke_dash form scoping ─────────────────────────────────────────────────
 
-# stroke_dash's "named" (a linetype absent from the palette, e.g. "dashed")
-# and "palette" (a pattern already in the palette, e.g. [6, 3]) forms are
-# F19/F19b: circle.wgsl:101 phases the dash pattern on `dist` (radial
-# distance from the instance center), so every point/rect stroke_dash
-# conditional renders as a concentric ring rather than perimeter dashes,
-# regardless of mark or pattern. "nonpalette" ([7, 2, 1, 2]) is a pattern
-# outside the fixed 4-entry dash palette, which renders solid on instance
-# marks by design (disclosed in `stroke_dash_index`'s doc comment: an
-# unrecognized pattern falls back to solid) — stays solid on both marks
-# (never xfailed).
-_DASH_XFAIL_FORMS = frozenset({"named", "palette"})
+# stroke_dash's "named" (a linetype name, e.g. "dashed", resolved to
+# lengths through `_LINETYPE_MAP`) and "palette" (a literal pattern already
+# in the palette, e.g. [6, 3]) forms both resolve to a real palette entry
+# and are expected to render as alternating stroke/background dashes on
+# both marks. "nonpalette" ([7, 2, 1, 2]) is a pattern outside the palette,
+# which renders solid on instance marks by design (disclosed in
+# `stroke_dash_index`'s doc comment: an unrecognized pattern falls back to
+# solid) — stays solid on both marks.
+_DASH_EXPECTED_FORMS = frozenset({"named", "palette"})
 
 # `stroke_opacity` on `rect`: there is no working plain-render path to
 # derive the opacity-family oracle's "expected" value from, for two
@@ -906,20 +941,7 @@ _OPACITY_XFAIL_REASON = (
 )
 
 
-def _is_dash_xfail(row: Row) -> bool:
-    if row.channel != "stroke_dash":
-        return False
-    return row.form_id in _DASH_XFAIL_FORMS
-
-
 def _row_param(row: Row) -> Any:
-    if _is_dash_xfail(row):
-        marks = pytest.mark.xfail(
-            strict=True,
-            raises=AssertionError,
-            reason="F19/F19b: interactive stroke_dash conditionals render a concentric ring",
-        )
-        return pytest.param(row, id=row.id, marks=marks)
     if row.channel == "stroke_opacity" and row.mark == "rect":
         marks = pytest.mark.xfail(
             strict=True, raises=AssertionError, reason=_RECT_STROKE_OPACITY_XFAIL_REASON
@@ -992,8 +1014,8 @@ def test_conditional_channel_pixels(row: Row, browser: Any, tmp_path: Path) -> N
             else:
                 _check_angle_rect(page, fx, rect, before, after)
         elif row.channel == "stroke_dash":
-            expect_dashed = row.form_id in _DASH_XFAIL_FORMS
-            _check_stroke_dash(page, fx, rect, after, expect_dashed=expect_dashed)
+            expect_dashed = row.form_id in _DASH_EXPECTED_FORMS
+            _check_stroke_dash(page, fx, rect, after, row, expect_dashed=expect_dashed)
         else:  # pragma: no cover - exhaustive over _CONDITIONAL_CHANNELS
             raise AssertionError(f"no oracle wired for channel {row.channel!r}")
 

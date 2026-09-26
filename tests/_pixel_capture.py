@@ -47,12 +47,22 @@ VIEWPORT = {"width": 900, "height": 560}
 # top absorbs remaining SwiftShader compositing latency.
 _LOAD_SETTLE_MS = 1200
 _INTERACTION_SETTLE_MS = 300
-# 3x Playwright's own 30s action-timeout default — generous enough to
-# absorb a rare CDP-pipe stall under two-worker (-n 2) contention without
-# masking a genuine hang (see `screenshot`'s docstring for the measurement
-# that ruled out a proportional multiple of the actual, sub-second capture
-# time).
-_SCREENSHOT_TIMEOUT_MS = 90_000
+# Canvas-attach time (`page.goto` through `wait_for_selector`) measured
+# directly across every page load in one full serial run of this module
+# (192 loads): mean 1.95s, max 3.53s (the first, cold-start load), with no
+# growth from the first load to the last. `page.close()` also closes the
+# implicit context `browser.new_page()` created (Playwright's own
+# documented behavior), so there is no per-row context leak to account for.
+# The one observed failure at the previous 90_000ms ceiling was a single
+# stall far outside that steady-state range, not a proportional slowdown:
+# the same occasional CDP-pipe stall `screenshot`'s own docstring already
+# documents ruling out a scaled multiple of measured time for. This ceiling
+# is a generous absolute bound for that kind of rare stall, not a multiple
+# of the ~2s steady state: 2x the previous ceiling, roughly 51x the
+# measured max. Shared by every long-running page action in this module
+# (screenshot, navigation, canvas-attach wait) rather than each picking its
+# own ceiling, since all three hit the same class of rare stall.
+_ACTION_TIMEOUT_MS = 180_000
 
 _DOUBLE_RAF_JS = (
     "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
@@ -122,8 +132,8 @@ def load_interactive(page: Any, html_path: Path) -> None:
     painted) before a short fixed settle for GPU compositing under
     SwiftShader.
     """
-    page.goto(html_path.resolve().as_uri())
-    page.wait_for_selector("canvas", state="attached", timeout=15_000)
+    page.goto(html_path.resolve().as_uri(), timeout=_ACTION_TIMEOUT_MS)
+    page.wait_for_selector("canvas", state="attached", timeout=_ACTION_TIMEOUT_MS)
     page.evaluate(_DOUBLE_RAF_JS)
     page.wait_for_timeout(_LOAD_SETTLE_MS)
 
@@ -200,7 +210,7 @@ def screenshot(page: Any) -> bytes:
     is an occasional CDP-pipe stall, not a proportional slowdown, so the fix
     is a much larger absolute ceiling rather than a scaled one.
     """
-    return page.screenshot(timeout=_SCREENSHOT_TIMEOUT_MS)
+    return page.screenshot(timeout=_ACTION_TIMEOUT_MS)
 
 
 def sample_pixels(

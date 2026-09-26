@@ -975,10 +975,13 @@ impl ShapeScale {
     }
 }
 
-/// An ordinal stroke-dash scale: maps a categorical field onto the canonical
-/// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE) index space (index 0
-/// solid, then each palette pattern), cycling when there are more categories
-/// than slots.
+/// An ordinal stroke-dash scale: maps a categorical field onto the dash
+/// index space's legacy slots (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`:
+/// index 0 solid, then the three patterns that predate the named-linetype
+/// append — never the appended linetypes, which the full
+/// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE) table carries but
+/// this scale's cycling does not reach), cycling when there are more
+/// categories than slots.
 ///
 /// Built by
 /// [`build_stroke_dash_scale`](crate::render::scale_resolve::build_stroke_dash_scale)

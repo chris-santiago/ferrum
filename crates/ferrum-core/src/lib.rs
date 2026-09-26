@@ -122,6 +122,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `parse_color_to_hex` uses, so a caller that needs channel bytes (the
     // selection wire helper) reads them directly instead of decoding hex.
     m.add_function(wrap_pyfunction!(render::color::primitive::parse_color_to_rgba, m)?)?;
+    // The canonical stroke-dash palette (`ferrum_scene::DASH_PALETTE`),
+    // published so `_LINETYPE_MAP` asserts its patterns are palette members
+    // instead of holding a copy of the table.
+    m.add_function(wrap_pyfunction!(render::draw::stroke_dash_palette, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     // Classification diagnostic curve kernels (sklearn-parity).

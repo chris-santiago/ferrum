@@ -569,10 +569,14 @@ pub enum RenderError {
     /// entry.
     ShapeRangeEntryUnrecognized { entry: String },
     /// A `StrokeDash(scale=...)` carries an explicit `range` at all — string,
-    /// numeric, or mixed (#123, spec §4.9). That channel's output is a fixed
-    /// 4-slot GPU dash-index palette
-    /// ([`crate::render::draw::DASH_PALETTE`]), not a value a scale can
-    /// redeclare, so ANY explicit range refuses outright rather than being
+    /// numeric, or mixed (#123, spec §4.9). That channel's output is the
+    /// categorical scale's fixed legacy dash-index range
+    /// (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`: solid plus the three
+    /// patterns that predate the named-linetype append — the full
+    /// [`crate::render::draw::DASH_PALETTE`] table is longer, but the
+    /// categorical scale never cycles past its own legacy slots), not a
+    /// value a scale can redeclare, so ANY explicit range refuses outright
+    /// rather than being
     /// parsed entry-by-entry — there is no "one bad entry" to name, every
     /// entry is equally unsupported, unlike [`Self::ShapeRangeEntryUnrecognized`].
     /// `entries` is the received range verbatim (each item rendered via
@@ -1105,11 +1109,12 @@ impl std::fmt::Display for RenderError {
             ),
             Self::StrokeDashRangeUnsupported { entries } => {
                 let received = entries.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(", ");
+                let slots = ferrum_scene::STROKE_DASH_LEGACY_SLOTS;
                 write!(
                     f,
                     "StrokeDash(scale=...) does not honor an explicit range (received [{received}]): \
-                     stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can \
-                     redeclare"
+                     the categorical scale's output is a fixed set of {slots} palette patterns, not a \
+                     value a scale can redeclare"
                 )
             }
             Self::LayeredChartMarkStyle { layers } => write!(
@@ -1245,9 +1250,10 @@ pub enum RenderWarning {
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
     /// A categorical `stroke_dash` channel named more categories than the dash
-    /// index space has slots (solid plus every
-    /// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE) pattern), so patterns
-    /// were recycled and two categories draw with the same dash. Mirrors
+    /// index space has slots (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`: solid
+    /// plus the three patterns that predate the named-linetype append, not
+    /// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE)'s full length), so
+    /// patterns were recycled and two categories draw with the same dash. Mirrors
     /// [`ShapePaletteOverflowed`](Self::ShapePaletteOverflowed) — the palette is
     /// finite, so the degradation stays (spec §4.3) but is never silent.
     StrokeDashPaletteOverflowed { categories: u32 },
@@ -3763,9 +3769,10 @@ mod orchestration_tests {
             "a numeric stroke_dash field must not produce a dash aux legend");
     }
 
-    /// Palette overflow (spec §4.3): more style categories than
-    /// `DASH_PALETTE` slots (4: solid + 3 patterns) still draws every
-    /// polyline — cycling the palette — while emitting
+    /// Palette overflow (spec §4.3): more style categories than the
+    /// categorical scale's legacy slots (`STROKE_DASH_LEGACY_SLOTS`, 4:
+    /// solid + 3 patterns) still draws every polyline — cycling the legacy
+    /// range — while emitting
     /// `RenderWarning::StrokeDashPaletteOverflowed`. Before T12 this warning
     /// fired over a chart with zero dasharray attributes; now the warning
     /// corresponds to real (cycled) drawn dashes.

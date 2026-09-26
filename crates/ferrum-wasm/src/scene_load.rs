@@ -46,28 +46,16 @@ pub(crate) fn color_to_linear(c: &Color, opacity: f64) -> [f32; 4] {
     ]
 }
 
-/// Stroke-dash palette: maps palette index (0–3) to a `stroke-dasharray`
-/// pattern string, shared with the SVG renderer for cross-renderer consistency.
-///
-/// Index mapping:
-/// - 0 → solid (no dash)
-/// - 1 → dashed  "6,3"
-/// - 2 → dotted  "2,3"
-/// - 3 → dash-dot "6,3,2,3"
-///
-/// Out-of-range float values in instance data are clamped to `[0, 3]` by
-/// the shader's `clamp(floor(stroke_dash + 0.5), 0, 3)` idiom.
-pub const STROKE_DASH_PALETTE: [&str; 4] = ["", "6,3", "2,3", "6,3,2,3"];
-
 /// GPU instance record for a single circle mark.
 ///
 /// Layout (16 floats = 64 bytes):
 ///   center(2) + radius(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1)
 ///   + stroke_opacity(1) + stroke_dash(1) + angle(1)
 ///
-/// `stroke_dash` is stored as an f32 palette index (0.0–3.0) for Pod
-/// compatibility; the vertex shader casts it to a uint index with
-/// `clamp(floor(dash + 0.5), 0, 3)`.
+/// `stroke_dash` is stored as an f32 palette index for Pod compatibility,
+/// packed by `stroke_dash_index` below (which reads
+/// `ferrum_scene::DASH_PALETTE`, the same table the SVG path resolves); the
+/// vertex shader casts it to a uint index, clamped to the palette's range.
 ///
 /// `angle` is in screen-space degrees, applied as a rotation around the
 /// instance anchor (circle center / rect center).
@@ -82,8 +70,8 @@ pub struct CircleInstance {
     pub opacity: f32,
     /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
     pub stroke_opacity: f32,
-    /// Palette index as f32 (0.0 = solid, 1.0 = dashed, 2.0 = dotted,
-    /// 3.0 = dash-dot). Values outside [0, 3] are clamped. Default: 0.0.
+    /// Palette index as f32 (0.0 = solid; 1.0..=`DASH_PALETTE.len()` selects
+    /// a dash pattern). Out-of-range values are clamped. Default: 0.0.
     pub stroke_dash: f32,
     /// Rotation in screen-space degrees around the circle center. Default: 0.0.
     pub angle: f32,
@@ -106,8 +94,8 @@ pub struct RectInstance {
     pub opacity: f32,
     /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
     pub stroke_opacity: f32,
-    /// Palette index as f32 (0.0 = solid, 1.0 = dashed, 2.0 = dotted,
-    /// 3.0 = dash-dot). Values outside [0, 3] are clamped. Default: 0.0.
+    /// Palette index as f32 (0.0 = solid; 1.0..=`DASH_PALETTE.len()` selects
+    /// a dash pattern). Out-of-range values are clamped. Default: 0.0.
     pub stroke_dash: f32,
     /// Rotation in screen-space degrees around the rect center. Default: 0.0.
     pub angle: f32,
@@ -2098,38 +2086,14 @@ fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     }
 }
 
-/// Map a `FillStroke.stroke_dash` pattern vector to the closest palette index.
+/// Map a `FillStroke.stroke_dash` pattern vector to the palette index the
+/// GPU instance fields and shaders read.
 ///
-/// `None` / empty vec → 0.0 (solid). Otherwise matches the first non-empty
-/// palette pattern by round-trip string comparison of the vec joined with ",".
-/// Falls back to 0.0 (solid) for unrecognised patterns.
+/// Reads [`ferrum_scene::stroke_dash_index`] (the single canonical source, an
+/// exact-value match against `DASH_PALETTE`) so this direction cannot drift
+/// from the SVG path's `resolve_stroke_dash` or from `pack_instances`'s copy.
 pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    match dash {
-        None => 0.0,
-        Some(v) if v.is_empty() => 0.0,
-        Some(v) => {
-            let joined = v
-                .iter()
-                .map(|x| {
-                    // Format without trailing ".0" for integer-valued floats so
-                    // "6,3" matches rather than "6.0,3.0".
-                    if x.fract() == 0.0 {
-                        format!("{}", *x as i64)
-                    } else {
-                        format!("{x}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            STROKE_DASH_PALETTE
-                .iter()
-                .enumerate()
-                .skip(1) // index 0 is always solid / empty
-                .find(|(_, pat)| **pat == joined)
-                .map(|(i, _)| i as f32)
-                .unwrap_or(0.0) // unrecognised pattern → solid
-        }
-    }
+    ferrum_scene::stroke_dash_index(dash) as f32
 }
 
 #[cfg(test)]
@@ -2501,10 +2465,118 @@ mod tests {
         assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
     }
 
+    /// A pattern outside the palette maps to solid -- the fallback's actual
+    /// scope, non-palette input only (every palette entry itself round-trips
+    /// to its own index).
     #[test]
-    fn stroke_dash_index_unknown_pattern_gives_solid() {
-        // unrecognised → solid (0.0)
+    fn stroke_dash_index_nonpalette_pattern_gives_solid() {
         assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
+    }
+
+    // ── Shader dash-period table vs. the ferrum_scene::DASH_PALETTE ─────
+    //
+    // Parses a shader's `const DASH_PATTERNS: array<vec4<f32>, N> =
+    // array<vec4<f32>, N>(vec4<f32>(...), ...);` declaration out of the raw
+    // shader text and asserts it equals the canonical palette, so the two
+    // cannot silently drift. Reads the actual shader source the pipeline
+    // loads via `include_str!` (`pipelines.rs`), not a hand-built mirror.
+
+    fn parse_dash_patterns(shader_src: &str) -> Vec<[f64; 4]> {
+        const MARKER: &str = "const DASH_PATTERNS";
+        let start = shader_src.find(MARKER).unwrap_or_else(|| {
+            panic!("shader has no `{MARKER}` declaration -- the dash-phase table must live there")
+        });
+        // Every `vec4<f32>(...)` literal closes with `)`, never `);`; the
+        // statement itself does, so the first `");"` after the marker is the
+        // declaration's own close.
+        let stmt_end = shader_src[start..]
+            .find(");")
+            .map(|i| start + i)
+            .expect("DASH_PATTERNS declaration has no statement terminator");
+        let stmt = &shader_src[start..stmt_end];
+        stmt.split("vec4<f32>(")
+            .skip(1) // text before the first vec4<f32>( literal
+            .map(|chunk| {
+                let end = chunk.find(')').expect("unterminated vec4<f32>(...) literal");
+                let nums: Vec<f64> = chunk[..end]
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("non-numeric dash pattern component"))
+                    .collect();
+                assert_eq!(nums.len(), 4, "each DASH_PATTERNS row must have 4 components");
+                [nums[0], nums[1], nums[2], nums[3]]
+            })
+            .collect()
+    }
+
+    /// The palette entries, zero-padded to 4 components each, in the order
+    /// `parse_dash_patterns` reads a shader's `DASH_PATTERNS` table.
+    fn expected_dash_patterns() -> Vec<[f64; 4]> {
+        ferrum_scene::DASH_PALETTE
+            .iter()
+            .map(|pat| {
+                let mut row = [0.0; 4];
+                for (slot, &v) in row.iter_mut().zip(pat.iter()) {
+                    *slot = v;
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// Parse the two hardcoded clamp bounds a shader uses to keep `dash_idx`
+    /// inside the palette's range: `dash_visible_along`'s
+    /// `clamp(dash_idx, 1, N)` (an `i32` literal) and `fs_main`'s
+    /// `clamp(floor(in.stroke_dash + 0.5), 0.0, N.0)` (an `f32` literal).
+    /// Both must track `DASH_PALETTE.len()` — an append that grows
+    /// `DASH_PATTERNS` without also growing these bounds would silently cap
+    /// every index past the old bound at the old top pattern instead of
+    /// reaching the new one.
+    fn parse_dash_clamp_bounds(shader_src: &str) -> (i64, f64) {
+        const IDX_MARKER: &str = "clamp(dash_idx, 1, ";
+        let idx_start = shader_src.find(IDX_MARKER).unwrap_or_else(|| {
+            panic!("shader has no `{IDX_MARKER}` clamp -- dash_idx must stay in-range")
+        }) + IDX_MARKER.len();
+        let idx_end = shader_src[idx_start..]
+            .find(')')
+            .map(|i| idx_start + i)
+            .expect("unterminated clamp(dash_idx, 1, ...) call");
+        let idx_bound: i64 = shader_src[idx_start..idx_end]
+            .trim()
+            .parse()
+            .expect("non-integer dash_idx clamp bound");
+
+        const FLOAT_MARKER: &str = "clamp(floor(in.stroke_dash + 0.5), 0.0, ";
+        let float_start = shader_src.find(FLOAT_MARKER).unwrap_or_else(|| {
+            panic!("shader has no `{FLOAT_MARKER}` clamp -- in.stroke_dash must stay in-range")
+        }) + FLOAT_MARKER.len();
+        let float_end = shader_src[float_start..]
+            .find(')')
+            .map(|i| float_start + i)
+            .expect("unterminated clamp(floor(in.stroke_dash + 0.5), 0.0, ...) call");
+        let float_bound: f64 = shader_src[float_start..float_end]
+            .trim()
+            .parse()
+            .expect("non-numeric in.stroke_dash clamp bound");
+
+        (idx_bound, float_bound)
+    }
+
+    #[test]
+    fn circle_shader_dash_patterns_equal_the_palette() {
+        let src = include_str!("shaders/circle.wgsl");
+        assert_eq!(parse_dash_patterns(src), expected_dash_patterns());
+        let (idx_bound, float_bound) = parse_dash_clamp_bounds(src);
+        assert_eq!(idx_bound, ferrum_scene::DASH_PALETTE.len() as i64);
+        assert_eq!(float_bound, ferrum_scene::DASH_PALETTE.len() as f64);
+    }
+
+    #[test]
+    fn rect_shader_dash_patterns_equal_the_palette() {
+        let src = include_str!("shaders/rect.wgsl");
+        assert_eq!(parse_dash_patterns(src), expected_dash_patterns());
+        let (idx_bound, float_bound) = parse_dash_clamp_bounds(src);
+        assert_eq!(idx_bound, ferrum_scene::DASH_PALETTE.len() as i64);
+        assert_eq!(float_bound, ferrum_scene::DASH_PALETTE.len() as f64);
     }
 
     // ── Task 3: scene_load builds correct instance fields ────────────

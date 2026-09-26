@@ -1,6 +1,7 @@
 //! Per-panel draw context + mark dispatch. Spec §4.5 / §4.6.
 
 use arrow::record_batch::RecordBatch;
+use pyo3::prelude::*;
 
 use crate::layout::{PanelLayout, ThemeInputs};
 use crate::spec::mark::Mark;
@@ -1412,45 +1413,25 @@ pub fn to_scene_text_style(
     }
 }
 
-/// Canonical stroke-dash palette: index → dasharray pattern.
-///
-/// Index 0 is solid (no entry here — `resolve_stroke_dash` returns `None` for 0).
-/// Indices 1–3 map to the pattern at `DASH_PALETTE[index - 1]`:
-///   - index 1 → `[6, 3]`   long dash
-///   - index 2 → `[2, 3]`   short dash / dot
-///   - index 3 → `[6, 3, 2, 3]`  long-short dash
-///
-/// **Both** `resolve_stroke_dash` (index→pattern, SVG/scene path) and
-/// `pack_instances::stroke_dash_index` (pattern→index, GPU packed path) derive
-/// from this single source so the two directions cannot silently drift.
-///
-/// The WASM shader (`crates/ferrum-wasm/src/shaders/`) encodes the same palette
-/// to interpret the `stroke_dash` f32 field packed by `stroke_dash_index`. Any
-/// change to this table **must** be reflected there too — that shader is not
-/// edited by the Rust cohesion refactor; its comment notes the dependency.
-pub(crate) const DASH_PALETTE: &[&[f64]] = &[
-    &[6.0, 3.0],           // index 1
-    &[2.0, 3.0],           // index 2
-    &[6.0, 3.0, 2.0, 3.0], // index 3
-];
+/// The canonical stroke-dash palette lives in `ferrum_scene::dash` (both
+/// `pack_instances::stroke_dash_index` and the WASM shaders derive from it
+/// too, so the SVG and GPU/interactive paths cannot silently drift). This
+/// crate reads it rather than holding a copy.
+pub(crate) use ferrum_scene::{resolve_stroke_dash, DASH_PALETTE};
 
-/// Map a stroke-dash palette index to its canonical SVG dasharray pattern.
+/// Publish the canonical stroke-dash palette to Python, on the
+/// `scale_accepted_keys` precedent, so `_LINETYPE_MAP` (`marks/base.py`) can
+/// assert every one of its values is a palette member without holding a
+/// Rust-side copy of the table.
 ///
-/// The index is rounded and clamped to `[0, 3]` before lookup:
-/// - `0` → solid (returns `None`)
-/// - `1` → long dash `[6, 3]`
-/// - `2` → short dash / dot `[2, 3]`
-/// - `3` → long-short dash `[6, 3, 2, 3]`
-///
-/// Derives from [`DASH_PALETTE`] so it cannot drift from the GPU-path inverse
-/// in `pack_instances::stroke_dash_index`.
-pub(crate) fn resolve_stroke_dash(idx: f64) -> Option<Vec<f64>> {
-    let idx = (idx.round() as i64).clamp(0, 3) as usize;
-    if idx == 0 {
-        None
-    } else {
-        DASH_PALETTE.get(idx - 1).map(|pat| pat.to_vec())
-    }
+/// Index-aligned with [`resolve_stroke_dash`]/`stroke_dash_index`: index `0`
+/// is solid, represented as an empty list (`_LINETYPE_MAP["solid"]`'s own
+/// spelling), and index `i` (`i >= 1`) is `DASH_PALETTE[i - 1]`.
+#[pyfunction]
+pub fn stroke_dash_palette() -> Vec<Vec<f64>> {
+    std::iter::once(Vec::new())
+        .chain(DASH_PALETTE.iter().map(|pat| pat.to_vec()))
+        .collect()
 }
 
 pub(crate) fn parse_stroke_cap(s: &str) -> Option<ferrum_scene::StrokeCap> {

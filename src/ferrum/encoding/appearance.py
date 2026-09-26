@@ -492,11 +492,11 @@ class StrokeDash(ChannelBase):
         Data type. Inferred from the column dtype when omitted.
     scale : Scale, optional
         Explicit scale override.  ``domain`` reorders the category-to-dash
-        assignment, mirroring ``Shape``.  ``range`` is **not** honored
-        (2026-09-23, #123, user ruling Q1b): the dash output is a fixed
-        4-slot GPU palette index (solid plus three patterns), which cannot
-        carry an arbitrary domain-to-range mapping, so a ``range`` key
-        raises ``ValueError`` at construction naming the fixed palette.
+        assignment, mirroring ``Shape``.  ``range`` is **not** honored: the
+        StrokeDash categorical scale's range is a fixed set of palette
+        patterns, which cannot carry an arbitrary domain-to-range mapping,
+        so a ``range`` key raises ``ValueError`` at construction naming the
+        fixed palette.
     title : str, optional
         Legend title override.
 
@@ -544,21 +544,20 @@ class StrokeDash(ChannelBase):
         """Refuse an explicit ``scale=`` range naming the fixed dash palette.
 
         Mirrors ``Shape._validate``'s eager gate, but StrokeDash's range
-        cannot be wired at all: the dash scale resolves to a palette INDEX
-        (solid plus three patterns, ``crates/ferrum-core/src/render/
-        draw.rs::DASH_PALETTE``), which the GPU-packed interactive path
-        reads as a 4-slot index -- there is no way to carry an arbitrary
-        domain-to-range mapping through that representation. Domain-only
-        scales pass through unchanged (2026-09-23, #123, user ruling Q1b).
+        cannot be wired at all: the dash scale resolves to a palette index
+        (``crates/ferrum-scene/src/dash.rs``), which the GPU-packed
+        interactive path reads as a fixed-slot index -- there is no way to
+        carry an arbitrary domain-to-range mapping through that
+        representation. Domain-only scales pass through unchanged.
         """
         super()._validate()
         range_ = self._explicit_scale_range()
         if range_ is not None:
             raise ValueError(
                 f"StrokeDash(scale=...): range={range_!r} is not supported -- "
-                "stroke-dash output is drawn from the fixed 4-slot GPU palette "
-                "(solid plus three patterns), not an arbitrary domain-to-range "
-                "mapping. Wire only the domain: "
+                "the StrokeDash categorical scale's range is a fixed set of "
+                "palette patterns, not an arbitrary domain-to-range mapping. "
+                "Wire only the domain: "
                 "StrokeDash('field', scale=OrdinalScale(domain=[...]))."
             )
 

@@ -23,6 +23,7 @@ from _conditional_oracle import (
     predicted_fill_edge,
     ring_is_alternating,
     ring_is_solid,
+    ring_sample_count,
     synthetic_dash_classes,
 )
 
@@ -61,12 +62,12 @@ def test_ring_alternating_rejects_a_ring_edge_with_an_antialiasing_blip() -> Non
 
 
 def test_ring_alternating_rejects_a_wide_noisy_fringe_around_one_big_arc() -> None:
-    """A real 128-sample capture of the same F19/F19b artifact, denser than 16.
+    """A real 128-sample capture of a radial-phase ring-edge artifact, denser than 16.
 
-    Captured directly on the committed bundle (`stroke_dash` `palette` on a
-    point mark, click driver): the harness's fixed sampling radius happens
-    to sit close to `circle.wgsl`'s own phase-wrap boundary (confirmed by
-    reading the shader), so each of the arc's two true edges produces a
+    Captured directly on a bundle with a radial (rather than perimeter)
+    dash phase (`stroke_dash` `palette` on a point mark, click driver): the
+    harness's fixed sampling radius happens to sit close to the shader's
+    own phase-wrap boundary, so each of the arc's two true edges produces a
     *multi*-sample noisy fringe, not `denoise_ring`'s single-sample blip.
     6 transitions survive single-sample denoising alone — past
     `min_transitions=4` — while the ring is still fundamentally one big
@@ -91,16 +92,12 @@ def test_ring_alternating_accepts_a_genuine_multi_dash_pattern() -> None:
 def test_ring_alternating_accepts_the_real_dash_geometry_at_128_samples() -> None:
     """Positive control built from the real `[6, 3]` pattern and real ring geometry.
 
-    Not a model of the renderer under test (which is F19/F19b-broken —
-    radial, not perimeter, phase) but a proof that `ring_is_alternating`
-    CAN see a genuine short-gap dash at the harness's actual sampling
-    density (128) and ring radius, once something (a future shader fix)
-    produces a perimeter-phased dash to sample. If this ever regresses to
-    False, the 128-sample density (or the ring radius it is computed
-    against) is too coarse for the shortest real segment, and a future fix
-    to the shader's dash phase would read as a solid ring rather than
-    flipping the `stroke_dash` xfail (see F19/F19b in
-    `test_conditional_pixels.py`).
+    Proof that `ring_is_alternating` can see a genuine short-gap dash at
+    the harness's actual sampling density (128, this mark's own floor —
+    see `ring_sample_count`) and ring radius, given a perimeter-phased
+    dash to sample. If this ever regresses to `False`, the 128-sample
+    floor (or the ring radius it is computed against) is too coarse for
+    the shortest real segment on this mark.
     """
     r = math.sqrt(_POINT_MARK_SIZE / math.pi)
     ring_r = r - _DASH_STROKE_W / 2
@@ -154,3 +151,77 @@ def test_predicted_fill_edge_formula_per_mark_kind() -> None:
     # Rect: the raw pixel value itself, inset by the stroke — never value/2
     # (the rect grows right/down from its own fixed top-left corner).
     assert predicted_fill_edge("rect", 900.0, stroke_width=3.0) == pytest.approx(897.0)
+
+
+# The exact geometry of the row a fixed 128-sample ring under-resolved:
+# `stroke_dash-palette-rect-unpacked` (perimeter 959.608 SVG px, `[6, 3]`
+# pattern, shortest segment 3).
+_UNDER_SAMPLED_PERIMETER = 959.608
+_UNDER_SAMPLED_MIN_SEGMENT = 3.0
+_OLD_FIXED_RING_SAMPLES = 128
+
+# A real 128-sample capture of that exact row's stroke ring (`classify_ring`
+# against the committed bundle's rendered frame, click driver) — not a
+# hand-built shape. The `[6, 3]` pattern's 3px gap falls under the fixed
+# 128-sample stride, so consecutive samples alias into a beat pattern with
+# a few wide runs rather than many short, even ones.
+_UNDER_SAMPLED_CAPTURE_128 = (
+    "SS.SS.SSS.SS.SS.SS.SS.SS.SSS.SSS.SS.SS.SS.S.SS.SS.SS.SS.SS.SS.S.S.SS.SS.SSS.SS.SS.SS.SS.SS"
+    "..SS..SS.SS.SS.SS.SS.SSSS.SS.SS.SS.SS."
+)
+
+# The same rendered frame, resampled at `ring_sample_count`'s own answer for
+# this row's (perimeter, shortest segment) — 1280 samples, four per 3px gap.
+_UNDER_SAMPLED_CAPTURE_AT_COMPUTED_N = (
+    "...SSSSSSSSSSSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS..........SSSSSSSSSSSSSSSSSSSSS......."
+    "....SSSSSSSSSSSSSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS..........SSSSSSSSSSSSSSSSSSSSSS..."
+    ".......SSSSSSSSSSSSSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS"
+    "..........SSSSSSSSSSSSSSSSSSSSS..SSSSSSSSSSS..SS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS"
+    "...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS..."
+    "SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS...SSS"
+    "S...SSSSS..SSSSS...SSSSS..SSSSS...SSSS...SSSSS..SSSSS...SSSSS..SSSSS...SSSS...SSSSS..SS.SSSS"
+    "SSSSSSS..........SSSSSSSSSSSSSSSSSSSSSS..........SSSSSSSSSSSSSSSSSSSSS...........SSSSSSSSSSS"
+    "SSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS..........SSSSSSSSSSSSSSSSSSSSS...........SSSSSSSS"
+    "SSSSSSSSSSSSS...........SSSSSSSSSSSSSSSSSSSSS..........SSSSSSSSSSSSSSSSSSSSSS..........SSSSS"
+    "SSSSSSSSSSSSSSSS...........SSS...........SS..SSSSS..SSSSS...SSSS...SSSSS..SSSSS...SSSSS..SSS"
+    "SS...SSSS...SSSSS..SSSSS...SSSSS..SSSSS...SSSS...SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS."
+    ".SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SS"
+    "SSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSSS..SSSSS..SSSSS...SSSSS..SSSSS...SSSS"
+)
+
+
+def test_ring_sample_count_matches_the_real_geometry() -> None:
+    """`ring_sample_count`'s answer for this row is the density the two captures below were taken at."""
+    n = ring_sample_count(_UNDER_SAMPLED_PERIMETER, _UNDER_SAMPLED_MIN_SEGMENT)
+    assert n == len(_UNDER_SAMPLED_CAPTURE_AT_COMPUTED_N)
+
+
+def test_ring_is_alternating_rejects_the_real_under_sampled_capture() -> None:
+    """The self-test that would have caught the under-sampling before it shipped.
+
+    A real 128-sample capture of `stroke_dash-palette-rect-unpacked`'s
+    stroke ring, at the exact density the old fixed floor used, reads as
+    not alternating — the aliasing `ring_sample_count` now fixes.
+    """
+    assert len(_UNDER_SAMPLED_CAPTURE_128) == _OLD_FIXED_RING_SAMPLES
+    assert not ring_is_alternating(list(_UNDER_SAMPLED_CAPTURE_128))
+
+
+def test_ring_is_alternating_accepts_the_capture_at_the_computed_n() -> None:
+    """The same rendered frame, resampled at `ring_sample_count`'s own density, reads correctly."""
+    assert ring_is_alternating(list(_UNDER_SAMPLED_CAPTURE_AT_COMPUTED_N))
+
+
+def test_ring_sample_count_floors_a_solid_pattern() -> None:
+    assert ring_sample_count(_UNDER_SAMPLED_PERIMETER, None) == _OLD_FIXED_RING_SAMPLES
+
+
+def test_ring_sample_count_raises_rather_than_silently_undersampling() -> None:
+    """A density need past the cap fails loudly, naming the perimeter and the count it would take.
+
+    A silent clamp here could under-sample a genuinely alternating pattern
+    into misreading as solid; a big enough perimeter against a short enough
+    segment must refuse instead.
+    """
+    with pytest.raises(ValueError, match=r"perimeter 100000\.0.*1\.0px.*400000 samples"):
+        ring_sample_count(100_000.0, 1.0)

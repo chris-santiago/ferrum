@@ -859,8 +859,9 @@ fn stroke_dash_scale_explicit_domain_reassigns_pattern_assignment() {
     );
 }
 
-/// #123: an explicit `scale.range` on `stroke_dash` refuses outright — that
-/// channel's output is the fixed 4-slot GPU dash palette, not a value a
+/// #123: an explicit `scale.range` on `stroke_dash` refuses outright — the
+/// categorical scale's output is a fixed set of `STROKE_DASH_LEGACY_SLOTS`
+/// palette patterns (not `DASH_PALETTE`'s full, longer table), not a value a
 /// scale can redeclare. Python's own `StrokeDash._validate` refuses this at
 /// construction, so this exercises the hand-built-spec defense
 /// (`ChartSpec::from_json` and similar raw-spec routes).
@@ -935,7 +936,7 @@ fn stroke_dash_range_unsupported_display_text_is_pinned() {
     assert_eq!(
         err.to_string(),
         "StrokeDash(scale=...) does not honor an explicit range (received ['a', 'b']): \
-         stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
+         the categorical scale's output is a fixed set of 4 palette patterns, not a value a scale can redeclare"
     );
 }
 
@@ -950,7 +951,7 @@ fn stroke_dash_range_unsupported_display_text_handles_empty_entries() {
     assert_eq!(
         err.to_string(),
         "StrokeDash(scale=...) does not honor an explicit range (received []): \
-         stroke_dash's output is the fixed 4-slot dash palette, not a value a scale can redeclare"
+         the categorical scale's output is a fixed set of 4 palette patterns, not a value a scale can redeclare"
     );
 }
 
@@ -6706,8 +6707,10 @@ fn charts_without_appearance_channels_resolve_no_appearance_scales() {
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
 }
 
-/// §4.3: a categorical `stroke_dash` field resolves onto the canonical dash
-/// index space — index 0 solid, then each `DASH_PALETTE` pattern in order.
+/// §4.3: a categorical `stroke_dash` field resolves onto the dash index
+/// space's legacy slots — index 0 solid, then the three patterns that
+/// predate the named-linetype append, in order (never the appended
+/// linetypes; see `STROKE_DASH_LEGACY_SLOTS`).
 #[test]
 fn categorical_stroke_dash_maps_onto_the_dash_palette() {
     use crate::render::pack_instances::stroke_dash_index;

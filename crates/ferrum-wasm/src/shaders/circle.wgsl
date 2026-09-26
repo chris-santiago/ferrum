@@ -21,7 +21,7 @@ struct VertexInput {
     @location(5) stroke_width: f32,
     @location(6) opacity: f32,
     @location(7) stroke_opacity: f32,
-    @location(8) stroke_dash: f32,  // palette index as float: 0=solid,1=dashed,2=dotted,3=dash-dot
+    @location(8) stroke_dash: f32,  // palette index as float: 0=solid, 1..7 index DASH_PATTERNS below
     @location(9) angle: f32,         // screen-space rotation degrees around circle center
 };
 
@@ -36,6 +36,40 @@ struct VertexOutput {
     @location(6) stroke_opacity: f32,
     @location(7) stroke_dash: f32,
 };
+
+// Stroke-dash pattern table: on/off segment lengths per non-solid palette
+// index, zero-padded to 4 components. Mirrors ferrum_scene::DASH_PALETTE (a
+// Rust test parses this declaration and asserts equality against it, so the
+// two cannot silently drift). Index 0 (solid) has no entry.
+const DASH_PATTERNS: array<vec4<f32>, 7> = array<vec4<f32>, 7>(
+    vec4<f32>(6.0, 3.0, 0.0, 0.0),
+    vec4<f32>(2.0, 3.0, 0.0, 0.0),
+    vec4<f32>(6.0, 3.0, 2.0, 3.0),
+    vec4<f32>(4.0, 2.0, 0.0, 0.0),
+    vec4<f32>(1.0, 3.0, 0.0, 0.0),
+    vec4<f32>(4.0, 2.0, 1.0, 2.0),
+    vec4<f32>(8.0, 4.0, 0.0, 0.0),
+);
+
+// Dash visibility at `dist_along` (distance measured along the stroke's
+// perimeter, never radially) for palette index `dash_idx`. Index 0 is
+// always visible (solid).
+fn dash_visible_along(dist_along: f32, dash_idx: i32) -> f32 {
+    if dash_idx == 0 {
+        return 1.0;
+    }
+    let pat = DASH_PATTERNS[clamp(dash_idx, 1, 7) - 1];
+    let period = pat.x + pat.y + pat.z + pat.w;
+    let phase = fract(dist_along / period) * period;
+    let c1 = pat.x;
+    let c2 = c1 + pat.y;
+    let c3 = c2 + pat.z;
+    var visible = phase < c1;
+    if pat.z > 0.0 {
+        visible = visible || (phase >= c2 && phase < c3);
+    }
+    return select(0.0, 1.0, visible);
+}
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -88,33 +122,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var sc = in.stroke_color;
         sc.a *= in.stroke_opacity;
 
-        // Stroke dash pattern: select based on palette index.
-        // stroke_dash encodes a palette index (0=solid, 1=dashed 6/3, 2=dotted 2/3, 3=dash-dot 6/3/2/3).
-        // We approximate dashing in screen-space using the distance along the circle perimeter.
-        // For GPU efficiency, we use a simple angular modulation on the SDF distance.
-        let dash_idx = i32(clamp(floor(in.stroke_dash + 0.5), 0.0, 3.0));
-        var dash_visible = 1.0;
-        if dash_idx == 1 {
-            // Dashed: 6 on, 3 off -- period = 9
-            let period = 9.0;
-            let on_frac = 6.0 / period;
-            let phase = fract(dist / period);
-            dash_visible = select(0.0, 1.0, phase < on_frac);
-        } else if dash_idx == 2 {
-            // Dotted: 2 on, 3 off -- period = 5
-            let period = 5.0;
-            let on_frac = 2.0 / period;
-            let phase = fract(dist / period);
-            dash_visible = select(0.0, 1.0, phase < on_frac);
-        } else if dash_idx == 3 {
-            // Dash-dot: 6 on, 3 off, 2 on, 3 off -- period = 14
-            let period = 14.0;
-            let phase = fract(dist / period) * period;
-            dash_visible = select(0.0, 1.0,
-                phase < 6.0 || (phase >= 9.0 && phase < 11.0));
-        }
-        // dash_visible = 0 for solid (always visible)
-        if dash_idx == 0 { dash_visible = 1.0; }
+        // Stroke dash pattern: select based on palette index. stroke_dash
+        // encodes a palette index (0=solid, 1..7 index DASH_PATTERNS above).
+        // Phase is measured along the stroke's perimeter (arc length =
+        // angle x radius), never radially -- a dash must alternate around
+        // the ring, not concentrically inward from it.
+        let dash_idx = i32(clamp(floor(in.stroke_dash + 0.5), 0.0, 7.0));
+        let ang = atan2(in.local_pos.y, in.local_pos.x);
+        let ang01 = select(ang, ang + 6.283185307179586, ang < 0.0);
+        let dist_along = ang01 * in.radius;
+        let dash_visible = dash_visible_along(dist_along, dash_idx);
 
         color = mix(color, sc * dash_visible, stroke_alpha * dash_visible);
     }

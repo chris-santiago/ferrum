@@ -991,6 +991,15 @@ def secondary_key(name: str | None, key: str) -> str: ...
 # unknown ``scale_type`` tag.
 def scale_accepted_keys(scale_type: str) -> list[str]: ...
 
+# The canonical stroke-dash pattern palette
+# (``ferrum_scene::DASH_PALETTE``), index-aligned with the Rust
+# ``resolve_stroke_dash``/``stroke_dash_index`` pair: index 0 is solid
+# (an empty list); index ``i`` (``i >= 1``) is ``DASH_PALETTE[i - 1]``.
+# Published so ``_LINETYPE_MAP`` (``marks/base.py``) can assert every one
+# of its values, including ``"solid"``'s empty pattern, is a palette member
+# without holding a Rust-side copy of the table.
+def stroke_dash_palette() -> list[list[float]]: ...
+
 # #159: ``ScaleSpec::TAGS`` -- the full set of ``ScaleSpec`` "type" tags (the
 # image of ``ScaleSpec::tag()`` over every variant, kept in step with it by a
 # Rust test), in ``TAGS`` order. Published so Python's override registry
