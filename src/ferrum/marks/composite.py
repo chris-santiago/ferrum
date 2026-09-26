@@ -60,7 +60,7 @@ _LV_OUTLIERS_KEY = "outliers"
 #: Spelled as a literal (rather than ``_lv_depth_key(1)``) because it is the
 #: key ``desugar_boxen`` hands ``registry_secondary_columns``, and the static
 #: sweep in ``tests/test_registry_output_column_consumers.py`` reads that
-#: argument from the source. ``tests/test_boxen_secondary_outputs.py`` pins it
+#: argument from the source. ``tests/marks/test_boxen_secondary_outputs.py`` pins it
 #: equal to ``_lv_depth_key(1)``.
 _LV_DEPTH_1_KEY = "depth_1"
 
@@ -70,7 +70,7 @@ def _lv_depth_key(k: int) -> str:
 
     Mirrors ``letter_value::depth_key`` on the Rust side. Every ``k`` this
     mark builds a layer for is pinned against the registry's declared keys by
-    ``tests/test_boxen_secondary_outputs.py``, so a Rust-side change to the
+    ``tests/marks/test_boxen_secondary_outputs.py``, so a Rust-side change to the
     key shape fails there rather than yielding a layer silently bound to a
     batch nothing publishes.
     """
@@ -939,7 +939,7 @@ def _boxen_materialized_depth(
     facet fix" section for the lifecycle where it is not (``+``/``.layer()``
     resolve the pending mark before ``.facet()`` can run), and this
     module's ``test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix``
-    (in ``tests/test_boxen_ramp_prep.py``) for the pinned pooled value on
+    (in ``tests/marks/test_boxen_ramp_prep.py``) for the pinned pooled value on
     that lifecycle. Fields absent from *data* (e.g. an unresolved repeat
     placeholder) are dropped rather than raising, since this remains a
     best-effort styling estimate. Non-faceted charts pass ``()`` (the
@@ -1210,7 +1210,7 @@ def desugar_boxen(
     # `depth_{k}` batch carries the same schema, so one lookup covers every
     # band layer this mark builds; that the registry declares a batch for
     # each k this mark builds is pinned by
-    # `tests/test_boxen_secondary_outputs.py`.
+    # `tests/marks/test_boxen_secondary_outputs.py`.
     depth_cols = registry_secondary_columns(
         "letter_value", _LV_DEPTH_1_KEY, ["group", "lower", "upper"]
     )

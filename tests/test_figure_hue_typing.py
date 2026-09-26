@@ -29,7 +29,7 @@ against the built extension and reported them as confirmed-wrong charts:
   fabricated colorbar in place of a categorical swatch legend, silently.
 
 **Why a new module rather than an extension of an existing one.** The
-project's test-file convention (see ``tests/test_boxen_palette.py``) keeps
+project's test-file convention (see ``tests/marks/test_boxen_palette.py``) keeps
 findings-ID-named modules scoped to their finding and gives net-new feature
 coverage its own ``test_<feature>.py``. ``tests/test_stroke_dash_rendering.py``
 has ``relplot`` fixtures, but for the ``style=``/``stroke_dash`` channel, not

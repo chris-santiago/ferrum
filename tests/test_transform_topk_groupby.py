@@ -16,7 +16,7 @@ typed `ValueError` instead.
 
 New-feature file, not an extension of `tests/test_transform_groupby.py`
 --------------------------------------------------------------------------
-Per the project's test-file convention (`tests/test_boxen_palette.py`'s
+Per the project's test-file convention (`tests/marks/test_boxen_palette.py`'s
 module docstring): a findings-ID-named file stays scoped to pinning the
 specific regression it describes, while net-new feature coverage for a
 transform gets its own `test_<feature>.py` module even when it lands

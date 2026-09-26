@@ -22,7 +22,7 @@ Two carried obligations close here:
    registry_pin.py` pins the derivation itself; this module pins that the
    newly-accepted methods actually render.
 
-Scoped per the Python test-file convention (`tests/test_boxen_palette.py`'s
+Scoped per the Python test-file convention (`tests/marks/test_boxen_palette.py`'s
 module docstring): net-new figure-function routing behavior gets its own
 module rather than growing `test_smooth_methods.py` (which scopes to
 `Smooth`/`mark_smooth` itself). `tests/test_lmplot_residplot_order.py` covers

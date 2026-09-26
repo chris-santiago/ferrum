@@ -12,7 +12,7 @@ seam itself and only died two layers down as a leaked JSON diagnostic.
 This module is the seam's own test home. It exists as a separate file from
 ``test_structural.py`` (which pins ``BreakAxis`` construction) and
 ``test_annotations.py`` (which pins annotation coercion) for the reason
-``tests/test_boxen_palette.py``'s docstring states as the convention: net-new
+``tests/marks/test_boxen_palette.py``'s docstring states as the convention: net-new
 coverage of a shared mechanism gets its own module rather than accreting into
 whichever consumer's file the work happened to start in. What is pinned here
 is the mechanism and the *agreement* of its consumers:

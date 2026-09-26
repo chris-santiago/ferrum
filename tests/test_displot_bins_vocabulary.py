@@ -21,7 +21,7 @@ hazards the routing had to clear first: every mode survives the
 ``spec -> wire -> spec`` round trip, and a rule-derived mode nices against
 the same target whether the extent is pinned facet-wide or derived per panel.
 
-Scope note (`tests/test_boxen_palette.py`'s convention): this is the
+Scope note (`tests/marks/test_boxen_palette.py`'s convention): this is the
 vocabulary's own feature module, not a findings-ID file. The separate
 channel-object-``hue=`` regression that shipped in the same commit is pinned
 in `TestChannelObjectHue` below, deliberately apart from the binning classes.

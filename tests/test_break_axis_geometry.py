@@ -18,7 +18,7 @@ Why this file holds many contracts while three others hold one each
 ------------------------------------------------------------------
 
 ``BreakAxis`` coverage is partitioned by what a reader would go looking for,
-which is the convention ``tests/test_boxen_palette.py``'s docstring states:
+which is the convention ``tests/marks/test_boxen_palette.py``'s docstring states:
 feature-named modules, not findings-ID-named ones. Three contracts got their
 own file because each is a *different subsystem meeting* the break, and a
 reader arrives at them by that other subsystem's name:

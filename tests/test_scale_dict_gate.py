@@ -62,7 +62,7 @@ Covers:
      layer routes refuse the same malformed dict identically.
 
 Scope note (per the repo's test-file convention, stated in
-``tests/test_boxen_palette.py``): this module covers the wire GATE. The
+``tests/marks/test_boxen_palette.py``): this module covers the wire GATE. The
 ``Chart.override(<channel>_scale_*=...)`` cascade regressions that the gate's
 introduction earned -- the type-switch merge and its eight remediation rounds
 -- live in ``tests/test_override_scale_merge.py``, next to

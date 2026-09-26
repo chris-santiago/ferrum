@@ -9,7 +9,7 @@ promotion (spec §4.6) makes that forwarding load-bearing: `order=2` now
 resolves to a real quadratic fit. This is net-new feature coverage for the
 two figure functions (`regplot` delegates to `lmplot` and is not
 separately covered), scoped to its own module per the Python
-test-file convention (`tests/test_boxen_palette.py`'s module docstring) —
+test-file convention (`tests/marks/test_boxen_palette.py`'s module docstring) —
 distinct from `tests/test_smooth_methods.py`, which scopes to `Smooth`/
 `mark_smooth` routing itself. Both modules share the `curved_xy_df`
 fixture in `tests/conftest.py`.

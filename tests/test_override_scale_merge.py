@@ -4,7 +4,7 @@ Split out of ``tests/test_scale_dict_gate.py`` (design review, 2026-09-04): that
 module covers the raw-dict scale key GATE, a wire-boundary feature; these cover
 ``Chart.override``'s scale-leaf merge, which is override-cascade behavior that
 merely *interacts* with the gate. Per the repo's test-file convention (stated in
-``tests/test_boxen_palette.py``'s module docstring), the two belong in separate
+``tests/marks/test_boxen_palette.py``'s module docstring), the two belong in separate
 modules -- and this one sits next to ``tests/test_override.py``, where the rest
 of the override surface, including the per-leaf render sweep that guards the
 leaf registry itself, is pinned.

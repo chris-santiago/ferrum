@@ -22,7 +22,7 @@ to pinning the specific P9 disposition per parameter above. Net-new feature
 coverage for a mark that happened to land alongside a P9 fix -- e.g.
 ``mark_boxen(palette=)``, a from-scratch feature rather than a dropped
 parameter -- gets its own ``test_<feature>.py`` module instead of
-accreting here; see ``tests/test_boxen_palette.py``.
+accreting here; see ``tests/marks/test_boxen_palette.py``.
 """
 
 from __future__ import annotations
@@ -933,7 +933,7 @@ def test_informational_kwarg_warning_points_at_caller_not_ferrum_source():
 # #91, 2026-08-27): `desugar_boxen` now colors the depth bands directly
 # from `palette`, so it is genuinely used and no longer registered or
 # warned. Its feature coverage (`test_mark_boxen_palette_*`) lives in
-# `tests/test_boxen_palette.py`, not here (design-review remediation,
+# `tests/marks/test_boxen_palette.py`, not here (design-review remediation,
 # 2026-08-27) -- see that module's docstring for the split rule.
 # ---------------------------------------------------------------------------
 

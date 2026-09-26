@@ -23,7 +23,7 @@ Two behaviors, pinned at the Python surface:
 
 This module is net-new feature coverage for the ``cull_labels`` Theme key, so
 it lives in its own file rather than in a findings-ID-named module (see
-``tests/test_boxen_palette.py``'s docstring for the convention).
+``tests/marks/test_boxen_palette.py``'s docstring for the convention).
 """
 
 import re

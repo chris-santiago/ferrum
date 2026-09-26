@@ -712,7 +712,7 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
     ``.facet()`` runs first there and ``ctx.chart._facet`` is populated by
     the time this prep step reads it. A lifecycle re-plumb so the layered
     path also resolves facet-aware is a filed follow-up, not attempted
-    here -- see ``tests/test_boxen_ramp_prep.py``'s
+    here -- see ``tests/marks/test_boxen_ramp_prep.py``'s
     ``test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix``
     for the pinned pooled value.
     """
@@ -753,7 +753,7 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
     # estimate a depth >= what any single panel really materializes, which
     # flattens every panel's ramp contrast toward the panel with the
     # deepest pooled group -- see `_boxen_materialized_depth`'s
-    # `extra_groupby_fields` docstring and `tests/test_boxen_ramp_prep.py`'s
+    # `extra_groupby_fields` docstring and `tests/marks/test_boxen_ramp_prep.py`'s
     # faceted case for the measured effect. `_Facet.field`/`.row`/`.col`
     # mirrors `_spec_build.py`'s own `(resolved._facet.col, resolved._facet.row,
     # resolved._facet.field)` sweep: wrap mode sets only `field`, grid mode

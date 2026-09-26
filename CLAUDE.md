@@ -284,7 +284,7 @@ the top of the new `tests.rs` naming what it carries and why it couldn't stay
 inline (see `projection/tests.rs`'s and `transform/stats/tests.rs`'s doc
 comments for the pattern to mirror).
 
-**Python test-file convention** (the parallel rule, stated in `tests/test_boxen_palette.py`'s module docstring): a findings-ID-named test file (`test_finding_p*.py`) stays scoped to pinning the specific regression or disposition the finding describes; net-new feature coverage for a mark or figure function gets its own `test_<feature>.py` module, even when the feature landed in the same batch as a findings fix.
+**Python test-file convention** (the parallel rule, stated in `tests/marks/test_boxen_palette.py`'s module docstring): a findings-ID-named test file (`test_finding_p*.py`) stays scoped to pinning the specific regression or disposition the finding describes; net-new feature coverage for a mark or figure function gets its own `test_<feature>.py` module, even when the feature landed in the same batch as a findings fix.
 
 ---
 
