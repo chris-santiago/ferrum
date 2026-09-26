@@ -25,7 +25,6 @@ class _Layer:
     name: Optional[str] = None
     mark: Optional[str] = None
     encoding: dict = field(default_factory=dict)
-    transforms: list = field(default_factory=list)
     mark_kwargs: Optional[dict] = None
     #: Keys of ``mark_kwargs`` that came from a caller instruction aimed at
     #: THIS layer specifically -- ``mark_smooth(layer_kwargs={"line": ...})``

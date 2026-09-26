@@ -617,7 +617,8 @@ def test_two_conditionals_on_one_wire_channel_refused_across_calls(df):
     with pytest.raises(ValueError) as excinfo:
         chart.encode(fill=_cond(sel))
     assert str(excinfo.value) == (
-        "encode(): selection 'sel_collide_2' and encode(fill=...) both "
+        "encode(): the chart's existing conditional on selection 'sel_collide_2' "
+        "and encode(fill=...) both "
         "declare a conditional on the 'color' wire channel (fill carries "
         "its conditional onto color); a channel can carry only one "
         "conditional. Drop one of the two declarations, or move one to a "
@@ -651,7 +652,8 @@ def test_chart_conditional_refuses_a_second_conditional_on_one_channel(df):
     with pytest.raises(ValueError) as excinfo:
         chart.conditional(_cond(sel))
     assert str(excinfo.value) == (
-        "Chart.conditional(): selection 'sel_collide_4' and selection "
+        "Chart.conditional(): the chart's existing conditional on selection "
+        "'sel_collide_4' and this call's conditional on selection "
         "'sel_collide_4' both declare a conditional on the 'color' wire "
         "channel; a channel can carry only one conditional. Drop one of "
         "the two declarations, or move one to a different channel."
@@ -730,7 +732,28 @@ def test_chained_layer_merge_names_the_two_colliding_declarations(df):
         (a + b) + c
     msg = str(excinfo.value)
     assert msg == (
-        "chart + chart: selection 'b' and selection 'c' both declare a "
+        "chart + chart: the left chart's conditional on selection 'b' and "
+        "the right chart's conditional on selection 'c' both declare a "
+        "conditional on the 'color' wire channel -- after the marks merge "
+        "onto one panel, every conditional on the merged wire applies to "
+        "every layer's marks, so there is no per-layer scope to keep the "
+        "two apart; a channel can carry only one conditional. Drop one of "
+        "the two declarations, or move one to a different channel."
+    )
+
+
+def test_layer_merge_collision_under_one_shared_selection_names_each_side_once(df):
+    """When one selection drives both colliding conditionals, the message
+    still tells the two declarations apart: each side is named once, by
+    which chart it came from, not as the same selection twice."""
+    sel = selection_point(fields=["category"], name="s")
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color=_cond(sel))
+    right = fm.Chart(df).mark_line().encode(x="x:Q", y="y:Q", color=_cond(sel))
+    with pytest.raises(ValueError) as excinfo:
+        left + right
+    assert str(excinfo.value) == (
+        "chart + chart: the left chart's conditional on selection 's' and "
+        "the right chart's conditional on selection 's' both declare a "
         "conditional on the 'color' wire channel -- after the marks merge "
         "onto one panel, every conditional on the merged wire applies to "
         "every layer's marks, so there is no per-layer scope to keep the "
@@ -913,7 +936,8 @@ def test_layer_encoding_condition_collides_with_existing_chart_conditional(df):
             fm.Layer(mark="point", encoding={"fill": fm.Fill("category", condition=_cond(sel))})
         )
     assert str(excinfo.value) == (
-        "Chart.layer(): selection 'sel_layer_collide' and "
+        "Chart.layer(): the chart's existing conditional on selection "
+        "'sel_layer_collide' and "
         "Layer(encoding={'fill': ...}) both declare a conditional on the "
         "'color' wire channel (fill carries its conditional onto color); a "
         "channel can carry only one conditional. Drop one of the two "
@@ -990,7 +1014,8 @@ def test_layer_encoding_bare_condition_collides_with_existing_chart_conditional(
     with pytest.raises(ValueError) as excinfo:
         chart.layer(fm.Layer(mark="point", encoding={"fill": _cond(sel)}))
     assert str(excinfo.value) == (
-        "Chart.layer(): selection 'sel_layer_bare_collide' and "
+        "Chart.layer(): the chart's existing conditional on selection "
+        "'sel_layer_bare_collide' and "
         "Layer(encoding={'fill': ...}) both declare a conditional on the "
         "'color' wire channel (fill carries its conditional onto color); a "
         "channel can carry only one conditional. Drop one of the two "

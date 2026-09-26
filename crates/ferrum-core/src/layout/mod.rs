@@ -4917,6 +4917,92 @@ mod tests {
         );
     }
 
+    /// Mirror of `compute_layout_zeroes_an_explicit_sides_extra_before_the_cap`
+    /// with the explicit/auto sides swapped: an explicit RIGHT side's own
+    /// extra must be zeroed before `cap_auto_contribution` too, so it cannot
+    /// compete for budget with the auto LEFT side's real contribution.
+    #[test]
+    fn compute_layout_zeroes_an_explicit_right_sides_extra_before_the_cap() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_first_and_last_labels();
+        let mut theme = default_theme_inputs();
+        theme.padding.padding_auto = true;
+        theme.padding.padding_right = Some(5.0);
+        let viewport = Viewport {
+            width: 100.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+
+        // Fixture assumptions: both sides want real extra, and together
+        // they exceed the viewport's budget (the cap must actually fire, or
+        // this test is vacuous).
+        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        assert!(
+            ticks.left > 0.0 && ticks.right > 0.0,
+            "fixture must want both sides: left={}, right={}",
+            ticks.left,
+            ticks.right,
+        );
+        let base = base_padding_insets(&theme);
+        let budget = viewport.width - base.left - base.right - MIN_PANEL_DIM;
+        assert!(
+            ticks.left + ticks.right > budget,
+            "fixture must exceed budget, or the cap never fires: {} + {} <= {budget}",
+            ticks.left,
+            ticks.right,
+        );
+
+        // The CORRECT cap input: the explicit right side's extra is zero, so
+        // only the left side's real extra competes for the budget.
+        let (expected_left, _) =
+            cap_auto_contribution(base.left, base.right, ticks.left, 0.0, viewport.width);
+        assert!(
+            (expected_left - ticks.left).abs() < 1e-9,
+            "fixture assumption: with the right extra zeroed, the left side \
+             should fit uncapped ({expected_left} should equal {})",
+            ticks.left,
+        );
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should still render");
+
+        // The explicit side ships verbatim either way — this is a control,
+        // not the discriminating assertion.
+        let actual_explicit_right_inset =
+            viewport.width - with_auto.padded_region.x - with_auto.padded_region.w;
+        assert!(
+            (actual_explicit_right_inset - 5.0).abs() < 1e-9,
+            "explicit padding_right must survive verbatim: {}",
+            actual_explicit_right_inset,
+        );
+
+        assert!(
+            (with_auto.padded_region.x - (base.left + expected_left)).abs() < 1e-9,
+            "the left (auto) side's inset ({}) must be capped as if the \
+             explicit right side's extra were zero ({}), not throttled to \
+             share budget with a contribution that never ships",
+            with_auto.padded_region.x,
+            base.left + expected_left,
+        );
+    }
+
     /// A continuous y axis titled `y_title` (10px per character, so its
     /// half extent is `5 * len`) beside an x axis on TOP. The 40px label font
     /// makes the y-tick pass want 22px of top padding at a 2px base, and the

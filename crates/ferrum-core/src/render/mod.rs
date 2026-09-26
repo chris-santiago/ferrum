@@ -767,7 +767,7 @@ pub enum RenderError {
     /// (e.g. more than `i32::MAX` bytes of string data — `LargeUtf8`'s
     /// reason for existing); empty for a normalized-schema `RecordBatch`
     /// rebuild failure, which is not about any one column.
-    StringNormalizationFailed { field: String, reason: String },
+    StringNormalizationFailed { field: Option<String>, reason: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -1193,13 +1193,10 @@ impl std::fmt::Display for RenderError {
                  remove the break or render this chart under Cartesian coords",
                 axis.wire_name()
             ),
-            Self::StringNormalizationFailed { field, reason } => {
-                if field.is_empty() {
-                    write!(f, "could not normalize string columns to Utf8: {reason}")
-                } else {
-                    write!(f, "could not normalize column '{field}' to Utf8: {reason}")
-                }
-            }
+            Self::StringNormalizationFailed { field, reason } => match field {
+                None => write!(f, "could not normalize string columns to Utf8: {reason}"),
+                Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
+            },
         }
     }
 }

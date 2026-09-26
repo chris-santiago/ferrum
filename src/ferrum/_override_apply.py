@@ -239,7 +239,7 @@ def _scale_type_tags() -> tuple[str, ...]:
     classes emit that somehow fell out of the published set is caught by
     ``tests/test_override.py``'s one-directional coverage test.
     """
-    from ferrum._core import scale_type_tags  # type: ignore[attr-defined]
+    from ferrum._core import scale_type_tags
 
     return tuple(scale_type_tags())
 
@@ -304,7 +304,7 @@ def _scale_leaves() -> frozenset[str]:
     :data:`_SCALE_LEAF_SYSTEM_ONLY` is subtracted afterwards: a wire key the
     gate parses is not automatically a presentation option the caller may set.
     """
-    from ferrum._core import scale_accepted_keys  # type: ignore[attr-defined]
+    from ferrum._core import scale_accepted_keys
 
     wire: set[str] = {"type"}
     for scale_type in _SCALE_TYPE_TAGS:

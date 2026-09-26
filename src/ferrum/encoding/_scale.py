@@ -43,7 +43,7 @@ def _temporal_scale_types() -> frozenset[str]:
     type's — so the temporal subset is its own published fact, holding no
     Python literal.
     """
-    from ferrum._core import scale_temporal_type_tags  # type: ignore[attr-defined]
+    from ferrum._core import scale_temporal_type_tags
 
     return frozenset(scale_temporal_type_tags())
 

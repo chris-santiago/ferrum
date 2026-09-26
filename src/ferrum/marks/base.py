@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ferrum._core import interpolate_accepted_values, mark_numeric_kwargs
+from ferrum._core import interpolate_accepted_values, mark_integer_kwargs, mark_numeric_kwargs
 from ferrum._validate import (
+    as_finite_real,
     coerce_finite_real,
+    coerce_non_negative_int,
     is_none_color_sentinel,
     is_real_number,
     validate_choice,
@@ -55,19 +57,16 @@ def _stroke_dash_error(context: str, value: Any) -> str:
 def _dash_lengths(lengths: Any, *, context: str, original: Any) -> list[float]:
     """Return *lengths* as floats, refusing any that is not a finite, non-negative real number.
 
-    A length must pass :func:`ferrum._validate.coerce_finite_real` (so never
-    ``bool``, a numeric-looking string, or a value a float cannot hold; numpy
-    scalars and ``Decimal`` are fine) and be non-negative. The refusal names
+    A length must be what :func:`ferrum._validate.as_finite_real` accepts (so
+    never ``bool``, a numeric-looking string, or a value a float cannot hold;
+    numpy scalars and ``Decimal`` are fine) and be non-negative. The refusal names
     *context* and *original*, the value the caller passed, via
     :func:`_stroke_dash_error`.
     """
     out = []
     for item in lengths:
-        try:
-            fv = float(coerce_finite_real(context, item, required=True))
-        except ValueError as exc:
-            raise ValueError(_stroke_dash_error(context, original)) from exc
-        if fv < 0:
+        fv = as_finite_real(item)
+        if fv is None or fv < 0:
             raise ValueError(_stroke_dash_error(context, original))
         out.append(fv)
     return out
@@ -232,14 +231,23 @@ MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
 }
 
 
-#: The style kwargs whose wire field is a number: the names Rust publishes
-#: (``MarkKwargsSpec``'s ``f64``/``usize`` fields) that some ``mark_*`` accepts.
-#: Each is stored as :func:`ferrum._validate.coerce_finite_real` returns it, so
-#: a numpy scalar or ``Decimal`` reaches the wire as a builtin number and a
-#: non-number or non-finite value refuses at the ``mark_*`` door.
-_NUMERIC_MARK_KWARGS: frozenset[str] = frozenset(mark_numeric_kwargs()) & frozenset().union(
-    *MARK_HONORED_KWARGS.values()
-)
+_ANY_HONORED_MARK_KWARG: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
+
+#: The style kwargs whose wire field is an unsigned integer: the names Rust
+#: publishes as ``MarkKwargsSpec``'s ``usize`` fields that some ``mark_*``
+#: accepts. Each is stored as :func:`ferrum._validate.coerce_non_negative_int`
+#: returns it, so ``np.int64(3)`` reaches the wire as ``3`` and ``2.5``, ``-1``
+#: or ``True`` refuses at the ``mark_*`` door.
+_INTEGER_MARK_KWARGS: frozenset[str] = frozenset(mark_integer_kwargs()) & _ANY_HONORED_MARK_KWARG
+
+#: The style kwargs whose wire field is a real number: the rest of the names
+#: Rust publishes as ``MarkKwargsSpec``'s numeric fields that some ``mark_*``
+#: accepts. Each is stored as :func:`ferrum._validate.coerce_finite_real`
+#: returns it, so a numpy scalar or ``Decimal`` reaches the wire as a builtin
+#: number and a non-number or non-finite value refuses at the ``mark_*`` door.
+_REAL_MARK_KWARGS: frozenset[str] = (
+    frozenset(mark_numeric_kwargs()) & _ANY_HONORED_MARK_KWARG
+) - _INTEGER_MARK_KWARGS
 
 
 def mark_honors(mark_name: str, kwarg: str) -> bool:
@@ -397,19 +405,22 @@ class MarkBase:
                 canonical = color_target
             else:
                 canonical = _MARK_KWARG_ALIASES.get(k, k)
+            # A kwarg the mark does not honor is refused as such before its
+            # value is judged.
+            if not mark_honors(mark_name, canonical):
+                raise TypeError(_mark_kwarg_error(mark_name, canonical))
             if canonical == "stroke_dash":
                 # Named forms ("dashed", "dotted", ...), the comma-split
                 # form, and list/tuple passthrough are all resolved by the
-                # one shared helper (#124) -- reached identically whether
-                # the user wrote the canonical ``stroke_dash=`` kwarg or
-                # either alias, so a named string works either way.
+                # one shared helper -- reached identically whether the user
+                # wrote the canonical ``stroke_dash=`` kwarg or either alias,
+                # so a named string works either way.
                 v = _normalize_stroke_dash(v, context=f"mark_{mark_name}: {k}")
-            elif canonical in _NUMERIC_MARK_KWARGS:
+            elif canonical in _INTEGER_MARK_KWARGS:
+                v = coerce_non_negative_int(f"mark_{mark_name}({k}=...)", v)
+            elif canonical in _REAL_MARK_KWARGS:
                 v = coerce_finite_real(f"mark_{mark_name}({k}=...)", v)
             resolved[canonical] = v
-        for k in resolved:
-            if not mark_honors(mark_name, k):
-                raise TypeError(_mark_kwarg_error(mark_name, k))
         # Validate shape= value for point marks. The constant shape is a fixed
         # string that must name one of the glyphs supported by the Rust renderer;
         # an unknown name would silently default to circle at render time.

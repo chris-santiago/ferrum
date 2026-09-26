@@ -34,7 +34,7 @@ from ferrum._desugar import (
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
-from ferrum._validate import coerce_finite_real, coerce_positive_int, validate_choice
+from ferrum._validate import as_finite_real, coerce_positive_int, validate_choice
 from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
@@ -1017,7 +1017,7 @@ def _catplot_interval_args(ci: Any, n_boot: Any) -> tuple[float, int]:
     :func:`_refuse_interval_args_on_non_aggregating_kind`.
 
     Whether each is a number is decided by the shared predicates
-    (:func:`ferrum._validate.coerce_finite_real`,
+    (:func:`ferrum._validate.as_finite_real`,
     :func:`ferrum._validate.coerce_positive_int`): ``bool`` is refused for
     both (it subclasses ``int``, so ``n_boot=True`` would otherwise mean
     "1 resample" and ``ci=True`` "a 1 % interval"), and so is a numeric
@@ -1027,16 +1027,11 @@ def _catplot_interval_args(ci: Any, n_boot: Any) -> tuple[float, int]:
     """
     # Message shape follows this family's house form -- `func(param=value) is
     # not supported -- <why>. <alternative>` -- the same one
-    # `_reject_per_row_appearance_channels` and `lmplot`'s refusals use. The
-    # bare `catplot: ci= ...` prefix these three carried was the file's one
-    # outlier (design review, cycle 1 S1 / cycle 2 carried).
-    # The shared predicates decide "is this a number"; a refusal is re-raised
+    # `_reject_per_row_appearance_channels` and `lmplot`'s refusals use.
+    # The shared predicates decide "is this a number"; a refusal is raised
     # in the house form, which also states the accepted range.
-    try:
-        ci_percent = float(coerce_finite_real("catplot(ci=...)", ci, required=True))
-    except ValueError as exc:
-        raise ValueError(_CI_REFUSAL.format(ci=ci)) from exc
-    if not 0.0 < ci_percent < 100.0:
+    ci_percent = as_finite_real(ci)
+    if ci_percent is None or not 0.0 < ci_percent < 100.0:
         raise ValueError(_CI_REFUSAL.format(ci=ci))
     try:
         n_boot_count = coerce_positive_int("catplot(n_boot=...)", n_boot, required=True)

@@ -97,12 +97,12 @@ _NO_LEGEND_MESSAGE = (
 # unvalidated here -- only the object form is malformed-checkable at
 # construction; the others still resolve (or warn) at render.
 _SORT_FIELD_MESSAGE = (
-    '{channel}(sort={value!r}) is not a valid sort object: "field" must be a '
+    '{channel}({kwarg}={value!r}) is not a valid sort object: "field" must be a '
     "string naming a column; got {field!r}"
 )
 
 
-def _validate_sort_object(channel: str, value: Any) -> None:
+def _validate_sort_object(channel: str, value: Any, *, kwarg: str = "sort") -> None:
     """Refuse a malformed sort-field object (#176(11) + N3, spec §6.4).
 
     Only the object form ``{"field": ..., "op": ..., "order": ...}`` is
@@ -110,7 +110,9 @@ def _validate_sort_object(channel: str, value: Any) -> None:
     string (``"-y"``) pass through unvalidated and keep resolving (or
     warning) at render, as before. An object without a string ``field``, or
     with an ``op``/``order`` outside the accepted vocabulary, raises
-    ``ValueError`` naming *channel* and the value received.
+    ``ValueError`` naming *channel* (the public entry, e.g. ``"Facet"`` or
+    ``"Chart.facet"``), *kwarg* (the parameter that took the value) and the
+    value received.
 
     An *absent* ``"op"``/``"order"`` key means "use the default" (Rust's
     ``parse_sort_field_object`` defaults ``op`` to ``sum`` and ``order`` to
@@ -132,14 +134,16 @@ def _validate_sort_object(channel: str, value: Any) -> None:
         return
     field = value.get("field")
     if not isinstance(field, str):
-        raise ValueError(_SORT_FIELD_MESSAGE.format(channel=channel, value=value, field=field))
+        raise ValueError(
+            _SORT_FIELD_MESSAGE.format(channel=channel, kwarg=kwarg, value=value, field=field)
+        )
     from ferrum._core import sort_accepted_vocabulary
 
     vocab = sort_accepted_vocabulary()
     if "op" in value:
-        validate_choice(f"{channel}(sort=...)", "op", value["op"], vocab["op"])
+        validate_choice(f"{channel}({kwarg}=...)", "op", value["op"], vocab["op"])
     if "order" in value:
-        validate_choice(f"{channel}(sort=...)", "order", value["order"], vocab["order"])
+        validate_choice(f"{channel}({kwarg}=...)", "order", value["order"], vocab["order"])
 
 
 @lru_cache(maxsize=None)

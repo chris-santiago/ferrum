@@ -32,7 +32,7 @@ from ferrum._shorthand import parse_shorthand
 from ferrum._spec_build import SpecBuildMixin
 from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
-from ferrum.encoding.base import ChannelBase, _PendingAggregate
+from ferrum.encoding.base import ChannelBase, _PendingAggregate, _validate_sort_object
 from ferrum.marks.base import MarkBase
 from ferrum.position import _STACKABLE_MARKS
 
@@ -90,6 +90,7 @@ _logger = logging.getLogger(__name__)
 
 from ferrum._validate import coerce_positive_int
 from ferrum._facet import (
+    FacetDeclaration,
     _Facet,
     build_facet_dict as _build_facet_dict_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
@@ -394,7 +395,7 @@ def _wire_channel_of_conditional(spec: "ConditionalSpec") -> str:
     (``selection._infer_conditional_channel``) exactly as
     ``ConditionalSpec.to_spec_dict`` does, so the collision check sees the
     channel the wire will actually carry. Split out of
-    :func:`_conditional_wire_channel_of` so a caller that already knows
+    :func:`_channel_claimed_by` so a caller that already knows
     *spec* is a ``ConditionalSpec`` (:meth:`Chart.conditional`) gets a
     non-``Optional`` result with no narrowing needed at the call site.
     """
@@ -405,7 +406,7 @@ def _wire_channel_of_conditional(spec: "ConditionalSpec") -> str:
     return _infer_conditional_channel(spec.if_selected, spec.if_not)
 
 
-def _conditional_wire_channel_of(spec: object) -> Optional[str]:
+def _channel_claimed_by(spec: object) -> Optional[str]:
     """Return the wire channel *spec* will serialize under, or ``None``.
 
     Returns ``None`` for anything that is not a ``ConditionalSpec`` --
@@ -428,19 +429,21 @@ def _conditional_on_wire(chart: "Chart", wire: str) -> Optional["ConditionalSpec
     name the earlier declaration in the collision message, so no site scans
     ``chart._conditionals`` twice.
     """
-    return next((c for c in chart._conditionals if _conditional_wire_channel_of(c) == wire), None)
+    return next((c for c in chart._conditionals if _channel_claimed_by(c) == wire), None)
 
 
-def _conditional_declaration_label(spec: "ConditionalSpec") -> str:
-    """Name a conditional declaration whose origin entry point is unknown.
+def _conditional_declaration_label(spec: "ConditionalSpec", *, whose: str) -> str:
+    """Name a conditional declaration that carries no parameter spelling of its own.
 
-    Used only for the *earlier* side of a cross-call collision: the chart
-    already carries this conditional from some prior call, and which entry
-    point declared it is not recorded on the spec, so it is named by the
+    A spec already on a chart, or one handed whole to ``Chart.conditional()``
+    or merged by ``+``, does not record the entry point that declared it, so
+    it is named by *whose* it is (``"the chart's existing"``, ``"this
+    call's"``, ``"the left chart's"``, ``"the right chart's"``) and the
     selection driving it (every ``ConditionalSpec`` carries a
-    ``selection_name``).
+    ``selection_name``). The role keeps the two sides of a collision apart
+    when both are driven by the same selection.
     """
-    return f"selection {spec.selection_name!r}"
+    return f"{whose} conditional on selection {spec.selection_name!r}"
 
 
 def _conditional_collision_message(
@@ -538,7 +541,7 @@ def _append_conditional(
             _conditional_collision_message(
                 context=context,
                 wire=wire,
-                first=_conditional_declaration_label(earlier),
+                first=_conditional_declaration_label(earlier, whose="the chart's existing"),
                 second=declare(source_key),
                 detail=alias_detail,
             )
@@ -985,7 +988,7 @@ class Chart(
         self._data = data
         self._mark = None
         self._mark_kwargs = {}
-        self._encoding: dict = {}
+        self._encoding: dict[str, ChannelBase] = {}
         self._transforms: list = []
         self._facet = None
         self._coord = None
@@ -1950,7 +1953,7 @@ class Chart(
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet={facet_enc!r})",
-                    kind="generic",
+                    kind=FacetDeclaration.GENERIC,
                     field=facet_enc.field,
                     title=facet_enc.option("title"),
                     ncols=facet_enc.option("columns"),
@@ -1963,7 +1966,7 @@ class Chart(
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet_col={col_enc!r}, facet_row={row_enc!r})",
-                    kind="grid",
+                    kind=FacetDeclaration.GRID,
                     col=col_enc.field,
                     row=row_enc.field,
                     title=col_enc.option("title"),
@@ -1975,7 +1978,7 @@ class Chart(
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet_col={col_enc!r})",
-                    kind="col",
+                    kind=FacetDeclaration.COL,
                     col=col_enc.field,
                     title=col_enc.option("title"),
                     sort=col_enc.option("sort"),
@@ -1992,7 +1995,7 @@ class Chart(
                 new._facet = _Facet.merged_with(
                     existing,
                     declare=f"encode(facet_row={row_enc!r})",
-                    kind="row",
+                    kind=FacetDeclaration.ROW,
                     row=row_enc.field,
                     row_title=row_enc.option("title"),
                     row_sort=row_enc.option("sort"),
@@ -2076,7 +2079,6 @@ class Chart(
                         encoding=_strip_layer_conditionals(
                             new, ly.encoding, claimed_here=claimed_here
                         ),
-                        transforms=list(ly.transforms),
                         mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
                     )
                 )
@@ -2444,15 +2446,15 @@ class Chart(
             # as it accumulates, so a third+ chart in a chained
             # `a + b + c` merge collides against everything merged so far.
             for cond in rhs._conditionals:
-                wire = _conditional_wire_channel_of(cond)
+                wire = _channel_claimed_by(cond)
                 earlier = _conditional_on_wire(new, wire) if wire is not None else None
                 if earlier is not None:
                     raise ValueError(
                         _conditional_collision_message(
                             context="chart + chart",
                             wire=wire,
-                            first=_conditional_declaration_label(earlier),
-                            second=_conditional_declaration_label(cond),
+                            first=_conditional_declaration_label(earlier, whose="the left chart's"),
+                            second=_conditional_declaration_label(cond, whose="the right chart's"),
                             detail=(
                                 " -- after the marks merge onto one panel, every "
                                 "conditional on the merged wire applies to every "
@@ -2512,6 +2514,8 @@ class Chart(
         nrows: Optional[int] = None,
         title: Optional[str] = None,
         row_title: Optional[str] = None,
+        sort: Any = None,
+        row_sort: Any = None,
     ) -> "Chart":
         """Facet this chart into small multiples by a field.
 
@@ -2564,6 +2568,20 @@ class Chart(
             produce a grid, since ``title=`` already covers that one
             dimension's title regardless of which mode the merge resolves
             to.
+        sort : str, list, or dict, optional
+            Panel order for the primary/wrap dimension's strip, routed exactly
+            like ``title=``, on the same contract as ``Facet(sort=...)``: a
+            direction (``"ascending"``/``"descending"``), an explicit list of
+            values, or a sort-field object (``{"field": ..., "op": ...,
+            "order": ...}``). A malformed sort-field object raises
+            ``ValueError`` naming ``Chart.facet(sort=...)``.
+        row_sort : str, list, or dict, optional
+            Panel order for the row strip in **grid** mode only, routed
+            exactly like ``row_title=`` (equivalent to
+            ``encode(facet_row=fm.FacetRow(field, sort=...))``), with the same
+            accepted forms as ``sort=``. A single-dimension declaration has
+            only one panel order, which ``sort=`` already sets, so
+            ``row_sort=`` raises there.
 
         Returns
         -------
@@ -2573,9 +2591,11 @@ class Chart(
         Raises
         ------
         ValueError
-            If neither ``field``, ``row``, nor ``col`` is provided, or if
-            ``row_title=`` is given alongside a single-dimension declaration
-            (``field=``, ``col=`` alone, or ``row=`` alone).
+            If neither ``field``, ``row``, nor ``col`` is provided, if
+            ``row_title=`` or ``row_sort=`` is given alongside a
+            single-dimension declaration (``field=``, ``col=`` alone, or
+            ``row=`` alone), or if ``sort=``/``row_sort=`` is a malformed
+            sort-field object.
 
         Examples
         --------
@@ -2598,7 +2618,20 @@ class Chart(
                     "the title via `title=` instead, or use both `row=` and "
                     "`col=` for a grid facet."
                 )
+            if row_sort is not None:
+                raise ValueError(
+                    f"facet(row_sort=...) has no effect on a facet declared via "
+                    f"{declared_as}: a single-dimension declaration has only one "
+                    "panel order, which `sort=` already sets; `row_sort=` names a "
+                    "second, distinct row-strip order that only a genuine "
+                    "two-dimension facet (`row=` and `col=` together) has. Pass "
+                    "the order via `sort=` instead, or use both `row=` and "
+                    "`col=` for a grid facet."
+                )
 
+        for kwarg, value in (("sort", sort), ("row_sort", row_sort)):
+            if value is not None:
+                _validate_sort_object("Chart.facet", value, kwarg=kwarg)
         ncols = coerce_positive_int("Chart.facet(ncols=...)", ncols)
         nrows = coerce_positive_int("Chart.facet(nrows=...)", nrows)
         new = self._clone()
@@ -2608,9 +2641,10 @@ class Chart(
             new._facet = _Facet.merged_with(
                 existing,
                 declare=f"Chart.facet(field={field!r})",
-                kind="facet_field",
+                kind=FacetDeclaration.FACET_FIELD,
                 field=field,
                 title=title,
+                sort=sort,
                 ncols=ncols,
                 nrows=nrows,
             )
@@ -2618,11 +2652,13 @@ class Chart(
             new._facet = _Facet.merged_with(
                 existing,
                 declare=f"Chart.facet(row={row!r}, col={col!r})",
-                kind="grid",
+                kind=FacetDeclaration.GRID,
                 row=row,
                 col=col,
                 title=title,
                 row_title=row_title,
+                sort=sort,
+                row_sort=row_sort,
                 ncols=ncols,
                 nrows=nrows,
             )
@@ -2631,9 +2667,10 @@ class Chart(
             new._facet = _Facet.merged_with(
                 existing,
                 declare=f"Chart.facet(col={col!r})",
-                kind="col",
+                kind=FacetDeclaration.COL,
                 col=col,
                 title=title,
+                sort=sort,
                 ncols=ncols,
                 nrows=nrows,
             )
@@ -2642,9 +2679,10 @@ class Chart(
             new._facet = _Facet.merged_with(
                 existing,
                 declare=f"Chart.facet(row={row!r})",
-                kind="row",
+                kind=FacetDeclaration.ROW,
                 row=row,
                 row_title=title,
+                row_sort=sort,
                 ncols=ncols,
                 nrows=nrows,
             )
@@ -2721,7 +2759,7 @@ class Chart(
         new._facet = _Facet.merged_with(
             self._facet,
             declare="Chart.share_scale(...)",
-            kind="resolve",
+            kind=FacetDeclaration.RESOLVE,
             resolve=new_resolve if new_resolve else None,
         )
         return new
@@ -3624,8 +3662,8 @@ class Chart(
                     _conditional_collision_message(
                         context="Chart.conditional()",
                         wire=wire,
-                        first=_conditional_declaration_label(earlier),
-                        second=_conditional_declaration_label(new_spec),
+                        first=_conditional_declaration_label(earlier, whose="the chart's existing"),
+                        second=_conditional_declaration_label(new_spec, whose="this call's"),
                     )
                 )
             spec = new_spec

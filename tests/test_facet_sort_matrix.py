@@ -153,6 +153,19 @@ DOORS: dict[str, tuple[str, Callable[[Any], "fm.Chart"]]] = {
             facet_col=fm.FacetCol("cat", sort=sort), facet_row=fm.FacetRow("other")
         ),
     ),
+    # The `Chart.facet()` door, one row per declaration shape it routes.
+    "method_field": ("column", lambda sort: _base().facet(field="cat", sort=sort)),
+    "method_col": ("column", lambda sort: _base().facet(col="cat", sort=sort)),
+    # A row-alone facet lowers to a wrap, whose one strip is the column strip.
+    "method_row": ("column", lambda sort: _base().facet(row="cat", sort=sort)),
+    "method_grid_row": (
+        "row",
+        lambda sort: _base().facet(row="cat", col="other", row_sort=sort),
+    ),
+    "method_grid_col": (
+        "column",
+        lambda sort: _base().facet(row="other", col="cat", sort=sort),
+    ),
 }
 
 SORT_FORMS: dict[str, tuple[Any, list[str]]] = {
@@ -440,6 +453,59 @@ def test_facet_sort_never_warns_not_yet_honored(channel_cls) -> None:
     )
 
 
+def test_facet_method_sort_wire_matches_the_channel_door() -> None:
+    """`Chart.facet(sort=/row_sort=)` writes the same wire as the channel
+    doors it parallels, per declaration shape."""
+    pairs = [
+        (
+            _base().facet(field="cat", sort="descending"),
+            _base().encode(facet=fm.Facet("cat", sort="descending")),
+        ),
+        (
+            _base().facet(col="cat", sort="descending"),
+            _base().encode(facet_col=fm.FacetCol("cat", sort="descending")),
+        ),
+        (
+            _base().facet(row="cat", sort="descending"),
+            _base().encode(facet_row=fm.FacetRow("cat", sort="descending")),
+        ),
+        (
+            _base().facet(row="other", col="cat", sort="ascending", row_sort="descending"),
+            _base().encode(
+                facet_col=fm.FacetCol("cat", sort="ascending"),
+                facet_row=fm.FacetRow("other", sort="descending"),
+            ),
+        ),
+    ]
+    for method, channel in pairs:
+        assert json.loads(method.to_json())["facet"] == json.loads(channel.to_json())["facet"]
+
+
+@pytest.mark.parametrize(
+    ("declared_as", "kwargs"),
+    [
+        ("field=", {"field": "cat"}),
+        ("col= alone", {"col": "cat"}),
+        ("row= alone", {"row": "cat"}),
+    ],
+    ids=["field", "col", "row"],
+)
+def test_facet_method_row_sort_on_a_single_dimension_refuses(
+    declared_as: str, kwargs: dict
+) -> None:
+    """A single-dimension declaration has one panel order, which `sort=`
+    sets; `row_sort=` there refuses exactly as `row_title=` does."""
+    with pytest.raises(ValueError) as exc_info:
+        _base().facet(**kwargs, row_sort="descending")
+    assert str(exc_info.value) == (
+        f"facet(row_sort=...) has no effect on a facet declared via {declared_as}: a "
+        "single-dimension declaration has only one panel order, which `sort=` already "
+        "sets; `row_sort=` names a second, distinct row-strip order that only a genuine "
+        "two-dimension facet (`row=` and `col=` together) has. Pass the order via "
+        "`sort=` instead, or use both `row=` and `col=` for a grid facet."
+    )
+
+
 def test_facet_no_sort_wire_omits_sort_keys() -> None:
     """Vacuity control: a facet with no `sort=` declared carries neither
     `sort` nor `row_sort` on the wire, byte-identical to before this task."""
@@ -553,6 +619,39 @@ def test_malformed_sort_object_refuses(class_name: str, form_name: str) -> None:
     vocab = sort_accepted_vocabulary()
     param = _CHOICE_PARAM[form_name]
     assert message == _choice_message(class_name, param, value[param], vocab[param])
+
+
+_METHOD_MALFORMED_CELLS = [
+    (kwarg, form) for kwarg in ("sort", "row_sort") for form in MALFORMED_FORMS
+]
+
+
+@pytest.mark.parametrize(
+    ("kwarg", "form_name"),
+    _METHOD_MALFORMED_CELLS,
+    ids=[f"{k}-{f}" for k, f in _METHOD_MALFORMED_CELLS],
+)
+def test_facet_method_malformed_sort_object_refuses(kwarg: str, form_name: str) -> None:
+    """`Chart.facet(sort=/row_sort=)` refuses a malformed sort-field object at
+    the call, in its own voice, with the channel doors' message shape."""
+    value = MALFORMED_FORMS[form_name]
+    with pytest.raises(ValueError) as exc_info:
+        _base().facet(row="other", col="cat", **{kwarg: value})
+    message = str(exc_info.value)
+    if form_name in ("no_field", "non_string_field"):
+        assert message == (
+            f'Chart.facet({kwarg}={value!r}) is not a valid sort object: "field" must be a '
+            f"string naming a column; got {value.get('field')!r}"
+        )
+        return
+    from ferrum._core import sort_accepted_vocabulary
+
+    param = _CHOICE_PARAM[form_name]
+    choices = sort_accepted_vocabulary()[param]
+    assert message == (
+        f"Chart.facet({kwarg}=...): {param} must be one of "
+        f"{sorted(str(c) for c in choices)}; got {value[param]!r}"
+    )
 
 
 # Independent mirror of the Rust reason text `EncodingSpec::new` raises for

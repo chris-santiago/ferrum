@@ -40,7 +40,6 @@ class _SpecView:
                 encoding=layer.encoding or {},
                 mark_kwargs=layer.mark_kwargs if layer.mark_kwargs else None,
                 data_source=layer.data_source,
-                transforms=list(layer.transforms or []),
             )
             out.append(ns)
         self._layers_cached = out

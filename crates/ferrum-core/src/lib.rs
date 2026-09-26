@@ -107,6 +107,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spec::mark_style::mark_kwargs_fields, m)?)?;
     // Its numeric (`f64`/`usize`) subset, the fields the Python funnel coerces.
     m.add_function(wrap_pyfunction!(spec::mark_style::mark_numeric_kwargs, m)?)?;
+    // The `usize` subset of the numeric fields, routed through a
+    // non-negative-integer contract instead of the real-number one.
+    m.add_function(wrap_pyfunction!(spec::mark_style::mark_integer_kwargs, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

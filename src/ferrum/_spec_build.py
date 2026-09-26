@@ -540,7 +540,6 @@ class SpecBuildMixin:
         """
         from ferrum.chart import _apply_inferred_type, _strip_unstackable
         from ferrum.encoding._aliases import apply_channel_aliases
-        from ferrum._layer_transforms import _transforms_to_json_list
 
         out = []
         layer_list = (layers if layers is not None else self._layers) or []
@@ -702,9 +701,6 @@ class SpecBuildMixin:
             # output instead of the final pipeline batch. Only emit when set.
             if layer.data_source is not None:
                 layer_dict["data_source"] = layer.data_source
-            # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
-            if layer.transforms:
-                layer_dict["transforms"] = _transforms_to_json_list(layer.transforms)
             # Phase 9c — per-layer position adjustment. Serialize value classes
             # via ``to_spec_dict``.
             if layer.position is not None:

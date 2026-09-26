@@ -362,13 +362,28 @@ def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int
             f"{label} must be a real number (int, float, numpy scalar, or Decimal), "
             f"not {type(value).__name__}; received {value!r}"
         )
+    as_float = as_finite_real(value)
+    if as_float is None:
+        raise ValueError(f"{label} must be a finite number a float can hold; received {value!r}")
+    return operator.index(value) if is_integer_number(value) else as_float
+
+
+def as_finite_real(value: Any) -> float | None:
+    """Return *value* as a builtin ``float`` if it is a finite real number, else ``None``.
+
+    The non-raising form of :func:`coerce_finite_real`, for a door that
+    refuses in its own message shape: it accepts exactly what
+    :func:`coerce_finite_real` accepts (never ``bool``, a numeric-looking
+    string, ``None``, or a value whose ``float`` is not finite or cannot be
+    formed, such as ``10**400`` or ``Decimal("sNaN")``).
+    """
+    if not is_real_number(value):
+        return None
     try:
         as_float = float(value)
     except (OverflowError, ValueError):
-        as_float = math.nan
-    if not math.isfinite(as_float):
-        raise ValueError(f"{label} must be a finite number a float can hold; received {value!r}")
-    return operator.index(value) if is_integer_number(value) else as_float
+        return None
+    return as_float if math.isfinite(as_float) else None
 
 
 #: The largest integer a float holds exactly; a count above it cannot cross
@@ -402,14 +417,40 @@ def coerce_positive_int(label: str, value: Any, *, required: bool = False) -> in
         If *value* is not an integer, is less than 1, or exceeds ``2**53`` --
         or, when *required* is set, if *value* is ``None``.
     """
+    return _coerce_bounded_int(label, value, required=required, minimum=1, kind="a positive int")
+
+
+def coerce_non_negative_int(label: str, value: Any, *, required: bool = False) -> int | None:
+    """Return *value* as a builtin ``int``, or raise ``ValueError`` unless it is an integer from ``0`` to ``2**53``.
+
+    The ``>= 0`` sibling of :func:`coerce_positive_int`, for a wire field
+    that is an unsigned integer (a Rust ``usize``) where ``0`` is meaningful.
+    Same contract otherwise: ``bool``, a float such as ``2.5`` and a
+    numeric-looking string are refused, a numpy integer scalar is accepted
+    and returned as a builtin ``int``, and ``None`` passes unless *required*
+    is set.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not an integer, is negative, or exceeds ``2**53`` --
+        or, when *required* is set, if *value* is ``None``.
+    """
+    return _coerce_bounded_int(
+        label, value, required=required, minimum=0, kind="a non-negative int"
+    )
+
+
+def _coerce_bounded_int(
+    label: str, value: Any, *, required: bool, minimum: int, kind: str
+) -> int | None:
+    """Shared body of the ``coerce_*_int`` family: an integer in ``[minimum, 2**53]``."""
     if value is None and not required:
         return None
     if not is_integer_number(value):
-        raise ValueError(
-            f"{label} must be a positive int, not {type(value).__name__}; received {value!r}"
-        )
-    if value < 1:
-        raise ValueError(f"{label} must be >= 1; received {value!r}")
+        raise ValueError(f"{label} must be {kind}, not {type(value).__name__}; received {value!r}")
+    if value < minimum:
+        raise ValueError(f"{label} must be >= {minimum}; received {value!r}")
     if value > _MAX_EXACT_INT:
         raise ValueError(
             f"{label} must be at most 2**53, the largest integer a float holds exactly; "

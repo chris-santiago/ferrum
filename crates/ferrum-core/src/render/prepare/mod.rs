@@ -311,7 +311,7 @@ fn normalize_string_views(batch: &RecordBatch) -> Result<RecordBatch, RenderErro
         if matches!(field.data_type(), DataType::Utf8View | DataType::LargeUtf8) {
             let casted = arrow::compute::cast(col, &DataType::Utf8).map_err(|e| {
                 RenderError::StringNormalizationFailed {
-                    field: field.name().clone(),
+                    field: Some(field.name().clone()),
                     reason: e.to_string(),
                 }
             })?;
@@ -332,7 +332,7 @@ fn normalize_string_views(batch: &RecordBatch) -> Result<RecordBatch, RenderErro
     }
     let new_schema = Arc::new(Schema::new(new_fields));
     RecordBatch::try_new(new_schema, new_cols).map_err(|e| RenderError::StringNormalizationFailed {
-        field: String::new(),
+        field: None,
         reason: e.to_string(),
     })
 }

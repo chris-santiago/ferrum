@@ -270,6 +270,32 @@ pub(crate) fn mark_numeric_kwargs() -> Vec<&'static str> {
     mark_numeric_kwarg_names()
 }
 
+/// The `Option<usize>` subset of [`mark_numeric_kwarg_names`], in declaration
+/// order. Derived from the numeric set itself, not listed: a numeric field is
+/// an integer field exactly when its derived `Deserialize` refuses a
+/// non-integer number (`1.5`) under its key, which every `Option<usize>`
+/// field does and every `Option<f64>` field accepts. This guarantees the
+/// integer and real subsets partition the numeric fields exactly — neither
+/// list is hand-maintained against the other.
+pub(crate) fn mark_integer_kwarg_names() -> Vec<&'static str> {
+    mark_numeric_kwarg_names()
+        .into_iter()
+        .filter(|name| {
+            serde_json::from_value::<MarkKwargsSpec>(serde_json::json!({ *name: 1.5 })).is_err()
+        })
+        .collect()
+}
+
+/// `ferrum._core.mark_integer_kwargs()`: [`mark_integer_kwarg_names`], so
+/// Python's mark-kwarg funnel routes exactly the struct's `usize` fields
+/// through a non-negative-integer contract instead of the real-number one it
+/// gives every other numeric field. Registered in `lib.rs`, typed in
+/// `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn mark_integer_kwargs() -> Vec<&'static str> {
+    mark_integer_kwarg_names()
+}
+
 #[cfg(test)]
 mod tests {
     /// The numeric set is exactly the struct's `Option<f64>`/`Option<usize>`
@@ -329,6 +355,61 @@ mod tests {
                 "height",
                 "arrow_size",
             ]
+        );
+    }
+
+    /// The integer subset is exactly `limit` (the struct's one `Option<usize>`
+    /// field) today, and it partitions the numeric fields exactly: every
+    /// numeric name is in the integer list or the real list, never both and
+    /// never neither.
+    #[test]
+    fn mark_integer_kwarg_names_partition_the_numeric_fields() {
+        let numeric = super::mark_numeric_kwarg_names();
+        let integer = super::mark_integer_kwarg_names();
+        assert_eq!(integer, vec!["limit"]);
+        for name in &integer {
+            assert!(numeric.contains(name), "'{name}' must be numeric to be an integer subset");
+        }
+        let real: Vec<&str> =
+            numeric.iter().copied().filter(|n| !integer.contains(n)).collect();
+        assert_eq!(
+            real,
+            vec![
+                "size",
+                "opacity",
+                "corner_radius",
+                "stroke_width",
+                "font_size",
+                "dx",
+                "dy",
+                "angle",
+                "band_size",
+                "width",
+                "height",
+                "arrow_size",
+            ]
+        );
+        assert_eq!(real.len() + integer.len(), numeric.len());
+    }
+
+    /// A float or a negative value under `limit`'s key is refused by the
+    /// struct's own `Deserialize`, which is the render-time floor
+    /// `mark_integer_kwargs()` exists to move earlier: Python routes these
+    /// through a non-negative-integer contract at declaration instead of
+    /// letting `usize`'s deserializer refuse them at render.
+    #[test]
+    fn limit_refuses_non_integer_and_negative_values() {
+        assert!(
+            serde_json::from_value::<super::MarkKwargsSpec>(serde_json::json!({ "limit": 2.5 }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::MarkKwargsSpec>(serde_json::json!({ "limit": -1 }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::MarkKwargsSpec>(serde_json::json!({ "limit": 2 }))
+                .is_ok()
         );
     }
 

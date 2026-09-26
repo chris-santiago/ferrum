@@ -963,6 +963,12 @@ def mark_kwargs_fields() -> list[str]: ...
 # declaration order, derived from the struct's own ``Deserialize``.
 def mark_numeric_kwargs() -> list[str]: ...
 
+# The ``usize`` subset of ``mark_numeric_kwargs()``, in declaration order.
+# Partitions the numeric fields exactly with ``mark_numeric_kwargs()`` minus
+# this list: route these through a non-negative-integer contract, not the
+# real-number one every other numeric field gets.
+def mark_integer_kwargs() -> list[str]: ...
+
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
 # at declaration instead of mirroring the list as a Python literal.

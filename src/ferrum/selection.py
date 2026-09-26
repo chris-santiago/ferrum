@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
-from ferrum._validate import coerce_finite_real, is_none_color_sentinel, is_real_number
+from ferrum._validate import as_finite_real, is_none_color_sentinel, is_real_number
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
@@ -965,14 +965,13 @@ def _literal_numeric_only(v: Any, *, channel: str) -> dict:
 
     A string is refused by channel name rather than reaching the color parser
     (a ``kind=color`` value would repaint the fill whatever the declared
-    channel). A number is what :func:`ferrum._validate.coerce_finite_real`
+    channel). A number is what :func:`ferrum._validate.as_finite_real`
     accepts (never ``bool``), so ``nan``/``inf`` and a value a float cannot
     hold are refused, in the conditional-literal refusal shape.
     """
-    try:
-        fv = float(coerce_finite_real(channel, v, required=True))
-    except ValueError as exc:
-        raise _conditional_literal_type_error(v, channel=channel, needs="a number") from exc
+    fv = as_finite_real(v)
+    if fv is None:
+        raise _conditional_literal_type_error(v, channel=channel, needs="a number")
     return {"kind": channel, "value": fv}
 
 

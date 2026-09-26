@@ -214,23 +214,6 @@ def _resolve_layer_bins(layers: list) -> tuple[list, list]:
     return new_layers, named_transforms
 
 
-def _transforms_to_json_list(transforms: list) -> list:
-    """Serialize a list of Python transform objects to JSON-safe dicts.
-
-    ``coerce_layers`` in Rust calls ``json.dumps()`` on each layer dict, so
-    PyO3 transform objects must be converted to plain dicts first.  We do
-    this by round-tripping through ``ChartSpec.to_json()``.
-    """
-    if not transforms:
-        return []
-    from ferrum import ChartSpec
-
-    # Build a minimal spec with the transforms; extract the "transforms" array.
-    dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=transforms)
-    parsed = json.loads(dummy.to_json())
-    return parsed.get("transforms", [])
-
-
 def _transforms_to_json_list_named(transforms: list) -> list:
     """Serialize a mixed transform list to the Rust ``TransformSpec`` wire shape.
 

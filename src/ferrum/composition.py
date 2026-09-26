@@ -892,7 +892,6 @@ def inject_scale(chart, channel: str, scale_dict: dict):
                 encoding={
                     k: (_set_on(v) if k == channel else v) for k, v in layer.encoding.items()
                 },
-                transforms=layer.transforms,
                 mark_kwargs=layer.mark_kwargs,
                 data_source=layer.data_source,
                 position=layer.position,
@@ -4353,7 +4352,6 @@ def _expand_layers(c) -> tuple[list, list]:
         _Layer(
             mark=c._mark,
             encoding=dict(c._encoding),
-            transforms=[],
             mark_kwargs=_layer_mark_kwargs(c),
             position=c._position,
         )

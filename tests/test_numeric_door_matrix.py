@@ -8,7 +8,8 @@ funnel (``MarkBase``, behind every ``mark_*`` style kwarg), and the hits that
 decide whether a user-facing numeric argument is a number are the doors
 below, each exercised through its public entry. Real-number doors store what
 ``ferrum._validate.coerce_finite_real`` returns; integer doors store what
-``coerce_positive_int`` returns. So every door accepts ``int``, ``float``,
+``coerce_positive_int`` (or, for a mark's unsigned-integer style field,
+``coerce_non_negative_int``) returns. So every door accepts ``int``, ``float``,
 numpy scalars and (for real-number doors) ``Decimal``, and refuses ``bool``,
 ``str``, ``list``, ``nan``, ``inf``, an integer a float cannot hold
 (``10**400``) and a signaling NaN with a ``ValueError`` naming the public door
@@ -42,8 +43,14 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from ferrum._core import mark_numeric_kwargs
-from ferrum.marks.base import _NUMERIC_MARK_KWARGS, MARK_HONORED_KWARGS, MarkBase
+from ferrum._core import mark_integer_kwargs, mark_numeric_kwargs
+from ferrum.marks.base import (
+    _INTEGER_MARK_KWARGS,
+    _REAL_MARK_KWARGS,
+    _mark_kwarg_error,
+    MARK_HONORED_KWARGS,
+    MarkBase,
+)
 from ferrum.plots.distribution import _CATPLOT_AGGREGATING_KINDS, _CATPLOT_VALID_KINDS
 
 _NON_FINITE = {"nan", "inf", "huge", "sNaN"}
@@ -173,8 +180,8 @@ def _real_refusal(label: str) -> Callable[[str, Any], str]:
     return refusal
 
 
-def _int_refusal(label: str) -> Callable[[str, Any], str]:
-    """``coerce_positive_int``'s refusals, in the door's voice."""
+def _int_refusal(label: str, expects: str = "a positive int") -> Callable[[str, Any], str]:
+    """The ``coerce_*_int`` refusals, in the door's voice."""
 
     def refusal(kind: str, v: Any) -> str:
         if kind == "huge":
@@ -182,7 +189,7 @@ def _int_refusal(label: str) -> Callable[[str, Any], str]:
                 f"{label} must be at most 2**53, the largest integer a float holds exactly; "
                 f"received {v!r}"
             )
-        return f"{label} must be a positive int, not {type(v).__name__}; received {v!r}"
+        return f"{label} must be {expects}, not {type(v).__name__}; received {v!r}"
 
     return refusal
 
@@ -247,6 +254,13 @@ _REAL = frozenset({"int", "float", "np_int", "np_float", "np_float32", "Decimal"
 _LITERAL_OF_ANOTHER_TYPE = frozenset({"bool", "str", "list", "None"})
 _INTEGER = frozenset({"int", "np_int", "None"})
 _TSNE_LABEL = "ModelSource.embeddings(method='tsne', perplexity=...)"
+_TEXT = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "t": ["abcdefghijkl", "mnopqrstuvwx"]})
+_MARK_TEXT_LIMIT = "mark_text(limit=...)"
+
+
+def _mark_text_limit(v: Any) -> "fm.Chart":
+    return fm.Chart(_TEXT).mark_text(limit=v).encode(x="x", y="y", text="t")
+
 
 DOORS: dict[str, Door] = {
     "heatmap_vmin": Door(
@@ -337,6 +351,14 @@ DOORS: dict[str, Door] = {
     "catplot_n_boot": Door(
         _catplot("n_boot"), 50, "int", 1000, _n_boot_refusal, _INTEGER - {"None"}
     ),
+    "mark_text_limit": Door(
+        lambda v: _mark_text_limit(v).to_json(),
+        3,
+        "int",
+        10,
+        _int_refusal(_MARK_TEXT_LIMIT, "a non-negative int"),
+        _INTEGER,
+    ),
 }
 
 CELLS = [(door, kind) for door, d in DOORS.items() for kind in KINDS if kind not in d.skip]
@@ -404,6 +426,7 @@ _INTEGER_BUILDERS: dict[str, tuple[Callable[[Any], Any], Callable[[str, Any], st
         lambda v: fm.catplot(_CAT, x="day", y="tip", kind="point", seed=0, n_boot=v),
         DOORS["catplot_n_boot"].refusal,
     ),
+    "mark_text_limit": (_mark_text_limit, DOORS["mark_text_limit"].refusal),
 }
 
 
@@ -414,6 +437,36 @@ def test_integer_door_accepts_the_ceiling_and_refuses_one_past_it(door: str) -> 
     with pytest.raises(ValueError) as exc_info:
         build(_MAX_EXACT_INT + 1)
     assert str(exc_info.value) == refusal("huge", _MAX_EXACT_INT + 1)
+
+
+# --- the unsigned-integer mark door: fractions and negatives ----------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (2.5, f"{_MARK_TEXT_LIMIT} must be a non-negative int, not float; received 2.5"),
+        (-1, f"{_MARK_TEXT_LIMIT} must be >= 0; received -1"),
+        (np.int64(-1), f"{_MARK_TEXT_LIMIT} must be >= 0; received {np.int64(-1)!r}"),
+    ],
+    ids=["fraction", "negative", "np_negative"],
+)
+def test_mark_text_limit_refuses_a_fraction_or_negative_at_construction(
+    value: Any, message: str
+) -> None:
+    """``limit`` is an unsigned integer on the wire: a fraction or a negative
+    refuses when the mark is declared, naming ``mark_text(limit=...)``, rather
+    than reaching the renderer."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.Chart(_TEXT).mark_text(limit=value)
+    assert str(exc_info.value) == message
+
+
+def test_mark_text_limit_accepts_zero() -> None:
+    """``0`` is an unsigned integer, so the non-negative door accepts it; the
+    wire carries it as the same builtin ``0`` a plain ``0`` gives."""
+    assert _mark_text_limit(np.int64(0)).to_json() == _mark_text_limit(0).to_json()
+    assert json.loads(_mark_text_limit(0).to_json())["mark_style"]["limit"] == 0
 
 
 # --- catplot ci=/n_boot= on the kinds that draw no interval ----------------------
@@ -464,13 +517,19 @@ def test_interval_arg_on_non_aggregating_kind(kind: str, arg: str, value_kind: s
 
 def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> None:
     """Each name ``mark_numeric_kwargs()`` publishes that some mark honors is
-    coerced at that mark's door: ``np.int64`` is stored as a builtin ``int`` and
-    a non-number refuses in the door's voice. A published name no mark honors
-    (a wire field set by the renderer, not a ``mark_*`` kwarg) is refused as
-    an unknown kwarg by every mark."""
+    coerced at that mark's door by the contract of its wire type: ``np.int64``
+    is stored as a builtin ``int`` and a non-number refuses in the door's
+    voice; a fraction is kept by a real-number field and refused by an
+    unsigned-integer one (the ``mark_integer_kwargs()`` subset). A published
+    name no mark honors (a wire field set by the renderer, not a ``mark_*``
+    kwarg) is refused as an unknown kwarg by every mark."""
     published = mark_numeric_kwargs()
+    integer = mark_integer_kwargs()
     assert published, "the binding must publish the numeric fields"
-    assert _NUMERIC_MARK_KWARGS == frozenset(published) & set().union(*MARK_HONORED_KWARGS.values())
+    assert integer and set(integer) < set(published)
+    honored = set().union(*MARK_HONORED_KWARGS.values())
+    assert _INTEGER_MARK_KWARGS == frozenset(integer) & honored
+    assert _REAL_MARK_KWARGS == (frozenset(published) & honored) - frozenset(integer)
     honoring = {
         name: [m for m, honored in MARK_HONORED_KWARGS.items() if name in honored]
         for name in published
@@ -484,9 +543,30 @@ def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> Non
         mark = marks[0]
         stored = MarkBase(mark, **{name: np.int64(2)}).kwargs[name]
         assert stored == 2 and type(stored) is int, (name, stored)
+        label = f"mark_{mark}({name}=...)"
+        if name in integer:
+            expected = _int_refusal(label, "a non-negative int")
+            with pytest.raises(ValueError) as exc_info:
+                MarkBase(mark, **{name: 2.5})
+            assert str(exc_info.value) == expected("fraction", 2.5)
+        else:
+            expected = _real_refusal(label)
+            assert MarkBase(mark, **{name: 2.5}).kwargs[name] == 2.5
         with pytest.raises(ValueError) as exc_info:
             MarkBase(mark, **{name: "2"})
-        assert str(exc_info.value) == _real_refusal(f"mark_{mark}({name}=...)")("str", "2")
+        assert str(exc_info.value) == expected("str", "2")
+
+
+def test_an_unhonored_kwarg_is_refused_as_unhonored_before_its_value_is_judged() -> None:
+    """A kwarg the mark does not honor is refused as not honored whatever its
+    value, not as a malformed value the mark would never use."""
+    assert "limit" not in MARK_HONORED_KWARGS["point"]
+    with pytest.raises(TypeError) as by_value:
+        MarkBase("point", limit="x")
+    with pytest.raises(TypeError) as by_name:
+        MarkBase("point", limit=2)
+    assert str(by_value.value) == str(by_name.value)
+    assert str(by_value.value) == _mark_kwarg_error("point", "limit")
 
 
 # --- stored and wire types --------------------------------------------------------

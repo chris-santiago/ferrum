@@ -22,20 +22,30 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Optional
 
 from ferrum._coerce import to_arrow_table
 
-#: Which dimension a facet door declares in one call to
-#: :meth:`_Facet.merged_with`. ``"generic"`` is the ``encode(facet=...)``
-#: door's wrap-only declaration (raises onto an existing grid); ``"facet_field"``
-#: is ``.facet(field=...)``'s wrap-only declaration (redeclares -- replaces an
-#: existing grid with a wrap instead of raising); ``"col"``/``"row"`` declare
-#: one grid dimension (``FacetCol``/``FacetRow`` / ``.facet(col=...)``/
-#: ``.facet(row=...)`` alone); ``"grid"`` declares both dimensions at once
-#: (``.facet(row=..., col=...)``); ``"resolve"`` is ``Chart.share_scale()``'s
-#: declaration -- the only field it changes is ``resolve``.
-FacetDeclarationKind = Literal["generic", "facet_field", "col", "row", "grid", "resolve"]
+
+class FacetDeclaration(str, Enum):
+    """Which dimension a facet door declares in one call to :meth:`_Facet.merged_with`.
+
+    ``GENERIC`` is the ``encode(facet=...)`` door's wrap-only declaration
+    (refuses onto an existing grid); ``FACET_FIELD`` is
+    ``.facet(field=...)``'s wrap-only declaration (redeclares: replaces an
+    existing grid with a wrap instead of refusing); ``COL``/``ROW`` declare
+    one grid dimension (``FacetCol``/``FacetRow`` / ``.facet(col=...)``/
+    ``.facet(row=...)`` alone); ``GRID`` declares both dimensions at once
+    (``.facet(row=..., col=...)``); ``RESOLVE`` is ``Chart.share_scale()``'s
+    declaration, the only field it changes is ``resolve``.
+    """
+
+    GENERIC = "generic"
+    FACET_FIELD = "facet_field"
+    COL = "col"
+    ROW = "row"
+    GRID = "grid"
+    RESOLVE = "resolve"
 
 
 class FacetMode(str, Enum):
@@ -166,7 +176,7 @@ class _Facet:
         existing: Optional["_Facet"],
         *,
         declare: str,
-        kind: FacetDeclarationKind,
+        kind: FacetDeclaration,
         field: Optional[str] = None,
         row: Optional[str] = None,
         col: Optional[str] = None,
@@ -182,7 +192,7 @@ class _Facet:
 
         *existing* is the chart's prior facet state (``None`` on the first
         facet declaration of a chart). *kind* names which dimension this
-        call declares: ``"generic"`` (the ``encode(facet=...)`` door's
+        call declares (a :class:`FacetDeclaration`): ``"generic"`` (the ``encode(facet=...)`` door's
         wrap-only declaration -- refuses onto an existing grid), ``"facet_field"``
         (the ``.facet(field=...)`` door's wrap-only declaration -- the
         redeclaration door the ``"generic"`` refusal names, so it replaces
@@ -194,9 +204,9 @@ class _Facet:
         changes only ``resolve`` and requires *existing*). A field this call
         does not state survives from *existing*; a field it does state wins
         (last writer). Carrying is by wire field, not by dimension: any
-        field this method's branches do not explicitly list -- including
+        field the declaration handlers do not explicitly list -- including
         ``resolve`` -- rides through :func:`dataclasses.replace`
-        automatically, so a branch that does not yet know about a field
+        automatically, so a handler that does not yet know about a field
         cannot silently drop it.
 
         Mode transitions are orientation-aware. Onto an existing grid,
@@ -222,178 +232,262 @@ class _Facet:
         *title*/*row_title*: *sort* is "this call's own value for whichever
         dimension its own kwarg represents" (the ``col`` dimension for a
         ``"col"`` door, the row-or-lowered-to-wrap dimension for a ``"row"``
-        door), and each branch below decides -- exactly as it already does
+        door), and each declaration handler decides -- exactly as it already does
         for title -- whether that value lands in the built ``_Facet``'s
         ``sort`` or ``row_sort`` slot, moving with a promoted field the same
         way its title does.
         """
+        stated = _Stated(
+            field=field,
+            row=row,
+            col=col,
+            title=title,
+            row_title=row_title,
+            ncols=ncols,
+            nrows=nrows,
+            resolve=resolve,
+            sort=sort,
+            row_sort=row_sort,
+        )
+        handler = _DECLARATION_HANDLERS[FacetDeclaration(kind)]
+        return handler(existing, _prior_of(existing), stated, declare)
 
-        def carry(attr: str, value):
-            if value is not None:
-                return value
-            return getattr(existing, attr) if existing is not None else None
 
-        def build(**structural) -> "_Facet":
-            # `existing is None`: nothing to carry, construct fresh.
-            # Otherwise `dataclasses.replace` copies every field this call
-            # doesn't list here (currently just `resolve`) from `existing`
-            # automatically.
-            if existing is None:
-                return _Facet(**structural)
-            return dataclasses.replace(existing, **structural)
+class _Prior(Enum):
+    """The shape of a chart's facet state before a declaration merges onto it."""
 
-        def wrap_call(wrap_field: Optional[str], *, wrap_orient, wrap_title, wrap_sort) -> "_Facet":
-            return build(
-                mode_kind="wrap",
-                field=wrap_field,
-                row=None,
-                col=None,
-                wrap_orient=wrap_orient,
-                title=wrap_title,
-                row_title=None,
-                sort=wrap_sort,
-                row_sort=None,
-                ncols=ncols_v,
-                nrows=nrows_v,
-            )
+    NONE = "none"
+    GRID = "grid"
+    WRAP_COL = "wrap_col"
+    WRAP_ROW = "wrap_row"
+    #: A wrap with no orientation of its own (``Facet``/``.facet(field=...)``).
+    WRAP_GENERIC = "wrap_generic"
 
-        def grid_call(
-            *, grid_row, grid_col, grid_title, grid_row_title, grid_sort, grid_row_sort
-        ) -> "_Facet":
-            return build(
-                mode_kind="grid",
-                field=None,
-                row=grid_row,
-                col=grid_col,
-                wrap_orient=None,
-                title=grid_title,
-                row_title=grid_row_title,
-                sort=grid_sort,
-                row_sort=grid_row_sort,
-                ncols=ncols_v,
-                nrows=nrows_v,
-            )
 
-        if kind == "resolve":
-            return build(resolve=resolve)
+def _prior_of(existing: Optional[_Facet]) -> _Prior:
+    if existing is None:
+        return _Prior.NONE
+    if existing.mode_kind is FacetMode.GRID:
+        return _Prior.GRID
+    if existing.wrap_orient is WrapOrient.COL:
+        return _Prior.WRAP_COL
+    if existing.wrap_orient is WrapOrient.ROW:
+        return _Prior.WRAP_ROW
+    return _Prior.WRAP_GENERIC
 
-        ncols_v = carry("ncols", ncols)
-        nrows_v = carry("nrows", nrows)
-        on_grid = existing is not None and existing.mode_kind == FacetMode.GRID
-        on_wrap = existing is not None and existing.mode_kind == FacetMode.WRAP
 
-        if kind == "grid":
-            return grid_call(
-                grid_row=row,
-                grid_col=col,
-                grid_title=carry("title", title),
-                grid_row_title=carry("row_title", row_title),
-                grid_sort=carry("sort", sort),
-                grid_row_sort=carry("row_sort", row_sort),
-            )
+@dataclass(frozen=True)
+class _Stated:
+    """What one facet declaration states; ``None`` is "not stated"."""
 
-        if kind in ("generic", "facet_field"):
-            if on_grid:
-                if kind == "generic":
-                    raise ValueError(
-                        f"{declare}: the chart is already a grid facet (row={existing.row!r}, "
-                        f"col={existing.col!r}); a wrap facet cannot replace it. Use "
-                        "facet_row=/facet_col= to change a dimension, or call .facet(...) "
-                        "to redeclare the facet."
-                    )
-                # "facet_field": `.facet(field=...)` is the redeclaration door
-                # the refusal above names -- falls through to the shared
-                # wrap-building return below, dropping row_title/row_sort (no
-                # home in wrap mode) rather than carrying them.
-            return wrap_call(
-                field,
-                # A wrap-only declaration states no orientation of its own
-                # (`Facet`/`.facet(field=...)` have no orientation
-                # parameter), so `wrap_orient` is a field this call does not
-                # mention and carries from `existing` per the field rule
-                # (spec §6.3) -- `.facet(col='g').encode(facet=Facet('k'))`
-                # keeps the side-by-side `ncols` a bare `wrap_orient=None`
-                # would silently collapse to 1. `existing.wrap_orient` is
-                # always `None` already when `existing` is a grid (the
-                # redeclare case), so this needs no on_grid special case.
-                wrap_orient=carry("wrap_orient", None),
-                wrap_title=carry("title", title),
-                wrap_sort=carry("sort", sort),
-            )
+    field: Optional[str]
+    row: Optional[str]
+    col: Optional[str]
+    title: Optional[str]
+    row_title: Optional[str]
+    ncols: Optional[int]
+    nrows: Optional[int]
+    resolve: Optional[dict]
+    sort: Optional[Any]
+    row_sort: Optional[Any]
 
-        if kind == "col":
-            if on_grid:
-                return grid_call(
-                    grid_row=existing.row,
-                    grid_col=col,
-                    grid_title=carry("title", title),
-                    grid_row_title=carry("row_title", row_title),
-                    grid_sort=carry("sort", sort),
-                    grid_row_sort=carry("row_sort", row_sort),
-                )
-            if on_wrap and existing.wrap_orient == WrapOrient.COL:
-                # same orientation: replace the field, stay wrap.
-                return wrap_call(
-                    col,
-                    wrap_orient="col",
-                    wrap_title=carry("title", title),
-                    wrap_sort=carry("sort", sort),
-                )
-            if on_wrap:
-                # other orientation: promote, keeping the prior field on its
-                # own (row) axis -- and its title/sort with it. The prior
-                # wrap's title/sort labeled its own single strip; now that
-                # field is the row, so they move to `row_title`/`row_sort`,
-                # not `title`/`sort`. `title`/`sort` (the new col strip) hold
-                # only what THIS call states about the col field it is
-                # declaring; nothing carries into them from the prior wrap,
-                # whose title/sort belong to a different axis now.
-                return grid_call(
-                    grid_row=existing.field,
-                    grid_col=col,
-                    grid_title=title,
-                    grid_row_title=row_title if row_title is not None else existing.title,
-                    grid_sort=sort,
-                    grid_row_sort=row_sort if row_sort is not None else existing.sort,
-                )
-            return wrap_call(
-                col,
-                wrap_orient="col",
-                wrap_title=carry("title", title),
-                wrap_sort=carry("sort", sort),
-            )
 
-        # kind == "row"
-        if on_grid:
-            return grid_call(
-                grid_row=row,
-                grid_col=existing.col,
-                grid_title=carry("title", title),
-                grid_row_title=carry("row_title", row_title),
-                grid_sort=carry("sort", sort),
-                grid_row_sort=carry("row_sort", row_sort),
-            )
-        if on_wrap and existing.wrap_orient == WrapOrient.ROW:
-            # same orientation: replace the field, stay wrap. The row door's
-            # own title/sort arrive via `row_title`/`row_sort` (F-L01-04: a
-            # row-alone wrap reads the wire's `title` key, not `row_title`),
-            # so those -- not `title`/`sort` -- are this call's stated
-            # values here.
-            wrap_title = row_title if row_title is not None else existing.title
-            wrap_sort = row_sort if row_sort is not None else existing.sort
-            return wrap_call(row, wrap_orient="row", wrap_title=wrap_title, wrap_sort=wrap_sort)
-        if on_wrap:
-            # other orientation: promote, keeping the prior field on its own
-            # (col) axis.
-            return grid_call(
-                grid_row=row,
-                grid_col=existing.field,
-                grid_title=carry("title", title),
-                grid_row_title=carry("row_title", row_title),
-                grid_sort=carry("sort", sort),
-                grid_row_sort=carry("row_sort", row_sort),
-            )
-        return wrap_call(row, wrap_orient="row", wrap_title=row_title, wrap_sort=row_sort)
+def _carry(existing: Optional[_Facet], attr: str, value: Any) -> Any:
+    """*value* when stated, else *existing*'s value for *attr* (``None`` without one)."""
+    if value is not None:
+        return value
+    return getattr(existing, attr) if existing is not None else None
+
+
+def _build(existing: Optional[_Facet], **fields: Any) -> _Facet:
+    """A fresh ``_Facet`` of *fields*, or *existing* with *fields* replaced.
+
+    ``dataclasses.replace`` copies every field the caller does not list
+    (currently just ``resolve``) from *existing*, so a merge that does not
+    know about a field cannot silently drop it.
+    """
+    if existing is None:
+        return _Facet(**fields)
+    return dataclasses.replace(existing, **fields)
+
+
+def _wrap(
+    existing: Optional[_Facet],
+    stated: _Stated,
+    field: Optional[str],
+    *,
+    orient: Optional[WrapOrient],
+    title: Optional[str],
+    sort: Optional[Any],
+) -> _Facet:
+    return _build(
+        existing,
+        mode_kind=FacetMode.WRAP,
+        field=field,
+        row=None,
+        col=None,
+        wrap_orient=orient,
+        title=title,
+        row_title=None,
+        sort=sort,
+        row_sort=None,
+        ncols=_carry(existing, "ncols", stated.ncols),
+        nrows=_carry(existing, "nrows", stated.nrows),
+    )
+
+
+def _grid(
+    existing: Optional[_Facet],
+    stated: _Stated,
+    *,
+    row: Optional[str],
+    col: Optional[str],
+    title: Optional[str],
+    row_title: Optional[str],
+    sort: Optional[Any],
+    row_sort: Optional[Any],
+) -> _Facet:
+    return _build(
+        existing,
+        mode_kind=FacetMode.GRID,
+        field=None,
+        row=row,
+        col=col,
+        wrap_orient=None,
+        title=title,
+        row_title=row_title,
+        sort=sort,
+        row_sort=row_sort,
+        ncols=_carry(existing, "ncols", stated.ncols),
+        nrows=_carry(existing, "nrows", stated.nrows),
+    )
+
+
+def _grid_carrying_labels(
+    existing: Optional[_Facet], stated: _Stated, *, row: Optional[str], col: Optional[str]
+) -> _Facet:
+    """A grid on *row* x *col* whose titles and sorts are stated-or-carried per slot."""
+    return _grid(
+        existing,
+        stated,
+        row=row,
+        col=col,
+        title=_carry(existing, "title", stated.title),
+        row_title=_carry(existing, "row_title", stated.row_title),
+        sort=_carry(existing, "sort", stated.sort),
+        row_sort=_carry(existing, "row_sort", stated.row_sort),
+    )
+
+
+def _declare_resolve(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    return _build(existing, resolve=stated.resolve)
+
+
+def _declare_grid(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    return _grid_carrying_labels(existing, stated, row=stated.row, col=stated.col)
+
+
+def _declare_facet_field(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    # Onto a grid this is the redeclaration the generic door's refusal
+    # names: the grid is replaced by a wrap, dropping row_title/row_sort (no
+    # home in wrap mode) rather than carrying them. A wrap-only declaration
+    # states no orientation of its own, so `wrap_orient` carries from
+    # `existing` (always `None` on a grid): `.facet(col='g').encode(
+    # facet=Facet('k'))` keeps the side-by-side `ncols` a bare `None` would
+    # collapse to 1.
+    return _wrap(
+        existing,
+        stated,
+        stated.field,
+        orient=_carry(existing, "wrap_orient", None),
+        title=_carry(existing, "title", stated.title),
+        sort=_carry(existing, "sort", stated.sort),
+    )
+
+
+def _declare_generic(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    if prior is _Prior.GRID:
+        raise ValueError(
+            f"{declare}: the chart is already a grid facet (row={existing.row!r}, "
+            f"col={existing.col!r}); a wrap facet cannot replace it. Use "
+            "facet_row=/facet_col= to change a dimension, or call .facet(...) "
+            "to redeclare the facet."
+        )
+    return _declare_facet_field(existing, prior, stated, declare)
+
+
+def _declare_col(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    if prior is _Prior.GRID:
+        return _grid_carrying_labels(existing, stated, row=existing.row, col=stated.col)
+    if prior in (_Prior.WRAP_ROW, _Prior.WRAP_GENERIC):
+        # Other orientation: promote, keeping the prior field on its own
+        # (row) axis -- and its title/sort with it. The prior wrap's
+        # title/sort labeled its own single strip; now that field is the row,
+        # so they move to `row_title`/`row_sort`. `title`/`sort` (the new col
+        # strip) hold only what this call states about its col field.
+        return _grid(
+            existing,
+            stated,
+            row=existing.field,
+            col=stated.col,
+            title=stated.title,
+            row_title=stated.row_title if stated.row_title is not None else existing.title,
+            sort=stated.sort,
+            row_sort=stated.row_sort if stated.row_sort is not None else existing.sort,
+        )
+    # No prior, or a column wrap: replace the field, stay a column wrap.
+    return _wrap(
+        existing,
+        stated,
+        stated.col,
+        orient=WrapOrient.COL,
+        title=_carry(existing, "title", stated.title),
+        sort=_carry(existing, "sort", stated.sort),
+    )
+
+
+def _declare_row(
+    existing: Optional[_Facet], prior: _Prior, stated: _Stated, declare: str
+) -> _Facet:
+    if prior is _Prior.GRID:
+        return _grid_carrying_labels(existing, stated, row=stated.row, col=existing.col)
+    if prior in (_Prior.WRAP_COL, _Prior.WRAP_GENERIC):
+        # Other orientation: promote, keeping the prior field on its own
+        # (col) axis.
+        return _grid_carrying_labels(existing, stated, row=stated.row, col=existing.field)
+    # No prior, or a row wrap: replace the field, stay a row wrap. The row
+    # door's own title/sort arrive as `row_title`/`row_sort`, but a row-alone
+    # wrap reads the wire's `title`/`sort` keys, so they land there.
+    return _wrap(
+        existing,
+        stated,
+        stated.row,
+        orient=WrapOrient.ROW,
+        title=_carry(existing, "title", stated.row_title),
+        sort=_carry(existing, "sort", stated.row_sort),
+    )
+
+
+_DeclarationHandler = Callable[[Optional[_Facet], _Prior, _Stated, str], _Facet]
+
+_DECLARATION_HANDLERS: dict[FacetDeclaration, _DeclarationHandler] = {
+    FacetDeclaration.GENERIC: _declare_generic,
+    FacetDeclaration.FACET_FIELD: _declare_facet_field,
+    FacetDeclaration.COL: _declare_col,
+    FacetDeclaration.ROW: _declare_row,
+    FacetDeclaration.GRID: _declare_grid,
+    FacetDeclaration.RESOLVE: _declare_resolve,
+}
 
 
 def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
