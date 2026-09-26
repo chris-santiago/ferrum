@@ -345,6 +345,20 @@ class MarkDesugarResult:
 
 
 @dataclass(frozen=True)
+class _EntryVoice:
+    """The public entry a composite mark's resolution-time warning names.
+
+    ``door`` opens the message; ``recourse`` is appended verbatim to its end,
+    for an entry that cannot point at a kwarg of its own. Carried on
+    :class:`_PendingMark`, never on the mark's kwargs, so no ``mark_*`` call
+    can set it and it never reaches the wire or a repr.
+    """
+
+    door: str
+    recourse: str = ""
+
+
+@dataclass(frozen=True)
 class _PendingMark:
     """Sentinel stored on ``Chart._pending_stat_mark`` when a composite or
     diagnostic ``mark_*()`` is called before ``.encode()``.
@@ -358,3 +372,7 @@ class _PendingMark:
     kwargs: dict
     desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], MarkDesugarResult]
     prior_mark: str | None = None  # Existing primitive mark to preserve as a layer
+    #: The entry that called the ``mark_*`` method on the caller's behalf
+    #: (e.g. ``catplot``), voiced by the desugar's warnings; ``None`` means
+    #: the ``mark_*`` method itself.
+    voice: _EntryVoice | None = None

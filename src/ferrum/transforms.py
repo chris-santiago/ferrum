@@ -24,12 +24,9 @@ contract.  Do not change the inner-dict key.
 
 from __future__ import annotations
 
-import math
-import numbers
-import operator
 from typing import TYPE_CHECKING, Any, Sequence
 
-from ferrum._validate import is_real_number
+from ferrum._validate import coerce_finite_real, is_real_number
 from ferrum.position import _validate_stack_offset
 
 if TYPE_CHECKING:
@@ -322,9 +319,10 @@ def _expr_literal(value: object, *, field: str | None = None) -> str:
     ``.max()``, ...) — are accepted and normalized to a plain literal
     rather than forwarding a hostile ``repr()`` (numpy >= 2's
     ``repr(np.float64(2.0))`` is ``"np.float64(2.0)"``, which the grammar's
-    tokenizer cannot parse). Integers and floats are normalized separately
-    (``operator.index`` / ``float``) rather than collapsed into one path,
-    since routing a large integer through ``float()`` would lose precision.
+    tokenizer cannot parse). The number is normalized by
+    :func:`ferrum._validate.coerce_finite_real`, which keeps an integer an
+    ``int`` (routing a large integer through ``float()`` would lose
+    precision) and refuses ``nan``/``inf`` and an integer a float cannot hold.
     A ``decimal.Decimal`` is emitted as its ``float`` value: the expression
     grammar evaluates every number as ``f64`` (see below), so no precision a
     ``Decimal`` literal could carry survives evaluation anyway. ``datetime``
@@ -360,20 +358,9 @@ def _expr_literal(value: object, *, field: str | None = None) -> str:
             .replace("\t", "\\t")
         )
         return f'"{escaped}"'
-    if is_real_number(value):
-        if isinstance(value, numbers.Integral):
-            return repr(operator.index(value))
-        as_float = float(value)
-        if not math.isfinite(as_float):
-            where = f" for field {field!r}" if field is not None else ""
-            accepted = "string, number, bool, or None"
-            msg = (
-                f"transform_filter: non-finite float {value!r} not allowed{where}; "
-                f"accepted: {accepted}"
-            )
-            raise ValueError(msg)
-        return repr(as_float)
     where = f" for field {field!r}" if field is not None else ""
+    if is_real_number(value):
+        return repr(coerce_finite_real(f"transform_filter: value{where}", value))
     accepted = "string, number, bool, or None"
     msg = f"transform_filter: {type(value).__name__} {value!r} not allowed{where}; accepted: {accepted}"
     raise TypeError(msg)
@@ -1021,7 +1008,8 @@ def _normalize_keyval(value: object, *, key: str | None) -> bool | int | float |
     not JSON serializable``, naming neither ``transform_impute`` nor
     ``keyvals``). Unlike ``_expr_literal``, this returns a plain scalar
     rather than a grammar-literal string, since ``keyvals`` rides the wire
-    as JSON, not an expression.
+    as JSON, not an expression. The number is normalized by
+    :func:`ferrum._validate.coerce_finite_real`, as ``_expr_literal``'s is.
     """
     if isinstance(value, bool):
         return value
@@ -1037,15 +1025,7 @@ def _normalize_keyval(value: object, *, key: str | None) -> bool | int | float |
         return value
     where = f" for key {key!r}" if key is not None else ""
     if is_real_number(value):
-        if isinstance(value, numbers.Integral):
-            return operator.index(value)
-        as_float = float(value)
-        if not math.isfinite(as_float):
-            raise ValueError(
-                f"transform_impute: non-finite float {value!r} not allowed in "
-                f"keyvals{where}; accepted: string, number, or bool"
-            )
-        return as_float
+        return coerce_finite_real(f"transform_impute: keyvals value{where}", value)
     raise TypeError(
         f"transform_impute: {type(value).__name__} {value!r} not allowed in "
         f"keyvals{where}; accepted: string, number, or bool"
@@ -1123,7 +1103,7 @@ def transform_impute(
     """
     spec: dict = {"type": "impute", "field": field, "method": method}
     if value is not None:
-        spec["value"] = value
+        spec["value"] = coerce_finite_real("transform_impute(value=...)", value)
     if groupby is not None:
         _reject_bare_string_groupby(groupby, where="transform_impute")
         spec["groupby"] = list(groupby)

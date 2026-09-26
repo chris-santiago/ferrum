@@ -235,7 +235,10 @@ def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
     wrappers (which use ``**kwargs``) still expose the underlying desugar
     signature.  ``x_field``/``y_field`` are passed positionally and
     ``chart_encoding`` is injected separately, so they never appear in
-    *user_kwargs*.
+    *user_kwargs*. A ``_``-prefixed parameter is injected by a prep step
+    from private chart state (e.g. ``desugar_violin``'s ``_voice``), never
+    a user kwarg: a user key of that name is a style key, which ``MarkBase``
+    refuses as unknown.
 
     Returns
     -------
@@ -247,6 +250,7 @@ def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
         name
         for name, p in params.items()
         if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and not name.startswith("_")
     }
     transform_kwargs: dict = {}
     style_kwargs: dict = {}
@@ -827,6 +831,15 @@ def _prep_cat_axis_types(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "y_type": ctx.y_type}
 
 
+def _prep_entry_voice(ctx: _ResolveContext) -> None:
+    """Thread the pending mark's entry voice (see :class:`_EntryVoice`) into
+    the desugar as ``_voice``, when an entry other than the ``mark_*`` method
+    set one."""
+    voice = ctx.chart._pending_stat_mark.voice
+    if voice is not None:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "_voice": voice}
+
+
 def _prep_color_field(ctx: _ResolveContext) -> None:
     """Thread the color (hue) field into the desugar so each (x, hue) group gets
     its own split summary, and every emitted layer carries a consistent color
@@ -1033,7 +1046,9 @@ _PENDING_PREP: dict[str, _KindPrep] = {
     ),
     "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
     "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
-    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
+    "violin": _KindPrep(
+        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_entry_voice)
+    ),
     "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types)),
     "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field)),
     "density": _KindPrep(pre=(_prep_groupby_from_color,)),

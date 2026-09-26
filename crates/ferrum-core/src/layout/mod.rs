@@ -1397,6 +1397,25 @@ fn recentering_padding(baseline_center: f64, half_extent: f64, span: f64) -> (f6
     }
 }
 
+/// Half the extent a drawn axis title occupies along its own axis, or `None`
+/// when the axis is hidden or untitled: the one measurement both the
+/// feasibility verdict ([`axis_title_infeasibility`]) and the recentering
+/// solve ([`auto_padding_for_axis_titles`]) read. A y title renders rotated
+/// -90°, so its measured (unrotated) width is its vertical extent.
+fn title_half_extent(
+    axis: &AxisInput,
+    shown: bool,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+) -> Option<f64> {
+    if !shown {
+        return None;
+    }
+    let text = axis.title.get().as_deref()?;
+    let font_size = axis.overrides.title.font_size.unwrap_or(theme.typography.title_font_size);
+    Some(metrics.measure_width(text, font_size) / 2.0)
+}
+
 /// Whether x's/y's axis-title recentering is in the genuine residual regime
 /// (title wider than the viewport axis itself, [`recentering_is_feasible`]),
 /// decided from title measurement and `viewport` alone — neither `base` nor
@@ -1413,32 +1432,17 @@ fn axis_title_infeasibility(
     axes: &AxesInput,
     metrics: &dyn TextMetrics,
 ) -> (bool, bool) {
-    let x_infeasible = match (axes.show_x, axes.x.title.get().as_deref()) {
-        (true, Some(text)) => {
-            let font_size = axes
-                .x
-                .overrides
-                .title
-                .font_size
-                .unwrap_or(theme.typography.title_font_size);
-            let half_w = metrics.measure_width(text, font_size) / 2.0;
-            !recentering_is_feasible(half_w, viewport.width)
-        }
-        _ => false,
+    let infeasible = |half_extent: Option<f64>, span: f64| {
+        half_extent.is_some_and(|half| !recentering_is_feasible(half, span))
     };
-    let y_infeasible = match (axes.show_y, axes.y.title.get().as_deref()) {
-        (true, Some(text)) => {
-            let font_size = axes
-                .y
-                .overrides
-                .title
-                .font_size
-                .unwrap_or(theme.typography.title_font_size);
-            let half_h = metrics.measure_width(text, font_size) / 2.0;
-            !recentering_is_feasible(half_h, viewport.height)
-        }
-        _ => false,
-    };
+    let x_infeasible = infeasible(
+        title_half_extent(&axes.x, axes.show_x, theme, metrics),
+        viewport.width,
+    );
+    let y_infeasible = infeasible(
+        title_half_extent(&axes.y, axes.show_y, theme, metrics),
+        viewport.height,
+    );
     (x_infeasible, y_infeasible)
 }
 
@@ -1522,24 +1526,17 @@ fn auto_padding_for_axis_titles(
     let y_gutter = clamped_y_gutter(theme, axes, metrics);
     let plot_w = (viewport.width - base_left - base_right - y_gutter).max(0.0);
 
-    let (extra_left, extra_right) = match (axes.show_x, axes.x.title.get().as_deref()) {
-        (true, Some(text)) => {
+    let (extra_left, extra_right) = match title_half_extent(&axes.x, axes.show_x, theme, metrics) {
+        Some(half_w) => {
             let plot_x = base_left + if y_on_right { 0.0 } else { y_gutter };
             let baseline_center = plot_x + plot_w / 2.0;
-            let font_size = axes
-                .x
-                .overrides
-                .title
-                .font_size
-                .unwrap_or(theme.typography.title_font_size);
-            let half_w = metrics.measure_width(text, font_size) / 2.0;
             recentering_padding(baseline_center, half_w, viewport.width)
         }
-        _ => (0.0, 0.0),
+        None => (0.0, 0.0),
     };
 
-    let (extra_top, extra_bottom) = match (axes.show_y, axes.y.title.get().as_deref()) {
-        (true, Some(text)) => {
+    let (extra_top, extra_bottom) = match title_half_extent(&axes.y, axes.show_y, theme, metrics) {
+        Some(half_h) => {
             let n_labels = axes.x.tick_labels.len().max(1);
             let x_label_band = if axes.show_x {
                 axis::estimate_x_label_band(
@@ -1571,18 +1568,9 @@ fn auto_padding_for_axis_titles(
             let plot_h =
                 (viewport.height - base_top - base_bottom - chart_title_h - x_band).max(0.0);
             let baseline_center = plot_y + plot_h / 2.0;
-            let font_size = axes
-                .y
-                .overrides
-                .title
-                .font_size
-                .unwrap_or(theme.typography.title_font_size);
-            // The y-axis title renders rotated -90°, so its measured WIDTH
-            // (unrotated) is the VERTICAL extent it actually occupies.
-            let half_h = metrics.measure_width(text, font_size) / 2.0;
             recentering_padding(baseline_center, half_h, viewport.height)
         }
-        _ => (0.0, 0.0),
+        None => (0.0, 0.0),
     };
 
     Inset {
@@ -4926,6 +4914,200 @@ mod tests {
              not throttled to share budget with a contribution that never \
              ships",
             base.right + expected_right,
+        );
+    }
+
+    /// A continuous y axis titled `y_title` (10px per character, so its
+    /// half extent is `5 * len`) beside an x axis on TOP. The 40px label font
+    /// makes the y-tick pass want 22px of top padding at a 2px base, and the
+    /// tall top x band pushes a feasible y title's center low enough that
+    /// its recentering asks for extra BOTTOM padding.
+    fn vertical_padding_fixture(y_title: &str) -> (AxesInput, ThemeInputs, impl TextMetrics) {
+        let x = axis_input(AxisOrient::Top, None, vec!["0".into(), "1".into()], None);
+        let mut y = axis_input(
+            AxisOrient::Left,
+            Some(y_title.to_string()),
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        y.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 0.5, 1.0],
+            minor: vec![],
+        });
+        let axes = AxesInput {
+            x,
+            y,
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        };
+        let mut theme = default_theme_inputs();
+        theme.padding.padding_auto = true;
+        theme.padding.padding = 2.0;
+        theme.typography.label_font_size = 40.0;
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        (axes, theme, m)
+    }
+
+    fn auto_layout(
+        theme: &ThemeInputs,
+        viewport: Viewport,
+        axes: &AxesInput,
+        m: &dyn TextMetrics,
+    ) -> LayoutResult {
+        compute_layout(
+            &minimal_chart_spec(),
+            theme,
+            viewport,
+            axes,
+            &[],
+            &[],
+            None,
+            None,
+            m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should render")
+    }
+
+    /// The y title renders rotated along the vertical axis, so its
+    /// feasibility is judged against the viewport HEIGHT. This fixture's y
+    /// title (100px) is taller than the 80px viewport but far narrower than
+    /// its 400px width, so a width-judged verdict would call it feasible.
+    #[test]
+    fn axis_title_infeasibility_judges_the_y_title_against_the_viewport_height() {
+        let (axes, theme, m) = vertical_padding_fixture(&"a".repeat(10));
+        let viewport = Viewport {
+            width: 400.0,
+            height: 80.0,
+        };
+        assert_eq!(
+            axis_title_infeasibility(&theme, viewport, &axes, &m),
+            (false, true),
+            "an untitled x axis is feasible; a y title taller than the viewport is not",
+        );
+    }
+
+    /// An infeasible y title suppresses the y-tick pass's top/bottom
+    /// contribution, the vertical sibling of the x title's left/right
+    /// suppression: the shipped top inset is the bare base.
+    #[test]
+    fn compute_layout_suppresses_the_vertical_tick_pass_on_an_infeasible_y_title() {
+        let (axes, theme, m) = vertical_padding_fixture(&"a".repeat(10));
+        let viewport = Viewport {
+            width: 400.0,
+            height: 80.0,
+        };
+        let ticks = auto_padding_for_edge_ticks(&minimal_chart_spec(), &theme, &axes, &m);
+        assert!(ticks.top > 0.0, "fixture must exercise the y-tick pass: {ticks:?}");
+
+        let layout = auto_layout(&theme, viewport, &axes, &m);
+        let base = base_padding_insets(&theme);
+        assert!(
+            (layout.padded_region.y - base.top).abs() < 1e-9,
+            "the top inset ({}) must be the bare base ({}), not base plus the \
+             suppressed tick contribution ({})",
+            layout.padded_region.y,
+            base.top,
+            base.top + ticks.top,
+        );
+    }
+
+    /// The vertical sibling of
+    /// `compute_layout_zeroes_an_explicit_sides_extra_before_the_cap`: an
+    /// explicit TOP side's doomed tick extra must not share the top/bottom
+    /// budget with the auto bottom side's title recentering.
+    #[test]
+    fn compute_layout_zeroes_an_explicit_tops_extra_before_the_cap() {
+        let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(6));
+        theme.padding.padding_top = Some(2.0);
+        let viewport = Viewport {
+            width: 400.0,
+            height: 80.0,
+        };
+        let spec = minimal_chart_spec();
+        let base = base_padding_insets(&theme);
+        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let titles = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, Inset {
+            top: base.top + ticks.top,
+            ..base
+        });
+        let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
+        assert!(
+            ticks.top > 0.0 && titles.bottom > 0.0 && titles.bottom <= budget,
+            "fixture must want a doomed top extra and a fitting bottom one: \
+             ticks.top={}, titles.bottom={}, budget={budget}",
+            ticks.top,
+            titles.bottom,
+        );
+        assert!(
+            ticks.top + titles.bottom > budget,
+            "fixture must exceed the budget, or the cap never fires",
+        );
+
+        let layout = auto_layout(&theme, viewport, &axes, &m);
+        assert!(
+            (layout.padded_region.y - 2.0).abs() < 1e-9,
+            "explicit padding_top must survive verbatim: {}",
+            layout.padded_region.y,
+        );
+        let bottom_inset = viewport.height - layout.padded_region.y - layout.padded_region.h;
+        assert!(
+            (bottom_inset - (base.bottom + titles.bottom)).abs() < 1e-9,
+            "the auto bottom inset ({bottom_inset}) must ship uncapped ({}), not \
+             throttled to share budget with the explicit top's extra",
+            base.bottom + titles.bottom,
+        );
+    }
+
+    /// As above, mirrored: an explicit BOTTOM side's doomed title extra must
+    /// not share the budget with the auto top side's tick correction.
+    #[test]
+    fn compute_layout_zeroes_an_explicit_bottoms_extra_before_the_cap() {
+        let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(6));
+        theme.padding.padding = 10.0;
+        theme.padding.padding_bottom = Some(2.0);
+        let viewport = Viewport {
+            width: 400.0,
+            height: 80.0,
+        };
+        let spec = minimal_chart_spec();
+        let base = base_padding_insets(&theme);
+        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let titles = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, Inset {
+            top: base.top + ticks.top,
+            ..base
+        });
+        let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
+        assert!(
+            ticks.top > 0.0 && ticks.top <= budget && titles.bottom > 0.0 && titles.top == 0.0,
+            "fixture must want a fitting top extra and a doomed bottom one: \
+             ticks.top={}, titles={titles:?}, budget={budget}",
+            ticks.top,
+        );
+        assert!(
+            ticks.top + titles.bottom > budget,
+            "fixture must exceed the budget, or the cap never fires",
+        );
+
+        let layout = auto_layout(&theme, viewport, &axes, &m);
+        let bottom_inset = viewport.height - layout.padded_region.y - layout.padded_region.h;
+        assert!(
+            (bottom_inset - 2.0).abs() < 1e-9,
+            "explicit padding_bottom must survive verbatim: {bottom_inset}",
+        );
+        assert!(
+            (layout.padded_region.y - (base.top + ticks.top)).abs() < 1e-9,
+            "the auto top inset ({}) must ship uncapped ({}), not throttled to \
+             share budget with the explicit bottom's extra",
+            layout.padded_region.y,
+            base.top + ticks.top,
         );
     }
 

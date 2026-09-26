@@ -6,16 +6,16 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-from ferrum._core import interpolate_accepted_values
+from ferrum._core import interpolate_accepted_values, mark_numeric_kwargs
 from ferrum._validate import (
+    coerce_finite_real,
     is_none_color_sentinel,
     is_real_number,
     validate_choice,
     validate_color_value,
-    validate_optional_choice,
+    validate_optional_vocabulary,
 )
 
 # Marks whose primary visual channel is stroke rather than fill.
@@ -55,17 +55,19 @@ def _stroke_dash_error(context: str, value: Any) -> str:
 def _dash_lengths(lengths: Any, *, context: str, original: Any) -> list[float]:
     """Return *lengths* as floats, refusing any that is not a finite, non-negative real number.
 
-    A length must satisfy :func:`ferrum._validate.is_real_number` (so never
-    ``bool`` or a numeric-looking string; numpy scalars are fine). The refusal
-    names *context* and *original*, the value the caller passed, via
+    A length must pass :func:`ferrum._validate.coerce_finite_real` (so never
+    ``bool``, a numeric-looking string, or a value a float cannot hold; numpy
+    scalars and ``Decimal`` are fine) and be non-negative. The refusal names
+    *context* and *original*, the value the caller passed, via
     :func:`_stroke_dash_error`.
     """
     out = []
     for item in lengths:
-        if not is_real_number(item):
-            raise ValueError(_stroke_dash_error(context, original))
-        fv = float(item)
-        if not math.isfinite(fv) or fv < 0:
+        try:
+            fv = float(coerce_finite_real(context, item, required=True))
+        except ValueError as exc:
+            raise ValueError(_stroke_dash_error(context, original)) from exc
+        if fv < 0:
             raise ValueError(_stroke_dash_error(context, original))
         out.append(fv)
     return out
@@ -230,6 +232,16 @@ MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
 }
 
 
+#: The style kwargs whose wire field is a number: the names Rust publishes
+#: (``MarkKwargsSpec``'s ``f64``/``usize`` fields) that some ``mark_*`` accepts.
+#: Each is stored as :func:`ferrum._validate.coerce_finite_real` returns it, so
+#: a numpy scalar or ``Decimal`` reaches the wire as a builtin number and a
+#: non-number or non-finite value refuses at the ``mark_*`` door.
+_NUMERIC_MARK_KWARGS: frozenset[str] = frozenset(mark_numeric_kwargs()) & frozenset().union(
+    *MARK_HONORED_KWARGS.values()
+)
+
+
 def mark_honors(mark_name: str, kwarg: str) -> bool:
     """Return ``True`` if ``mark_name`` honors the (already alias-resolved) *kwarg*.
 
@@ -392,6 +404,8 @@ class MarkBase:
                 # the user wrote the canonical ``stroke_dash=`` kwarg or
                 # either alias, so a named string works either way.
                 v = _normalize_stroke_dash(v, context=f"mark_{mark_name}: {k}")
+            elif canonical in _NUMERIC_MARK_KWARGS:
+                v = coerce_finite_real(f"mark_{mark_name}({k}=...)", v)
             resolved[canonical] = v
         for k in resolved:
             if not mark_honors(mark_name, k):
@@ -403,7 +417,7 @@ class MarkBase:
         if shape_val is not None and isinstance(shape_val, str):
             validate_choice(f"mark_{mark_name}", "shape", shape_val, _VALID_POINT_SHAPES)
         # interpolate= is refused at declaration, like every door that takes it.
-        validate_optional_choice(
+        validate_optional_vocabulary(
             f"mark_{mark_name}",
             "interpolate",
             resolved.get("interpolate"),

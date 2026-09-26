@@ -39,14 +39,14 @@
 //! gate wraps would happily accept it: the gate and the type it guards would
 //! silently disagree on what a valid dict looks like. No `ScaleSpec` field
 //! carries `#[serde(alias)]` today, and `no_scale_spec_field_carries_a_serde_alias`
-//! below pins that so the gap stays theoretical rather than a live
-//! over-refusal.
+//! below scans this module's source files to keep it that way.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde::{Deserialize, Serialize};
 
+use super::sort::{SortOp, SortOrder};
 use super::ScaleSpec;
 
 // ── Wire-key gate: schema-derived accepted-key sets (F-L04-07, batch-C task 4) ──
@@ -221,20 +221,18 @@ pub fn scale_temporal_type_tags() -> Vec<&'static str> {
     ScaleSpec::TEMPORAL_TAGS.to_vec()
 }
 
-/// The `sort`-field-object vocabulary (`#176`(11) + N3): keys `"op"` and
-/// `"order"`, each the accepted string spellings for that key, sourced from
-/// `render::scale_resolve::{sort_op_accepted_values,
-/// sort_order_accepted_values}` -- the same values
-/// `validate_sort_field_object`/`EncodingSpec::new` accept. Published on the
+/// The `sort`-field-object vocabulary: keys `"op"` and `"order"`, each the
+/// accepted string spellings for that key, sourced from
+/// [`SortOp::ACCEPTED`]/[`SortOrder::ACCEPTED`] -- the same values
+/// `parse_sort_field_object`/`EncodingSpec::new` accept. Published on the
 /// `scale_accepted_keys` precedent so Python's sort-accepting channels
 /// (`X`/`Y`/`Facet`/... and every other honored-`sort` door) validate
 /// against these instead of holding a second copy of the vocabulary.
 #[pyfunction]
 pub fn sort_accepted_vocabulary() -> std::collections::BTreeMap<&'static str, Vec<String>> {
-    use crate::render::scale_resolve::{sort_op_accepted_values, sort_order_accepted_values};
     std::collections::BTreeMap::from([
-        ("op", sort_op_accepted_values().iter().map(|s| s.to_string()).collect()),
-        ("order", sort_order_accepted_values().iter().map(|s| s.to_string()).collect()),
+        ("op", SortOp::ACCEPTED.iter().map(|s| s.to_string()).collect()),
+        ("order", SortOrder::ACCEPTED.iter().map(|s| s.to_string()).collect()),
     ])
 }
 
@@ -548,99 +546,62 @@ mod tests {
         }
     }
 
-    /// Every `#[serde(flatten)]`-embedded type name inside a source span
-    /// (e.g. `common: ContinuousScaleCommon,` under a `#[serde(flatten)]`
-    /// attribute) — derived from the real field declarations rather than
-    /// hand-listed, so a future flattened type is picked up automatically.
-    fn flattened_type_names(body: &str) -> Vec<String> {
-        const MARKER: &str = "#[serde(flatten)]";
-        let mut names = std::collections::BTreeSet::new();
-        let mut cursor = 0usize;
-        while let Some(rel) = body[cursor..].find(MARKER) {
-            let after_marker = cursor + rel + MARKER.len();
-            let tail = &body[after_marker..];
-            let colon = tail.find(':').expect("a #[serde(flatten)] field must have `name: Type`");
-            let ty_start = colon + 1;
-            let ty_end = tail[ty_start..]
-                .find(|c: char| c == ',' || c == '\n')
-                .map(|i| ty_start + i)
-                .unwrap_or(tail.len());
-            names.insert(tail[ty_start..ty_end].trim().to_string());
-            cursor = after_marker;
-        }
-        names.into_iter().collect()
+    // Kept as two constants so no line of this file pairs them itself.
+    const SERDE_ATTR: &str = "serde(";
+    const ALIAS_KEY: &str = "alias";
+
+    /// 1-based numbers of the non-comment lines in `text` carrying a serde
+    /// attribute with an `alias` key.
+    fn serde_alias_lines(text: &str) -> Vec<usize> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim_start().starts_with("//"))
+            .filter(|(_, line)| {
+                line.find(SERDE_ATTR).is_some_and(|at| line[at..].contains(ALIAS_KEY))
+            })
+            .map(|(i, _)| i + 1)
+            .collect()
     }
 
-    /// The full text of `struct {type_name} { ... }`'s body in `source`,
-    /// found by brace-depth counting from the struct's opening `{` (every
-    /// `{`/`}` pair inside this crate's doc-comment JSON examples closes on
-    /// the same line it opens on, so naive depth counting does not
-    /// mis-close early on them).
-    fn struct_body<'a>(source: &'a str, type_name: &str) -> &'a str {
-        let needle = format!("struct {type_name} {{");
-        let start = source
-            .find(&needle)
-            .unwrap_or_else(|| panic!("definition of struct {type_name} not found"));
-        let body_start = start + needle.len() - 1;
-        let mut depth = 0i32;
-        for (i, c) in source[body_start..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &source[body_start..body_start + i + 1];
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("struct {type_name}'s opening brace never closes");
-    }
-
-    /// Whether `text` contains a `#[serde(alias = ...)]`-shaped attribute
-    /// key, tolerant of `alias="x"`/`alias  =  "x"` spacing (not just a
-    /// fixed `"alias ="` substring, which an unspaced spelling — this crate
-    /// is not rustfmt-clean, so one could land — would slip past) and not
-    /// fooled by an unrelated identifier merely prefixed with `alias`
-    /// (e.g. `alias_name`, whose next non-whitespace character is `_`, not
-    /// `=`).
-    fn contains_alias_attribute(text: &str) -> bool {
-        text.match_indices("alias").any(|(idx, _)| {
-            text[idx + "alias".len()..].trim_start().starts_with('=')
-        })
+    #[test]
+    fn serde_alias_rule_flags_a_synthetic_attribute() {
+        let synthetic = format!(
+            "    /// #[{SERDE_ATTR}{ALIAS_KEY})] in a doc\n    #[{SERDE_ATTR}{ALIAS_KEY} = \"lo\")]\n    pub low: f64,\n"
+        );
+        assert_eq!(serde_alias_lines(&synthetic), vec![2]);
     }
 
     /// The gate's serde-alias blind spot (this file's module doc) stays
-    /// theoretical: no field of `ScaleSpec` itself, nor of any type
-    /// `#[serde(flatten)]`-embedded into it (`ContinuousScaleCommon` today,
-    /// derived rather than hand-listed so a future flattened type is
-    /// covered automatically), carries `#[serde(alias = ...)]`. Reads the
-    /// real source file rather than re-deriving the field list by hand, so
-    /// a future field growing an alias fails this test the moment it
-    /// lands, not only when someone remembers to check.
+    /// theoretical: no source file of this module, where `ScaleSpec` and the
+    /// `ContinuousScaleCommon` it flattens are declared, carries a
+    /// `#[serde(alias = ...)]` attribute.
     #[test]
     fn no_scale_spec_field_carries_a_serde_alias() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/spec/encoding/mod.rs");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let start = source.find("pub enum ScaleSpec {").expect("ScaleSpec enum definition");
-        let end = source[start..]
-            .find("\nimpl ScaleSpec {")
-            .map(|i| start + i)
-            .expect("ScaleSpec impl block");
-        let enum_body = &source[start..end];
-        assert!(
-            !contains_alias_attribute(enum_body),
-            "a ScaleSpec field carries #[serde(alias = ...)] — see this file's module doc for the gate blind spot that creates"
-        );
-        for type_name in flattened_type_names(enum_body) {
-            let body = struct_body(&source, &type_name);
-            assert!(
-                !contains_alias_attribute(body),
-                "{type_name} (flattened into ScaleSpec) carries #[serde(alias = ...)] — see this file's module doc for the gate blind spot that creates"
-            );
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/spec/encoding");
+        let mut scanned = Vec::new();
+        let mut hits = Vec::new();
+        for entry in
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                hits.extend(
+                    serde_alias_lines(&text)
+                        .into_iter()
+                        .map(|n| format!("{}:{n}", path.display())),
+                );
+                scanned.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
         }
+        assert!(
+            scanned.iter().any(|f| f == "mod.rs"),
+            "the scan must reach ScaleSpec's file: {scanned:?}"
+        );
+        assert!(
+            hits.is_empty(),
+            "serde alias attributes the scale-key gate cannot see: {hits:?}"
+        );
     }
 
     /// Drift guard: `accepted_keys_for_scale_type`'s hand-maintained set must

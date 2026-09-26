@@ -268,14 +268,17 @@ pub(in crate::render) fn build_axis_scale(
                     e => e,
                 })
             } else {
-                let (lo, hi) = column_extent(located.batch, &enc.field)?;
-                match paired_enc.and_then(|p| locate_field(&p.field, primary_batch, transform_outputs).map(|l| (l, p))) {
-                    Some((l, p)) => {
-                        let (plo, phi) = column_extent(l.batch, &p.field)?;
-                        Ok((lo.min(plo), hi.max(phi)))
-                    }
-                    None => Ok((lo, hi)),
+                let (mut lo, mut hi) = column_extent(located.batch, &enc.field)?;
+                if let Some((l, p)) = paired_enc.and_then(|p| locate_field(&p.field, primary_batch, transform_outputs).map(|l| (l, p))) {
+                    let (plo, phi) = column_extent(l.batch, &p.field)?;
+                    (lo, hi) = (lo.min(plo), hi.max(phi));
                 }
+                // No value in either column: the same `(0, 1)` fallback the
+                // layered union and the auto path take.
+                if !lo.is_finite() || !hi.is_finite() {
+                    return Ok((0.0, 1.0));
+                }
+                Ok((lo, hi))
             }
         };
         return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, &data_extent, warnings);
@@ -353,7 +356,7 @@ pub(in crate::render) fn build_axis_scale(
                 y_field: positional_fields.y,
                 coord_flipped,
             };
-            apply_sort_to_domain(&mut domain, enc.sort.as_ref(), &sort_ctx, warnings);
+            apply_sort_to_domain(&mut domain, enc.sort.as_ref(), &sort_ctx, warnings)?;
             // An auto-inferred categorical axis has no user padding to honor:
             // the unpadded band model, which reduces to the pre-F-L04-03
             // symmetric model bit-exactly (see `crate::scale::discrete`).
@@ -552,7 +555,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             // Extract numeric pixel range from the typed polymorphic `range`.
             // String values (color ranges) are handled by `build_color_scale` —
             // fall back to the pixel-range default when the range has no numbers.
@@ -594,7 +597,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             // d3's `padding` is a shorthand that sets BOTH inner and outer;
             // an explicit `padding_inner`/`padding_outer` overrides its side.
             let layout = DiscreteLayout::band(
@@ -614,7 +617,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
             // PointScale(reverse=True) reverses the resolved domain order (GH #65).
             // Domain reversal — not a pixel-range flip — so axis tick labels
             // (domain-order via tick_labels/uniform_center) and explicit-range band
@@ -876,16 +879,22 @@ fn resolve_continuous_domain_and_range(
 
 /// The data extent of `field` in `batch`, refused in the scale's voice: what
 /// an explicit continuous scale stating no `domain` reads per column on an
-/// unlayered spec.
+/// unlayered spec. A column with no non-null value is the empty extent
+/// `(inf, -inf)` whatever its dtype (an integer column's min/max fold would
+/// otherwise return its type's `MAX`/`MIN` seeds).
 fn column_extent(batch: &RecordBatch, field: &str) -> Result<(f64, f64), RenderError> {
     let col = batch
         .column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+    let extent = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
         field: field.to_string(),
         dtype: format!("{:?}", col.data_type()),
         context: Some("scale"),
-    })
+    })?;
+    if col.null_count() == col.len() {
+        return Ok((f64::INFINITY, f64::NEG_INFINITY));
+    }
+    Ok(extent)
 }
 
 /// Domain-swap sugar for `ContinuousScaleCommon::reverse` (F-L04-07, spec
@@ -2670,6 +2679,38 @@ mod tests {
         let paired = EncodingSpec { field: "w".into(), type_: None, ..Default::default() };
         let scale = resolve_y(&schema_batch, &linear_y("v", false, true), Some(&paired), None);
         assert_eq!(scale.data_domain(), Some((40.0, 1.0)));
+    }
+
+    /// An unlayered caller scale over columns with no value resolves the
+    /// `(0, 1)` fallback, never an infinite or type-seed domain: an all-null
+    /// Float64 `v`, the same with an all-null paired `w`, and an all-null
+    /// Int64 `v`.
+    #[test]
+    fn unlayered_domainless_scale_over_all_null_columns_falls_back_to_unit_domain() {
+        use crate::spec::encoding::EncodingSpec;
+        use arrow::array::{ArrayRef, Float64Array, Int64Array};
+        use arrow::datatypes::{Field, Schema};
+        use std::sync::Arc;
+        let batch_of = |cols: Vec<(&str, ArrayRef)>| {
+            let fields: Vec<Field> =
+                cols.iter().map(|(n, a)| Field::new(*n, a.data_type().clone(), true)).collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), cols.into_iter().map(|(_, a)| a).collect())
+                .unwrap()
+        };
+        let null_f64 = || -> ArrayRef { Arc::new(Float64Array::from(vec![None, None])) };
+        let paired = EncodingSpec { field: "w".into(), type_: None, ..Default::default() };
+        let enc = linear_y("v", false, false);
+
+        let flat = resolve_y(&batch_of(vec![("v", null_f64())]), &enc, None, None);
+        assert_eq!(flat.data_domain(), Some((0.0, 1.0)));
+
+        let with_pair = batch_of(vec![("v", null_f64()), ("w", null_f64())]);
+        let paired_scale = resolve_y(&with_pair, &enc, Some(&paired), None);
+        assert_eq!(paired_scale.data_domain(), Some((0.0, 1.0)));
+
+        let null_i64: ArrayRef = Arc::new(Int64Array::from(vec![None, None]));
+        let int_scale = resolve_y(&batch_of(vec![("v", null_i64)]), &enc, None, None);
+        assert_eq!(int_scale.data_domain(), Some((0.0, 1.0)));
     }
 
     /// One row, `v = 5`, under a caller scale with `zero: true`: the layered

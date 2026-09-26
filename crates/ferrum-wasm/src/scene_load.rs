@@ -53,7 +53,7 @@ pub(crate) fn color_to_linear(c: &Color, opacity: f64) -> [f32; 4] {
 ///   + stroke_opacity(1) + stroke_dash(1) + angle(1)
 ///
 /// `stroke_dash` is stored as an f32 palette index for Pod compatibility,
-/// packed by `stroke_dash_index` below (which reads
+/// packed by `ferrum_scene::stroke_dash_index` (which reads
 /// `ferrum_scene::DASH_PALETTE`, the same table the SVG path resolves); the
 /// vertex shader casts it to a uint index, clamped to the palette's range.
 ///
@@ -1692,7 +1692,7 @@ fn collect_nodes(
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
-                    stroke_dash: stroke_dash_index(&style.stroke_dash),
+                    stroke_dash: stroke_dash_index(style.stroke_dash.as_deref()) as f32,
                     angle: style.angle as f32,
                 });
             }
@@ -1713,7 +1713,7 @@ fn collect_nodes(
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
-                    stroke_dash: stroke_dash_index(&style.stroke_dash),
+                    stroke_dash: stroke_dash_index(style.stroke_dash.as_deref()) as f32,
                     angle: style.angle as f32,
                 });
             }
@@ -2086,16 +2086,6 @@ fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     }
 }
 
-/// Map a `FillStroke.stroke_dash` pattern vector to the palette index the
-/// GPU instance fields and shaders read.
-///
-/// Reads [`ferrum_scene::stroke_dash_index`] (the single canonical source, an
-/// exact-value match against `DASH_PALETTE`) so this direction cannot drift
-/// from the SVG path's `resolve_stroke_dash` or from `pack_instances`'s copy.
-pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    ferrum_scene::stroke_dash_index(dash) as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2433,44 +2423,6 @@ mod tests {
         assert!((back.stroke_opacity - 0.4).abs() < 1e-6);
         assert!((back.stroke_dash - 1.0).abs() < 1e-6);
         assert!((back.angle - 30.0).abs() < 1e-6);
-    }
-
-    // ── stroke_dash_index helper ──────────────────────────────────────
-
-    #[test]
-    fn stroke_dash_index_solid_on_none() {
-        assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn stroke_dash_index_solid_on_empty_vec() {
-        assert!((stroke_dash_index(&Some(vec![])) - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn stroke_dash_index_dashed() {
-        // "6,3" → index 1
-        assert!((stroke_dash_index(&Some(vec![6.0, 3.0])) - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn stroke_dash_index_dotted() {
-        // "2,3" → index 2
-        assert!((stroke_dash_index(&Some(vec![2.0, 3.0])) - 2.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn stroke_dash_index_dash_dot() {
-        // "6,3,2,3" → index 3
-        assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
-    }
-
-    /// A pattern outside the palette maps to solid -- the fallback's actual
-    /// scope, non-palette input only (every palette entry itself round-trips
-    /// to its own index).
-    #[test]
-    fn stroke_dash_index_nonpalette_pattern_gives_solid() {
-        assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
     }
 
     // ── Shader dash-period table vs. the ferrum_scene::DASH_PALETTE ─────
@@ -8192,28 +8144,6 @@ mod bug_hunt_tests {
             result,
             [0.0, 0.0, 0.0, 0.0],
             "None color must produce fully transparent [0,0,0,0]"
-        );
-    }
-
-    // ── stroke_dash_index: float edge values ───────────────────────────
-
-    #[test]
-    fn bug_hunt_stroke_dash_index_non_integer_floats() {
-        // Non-integer-valued floats (e.g. 6.5, 3.5) should not match "6,3".
-        let result = stroke_dash_index(&Some(vec![6.5, 3.5]));
-        assert!(
-            (result - 0.0).abs() < 1e-6,
-            "non-integer pattern must fall back to solid (0.0); got {result}"
-        );
-    }
-
-    #[test]
-    fn bug_hunt_stroke_dash_index_single_element_vec() {
-        // Single-element vec must not match any palette entry.
-        let result = stroke_dash_index(&Some(vec![6.0]));
-        assert!(
-            (result - 0.0).abs() < 1e-6,
-            "single-element vec must fall back to solid; got {result}"
         );
     }
 

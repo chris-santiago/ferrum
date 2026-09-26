@@ -19,14 +19,13 @@ when               — ``fm.when(sel).then(v_if).otherwise(v_else)`` conditional
 
 from __future__ import annotations
 
-import math
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
-from ferrum._validate import is_none_color_sentinel, is_real_number
+from ferrum._validate import coerce_finite_real, is_none_color_sentinel, is_real_number
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
@@ -966,14 +965,15 @@ def _literal_numeric_only(v: Any, *, channel: str) -> dict:
 
     A string is refused by channel name rather than reaching the color parser
     (a ``kind=color`` value would repaint the fill whatever the declared
-    channel). A number is :func:`ferrum._validate.is_real_number` (never
-    ``bool``), and ``nan``/``inf`` are refused.
+    channel). A number is what :func:`ferrum._validate.coerce_finite_real`
+    accepts (never ``bool``), so ``nan``/``inf`` and a value a float cannot
+    hold are refused, in the conditional-literal refusal shape.
     """
-    if is_real_number(v):
-        fv = float(v)
-        if math.isfinite(fv):
-            return {"kind": channel, "value": fv}
-    raise _conditional_literal_type_error(v, channel=channel, needs="a number")
+    try:
+        fv = float(coerce_finite_real(channel, v, required=True))
+    except ValueError as exc:
+        raise _conditional_literal_type_error(v, channel=channel, needs="a number") from exc
+    return {"kind": channel, "value": fv}
 
 
 def _literal_stroke_dash(v: Any, *, channel: str) -> dict:

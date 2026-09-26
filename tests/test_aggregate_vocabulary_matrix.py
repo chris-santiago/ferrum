@@ -212,6 +212,12 @@ def _validate_choice_text(door: str, param: str, choices, bad: str) -> str:
     return f"{door}: {param} must be one of {sorted(str(c) for c in choices)}; got {bad!r}"
 
 
+def _vocabulary_refusal_text(door: str, param: str, accepted: list[str], bad: object) -> str:
+    """The Rust vocabulary refusal shape, ``{door}: unknown {param} '{bad}';
+    expected a|b|c``, in the order Rust publishes *accepted*."""
+    return f"{door}: unknown {param} '{bad}'; expected {'|'.join(accepted)}"
+
+
 # ---------------------------------------------------------------------------
 # Bin(agg=)
 # ---------------------------------------------------------------------------
@@ -658,7 +664,7 @@ def test_bogus_or_nonstring_interpolate_refused_at_declaration_on_every_door(doo
     """Non-member strings and non-strings both refuse, at declaration, on
     every door -- no isinstance(str) guard skips a non-string value into a
     Rust serde message that never names the door the caller called."""
-    expected = _validate_choice_text(door, "interpolate", INTERPOLATE_VALUES, bad)
+    expected = _vocabulary_refusal_text(door, "interpolate", interpolate_accepted_values(), bad)
     with pytest.raises(ValueError) as exc:
         _interpolate_door_chart(door, bad)
     assert str(exc.value) == expected

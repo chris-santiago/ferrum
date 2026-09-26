@@ -37,8 +37,8 @@ from ferrum import value
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _LINETYPE_MAP
 
-import _pixel_capture as pc
-from _conditional_oracle import (
+from tests import _pixel_capture as pc
+from tests._conditional_oracle import (
     assert_radius_close,
     assert_rgb_close,
     classify_ring,

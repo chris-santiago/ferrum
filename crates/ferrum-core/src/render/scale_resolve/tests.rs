@@ -6713,7 +6713,7 @@ fn charts_without_appearance_channels_resolve_no_appearance_scales() {
 /// linetypes; see `STROKE_DASH_LEGACY_SLOTS`).
 #[test]
 fn categorical_stroke_dash_maps_onto_the_dash_palette() {
-    use crate::render::pack_instances::stroke_dash_index;
+    use ferrum_scene::stroke_dash_index;
     let batch = appearance_batch();
     let spec = appearance_spec(serde_json::json!({
         "stroke_dash": {"field": "level", "type": "nominal"},
@@ -6735,9 +6735,9 @@ fn categorical_stroke_dash_maps_onto_the_dash_palette() {
 
     // Packed-index parity (§7): each resolved pattern round-trips to the palette
     // index the GPU path packs, so SVG and WASM draw the same dash.
-    assert!((stroke_dash_index(&dash.dash_for("low")) - 0.0).abs() < 1e-6);
-    assert!((stroke_dash_index(&dash.dash_for("mid")) - 1.0).abs() < 1e-6);
-    assert!((stroke_dash_index(&dash.dash_for("high")) - 2.0).abs() < 1e-6);
+    assert_eq!(stroke_dash_index(dash.dash_for("low").as_deref()), 0);
+    assert_eq!(stroke_dash_index(dash.dash_for("mid").as_deref()), 1);
+    assert_eq!(stroke_dash_index(dash.dash_for("high").as_deref()), 2);
 }
 
 /// The numeric contract is untouched (§6): a quantitative `stroke_dash` column

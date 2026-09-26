@@ -573,7 +573,7 @@ pub enum RenderError {
     /// categorical scale's fixed legacy dash-index range
     /// (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`: solid plus the three
     /// patterns that predate the named-linetype append — the full
-    /// [`crate::render::draw::DASH_PALETTE`] table is longer, but the
+    /// [`ferrum_scene::DASH_PALETTE`] table is longer, but the
     /// categorical scale never cycles past its own legacy slots), not a
     /// value a scale can redeclare, so ANY explicit range refuses outright
     /// rather than being
@@ -599,8 +599,8 @@ pub enum RenderError {
     LayerTransformsUnsupported { layer: usize, count: usize },
     /// A sort-field object (`{"field": ..., "op": ..., "order": ...}`)
     /// reaches render without a string `"field"`, or naming an `"op"`/
-    /// `"order"` outside [`scale_resolve::sort_op_accepted_values`]/
-    /// [`scale_resolve::sort_order_accepted_values`]. Python's
+    /// `"order"` outside [`crate::spec::encoding::sort::SortOp::ACCEPTED`]/
+    /// [`crate::spec::encoding::sort::SortOrder::ACCEPTED`]. Python's
     /// construction-time gate (`EncodingSpec.__new__`, every sort-accepting
     /// channel) refuses this shape before a spec can exist; this refuses a
     /// hand-built spec that bypasses it — `ChartSpec.from_json`,
@@ -610,9 +610,10 @@ pub enum RenderError {
     /// reach render without passing through that gate. `location` names
     /// where the sort sits: a chart channel's wire name (`"x"`, `"color"`,
     /// ...), a layer channel (`"layers[{i}].{channel}"`), or a facet
-    /// dimension (`"facet.sort"`/`"facet.row_sort"`). `reason` is
-    /// [`scale_resolve::validate_sort_field_object`]'s own refusal text —
-    /// the SAME validator `EncodingSpec::new` calls, so a shape refused at
+    /// dimension (`"facet.sort"`/`"facet.row_sort"`); a caller that resolves
+    /// a sort without that walk gets the category field it was sorting.
+    /// `reason` is [`crate::spec::encoding::sort::parse_sort_field_object`]'s
+    /// own refusal text — the SAME parser `EncodingSpec::new` calls, so a shape refused at
     /// construction and a shape refused here can never disagree. `value` is
     /// the malformed value, verbatim. Mirrors [`Self::LayerTransformsUnsupported`]:
     /// an accepted-but-inert wire shape refuses rather than being silently
@@ -1028,11 +1029,10 @@ impl std::fmt::Display for RenderError {
                 f,
                 "{channel} axis scale-domain config: {reason}"
             ),
-            Self::UnknownInterpolate { value } => write!(
-                f,
-                "interpolate='{value}' is not supported; accepted values are: {}",
-                marks::curve::Interpolate::accepted_values()
-            ),
+            Self::UnknownInterpolate { value } => {
+                use crate::transform::vocabulary::Vocabulary;
+                f.write_str(&marks::curve::Interpolate::refusal("interpolate", value))
+            }
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
             Self::MarkRequiresCoord { mark, required } =>
@@ -1252,7 +1252,7 @@ pub enum RenderWarning {
     /// A categorical `stroke_dash` channel named more categories than the dash
     /// index space has slots (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`: solid
     /// plus the three patterns that predate the named-linetype append, not
-    /// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE)'s full length), so
+    /// [`DASH_PALETTE`](ferrum_scene::DASH_PALETTE)'s full length), so
     /// patterns were recycled and two categories draw with the same dash. Mirrors
     /// [`ShapePaletteOverflowed`](Self::ShapePaletteOverflowed) — the palette is
     /// finite, so the degradation stays (spec §4.3) but is never silent.

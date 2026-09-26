@@ -246,8 +246,92 @@ pub(crate) fn mark_kwargs_fields() -> Vec<String> {
     mark_kwargs_field_names().iter().map(|f| f.to_string()).collect()
 }
 
+/// Every numeric (`f64`/`usize`) `MarkKwargsSpec` field, in declaration
+/// order. Derived from the struct, not listed: a field is numeric exactly
+/// when its derived `Deserialize` accepts a bare number under its key, which
+/// every `Option<f64>`/`Option<usize>` field does and every string, bool,
+/// pattern-list or enum field refuses.
+pub(crate) fn mark_numeric_kwarg_names() -> Vec<&'static str> {
+    mark_kwargs_field_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            serde_json::from_value::<MarkKwargsSpec>(serde_json::json!({ *name: 1 })).is_ok()
+        })
+        .collect()
+}
+
+/// `ferrum._core.mark_numeric_kwargs()`: [`mark_numeric_kwarg_names`], so
+/// Python's mark-kwarg funnel coerces exactly the struct's numeric fields
+/// instead of hand-listing them. Registered in `lib.rs`, typed in
+/// `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn mark_numeric_kwargs() -> Vec<&'static str> {
+    mark_numeric_kwarg_names()
+}
+
 #[cfg(test)]
 mod tests {
+    /// The numeric set is exactly the struct's `Option<f64>`/`Option<usize>`
+    /// fields. The exhaustive destructure makes a new field fail to compile
+    /// here until it is classified below.
+    #[test]
+    fn mark_numeric_kwarg_names_are_the_structs_numeric_fields() {
+        let super::MarkKwargsSpec {
+            size: _,
+            stroke: _,
+            fill: _,
+            opacity: _,
+            corner_radius: _,
+            stroke_width: _,
+            stroke_dash: _,
+            font_size: _,
+            font_weight: _,
+            align: _,
+            baseline: _,
+            dx: _,
+            dy: _,
+            angle: _,
+            detail: _,
+            cmap: _,
+            interpolate: _,
+            stroke_cap: _,
+            stroke_join: _,
+            filled: _,
+            shape: _,
+            limit: _,
+            band_size: _,
+            line: _,
+            borders: _,
+            leader_line: _,
+            width: _,
+            height: _,
+            clip: _,
+            zero: _,
+            arrow: _,
+            arrow_size: _,
+            value_axis: _,
+        } = super::MarkKwargsSpec::default();
+        assert_eq!(
+            super::mark_numeric_kwarg_names(),
+            vec![
+                "size",
+                "opacity",
+                "corner_radius",
+                "stroke_width",
+                "font_size",
+                "dx",
+                "dy",
+                "angle",
+                "limit",
+                "band_size",
+                "width",
+                "height",
+                "arrow_size",
+            ]
+        );
+    }
+
     /// Every traced name is a real field: a wrong-typed value under it is
     /// refused, where an unknown key would be ignored (the struct does not
     /// deny unknown fields). The reverse holds by construction: the list is

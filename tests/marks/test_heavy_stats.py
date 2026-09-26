@@ -8,6 +8,7 @@ Each mark gets:
 """
 
 import re
+import sys
 import warnings
 
 import polars as pl
@@ -554,6 +555,34 @@ def test_violin_hue_inner_warns_once_per_render(inner):
     assert len(matching2) == 1, (
         f"expected exactly 1 warning on the second render, got {len(matching2)}"
     )
+
+
+@pytest.mark.parametrize("resolve", ["to_json", "to_svg"])
+def test_violin_hue_inner_warning_names_the_callers_line(resolve):
+    """The warning fires once on every resolution of the chart -- ``to_json()``
+    as well as a render -- and its frame is the caller's own line, not a
+    line inside ferrum, however deep the resolution runs."""
+    chart = fe.Chart(_violin_hue_df()).mark_violin(inner="box").encode(x="g", y="v", color="h")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1  # the next line resolves the chart
+        getattr(chart, resolve)()
+    matching = [w for w in record if str(w.message) == _VIOLIN_HUE_INNER_WARNING]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+@pytest.mark.parametrize("kwarg", ["door", "door_recourse", "_door", "_door_recourse", "_voice"])
+def test_violin_warning_voice_is_not_a_mark_kwarg(kwarg):
+    """The warning's voice is not a ``mark_violin`` knob: any spelling of it is
+    refused exactly as an unknown kwarg is, instead of rewriting the message."""
+
+    def refusal(name: str) -> str:
+        chart = fe.Chart(_violin_hue_df()).mark_violin(**{name: "spoof"})
+        with pytest.raises(TypeError) as exc_info:
+            chart.encode(x="g", y="v", color="h").to_json()
+        return str(exc_info.value)
+
+    assert refusal(kwarg) == refusal("not_a_kwarg").replace("not_a_kwarg", kwarg)
 
 
 def test_violin_no_hue_inner_never_warns(df_xy):

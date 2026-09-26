@@ -20,7 +20,7 @@
 //! - `HAS_KEYS (0x4)`: length-prefixed string table, one entry per instance
 //!   (spec §4.3 / GH #93 — object-constancy keys for keyed transitions)
 
-use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
+use ferrum_scene::{stroke_dash_index, Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
 // ── Wire-format stride constants ────────────────────────────────────────────
 //
@@ -277,7 +277,7 @@ pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_f32(&mut buf, style.stroke_width as f32);
             push_f32(&mut buf, style.opacity as f32);
             push_f32(&mut buf, style.stroke_opacity as f32);
-            push_f32(&mut buf, stroke_dash_index(&style.stroke_dash));
+            push_f32(&mut buf, stroke_dash_index(style.stroke_dash.as_deref()) as f32);
             push_f32(&mut buf, style.angle as f32);
         }
     }
@@ -317,7 +317,7 @@ pub fn pack_rect_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_f32(&mut buf, style.stroke_width as f32);
             push_f32(&mut buf, style.opacity as f32);
             push_f32(&mut buf, style.stroke_opacity as f32);
-            push_f32(&mut buf, stroke_dash_index(&style.stroke_dash));
+            push_f32(&mut buf, stroke_dash_index(style.stroke_dash.as_deref()) as f32);
             push_f32(&mut buf, style.angle as f32);
         }
     }
@@ -355,25 +355,6 @@ fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
             push_f32(buf, 0.0);
         }
     }
-}
-
-/// Map a stroke-dash pattern to the palette index used by the WASM renderer.
-///
-/// Reads [`ferrum_scene::stroke_dash_index`] (the single canonical source, an
-/// exact-value match) so this direction (pattern→index) cannot drift from
-/// `resolve_stroke_dash` (index→pattern) or from the WASM scene-loader's copy.
-///
-/// **Behavior change**: this packed (>=1000-mark) path previously matched by
-/// truncating each pattern component to `u64` before comparing, so a
-/// non-integer-valued pattern like `[6.5, 3.5]` truncated to `[6, 3]` and
-/// matched index 1. The canonical exact-value match maps it to solid
-/// instead, unifying this path with `scene_load.rs`'s JSON-instance path,
-/// which already matched exactly.
-///
-/// Exposed as `pub(crate)` so the `draw` module's round-trip tests can call it
-/// without a `#[cfg(test)]` re-export.
-pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    ferrum_scene::stroke_dash_index(dash) as f32
 }
 
 #[cfg(test)]
@@ -779,28 +760,6 @@ mod tests {
             corner_radius: 0.0,
         }];
         assert_eq!(pack_rect_batch(&nodes).len(), RECT_STRIDE);
-    }
-
-    #[test]
-    fn stroke_dash_index_maps_correctly() {
-        assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6);
-        assert!((stroke_dash_index(&Some(vec![])) - 0.0).abs() < 1e-6);
-        assert!((stroke_dash_index(&Some(vec![6.0, 3.0])) - 1.0).abs() < 1e-6);
-        assert!((stroke_dash_index(&Some(vec![2.0, 3.0])) - 2.0).abs() < 1e-6);
-        assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
-        assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
-    }
-
-    /// This packed (>=1000-mark) path used to match a non-integer-valued pattern by
-    /// truncating each component to `u64` (dropping the fraction), so
-    /// `[6.5, 3.5]` truncated to `[6, 3]` and matched index 1 (dashed).
-    /// Reading `ferrum_scene::stroke_dash_index` now matches by exact value
-    /// (within `1e-6`), the same rule `scene_load.rs`'s JSON-instance path
-    /// already used, so a non-integer pattern now maps to solid on BOTH
-    /// interactive paths instead of only one.
-    #[test]
-    fn stroke_dash_index_non_integer_valued_pattern_maps_to_solid_not_truncated() {
-        assert!((stroke_dash_index(&Some(vec![6.5, 3.5])) - 0.0).abs() < 1e-6);
     }
 
     // ── B1/B3: opacity semantics regression tests ─────────────────────

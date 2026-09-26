@@ -258,19 +258,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Polygon,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Polygon, nodes, data_indices, &meta)
 }
 
 #[cfg(test)]

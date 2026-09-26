@@ -275,18 +275,7 @@ fn finalize_rule_build(
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-    MarkBuildResult::new(
-        MarkBatchKind::Rule,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Rule, nodes, data_indices, meta)
 }
 
 /// Emit one `Line` node per row whose `endpoints` resolve, keeping node and

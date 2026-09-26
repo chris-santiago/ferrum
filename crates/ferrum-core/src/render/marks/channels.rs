@@ -38,7 +38,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, DrawCtx};
-use ferrum_scene::{resolve_stroke_dash, STROKE_DASH_LEGACY_SLOTS};
+use ferrum_scene::numeric_index_dash;
 use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
 use crate::render::RenderError;
 use crate::spec::coord::PolarThetaChannel;
@@ -252,16 +252,9 @@ pub(crate) fn stroke_dash_column_loader(ctx: &DrawCtx) -> DashColumns {
 /// mean "no dasharray" per that method's own contract, so a resolved
 /// (possibly solid) categorical hit is assigned as-is, never re-rescued by
 /// `base` — `base` only stands in for a row with NO categorical value at all
-/// (a null category). Numeric rows keep the pre-T12 contract byte-identically:
-/// a finite index rounded and clamped to the legacy 4-slot span
-/// (`ferrum_scene::STROKE_DASH_LEGACY_SLOTS`, solid plus the three patterns
-/// that predate the named-linetype append) before `resolve_stroke_dash`,
-/// falling back to `base` for a null/non-finite value. This clamp is scoped
-/// to this one caller, not to `resolve_stroke_dash` itself: a raw numeric
-/// column reading a literal palette index must keep landing on the same
-/// pattern it always did, even though the palette now has entries past
-/// index 3 for other callers (a named linetype's literal pattern, resolved
-/// by `stroke_dash_index` for the GPU/interactive path).
+/// (a null category). Numeric rows read the value as a slot index through
+/// [`numeric_index_dash`] (which owns the index space's clamp), falling back
+/// to `base` for a null/non-finite value.
 pub(crate) fn resolve_row_stroke_dash(
     cols: &DashColumns,
     scale: Option<&StrokeDashScale>,
@@ -278,11 +271,7 @@ pub(crate) fn resolve_row_stroke_dash(
         .as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| v.is_finite())
-        .map(|v| {
-            let max_legacy_idx = (STROKE_DASH_LEGACY_SLOTS - 1) as i64;
-            (v.round() as i64).clamp(0, max_legacy_idx) as f64
-        })
-        .and_then(resolve_stroke_dash)
+        .and_then(numeric_index_dash)
         .or_else(|| base.map(<[f64]>::to_vec))
 }
 

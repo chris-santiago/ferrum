@@ -34,7 +34,7 @@ from ferrum._desugar import (
 )
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
-from ferrum._validate import coerce_finite_real, validate_choice, validate_positive_int
+from ferrum._validate import coerce_finite_real, coerce_positive_int, validate_choice
 from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
@@ -1002,8 +1002,8 @@ def _refuse_interval_args_on_non_aggregating_kind(kind: str, ci: Any, n_boot: An
             )
 
 
-def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
-    """Validate ``ci``/``n_boot`` and return the CI as a level in ``(0, 1)``.
+def _catplot_interval_args(ci: Any, n_boot: Any) -> tuple[float, int]:
+    """Validate ``ci``/``n_boot`` and return the CI as a level in ``(0, 1)`` and ``n_boot`` as an ``int``.
 
     ``ci`` is a PERCENT on catplot's public signature (``ci=95``) but a LEVEL
     on ``Summary`` (``ci=0.95``); this is the one site that converts between
@@ -1018,11 +1018,12 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
 
     Whether each is a number is decided by the shared predicates
     (:func:`ferrum._validate.coerce_finite_real`,
-    :func:`ferrum._validate.validate_positive_int`): ``bool`` is refused for
+    :func:`ferrum._validate.coerce_positive_int`): ``bool`` is refused for
     both (it subclasses ``int``, so ``n_boot=True`` would otherwise mean
     "1 resample" and ``ci=True`` "a 1 % interval"), and so is a numeric
     string (``ci="95"``). ``ci=1`` and ``n_boot=1`` stay accepted, as do
-    numpy scalars.
+    numpy scalars; ``n_boot`` is returned as the builtin ``int`` the shared
+    predicate coerces it to.
     """
     # Message shape follows this family's house form -- `func(param=value) is
     # not supported -- <why>. <alternative>` -- the same one
@@ -1038,14 +1039,14 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     if not 0.0 < ci_percent < 100.0:
         raise ValueError(_CI_REFUSAL.format(ci=ci))
     try:
-        validate_positive_int("catplot(n_boot=...)", n_boot, required=True)
+        n_boot_count = coerce_positive_int("catplot(n_boot=...)", n_boot, required=True)
     except ValueError as exc:
         raise ValueError(
             f"catplot(n_boot={n_boot!r}) is not supported -- n_boot is the bootstrap "
             "resample count and must be an integer >= 1 and at most 2**53. Pass n_boot=1000 (the default) "
             "or any positive count."
         ) from exc
-    return ci_percent / 100.0
+    return ci_percent / 100.0, n_boot_count
 
 
 # The short type codes (`Channel.option("type")`) whose scale is continuous
@@ -1786,7 +1787,7 @@ def catplot(
     validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
 
     if kind in _CATPLOT_AGGREGATING_KINDS:
-        ci_level = _catplot_ci_level(ci, n_boot)
+        ci_level, n_boot = _catplot_interval_args(ci, n_boot)
     else:
         _refuse_interval_args_on_non_aggregating_kind(kind, ci, n_boot)
         ci_level = None
@@ -2159,19 +2160,18 @@ def _catplot_build(
         else:
             chart = chart.mark_boxplot()
     elif kind == "violin":
-        # `_door` re-voices the hue-inner warning as catplot's own entry:
-        # catplot fixes `inner=` at its own default and never exposes it,
-        # so a message pointing at `mark_violin(inner=...)` would send the
-        # caller looking for a kwarg catplot does not have; `_door_recourse`
-        # gives that caller a working alternative instead.
-        violin_door = f"catplot(kind={kind!r})"
-        violin_door_recourse = '; use Chart.mark_violin(inner="none") to drop the inner mark'
         if position is not None:
-            chart = chart.mark_violin(
-                position=position, _door=violin_door, _door_recourse=violin_door_recourse
-            )
+            chart = chart.mark_violin(position=position)
         else:
-            chart = chart.mark_violin(_door=violin_door, _door_recourse=violin_door_recourse)
+            chart = chart.mark_violin()
+        # The hue-inner warning speaks as catplot's own entry: catplot fixes
+        # `inner=` at its own default and never exposes it, so a message
+        # pointing at `mark_violin(inner=...)` would send the caller looking
+        # for a kwarg catplot does not have; the recourse names one that works.
+        chart = chart._with_warning_voice(
+            f"catplot(kind={kind!r})",
+            '; use Chart.mark_violin(inner="none") to drop the inner mark',
+        )
     elif kind == "boxen":
         if position is not None:
             chart = chart.mark_boxen(position=position)
@@ -2198,7 +2198,7 @@ def _catplot_build(
             # under optimized runs.
             raise ValueError(
                 f"catplot(kind={kind!r}) requires a validated CI level; it is computed "
-                "by `catplot` via `_catplot_ci_level` for exactly the aggregating "
+                "by `catplot` via `_catplot_interval_args` for exactly the aggregating "
                 "kinds, so reaching here means the builder was called directly with "
                 "ci_level=None."
             )

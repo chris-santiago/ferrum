@@ -166,19 +166,8 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult::new(
-        MarkBatchKind::Rect,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        None,
-    ))
+    Ok(MarkBuildResult::populated(MarkBatchKind::Rect, nodes, data_indices, &meta))
 }
 
 fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
@@ -434,19 +423,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult::new(
-        MarkBatchKind::Rect,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        None,
-    ))
+    Ok(MarkBuildResult::populated(MarkBatchKind::Rect, nodes, data_indices, &meta))
 }
 
 fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
@@ -643,19 +621,8 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult::new(
-        MarkBatchKind::Rect,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        None,
-    ))
+    Ok(MarkBuildResult::populated(MarkBatchKind::Rect, nodes, data_indices, &meta))
 }
 
 #[cfg(test)]

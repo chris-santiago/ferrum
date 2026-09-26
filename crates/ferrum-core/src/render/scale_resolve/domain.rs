@@ -8,6 +8,7 @@ use arrow::record_batch::RecordBatch;
 use super::column_min_max_f64;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
+use crate::spec::encoding::sort::{parse_sort_field_object, SortOp, SortOrder};
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
 use crate::transform::core::FINAL_OUTPUT_KEY;
@@ -123,99 +124,6 @@ pub(in crate::render) fn explicit_ordinal_range(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortOp {
-    Sum,
-    Mean,
-    Max,
-    Min,
-    Count,
-    Median,
-}
-
-impl SortOp {
-    /// Every accepted `"op"` spelling, aliases included (`"average"` for
-    /// `Mean`), published as-is by [`sort_op_accepted_values`].
-    /// [`parse`](Self::parse) matches these same literals directly rather
-    /// than iterating this slice; `validate_sort_field_object_accepts_every_well_formed_shape`/
-    /// `sort_accepted_vocabulary_matches_validate_sort_field_object` are the
-    /// two-sided tests that keep the vocabulary `sort_accepted_vocabulary()`
-    /// publishes to Python from drifting apart from what `parse` actually
-    /// accepts.
-    const ACCEPTED: &'static [&'static str] =
-        &["sum", "mean", "average", "max", "min", "count", "median"];
-
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "sum" => Some(Self::Sum),
-            "mean" | "average" => Some(Self::Mean),
-            "max" => Some(Self::Max),
-            "min" => Some(Self::Min),
-            "count" => Some(Self::Count),
-            "median" => Some(Self::Median),
-            _ => None,
-        }
-    }
-
-    /// Reduce a category's per-row values (already filtered to non-null) to a
-    /// single ordering key. An empty slice yields `f64::NEG_INFINITY` so empty
-    /// categories sort to the bottom under ascending order (and to the top under
-    /// descending), which keeps them out of the visually-meaningful extremes.
-    fn aggregate(self, values: &[f64]) -> f64 {
-        if matches!(self, Self::Count) {
-            return values.len() as f64;
-        }
-        if values.is_empty() {
-            return f64::NEG_INFINITY;
-        }
-        match self {
-            Self::Sum => values.iter().sum(),
-            Self::Mean => values.iter().sum::<f64>() / values.len() as f64,
-            Self::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            Self::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
-            Self::Count => unreachable!("handled above"),
-            Self::Median => {
-                let mut sorted = values.to_vec();
-                sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = sorted.len();
-                if n % 2 == 1 {
-                    sorted[n / 2]
-                } else {
-                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-                }
-            }
-        }
-    }
-}
-
-/// Sort order for data-aware forms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortOrder {
-    Ascending,
-    Descending,
-}
-
-impl SortOrder {
-    /// Every accepted `"order"` spelling, published as-is by
-    /// [`sort_order_accepted_values`]. [`parse`](Self::parse) matches these
-    /// same two literals directly rather than iterating this slice (there
-    /// are only two, neither aliased, so a match arm is plainer than a
-    /// lookup); `validate_sort_field_object_accepts_every_well_formed_shape`/
-    /// `sort_accepted_vocabulary_matches_validate_sort_field_object` are the
-    /// two-sided tests that keep the two from drifting apart. Mirrors
-    /// [`SortOp::ACCEPTED`], which carries the identical relationship to its
-    /// own `parse`.
-    const ACCEPTED: &'static [&'static str] = &["ascending", "descending"];
-
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "ascending" => Some(Self::Ascending),
-            "descending" => Some(Self::Descending),
-            _ => None,
-        }
-    }
-}
-
 /// Data needed to resolve the *data-aware* sort forms (channel shorthand
 /// `"x"`/`"-x"`/`"y"`/`"-y"` and the sort-field object). The alphabetical and
 /// explicit-array forms ignore this context entirely.
@@ -267,16 +175,17 @@ pub(in crate::render) struct SortContext<'a> {
 ///   original relative order so no data disappears from the scale.
 /// - Absent — no-op (preserves insertion order).
 ///
-/// When a data-aware form references a missing field, an unsupported dtype, or
-/// an invalid `op`, the domain is left in insertion order and a
+/// When a data-aware form references a missing field or an unsupported dtype,
+/// the domain is left in insertion order and a
 /// [`RenderWarning::SortSpecIgnored`] is pushed onto `warnings` — never a silent
-/// no-op and never a panic.
+/// no-op and never a panic. A malformed sort-field object refuses with
+/// [`RenderError::SortSpecMalformed`].
 pub(in crate::render) fn apply_sort_to_domain(
     domain: &mut Vec<String>,
     sort: Option<&serde_json::Value>,
     ctx: &SortContext<'_>,
     warnings: &mut Vec<RenderWarning>,
-) {
+) -> Result<(), RenderError> {
     match sort {
         None => {}
         Some(serde_json::Value::String(s)) if s == "ascending" => {
@@ -318,7 +227,7 @@ pub(in crate::render) fn apply_sort_to_domain(
             *domain = reordered;
         }
         Some(serde_json::Value::Object(obj)) => {
-            apply_sort_field_object(domain, obj, ctx, warnings);
+            apply_sort_field_object(domain, obj, ctx, warnings)?;
         }
         Some(other) => {
             warnings.push(RenderWarning::SortSpecIgnored {
@@ -326,6 +235,7 @@ pub(in crate::render) fn apply_sort_to_domain(
             });
         }
     }
+    Ok(())
 }
 
 /// Resolve the channel-shorthand form (`"x"`/`"-x"`/`"y"`/`"-y"`). The domain is
@@ -385,89 +295,27 @@ fn apply_channel_shorthand_sort(
     sort_domain_by_aggregate(domain, value_field, SortOp::Sum, order, ctx, warnings);
 }
 
-/// Parse and validate a sort-field object's three optional keys
-/// (`"field"`, `"op"`, `"order"`) into their typed values, or the reason the
-/// shape does not conform. The single definition both
-/// [`validate_sort_field_object`] (construction-time: `EncodingSpec::new`,
-/// every sort-accepting Python channel) and [`apply_sort_field_object`]
-/// (render-time resolution) share, so a shape neither of them recognizes
-/// cannot exist by the time it reaches render -- there is no second copy of
-/// this vocabulary to drift from.
-///
-/// A well-formed object requires a string `"field"`; `"op"`, if present,
-/// must be one of [`SortOp::ACCEPTED`]; `"order"`, if present, must be
-/// `"ascending"` or `"descending"`. Both default per the Vega-Lite
-/// convention (`op` -> sum, `order` -> ascending).
-fn parse_sort_field_object(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(String, SortOp, SortOrder), String> {
-    let field = match obj.get("field") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => return Err(format!("sort \"field\" must be a string, got {other}")),
-        None => return Err("sort object missing string \"field\"".to_string()),
-    };
-    // `op` defaults to sum (Vega-Lite default). `count` ignores the field's
-    // values but still requires the category column.
-    let op = match obj.get("op") {
-        None => SortOp::Sum,
-        Some(serde_json::Value::String(s)) => {
-            SortOp::parse(s).ok_or_else(|| format!("unsupported sort op {s:?}"))?
-        }
-        Some(other) => return Err(format!("sort \"op\" must be a string, got {other}")),
-    };
-    let order = match obj.get("order") {
-        None => SortOrder::Ascending,
-        Some(serde_json::Value::String(s)) => {
-            SortOrder::parse(s).ok_or_else(|| format!("unsupported sort order {s:?}"))?
-        }
-        Some(other) => return Err(format!("sort \"order\" must be a string, got {other}")),
-    };
-    Ok((field, op, order))
-}
-
-/// Construction-time gate for a sort-field object, published for
-/// `EncodingSpec::new` and every sort-accepting Python channel to refuse a
-/// malformed object before a spec carrying one can exist. Delegates to
-/// [`parse_sort_field_object`] so accepted shapes can never drift from what
-/// [`apply_sort_field_object`] resolves at render.
-pub(crate) fn validate_sort_field_object(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    parse_sort_field_object(obj).map(|_| ())
-}
-
-/// The `"op"` and `"order"` string vocabularies the sort-field-object form
-/// accepts, published as `ferrum._core.sort_accepted_vocabulary()` (the
-/// `scale_accepted_keys` precedent) so Python's sort-accepting channels
-/// validate against these values instead of holding a second copy.
-pub(crate) fn sort_op_accepted_values() -> &'static [&'static str] {
-    SortOp::ACCEPTED
-}
-
-/// See [`sort_op_accepted_values`].
-pub(crate) fn sort_order_accepted_values() -> &'static [&'static str] {
-    SortOrder::ACCEPTED
-}
-
 /// Resolve the sort-field object form
 /// `{"field": ..., "op": ..., "order": ...}`.
 ///
-/// A malformed shape (missing/non-string `"field"`, an unrecognized `"op"`/
-/// `"order"`) is refused at construction (see [`validate_sort_field_object`])
-/// before a spec carrying one can reach render, so the warning this used to
-/// push for that case is unreachable and gone. A hand-built spec that still
-/// manages to carry one is left in insertion order rather than resurrecting
-/// that dead branch.
+/// A malformed shape refuses with [`RenderError::SortSpecMalformed`] naming
+/// the category field it was sorting; every chart-level, layer and facet
+/// slot is already refused with its own location by `prepare`'s up-front
+/// walk, so this is the typed backstop for a caller that skips that walk.
 fn apply_sort_field_object(
     domain: &mut Vec<String>,
     obj: &serde_json::Map<String, serde_json::Value>,
     ctx: &SortContext<'_>,
     warnings: &mut Vec<RenderWarning>,
-) {
-    let Ok((field, op, order)) = parse_sort_field_object(obj) else {
-        return;
-    };
+) -> Result<(), RenderError> {
+    let (field, op, order) =
+        parse_sort_field_object(obj).map_err(|reason| RenderError::SortSpecMalformed {
+            location: ctx.category_field.to_string(),
+            reason,
+            value: Box::new(serde_json::Value::Object(obj.clone())),
+        })?;
     sort_domain_by_aggregate(domain, &field, op, order, ctx, warnings);
+    Ok(())
 }
 
 /// Shared driver for both data-aware forms: compute the per-category aggregate
@@ -734,10 +582,12 @@ pub(in crate::render) enum LayerUnion<'a> {
     /// caller wrote on it, so the scale spans all of them. A layer without it
     /// stays out, since a caller's own scale is never unioned with a sibling
     /// layer it was not written on. The scale's own `zero` decides the zero
-    /// anchor, so the auto path's bar rule does not apply, and the raw extent
-    /// is returned without the auto path's all-null and single-value
-    /// fallbacks, exactly as an unlayered caller scale reads its column: the
-    /// scale's own resolution handles a degenerate domain either way.
+    /// anchor, so the auto path's bar rule does not apply, and the extent
+    /// is returned without the auto path's single-value widening, exactly as
+    /// an unlayered caller scale reads its column: the scale's own resolution
+    /// handles a degenerate domain either way. An all-null extent still takes
+    /// the auto path's `(0, 1)` fallback, so no infinite endpoint leaves this
+    /// function.
     CarryingScale(&'a crate::spec::encoding::ScaleSpec),
 }
 
@@ -768,6 +618,11 @@ pub(in crate::render) fn numeric_domain_union_over(
             dtype: format!("{:?}", c.data_type()),
             context: None,
         })?;
+        // A column with no value contributes nothing; an integer column's
+        // fold would otherwise report its type's `MAX`/`MIN` seeds.
+        if c.null_count() == c.len() {
+            return Ok(());
+        }
         if a < mn { mn = a; }
         if b > mx { mx = b; }
         Ok(())
@@ -986,13 +841,13 @@ pub(in crate::render) fn numeric_domain_union_over(
         }
     }
 
-    if matches!(layer_union, LayerUnion::CarryingScale(_)) {
-        return Ok((mn, mx));
-    }
     if !mn.is_finite() || !mx.is_finite() {
         // All values were null/NaN — return a default domain so the chart
         // renders with axes but no marks, instead of raising an error.
         return Ok((0.0, 1.0));
+    }
+    if matches!(layer_union, LayerUnion::CarryingScale(_)) {
+        return Ok((mn, mx));
     }
     if bar_zero_wanted {
         // The SAME widening `resolve_continuous_domain_and_range` applies for a
@@ -1023,9 +878,9 @@ pub(in crate::render) fn numeric_domain_union_over(
     // axis no visible span to lay out against; expanding to a symmetric band
     // around `mn == mx` gives the auto-inferred axis a real (if synthetic)
     // extent to tick and label, which #104's per-value guard has no way to
-    // provide. This widening and the all-null fallback above serve only the
-    // auto path (`LayerUnion::Every`): a caller's scale, layered or not, never
-    // reaches them (`CarryingScale` returns the raw extent earlier, and an
+    // provide. This widening serves only the auto path (`LayerUnion::Every`):
+    // a caller's scale, layered or not, never reaches it (`CarryingScale`
+    // returns after the all-null fallback, and an
     // unlayered or stated-domain scale resolves in `build_from_scale_spec` →
     // `resolve_continuous_domain_and_range`), and relies on #104's per-scale
     // guard to keep a degenerate domain finite instead.
@@ -1487,55 +1342,11 @@ mod tests {
         assert!(!layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], false));
     }
 
-    // --- `#176`(11) + N3: validate_sort_field_object / parse_sort_field_object ---
-
-    /// `validate_sort_field_object` accepts every well-formed shape: `field`
-    /// alone, `field` + a recognized `op`, `field` + a recognized `order`,
-    /// and every `op`/`order` this module actually parses (including the
-    /// `"average"` alias for `Mean`).
+    /// A malformed sort-field object reaching `apply_sort_to_domain`
+    /// directly (a caller that skipped `prepare`'s refusal walk) refuses with
+    /// the typed error rather than leaving the domain silently unsorted.
     #[test]
-    fn validate_sort_field_object_accepts_every_well_formed_shape() {
-        let field_only = serde_json::json!({"field": "v"});
-        let serde_json::Value::Object(m) = &field_only else { unreachable!() };
-        assert!(validate_sort_field_object(m).is_ok());
-
-        for op in SortOp::ACCEPTED {
-            let obj = serde_json::json!({"field": "v", "op": op});
-            let serde_json::Value::Object(m) = &obj else { unreachable!() };
-            assert!(validate_sort_field_object(m).is_ok(), "op {op:?} must validate");
-        }
-        for order in ["ascending", "descending"] {
-            let obj = serde_json::json!({"field": "v", "order": order});
-            let serde_json::Value::Object(m) = &obj else { unreachable!() };
-            assert!(validate_sort_field_object(m).is_ok(), "order {order:?} must validate");
-        }
-    }
-
-    /// The four malformed shapes N3 names (no `field`, non-string `field`,
-    /// unknown `op`, unknown `order`) all refuse.
-    #[test]
-    fn validate_sort_field_object_refuses_every_malformed_shape() {
-        let cases = [
-            serde_json::json!({"op": "mean"}),
-            serde_json::json!({"field": 1}),
-            serde_json::json!({"field": "v", "op": "not-a-real-op"}),
-            serde_json::json!({"field": "v", "order": "not-a-real-order"}),
-        ];
-        for case in cases {
-            let serde_json::Value::Object(m) = &case else { unreachable!() };
-            assert!(validate_sort_field_object(m).is_err(), "{case} must refuse");
-        }
-    }
-
-    /// The render-time "could not be applied" arm for a malformed sort
-    /// object is gone: a malformed object reaching `apply_sort_to_domain`
-    /// directly (bypassing construction-time validation, as a hand-built
-    /// `ChartSpec` could) leaves the domain in insertion order and pushes NO
-    /// warning, rather than the earlier `SortSpecIgnored`. This is the
-    /// documented residual of deleting that arm, not a regression: every
-    /// Python-constructed spec already refuses at `EncodingSpec::new`.
-    #[test]
-    fn apply_sort_to_domain_malformed_object_is_a_silent_no_op_not_a_warning() {
+    fn apply_sort_to_domain_malformed_object_refuses() {
         let batch = group_batch(vec!["a", "b"]);
         let ctx = SortContext {
             category_field: "group",
@@ -1546,10 +1357,20 @@ mod tests {
         };
         let mut domain = vec!["a".to_string(), "b".to_string()];
         let mut warnings = Vec::new();
-        apply_sort_to_domain(&mut domain, Some(&serde_json::json!({"op": "mean"})), &ctx, &mut warnings);
-        assert_eq!(domain, vec!["a".to_string(), "b".to_string()], "insertion order preserved");
-        assert!(warnings.is_empty(), "the malformed-object arm is deleted, not relocated: {warnings:?}");
+        let err = apply_sort_to_domain(
+            &mut domain,
+            Some(&serde_json::json!({"op": "mean"})),
+            &ctx,
+            &mut warnings,
+        )
+        .expect_err("a sort object without a field must refuse");
+        assert_eq!(
+            err.to_string(),
+            r#"group: sort={"op":"mean"} is malformed (sort object missing string "field")"#
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
+
 
     /// A well-formed sort-field object
     /// naming a field the batch does not carry still warns exactly as
@@ -1571,7 +1392,8 @@ mod tests {
             Some(&serde_json::json!({"field": "does_not_exist"})),
             &ctx,
             &mut warnings,
-        );
+        )
+        .unwrap();
         assert_eq!(warnings.len(), 1, "an unresolvable well-formed object still warns: {warnings:?}");
         assert!(matches!(&warnings[0], RenderWarning::SortSpecIgnored { .. }));
     }
@@ -1594,7 +1416,7 @@ mod tests {
         };
         let mut domain = vec!["a".to_string(), "b".to_string()];
         let mut warnings = Vec::new();
-        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings);
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings).unwrap();
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
             RenderWarning::SortSpecIgnored { reason } => {
@@ -1635,7 +1457,7 @@ mod tests {
         };
         let mut domain = vec!["a".to_string(), "b".to_string()];
         let mut warnings = Vec::new();
-        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings);
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings).unwrap();
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
             RenderWarning::SortSpecIgnored { reason } => {
@@ -1691,7 +1513,7 @@ mod tests {
         };
         let mut domain = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let mut warnings = Vec::new();
-        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &unflipped, &mut warnings);
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &unflipped, &mut warnings).unwrap();
         assert!(warnings.is_empty(), "control must resolve: {warnings:?}");
         assert_eq!(domain, ["a", "c", "b"], "descending by val");
 
@@ -1710,7 +1532,8 @@ mod tests {
             Some(&serde_json::json!("-y")),
             &flipped,
             &mut flipped_warnings,
-        );
+        )
+        .unwrap();
         assert!(
             flipped_warnings.is_empty(),
             "the authored spelling must resolve under flip too: {flipped_warnings:?}"
@@ -2414,6 +2237,61 @@ mod tests {
              value-channel zero-anchor, even with no span field to fall \
              back on for protection"
         );
+    }
+
+    /// A caller's scale carried only by layers whose column is entirely null
+    /// resolves the auto path's `(0, 1)` fallback, never `(inf, -inf)`.
+    #[test]
+    fn carrying_scale_over_all_null_layers_falls_back_to_unit_domain() {
+        const SPEC: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"v","scale":{"type":"linear"}}}},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"v","scale":{"type":"linear"}}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(SPEC).expect("layered spec JSON must deserialize");
+        let scale = spec.layers.as_ref().unwrap()[0].encoding.y.as_ref().unwrap().scale.clone().unwrap();
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![None, None]))]).unwrap()
+        };
+        let extent = numeric_domain_union_over(
+            "y",
+            "v",
+            None,
+            &batch,
+            &HashMap::new(),
+            &spec,
+            false,
+            LayerUnion::CarryingScale(&scale),
+        )
+        .expect("an all-null Float64 column is readable");
+        assert_eq!(extent, (0.0, 1.0));
+    }
+
+    /// An all-null Int64 column contributes no extent to either union: the
+    /// auto path and a carried caller scale both resolve `(0, 1)`, not the
+    /// integer fold's `(i64::MAX, i64::MIN)` seeds.
+    #[test]
+    fn all_null_integer_column_takes_the_unit_fallback() {
+        const SPEC: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"v","scale":{"type":"linear"}}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(SPEC).expect("layered spec JSON must deserialize");
+        let scale = spec.layers.as_ref().unwrap()[0].encoding.y.as_ref().unwrap().scale.clone().unwrap();
+        let batch = {
+            use arrow::array::Int64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![None, None]))]).unwrap()
+        };
+        for union in [LayerUnion::Every, LayerUnion::CarryingScale(&scale)] {
+            let extent = numeric_domain_union_over(
+                "y",
+                "v",
+                None,
+                &batch,
+                &HashMap::new(),
+                &spec,
+                false,
+                union,
+            )
+            .expect("an all-null Int64 column is readable");
+            assert_eq!(extent, (0.0, 1.0));
+        }
     }
 
     /// Every value negative (`-3.0`, `-8.0`) — a bar chart of negative

@@ -19,7 +19,7 @@ from ferrum import (
     Violin,
 )
 from ferrum._core import secondary_key, transform_registry
-from ferrum._layer import MarkDesugarResult, _Layer
+from ferrum._layer import MarkDesugarResult, _EntryVoice, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import (
     registry_output_columns,
@@ -27,6 +27,7 @@ from ferrum._registry import (
     require_aggregate_field,
 )
 from ferrum._validate import validate_choice
+from ferrum._warn import user_stacklevel
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
@@ -281,8 +282,7 @@ def desugar_violin(
     color_sort: Any = None,
     shared_extent: bool = False,
     horizontal: bool = False,
-    door: str = "mark_violin(inner=...)",
-    door_recourse: str = "",
+    _voice: _EntryVoice | None = None,
 ) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
@@ -369,17 +369,11 @@ def desugar_violin(
         emits ``__pos_y_offset__`` (scaled by panel height) instead of
         ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
         expands along the category band on the ``y`` axis.
-    door : str, default "mark_violin(inner=...)"
-        Names the public entry that invoked this desugar, voiced by the
-        hue-inner warning below. A caller that has no ``inner=`` kwarg of
-        its own (e.g. ``catplot``, whose ``kind="violin"`` never exposes
-        one) passes its own entry, e.g. ``"catplot(kind='violin')"``.
-    door_recourse : str, default ""
-        Appended verbatim to the end of the hue-inner warning. Empty for
-        the default door, which already names its own ``inner=`` kwarg; a
-        caller with no ``inner=`` of its own passes a working recourse
-        instead, e.g. ``'; use Chart.mark_violin(inner="none") to drop
-        the inner mark'``.
+    _voice : _EntryVoice or None, default None
+        The public entry the hue-inner warning below names, injected at
+        resolution from the pending mark (never a user kwarg). ``None`` names
+        ``mark_violin(inner=...)``; ``catplot``, which exposes no ``inner=``
+        of its own, sets its own entry and a working recourse.
 
     Returns
     -------
@@ -488,18 +482,17 @@ def desugar_violin(
     if split_hue:
         # WARN DEGRADED: every inner variant draws at the category's own
         # position, undodged per hue -- see _VIOLIN_QUARTILE_BAND_SIZE's
-        # comment above. Warns once per render (this desugar runs exactly
-        # once per to_svg()/to_png() call); does not warn without a hue
-        # split, where the inner mark IS drawn at its (single) own position.
-        # `door` names the public entry that was actually called, since a
-        # caller with no `inner=` of its own (e.g. catplot) cannot act on
-        # a message naming a kwarg it does not expose; `door_recourse`
-        # (empty by default) lets such a caller append a working recourse
-        # of its own instead.
+        # comment above. Warns once per resolution of the pending mark (each
+        # to_json() and each render resolves it exactly once); does not warn
+        # without a hue split, where the inner mark IS drawn at its (single)
+        # own position. The voice names the public entry that was actually
+        # called, since a caller with no `inner=` of its own (catplot)
+        # cannot act on a message naming a kwarg it does not expose.
+        voice = _voice or _EntryVoice("mark_violin(inner=...)")
         warnings.warn(
-            f"{door}: inner marks are drawn at each category's center and "
-            f"are not dodged per hue group{door_recourse}",
-            stacklevel=2,
+            f"{voice.door}: inner marks are drawn at each category's center and "
+            f"are not dodged per hue group{voice.recourse}",
+            stacklevel=user_stacklevel(),
         )
     if inner == "point":
         # Raw points on the original data (not the violin batch).

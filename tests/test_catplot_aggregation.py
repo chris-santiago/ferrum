@@ -202,7 +202,7 @@ class TestBootstrapArguments:
         """``ci=95`` draws a 95 % interval -- an ABSOLUTE claim, in data units.
 
         ``ci`` is a percent on catplot's signature and a level on ``Summary``,
-        and ``_catplot_ci_level`` is the single site that divides by 100. Every
+        and ``_catplot_interval_args`` is the single site that divides by 100. Every
         other assertion in this class is relative (narrower ci -> shorter
         whisker, different seed -> different whisker) and therefore invariant
         under a wrong constant: dividing by 200 instead renders a 47.5 %

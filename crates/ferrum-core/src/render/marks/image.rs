@@ -177,19 +177,9 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
 
     let (nodes, data_indices) = acc.finalize();
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Image,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        Some(anchors),
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Image, nodes, data_indices, &meta)
+        .with_glyph_anchors(anchors)
 }
 
 /// Raster path: single-row Raster transform output → one colormap-rendered PNG.
@@ -325,46 +315,23 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let svg_w = (svg_x_far - svg_x).abs();
     let svg_h = (svg_y_bot - svg_y_top).abs();
 
-    let raster_indices = [0usize];
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&raster_indices);
-
-    MarkBuildResult::new(
-        MarkBatchKind::Image,
-        vec![SceneNode::Image {
-            x: svg_x,
-            y: svg_y_top,
-            w: svg_w,
-            h: svg_h,
-            data: ImageData::Inline {
-                bytes: png_bytes,
-                mime: ImageMime::Png,
-            },
-        }],
-        Some(vec![0]),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        // Unlike the URL-tile path above (whose anchor IS the true
-        // center `(px, py)`), this value is NOT a correct data-position
-        // anchor — it is the raster extent's drawn top-left corner
-        // (`svg_x, svg_y_top`), the same value `SceneNode::Image.x/y` gets.
-        // A raster covers a whole data rect, not a point, so there is no
-        // single "position" to anchor on the way a glyph has one; the
-        // honest exact value would be the extent's own center,
-        // `((svg_x + svg_x_far) / 2.0, (svg_y_top + svg_y_bot) / 2.0)`. This
-        // is populated only so an `Image` batch satisfies the `MoveGlyph`
-        // contract's shape (one anchor per node) rather than being a silent
-        // exception a debug build has to special-case; it is inert today
-        // because `for_each_along` no-ops `Image` nodes unconditionally
-        // (reviewed, not required to fix, since nothing reads it). If that
-        // no-op is ever lifted for `Image`, this field must be corrected to
-        // the extent's center FIRST, or a raster tile will move by half its
-        // own width/height under a break.
-        Some(vec![(svg_x, svg_y_top)]),
-        None,
-    )
+    let node = SceneNode::Image {
+        x: svg_x,
+        y: svg_y_top,
+        w: svg_w,
+        h: svg_h,
+        data: ImageData::Inline {
+            bytes: png_bytes,
+            mime: ImageMime::Png,
+        },
+    };
+    // The anchor is the raster's drawn top-left corner, not its center: a
+    // raster covers a data rect, not a point. It is inert because
+    // `for_each_along` skips `Image` nodes; if that skip is lifted, move the
+    // anchor to the extent's center first.
+    MarkBuildResult::populated(MarkBatchKind::Image, vec![node], vec![0], &meta)
+        .with_glyph_anchors(vec![(svg_x, svg_y_top)])
 }
 
 #[cfg(test)]

@@ -336,19 +336,9 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Arc,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        Some(spans),
-        None,
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
+        .with_polar_spans(spans)
 }
 
 fn empty_result() -> crate::render::draw::MarkBuildResult {
@@ -478,20 +468,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
     let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult::new(
-        MarkBatchKind::Bar,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        empty_reason,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -644,20 +624,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
     let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult::new(
-        MarkBatchKind::Bar,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        empty_reason,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -828,20 +798,10 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
     let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult::new(
-        MarkBatchKind::Bar,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        empty_reason,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -954,20 +914,10 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
     let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
 
-    MarkBuildResult::new(
-        MarkBatchKind::Bar,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        None,
-        empty_reason,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
+        .with_empty_reason(empty_reason)
 }
 
 #[cfg(test)]

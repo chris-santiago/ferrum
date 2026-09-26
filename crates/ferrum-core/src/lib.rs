@@ -26,8 +26,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // for the side effect of its exception (rust-design recommendation 5 /
     // python-design S2, converged).
     m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_dict, m)?)?;
-    // `#176`(11) + N3: the sort-field-object vocabulary
-    // (`validate_sort_field_object`/`EncodingSpec::new` enforce), published so
+    // The sort-field-object vocabulary (`parse_sort_field_object`/
+    // `EncodingSpec::new` enforce), published so
     // every sort-accepting Python channel (`X`/`Y`/`Facet`/...) validates
     // against the SAME `op`/`order` spellings instead of holding a copy.
     m.add_function(wrap_pyfunction!(spec::encoding::sort_accepted_vocabulary, m)?)?;
@@ -105,6 +105,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The mark-kwargs wire keys (`spec/mark_style.rs::mark_kwargs_field_names`),
     // published so Python reads them instead of parsing the Rust source.
     m.add_function(wrap_pyfunction!(spec::mark_style::mark_kwargs_fields, m)?)?;
+    // Its numeric (`f64`/`usize`) subset, the fields the Python funnel coerces.
+    m.add_function(wrap_pyfunction!(spec::mark_style::mark_numeric_kwargs, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

@@ -13,6 +13,7 @@
 //! `tests.rs`, mirroring `render/scale_resolve/` and `transform/stats/`.
 
 mod gate;
+pub(crate) mod sort;
 #[cfg(test)]
 mod tests;
 
@@ -879,7 +880,7 @@ impl EncodingSpec {
 
         let sort: Option<serde_json::Value> = json_round(py, sort, "sort")?;
         if let Some(serde_json::Value::Object(obj)) = &sort {
-            crate::render::scale_resolve::validate_sort_field_object(obj).map_err(
+            sort::parse_sort_field_object(obj).map_err(
                 |reason| {
                     PyValueError::new_err(format!(
                         "EncodingSpec(sort=...): {reason}; received {}",

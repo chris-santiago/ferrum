@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ferrum._validate import (
-    is_real_number,
-    validate_choice,
-    validate_finite_ordered_pair,
+    coerce_finite_ordered_pair,
     coerce_fraction_value,
     coerce_pixel_value,
+    is_real_number,
+    validate_choice,
 )
 
 _VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
@@ -206,7 +206,7 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
     - ``"numeric"``: a real number (:func:`ferrum._validate.is_real_number`:
       builtins, numpy scalars such as the ``np.int64`` a
       ``DataFrame[col].max()`` hands back, ``Decimal``), returned unchanged
-      for :func:`ferrum._validate.validate_finite_ordered_pair` to check and
+      for :func:`ferrum._validate.coerce_finite_ordered_pair` to check and
       coerce to ``float`` (so a bound a float cannot hold, e.g. ``10**400``,
       refuses there in the ``BreakAxis.gap[i]`` voice). ``bool`` is
       excluded: a boolean gap bound is a mistake, not a 0/1 break region.
@@ -216,7 +216,7 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
       :func:`_coerce_temporal_gap_bound`.
     - ``"other"``: anything else (``bool``, ``None``, a list, a dict, ...),
       passed through unchanged so
-      :func:`ferrum._validate.validate_finite_ordered_pair` raises its own
+      :func:`ferrum._validate.coerce_finite_ordered_pair` raises its own
       numeric-type message downstream — matching pre-#230-6 behavior for
       non-string malformed bounds.
 
@@ -252,7 +252,7 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
     and coerced via :func:`_classify_and_coerce_gap_bound`: a pair mixing a
     numeric bound with a temporal bound raises ``ValueError`` (#230-6) before
     the coerced pair is checked for finiteness and ordering
-    (:func:`ferrum._validate.validate_finite_ordered_pair`). An empty ``gap``
+    (:func:`ferrum._validate.coerce_finite_ordered_pair`). An empty ``gap``
     (no break regions at all) is refused as malformed too, as is a ``gap``
     that is not iterable (e.g. a bare number).
 
@@ -296,7 +296,7 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
                 f"{label}: mixes a numeric bound ({numeric_val!r}) with a temporal "
                 f"bound ({temporal_val!r}); both bounds of one gap must be the same kind"
             )
-        coerced_pairs.append(validate_finite_ordered_pair(label, start, end))
+        coerced_pairs.append(coerce_finite_ordered_pair(label, start, end))
 
     # Derive the return shape from `pairs` itself rather than re-running the
     # single-pair-vs-list classification: `_normalize_break_gaps` is that

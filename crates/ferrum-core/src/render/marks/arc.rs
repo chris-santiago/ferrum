@@ -276,19 +276,9 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     // exactly the kept rows in node order so node j receives its true source
     // row's metadata.
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    Ok(MarkBuildResult::new(
-        MarkBatchKind::Arc,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        Some(spans),
-        None,
-        None,
-    ))
+    Ok(MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
+        .with_polar_spans(spans))
 }
 
 /// Build arc wedges for a nominal/ordinal theta channel.
@@ -399,19 +389,9 @@ fn build_nominal_theta(
     // gathers exactly the kept rows in node order so node j receives its true
     // source row's tooltip/href/description (not row j's).
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Arc,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        Some(spans),
-        None,
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
+        .with_polar_spans(spans)
 }
 
 /// Build annular-wedge nodes from per-row angular and radial extents.
@@ -505,19 +485,9 @@ fn build_annular(
     // gathers exactly the kept rows in node order so node j receives its true
     // source row's tooltip/href/description (not row j's).
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Arc,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        Some(spans),
-        None,
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Arc, nodes, data_indices, &meta)
+        .with_polar_spans(spans)
 }
 
 /// SVG path commands for an arc wedge from `angle_start` to `angle_end`.

@@ -647,7 +647,7 @@ def test_encode_facet_columns_refuses_non_positive_int(bad):
 
 def test_facet_ncols_none_is_still_accepted():
     """`ncols=None` (the default, "let the renderer choose") must keep
-    passing -- validate_positive_int's None-sentinel convention, not a
+    passing -- coerce_positive_int's None-sentinel convention, not a
     regression introduced by the #238 refusal."""
     df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
     chart = Chart(df).mark_point().encode(x="x", y="x").facet(field="g")

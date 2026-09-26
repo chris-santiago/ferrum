@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
-from ferrum._layer import _Layer, _PendingMark
+from ferrum._layer import _EntryVoice, _Layer, _PendingMark
 from ferrum._layer_transforms import (
     _NamedTransform,
     _resolve_layer_aggregates,
@@ -88,7 +88,7 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
 _logger = logging.getLogger(__name__)
 
 
-from ferrum._validate import validate_positive_int
+from ferrum._validate import coerce_positive_int
 from ferrum._facet import (
     _Facet,
     build_facet_dict as _build_facet_dict_fn,
@@ -1133,6 +1133,17 @@ class Chart(
         new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
         new._position = position
         new._composite_kind = name
+        return new
+
+    def _with_warning_voice(self, door: str, recourse: str = "") -> "Chart":
+        # A clone whose pending composite mark voices its resolution-time
+        # warnings as *door* (the public entry that called the mark_* method
+        # on the caller's behalf), appending *recourse*. Private chart state:
+        # never serialized, never in the repr, never a mark kwarg.
+        if self._pending_stat_mark is None:
+            raise RuntimeError("_with_warning_voice needs a pending composite mark to voice")
+        new = self._clone()
+        new._pending_stat_mark = replace(self._pending_stat_mark, voice=_EntryVoice(door, recourse))
         return new
 
     def mark_point(self, **kwargs) -> "Chart":
@@ -2588,8 +2599,8 @@ class Chart(
                     "`col=` for a grid facet."
                 )
 
-        validate_positive_int("Chart.facet(ncols=...)", ncols)
-        validate_positive_int("Chart.facet(nrows=...)", nrows)
+        ncols = coerce_positive_int("Chart.facet(ncols=...)", ncols)
+        nrows = coerce_positive_int("Chart.facet(nrows=...)", nrows)
         new = self._clone()
         existing = self._facet
         if field is not None:

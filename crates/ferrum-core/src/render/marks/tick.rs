@@ -223,18 +223,8 @@ fn build_geometry(
                     anchors.push(((x1 + x2) / 2.0, cy));
                 }
                 let (nodes, data_indices) = acc.finalize();
-                let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-                return MarkBuildResult::new(
-                    MarkBatchKind::Tick,
-                    nodes,
-                    Some(data_indices),
-                    tooltips,
-                    hrefs,
-                    descriptions,
-                    None,
-                    Some(anchors),
-                    None,
-                );
+                return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                    .with_glyph_anchors(anchors);
             }
 
             // Quantitative y only → y-rug: horizontal ticks at left axis edge.
@@ -272,18 +262,8 @@ fn build_geometry(
                 anchors.push(((x1 + x2) / 2.0, py));
             }
             let (nodes, data_indices) = acc.finalize();
-            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult::new(
-                MarkBatchKind::Tick,
-                nodes,
-                Some(data_indices),
-                tooltips,
-                hrefs,
-                descriptions,
-                None,
-                Some(anchors),
-                None,
-            );
+            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors);
         }
         // No x and no y: return empty.
         return empty();
@@ -352,18 +332,8 @@ fn build_geometry(
                 anchors.push((cx, py));
             }
             let (nodes, data_indices) = acc.finalize();
-            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult::new(
-                MarkBatchKind::Tick,
-                nodes,
-                Some(data_indices),
-                tooltips,
-                hrefs,
-                descriptions,
-                None,
-                Some(anchors),
-                None,
-            );
+            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors);
         }
     }
 
@@ -413,18 +383,8 @@ fn build_geometry(
                 anchors.push((px, cy));
             }
             let (nodes, data_indices) = acc.finalize();
-            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-            return MarkBuildResult::new(
-                MarkBatchKind::Tick,
-                nodes,
-                Some(data_indices),
-                tooltips,
-                hrefs,
-                descriptions,
-                None,
-                Some(anchors),
-                None,
-            );
+            return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+                .with_glyph_anchors(anchors);
         }
     }
 
@@ -484,18 +444,8 @@ fn build_geometry(
             anchors.push((cx, (y1 + y2) / 2.0));
         }
         let (nodes, data_indices) = acc.finalize();
-        let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-        return MarkBuildResult::new(
-            MarkBatchKind::Tick,
-            nodes,
-            Some(data_indices),
-            tooltips,
-            hrefs,
-            descriptions,
-            None,
-            Some(anchors),
-            None,
-        );
+        return MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+            .with_glyph_anchors(anchors);
     }
 
     // Quantitative x → rug-style vertical tick at panel baseline.
@@ -563,19 +513,9 @@ fn build_geometry(
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult::new(
-        MarkBatchKind::Tick,
-        nodes,
-        Some(data_indices),
-        tooltips,
-        hrefs,
-        descriptions,
-        None,
-        Some(anchors),
-        None,
-    )
+    MarkBuildResult::populated(MarkBatchKind::Tick, nodes, data_indices, &meta)
+        .with_glyph_anchors(anchors)
 }
 
 #[cfg(test)]

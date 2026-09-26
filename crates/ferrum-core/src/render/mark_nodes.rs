@@ -33,8 +33,7 @@
 //!     acc.push(make_node(v), row);
 //! }
 //! let (nodes, data_indices) = acc.finalize();
-//! let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-//! MarkBuildResult::new(kind, nodes, Some(data_indices), tooltips, hrefs, descriptions, None, None, None)
+//! MarkBuildResult::populated(kind, nodes, data_indices, &meta)
 //! ```
 
 use ferrum_scene::SceneNode;

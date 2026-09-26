@@ -45,6 +45,7 @@ rendered behavior that guard exists to protect.
 
 from __future__ import annotations
 
+import sys
 import warnings
 
 import numpy as np
@@ -209,6 +210,29 @@ def test_catplot_violin_hue_warning_names_catplot_not_mark_violin() -> None:
         fm.catplot(df, x="cat", y="y", hue="grp", kind="violin").to_svg()
     matching = [w for w in record if str(w.message) == _CATPLOT_VIOLIN_HUE_WARNING]
     assert len(matching) == 1, f"expected exactly 1 catplot-voiced warning, got {matching}"
+
+
+def test_catplot_violin_voice_stays_off_the_wire_and_the_repr() -> None:
+    """catplot's voice rides the pending mark, not its kwargs: it never
+    reaches the spec JSON or the repr, and the warning still names the
+    caller's own line."""
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b"] * 6,
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] * 2,
+            "grp": ["x", "y"] * 6,
+        }
+    )
+    chart = fm.catplot(df, x="cat", y="y", hue="grp", kind="violin")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1  # the next line resolves the chart
+        spec = chart.to_json()
+    matching = [w for w in record if str(w.message) == _CATPLOT_VIOLIN_HUE_WARNING]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+    for surface in (spec, repr(chart)):
+        assert "catplot(kind=" not in surface
+        assert "mark_violin(inner=" not in surface
 
 
 def test_catplot_violin_no_hue_never_warns() -> None:

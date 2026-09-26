@@ -107,7 +107,7 @@ class _Facet:
     sites and the serialized JSON are unaffected.
 
     #238: ``ncols``/``nrows`` arrive already validated as positive ints
-    (:func:`ferrum._validate.validate_positive_int`) by the public door that
+    (:func:`ferrum._validate.coerce_positive_int`) by the public door that
     wrote them, each refusing in its own voice: ``Chart.facet(ncols=/nrows=)``
     and ``Facet(columns=)`` (at channel construction). A carried value from an
     earlier ``_Facet`` passed the same check when it was first written.

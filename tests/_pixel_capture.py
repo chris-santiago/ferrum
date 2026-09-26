@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from _conditional_oracle import rgb_distance3
+from tests._conditional_oracle import rgb_distance3
 
 # Software-GL flags: headless Chrome has no real GPU, so WebGL is routed
 # through SwiftShader rather than silently falling back to no-WebGL.

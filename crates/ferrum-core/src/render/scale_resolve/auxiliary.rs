@@ -8,7 +8,7 @@ use arrow::record_batch::RecordBatch;
 use crate::layout::ThemeInputs;
 use crate::scale::linear::LinearScale;
 
-use ferrum_scene::{resolve_stroke_dash, STROKE_DASH_LEGACY_SLOTS};
+use ferrum_scene::{categorical_slot_dash, STROKE_DASH_LEGACY_SLOTS};
 
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
@@ -105,7 +105,7 @@ fn sorted_categorical_domain(
         y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
         coord_flipped,
     };
-    apply_sort_to_domain(&mut distinct, sort, &sort_ctx, &mut warnings);
+    apply_sort_to_domain(&mut distinct, sort, &sort_ctx, &mut warnings)?;
     Ok((distinct, warnings))
 }
 
@@ -432,10 +432,8 @@ pub fn build_opacity_channel_scale(
 /// *categorical* field.
 ///
 /// A quantitative `stroke_dash` field keeps the numeric palette-index contract
-/// (`channels::resolve_row_stroke_dash`'s own legacy clamp: 0 solid, 1–3
-/// patterns — `resolve_stroke_dash` itself resolves the full 0..=7 palette;
-/// the legacy range is that one caller's own clamp, not a limit of the
-/// function) and resolves NO scale — this returns `None` for it, which is
+/// (`ferrum_scene::numeric_index_dash`: 0 solid, 1–3 patterns) and resolves
+/// NO scale — this returns `None` for it, which is
 /// what tells mark builders to read the column as indices. A nominal/ordinal
 /// field (including a numeric column the user typed `"N"`) resolves here
 /// instead. See [`StrokeDashScale`] for the contract.
@@ -491,19 +489,13 @@ pub fn build_stroke_dash_scale(
         coord_flipped,
     )?;
 
-    // The categorical scale's cycling slot count is pinned to the legacy
-    // 4-slot span (solid plus the three pre-append patterns), independent of
-    // `DASH_PALETTE`'s full length: see `STROKE_DASH_LEGACY_SLOTS`'s doc
-    // comment for why appending the named linetypes must not move which
-    // pattern an existing categorical domain gets.
-    let slots = STROKE_DASH_LEGACY_SLOTS;
-    if distinct.len() > slots {
+    if distinct.len() > STROKE_DASH_LEGACY_SLOTS {
         warnings.push(crate::render::RenderWarning::StrokeDashPaletteOverflowed {
             categories: distinct.len() as u32,
         });
     }
     let patterns: Vec<Vec<f64>> = (0..distinct.len())
-        .map(|i| resolve_stroke_dash((i % slots) as f64).unwrap_or_default())
+        .map(|i| categorical_slot_dash(i).unwrap_or_default())
         .collect();
     Ok((Some(StrokeDashScale { domain: distinct, patterns }), warnings))
 }

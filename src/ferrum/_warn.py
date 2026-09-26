@@ -1,6 +1,9 @@
 """Warn-once registry: each (channel, kwarg, message) triple emits at most
 one UserWarning per context. Tests use reset_warnings() to clear state.
 
+``user_stacklevel`` is the ``stacklevel`` for a warning raised at any depth
+inside ``ferrum``, naming the first caller frame outside the package.
+
 State is stored in a ``contextvars.ContextVar`` so it is scoped to the
 current execution context (thread-safe and async-safe) rather than
 process-global.
@@ -19,8 +22,12 @@ pair, different message" reaches the user once per distinct message.
 from __future__ import annotations
 
 import contextvars
+import os
+import sys
 import warnings
 from typing import Optional
+
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
 
 _seen_var: contextvars.ContextVar[set | None] = contextvars.ContextVar(
     "_ferrum_warn_seen", default=None
@@ -84,6 +91,23 @@ def warn_once(
         return
     seen.add(key)
     warnings.warn(msg, UserWarning, stacklevel=stacklevel)
+
+
+def user_stacklevel() -> int:
+    """Return the ``stacklevel`` naming the first frame outside ``ferrum``.
+
+    For a ``warnings.warn`` called directly by the function that calls this
+    one, when that function runs at a depth that depends on the public entry
+    the user called (a desugar reached from ``to_json``, ``to_svg``, a
+    composition render, ...), so no fixed ``stacklevel`` names the user's
+    line.
+    """
+    frame = sys._getframe(1)  # the function that will call warnings.warn
+    level = 1
+    while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE_DIR):
+        frame = frame.f_back
+        level += 1
+    return level
 
 
 def reset_warnings() -> None:

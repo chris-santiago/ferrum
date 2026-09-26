@@ -1192,7 +1192,7 @@ fn encoding_spec_sort_non_object_form_is_not_validated_at_construction() {
 }
 
 /// `sort_accepted_vocabulary()` publishes the same `op`/`order` spellings
-/// `validate_sort_field_object` accepts -- the two-sided check the
+/// `parse_sort_field_object` accepts -- the two-sided check the
 /// `scale_accepted_keys`/`interpolate_accepted_values` precedents both pin,
 /// so Python's channels validate against the real vocabulary rather than a
 /// hand-copied one.
@@ -1205,7 +1205,7 @@ fn sort_accepted_vocabulary_matches_validate_sort_field_object() {
         let obj = serde_json::json!({"field": "v", "op": op});
         let serde_json::Value::Object(map) = &obj else { unreachable!() };
         assert!(
-            crate::render::scale_resolve::validate_sort_field_object(map).is_ok(),
+            super::sort::parse_sort_field_object(map).is_ok(),
             "published op {op:?} must validate"
         );
     }
@@ -1213,7 +1213,7 @@ fn sort_accepted_vocabulary_matches_validate_sort_field_object() {
         let obj = serde_json::json!({"field": "v", "order": order});
         let serde_json::Value::Object(map) = &obj else { unreachable!() };
         assert!(
-            crate::render::scale_resolve::validate_sort_field_object(map).is_ok(),
+            super::sort::parse_sort_field_object(map).is_ok(),
             "published order {order:?} must validate"
         );
     }
@@ -1223,11 +1223,11 @@ fn sort_accepted_vocabulary_matches_validate_sort_field_object() {
     // the op side alone would not catch an order-side drift (or vice versa).
     let bad_op = serde_json::json!({"field": "v", "op": "not-in-vocabulary"});
     let serde_json::Value::Object(map) = &bad_op else { unreachable!() };
-    assert!(crate::render::scale_resolve::validate_sort_field_object(map).is_err());
+    assert!(super::sort::parse_sort_field_object(map).is_err());
 
     let bad_order = serde_json::json!({"field": "v", "order": "not-in-vocabulary"});
     let serde_json::Value::Object(map) = &bad_order else { unreachable!() };
-    assert!(crate::render::scale_resolve::validate_sort_field_object(map).is_err());
+    assert!(super::sort::parse_sort_field_object(map).is_err());
 }
 
 /// [`Encoding::channels`] on a struct literal populating every field (this

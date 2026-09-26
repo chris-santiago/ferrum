@@ -17,7 +17,7 @@ import math
 
 import pytest
 
-from _conditional_oracle import (
+from tests._conditional_oracle import (
     assert_radius_close,
     assert_rgb_close,
     predicted_fill_edge,

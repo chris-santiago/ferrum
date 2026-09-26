@@ -1,18 +1,24 @@
 """Numeric door x input kind matrix: every numeric door answers "is this a number" alike.
 
 The door population is derived, not hand-listed: every hit of
-``isinstance(... numbers.Real | (int, float) | int)`` and ``math.isfinite`` in
-``src/ferrum`` was classified, plus ``catplot(ci=)``'s ``float()`` probe, and
-the hits that decide whether a user-facing numeric argument is a number are
-the doors below, each exercised through its public entry. Real-number doors
-store what ``ferrum._validate.coerce_finite_real`` returns; integer doors ask
-``validate_positive_int``. So every door accepts ``int``, ``float``, numpy
-scalars and (for real-number doors) ``Decimal``, and refuses ``bool``,
+``isinstance(... numbers.Real | (int, float) | int)``, ``math.isfinite`` and
+``float(`` after ``is_real_number(`` in ``src/ferrum`` was classified, plus
+``catplot(ci=)``'s ``float()`` probe and the numeric fields of the mark-style
+funnel (``MarkBase``, behind every ``mark_*`` style kwarg), and the hits that
+decide whether a user-facing numeric argument is a number are the doors
+below, each exercised through its public entry. Real-number doors store what
+``ferrum._validate.coerce_finite_real`` returns; integer doors store what
+``coerce_positive_int`` returns. So every door accepts ``int``, ``float``,
+numpy scalars and (for real-number doors) ``Decimal``, and refuses ``bool``,
 ``str``, ``list``, ``nan``, ``inf``, an integer a float cannot hold
 (``10**400``) and a signaling NaN with a ``ValueError`` naming the public door
 and the value received. ``None`` is each door's own documented unset sentinel
 where it has one (heatmap bounds, ``AxisConfig.domain_min``, the t-SNE
-default, ``ncols``/``columns``), and a refusal where the argument is required.
+default, ``ncols``/``columns``, mark style kwargs, ``transform_impute(value=)``),
+and a refusal where the argument is required. The expression and key-universe
+literals of ``transform_filter`` and ``transform_impute(keyvals=)`` also take
+strings, booleans and ``None`` as literals of their own type, so only the
+numeric kinds are cells there.
 
 Every accepted cell must produce the same output as the builtin spelling of
 the same value, and each door carries a control value whose output must
@@ -25,6 +31,9 @@ from __future__ import annotations
 import decimal
 import functools
 import hashlib
+import json
+import numbers
+import operator
 import warnings
 from typing import Any, Callable, NamedTuple
 
@@ -33,18 +42,21 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._core import mark_numeric_kwargs
+from ferrum.marks.base import _NUMERIC_MARK_KWARGS, MARK_HONORED_KWARGS, MarkBase
 from ferrum.plots.distribution import _CATPLOT_AGGREGATING_KINDS, _CATPLOT_VALID_KINDS
 
 _NON_FINITE = {"nan", "inf", "huge", "sNaN"}
 
 
 def _kinds(v: int) -> dict[str, Any]:
-    """The thirteen input kinds, each spelling the value *v* where it can."""
+    """The fourteen input kinds, each spelling the value *v* where it can."""
     return {
         "int": v,
         "float": float(v),
         "np_int": np.int64(v),
         "np_float": np.float64(v),
+        "np_float32": np.float32(v),
         "Decimal": decimal.Decimal(v),
         "bool": True,
         "str": str(v),  # a numeric string: no door may launder it into a number
@@ -116,6 +128,34 @@ def _catplot(kwarg: str) -> Callable[[Any], str]:
     return call
 
 
+def _mark_json(build: Callable[["fm.Chart", Any], "fm.Chart"], df: pl.DataFrame):
+    def call(v: Any) -> str:
+        return build(fm.Chart(df), v).to_json()
+
+    return call
+
+
+_SELECTION = fm.selection_point(name="door_matrix")
+
+
+def _conditional_opacity(v: Any) -> str:
+    cond = _SELECTION.when(fm.value(1.0)).otherwise(fm.value(v))
+    chart = fm.Chart(_POINTS).mark_point().encode(x="x", y="y", opacity=cond)
+    return json.dumps(json.loads(chart.to_json())["conditionals"])
+
+
+def _transform_filter(v: Any) -> str:
+    return json.dumps(fm.transform_filter({"x": {">": v}}))
+
+
+def _impute_keyval(v: Any) -> str:
+    return json.dumps(fm.transform_impute("y", key="x", keyvals=[v]))
+
+
+def _impute_value(v: Any) -> str:
+    return json.dumps(fm.transform_impute("y", value=v))
+
+
 # --- expected refusals ------------------------------------------------------
 
 
@@ -134,7 +174,7 @@ def _real_refusal(label: str) -> Callable[[str, Any], str]:
 
 
 def _int_refusal(label: str) -> Callable[[str, Any], str]:
-    """``validate_positive_int``'s refusals, in the door's voice."""
+    """``coerce_positive_int``'s refusals, in the door's voice."""
 
     def refusal(kind: str, v: Any) -> str:
         if kind == "huge":
@@ -160,6 +200,19 @@ def _break_axis_refusal(kind: str, v: Any) -> str:
     return _real_refusal("BreakAxis.gap[0]: start")(kind, v)
 
 
+def _stroke_dash_refusal(kind: str, v: Any) -> str:
+    return (
+        f"mark_line: stroke_dash={[v, 2]!r} is not a valid stroke_dash value. Expected a "
+        "numeric list (e.g. [4.0, 2.0]), a comma-separated numeric string "
+        '(e.g. "4,2"), or a named linetype (one of '
+        "['dashdot', 'dashed', 'dotted', 'longdash', 'solid'])."
+    )
+
+
+def _conditional_refusal(kind: str, v: Any) -> str:
+    return f"fm.value({v!r}) for channel='opacity' needs a number, got {type(v).__name__}: {v!r}"
+
+
 def _ci_refusal(kind: str, v: Any) -> str:
     return (
         f"catplot(ci={v!r}) is not supported -- ci is a PERCENT and must be a number in "
@@ -180,13 +233,18 @@ def _n_boot_refusal(kind: str, v: Any) -> str:
 class Door(NamedTuple):
     call: Callable[[Any], str]
     sample: int  # the value every kind spells
-    reference: str  # the kind whose output every accepted kind must equal
+    # The kind whose output every accepted kind must equal, or ``None`` when
+    # the door keeps an integer an integer on the wire: each accepted kind
+    # then equals its own builtin spelling (``int`` or ``float``).
+    reference: str | None
     control: Any  # a different valid value whose output must differ
     refusal: Callable[[str, Any], str]
     accepted: frozenset[str]
+    skip: frozenset[str] = frozenset()  # kinds that are a literal of another type here
 
 
-_REAL = frozenset({"int", "float", "np_int", "np_float", "Decimal", "None"})
+_REAL = frozenset({"int", "float", "np_int", "np_float", "np_float32", "Decimal", "None"})
+_LITERAL_OF_ANOTHER_TYPE = frozenset({"bool", "str", "list", "None"})
 _INTEGER = frozenset({"int", "np_int", "None"})
 _TSNE_LABEL = "ModelSource.embeddings(method='tsne', perplexity=...)"
 
@@ -206,6 +264,70 @@ DOORS: dict[str, Door] = {
     "tsne_perplexity": Door(_tsne_perplexity, 5, "float", None, _real_refusal(_TSNE_LABEL), _REAL),
     "break_axis_gap": Door(_break_axis_gap, 1, "float", 2, _break_axis_refusal, _REAL - {"None"}),
     "catplot_ci": Door(_catplot("ci"), 90, "float", 50, _ci_refusal, _REAL - {"None"}),
+    "mark_point_size": Door(
+        _mark_json(lambda c, v: c.mark_point(size=v).encode(x="x", y="y"), _POINTS),
+        3,
+        None,
+        100,
+        _real_refusal("mark_point(size=...)"),
+        _REAL,
+    ),
+    "mark_point_alpha": Door(
+        _mark_json(lambda c, v: c.mark_point(alpha=v).encode(x="x", y="y"), _POINTS),
+        1,
+        None,
+        0.5,
+        _real_refusal("mark_point(alpha=...)"),
+        _REAL,
+    ),
+    "mark_line_stroke_width": Door(
+        _mark_json(lambda c, v: c.mark_line(stroke_width=v).encode(x="x", y="y"), _POINTS),
+        2,
+        None,
+        5,
+        _real_refusal("mark_line(stroke_width=...)"),
+        _REAL,
+    ),
+    "mark_boxplot_opacity": Door(
+        _mark_json(lambda c, v: c.mark_boxplot(opacity=v).encode(x="day", y="tip"), _CAT),
+        1,
+        None,
+        0.5,
+        _real_refusal("mark_boxplot(opacity=...)"),
+        _REAL,
+    ),
+    "stroke_dash_length": Door(
+        _mark_json(lambda c, v: c.mark_line(stroke_dash=[v, 2]).encode(x="x", y="y"), _POINTS),
+        3,
+        "float",
+        5,
+        _stroke_dash_refusal,
+        _REAL - {"None"},
+    ),
+    "conditional_opacity": Door(
+        _conditional_opacity, 1, "float", 0.25, _conditional_refusal, _REAL - {"None"}
+    ),
+    "transform_filter_literal": Door(
+        _transform_filter,
+        5,
+        None,
+        10,
+        _real_refusal("transform_filter: value for field 'x'"),
+        _REAL,
+        _LITERAL_OF_ANOTHER_TYPE,
+    ),
+    "transform_impute_keyval": Door(
+        _impute_keyval,
+        5,
+        None,
+        10,
+        _real_refusal("transform_impute: keyvals value for key 'x'"),
+        _REAL,
+        _LITERAL_OF_ANOTHER_TYPE,
+    ),
+    "transform_impute_value": Door(
+        _impute_value, 5, None, 10, _real_refusal("transform_impute(value=...)"), _REAL
+    ),
     "facet_ncols": Door(
         _facet_ncols, 2, "int", None, _int_refusal("Chart.facet(ncols=...)"), _INTEGER
     ),
@@ -217,13 +339,18 @@ DOORS: dict[str, Door] = {
     ),
 }
 
-CELLS = [(door, kind) for door in DOORS for kind in KINDS]
+CELLS = [(door, kind) for door, d in DOORS.items() for kind in KINDS if kind not in d.skip]
+
+
+def _builtin(value: Any) -> int | float:
+    """The builtin spelling of an accepted *value*: ``int`` for an integer, else ``float``."""
+    return operator.index(value) if isinstance(value, numbers.Integral) else float(value)
 
 
 @functools.cache
 def _reference(door: str) -> str:
     d = DOORS[door]
-    return d.call(_kinds(d.sample)[d.reference])
+    return d.call(_kinds(d.sample)[d.reference or "float"])
 
 
 @pytest.mark.parametrize(("door", "kind"), CELLS, ids=[f"{d}-{k}" for d, k in CELLS])
@@ -232,8 +359,10 @@ def test_numeric_door_cell(door: str, kind: str) -> None:
     value = _kinds(d.sample)[kind]
     if kind in d.accepted:
         out = d.call(value)
-        if kind != "None":
-            assert out == _reference(door)
+        if kind == "None":
+            return
+        expected = _reference(door) if d.reference else d.call(_builtin(value))
+        assert out == expected
         return
     with pytest.raises(ValueError) as exc_info:
         d.call(value)
@@ -328,3 +457,69 @@ def test_interval_arg_on_non_aggregating_kind(kind: str, arg: str, value_kind: s
         f"confidence interval, so {arg}= would be ignored. Drop {arg}=, or use one of the "
         f"estimating kinds ({_ESTIMATING})."
     )
+
+
+# --- the mark-style funnel's numeric population ---------------------------------
+
+
+def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> None:
+    """Each name ``mark_numeric_kwargs()`` publishes that some mark honors is
+    coerced at that mark's door: ``np.int64`` is stored as a builtin ``int`` and
+    a non-number refuses in the door's voice. A published name no mark honors
+    (a wire field set by the renderer, not a ``mark_*`` kwarg) is refused as
+    an unknown kwarg by every mark."""
+    published = mark_numeric_kwargs()
+    assert published, "the binding must publish the numeric fields"
+    assert _NUMERIC_MARK_KWARGS == frozenset(published) & set().union(*MARK_HONORED_KWARGS.values())
+    honoring = {
+        name: [m for m, honored in MARK_HONORED_KWARGS.items() if name in honored]
+        for name in published
+    }
+    assert any(honoring.values())
+    for name, marks in honoring.items():
+        if not marks:
+            with pytest.raises(TypeError, match=f"unknown keyword argument '{name}'"):
+                MarkBase("point", **{name: 2})
+            continue
+        mark = marks[0]
+        stored = MarkBase(mark, **{name: np.int64(2)}).kwargs[name]
+        assert stored == 2 and type(stored) is int, (name, stored)
+        with pytest.raises(ValueError) as exc_info:
+            MarkBase(mark, **{name: "2"})
+        assert str(exc_info.value) == _real_refusal(f"mark_{mark}({name}=...)")("str", "2")
+
+
+# --- stored and wire types --------------------------------------------------------
+
+
+def test_integer_doors_store_a_builtin_int() -> None:
+    """An integer door stores the builtin ``int`` its predicate returns, not
+    the numpy scalar it was given, and the wire carries that integer."""
+    by_method = (
+        fm.Chart(_POINTS).mark_point().encode(x="x", y="y").facet(field="g", ncols=np.int64(2))
+    )
+    by_channel = (
+        fm.Chart(_POINTS)
+        .mark_point()
+        .encode(x="x", y="y", facet=fm.Facet("g", columns=np.int64(2)))
+    )
+    grid = fm.Chart(_POINTS).mark_point().encode(x="x", y="y").facet(row="g", nrows=np.int64(2))
+    for chart in (by_method, by_channel):
+        assert type(chart._facet.ncols) is int
+        assert json.loads(chart.to_json())["facet"]["mode"]["ncols"] == 2
+    assert type(grid._facet.nrows) is int
+
+    boot = fm.catplot(_CAT, x="day", y="tip", kind="point", seed=0, n_boot=np.int64(50))
+    (summary,) = [t for t in json.loads(boot.to_json())["transforms"] if t["type"] == "summary"]
+    assert summary["n_boot"] == 50
+
+
+def test_a_real_door_keeps_an_integer_an_integer_on_the_wire() -> None:
+    """``coerce_finite_real`` returns an integer as ``int``: an ``AxisConfig``
+    bound given ``np.int64(2)`` serializes as ``2``, exactly as ``2`` does,
+    not as ``2.0``; a float stays a float."""
+    as_int = json.dumps(fm.AxisConfig(domain_min=np.int64(2)).to_dict())
+    assert as_int == json.dumps(fm.AxisConfig(domain_min=2).to_dict())
+    assert type(json.loads(as_int)["domain_min"]) is int
+    as_float = json.loads(json.dumps(fm.AxisConfig(domain_min=np.float64(2)).to_dict()))
+    assert type(as_float["domain_min"]) is float

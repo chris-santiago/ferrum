@@ -802,11 +802,11 @@ class StatisticalMarksMixin:
         Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
         """
         from ferrum._core import interpolate_accepted_values
-        from ferrum._validate import validate_optional_choice
+        from ferrum._validate import validate_optional_vocabulary
         from ferrum.marks.composite import desugar_ribbon
 
         # Refused at the call, like every other interpolate= door.
-        validate_optional_choice(
+        validate_optional_vocabulary(
             "mark_ribbon", "interpolate", interpolate, interpolate_accepted_values()
         )
 
@@ -912,8 +912,6 @@ class StatisticalMarksMixin:
         orient=None,
         horizontal=False,
         position=None,
-        _door="mark_violin(inner=...)",
-        _door_recourse="",
         **mark_kwargs,
     ) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
@@ -937,12 +935,14 @@ class StatisticalMarksMixin:
             no inner mark. With a hue split (``color=`` distinct from the
             categorical axis), no ``inner`` variant dodges per hue -- see
             ``heavy_stat.py``'s ``_VIOLIN_QUARTILE_BAND_SIZE`` comment for
-            the limitation this shares across variants. Each render with
-            ``inner`` other than ``"none"``/``None`` under a hue split
-            warns once, naming what is dropped -- ``catplot(kind="violin",
-            hue=...)`` voices this same warning under its own name, since
-            it drives this method with its own fixed ``inner`` default and
-            exposes no ``inner=`` of its own for the message to point at.
+            the limitation this shares across variants. With ``inner``
+            other than ``"none"``/``None`` under a hue split, the chart
+            warns once each time it is resolved -- every ``to_json()`` and
+            every render (``to_svg()``, ``to_png()``, ``show()``, ...) --
+            naming what is dropped. ``catplot(kind="violin", hue=...)``
+            voices this same warning under its own name, since it drives
+            this method with its own fixed ``inner`` default and exposes no
+            ``inner=`` of its own for the message to point at.
         shared_extent : bool, default False
             When ``True``, all groups share the same KDE evaluation range
             (cross-group global min/max), making the value axis directly
@@ -989,8 +989,6 @@ class StatisticalMarksMixin:
                 "inner": inner,
                 "shared_extent": shared_extent,
                 "horizontal": effective_horizontal,
-                "door": _door,
-                "door_recourse": _door_recourse,
                 **mark_kwargs,
             },
             placeholder="polygon",

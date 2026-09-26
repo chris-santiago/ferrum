@@ -48,13 +48,13 @@
 use ferrum_scene::PathCmd;
 use pyo3::prelude::*;
 
-use crate::render::RenderError;
+use crate::transform::vocabulary::Vocabulary;
 
-/// The `interpolate=` vocabulary (spec §6.1).
-///
-/// [`Interpolate::ALL`] is the single source for both dispatch and the
-/// [`RenderError::UnknownInterpolate`] message: a value the enum cannot name
-/// cannot be dispatched, and the refusal lists exactly what dispatch accepts.
+/// The `interpolate=` vocabulary (spec §6.1), on the shared [`Vocabulary`]
+/// API: its declared order and spellings are the single source for dispatch,
+/// the published list and the
+/// [`RenderError::UnknownInterpolate`](crate::render::RenderError::UnknownInterpolate)
+/// refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Interpolate {
     #[default]
@@ -67,9 +67,8 @@ pub(crate) enum Interpolate {
     Cardinal,
 }
 
-impl Interpolate {
-    /// Every accepted method, in the order the refusal message lists them.
-    pub(crate) const ALL: [Self; 7] = [
+impl Vocabulary for Interpolate {
+    const ALL: &'static [Self] = &[
         Self::Linear,
         Self::Step,
         Self::StepBefore,
@@ -79,44 +78,20 @@ impl Interpolate {
         Self::Cardinal,
     ];
 
-    /// The user-facing spelling — the string accepted by `interpolate=`.
-    pub(crate) const fn as_str(self) -> &'static str {
+    fn spellings(self) -> &'static [&'static str] {
         match self {
-            Self::Linear => "linear",
-            Self::Step => "step",
-            Self::StepBefore => "step-before",
-            Self::StepAfter => "step-after",
-            Self::Monotone => "monotone",
-            Self::Basis => "basis",
-            Self::Cardinal => "cardinal",
+            Self::Linear => &["linear"],
+            Self::Step => &["step"],
+            Self::StepBefore => &["step-before"],
+            Self::StepAfter => &["step-after"],
+            Self::Monotone => &["monotone"],
+            Self::Basis => &["basis"],
+            Self::Cardinal => &["cardinal"],
         }
     }
+}
 
-    /// Resolve a user-supplied `interpolate=` value, or refuse it.
-    ///
-    /// Called once per mark from [`crate::render::draw::resolve_mark_style`],
-    /// so an unknown value is refused before any geometry is built and the
-    /// drawers downstream hold a value that is valid by construction — there
-    /// is no "unrecognized method quietly renders straight" path left.
-    pub(crate) fn parse(value: &str) -> Result<Self, RenderError> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|method| method.as_str() == value)
-            .ok_or_else(|| RenderError::UnknownInterpolate { value: value.to_string() })
-    }
-
-    /// `"linear|step|step-before|step-after|monotone|basis|cardinal"` — the
-    /// accepted set as it appears in the refusal message, rendered the same
-    /// `a|b|c` way as every aggregate vocabulary's `accepted_values()`.
-    pub(crate) fn accepted_values() -> String {
-        Self::ALL
-            .iter()
-            .map(|method| method.as_str())
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
+impl Interpolate {
     /// Whether this method traces straight segments between consecutive
     /// points. `mark_line` uses this to choose its scene node: a straight
     /// series stays a `Polyline`, anything else needs a `Path`.
@@ -145,12 +120,12 @@ impl Interpolate {
 }
 
 /// `ferrum._core.interpolate_accepted_values()`: every `interpolate=`
-/// spelling, in [`Interpolate::ALL`] order, so Python's declaration-time gate
+/// spelling, in [`Vocabulary::ALL`] order, so Python's declaration-time gate
 /// reads the vocabulary dispatch uses instead of mirroring it. Registered in
 /// `lib.rs`, typed in `src/ferrum/_core.pyi`; mirrors `scale_accepted_keys`.
 #[pyfunction]
 pub(crate) fn interpolate_accepted_values() -> Vec<String> {
-    Interpolate::ALL.iter().map(|method| method.as_str().to_string()).collect()
+    Interpolate::all().into_iter().map(str::to_string).collect()
 }
 
 /// Which screen coordinate a traced series is parameterized by — the
@@ -588,6 +563,7 @@ pub(crate) fn observe_monotone_trace(cmds: &[PathCmd]) -> ObservedTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::RenderError;
 
     /// An x-parameterized trace — what every consumer but a horizontal area
     /// uses. The `CurveAxis::Y` cases construct `Trace` directly.
@@ -610,7 +586,7 @@ mod tests {
 
     #[test]
     fn every_accepted_value_round_trips_through_parse() {
-        for method in Interpolate::ALL {
+        for &method in Interpolate::ALL {
             assert_eq!(
                 Interpolate::parse(method.as_str()).expect("ALL member must parse"),
                 method,
@@ -621,23 +597,13 @@ mod tests {
 
     #[test]
     fn unknown_value_refuses_and_names_the_accepted_set() {
-        let err = Interpolate::parse("cubic").expect_err("unknown value must refuse");
+        assert_eq!(Interpolate::parse("cubic"), None, "unknown value must refuse");
+        let err = RenderError::UnknownInterpolate { value: "cubic".into() };
         assert_eq!(
-            err,
-            RenderError::UnknownInterpolate { value: "cubic".into() }
+            err.to_string(),
+            "unknown interpolate 'cubic'; expected \
+             linear|step|step-before|step-after|monotone|basis|cardinal"
         );
-        let message = err.to_string();
-        assert!(
-            message.contains("'cubic'"),
-            "message must quote the offending value; got {message}"
-        );
-        for method in Interpolate::ALL {
-            assert!(
-                message.contains(method.as_str()),
-                "message must list the accepted value {:?}; got {message}",
-                method.as_str()
-            );
-        }
     }
 
     #[test]
@@ -657,7 +623,7 @@ mod tests {
             Interpolate::ALL.iter().map(|m| m.as_str().to_string()).collect();
         assert_eq!(published, expected);
         for value in &published {
-            assert!(Interpolate::parse(value).is_ok(), "published '{value}' must parse");
+            assert!(Interpolate::parse(value).is_some(), "published '{value}' must parse");
         }
         assert_eq!(published.join("|"), Interpolate::accepted_values());
     }
@@ -933,7 +899,7 @@ mod tests {
 
     #[test]
     fn one_point_emits_only_the_move_and_none_emits_nothing() {
-        for method in Interpolate::ALL {
+        for &method in Interpolate::ALL {
             assert_eq!(
                 trace(method, StepSpelling::Shorthand).subpath(&[(3.0, 4.0)]),
                 vec![PathCmd::MoveTo { x: 3.0, y: 4.0 }],
@@ -968,7 +934,7 @@ mod tests {
                 .collect()
         }
 
-        for method in Interpolate::ALL {
+        for &method in Interpolate::ALL {
             let t = trace(method, StepSpelling::Vertices);
             let mut ring = vec![PathCmd::MoveTo { x: -1.0, y: -1.0 }];
             t.extend_reversed(&mut ring, &SAMPLE);
@@ -1049,7 +1015,7 @@ mod tests {
             }
         }
 
-        for method in Interpolate::ALL {
+        for &method in Interpolate::ALL {
             for step in [StepSpelling::Shorthand, StepSpelling::Vertices] {
                 let along_y = Trace { method, step, axis: CurveAxis::Y }.subpath(&SAMPLE);
                 let along_x =

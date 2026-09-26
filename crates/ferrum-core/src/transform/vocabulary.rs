@@ -1,5 +1,6 @@
 //! The one API every closed string vocabulary enum shares (`AggFn`, its
-//! declared subsets `HexAggregate`/`XEstimator`, `RasterAggregate`).
+//! declared subsets `HexAggregate`/`XEstimator`, `RasterAggregate`, and the
+//! mark-side `Interpolate`).
 //!
 //! An implementor supplies its variants in declared order and each variant's
 //! spellings (canonical first, then aliases); parsing, listing, the registry's
@@ -59,12 +60,17 @@ pub(crate) trait Vocabulary: Copy + PartialEq + 'static {
     /// received: `unknown <param> '<s>'; expected a|b|c`. The caller prefixes
     /// the door it guards (`Hex: `, `stat_hex: `, ...).
     fn parse_or_refuse(param: &str, s: &str) -> Result<Self, String> {
-        Self::parse(s).ok_or_else(|| {
-            format!(
-                "unknown {param} '{s}'; expected {}",
-                Self::accepted_values()
-            )
-        })
+        Self::parse(s).ok_or_else(|| Self::refusal(param, s))
+    }
+
+    /// The refusal body for a value outside the vocabulary:
+    /// `unknown <param> '<s>'; expected a|b|c`. For a door that carries the
+    /// rejected value in a typed error and renders the text later.
+    fn refusal(param: &str, s: &str) -> String {
+        format!(
+            "unknown {param} '{s}'; expected {}",
+            Self::accepted_values()
+        )
     }
 }
 

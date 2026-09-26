@@ -256,7 +256,7 @@ pub fn build_color_scale(
                         Some(declared) => declared,
                         None => distinct_values_in_order(domain_batch, &c_enc.field)?,
                     };
-                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
+                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings)?;
                     let palette: Cow<'static, [Color]> = Cow::Owned(parsed);
                     // No overflow warning when the user supplied an explicit range;
                     // they own the mapping and repeated colors are intentional.
@@ -286,7 +286,7 @@ pub fn build_color_scale(
             Some(cats) => cats,
             None => distinct_values_in_order(domain_batch, &c_enc.field)?,
         };
-        apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
+        apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings)?;
         let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
         Ok((Some(scale), warnings))
     }

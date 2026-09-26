@@ -42,18 +42,21 @@ Independent predicates live here:
   ``float`` is finite, returned in its wire form (builtin ``int``/``float``).
   Every numeric door without a narrower range stores what it returns
   (``heatmap`` bounds, ``AxisConfig`` domain bounds, t-SNE ``perplexity``,
-  ``catplot(ci=)``, and each ``BreakAxis.gap`` bound via
-  ``validate_finite_ordered_pair``).
+  ``catplot(ci=)``, each ``BreakAxis.gap`` bound via
+  ``coerce_finite_ordered_pair``, the numeric ``mark_*`` style kwargs, dash
+  lengths, the conditional numeric literal, and the ``transform_filter`` /
+  ``transform_impute`` number literals).
 
-- ``validate_positive_int`` (#238) is the "count contract": a value
+- ``coerce_positive_int`` (#238) is the "count contract": a value
   must be an integer (``is_integer_number``: ``bool`` excluded, same
-  reasoning as ``coerce_pixel_value``), ``>= 1`` and at most ``2**53``.
-  ``None`` passes as the caller's "unset, let inference decide" sentinel
-  unless the caller requires a value. Asked by each public door with the
-  label the caller invoked: ``Chart.facet(ncols=/nrows=)``,
-  ``Facet(columns=)`` and ``catplot(n_boot=)``.
+  reasoning as ``coerce_pixel_value``), ``>= 1`` and at most ``2**53``,
+  returned as a builtin ``int``. ``None`` passes as the caller's "unset,
+  let inference decide" sentinel unless the caller requires a value. Asked
+  by each public door with the label the caller invoked, which stores the
+  return: ``Chart.facet(ncols=/nrows=)``, ``Facet(columns=)`` and
+  ``catplot(n_boot=)``.
 
-- ``validate_finite_ordered_pair`` (#92) is the "break-gap contract": both
+- ``coerce_finite_ordered_pair`` (#92) is the "break-gap contract": both
   ``start`` and ``end`` must pass ``coerce_finite_real``, and ``start`` must be strictly less than ``end``. Shared by
   ``BreakAxis.__post_init__``, which validates every ``(start, end)`` pair in
   ``gap`` (a single pair or a list of pairs) — the numeric-pair analog of
@@ -103,7 +106,7 @@ import decimal
 import math
 import numbers
 import operator
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 
 def is_real_number(value: Any) -> bool:
@@ -198,11 +201,33 @@ def validate_optional_choice(
 
     Any other value, string or not, must be in *choices*, so a malformed value
     is refused at the declaring door (*func_name*) instead of reaching a Rust
-    serde type error that names no door. Used with a Rust-published
-    vocabulary the caller passes in (``interpolate=``, ``x_estimator=``).
+    serde type error that names no door. Used for ``x_estimator=``, whose
+    Python doors speak ``validate_choice``'s shape rather than
+    ``fm.Smooth``'s (see :func:`validate_optional_vocabulary` for the
+    ``interpolate=`` doors, which speak their Rust vocabulary's shape).
     """
     if value is not None:
         validate_choice(func_name, param, value, choices)
+
+
+def validate_optional_vocabulary(
+    door: str,
+    param: str,
+    value: Any,
+    accepted: "Sequence[str]",
+) -> None:
+    """Refuse *value* unless it is ``None`` (unset) or one of the Rust-published *accepted* spellings.
+
+    Any other value, string or not, is refused at the declaring *door*
+    instead of reaching a Rust serde type error that names no door. Every
+    caller guards a vocabulary Rust publishes (``interpolate=``), so the
+    refusal speaks that vocabulary's Rust shape, ``{door}: unknown {param}
+    '{value}'; expected a|b|c``, with *accepted* joined in the order Rust
+    publishes it: the text a hand-built spec's ``interpolate`` refuses with
+    at render, under the calling door's name.
+    """
+    if value is not None and value not in accepted:
+        raise ValueError(f"{door}: unknown {param} '{value}'; expected {'|'.join(accepted)}")
 
 
 def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
@@ -351,8 +376,8 @@ def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int
 _MAX_EXACT_INT = 2**53
 
 
-def validate_positive_int(label: str, value: Any, *, required: bool = False) -> None:
-    """Raise ``ValueError`` when *value* is not a positive integer no larger than ``2**53``.
+def coerce_positive_int(label: str, value: Any, *, required: bool = False) -> int | None:
+    """Return *value* as a builtin ``int``, or raise ``ValueError`` unless it is a positive integer no larger than ``2**53``.
 
     A valid value is an integer (:func:`is_integer_number`: ``int`` or a
     numpy integer scalar, never ``bool``), ``>= 1``, and at most ``2**53``,
@@ -360,10 +385,16 @@ def validate_positive_int(label: str, value: Any, *, required: bool = False) -> 
     or a native integer argument as a raw ``OverflowError``. ``None`` is the
     caller's "unset, let inference decide" sentinel and passes unless
     *required* is set, matching :func:`coerce_pixel_value`'s convention.
+    Callers store the return, not *value*: ``np.int64(2)`` is stored as ``2``.
 
     *label* is the pre-composed public door (e.g.
     ``"Chart.facet(ncols=...)"``), matching :func:`coerce_pixel_value`'s
     convention.
+
+    Returns
+    -------
+    int or None
+        *value* as a builtin ``int``, or ``None`` when unset.
 
     Raises
     ------
@@ -372,7 +403,7 @@ def validate_positive_int(label: str, value: Any, *, required: bool = False) -> 
         or, when *required* is set, if *value* is ``None``.
     """
     if value is None and not required:
-        return
+        return None
     if not is_integer_number(value):
         raise ValueError(
             f"{label} must be a positive int, not {type(value).__name__}; received {value!r}"
@@ -384,9 +415,10 @@ def validate_positive_int(label: str, value: Any, *, required: bool = False) -> 
             f"{label} must be at most 2**53, the largest integer a float holds exactly; "
             f"received {value!r}"
         )
+    return operator.index(value)
 
 
-def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> tuple[float, float]:
+def coerce_finite_ordered_pair(label: str, start: Any, end: Any) -> tuple[float, float]:
     """Return ``(start, end)`` as floats, or raise ``ValueError`` unless it is a finite, ordered pair.
 
     Each of *start*/*end* must pass :func:`coerce_finite_real` (refused as

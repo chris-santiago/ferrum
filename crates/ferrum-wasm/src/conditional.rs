@@ -1,12 +1,14 @@
-use ferrum_scene::{ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, SceneNode};
+use ferrum_scene::{
+    stroke_dash_index, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, SceneNode,
+};
 // `Panel` is named only by the wasm32 render entry and this module's host tests
 // — every other signature here takes the panels inside an `InstanceLayout`.
 #[cfg(any(target_arch = "wasm32", test))]
 use ferrum_scene::Panel;
 
 use crate::scene_load::{
-    batch_instance_spans, color_to_linear, stroke_dash_index, CircleInstance, DrawKind,
-    InstanceLayout, PackedBatchMeta, RectInstance,
+    batch_instance_spans, color_to_linear, CircleInstance, DrawKind, InstanceLayout,
+    PackedBatchMeta, RectInstance,
 };
 use crate::selection_state::SelectionState;
 
@@ -449,7 +451,7 @@ fn apply_value_common(value: &EncodingValue, view: &mut FillStrokeView<'_>) -> b
             true
         }
         EncodingValue::StrokeDash { value: pattern } => {
-            *view.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+            *view.stroke_dash = stroke_dash_index(Some(pattern.as_slice())) as f32;
             true
         }
         EncodingValue::StrokeOpacity { value: o } => {

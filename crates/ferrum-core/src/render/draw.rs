@@ -16,6 +16,7 @@ use super::color::{parse_color, with_opacity, Color};
 use super::marks::curve::Interpolate;
 use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind};
 use super::RenderError;
+use crate::transform::vocabulary::Vocabulary;
 
 impl DrawCtx<'_> {
     /// Whether this chart's coordinate system is flipped (`fm.CoordFlip()`).
@@ -614,7 +615,7 @@ pub fn resolve_mark_style(
 
     // S1: interpolate — resolves or refuses; there is no third "unrecognized
     // method silently renders straight" outcome (spec §7, no silent fallbacks).
-    if let Some(ref i) = o.interpolate { style.line.interpolate = Some(Interpolate::parse(i)?); }
+    if let Some(ref i) = o.interpolate { style.line.interpolate = Some(Interpolate::parse(i).ok_or_else(|| RenderError::UnknownInterpolate { value: i.clone() })?); }
     // S2: stroke_cap
     if let Some(ref sc) = o.stroke_cap { style.line.stroke_cap = Some(sc.clone()); }
     // S3: stroke_join
@@ -855,32 +856,34 @@ pub struct EmptyReason(pub String);
 
 impl MarkBuildResult {
     /// The populated case, beside [`empty`](Self::empty) and
-    /// [`empty_because`](Self::empty_because): every field a mark builder
-    /// produces, in the struct's own declared order, so a call site reads
-    /// the same order it would from a literal.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    /// [`empty_because`](Self::empty_because): the nodes, each node's source
+    /// row, and the per-node tooltip/href/description metadata gathered from
+    /// `meta` for exactly those rows. The optional per-mark slots are set by
+    /// the named `with_*` methods, so no two same-typed values are ever
+    /// positional neighbors.
+    pub fn populated(
         kind: MarkBatchKind,
         nodes: Vec<FsSceneNode>,
-        data_indices: Option<Vec<usize>>,
-        tooltips: Option<Vec<FsTooltipContent>>,
-        hrefs: Option<Vec<Option<String>>>,
-        descriptions: Option<Vec<Option<String>>>,
-        polar_spans: Option<Vec<(f64, f64)>>,
-        glyph_anchors: Option<Vec<(f64, f64)>>,
-        empty_reason: Option<EmptyReason>,
+        data_indices: Vec<usize>,
+        meta: &MetadataColumns,
     ) -> Self {
-        Self {
-            kind,
-            nodes,
-            data_indices,
-            tooltips,
-            hrefs,
-            descriptions,
-            polar_spans,
-            glyph_anchors,
-            empty_reason,
-        }
+        let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+        Self { tooltips, hrefs, descriptions, data_indices: Some(data_indices), nodes, ..Self::empty(kind) }
+    }
+
+    pub fn with_polar_spans(mut self, spans: Vec<(f64, f64)>) -> Self {
+        self.polar_spans = Some(spans);
+        self
+    }
+
+    pub fn with_glyph_anchors(mut self, anchors: Vec<(f64, f64)>) -> Self {
+        self.glyph_anchors = Some(anchors);
+        self
+    }
+
+    pub fn with_empty_reason(mut self, reason: Option<EmptyReason>) -> Self {
+        self.empty_reason = reason;
+        self
     }
 
     pub fn empty(kind: MarkBatchKind) -> Self {
@@ -1413,24 +1416,19 @@ pub fn to_scene_text_style(
     }
 }
 
-/// The canonical stroke-dash palette lives in `ferrum_scene::dash` (both
-/// `pack_instances::stroke_dash_index` and the WASM shaders derive from it
-/// too, so the SVG and GPU/interactive paths cannot silently drift). This
-/// crate reads it rather than holding a copy.
-pub(crate) use ferrum_scene::{resolve_stroke_dash, DASH_PALETTE};
-
 /// Publish the canonical stroke-dash palette to Python, on the
 /// `scale_accepted_keys` precedent, so `_LINETYPE_MAP` (`marks/base.py`) can
 /// assert every one of its values is a palette member without holding a
 /// Rust-side copy of the table.
 ///
-/// Index-aligned with [`resolve_stroke_dash`]/`stroke_dash_index`: index `0`
+/// Index-aligned with [`ferrum_scene::resolve_stroke_dash`]: index `0`
 /// is solid, represented as an empty list (`_LINETYPE_MAP["solid"]`'s own
-/// spelling), and index `i` (`i >= 1`) is `DASH_PALETTE[i - 1]`.
+/// spelling), and index `i` (`i >= 1`) is
+/// [`ferrum_scene::DASH_PALETTE`]`[i - 1]`.
 #[pyfunction]
 pub fn stroke_dash_palette() -> Vec<Vec<f64>> {
     std::iter::once(Vec::new())
-        .chain(DASH_PALETTE.iter().map(|pat| pat.to_vec()))
+        .chain(ferrum_scene::DASH_PALETTE.iter().map(|pat| pat.to_vec()))
         .collect()
 }
 
@@ -1512,57 +1510,6 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- RSUP-01: DASH_PALETTE round-trip (index→pattern→index and pattern→index→pattern) ---
-
-    /// Verify that `resolve_stroke_dash` and `stroke_dash_index` are exact mutual inverses
-    /// for every entry in `DASH_PALETTE`.  A drift between the two functions silently renders
-    /// dashes correctly in SVG but wrong in the GPU/interactive path with no compile error.
-    ///
-    /// This test exercises both directions of the round-trip:
-    ///   1. index → pattern (`resolve_stroke_dash`) → index (`stroke_dash_index`) == original index
-    ///   2. pattern → index (`stroke_dash_index`) → pattern (`resolve_stroke_dash`) == original pattern
-    #[test]
-    fn dash_palette_round_trip_index_to_pattern_to_index() {
-        use crate::render::pack_instances::stroke_dash_index;
-
-        // Index 0 is solid.
-        assert_eq!(resolve_stroke_dash(0.0), None, "index 0 must be solid (None)");
-        let solid_idx = stroke_dash_index(&None);
-        assert!((solid_idx - 0.0).abs() < 1e-6, "None pattern → index 0");
-
-        // Indices 1..=N: round-trip in both directions.
-        for palette_idx in 1..=(DASH_PALETTE.len()) {
-            let pattern = resolve_stroke_dash(palette_idx as f64)
-                .expect("non-zero index must produce a pattern");
-
-            // Direction 1: index → pattern → index must recover the original index.
-            let recovered_idx = stroke_dash_index(&Some(pattern.clone()));
-            assert!(
-                (recovered_idx - palette_idx as f32).abs() < 1e-6,
-                "round-trip index {palette_idx}: pattern={pattern:?} → index={recovered_idx} (expected {palette_idx})"
-            );
-
-            // Direction 2: pattern → index → pattern must recover the original pattern.
-            let recovered_pattern = resolve_stroke_dash(recovered_idx as f64)
-                .expect("recovered index must produce a pattern");
-            assert_eq!(
-                pattern, recovered_pattern,
-                "round-trip pattern {pattern:?}: index={recovered_idx} → pattern={recovered_pattern:?}"
-            );
-        }
-    }
-
-    /// Solid and unknown patterns always map to index 0 (the solid sentinel).
-    #[test]
-    fn dash_palette_solid_and_unknown_map_to_zero() {
-        use crate::render::pack_instances::stroke_dash_index;
-
-        assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6, "None → 0");
-        assert!((stroke_dash_index(&Some(vec![])) - 0.0).abs() < 1e-6, "empty → 0");
-        assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6,
-            "unknown pattern → 0");
-    }
 
     // --- Phase 7 baseline tests (updated to 3-arg signature; None overrides = same result) ---
 

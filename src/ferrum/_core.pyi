@@ -959,6 +959,10 @@ def aux_legend_channels() -> list[str]: ...
 # declaration order, read from the struct's derived serde field list.
 def mark_kwargs_fields() -> list[str]: ...
 
+# The numeric (``f64``/``usize``) subset of ``mark_kwargs_fields()``, in
+# declaration order, derived from the struct's own ``Deserialize``.
+def mark_numeric_kwargs() -> list[str]: ...
+
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
 # at declaration instead of mirroring the list as a Python literal.
