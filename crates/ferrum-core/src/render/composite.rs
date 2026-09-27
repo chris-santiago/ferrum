@@ -689,6 +689,14 @@ fn resolve_caller_scale_group(
 /// draws exactly that distinction, the same predicate a single leaf's own
 /// internal `spec.layers` union reads.
 ///
+/// Every member of the group is judged, not only the ones
+/// [`LayerUnion::admits`] lets into the axis's extent: the two ask different
+/// questions. A member carrying a different scale, or its own `domain`,
+/// stays out of the extent but still draws in the one shared panel, so its
+/// column must sit on that axis all the same. The flat layered route's gate
+/// (`scale_resolve::require_layers_placeable_on_caller_scale`) judges every
+/// layer the same way.
+///
 /// At most `group[0]`'s own domain is resolved here (`resolve_group`, called
 /// right after this returns, resolves every member's on its own): reading
 /// a domain this function never uses would let a LATER member's unrelated
@@ -2899,8 +2907,18 @@ mod tests {
             .collect();
         let flat_spec = ChartSpec { encoding: layers[0].encoding.clone(), layers: Some(layers), ..base_spec() };
         let flat_batch = batch_of(&members.iter().collect::<Vec<_>>());
-        let flat = resolve_scales_with_leaf_context(&flat_spec, &flat_batch, &HashMap::new(), pr, pr, &theme, None)
-            .map(|(scales, _)| domain_of(scales));
+        // Through `prepare_render_inputs`, the one funnel a `+` render takes:
+        // its spec-level layer checks run there, before scale resolution.
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let flat = crate::render::prepare::prepare_render_inputs(
+            &flat_spec,
+            &flat_batch,
+            &theme,
+            viewport,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .map(|prep| domain_of(prep.provisional_scales));
         Routes { leaves, flat }
     }
 
@@ -3122,5 +3140,73 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// On `+`, a layer's `y2` endpoint on an axis a domain-less caller scale
+    /// establishes is read into the axis's extent, and a `Utf8` endpoint
+    /// refuses in the shared-axis voice naming that layer. The spec-level
+    /// gate judges value columns only, so the union's read guard is the one
+    /// owner of this refusal.
+    #[test]
+    fn caller_scale_union_refuses_a_utf8_paired_endpoint_on_the_flat_route() {
+        let layer = |mark: Mark, encoding: Encoding| Layer {
+            mark,
+            encoding,
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        };
+        let scaled = Encoding {
+            x: Some(enc("i")),
+            y: Some(EncodingSpec { scale: Some(serde_json::from_value(domainless(None)).unwrap()), ..enc("v") }),
+            ..Encoding::default()
+        };
+        let paired = Encoding { x: Some(enc("i")), y: Some(enc("p")), y2: Some(enc("s")), ..Encoding::default() };
+        let spec = ChartSpec {
+            encoding: scaled.clone(),
+            layers: Some(vec![layer(Mark::Point, scaled), layer(Mark::Rule, paired)]),
+            ..base_spec()
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("i", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("p", DataType::Float64, false),
+                Field::new("s", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        let err = crate::render::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .err()
+        .expect("+ refuses");
+        assert_eq!(
+            err,
+            RenderError::LayerAxisColumnUnplaceable {
+                layer: 1,
+                detail: Box::new(crate::render::LayerAxisColumnDetail {
+                    channel: "y".to_string(),
+                    field: "s".to_string(),
+                    dtype: "Utf8".to_string(),
+                }),
+            }
+        );
     }
 }

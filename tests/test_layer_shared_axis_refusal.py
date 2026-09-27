@@ -40,29 +40,7 @@ import pytest
 
 import ferrum as fm
 
-_CHANNEL = "y"
-
-
-def _refusal(layer_index: int, field: str, dtype: str, channel: str = _CHANNEL) -> str:
-    """The exact `LayerCoordUnplaceable` text, filled in."""
-    return (
-        f"layer {layer_index}: column '{field}' ({dtype}) cannot be drawn on the shared "
-        f"{channel} axis, which is continuous — a layered chart (fm.layer(...) / chart + chart) "
-        "merges its members onto one panel. Cast the column, or give the layer its own scale "
-        f'with resolve={{"{channel}": "independent"}}.'
-    )
-
-
-def _composite_wrapped_refusal(
-    layer_index: int, field: str, dtype: str, channel: str = _CHANNEL
-) -> str:
-    """The same exact text, wrapped in the composite route's crate-wide
-    `CompositeResolveError::DomainResolve` envelope -- the shape a `fm.layer(...)`
-    refusal takes, unlike `+`/`.interactive()`'s merged-flat prepare, which raises the
-    bare text directly."""
-    core = _refusal(layer_index, field, dtype, channel)
-    return f"composite scale resolution failed: failed to resolve shared {channel} domain for field '{field}': {core}"
-
+from _shared_axis_refusal import composite_wrapped_refusal, refusal
 
 LEFT = pl.DataFrame({"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
 
@@ -128,8 +106,8 @@ def _render(route: str, dtype_label: str) -> None:
 
 def _expected_refusal(route: str, layer_index: int, field: str, dtype: str) -> str:
     if route == "fm.layer":
-        return _composite_wrapped_refusal(layer_index, field, dtype)
-    return _refusal(layer_index, field, dtype)
+        return composite_wrapped_refusal(layer_index, field, dtype)
+    return refusal(layer_index, field, dtype)
 
 
 @pytest.mark.parametrize(
@@ -159,7 +137,7 @@ def test_nested_overlay_inside_hconcat_refuses_with_the_same_wrapped_text() -> N
     )
     with pytest.raises(ValueError) as exc:
         fm.hconcat(fm.layer(left, right), third).to_svg()
-    assert str(exc.value) == _composite_wrapped_refusal(1, field, dtype)
+    assert str(exc.value) == composite_wrapped_refusal(1, field, dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +248,7 @@ def _render_wire(spec_json: str, output_kind: str) -> None:
 def test_wire_layer_utf8_column_refuses_with_the_exact_text(output_kind: str) -> None:
     with pytest.raises(ValueError) as exc:
         _render_wire(_WIRE_UTF8_SPEC, output_kind)
-    assert str(exc.value) == _refusal(1, "s", "Utf8")
+    assert str(exc.value) == refusal(1, "s", "Utf8")
 
 
 @pytest.mark.parametrize("output_kind", ["static", "interactive"])

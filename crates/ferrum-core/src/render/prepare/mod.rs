@@ -1066,6 +1066,21 @@ pub fn prepare_render_inputs(
         }
     }
 
+    // A layered spec whose axis a continuous caller scale establishes draws
+    // every layer on that axis, so each layer's column must be placeable on
+    // it. Asked once per spec, before any scale resolution reads a column; a
+    // geoshape chart resolves no positional axis, so it has none to ask about.
+    if !matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
+        for channel in ["x", "y"] {
+            crate::render::scale_resolve::require_layers_placeable_on_caller_scale(
+                spec,
+                channel,
+                &transformed,
+                &transform_outputs,
+            )?;
+        }
+    }
+
     // Build provisional scales and axes using the first layer's resolved encoding,
     // which already incorporates CoordFlip. For single-layer non-flipped specs this
     // is identical to what Phase 7 computed (same encoding, same spec fields).

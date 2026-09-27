@@ -52,9 +52,9 @@ import pytest
 import ferrum as fm
 from ferrum._core import ChartSpec as _ChartSpec
 
+from _shared_axis_refusal import composite_wrapped_refusal, refusal
 from _svg_extents import axis_tick_labels, pixel_for, value_axis_ladder, value_axis_ladders
 from _svg_rects import data_bar_rects, mark_layer, svg_elements
-from tests.test_layer_shared_axis_refusal import _composite_wrapped_refusal, _refusal
 
 #: Pixel coordinates are emitted rounded to 3 decimals, so a tolerance below
 #: ~1e-3 would be asserting on the formatter rather than on the geometry.
@@ -590,8 +590,8 @@ def test_stated_domain_scale_refuses_a_string_layer_on_the_shared_axis(spelling)
     strings = strings.mark_point().encode(x="cat", y="s")
     layered, plus = _both_spellings(stated, strings)
     chart, expected = {
-        "layer": (layered, _composite_wrapped_refusal(1, "s", "Utf8")),
-        "plus": (plus, _refusal(1, "s", "Utf8")),
+        "layer": (layered, composite_wrapped_refusal(1, "s", "Utf8")),
+        "plus": (plus, refusal(1, "s", "Utf8")),
     }[spelling]
     with pytest.raises(ValueError) as exc:
         chart.to_svg()

@@ -675,7 +675,8 @@ pub(in crate::render) fn layered_caller_scale<'a>(
 /// `domain`. An `independent_y` layer owns its own y axis, and a later layer
 /// whose own coord exchanges its channels relative to the panel is judged by
 /// `scene_build::validate_layer_coord_exchange_is_servable`; neither is
-/// judged here.
+/// judged here. Asked once per spec, by `prepare::prepare_render_inputs`,
+/// before any scale resolution reads a column.
 pub(in crate::render) fn require_layers_placeable_on_caller_scale(
     spec: &ChartSpec,
     channel: &str,
@@ -871,22 +872,16 @@ pub(in crate::render) fn numeric_domain_union_over(
                 e
             });
             let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
-            let own_scale = layer_channel_encoding(layer, spec.coord.as_ref(), channel)
-                .and_then(|e| e.scale.as_ref());
-            if !layer_union.admits(own_scale) {
+            let (value_enc, paired_enc) = match channel {
+                "x" => (encoding.x.as_ref(), encoding.x2.as_ref()),
+                "y" => (encoding.y.as_ref(), encoding.y2.as_ref()),
+                _ => (None, None),
+            };
+            if !layer_union.admits(value_enc.and_then(|e| e.scale.as_ref())) {
                 continue;
             }
-            let layer_fields: [Option<&str>; 2] = match channel {
-                "x" => [
-                    encoding.x.as_ref().map(|e| e.field.as_str()),
-                    encoding.x2.as_ref().map(|e| e.field.as_str()),
-                ],
-                "y" => [
-                    encoding.y.as_ref().map(|e| e.field.as_str()),
-                    encoding.y2.as_ref().map(|e| e.field.as_str()),
-                ],
-                _ => [None, None],
-            };
+            let layer_fields: [Option<&str>; 2] =
+                [value_enc.map(|e| e.field.as_str()), paired_enc.map(|e| e.field.as_str())];
             // Union every declared field for this layer on this channel, and
             // remember whether the VALUE slot (index 0) actually resolved to
             // data in some batch — `value_field_contributed` below. One pass
@@ -921,7 +916,12 @@ pub(in crate::render) fn numeric_domain_union_over(
                             // mirroring the ordinal sibling's
                             // `ensure_category_keyable` gate later in this
                             // file. Every OTHER `union_field` failure
-                            // propagates with `?`.
+                            // propagates with `?`. This is the read guard for
+                            // every column the union reads, on the auto path
+                            // and under a caller's scale alike; the spec-level
+                            // `require_layers_placeable_on_caller_scale` judges
+                            // each layer's value column only, so a layer's
+                            // `x2`/`y2` endpoint is judged here alone.
                             crate::render::arrow_cast::require_placeable_on_continuous_axis(
                                 layer_index,
                                 channel,

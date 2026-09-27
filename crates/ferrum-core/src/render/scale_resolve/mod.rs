@@ -54,7 +54,7 @@ pub use self::color::build_color_scale;
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
     apply_sort_to_domain, establishing_caller_scale, locate_field, numeric_domain_union_over, positional_category_union,
-    LayerUnion, SortContext,
+    require_layers_placeable_on_caller_scale, LayerUnion, SortContext,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -2106,7 +2106,8 @@ fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError>
     Ok(())
 }
 
-/// `enc` with `scale` in place of whatever scale it declares, when both exist.
+/// `enc` with `scale` in place of whatever scale it declares, the bar anchor
+/// ferrum injects included, when both exist.
 fn with_group_scale(
     enc: Option<&crate::spec::encoding::EncodingSpec>,
     scale: Option<&crate::spec::encoding::ScaleSpec>,
