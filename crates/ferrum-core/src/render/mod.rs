@@ -1649,7 +1649,10 @@ pub enum RenderWarning {
     /// `scale_resolve::establishing_caller_scale`; a categorical one owns the
     /// band axis outright), so the layer stays out of the axis. Its scale is
     /// partially honored: `placement` says where its marks draw instead.
-    /// `layer` and `establishing` are layer positions in declaration order;
+    /// `layer` and `establishing` count the way the shared-axis refusal
+    /// counts: positions among a flat chart's layers in declaration order,
+    /// or positions among an `Overlay` group's members on the composite
+    /// route (a nested `+` member numbers its own layers separately).
     /// `channel` is `"x"`/`"y"`. One per excluded layer per channel.
     LayerScaleExcluded {
         layer: usize,
