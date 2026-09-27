@@ -167,7 +167,9 @@ pub(in crate::render) fn build_axis_scale(
     // explicit `enc.scale` bypass below, so a genuine user scale still wins —
     // a SYSTEM-INJECTED scale (#247A) is the one thing that bypass now yields
     // to, and only when an auto path has a cross-mark domain to offer (this, or
-    // a layered spec's own cross-layer union); see the gate below.
+    // a layered spec's own cross-layer union); see the gate below. A caller's
+    // scale receives one only as its overlay group's extent, which that scale
+    // spans in place of its own data.
     shared: Option<&SharedDomain>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
@@ -243,13 +245,19 @@ pub(in crate::render) fn build_axis_scale(
             coord_flipped,
         };
         // What a continuous scale stating no `domain` spans: the data of every
-        // layer carrying this same scale, with their paired `x2`/`y2`
-        // endpoints and the facet-shared global batch. A composite mark's
-        // layers each carry a copy of the one scale the caller wrote on it, so
-        // the axis covers the whole mark; a sibling layer without it stays out
-        // (see `LayerUnion::CarryingScale`). Unlayered, it is the bound column
-        // and its paired `x2`/`y2` column.
+        // layer carrying this same scale or declaring none, with their paired
+        // `x2`/`y2` endpoints and the facet-shared global batch. A composite
+        // mark's layers each carry a copy of the one scale the caller wrote on
+        // it, so the axis covers the whole mark; a sibling layer with a
+        // different scale stays out (see `LayerUnion::CarryingScale`).
+        // Unlayered, it is the bound column and its paired `x2`/`y2` column. A
+        // composite overlay group under this scale has already unioned its
+        // members the same way, and hands every member that extent as
+        // `shared` (see `LeafScaleContext::x_scale`).
         let data_extent = || {
+            if let Some(SharedDomain::Numeric { lo, hi }) = shared {
+                return Ok((*lo, *hi));
+            }
             if layered {
                 numeric_domain_union_over(
                     channel,
@@ -2454,21 +2462,28 @@ mod tests {
 
     /// The provenance half of the gate, as a control: the identical scale with
     /// `zero: true` but written by the CALLER keeps the bypass even when a shared
-    /// domain is offered. `zero` is not what decides — authorship is.
+    /// domain is offered. `zero` is not what decides — authorship is. The bypass
+    /// spans the offered extent (its overlay group's data) and applies its own
+    /// `zero`: `[5, 80]` resolves `(0, 80)`, where the auto path would keep
+    /// `(5, 80)` and the bar column alone would give `(0, 3)`.
     #[test]
     fn user_written_zero_scale_keeps_the_bypass_against_a_shared_domain() {
-        let shared = SharedDomain::Numeric { lo: 0.0, hi: 80.0 };
+        let shared = SharedDomain::Numeric { lo: 5.0, hi: 80.0 };
         let scale = build_zero_anchored_y(false, Some(&shared), None);
-        assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
+        assert_eq!(scale.data_domain(), Some((0.0, 80.0)));
+        let injected = build_zero_anchored_y(true, Some(&shared), None);
+        assert_eq!(injected.data_domain(), Some((5.0, 80.0)));
     }
 
     /// The same control on the layered arm: a caller's own scale is not overruled
     /// by the presence of layers either, so their `padding`/`nice`/`range` keep
-    /// being honored in a layered chart.
+    /// being honored in a layered chart. The point sibling answers to a scale of
+    /// its own, so the caller scale spans only the bar's `[1, 3]`, zero-extended
+    /// by its own `zero`: `(0, 3)`, where the auto path's union would be `(0, 80)`.
     #[test]
     fn user_written_zero_scale_keeps_the_bypass_in_a_layered_spec() {
         use crate::spec::mark::Mark;
-        let layers = vec![y_layer(Mark::Bar, "v"), y_layer(Mark::Point, "p")];
+        let layers = vec![y_layer(Mark::Bar, "v"), scaled_layer(Mark::Point, linear_y("p", false, false))];
         let scale = build_zero_anchored_y(false, None, Some(layers));
         assert_eq!(scale.data_domain(), Some((0.0, 3.0)));
     }
@@ -2547,12 +2562,13 @@ mod tests {
         assert_eq!(scale.data_domain(), Some((9.0, 0.5)));
     }
 
-    /// A sibling layer that does not carry the scale stays out: the axis is the
-    /// scaled whisker's own `lo..hi`, `(6, 2)` reversed, not the outliers' `9`.
+    /// A sibling layer that declares no scale draws against this axis, so its
+    /// data joins it: the outliers' `0.5..9` widens the scaled whisker's own
+    /// `lo..hi` to `(9, 0.5)` reversed, not `(6, 2)` with the outliers off it.
     #[test]
-    fn domainless_user_scale_leaves_out_a_layer_without_it() {
+    fn domainless_user_scale_spans_a_scale_less_sibling() {
         let scale = build_composite_y(reverse_common(None, None, true), false).unwrap();
-        assert_eq!(scale.data_domain(), Some((6.0, 2.0)));
+        assert_eq!(scale.data_domain(), Some((9.0, 0.5)));
     }
 
     /// Control: a stated `domain` is the caller's extent and is taken
@@ -2740,6 +2756,55 @@ mod tests {
         let layers = vec![scaled_layer(Mark::Bar, enc.clone()), scaled_layer(Mark::Point, linear_y("p", false, false))];
         let scale = resolve_y(&batch, &enc, None, Some(layers));
         assert_eq!(scale.data_domain(), Some((1.0, 80.0)));
+    }
+
+    /// The layer selection a caller's scale unions, as a matrix: the bound
+    /// layer (`v = [1, 3]`) carries the caller's linear scale, domain-less or
+    /// stating `[1, 4]`, and a point sibling (`p = [40, 80]`) declares one of
+    /// five things on y. A domain-less scale spans the sibling that declares
+    /// no scale, carries an equal copy, or carries only ferrum's injected
+    /// bar anchor, `(1, 80)`; a sibling with a different scale or its own
+    /// domain stays out, `(1, 3)`. A stated domain wins over every sibling.
+    #[test]
+    fn caller_scale_layer_selection_matrix() {
+        use crate::spec::encoding::ScaleSpec;
+        use crate::spec::mark::Mark;
+        let batch = bar_and_sibling_batch();
+        let linear = |domain: Option<Vec<f64>>, zero: bool, system_injected: bool| ScaleSpec::Linear {
+            common: reverse_common(domain, None, false),
+            nice: false,
+            zero,
+            system_injected,
+        };
+        let siblings: [(&str, Option<ScaleSpec>); 5] = [
+            ("no scale", None),
+            ("equal copy", Some(linear(None, false, false))),
+            ("injected anchor", Some(linear(None, true, true))),
+            ("different scale", Some(linear(None, true, false))),
+            ("own domain", Some(linear(Some(vec![0.0, 100.0]), false, false))),
+        ];
+        let callers: [(&str, Option<Vec<f64>>); 2] =
+            [("domain-less", None), ("stated domain", Some(vec![1.0, 4.0]))];
+        let mut failures = Vec::new();
+        for (caller_name, caller_domain) in &callers {
+            for (sibling_name, sibling_scale) in &siblings {
+                let mut enc = linear_y("v", false, false);
+                enc.scale = Some(linear(caller_domain.clone(), false, false));
+                let mut sibling = y_layer(Mark::Point, "p");
+                sibling.encoding.y.as_mut().unwrap().scale = sibling_scale.clone();
+                let layers = vec![scaled_layer(Mark::Point, enc.clone()), sibling];
+                let got = resolve_y(&batch, &enc, None, Some(layers)).data_domain();
+                let want = match (caller_domain, *sibling_name) {
+                    (Some(_), _) => (1.0, 4.0),
+                    (None, "no scale" | "equal copy" | "injected anchor") => (1.0, 80.0),
+                    (None, _) => (1.0, 3.0),
+                };
+                if got != Some(want) {
+                    failures.push(format!("{caller_name} x {sibling_name}: got {got:?}, want {want:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 
     /// The other half: with NEITHER a shared domain nor layers there is nothing

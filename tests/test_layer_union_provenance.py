@@ -75,8 +75,9 @@ def bar_chart(*, flip: bool = False, zero: bool = True, scale: dict | None = Non
     return chart.coord(fm.CoordFlip()) if flip else chart
 
 
-def point_chart(*, flip: bool = False):
-    chart = fm.Chart(POINT_FRAME).mark_point().encode(x="cat", y="v")
+def point_chart(*, flip: bool = False, scale: dict | None = None):
+    y = fm.Y("v", scale=scale) if scale is not None else "v"
+    chart = fm.Chart(POINT_FRAME).mark_point().encode(x="cat", y=y)
     return chart.coord(fm.CoordFlip()) if flip else chart
 
 
@@ -158,9 +159,17 @@ ORDERS = [
 ]
 
 
-def overlay(order, *, spelling: str, **bar_kwargs):
-    """`bar` and `point` overlaid in `order`, written the `spelling` way."""
-    built = [bar_chart(**bar_kwargs) if name == "bar" else point_chart() for name in order]
+def overlay(order, *, spelling: str, point_scale: dict | None = None, **bar_kwargs):
+    """`bar` and `point` overlaid in `order`, written the `spelling` way.
+
+    `point_scale` is the point leaf's own `y` scale (`None` by default, i.e.
+    no scale declared at all) -- the sibling-join matrix below is the only
+    caller that varies it.
+    """
+    built = [
+        bar_chart(**bar_kwargs) if name == "bar" else point_chart(scale=point_scale)
+        for name in order
+    ]
     if spelling == "layer":
         return fm.layer(*built)
     return built[0] + built[1]
@@ -256,45 +265,97 @@ def test_zero_false_bar_overlay_keeps_its_unanchored_union(spelling):
     assert_marks_match_the_ladder(svg, axis="y", bar_values=BAR_VALUES, point_values=POINT_VALUES)
 
 
-@pytest.mark.parametrize(
-    ("spelling", "expected_span"),
-    [
-        # `fm.layer`: the bar leaf resolves its own encoding, injection included,
-        # so the axis is its data anchored at zero.
-        pytest.param("layer", (0.0, 3.0), id="fm.layer"),
-        # `+`: the merged-flat panel scale comes from LAYER 0's copy of the
-        # caller's scale (`Encoding::overlay_from` in `resolve_panel_scales`), and
-        # the zero-anchor injection only ever stamps the CHART-LEVEL encoding — so
-        # the layer's copy carries `zero: false` and the axis is the raw `1..3`.
-        # Pre-existing on both sides of this fix (an unflagged scale keeps the
-        # bypass either way); pinned here so it cannot drift silently, and called
-        # out rather than smoothed over because the two spellings genuinely differ
-        # on the lower bound.
-        pytest.param("plus", (1.0, 3.0), id="chart-plus"),
-    ],
-)
-def test_user_written_scale_on_a_bar_still_wins_over_the_union(spelling, expected_span):
-    """A caller's own `scale=` keeps the documented "explicit scale wins" exit,
-    even though the zero-anchor injection also touched it (it adds ``zero`` on
-    top of what the caller wrote).
+#: The exact rendered y span of `test_user_written_scale_on_a_bar_still_wins_over_the_union`'s
+#: `reverse=True` overlay, keyed by spelling. The two routes genuinely
+#: diverge: the bar's zero anchor is merged into the chart-level scale copy
+#: only. `fm.layer`'s composite route resolves each leaf's axis from that
+#: chart-level copy, so it reaches zero; `+`'s flat route resolves the
+#: shared axis from the union of the layers' own copies, which do not carry
+#: the anchor, so its span starts at the lowest tick the data union and
+#: `reverse=True`'s own padding produce instead of zero. This is a known
+#: divergence, pinned here until the injected anchor carries provenance on
+#: both routes, not something this test should paper over.
+_REVERSED_BAR_SPAN = {"layer": (0.0, 80.0), "plus": (10.0, 80.0)}
 
-    The discriminating half is the UPPER bound: it stays at the bar's own ``3``
-    instead of reaching the point layer's ``80``. That is what the cheap version
-    of this fix — dropping the ``is_some()`` check outright instead of asking WHO
-    wrote the scale — would break, on whichever path the caller wrote it, while
-    silently discarding the ``padding`` they asked for.
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_user_written_scale_on_a_bar_still_wins_over_the_union(spelling):
+    """A caller's own `scale=` on the bar layer keeps its own field, even
+    though the point sibling -- which declares no `scale=` at all on `y` --
+    now joins the same axis and contributes its own data to the domain.
+
+    `reverse=True` is the discriminating field: it flips which end of the
+    rendered pixel range the low value maps to. It is checked against a
+    no-scale control rather than asserted in isolation, because a change
+    that dropped the caller's scale entirely and fell back to the
+    auto-resolved one would satisfy every other assertion in this file and
+    still pass here undetected. The exact span differs by spelling -- see
+    `_REVERSED_BAR_SPAN`'s comment for why the two routes are not expected
+    to agree here.
     """
-    svg = overlay(("bar", "point"), spelling=spelling, scale={"padding": 0.2}).to_svg()
-    span = ladder_span(svg, axis="y")
-    assert span[1] == 3.0, "a caller's own scale must not be unioned with a sibling layer"
-    assert span == expected_span
-    ladder = value_axis_ladder(svg, axis="y")
-    for got, want in zip(
-        bar_value_ends(svg, axis="y"),
-        sorted(pixel_for(ladder, v) for v in BAR_VALUES),
-        strict=True,
-    ):
-        assert got == pytest.approx(want, abs=EPS)
+    with_scale = overlay(("bar", "point"), spelling=spelling, scale={"reverse": True}).to_svg()
+    control = overlay(("bar", "point"), spelling=spelling).to_svg()
+    with_ladder = value_axis_ladder(with_scale, axis="y")
+    control_ladder = value_axis_ladder(control, axis="y")
+    common = sorted(set(with_ladder) & set(control_ladder))
+    assert len(common) >= 2, "the two ladders share no ticks to compare direction with"
+    lo, hi = common[0], common[-1]
+    assert (with_ladder[hi] > with_ladder[lo]) != (control_ladder[hi] > control_ladder[lo]), (
+        "reverse=True must flip which end of the pixel range the low value maps to"
+    )
+    assert_marks_match_the_ladder(
+        with_scale, axis="y", bar_values=BAR_VALUES, point_values=POINT_VALUES
+    )
+    assert ladder_span(with_scale, axis="y") == _REVERSED_BAR_SPAN[spelling]
+
+
+# ── a domain-less caller scale and a scale-less sibling now join ───────────
+
+#: The bar's own domain-less scale (states no `domain`, so its extent comes
+#: from the union rather than a stated range). `zero` is explicit here
+#: (rather than relying on the bar's own zero-anchor injection) so the same
+#: scale, byte for byte, can also be given to the point sibling for the
+#: "equal-scale sibling" cell below -- injection only ever stamps the BAR's
+#: own copy, which would make an "equal" sibling scale impossible to
+#: construct.
+_SIBLING_JOIN_SHARED_SCALE = {"padding": 0.2, "zero": True}
+#: A scale that differs from `_SIBLING_JOIN_SHARED_SCALE` in one field -- the
+#: different-scale cell's whole point is that this must NOT match.
+_SIBLING_JOIN_DIFFERENT_SCALE = {"padding": 0.6, "zero": True}
+
+_SIBLING_JOIN_CASES = [
+    pytest.param(None, True, id="scale-less-sibling"),
+    pytest.param(_SIBLING_JOIN_SHARED_SCALE, True, id="equal-scale-sibling"),
+    pytest.param(_SIBLING_JOIN_DIFFERENT_SCALE, False, id="different-scale-sibling"),
+]
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+@pytest.mark.parametrize("sibling_scale, joins", _SIBLING_JOIN_CASES)
+def test_domainless_caller_scale_sibling_join_matrix(spelling, sibling_scale, joins):
+    """A domain-less caller scale on one layer and a sibling layer that
+    declares no scale at all on the same channel now join -- the sibling's
+    data spans the axis together with the caller's, on both layering routes
+    (`fm.layer` and `+`). A sibling carrying an equal copy of the caller's
+    scale already joined before this case existed; this matrix re-proves it
+    alongside the new case rather than trusting it stayed true. A sibling
+    carrying a different scale is the vacuity control -- without it, a
+    change that joined every sibling regardless of scale identity would
+    pass this test undetected.
+    """
+    svg = overlay(
+        ("bar", "point"),
+        spelling=spelling,
+        point_scale=sibling_scale,
+        scale=_SIBLING_JOIN_SHARED_SCALE,
+    ).to_svg()
+    if joins:
+        assert_marks_match_the_ladder(
+            svg, axis="y", bar_values=BAR_VALUES, point_values=POINT_VALUES
+        )
+    else:
+        span = ladder_span(svg, axis="y")
+        assert span[1] == 3.0, "a sibling with a different scale must stay excluded from the union"
 
 
 # ── the independent-y layered bar keeps its own primary axis ────────────────

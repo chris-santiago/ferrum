@@ -73,6 +73,14 @@ pub(crate) struct LeafScaleContext {
     pub(crate) y: Option<SharedDomain>,
     pub(crate) color: Option<SharedDomain>,
     pub(crate) size: Option<SharedDomain>,
+    /// The caller's positional scale this leaf's `x`/`y` axis resolves with:
+    /// set for a leaf that declares no scale on the channel (or only the
+    /// injected bar anchor) and draws in an `Overlay` group whose first leaf
+    /// carries a caller scale stating no `domain`. The leaf then resolves that
+    /// scale over the group's shared extent, the same axis the scale's own
+    /// leaf draws. `None` (the default) resolves the leaf's own encoding.
+    pub(crate) x_scale: Option<crate::spec::encoding::ScaleSpec>,
+    pub(crate) y_scale: Option<crate::spec::encoding::ScaleSpec>,
     /// Layout-stage-only signal (never affects `prepare_render_inputs`, which
     /// always builds the channel's legend bundle in full) that the compositor
     /// is rendering one figure-level legend for this channel and this leaf's
@@ -134,6 +142,16 @@ impl LeafScaleContext {
             Channel::Y => self.y = Some(domain),
             Channel::Color => self.color = Some(domain),
             Channel::Size => self.size = Some(domain),
+        }
+    }
+
+    /// Record the caller scale this leaf's positional `channel` resolves with
+    /// (see [`Self::x_scale`]). Color and size carry no such slot.
+    pub(crate) fn set_scale(&mut self, channel: Channel, scale: crate::spec::encoding::ScaleSpec) {
+        match channel {
+            Channel::X => self.x_scale = Some(scale),
+            Channel::Y => self.y_scale = Some(scale),
+            Channel::Color | Channel::Size => {}
         }
     }
 }

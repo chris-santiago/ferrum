@@ -53,8 +53,8 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    apply_sort_to_domain, locate_field, numeric_domain_union, positional_category_union,
-    SortContext,
+    apply_sort_to_domain, locate_field, numeric_domain_union_over, positional_category_union,
+    LayerUnion, SortContext,
 };
 
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
@@ -2106,6 +2106,14 @@ fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError>
     Ok(())
 }
 
+/// `enc` with `scale` in place of whatever scale it declares, when both exist.
+fn with_group_scale(
+    enc: Option<&crate::spec::encoding::EncodingSpec>,
+    scale: Option<&crate::spec::encoding::ScaleSpec>,
+) -> Option<crate::spec::encoding::EncodingSpec> {
+    Some(crate::spec::encoding::EncodingSpec { scale: Some(scale?.clone()), ..enc?.clone() })
+}
+
 /// D4b composite seam: the full scale-resolution form, threading an optional
 /// per-leaf resolved-domain context so a composite-shared leaf resolves its
 /// positional axes on the auto path (facet padding/`nice`), seeded by the shared
@@ -2187,6 +2195,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let (y_binding, y2_binding) = positional_binding(spec, PositionalChannel::Y);
     let (x_enc, x2_enc) = (x_binding.as_deref(), x2_binding.as_deref());
     let (y_enc, y2_enc) = (y_binding.as_deref(), y2_binding.as_deref());
+    // A composite overlay leaf that declares no scale of its own resolves its
+    // axis with the caller scale its group adopted (see
+    // `LeafScaleContext::x_scale`).
+    let x_adopted = with_group_scale(x_enc, leaf_scales.and_then(|c| c.x_scale.as_ref()));
+    let y_adopted = with_group_scale(y_enc, leaf_scales.and_then(|c| c.y_scale.as_ref()));
+    let (x_enc, y_enc) = (x_adopted.as_ref().or(x_enc), y_adopted.as_ref().or(y_enc));
     let has_x = x_enc.is_some();
     let has_y = y_enc.is_some();
 

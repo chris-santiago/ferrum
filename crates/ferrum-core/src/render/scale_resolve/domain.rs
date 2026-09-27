@@ -576,19 +576,34 @@ pub(in crate::render) enum LayerUnion<'a> {
     /// The auto path: every layer, and an eligible bar layer anchors the
     /// extent at zero.
     Every,
-    /// A caller's scale that states no `domain`: only the layers whose own
-    /// encoding for this channel carries this same scale. A composite mark
-    /// desugars into several layers that each hold a copy of the one scale the
-    /// caller wrote on it, so the scale spans all of them. A layer without it
-    /// stays out, since a caller's own scale is never unioned with a sibling
-    /// layer it was not written on. The scale's own `zero` decides the zero
-    /// anchor, so the auto path's bar rule does not apply, and the extent
-    /// is returned without the auto path's single-value widening, exactly as
-    /// an unlayered caller scale reads its column: the scale's own resolution
-    /// handles a degenerate domain either way. An all-null extent still takes
-    /// the auto path's `(0, 1)` fallback, so no infinite endpoint leaves this
-    /// function.
+    /// A caller's scale that states no `domain`: the layers whose own
+    /// encoding for this channel carries this same scale, and the layers that
+    /// declare no scale there (none at all, or only the bar anchor ferrum
+    /// injects). A composite mark desugars into several layers that each hold
+    /// a copy of the one scale the caller wrote on it, so the scale spans all
+    /// of them; a scale-less sibling draws against this axis, so its data
+    /// joins it. A layer carrying a different scale, or one stating its own
+    /// `domain`, answers to that scale and stays out. The scale's own `zero`
+    /// decides the zero anchor, so the auto path's bar rule does not apply,
+    /// and the extent is returned without the auto path's single-value
+    /// widening, exactly as an unlayered caller scale reads its column: the
+    /// scale's own resolution handles a degenerate domain either way. An
+    /// all-null extent still takes the auto path's `(0, 1)` fallback, so no
+    /// infinite endpoint leaves this function.
     CarryingScale(&'a crate::spec::encoding::ScaleSpec),
+}
+
+impl LayerUnion<'_> {
+    /// Whether a layer, or a composite overlay leaf, whose own encoding for
+    /// the channel declares `own` joins this union.
+    pub(in crate::render) fn admits(self, own: Option<&crate::spec::encoding::ScaleSpec>) -> bool {
+        match self {
+            LayerUnion::Every => true,
+            LayerUnion::CarryingScale(scale) => {
+                own.filter(|s| !s.is_system_injected()).is_none_or(|s| s == scale)
+            }
+        }
+    }
 }
 
 /// [`numeric_domain_union`] with the layer selection spelled out.
@@ -757,15 +772,14 @@ pub(in crate::render) fn numeric_domain_union_over(
                 e
             });
             let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
-            if let LayerUnion::CarryingScale(scale) = layer_union {
-                let own = match channel {
-                    "x" => encoding.x.as_ref(),
-                    "y" => encoding.y.as_ref(),
-                    _ => None,
-                };
-                if own.and_then(|e| e.scale.as_ref()) != Some(scale) {
-                    continue;
-                }
+            let own_scale = match channel {
+                "x" => encoding.x.as_ref(),
+                "y" => encoding.y.as_ref(),
+                _ => None,
+            }
+            .and_then(|e| e.scale.as_ref());
+            if !layer_union.admits(own_scale) {
+                continue;
             }
             let layer_fields: [Option<&str>; 2] = match channel {
                 "x" => [
