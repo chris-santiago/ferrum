@@ -45,6 +45,8 @@ every user-written `scale=`.
 from __future__ import annotations
 
 import json
+import re
+import warnings
 
 import polars as pl
 import pytest
@@ -137,6 +139,40 @@ def assert_marks_match_the_ladder(svg: str, *, axis: str, bar_values, point_valu
         assert got == pytest.approx(want, abs=EPS), (
             f"bar value edge at {got} but the {axis} ladder {ladder} places its value at {want}"
         )
+
+
+#: The warning's own text up to its placement clause. Filtering on it (rather
+#: than on "no warnings at all") keeps the negative controls discriminating when
+#: a render also warns for an unrelated reason.
+_EXCLUDED_LAYER_WARNING = re.compile(
+    r"^layer \d+: its \w+ scale differs from the one layer \d+ establishes the \w+ axis with"
+)
+
+#: Each spelling's placement clause. `+` places the excluded layer's marks on
+#: the shared axis (so they may fall outside it); `fm.layer` draws them on the
+#: layer's own scale, which no axis labels.
+_EXCLUDED_LAYER_PLACEMENT = {
+    "plus": "its marks are placed on that axis and may fall outside it",
+    "layer": "its marks draw on the layer's own scale, not the labelled axis",
+}
+
+
+def excluded_layer_warning(spelling: str, *, layer: int, establishing: int, channel: str) -> str:
+    """The exact warning a layer left out of the establishing scale emits."""
+    return (
+        f"layer {layer}: its {channel} scale differs from the one layer {establishing} "
+        f"establishes the {channel} axis with, so it stays out of that axis; "
+        f"{_EXCLUDED_LAYER_PLACEMENT[spelling]}"
+    )
+
+
+def render(chart) -> tuple[str, list[str]]:
+    """`chart.to_svg()` plus every excluded-layer warning the render emitted."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    excluded = [str(w.message) for w in caught if _EXCLUDED_LAYER_WARNING.match(str(w.message))]
+    return svg, excluded
 
 
 def ladder_span(svg: str, *, axis: str) -> tuple[float, float]:
@@ -344,19 +380,23 @@ def test_domainless_caller_scale_sibling_join_matrix(spelling, sibling_scale, jo
     change that joined every sibling regardless of scale identity would
     pass this test undetected.
     """
-    svg = overlay(
-        ("bar", "point"),
-        spelling=spelling,
-        point_scale=sibling_scale,
-        scale=_SIBLING_JOIN_SHARED_SCALE,
-    ).to_svg()
+    svg, excluded = render(
+        overlay(
+            ("bar", "point"),
+            spelling=spelling,
+            point_scale=sibling_scale,
+            scale=_SIBLING_JOIN_SHARED_SCALE,
+        )
+    )
     if joins:
         assert_marks_match_the_ladder(
             svg, axis="y", bar_values=BAR_VALUES, point_values=POINT_VALUES
         )
+        assert excluded == [], "a sibling that joins the axis must not warn"
     else:
         span = ladder_span(svg, axis="y")
         assert span[1] == 3.0, "a sibling with a different scale must stay excluded from the union"
+        assert excluded == [excluded_layer_warning(spelling, layer=1, establishing=0, channel="y")]
 
 
 # ── the join does not depend on where the caller-scale layer sits ─────────
@@ -435,7 +475,8 @@ def test_three_layer_join_is_order_independent(position, spelling):
     for the identical order -- proving the two routes agree rather than each
     merely failing to contradict its own (possibly wrong) ladder.
     """
-    svg = _three_layer_overlay(position, spelling=spelling).to_svg()
+    svg, excluded = render(_three_layer_overlay(position, spelling=spelling))
+    assert excluded == [], "scale-less siblings join the axis, so none may warn"
     all_values = _ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES + _ORDER_SIBLING2_VALUES
     assert_all_point_marks_match_the_ladder(svg, axis="y", values=all_values)
     if spelling == "layer":
@@ -456,27 +497,34 @@ def test_three_layer_join_is_order_independent(position, spelling):
 #: - last   ``[none, 0.6, 0.2]``: 0.6 establishes, so the padding-0.2 layer
 #:   is the one left out.
 #:
-#: Values are ``(inside the axis, outside it)``.
+#: Values are ``(inside the axis, outside it, (excluded layer, establishing
+#: layer))``; the indices are layer positions in that order.
 _CONTROL_EXPECTED = {
-    "first": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES),
-    "middle": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES),
-    "last": (_ORDER_SIBLING1_VALUES + _ORDER_SIBLING2_VALUES, _ORDER_CALLER_VALUES),
+    "first": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES, (2, 0)),
+    "middle": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES, (2, 1)),
+    "last": (_ORDER_SIBLING1_VALUES + _ORDER_SIBLING2_VALUES, _ORDER_CALLER_VALUES, (2, 1)),
 }
 
 #: How many of the excluded layer's marks each spelling draws. The two routes
 #: diverge: `fm.layer`'s composite route draws the excluded layer on its own
-#: scale, off the shared ladder, while `+`'s flat route drops its marks
-#: without a warning. This is a known divergence outside the establishing-scale
-#: rule, recorded as a follow-up and pinned here until both routes give the
-#: excluded layer one disposition.
+#: scale, off the shared ladder, while `+`'s flat route places its marks on
+#: the shared axis, where these fall outside it and are dropped. Each route
+#: says which in its excluded-layer warning (`excluded_layer_warning`), so
+#: the disposition is never silent.
 _EXCLUDED_LAYER_MARKS = {"layer": 3, "plus": 0}
 
 
-def assert_excluded_layer_disposition(svg: str, *, spelling: str, inside, outside) -> None:
+def assert_excluded_layer_disposition(
+    svg: str, excluded: list[str], *, spelling: str, inside, outside, layer: int, establishing: int
+) -> None:
     """Exactly the `inside` values sit on the shared y ladder, none of the
-    `outside` values do, and the excluded layer contributes exactly the
-    `_EXCLUDED_LAYER_MARKS` count for this spelling.
+    `outside` values do, the excluded layer contributes exactly the
+    `_EXCLUDED_LAYER_MARKS` count for this spelling, and the render emitted
+    exactly one excluded-layer warning, naming `layer` and `establishing`.
     """
+    assert excluded == [
+        excluded_layer_warning(spelling, layer=layer, establishing=establishing, channel="y")
+    ], f"{spelling}: expected one excluded-layer warning, got {excluded}"
     assert values_marked_on_the_ladder(svg, axis="y", values=inside) == inside, (
         f"{spelling}: the layers on the axis {inside} must all sit at their ladder pixels"
     )
@@ -509,19 +557,27 @@ def test_three_layer_different_scale_sibling_stays_out_regardless_of_position(po
     order owns the axis, the scale-less layer joins it, and the other scaled
     layer stays out -- identically on `fm.layer` and `+`.
     """
-    svg = _three_layer_overlay(
-        position, spelling=spelling, sibling2_scale=_ORDER_DIFFERENT_SCALE
-    ).to_svg()
-    inside, outside = _CONTROL_EXPECTED[position]
-    assert_excluded_layer_disposition(svg, spelling=spelling, inside=inside, outside=outside)
+    svg, excluded = render(
+        _three_layer_overlay(position, spelling=spelling, sibling2_scale=_ORDER_DIFFERENT_SCALE)
+    )
+    inside, outside, (layer, establishing) = _CONTROL_EXPECTED[position]
+    assert_excluded_layer_disposition(
+        svg,
+        excluded,
+        spelling=spelling,
+        inside=inside,
+        outside=outside,
+        layer=layer,
+        establishing=establishing,
+    )
     lo, hi = ladder_span(svg, axis="y")
     assert all(v > hi for v in outside) or all(v < lo for v in outside), (
         f"the other scaled layer's values {outside} must lie outside the axis span {(lo, hi)}"
     )
     if spelling == "layer":
-        plus_svg = _three_layer_overlay(
-            position, spelling="plus", sibling2_scale=_ORDER_DIFFERENT_SCALE
-        ).to_svg()
+        plus_svg, _ = render(
+            _three_layer_overlay(position, spelling="plus", sibling2_scale=_ORDER_DIFFERENT_SCALE)
+        )
         assert value_axis_ladder(svg, axis="y") == value_axis_ladder(plus_svg, axis="y"), (
             "fm.layer must resolve the same axis + resolves for the identical layer order"
         )
@@ -547,14 +603,22 @@ def test_categorical_first_scale_owns_the_axis_and_a_later_continuous_scale_rend
     )
     numeric_x = pl.DataFrame({"n": [1.0, 2.0, 3.0], "v": _ORDER_SIBLING1_VALUES})
     linear = fm.Chart(numeric_x).mark_point().encode(x=fm.X("n", scale=fm.LinearScale()), y="v")
-    layered, plus = (chart.to_svg() for chart in _both_spellings(band, linear))
+    (layered, layered_excluded), (plus, plus_excluded) = (
+        render(chart) for chart in _both_spellings(band, linear)
+    )
     assert axis_tick_labels(plus, axis="x") == ["a", "b", "c"]
     assert axis_tick_labels(layered, axis="x") == axis_tick_labels(plus, axis="x")
     # The linear layer is the excluded one; see `_EXCLUDED_LAYER_MARKS`.
-    for spelling, svg in (("layer", layered), ("plus", plus)):
+    for spelling, svg, excluded in (
+        ("layer", layered, layered_excluded),
+        ("plus", plus, plus_excluded),
+    ):
         got = len(point_marks(svg, axis="y"))
         want = len(_ORDER_CALLER_VALUES) + _EXCLUDED_LAYER_MARKS[spelling]
         assert got == want, f"{spelling}: expected {want} point marks, got {got}"
+        assert excluded == [
+            excluded_layer_warning(spelling, layer=1, establishing=0, channel="x")
+        ], f"{spelling}: expected one excluded-layer warning, got {excluded}"
 
 
 def test_stated_domain_first_scale_owns_the_axis_and_a_scale_less_layer_adopts_it():
@@ -566,15 +630,23 @@ def test_stated_domain_first_scale_owns_the_axis_and_a_scale_less_layer_adopts_i
     stated = _order_point_chart(_ORDER_CALLER_FRAME, scale={"domain": [0.0, 40.0]})
     domainless = _order_point_chart(_ORDER_SIBLING2_FRAME, scale=_ORDER_CALLER_SCALE)
     scale_less = _order_point_chart(_ORDER_SIBLING1_FRAME)
-    layered, plus = (chart.to_svg() for chart in _both_spellings(stated, domainless, scale_less))
+    (layered, layered_excluded), (plus, plus_excluded) = (
+        render(chart) for chart in _both_spellings(stated, domainless, scale_less)
+    )
     assert ladder_span(plus, axis="y") == (0.0, 40.0)
     # The domain-less caller-scale layer is the excluded one; see `_EXCLUDED_LAYER_MARKS`.
-    for spelling, svg in (("plus", plus), ("layer", layered)):
+    for spelling, svg, excluded in (
+        ("plus", plus, plus_excluded),
+        ("layer", layered, layered_excluded),
+    ):
         assert_excluded_layer_disposition(
             svg,
+            excluded,
             spelling=spelling,
             inside=_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES,
             outside=_ORDER_SIBLING2_VALUES,
+            layer=1,
+            establishing=0,
         )
     assert value_axis_ladder(layered, axis="y") == value_axis_ladder(plus, axis="y")
 

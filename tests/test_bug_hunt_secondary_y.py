@@ -23,7 +23,7 @@ import pytest
 import ferrum as fm
 from ferrum.composition import HConcatChart, LayerChart, VConcatChart
 from ferrum.structural import SecondaryY
-from tests._svg_extents import y_axis_extents
+from tests._svg_extents import value_axis_ladders, y_axis_extents
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +208,10 @@ def test_log_scale_on_secondary_slot_only():
     _assert_no_bad_tokens(svg)
     titles = _rotated_titles(svg)
     assert "y" in titles and "z" in titles
+    # The LogScale configures only the secondary slot: the primary (leftmost)
+    # ladder stays the bar's own linear, zero-anchored extent over y = 1..4.
+    primary = sorted(value_axis_ladders(svg, axis="y")[0][1])
+    assert primary == [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 
 
 def test_symlog_scale_on_secondary_slot_with_negatives():

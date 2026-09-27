@@ -10209,6 +10209,41 @@ mod tests {
         assert!(msg.contains("Utf8"), "message must name the dtype: {msg}");
     }
 
+    /// The same refusal when a caller's scale establishes the continuous axis
+    /// the flipped member's categorical column lands on: the member's own
+    /// coord exchanges its channels, so it is judged by the coord-exchange
+    /// gate and refused in its voice, naming the coord, not in the
+    /// shared-axis voice a same-coord layer gets.
+    #[test]
+    fn a_layer_flip_onto_a_caller_scale_axis_refuses_in_the_coord_voice() {
+        let (mut spec, batch) = two_layer_ordinal_spec_with_flipped_secondary(true);
+        let caller: crate::spec::encoding::ScaleSpec = serde_json::from_value(
+            serde_json::json!({"type": "linear", "nice": false, "zero": false}),
+        )
+        .unwrap();
+        // On the first member only, as `+` lowers it: the chart-level
+        // encoding is that member's.
+        for enc in [&mut spec.encoding, &mut spec.layers.as_mut().unwrap()[0].encoding] {
+            enc.y.as_mut().unwrap().scale = Some(caller.clone());
+        }
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect_err("a flipped member whose y is categorical must refuse");
+        match &err {
+            RenderError::LayerCoordUnplaceable { layer: 1, coord, reason } => {
+                assert_eq!(*coord, "fm.CoordFlip");
+                assert!(
+                    matches!(
+                        &**reason,
+                        crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable { .. }
+                    ),
+                    "{reason:?}"
+                );
+            }
+            other => panic!("expected LayerCoordUnplaceable for layer 1, got {other:?}"),
+        }
+    }
+
     /// The discriminating control: the same shape whose category column is an
     /// INTEGER renders, because a continuous axis can read it.
     ///

@@ -6147,3 +6147,101 @@ fn normalize_transform_outputs_casts_a_real_transforms_large_utf8_groupby_echo()
         "the normalized LargeUtf8 groupby echo must match the Utf8 baseline byte-for-byte"
     );
 }
+
+// ── secondary y beside a caller's y scale ─────────────────────────────────
+
+/// `prepare_render_inputs` over a wire spec and three-row batch whose `y`
+/// column holds `y` and `z` column holds `z`.
+fn prepare_secondary_y_spec(spec: serde_json::Value, z: arrow::array::ArrayRef) -> Result<PreparedInputs, RenderError> {
+    let spec: crate::spec::chart::ChartSpec = serde_json::from_value(spec).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Utf8, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("z", z.data_type().clone(), false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(vec!["a", "b", "c"])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])), z],
+    )
+    .unwrap();
+    prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+}
+
+/// An `independent_y` layer's own caller scale configures only its own axis:
+/// beside a bar, `SecondaryY("z", scale=LogScale())` leaves the primary y the
+/// bar's zero-anchored linear extent, `(0, 3)`, and the secondary axis keeps
+/// its log ladder. The spec is the one `Chart.mark_bar().encode(x="x",
+/// y="y") + SecondaryY("z", scale=fm.LogScale())` sends. If the independent
+/// layer's scale established the primary axis, that axis would be a log scale
+/// over the bar's own values, `(1, 3)`, with no zero anchor.
+#[test]
+fn an_independent_y_layers_own_scale_does_not_establish_the_primary_axis() {
+    let spec = serde_json::json!({
+        "mark": "bar",
+        "encoding": {
+            "x": {"field": "x"},
+            "y": {"field": "y", "scale": {
+                "type": "linear", "clamp": false, "nice": false, "zero": true, "systemInjected": true
+            }}
+        },
+        "layers": [
+            {"mark": "bar", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+            {
+                "mark": "line",
+                "encoding": {
+                    "x": {"field": "x"},
+                    "y": {"field": "z", "scale": {"type": "log", "base": 10.0, "clamp": false, "nice": false}}
+                },
+                "independent_y": true
+            }
+        ]
+    });
+    let prep = prepare_secondary_y_spec(spec, Arc::new(Float64Array::from(vec![1.0, 10.0, 100.0]))).unwrap();
+    assert!(
+        matches!(prep.provisional_scales.y, crate::render::scale_resolve::ScaleKind::Linear(_)),
+        "primary y is the bar's linear scale, got {:?}",
+        prep.provisional_scales.y
+    );
+    assert_eq!(prep.provisional_scales.y.data_domain(), Some((0.0, 3.0)));
+    let primary = &prep.axes.y.tick_labels;
+    assert_eq!(
+        (primary.first().map(String::as_str), primary.last().map(String::as_str)),
+        (Some("3"), Some("0")),
+        "the primary ladder runs from the bar's top to zero: {primary:?}"
+    );
+    assert_eq!(prep.axes.secondary_y.len(), 1);
+    assert_eq!(
+        prep.axes.secondary_y[0].tick_labels,
+        ["100", "63.0957", "39.8107", "25.1189", "15.8489", "10", "6.3096", "3.9811", "2.5119", "1.5849", "1"],
+        "the secondary axis keeps its log ladder"
+    );
+}
+
+/// A secondary-y layer draws on its own axis, so a non-numeric column there
+/// is no member of a caller-established primary y axis and renders: the spec
+/// `Chart.mark_point().encode(x=..., y=fm.Y("y", scale=fm.LinearScale())) +
+/// SecondaryY("z")` sends, with `z` a string column, resolves its secondary
+/// axis over the categories.
+#[test]
+fn a_non_numeric_secondary_y_column_beside_a_caller_y_scale_renders() {
+    let caller = serde_json::json!({"type": "linear", "clamp": false, "nice": false, "zero": false});
+    let spec = serde_json::json!({
+        "mark": "point",
+        "encoding": {"x": {"field": "x"}, "y": {"field": "y", "scale": caller}},
+        "layers": [
+            {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y", "scale": caller}}},
+            {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "z"}}, "independent_y": true}
+        ]
+    });
+    let prep = prepare_secondary_y_spec(spec, Arc::new(StringArray::from(vec!["lo", "mid", "hi"])))
+        .expect("a secondary-y string column is not judged against the primary axis");
+    assert_eq!(prep.axes.secondary_y.len(), 1);
+    assert_eq!(prep.axes.secondary_y[0].tick_labels, vec!["lo", "mid", "hi"]);
+}

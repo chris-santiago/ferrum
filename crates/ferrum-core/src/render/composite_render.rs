@@ -307,7 +307,11 @@ pub(crate) fn render_composite_scene(
             transform_outputs: &prep.transform_outputs,
         })
         .collect();
-    let mut contexts = resolve_composite_scales(tree, &resolve_inputs)?;
+    // `warnings` opens with the resolve pass, the first stage that can produce
+    // one (an overlay member a caller's scale leaves out of the group's
+    // axis); leaf warnings follow in leaf pre-order after the pre-passes.
+    let mut warnings: Vec<RenderWarning> = Vec::new();
+    let mut contexts = resolve_composite_scales(tree, &resolve_inputs, &mut warnings)?;
     drop(resolve_inputs);
     // `prepared` stays alive through the line/ribbon exemption pre-pass below
     // (spec-review cycle-2 fix), which needs each leaf's REAL resolved
@@ -342,11 +346,6 @@ pub(crate) fn render_composite_scene(
     // A cleared entry (a mixed leaf/composite Overlay, a singleton Overlay, or
     // a group whose intersection degenerated) leaves that leaf laying out on
     // its own terms and keeping its chrome.
-    //
-    // `warnings` is opened here rather than with the render loop below because
-    // the pre-pass is the first stage that can produce one (a group whose
-    // gutters diverge); leaf warnings still follow in leaf pre-order after it.
-    let mut warnings: Vec<RenderWarning> = Vec::new();
     let mut overlay_groups = plan_overlay_groups(tree, n);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
 

@@ -1068,8 +1068,10 @@ pub fn prepare_render_inputs(
 
     // A layered spec whose axis a continuous caller scale establishes draws
     // every layer on that axis, so each layer's column must be placeable on
-    // it. Asked once per spec, before any scale resolution reads a column; a
-    // geoshape chart resolves no positional axis, so it has none to ask about.
+    // it, and a layer whose own scale that axis leaves out is reported. Asked
+    // once per spec, before any scale resolution reads a column; a geoshape
+    // chart resolves no positional axis, so it has none to ask about.
+    let mut layer_scale_warnings = Vec::new();
     if !matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
         for channel in ["x", "y"] {
             crate::render::scale_resolve::require_layers_placeable_on_caller_scale(
@@ -1078,6 +1080,7 @@ pub fn prepare_render_inputs(
                 &transformed,
                 &transform_outputs,
             )?;
+            crate::render::scale_resolve::warn_layers_off_caller_scale(spec, channel, &mut layer_scale_warnings);
         }
     }
 
@@ -1139,6 +1142,7 @@ pub fn prepare_render_inputs(
     let mut scale_warnings: Vec<RenderWarning> = transform_warnings
         .into_iter()
         .map(RenderWarning::Transform)
+        .chain(layer_scale_warnings)
         .chain(drop_placeholder_only_warnings(provisional_scale_warnings))
         .collect();
     let mut provisional_scales = provisional_scales;

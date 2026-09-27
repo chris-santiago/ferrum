@@ -45,10 +45,10 @@
 //! from within the crate.
 use crate::render::scale_resolve::{
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field,
-    establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union, Channel, LayerUnion,
-    LeafScaleContext, SharedDomain,
+    establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
+    warn_members_off_caller_scale, Channel, LayerUnion, LeafScaleContext, SharedDomain,
 };
-use crate::render::RenderError;
+use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::{DataType as SpecDataType, Encoding};
@@ -205,9 +205,13 @@ pub(crate) fn effective_share(
 /// node has non-empty `children` — `resolve_channel` indexes `children[0]`
 /// after a vacuously-true congruence check and would panic on an unvalidated
 /// empty node.
+///
+/// `warnings` receives one [`RenderWarning::LayerScaleExcluded`] per `Overlay`
+/// member a caller's scale leaves out of the group's axis.
 pub(crate) fn resolve_composite_scales(
     tree: &CompositeNode,
     leaves: &[LeafResolveInput<'_>],
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<LeafScaleContext>, CompositeResolveError> {
     let n = leaf_count(tree);
     if leaves.len() != n {
@@ -222,7 +226,7 @@ pub(crate) fn resolve_composite_scales(
     // Positional x/y: tree-path pairing across congruent direct children
     // (grids pair by column — pairplot/compare), node-local, no inheritance.
     for channel in [Channel::X, Channel::Y] {
-        resolve_channel(tree, &span, channel, leaves, &mut out)?;
+        resolve_channel(tree, &span, channel, leaves, &mut out, warnings)?;
     }
     // Non-positional color/size: leaf-span union at each effective-shared node
     // (GH #74). A node's effective mode is its explicit setting if any, else
@@ -348,6 +352,7 @@ fn resolve_channel(
     channel: Channel,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), CompositeResolveError> {
     let CompositeNode::Composite { layout, children, resolve, .. } = node else {
         return Ok(()); // Leaf: assignment is decided by its parent.
@@ -388,6 +393,12 @@ fn resolve_channel(
                 .collect();
             if *layout == CompositeLayout::Overlay {
                 refuse_unplaceable_overlay_members(&group, channel, leaves)?;
+                warn_members_off_caller_scale(
+                    overlay_members(&group, channel, leaves),
+                    channel.as_str(),
+                    ExcludedLayerPlacement::OwnScale,
+                    warnings,
+                );
                 if let Some((_, scale)) = overlay_caller_scale(&group, channel, leaves) {
                     resolve_caller_scale_group(&group, channel, scale, leaves, out)?;
                     continue;
@@ -400,7 +411,7 @@ fn resolve_channel(
         // Independent node, or a non-congruent Shared node (skip sharing for the
         // group): fall back to per-child resolution so inner Shared nodes work.
         for (child, span) in children.iter().zip(&subspans) {
-            resolve_channel(child, span, channel, leaves, out)?;
+            resolve_channel(child, span, channel, leaves, out, warnings)?;
         }
         Ok(())
     }
@@ -592,16 +603,26 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
     }
 }
 
+/// Each member of an `Overlay` group, by its position in the group, with its
+/// own scale for `channel`, in member order.
+fn overlay_members<'g, 'a>(
+    group: &'g [usize],
+    channel: Channel,
+    leaves: &'g [LeafResolveInput<'a>],
+) -> impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone + 'g {
+    group.iter().enumerate().map(move |(position, &idx)| (position, leaf_own_scale(&leaves[idx], channel)))
+}
+
 /// The caller's scale an `Overlay` group's axis resolves with on `channel`,
-/// with the member that establishes it: [`establishing_caller_scale`] over
-/// the group's leaves in member order, the one rule the flat layered route
-/// applies to its layers.
+/// with the position in `group` of the member that establishes it:
+/// [`establishing_caller_scale`] over the group's leaves in member order, the
+/// one rule the flat layered route applies to its layers.
 fn overlay_caller_scale<'a>(
     group: &[usize],
     channel: Channel,
     leaves: &[LeafResolveInput<'a>],
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    establishing_caller_scale(group.iter().map(|&idx| (idx, leaf_own_scale(&leaves[idx], channel))))
+    establishing_caller_scale(overlay_members(group, channel, leaves))
 }
 
 /// A leaf's own scale for the positional `channel`, if its encoding binds one.
@@ -713,7 +734,7 @@ fn refuse_unplaceable_overlay_members(
     // column's own inferred type. Otherwise the first member's own domain
     // decides.
     let establishing = match overlay_caller_scale(group, channel, leaves) {
-        Some((idx, _)) => idx,
+        Some((position, _)) => position,
         None => {
             let continuous = matches!(
                 leaf_channel_domain(&leaves[group[0]], channel)?,
@@ -722,14 +743,14 @@ fn refuse_unplaceable_overlay_members(
             if !continuous {
                 return Ok(());
             }
-            group[0]
+            0
         }
     };
     let panel_flipped = crate::spec::coord::flips_positional_channels(
         leaves[group[0]].spec.coord.as_ref(),
     );
     for (position, &idx) in group.iter().enumerate() {
-        if idx == establishing {
+        if position == establishing {
             continue; // the establishing member; trivially placeable
         }
         let leaf = &leaves[idx];
@@ -1286,7 +1307,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].x, expect, "labeled child 0 must still receive the shared union");
         assert_eq!(ctx[1].x, expect, "labeled child 1 must still receive the shared union");
@@ -1304,7 +1325,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx.len(), 2);
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].x, expect);
@@ -1326,7 +1347,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].x, None);
         assert_eq!(ctx[1].x, None);
     }
@@ -1343,7 +1364,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let err = resolve_composite_scales(&tree, &inputs).unwrap_err();
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap_err();
         match err {
             CompositeResolveError::UnknownField { channel, field, coord_flipped } => {
                 assert_eq!(channel, "x");
@@ -1383,7 +1404,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let err = resolve_composite_scales(&tree, &inputs).unwrap_err();
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap_err();
         match &err {
             CompositeResolveError::UnknownField { channel, field, coord_flipped } => {
                 // Resolved/internal token: this is the slot actually looked up.
@@ -1414,7 +1435,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].x, expect);
         assert_eq!(ctx[1].x, expect);
@@ -1461,7 +1482,7 @@ mod tests {
             CompositeResolve::default(), // both independent
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].x, None);
         assert_eq!(ctx[1].x, None);
     }
@@ -1476,7 +1497,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // First-appearance order across the group: b, a (leaf0), then c (new in leaf1).
         let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
         assert_eq!(ctx[0].x, expect);
@@ -1512,7 +1533,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].color, expect);
         assert_eq!(ctx[1].color, expect);
@@ -1531,7 +1552,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // First-appearance order across the group: b, a (leaf0), then c (new in leaf1).
         let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
         assert_eq!(ctx[0].color, expect);
@@ -1548,7 +1569,7 @@ mod tests {
             shared_size(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 1.0, hi: 9.0 });
         assert_eq!(ctx[0].size, expect);
         assert_eq!(ctx[1].size, expect);
@@ -1564,7 +1585,7 @@ mod tests {
             CompositeResolve::default(), // all independent
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].color, None);
         assert_eq!(ctx[1].color, None);
     }
@@ -1590,7 +1611,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1), input(&l2)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].color, expect, "nested leaf 0 must join the outer union");
         assert_eq!(ctx[1].color, expect, "nested leaf 1 must join the outer union");
@@ -1616,7 +1637,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1), input(&l2)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].color, expect);
         assert_eq!(ctx[1].color, expect);
@@ -1644,7 +1665,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1), input(&l2)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Opted-out inner leaves: excluded from the outer union.
         assert_eq!(ctx[0].color, None, "explicit-independent inner leaf 0 opts out");
         assert_eq!(ctx[1].color, None, "explicit-independent inner leaf 1 opts out");
@@ -1676,7 +1697,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1), input(&l2)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Outer sibling: only participant of the OUTER union (mid opted out).
         assert_eq!(ctx[0].color, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
         // Inner-inner leaves: re-shared among themselves = [5, 40].
@@ -1720,7 +1741,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Leaf 0 participates → shares only its own extent [0, 10].
         assert_eq!(ctx[0].color, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
         // Leaf 1's explicit color scale wins → no shared context injected.
@@ -1739,7 +1760,7 @@ mod tests {
             shared_color(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].color, None);
         assert_eq!(ctx[1].color, None);
     }
@@ -1760,7 +1781,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Union of whisker extents [0.5, 8.0] ∪ [2.0, 12.0] = [0.5, 12.0].
         assert_eq!(ctx[0].y, Some(SharedDomain::Numeric { lo: 0.5, hi: 12.0 }));
         assert_eq!(ctx[1].y, Some(SharedDomain::Numeric { lo: 0.5, hi: 12.0 }));
@@ -1786,7 +1807,7 @@ mod tests {
         };
         let tree = composite(CompositeLayout::Grid, vec![child(), child()], shared_x());
         let inputs = [input(&a0), input(&a1), input(&b0), input(&b1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Position 0: a0 ∪ b0 = [0, 3].
         assert_eq!(ctx[0].x, Some(SharedDomain::Numeric { lo: 0.0, hi: 3.0 }));
         assert_eq!(ctx[2].x, Some(SharedDomain::Numeric { lo: 0.0, hi: 3.0 }));
@@ -1817,7 +1838,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&leaf_input), input(&g0), input(&g1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].x, None);
         assert_eq!(ctx[1].x, None);
         assert_eq!(ctx[2].x, None);
@@ -1844,7 +1865,7 @@ mod tests {
             shared_x(), // outer shares but is non-congruent → recurse
         );
         let inputs = [input(&leaf_input), input(&g0), input(&g1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Outer leaf: no sharing.
         assert_eq!(ctx[0].x, None);
         // Inner two leaves: shared among themselves = [5, 30].
@@ -1889,7 +1910,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // Leaf 0 is the only participant → shares only its own extent [0, 10].
         assert_eq!(ctx[0].x, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
         // Leaf 1's explicit scale wins → no shared context injected.
@@ -1948,7 +1969,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let unioned = Some(SharedDomain::Numeric { lo: 0.0, hi: 40.0 });
         assert_eq!(ctx[0].x, unioned);
         assert_eq!(ctx[1].x, unioned);
@@ -1968,7 +1989,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx[0].x, Some(SharedDomain::Numeric { lo: 12.0, hi: 40.0 }));
         assert_eq!(ctx[1].x, None);
     }
@@ -1995,7 +2016,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let unioned = Some(SharedDomain::Numeric { lo: 5.0, hi: 40.0 });
         assert_eq!(ctx[0].x, unioned);
         assert_eq!(ctx[1].x, unioned);
@@ -2050,7 +2071,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // x: faceted-independent → excluded.
         assert_eq!(ctx[0].x, None);
         assert_eq!(ctx[1].x, None);
@@ -2070,7 +2091,7 @@ mod tests {
             shared_x(),
         );
         let inputs = [input(&l0)]; // only 1, tree has 2
-        let err = resolve_composite_scales(&tree, &inputs).unwrap_err();
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap_err();
         assert!(matches!(err, CompositeResolveError::LeafCountMismatch { expected: 2, got: 1, .. }));
     }
 
@@ -2123,7 +2144,7 @@ mod tests {
         let l1 = owned(spec_with_x("b"), num_batch("b", &[0.0, 1.0]));
         let l2 = owned(spec_with_x("c"), num_batch("c", &[0.0, 1.0]));
         let inputs = [input(&l0), input(&l1), input(&l2)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         assert_eq!(ctx.len(), 3, "leaf count excludes the hole");
     }
 
@@ -2338,7 +2359,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&numeric_leaf), input(&utf8_leaf)];
-        let err = resolve_composite_scales(&tree, &inputs).expect_err(
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect_err(
             "a Utf8 y column beside a numeric y column on ONE shared Overlay panel must refuse",
         );
         match err {
@@ -2377,7 +2398,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&l0), input(&l1)];
-        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
         assert_eq!(ctx[0].y, expect);
         assert_eq!(ctx[1].y, expect);
@@ -2435,7 +2456,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&bar), input(&point_flipped)];
-        let ctx = resolve_composite_scales(&tree, &inputs)
+        let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
             .expect("a flip-caused mismatch on the composite-leaves route must not refuse");
         // Sharing is skipped on both channels (the mismatch is the flip
         // exchange, not a malformed column), so each leaf falls back to its
@@ -2494,7 +2515,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&leaf0), input(&leaf1)];
-        let err = resolve_composite_scales(&tree, &inputs)
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
             .expect_err("a flip-matching sibling's genuinely non-placeable column must refuse");
         let message = err.to_string();
         assert!(
@@ -2573,7 +2594,7 @@ mod tests {
             shared_both(),
         );
         let inputs = [input(&leaf0), input(&leaf1), input(&leaf2)];
-        let err = resolve_composite_scales(&tree, &inputs)
+        let err = resolve_composite_scales(&tree, &inputs, &mut Vec::new())
             .expect_err("leaf1's Utf8 column must still refuse the shared y axis");
         match err {
             CompositeResolveError::DomainResolve { source, .. } => {
@@ -2667,7 +2688,7 @@ mod tests {
             for (sibling_name, sibling_scale) in &siblings {
                 let a = owned(leaf("v", Some(linear(caller_domain.clone(), false, false))), batch("v", [1.0, 3.0]));
                 let b = owned(leaf("p", sibling_scale.clone()), batch("p", [40.0, 80.0]));
-                let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)]).unwrap();
+                let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
                 let y_domain = |o: &LeafOwned, c: &LeafScaleContext| {
                     let (scales, _) = resolve_scales_with_leaf_context(
                         &o.spec, &o.batch, &o.outputs, pr, pr, &theme, Some(c),
@@ -2765,7 +2786,7 @@ mod tests {
                 fields.iter().map(|f| leaf_node(Some("b"), Some(f))).collect(),
                 shared_both(),
             );
-            let err = resolve_composite_scales(&tree, &members.map(input))
+            let err = resolve_composite_scales(&tree, &members.map(input), &mut Vec::new())
                 .expect_err("a Utf8 member cannot sit on the caller scale's continuous axis");
             match err {
                 CompositeResolveError::DomainResolve { source, .. } => assert_eq!(
@@ -2809,6 +2830,8 @@ mod tests {
         /// The flat layered route's data domain on the channel, its
         /// chart-level encoding being layer 0's as `+` lowers it.
         flat: Result<Option<(f64, f64)>, RenderError>,
+        /// Each route's `LayerScaleExcluded` warnings: composite, then flat.
+        excluded: (Vec<RenderWarning>, Vec<RenderWarning>),
     }
 
     impl Routes {
@@ -2869,7 +2892,8 @@ mod tests {
                 .collect(),
             shared_both(),
         );
-        let leaves = resolve_composite_scales(&tree, &inputs)
+        let mut leaf_warnings = Vec::new();
+        let leaves = resolve_composite_scales(&tree, &inputs, &mut leaf_warnings)
             .map_err(|e| match e {
                 CompositeResolveError::DomainResolve { source, .. } => source,
                 other => panic!("unexpected composite error {other:?}"),
@@ -2917,9 +2941,16 @@ mod tests {
             viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
-        )
-        .map(|prep| domain_of(prep.provisional_scales));
-        Routes { leaves, flat }
+        );
+        let mut flat_warnings = Vec::new();
+        let flat = flat.map(|prep| {
+            flat_warnings = prep.warnings;
+            domain_of(prep.provisional_scales)
+        });
+        let excluded = |ws: Vec<RenderWarning>| {
+            ws.into_iter().filter(|w| matches!(w, RenderWarning::LayerScaleExcluded { .. })).collect()
+        };
+        Routes { leaves, flat, excluded: (excluded(leaf_warnings), excluded(flat_warnings)) }
     }
 
     fn domainless(padding: Option<f64>) -> serde_json::Value {
@@ -3009,6 +3040,196 @@ mod tests {
         let (leaves, flat) = overlay_routes_on(Channel::X, &members).unwrap();
         assert_eq!(leaves, vec![(Some((0.0, 80.0)), true); 2], "fm.layer leaves");
         assert_eq!(flat, Some((0.0, 80.0)), "+ axis");
+    }
+
+    /// Which layers each route reports as left out of the axis a caller's
+    /// scale establishes: a layer carrying a different scale, or its own
+    /// `domain`, warns once, naming itself, the establishing layer and the
+    /// channel, with the route's placement (its own scale on `fm.layer`, the
+    /// shared axis on `+`). A categorical first scale owns the axis the same
+    /// way. The owning layer, a scale-less or anchor-only layer, and an
+    /// equal copy do not warn; the equal-copy rows are the controls that must
+    /// differ from the different-scale rows.
+    #[test]
+    fn a_layer_left_out_of_the_caller_scale_warns_once_on_both_routes() {
+        let c = || member("c", &[1.0, 2.0, 3.0], Some(domainless(Some(0.2))));
+        let s = || member("s", &[10.0, 20.0, 30.0], None);
+        let d = || member("d", &[50.0, 60.0, 70.0], Some(domainless(Some(0.6))));
+        let anchored = || {
+            member("a", &[5.0, 6.0, 7.0], Some(serde_json::json!({"type": "linear", "zero": true, "systemInjected": true})))
+        };
+        let own_domain =
+            || member("o", &[5.0, 6.0, 7.0], Some(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]})));
+        let categorical_as = |kind: &str| Member {
+            field: "k",
+            values: Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            scale: Some(serde_json::from_value(serde_json::json!({"type": kind})).unwrap()),
+        };
+        let categorical = || categorical_as("band");
+        // Each shape, its channel, and the (layer, establishing) pair it
+        // reports, if any.
+        let shapes: Vec<(&str, Channel, Vec<Member>, Option<(usize, usize)>)> = vec![
+            ("different scale last", Channel::Y, vec![c(), s(), d()], Some((2, 0))),
+            ("caller scale established later", Channel::Y, vec![s(), d(), c()], Some((2, 1))),
+            ("own domain", Channel::Y, vec![c(), own_domain()], Some((1, 0))),
+            ("different scale on x", Channel::X, vec![c(), d()], Some((1, 0))),
+            ("equal copy", Channel::Y, vec![c(), c()], None),
+            ("scale-less sibling", Channel::Y, vec![c(), s()], None),
+            ("anchor-only sibling", Channel::Y, vec![c(), anchored()], None),
+            ("different scale after a categorical first scale", Channel::Y, vec![categorical(), d()], Some((1, 0))),
+            ("different categorical scale", Channel::Y, vec![categorical(), categorical_as("point")], Some((1, 0))),
+            ("scale-less after a categorical first scale", Channel::Y, vec![categorical(), s()], None),
+            ("categorical equal copy", Channel::Y, vec![categorical(), categorical()], None),
+        ];
+        let mut failures = Vec::new();
+        for (name, channel, members, want) in shapes {
+            let expect = |placement| {
+                want.map(|(layer, establishing)| RenderWarning::LayerScaleExcluded {
+                    layer,
+                    establishing,
+                    channel: channel.as_str().to_string(),
+                    placement,
+                })
+                .into_iter()
+                .collect::<Vec<_>>()
+            };
+            let routes = overlay_routes_on(channel, &members);
+            let (composite, flat) = &routes.excluded;
+            if *composite != expect(ExcludedLayerPlacement::OwnScale) {
+                failures.push(format!("{name}: fm.layer warned {composite:?}"));
+            }
+            if *flat != expect(ExcludedLayerPlacement::SharedAxis) {
+                failures.push(format!("{name}: + warned {flat:?}"));
+            }
+            routes.unwrap();
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// A later layer under `CoordFlip` whose own caller y scale lands on the
+    /// panel's x axis establishes that axis as continuous, so layer 0's
+    /// string x column is refused in the shared-axis voice, naming layer 0, on
+    /// both routes. Whether a coord-exchanging layer may establish the
+    /// panel's axis at all is a recorded follow-up; this pins today's outcome
+    /// as its repro.
+    #[test]
+    fn a_flipped_layers_caller_scale_on_the_panel_x_refuses_layer_0s_string_column_on_both_routes() {
+        use crate::layout::{ThemeInputs, Viewport};
+        use crate::render::chart_config::ChartConfig;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![1.0, 5.0]))],
+        )
+        .unwrap();
+        let caller: crate::spec::encoding::ScaleSpec =
+            serde_json::from_value(serde_json::json!({"type": "linear", "nice": false, "zero": false})).unwrap();
+        let encoding = |scale: Option<crate::spec::encoding::ScaleSpec>| {
+            let mut e = Encoding::default();
+            e.x = Some(enc("cat"));
+            e.y = Some(EncodingSpec { scale, ..enc("v") });
+            e
+        };
+        let plain = spec_with(encoding(None));
+        let flipped =
+            ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec_with(encoding(Some(caller.clone()))) };
+        let want = RenderError::LayerAxisColumnUnplaceable {
+            layer: 0,
+            detail: Box::new(crate::render::LayerAxisColumnDetail {
+                channel: "x".to_string(),
+                field: "cat".to_string(),
+                dtype: "Utf8".to_string(),
+            }),
+        };
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let prepare = |spec: &ChartSpec| {
+            crate::render::prepare::prepare_render_inputs(spec, &batch, &theme, viewport, &ChartConfig::default(), None)
+        };
+
+        // `+`: layer 1 carries the flip and the scale, as the lowering writes it.
+        let layer = |spec: &ChartSpec| Layer {
+            mark: Mark::Point,
+            encoding: spec.encoding.clone(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: spec.coord.clone(),
+        };
+        let flat = ChartSpec { layers: Some(vec![layer(&plain), layer(&flipped)]), ..plain.clone() };
+        assert_eq!(prepare(&flat).err(), Some(want.clone()), "+");
+
+        // `fm.layer`: each leaf resolves with its own post-flip encoding.
+        let leaves: Vec<LeafOwned> = [plain, flipped]
+            .into_iter()
+            .map(|spec| {
+                let encoding = prepare(&spec).unwrap().layers[0].encoding.clone();
+                LeafOwned { encoding, outputs: outputs(&batch), batch: batch.clone(), spec }
+            })
+            .collect();
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("cat"), Some("v"))],
+            shared_both(),
+        );
+        match resolve_composite_scales(&tree, &leaves.iter().map(input).collect::<Vec<_>>(), &mut Vec::new()) {
+            Err(CompositeResolveError::DomainResolve { source, .. }) => assert_eq!(source, want, "fm.layer"),
+            other => panic!("fm.layer: expected the shared-axis refusal, got {other:?}"),
+        }
+    }
+
+    /// A member admitted to a caller scale's axis reads its column as the
+    /// continuous extent it draws on, whatever type it annotates: a numeric
+    /// column annotated nominal, with no scale of its own, widens the
+    /// domain-less caller scale's axis like any other admitted member.
+    #[test]
+    fn an_admitted_member_annotated_nominal_joins_the_caller_scale_extent() {
+        use crate::layout::ThemeInputs;
+        use crate::render::scale_resolve::resolve_scales_with_leaf_context;
+        use crate::spec::encoding::DataType as SpecType;
+
+        let batch = |field: &str, values: [f64; 2]| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("i", DataType::Float64, false),
+                Field::new(field, DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![0.0, 1.0])), Arc::new(Float64Array::from(values.to_vec()))],
+            )
+            .unwrap()
+        };
+        let leaf = |y: EncodingSpec| {
+            let mut e = Encoding::default();
+            e.x = Some(enc("i"));
+            e.y = Some(y);
+            spec_with(e)
+        };
+        let caller = serde_json::from_value(domainless(None)).unwrap();
+        let a = owned(leaf(EncodingSpec { scale: Some(caller), ..enc("v") }), batch("v", [1.0, 3.0]));
+        let b = owned(
+            leaf(EncodingSpec { type_: Some(SpecType::Nominal), ..enc("p") }),
+            batch("p", [40.0, 80.0]),
+        );
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("i"), Some("v")), leaf_node(Some("i"), Some("p"))],
+            shared_both(),
+        );
+        let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
+        let pr = (0.0, 100.0);
+        let (scales, _) =
+            resolve_scales_with_leaf_context(&a.spec, &a.batch, &a.outputs, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
+                .unwrap();
+        assert_eq!(scales.y.data_domain(), Some((1.0, 80.0)));
     }
 
     /// Two different domain-less caller scales and a scale-less member, the

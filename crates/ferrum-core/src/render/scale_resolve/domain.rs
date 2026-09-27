@@ -624,11 +624,18 @@ pub(in crate::render) fn establishing_caller_scale<'a>(
     members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
     use crate::spec::encoding::ScaleSpec;
-    let (idx, scale) = members
-        .into_iter()
-        .find_map(|(idx, own)| Some((idx, own.filter(|s| !s.is_system_injected())?)))?;
+    let (idx, scale) = first_caller_scale(members)?;
     let categorical = matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. });
     (!categorical).then_some((idx, scale))
+}
+
+/// The first scale a caller wrote among `members`, in member order, with the
+/// index of the member carrying it, whatever its kind; the bar anchor ferrum
+/// injects is no scale.
+fn first_caller_scale<'a>(
+    members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
+) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
+    members.into_iter().find_map(|(idx, own)| Some((idx, own.filter(|s| !s.is_system_injected())?)))
 }
 
 /// A layer's own encoding for the post-flip `channel`: under a layer whose
@@ -647,24 +654,71 @@ fn layer_channel_encoding<'a>(
     }
 }
 
+/// A warning for each member left out of the axis the first caller-written
+/// scale among `members` owns: one carrying a scale
+/// [`LayerUnion::CarryingScale`] does not admit. Such a member is partially
+/// honored: its marks still draw, where `placement` says. A continuous first
+/// scale establishes the axis ([`establishing_caller_scale`]); a categorical
+/// one keeps the categorical axis's own sharing, which a scale-less member
+/// joins and a member carrying another scale stays out of all the same.
+/// Nothing for the owning member, an admitted one, or a group with no caller
+/// scale. Both layering routes ask this over the members they ask
+/// [`establishing_caller_scale`] over, so they warn on the same shapes.
+pub(in crate::render) fn warn_members_off_caller_scale<'a>(
+    members: impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone,
+    channel: &str,
+    placement: crate::render::ExcludedLayerPlacement,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let Some((establishing, scale)) = first_caller_scale(members.clone()) else { return };
+    let union = LayerUnion::CarryingScale(scale);
+    warnings.extend(members.filter(|&(_, own)| !union.admits(own)).map(|(layer, _)| {
+        RenderWarning::LayerScaleExcluded { layer, establishing, channel: channel.to_string(), placement }
+    }));
+}
+
+/// Each member of a flat layered spec's axis on `channel`, with its own
+/// scale there, in layer order. An `independent_y` layer owns its own y axis,
+/// so it is no member of the shared `y`, as in [`numeric_domain_union_over`].
+fn layered_members<'a>(
+    spec: &'a ChartSpec,
+    channel: &'a str,
+) -> impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone + 'a {
+    spec.layers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .filter(move |(_, layer)| !(channel == "y" && layer.independent_y))
+        .map(move |(idx, layer)| {
+            (idx, layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()))
+        })
+}
+
 /// The scale a flat layered spec's axis on `channel` establishes by
 /// [`establishing_caller_scale`] over its layers, with the establishing
-/// layer's index. An `independent_y` layer owns its own y axis, so it is no
-/// member of the shared `y`, as in [`numeric_domain_union_over`].
+/// layer's index.
 pub(in crate::render) fn layered_caller_scale<'a>(
     spec: &'a ChartSpec,
-    channel: &str,
+    channel: &'a str,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    let layers = spec.layers.as_deref()?;
-    establishing_caller_scale(
-        layers
-            .iter()
-            .enumerate()
-            .filter(|(_, layer)| !(channel == "y" && layer.independent_y))
-            .map(|(idx, layer)| {
-                (idx, layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()))
-            }),
-    )
+    establishing_caller_scale(layered_members(spec, channel))
+}
+
+/// [`warn_members_off_caller_scale`] over a flat layered spec's layers on
+/// `channel`. One scale serves each axis, so a layer left out of it draws on
+/// the shared axis.
+pub(in crate::render) fn warn_layers_off_caller_scale(
+    spec: &ChartSpec,
+    channel: &str,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    warn_members_off_caller_scale(
+        layered_members(spec, channel),
+        channel,
+        crate::render::ExcludedLayerPlacement::SharedAxis,
+        warnings,
+    );
 }
 
 /// Refuse a flat layered spec whose axis on `channel` a continuous caller

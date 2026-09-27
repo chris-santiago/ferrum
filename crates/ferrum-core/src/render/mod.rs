@@ -1224,6 +1224,22 @@ pub enum OpacityScaleFallback {
     LiteralAlpha,
 }
 
+/// Where a layer left out of the layered axis a caller's scale establishes
+/// draws its marks (see [`RenderWarning::LayerScaleExcluded`]). The two
+/// layering routes differ here: a flat layered chart (`+`, `Chart.layer`)
+/// has one scale per axis, while each layer of a composite overlay
+/// (`fm.layer`) is its own leaf with its own scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExcludedLayerPlacement {
+    /// The flat route: the layer's own scale is not applied, and its marks are
+    /// placed on the one shared axis, whose extent does not include them.
+    SharedAxis,
+    /// The composite overlay route: the layer resolves its own scale, which
+    /// no axis in the panel labels.
+    OwnScale,
+}
+
 /// Warnings emitted during render. Geometric edge cases or wrapped layout warnings.
 ///
 /// Note (2026-05-09): spec §11 (line ~556) used `#[serde(tag = "kind", ...)]` but
@@ -1627,6 +1643,20 @@ pub enum RenderWarning {
     /// `resolve_continuous_scheme`). `count` is the number of stops that
     /// survived parsing.
     GradientTooFewStops { count: usize },
+    /// A layer of a layered chart carries its own positional scale that
+    /// differs from the scale establishing that axis (the first one a caller
+    /// wrote, in layer order: a continuous one establishes the axis through
+    /// `scale_resolve::establishing_caller_scale`; a categorical one owns the
+    /// band axis outright), so the layer stays out of the axis. Its scale is
+    /// partially honored: `placement` says where its marks draw instead.
+    /// `layer` and `establishing` are layer positions in declaration order;
+    /// `channel` is `"x"`/`"y"`. One per excluded layer per channel.
+    LayerScaleExcluded {
+        layer: usize,
+        establishing: usize,
+        channel: String,
+        placement: ExcludedLayerPlacement,
+    },
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -1853,6 +1883,21 @@ impl std::fmt::Display for RenderWarning {
                 "the gradient's {count} stop(s) cannot form a gradient (at least 2 are \
                  required); the theme's default scheme was used instead"
             ),
+            RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {
+                let draws = match placement {
+                    ExcludedLayerPlacement::SharedAxis => {
+                        "its marks are placed on that axis and may fall outside it"
+                    }
+                    ExcludedLayerPlacement::OwnScale => {
+                        "its marks draw on the layer's own scale, not the labelled axis"
+                    }
+                };
+                write!(
+                    f,
+                    "layer {layer}: its {channel} scale differs from the one layer {establishing} \
+                     establishes the {channel} axis with, so it stays out of that axis; {draws}"
+                )
+            }
         }
     }
 }
@@ -1974,6 +2019,18 @@ mod tests {
             },
             RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() },
             RenderWarning::GradientTooFewStops { count: 1 },
+            RenderWarning::LayerScaleExcluded {
+                layer: 2,
+                establishing: 0,
+                channel: "y".into(),
+                placement: ExcludedLayerPlacement::SharedAxis,
+            },
+            RenderWarning::LayerScaleExcluded {
+                layer: 1,
+                establishing: 0,
+                channel: "x".into(),
+                placement: ExcludedLayerPlacement::OwnScale,
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -2045,6 +2102,25 @@ mod tests {
         assert!(
             !unresolvable_text.contains("ExtentAlignmentUnresolvable"),
             "{unresolvable_text}"
+        );
+
+        // A layer left out of a caller scale's axis: one sentence, with the
+        // clause the route's placement decides, asserted verbatim.
+        let excluded = |placement| {
+            format!(
+                "{}",
+                RenderWarning::LayerScaleExcluded { layer: 2, establishing: 0, channel: "y".into(), placement }
+            )
+        };
+        assert_eq!(
+            excluded(ExcludedLayerPlacement::SharedAxis),
+            "layer 2: its y scale differs from the one layer 0 establishes the y axis with, so it stays \
+             out of that axis; its marks are placed on that axis and may fall outside it"
+        );
+        assert_eq!(
+            excluded(ExcludedLayerPlacement::OwnScale),
+            "layer 2: its y scale differs from the one layer 0 establishes the y axis with, so it stays \
+             out of that axis; its marks draw on the layer's own scale, not the labelled axis"
         );
 
         // D2/F-L07-06 (this task): `axis_y2` names a surface the chart lacks.
