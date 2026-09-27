@@ -18,9 +18,9 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning};
 
 use super::domain::{
-    apply_sort_to_domain, locate_field, numeric_domain_union, numeric_domain_union_over,
-    positional_category_union, LayerUnion,
-    SortContext,
+    apply_sort_to_domain, layered_caller_scale, locate_field, numeric_domain_union,
+    numeric_domain_union_over, positional_category_union, require_layers_placeable_on_caller_scale,
+    LayerUnion, SortContext,
 };
 use super::{
     column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind, SharedDomain,
@@ -234,8 +234,20 @@ pub(in crate::render) fn build_axis_scale(
     // `injected_scale_with_an_empty_layers_list_keeps_the_bypass`.
     let layered = spec.layers.as_ref().is_some_and(|l| !l.is_empty());
     let yields_to_auto_path = shared.is_some() || layered;
-    let explicit_scale =
-        enc.scale.as_ref().filter(|s| !(yields_to_auto_path && s.is_system_injected()));
+    // A layered spec whose chart-level encoding declares no scale of the
+    // caller's on this channel resolves with the scale its layers establish
+    // (see `domain::establishing_caller_scale`), the rule a composite overlay
+    // group applies to its leaves. Every layer then draws on that continuous
+    // axis, so each must be placeable on it, whether or not its extent is a
+    // union of their data.
+    if layered {
+        require_layers_placeable_on_caller_scale(spec, channel, primary_batch, transform_outputs)?;
+    }
+    let own_scale = enc.scale.as_ref().filter(|s| !(yields_to_auto_path && s.is_system_injected()));
+    let explicit_scale = match own_scale.filter(|s| !s.is_system_injected()) {
+        Some(_) => own_scale,
+        None => layered.then(|| layered_caller_scale(spec, channel)).flatten().map(|(_, scale)| scale).or(own_scale),
+    };
     if let Some(scale_spec) = explicit_scale {
         let sort_ctx = SortContext {
             category_field: &enc.field,

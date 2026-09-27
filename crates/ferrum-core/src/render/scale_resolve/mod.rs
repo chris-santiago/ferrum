@@ -53,7 +53,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    apply_sort_to_domain, locate_field, numeric_domain_union_over, positional_category_union,
+    apply_sort_to_domain, establishing_caller_scale, locate_field, numeric_domain_union_over, positional_category_union,
     LayerUnion, SortContext,
 };
 

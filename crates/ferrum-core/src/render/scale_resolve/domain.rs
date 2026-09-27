@@ -606,6 +606,105 @@ impl LayerUnion<'_> {
     }
 }
 
+/// Which member's scale establishes a layered axis on one channel, for both
+/// the flat layered route and a composite `Overlay` group. `members` pairs
+/// each member's index with its own scale for the channel, in member order.
+///
+/// The establishing scale is the first one a caller wrote, in member order,
+/// whatever its kind; the bar anchor ferrum injects is no scale. When it is
+/// continuous, it and the index of the member carrying it are returned. The
+/// members [`LayerUnion::CarryingScale`] admits (those declaring no scale, and
+/// those carrying an equal copy) resolve on it; a member carrying another
+/// scale, or its own `domain`, stays out. Only a scale stating no `domain`
+/// spans the admitted members' data: a stated `domain` is the axis as
+/// written. A categorical scale takes its categories from its own column and
+/// keeps the categorical axis's own sharing, and a group with no caller scale
+/// takes the auto path; both return `None`.
+pub(in crate::render) fn establishing_caller_scale<'a>(
+    members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
+) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
+    use crate::spec::encoding::ScaleSpec;
+    let (idx, scale) = members
+        .into_iter()
+        .find_map(|(idx, own)| Some((idx, own.filter(|s| !s.is_system_injected())?)))?;
+    let categorical = matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. });
+    (!categorical).then_some((idx, scale))
+}
+
+/// A layer's own encoding for the post-flip `channel`: under a layer whose
+/// effective coord flips, its authored `y` occupies the x axis (see the
+/// coordinate-space note in [`numeric_domain_union_over`]).
+fn layer_channel_encoding<'a>(
+    layer: &'a Layer,
+    chart_coord: Option<&'a crate::spec::coord::CoordKind>,
+    channel: &str,
+) -> Option<&'a crate::spec::encoding::EncodingSpec> {
+    let flipped = crate::spec::coord::flips_positional_channels(layer.effective_coord(chart_coord));
+    match (channel, flipped) {
+        ("x", false) | ("y", true) => layer.encoding.x.as_ref(),
+        ("y", false) | ("x", true) => layer.encoding.y.as_ref(),
+        _ => None,
+    }
+}
+
+/// The scale a flat layered spec's axis on `channel` establishes by
+/// [`establishing_caller_scale`] over its layers, with the establishing
+/// layer's index. An `independent_y` layer owns its own y axis, so it is no
+/// member of the shared `y`, as in [`numeric_domain_union_over`].
+pub(in crate::render) fn layered_caller_scale<'a>(
+    spec: &'a ChartSpec,
+    channel: &str,
+) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
+    let layers = spec.layers.as_deref()?;
+    establishing_caller_scale(
+        layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| !(channel == "y" && layer.independent_y))
+            .map(|(idx, layer)| {
+                (idx, layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()))
+            }),
+    )
+}
+
+/// Refuse a flat layered spec whose axis on `channel` a continuous caller
+/// scale establishes (see [`layered_caller_scale`]) when a layer's column on
+/// that axis cannot sit on it. Every layer draws on the one axis, so every
+/// layer is judged against the establishing one, the rule a composite
+/// `Overlay` group applies to its members, whether or not the scale states a
+/// `domain`. An `independent_y` layer owns its own y axis, and a later layer
+/// whose own coord exchanges its channels relative to the panel is judged by
+/// `scene_build::validate_layer_coord_exchange_is_servable`; neither is
+/// judged here.
+pub(in crate::render) fn require_layers_placeable_on_caller_scale(
+    spec: &ChartSpec,
+    channel: &str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> Result<(), RenderError> {
+    let (Some(layers), Some((establishing, _))) = (spec.layers.as_deref(), layered_caller_scale(spec, channel)) else {
+        return Ok(());
+    };
+    let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
+    for (idx, layer) in layers.iter().enumerate() {
+        let exchanges = idx != 0
+            && crate::spec::coord::flips_positional_channels(layer.effective_coord(spec.coord.as_ref())) != chart_flipped;
+        if idx == establishing || exchanges || (channel == "y" && layer.independent_y) {
+            continue;
+        }
+        let Some(enc) = layer_channel_encoding(layer, spec.coord.as_ref(), channel) else { continue };
+        if let Some(located) = locate_field(&enc.field, primary_batch, transform_outputs) {
+            crate::render::arrow_cast::require_placeable_on_continuous_axis(
+                idx,
+                channel,
+                &enc.field,
+                located.col.data_type(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// [`numeric_domain_union`] with the layer selection spelled out.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn numeric_domain_union_over(
@@ -772,12 +871,8 @@ pub(in crate::render) fn numeric_domain_union_over(
                 e
             });
             let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
-            let own_scale = match channel {
-                "x" => encoding.x.as_ref(),
-                "y" => encoding.y.as_ref(),
-                _ => None,
-            }
-            .and_then(|e| e.scale.as_ref());
+            let own_scale = layer_channel_encoding(layer, spec.coord.as_ref(), channel)
+                .and_then(|e| e.scale.as_ref());
             if !layer_union.admits(own_scale) {
                 continue;
             }

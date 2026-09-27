@@ -52,8 +52,9 @@ import pytest
 import ferrum as fm
 from ferrum._core import ChartSpec as _ChartSpec
 
-from _svg_extents import pixel_for, value_axis_ladder, value_axis_ladders
+from _svg_extents import axis_tick_labels, pixel_for, value_axis_ladder, value_axis_ladders
 from _svg_rects import data_bar_rects, mark_layer, svg_elements
+from tests.test_layer_shared_axis_refusal import _composite_wrapped_refusal, _refusal
 
 #: Pixel coordinates are emitted rounded to 3 decimals, so a tolerance below
 #: ~1e-3 would be asserting on the formatter rather than on the geometry.
@@ -356,6 +357,266 @@ def test_domainless_caller_scale_sibling_join_matrix(spelling, sibling_scale, jo
     else:
         span = ladder_span(svg, axis="y")
         assert span[1] == 3.0, "a sibling with a different scale must stay excluded from the union"
+
+
+# ── the join does not depend on where the caller-scale layer sits ─────────
+
+#: Three point layers, no bar -- the bar zero-anchor mechanics this file
+#: pins separately do not enter into this section at all.
+_ORDER_CALLER_VALUES = [1.0, 2.0, 3.0]
+_ORDER_SIBLING1_VALUES = [10.0, 20.0, 30.0]
+_ORDER_SIBLING2_VALUES = [50.0, 60.0, 70.0]
+
+_ORDER_CALLER_FRAME = pl.DataFrame({"cat": ["a", "b", "c"], "v": _ORDER_CALLER_VALUES})
+_ORDER_SIBLING1_FRAME = pl.DataFrame({"cat": ["a", "b", "c"], "v": _ORDER_SIBLING1_VALUES})
+_ORDER_SIBLING2_FRAME = pl.DataFrame({"cat": ["a", "b", "c"], "v": _ORDER_SIBLING2_VALUES})
+
+_ORDER_CALLER_SCALE = {"padding": 0.2}
+#: A scale that differs from `_ORDER_CALLER_SCALE` -- the different-scale
+#: control's whole point is that this must NOT match.
+_ORDER_DIFFERENT_SCALE = {"padding": 0.6}
+
+
+def _order_point_chart(frame, *, scale: dict | None = None):
+    y = fm.Y("v", scale=scale) if scale is not None else "v"
+    return fm.Chart(frame).mark_point().encode(x="cat", y=y)
+
+
+def _three_layer_overlay(
+    position: str,
+    *,
+    spelling: str,
+    sibling1_scale: dict | None = None,
+    sibling2_scale: dict | None = None,
+):
+    """The caller-scale layer plus two siblings, with the caller-scale layer
+    at `position` ("first", "middle" or "last") among the three."""
+    caller = _order_point_chart(_ORDER_CALLER_FRAME, scale=_ORDER_CALLER_SCALE)
+    sibling1 = _order_point_chart(_ORDER_SIBLING1_FRAME, scale=sibling1_scale)
+    sibling2 = _order_point_chart(_ORDER_SIBLING2_FRAME, scale=sibling2_scale)
+    charts = {
+        "first": [caller, sibling1, sibling2],
+        "middle": [sibling1, caller, sibling2],
+        "last": [sibling1, sibling2, caller],
+    }[position]
+    if spelling == "layer":
+        return fm.layer(*charts)
+    a, b, c = charts
+    return a + b + c
+
+
+def assert_all_point_marks_match_the_ladder(svg: str, *, axis: str, values) -> None:
+    """Every point mark, across every layer, sits where this chart's own
+    ladder says its value is -- the multi-layer sibling of
+    `assert_marks_match_the_ladder` above, for a fixture built entirely from
+    point layers.
+    """
+    ladder = value_axis_ladder(svg, axis=axis)
+    got = point_marks(svg, axis=axis)
+    assert len(got) == len(values), (
+        f"expected {len(values)} point marks, got {len(got)} ({axis} ladder {ladder})"
+    )
+    expected = sorted(pixel_for(ladder, v) for v in values)
+    for got_px, want_px in zip(got, expected, strict=True):
+        assert got_px == pytest.approx(want_px, abs=EPS), (
+            f"point mark at {got_px} but the {axis} ladder {ladder} places its value at {want_px}"
+        )
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_three_layer_join_is_order_independent(position, spelling):
+    """The caller-scale layer's position among three overlaid point layers
+    must not change whether the two scale-less siblings join its axis.
+
+    Every mark across all three layers must sit where this chart's own
+    ladder says its value is, regardless of which layer carries the caller's
+    scale. On `fm.layer`, that ladder must also equal the `+` route's ladder
+    for the identical order -- proving the two routes agree rather than each
+    merely failing to contradict its own (possibly wrong) ladder.
+    """
+    svg = _three_layer_overlay(position, spelling=spelling).to_svg()
+    all_values = _ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES + _ORDER_SIBLING2_VALUES
+    assert_all_point_marks_match_the_ladder(svg, axis="y", values=all_values)
+    if spelling == "layer":
+        plus_svg = _three_layer_overlay(position, spelling="plus").to_svg()
+        assert value_axis_ladder(svg, axis="y") == value_axis_ladder(plus_svg, axis="y"), (
+            "fm.layer must resolve the same axis + resolves for the identical layer order"
+        )
+
+
+#: The control's three layers keep the join test's frames but give the
+#: `_ORDER_SIBLING2_*` layer a scale of its own, so two layers carry
+#: caller-written scales that differ. The establishing scale is the FIRST
+#: caller-written scale in layer order; the scale-less layer joins it and the
+#: other scaled layer stays out. Per position of the padding-0.2 layer:
+#:
+#: - first  ``[0.2, none, 0.6]``: 0.2 establishes.
+#: - middle ``[none, 0.2, 0.6]``: 0.2 is still the first scaled layer.
+#: - last   ``[none, 0.6, 0.2]``: 0.6 establishes, so the padding-0.2 layer
+#:   is the one left out.
+#:
+#: Values are ``(inside the axis, outside it)``.
+_CONTROL_EXPECTED = {
+    "first": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES),
+    "middle": (_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES, _ORDER_SIBLING2_VALUES),
+    "last": (_ORDER_SIBLING1_VALUES + _ORDER_SIBLING2_VALUES, _ORDER_CALLER_VALUES),
+}
+
+#: How many of the excluded layer's marks each spelling draws. The two routes
+#: diverge: `fm.layer`'s composite route draws the excluded layer on its own
+#: scale, off the shared ladder, while `+`'s flat route drops its marks
+#: without a warning. This is a known divergence outside the establishing-scale
+#: rule, recorded as a follow-up and pinned here until both routes give the
+#: excluded layer one disposition.
+_EXCLUDED_LAYER_MARKS = {"layer": 3, "plus": 0}
+
+
+def assert_excluded_layer_disposition(svg: str, *, spelling: str, inside, outside) -> None:
+    """Exactly the `inside` values sit on the shared y ladder, none of the
+    `outside` values do, and the excluded layer contributes exactly the
+    `_EXCLUDED_LAYER_MARKS` count for this spelling.
+    """
+    assert values_marked_on_the_ladder(svg, axis="y", values=inside) == inside, (
+        f"{spelling}: the layers on the axis {inside} must all sit at their ladder pixels"
+    )
+    assert values_marked_on_the_ladder(svg, axis="y", values=outside) == [], (
+        f"{spelling}: the excluded layer's values {outside} must not sit on the axis"
+    )
+    got = len(point_marks(svg, axis="y"))
+    want = len(inside) + _EXCLUDED_LAYER_MARKS[spelling]
+    assert got == want, f"{spelling}: expected {want} point marks, got {got}"
+
+
+def values_marked_on_the_ladder(svg: str, *, axis: str, values) -> list[float]:
+    """The subset of `values` that has a point mark exactly where this chart's
+    own ladder places it -- i.e. the values drawn ON the shared axis.
+    """
+    ladder = value_axis_ladder(svg, axis=axis)
+    marks = point_marks(svg, axis=axis)
+    return [
+        value
+        for value in values
+        if any(got == pytest.approx(pixel_for(ladder, value), abs=EPS) for got in marks)
+    ]
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_three_layer_different_scale_sibling_stays_out_regardless_of_position(position, spelling):
+    """The vacuity control for the order-independence matrix above: with two
+    layers carrying different caller-written scales, the first one in layer
+    order owns the axis, the scale-less layer joins it, and the other scaled
+    layer stays out -- identically on `fm.layer` and `+`.
+    """
+    svg = _three_layer_overlay(
+        position, spelling=spelling, sibling2_scale=_ORDER_DIFFERENT_SCALE
+    ).to_svg()
+    inside, outside = _CONTROL_EXPECTED[position]
+    assert_excluded_layer_disposition(svg, spelling=spelling, inside=inside, outside=outside)
+    lo, hi = ladder_span(svg, axis="y")
+    assert all(v > hi for v in outside) or all(v < lo for v in outside), (
+        f"the other scaled layer's values {outside} must lie outside the axis span {(lo, hi)}"
+    )
+    if spelling == "layer":
+        plus_svg = _three_layer_overlay(
+            position, spelling="plus", sibling2_scale=_ORDER_DIFFERENT_SCALE
+        ).to_svg()
+        assert value_axis_ladder(svg, axis="y") == value_axis_ladder(plus_svg, axis="y"), (
+            "fm.layer must resolve the same axis + resolves for the identical layer order"
+        )
+
+
+def _both_spellings(*charts):
+    """The same layers as `(fm.layer(...), a + b + ...)`."""
+    plus = charts[0]
+    for chart in charts[1:]:
+        plus = plus + chart
+    return fm.layer(*charts), plus
+
+
+def test_categorical_first_scale_owns_the_axis_and_a_later_continuous_scale_renders():
+    """A first-layer `BandScale` establishes x and owns it outright; a later
+    layer's domain-less continuous x scale does not establish the axis, so the
+    chart renders on both spellings with the band's categories as its x ticks.
+    """
+    band = (
+        fm.Chart(_ORDER_CALLER_FRAME)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.BandScale()), y="v")
+    )
+    numeric_x = pl.DataFrame({"n": [1.0, 2.0, 3.0], "v": _ORDER_SIBLING1_VALUES})
+    linear = fm.Chart(numeric_x).mark_point().encode(x=fm.X("n", scale=fm.LinearScale()), y="v")
+    layered, plus = (chart.to_svg() for chart in _both_spellings(band, linear))
+    assert axis_tick_labels(plus, axis="x") == ["a", "b", "c"]
+    assert axis_tick_labels(layered, axis="x") == axis_tick_labels(plus, axis="x")
+    # The linear layer is the excluded one; see `_EXCLUDED_LAYER_MARKS`.
+    for spelling, svg in (("layer", layered), ("plus", plus)):
+        got = len(point_marks(svg, axis="y"))
+        want = len(_ORDER_CALLER_VALUES) + _EXCLUDED_LAYER_MARKS[spelling]
+        assert got == want, f"{spelling}: expected {want} point marks, got {got}"
+
+
+def test_stated_domain_first_scale_owns_the_axis_and_a_scale_less_layer_adopts_it():
+    """A first-layer scale stating its `domain` owns y outright: a later
+    domain-less caller scale does not re-open it, and a scale-less layer
+    adopts that axis -- its marks resolve on the stated domain, even though
+    no domain union is taken because the domain is stated.
+    """
+    stated = _order_point_chart(_ORDER_CALLER_FRAME, scale={"domain": [0.0, 40.0]})
+    domainless = _order_point_chart(_ORDER_SIBLING2_FRAME, scale=_ORDER_CALLER_SCALE)
+    scale_less = _order_point_chart(_ORDER_SIBLING1_FRAME)
+    layered, plus = (chart.to_svg() for chart in _both_spellings(stated, domainless, scale_less))
+    assert ladder_span(plus, axis="y") == (0.0, 40.0)
+    # The domain-less caller-scale layer is the excluded one; see `_EXCLUDED_LAYER_MARKS`.
+    for spelling, svg in (("plus", plus), ("layer", layered)):
+        assert_excluded_layer_disposition(
+            svg,
+            spelling=spelling,
+            inside=_ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES,
+            outside=_ORDER_SIBLING2_VALUES,
+        )
+    assert value_axis_ladder(layered, axis="y") == value_axis_ladder(plus, axis="y")
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_stated_domain_scale_refuses_a_string_layer_on_the_shared_axis(spelling):
+    """A scale stating its `domain` still establishes a continuous shared y,
+    so a later layer whose y column is a string refuses in the shared-axis
+    voice on both spellings, just as it does under a domain-less caller scale.
+    """
+    stated = _order_point_chart(_ORDER_CALLER_FRAME, scale={"domain": [0, 10]})
+    strings = fm.Chart(pl.DataFrame({"cat": ["a", "b", "c"], "s": ["p", "q", "r"]}))
+    strings = strings.mark_point().encode(x="cat", y="s")
+    layered, plus = _both_spellings(stated, strings)
+    chart, expected = {
+        "layer": (layered, _composite_wrapped_refusal(1, "s", "Utf8")),
+        "plus": (plus, _refusal(1, "s", "Utf8")),
+    }[spelling]
+    with pytest.raises(ValueError) as exc:
+        chart.to_svg()
+    assert str(exc.value) == expected
+
+
+def test_scale_less_sibling_joins_a_domainless_caller_scale_on_x():
+    """The join is per channel, not a y special case: a domain-less caller
+    scale on a numeric x and a scale-less x sibling share one x axis, with
+    identical ladders on `fm.layer` and `+`.
+    """
+
+    def x_point_chart(frame, *, scale: dict | None = None):
+        x = fm.X("v", scale=scale) if scale is not None else "v"
+        return fm.Chart(frame).mark_point().encode(x=x, y="cat")
+
+    caller = x_point_chart(_ORDER_CALLER_FRAME, scale=_ORDER_CALLER_SCALE)
+    scale_less = x_point_chart(_ORDER_SIBLING1_FRAME)
+    layered, plus = (chart.to_svg() for chart in _both_spellings(caller, scale_less))
+    all_values = _ORDER_CALLER_VALUES + _ORDER_SIBLING1_VALUES
+    for name, svg in (("+", plus), ("fm.layer", layered)):
+        assert values_marked_on_the_ladder(svg, axis="x", values=all_values) == all_values, (
+            f"{name}: both layers' x values must sit at their own x-ladder pixels"
+        )
+    assert value_axis_ladder(layered, axis="x") == value_axis_ladder(plus, axis="x")
 
 
 # ── the independent-y layered bar keeps its own primary axis ────────────────

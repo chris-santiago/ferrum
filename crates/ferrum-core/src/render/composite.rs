@@ -45,7 +45,7 @@
 //! from within the crate.
 use crate::render::scale_resolve::{
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field,
-    numeric_domain_union_over, numeric_extent, positional_category_union, Channel, LayerUnion,
+    establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union, Channel, LayerUnion,
     LeafScaleContext, SharedDomain,
 };
 use crate::render::RenderError;
@@ -388,7 +388,7 @@ fn resolve_channel(
                 .collect();
             if *layout == CompositeLayout::Overlay {
                 refuse_unplaceable_overlay_members(&group, channel, leaves)?;
-                if let Some(scale) = overlay_caller_scale(&leaves[group[0]], channel) {
+                if let Some((_, scale)) = overlay_caller_scale(&group, channel, leaves) {
                     resolve_caller_scale_group(&group, channel, scale, leaves, out)?;
                     continue;
                 }
@@ -592,35 +592,41 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
     }
 }
 
-/// The caller's scale an `Overlay` group's axis resolves with on `channel`:
-/// the first leaf's own scale, when the caller wrote it and it spans the data
-/// rather than stating a `domain`. The first leaf owns the panel's axes, as it
-/// does for [`refuse_unplaceable_overlay_members`]. A categorical scale takes
-/// its categories from its own column, so it has no extent to share.
+/// The caller's scale an `Overlay` group's axis resolves with on `channel`,
+/// with the member that establishes it: [`establishing_caller_scale`] over
+/// the group's leaves in member order, the one rule the flat layered route
+/// applies to its layers.
 fn overlay_caller_scale<'a>(
+    group: &[usize],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'a>],
+) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
+    establishing_caller_scale(group.iter().map(|&idx| (idx, leaf_own_scale(&leaves[idx], channel))))
+}
+
+/// A leaf's own scale for the positional `channel`, if its encoding binds one.
+fn leaf_own_scale<'a>(
     leaf: &LeafResolveInput<'a>,
     channel: Channel,
 ) -> Option<&'a crate::spec::encoding::ScaleSpec> {
-    use crate::spec::encoding::ScaleSpec;
     let enc = match channel {
         Channel::X => leaf.encoding.x.as_ref(),
         Channel::Y => leaf.encoding.y.as_ref(),
         Channel::Color | Channel::Size => None,
-    }?;
-    enc.scale.as_ref().filter(|s| {
-        !s.is_system_injected()
-            && s.positional_extent().is_none()
-            && !matches!(s, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. })
-    })
+    };
+    enc.and_then(|e| e.scale.as_ref())
 }
 
-/// Resolve an `Overlay` group whose axis is the caller's `scale` (see
-/// [`overlay_caller_scale`]). The members are the leaves the flat layered
-/// route's [`LayerUnion::CarryingScale`] would admit as layers: those carrying
-/// this same scale and those declaring none. Their data unions into one
-/// extent every member resolves `scale` over, so each draws on the axis the
-/// first leaf renders. A leaf carrying a different scale, or its own
-/// `domain`, stays out and resolves on its own.
+/// Resolve an `Overlay` group whose axis is the caller's `scale`, the one
+/// [`overlay_caller_scale`] names as establishing it. The members are the
+/// leaves [`LayerUnion::CarryingScale`] admits, as the flat layered route
+/// admits layers: those carrying this same scale and those declaring none.
+/// Every member resolves `scale`, so the panel's axis (drawn by the first
+/// leaf, itself a member whenever it declares no scale) and every member's
+/// marks describe one scale. When `scale` states no `domain`, the members'
+/// data unions into the one extent they all resolve it over; a stated
+/// `domain` is the extent as written. A leaf carrying a different scale, or
+/// its own `domain`, stays out and resolves on its own.
 fn resolve_caller_scale_group(
     group: &[usize],
     channel: Channel,
@@ -629,23 +635,29 @@ fn resolve_caller_scale_group(
     out: &mut [LeafScaleContext],
 ) -> Result<(), CompositeResolveError> {
     let selection = LayerUnion::CarryingScale(scale);
-    let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
-    for &idx in group {
-        if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection)? {
-            domains.push((idx, d));
+    let members: Vec<usize> = if scale.positional_extent().is_some() {
+        group.iter().copied().filter(|&idx| selection.admits(leaf_own_scale(&leaves[idx], channel))).collect()
+    } else {
+        let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
+        for &idx in group {
+            if let Some(d) = leaf_positional_domain(&leaves[idx], channel, selection)? {
+                domains.push((idx, d));
+            }
         }
-    }
-    assign_union(&domains, channel, out);
-    for (idx, _) in &domains {
-        out[*idx].set_scale(channel, scale.clone());
+        assign_union(&domains, channel, out);
+        domains.into_iter().map(|(idx, _)| idx).collect()
+    };
+    for idx in members {
+        out[idx].set_scale(channel, scale.clone());
     }
     Ok(())
 }
 
 /// The Overlay-only half of `#120`(9)/N1: a member of an `Overlay` group
-/// whose own column cannot serve the CONTINUOUS axis the group's first
-/// member establishes has nowhere else to draw, since every member of an
-/// `Overlay` shares one panel. Called from [`resolve_channel`] (the one
+/// whose own column cannot serve the CONTINUOUS axis the group establishes
+/// (through the caller scale [`overlay_caller_scale`] names, else through the
+/// first member's own domain) has nowhere else to draw, since every member of
+/// an `Overlay` shares one panel. Called from [`resolve_channel`] (the one
 /// caller that knows the node's `layout`, and resolves positional channels
 /// only) immediately before [`resolve_group`], so `resolve_group` itself
 /// stays generic over every layout and both callers it serves — a
@@ -653,8 +665,9 @@ fn resolve_caller_scale_group(
 /// all, rather than carrying an unused parameter through the shared
 /// function.
 ///
-/// The panel's own axis type AND its own flip state are BOTH decided by the
-/// group's first member, the same "Layer 0 is exempt... the panel's axes
+/// When no caller scale establishes the axis, the panel's own axis type is
+/// decided by the group's first member; its flip state always is. The same
+/// "Layer 0 is exempt... the panel's axes
 /// are resolved from its own post-flip encoding" precedent
 /// [`crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable`]
 /// already states: a mixed group whose first member is categorical is not
@@ -676,7 +689,7 @@ fn resolve_caller_scale_group(
 /// draws exactly that distinction, the same predicate a single leaf's own
 /// internal `spec.layers` union reads.
 ///
-/// Only `group[0]`'s own domain is resolved here (`resolve_group`, called
+/// At most `group[0]`'s own domain is resolved here (`resolve_group`, called
 /// right after this returns, resolves every member's on its own): reading
 /// a domain this function never uses would let a LATER member's unrelated
 /// resolution failure pre-empt an EARLIER member's typed refusal below,
@@ -687,21 +700,28 @@ fn refuse_unplaceable_overlay_members(
     channel: Channel,
     leaves: &[LeafResolveInput<'_>],
 ) -> Result<(), CompositeResolveError> {
-    // A caller's continuous scale on the first member establishes a
-    // continuous axis whatever its column's own inferred type.
-    let panel_wants_continuous = overlay_caller_scale(&leaves[group[0]], channel).is_some()
-        || matches!(
-            leaf_channel_domain(&leaves[group[0]], channel)?,
-            Some(SharedDomain::Numeric { .. })
-        );
-    if !panel_wants_continuous {
-        return Ok(());
-    }
+    // The member whose caller scale establishes the continuous axis is the
+    // one the others are judged against, whatever its position or its
+    // column's own inferred type. Otherwise the first member's own domain
+    // decides.
+    let establishing = match overlay_caller_scale(group, channel, leaves) {
+        Some((idx, _)) => idx,
+        None => {
+            let continuous = matches!(
+                leaf_channel_domain(&leaves[group[0]], channel)?,
+                Some(SharedDomain::Numeric { .. })
+            );
+            if !continuous {
+                return Ok(());
+            }
+            group[0]
+        }
+    };
     let panel_flipped = crate::spec::coord::flips_positional_channels(
         leaves[group[0]].spec.coord.as_ref(),
     );
     for (position, &idx) in group.iter().enumerate() {
-        if idx == group[0] {
+        if idx == establishing {
             continue; // the establishing member; trivially placeable
         }
         let leaf = &leaves[idx];
@@ -2648,9 +2668,13 @@ mod tests {
                     scales.y.data_domain()
                 };
                 let axis = y_domain(&a, &ctx[0]);
-                let joins = caller_domain.is_none()
-                    && matches!(*sibling_name, "no scale" | "equal copy" | "injected anchor");
-                let want = match (caller_domain, joins) {
+                // The sibling adopts the caller's scale when it declares none
+                // (or only the anchor) or carries an equal copy; the
+                // domain-less "equal copy" is a different scale from a caller
+                // stating a domain. Its data joins only a domain-less axis.
+                let adopts = matches!(*sibling_name, "no scale" | "injected anchor")
+                    || (caller_domain.is_none() && *sibling_name == "equal copy");
+                let want = match (caller_domain, adopts) {
                     (Some(_), _) => (1.0, 4.0),
                     (None, true) => (1.0, 80.0),
                     (None, false) => (1.0, 3.0),
@@ -2658,7 +2682,10 @@ mod tests {
                 if axis != Some(want) {
                     failures.push(format!("{caller_name} x {sibling_name}: axis {axis:?}, want {want:?}"));
                 }
-                if joins {
+                if ctx[1].y_scale.is_some() != adopts {
+                    failures.push(format!("{caller_name} x {sibling_name}: sibling adopts the caller scale: {}", !adopts));
+                }
+                if adopts {
                     let sibling = y_domain(&b, &ctx[1]);
                     if sibling != axis {
                         failures.push(format!("{caller_name} x {sibling_name}: sibling {sibling:?}, axis {axis:?}"));
@@ -2669,7 +2696,7 @@ mod tests {
         assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 
-    /// An overlay whose first leaf carries the caller's linear scale with no
+    /// An overlay whose leaf carries the caller's linear scale with no
     /// `domain` establishes a continuous y axis, so a member whose own column
     /// is `Utf8` refuses in the shared-axis voice, naming that member.
     #[test]
@@ -2721,26 +2748,379 @@ mod tests {
             )
             .unwrap(),
         );
+        // The caller leaf first, then last: the text member refuses at its
+        // own position either way.
+        for (members, text_at) in [([&scaled, &text], 1), ([&text, &scaled], 0)] {
+            let fields = members.map(|m| m.spec.encoding.y.as_ref().unwrap().field.clone());
+            let tree = composite(
+                CompositeLayout::Overlay,
+                fields.iter().map(|f| leaf_node(Some("b"), Some(f))).collect(),
+                shared_both(),
+            );
+            let err = resolve_composite_scales(&tree, &members.map(input))
+                .expect_err("a Utf8 member cannot sit on the caller scale's continuous axis");
+            match err {
+                CompositeResolveError::DomainResolve { source, .. } => assert_eq!(
+                    source,
+                    RenderError::LayerAxisColumnUnplaceable {
+                        layer: text_at,
+                        detail: Box::new(crate::render::LayerAxisColumnDetail {
+                            channel: "y".to_string(),
+                            field: "s".to_string(),
+                            dtype: "Utf8".to_string(),
+                        }),
+                    }
+                ),
+                other => panic!("expected the typed shared-axis refusal, got {other:?}"),
+            }
+        }
+    }
+
+    /// One member of an overlay for [`overlay_routes`]: the `y` column it
+    /// binds, that column's values, and its own `y` scale.
+    struct Member {
+        field: &'static str,
+        values: arrow::array::ArrayRef,
+        scale: Option<crate::spec::encoding::ScaleSpec>,
+    }
+
+    fn member(field: &'static str, values: &[f64], scale: Option<serde_json::Value>) -> Member {
+        Member {
+            field,
+            values: Arc::new(Float64Array::from(values.to_vec())),
+            scale: scale.map(|s| serde_json::from_value(s).unwrap()),
+        }
+    }
+
+    /// How both layering routes resolve `members`' shared axis on the
+    /// channel they bind, layered in the given order.
+    struct Routes {
+        /// Each composite overlay leaf's data domain on the channel, and
+        /// whether it resolves with a scale its group adopted.
+        leaves: Result<Vec<(Option<(f64, f64)>, bool)>, RenderError>,
+        /// The flat layered route's data domain on the channel, its
+        /// chart-level encoding being layer 0's as `+` lowers it.
+        flat: Result<Option<(f64, f64)>, RenderError>,
+    }
+
+    impl Routes {
+        fn unwrap(self) -> (Vec<(Option<(f64, f64)>, bool)>, Option<(f64, f64)>) {
+            (self.leaves.expect("fm.layer resolves"), self.flat.expect("+ resolves"))
+        }
+    }
+
+    fn overlay_routes(members: &[Member]) -> Routes {
+        overlay_routes_on(Channel::Y, members)
+    }
+
+    /// [`overlay_routes`] with the members binding `channel` (`X` or `Y`)
+    /// and the other positional channel bound to a shared index column.
+    fn overlay_routes_on(channel: Channel, members: &[Member]) -> Routes {
+        use crate::layout::ThemeInputs;
+        use crate::render::scale_resolve::resolve_scales_with_leaf_context;
+
+        let rows = members[0].values.len();
+        let index: arrow::array::ArrayRef =
+            Arc::new(Float64Array::from((0..rows).map(|i| i as f64).collect::<Vec<_>>()));
+        let encoding_of = |m: &Member| {
+            let own = Some(EncodingSpec { scale: m.scale.clone(), ..enc(m.field) });
+            let mut e = Encoding::default();
+            (e.x, e.y) = match channel {
+                Channel::X => (own, Some(enc("i"))),
+                _ => (Some(enc("i")), own),
+            };
+            e
+        };
+        let domain_of = |scales: crate::render::scale_resolve::ResolvedScales| match channel {
+            Channel::X => scales.x.data_domain(),
+            _ => scales.y.data_domain(),
+        };
+        let batch_of = |ms: &[&Member]| {
+            let mut fields = vec![Field::new("i", DataType::Float64, false)];
+            let mut arrays = vec![index.clone()];
+            for m in ms {
+                fields.push(Field::new(m.field, m.values.data_type().clone(), true));
+                arrays.push(m.values.clone());
+            }
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
+        };
+        let theme = ThemeInputs::default();
+        let pr = (0.0, 100.0);
+
+        let owned_leaves: Vec<LeafOwned> =
+            members.iter().map(|m| owned(spec_with(encoding_of(m)), batch_of(&[m]))).collect();
+        let inputs: Vec<LeafResolveInput<'_>> = owned_leaves.iter().map(input).collect();
         let tree = composite(
             CompositeLayout::Overlay,
-            vec![leaf_node(Some("b"), Some("a")), leaf_node(Some("b"), Some("s"))],
+            members
+                .iter()
+                .map(|m| match channel {
+                    Channel::X => leaf_node(Some(m.field), Some("i")),
+                    _ => leaf_node(Some("i"), Some(m.field)),
+                })
+                .collect(),
             shared_both(),
         );
-        let err = resolve_composite_scales(&tree, &[input(&scaled), input(&text)])
-            .expect_err("a Utf8 member cannot sit on the caller scale's continuous axis");
-        match err {
-            CompositeResolveError::DomainResolve { source, .. } => assert_eq!(
-                source,
-                RenderError::LayerAxisColumnUnplaceable {
-                    layer: 1,
-                    detail: Box::new(crate::render::LayerAxisColumnDetail {
-                        channel: "y".to_string(),
-                        field: "s".to_string(),
-                        dtype: "Utf8".to_string(),
-                    }),
+        let leaves = resolve_composite_scales(&tree, &inputs)
+            .map_err(|e| match e {
+                CompositeResolveError::DomainResolve { source, .. } => source,
+                other => panic!("unexpected composite error {other:?}"),
+            })
+            .and_then(|ctx| {
+                owned_leaves
+                    .iter()
+                    .zip(&ctx)
+                    .map(|(o, c)| {
+                        let (scales, _) =
+                            resolve_scales_with_leaf_context(&o.spec, &o.batch, &o.outputs, pr, pr, &theme, Some(c))?;
+                        let adopted = match channel {
+                            Channel::X => c.x_scale.is_some(),
+                            _ => c.y_scale.is_some(),
+                        };
+                        Ok((domain_of(scales), adopted))
+                    })
+                    .collect()
+            });
+
+        let layers: Vec<Layer> = members
+            .iter()
+            .map(|m| Layer {
+                mark: Mark::Point,
+                encoding: encoding_of(m),
+                transforms: Vec::new(),
+                mark_style: None,
+                data_source: None,
+                position: None,
+                blend: None,
+                name: None,
+                independent_y: false,
+                coord: None,
+            })
+            .collect();
+        let flat_spec = ChartSpec { encoding: layers[0].encoding.clone(), layers: Some(layers), ..base_spec() };
+        let flat_batch = batch_of(&members.iter().collect::<Vec<_>>());
+        let flat = resolve_scales_with_leaf_context(&flat_spec, &flat_batch, &HashMap::new(), pr, pr, &theme, None)
+            .map(|(scales, _)| domain_of(scales));
+        Routes { leaves, flat }
+    }
+
+    fn domainless(padding: Option<f64>) -> serde_json::Value {
+        serde_json::json!({"type": "linear", "padding": padding, "nice": false, "zero": false})
+    }
+
+    /// Order independence of an overlay under a caller's scale: three point
+    /// leaves, one (`v`) carrying the caller's domain-less linear scale and
+    /// two (`p`, `q`) declaring none, with the caller leaf first, in the
+    /// middle, and last. Every leaf resolves the one axis `(1, 80)` wherever
+    /// the caller leaf sits, and that is the domain the flat layered route
+    /// resolves for the same layers in the same order.
+    #[test]
+    fn overlay_caller_scale_join_is_order_independent() {
+        let v = || member("v", &[1.0, 2.0, 3.0], Some(domainless(None)));
+        let p = || member("p", &[40.0, 60.0, 80.0], None);
+        let q = || member("q", &[20.0, 40.0, 60.0], None);
+        let orders = [("caller first", [v(), p(), q()]), ("caller middle", [p(), v(), q()]), ("caller last", [p(), q(), v()])];
+        let mut failures = Vec::new();
+        for (name, members) in orders {
+            let (leaves, flat) = overlay_routes(&members).unwrap();
+            for (i, (d, _)) in leaves.iter().enumerate() {
+                if *d != Some((1.0, 80.0)) {
+                    failures.push(format!("{name}: fm.layer leaf {i} resolved {d:?}, want (1, 80)"));
                 }
-            ),
-            other => panic!("expected the typed shared-axis refusal, got {other:?}"),
+            }
+            if leaves[0].0 != flat {
+                failures.push(format!("{name}: fm.layer axis {:?}, + axis {flat:?}", leaves[0].0));
+            }
         }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// A first member whose caller scale is categorical owns the axis: a
+    /// later member's domain-less continuous scale does not turn the panel
+    /// continuous, so neither route refuses the categorical member's column
+    /// and no member adopts the later scale.
+    #[test]
+    fn overlay_categorical_first_member_owns_the_axis_on_both_routes() {
+        let members = [
+            Member {
+                field: "c",
+                values: Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                scale: Some(serde_json::from_value(serde_json::json!({"type": "band"})).unwrap()),
+            },
+            member("n", &[1.0, 2.0, 3.0], Some(domainless(None))),
+        ];
+        let (leaves, flat) = overlay_routes(&members).unwrap();
+        assert_eq!((leaves[0].0, flat), (None, None), "both panel axes stay categorical");
+        assert!(!leaves[1].1, "the continuous member keeps its own scale");
+    }
+
+    /// A first member stating its own `domain` establishes the axis on both
+    /// routes as written: the scale-less member resolves on it, and a later
+    /// member's domain-less scale is a different scale that stays out.
+    #[test]
+    fn overlay_stated_domain_first_member_establishes_the_axis_on_both_routes() {
+        let members = [
+            member("a", &[1.0, 2.0, 3.0], Some(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]}))),
+            member("b", &[40.0, 50.0, 60.0], Some(domainless(None))),
+            member("s", &[20.0, 30.0, 40.0], None),
+        ];
+        let (leaves, flat) = overlay_routes(&members).unwrap();
+        assert_eq!(leaves[0].0, Some((0.0, 10.0)), "fm.layer panel axis");
+        assert_eq!(flat, Some((0.0, 10.0)), "+ axis");
+        assert_eq!(leaves[2], (Some((0.0, 10.0)), true), "the scale-less member resolves on the stated axis");
+        assert!(!leaves[1].1, "the different-scale member stays out");
+
+        // Established by a later member, the stated axis is the same.
+        let members = [
+            member("s", &[20.0, 30.0, 40.0], None),
+            member("a", &[1.0, 2.0, 3.0], Some(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]}))),
+        ];
+        let (leaves, flat) = overlay_routes(&members).unwrap();
+        assert_eq!(leaves[0], (Some((0.0, 10.0)), true), "fm.layer panel axis, drawn by the scale-less member");
+        assert_eq!(flat, Some((0.0, 10.0)), "+ axis");
+    }
+
+    /// The caller's scale on `x`: a scale-less sibling joins it on both
+    /// routes exactly as on `y`. The scale's own `zero` makes adopting it
+    /// visible in the sibling's domain, `(0, 80)`, where the auto path over
+    /// the same union would give `(1, 80)`.
+    #[test]
+    fn overlay_caller_scale_on_x_joins_a_scale_less_sibling_on_both_routes() {
+        let zeroed = serde_json::json!({"type": "linear", "nice": false, "zero": true});
+        let members = [member("v", &[1.0, 2.0, 3.0], Some(zeroed)), member("p", &[40.0, 60.0, 80.0], None)];
+        let (leaves, flat) = overlay_routes_on(Channel::X, &members).unwrap();
+        assert_eq!(leaves, vec![(Some((0.0, 80.0)), true); 2], "fm.layer leaves");
+        assert_eq!(flat, Some((0.0, 80.0)), "+ axis");
+    }
+
+    /// Two different domain-less caller scales and a scale-less member, the
+    /// caller scale `c` first, in the middle, and last. The first caller
+    /// scale in member order establishes the axis on both routes: the
+    /// scale-less member joins it and the member carrying the other scale
+    /// stays out. With `c` last, `d` is that first scale.
+    #[test]
+    fn overlay_different_scale_member_stays_out_in_every_order() {
+        let c = || member("c", &[1.0, 2.0, 3.0], Some(domainless(Some(0.2))));
+        let s = || member("s", &[10.0, 20.0, 30.0], None);
+        let d = || member("d", &[50.0, 60.0, 70.0], Some(domainless(Some(0.6))));
+        // Each order, the axis it establishes, and the position of the
+        // member that stays out.
+        let orders = [
+            ("c first", [c(), s(), d()], (1.0, 30.0), 2),
+            ("c middle", [s(), c(), d()], (1.0, 30.0), 2),
+            ("c last", [s(), d(), c()], (10.0, 70.0), 2),
+        ];
+        let mut failures = Vec::new();
+        for (name, members, axis, out) in orders {
+            let (leaves, flat) = overlay_routes(&members).unwrap();
+            for (i, (d, adopted)) in leaves.iter().enumerate() {
+                let joined = i != out;
+                if joined && *d != Some(axis) {
+                    failures.push(format!("{name}: fm.layer leaf {i} resolved {d:?}, want {axis:?}"));
+                }
+                if *adopted != joined {
+                    failures.push(format!("{name}: fm.layer leaf {i} adopted the group scale: {adopted}"));
+                }
+            }
+            if flat != Some(axis) {
+                failures.push(format!("{name}: + axis {flat:?}, want {axis:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// A `Utf8` member of a group a later member's caller scale establishes
+    /// refuses in the shared-axis voice on both routes, naming the member,
+    /// here the chart-level column the flat route reads first.
+    #[test]
+    fn caller_scale_established_later_refuses_a_utf8_member_on_both_routes() {
+        let members = [
+            Member { field: "s", values: Arc::new(StringArray::from(vec!["a", "b", "c"])), scale: None },
+            member("n", &[1.0, 2.0, 3.0], Some(domainless(None))),
+        ];
+        let want = RenderError::LayerAxisColumnUnplaceable {
+            layer: 0,
+            detail: Box::new(crate::render::LayerAxisColumnDetail {
+                channel: "y".to_string(),
+                field: "s".to_string(),
+                dtype: "Utf8".to_string(),
+            }),
+        };
+        let routes = overlay_routes(&members);
+        assert_eq!(routes.leaves.expect_err("fm.layer refuses"), want);
+        assert_eq!(routes.flat.expect_err("+ refuses"), want);
+    }
+
+    /// A caller scale stating its own `domain` needs no data union, and a
+    /// `Utf8` member of the group it establishes still refuses in the
+    /// shared-axis voice on both routes, with the establishing member first
+    /// and after a scale-less member.
+    #[test]
+    fn stated_domain_caller_scale_refuses_a_utf8_member_on_both_routes() {
+        let stated = || member("n", &[1.0, 2.0, 3.0], Some(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]})));
+        let utf8 = || Member { field: "s", values: Arc::new(StringArray::from(vec!["a", "b", "c"])), scale: None };
+        let orders = [
+            ("stated first", vec![stated(), utf8()], 1),
+            ("stated after a scale-less member", vec![member("p", &[4.0, 5.0, 6.0], None), stated(), utf8()], 2),
+        ];
+        let mut failures = Vec::new();
+        for (name, members, layer) in orders {
+            let want = RenderError::LayerAxisColumnUnplaceable {
+                layer,
+                detail: Box::new(crate::render::LayerAxisColumnDetail {
+                    channel: "y".to_string(),
+                    field: "s".to_string(),
+                    dtype: "Utf8".to_string(),
+                }),
+            };
+            let routes = overlay_routes(&members);
+            if routes.leaves.as_ref().err() != Some(&want) {
+                failures.push(format!("{name}: fm.layer {:?}", routes.leaves.map(|_| "rendered")));
+            }
+            if routes.flat.as_ref().err() != Some(&want) {
+                failures.push(format!("{name}: + {:?}", routes.flat.map(|_| "rendered")));
+            }
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// A `Utf8` member carrying its own categorical scale beside a
+    /// continuous establishing scale still refuses in the shared-axis
+    /// voice on both routes, naming the `Utf8` member's own position,
+    /// whether the establishing scale is domain-less or states its own
+    /// `domain`.
+    #[test]
+    fn own_scale_utf8_member_refuses_beside_a_continuous_establishing_scale_on_both_routes() {
+        let utf8_band = || Member {
+            field: "s",
+            values: Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            scale: Some(serde_json::from_value(serde_json::json!({"type": "band"})).unwrap()),
+        };
+        let cases = [
+            ("domain-less establishing scale", vec![member("n", &[1.0, 2.0, 3.0], Some(domainless(None))), utf8_band()]),
+            (
+                "stated-domain establishing scale",
+                vec![member("n", &[1.0, 2.0, 3.0], Some(serde_json::json!({"type": "linear", "domain": [0.0, 10.0]}))), utf8_band()],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, members) in cases {
+            let want = RenderError::LayerAxisColumnUnplaceable {
+                layer: 1,
+                detail: Box::new(crate::render::LayerAxisColumnDetail {
+                    channel: "y".to_string(),
+                    field: "s".to_string(),
+                    dtype: "Utf8".to_string(),
+                }),
+            };
+            let routes = overlay_routes(&members);
+            if routes.leaves.as_ref().err() != Some(&want) {
+                failures.push(format!("{name}: fm.layer {:?}", routes.leaves.map(|_| "rendered")));
+            }
+            if routes.flat.as_ref().err() != Some(&want) {
+                failures.push(format!("{name}: + {:?}", routes.flat.map(|_| "rendered")));
+            }
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 }

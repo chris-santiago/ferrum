@@ -75,10 +75,12 @@ pub(crate) struct LeafScaleContext {
     pub(crate) size: Option<SharedDomain>,
     /// The caller's positional scale this leaf's `x`/`y` axis resolves with:
     /// set for a leaf that declares no scale on the channel (or only the
-    /// injected bar anchor) and draws in an `Overlay` group whose first leaf
-    /// carries a caller scale stating no `domain`. The leaf then resolves that
-    /// scale over the group's shared extent, the same axis the scale's own
-    /// leaf draws. `None` (the default) resolves the leaf's own encoding.
+    /// injected bar anchor), or an equal copy of it, and draws in an
+    /// `Overlay` group whose axis a caller's continuous scale establishes
+    /// (see `domain::establishing_caller_scale`). The leaf then resolves that
+    /// scale, over the group's shared extent when it states no `domain`, the
+    /// same axis the scale's own leaf draws. `None` (the default) resolves
+    /// the leaf's own encoding.
     pub(crate) x_scale: Option<crate::spec::encoding::ScaleSpec>,
     pub(crate) y_scale: Option<crate::spec::encoding::ScaleSpec>,
     /// Layout-stage-only signal (never affects `prepare_render_inputs`, which
