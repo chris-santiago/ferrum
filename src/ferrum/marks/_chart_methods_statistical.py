@@ -1310,7 +1310,8 @@ class StatisticalMarksMixin:
         Parameters
         ----------
         size : float, optional
-            Point diameter in pixels.  Default is ``4``.  The rendered
+            Point diameter in pixels: both the drawn dot's diameter and
+            the placement diameter.  Default is ``4``.  The rendered
             *spread* of point centers along the cross-axis (not this
             diameter itself) responds to the chart's *value-axis* panel
             dimension using a pre-layout size estimate — panel height for
@@ -1339,8 +1340,9 @@ class StatisticalMarksMixin:
             Position adjustment.
         **mark_kwargs
             Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
-            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
-            ``alpha``→``opacity``) forwarded to the point layer.
+            ``stroke_width``, ``stroke_dash``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the point layer.  ``size``
+            is a named parameter above, not one of these.
 
         Returns
         -------

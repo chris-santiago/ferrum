@@ -5,6 +5,7 @@ Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
 """
 
 from __future__ import annotations
+import math
 import warnings
 from typing import Any, Optional
 
@@ -1047,14 +1048,14 @@ def desugar_swarm(
     y_field : str or None
         Field name on the y axis (value when vertical). Required.
     size : int, default 4
-        Point diameter in pixels (the transform's placement radius is
-        ``size / 2``).  The rendered pixel *spread* along the cross-axis
-        (not this diameter) responds to a pre-layout estimate of the
-        chart's *value-axis* panel dimension (height when vertical, width
-        when ``orient="horizontal"``), inversely: a longer value axis
-        needs less displacement to avoid collisions and produces a smaller
-        spread at the same ``size``.  The cross-axis dimension has no
-        effect.
+        Point diameter in pixels: the transform's placement radius and the
+        drawn dot's radius are both ``size / 2``.  The rendered pixel
+        *spread* along the cross-axis (not this diameter) responds to a
+        pre-layout estimate of the chart's *value-axis* panel dimension
+        (height when vertical, width when ``orient="horizontal"``),
+        inversely: a longer value axis needs less displacement to avoid
+        collisions and produces a smaller spread at the same ``size``.
+        The cross-axis dimension has no effect.
     orient : {"vertical", "horizontal"}, default "vertical"
         Swarm orientation.  ``"vertical"`` means the value axis is y.
     spacing : float, default 1.0
@@ -1112,6 +1113,10 @@ def desugar_swarm(
     if dodge is not None:
         swarm_kwargs["dodge"] = str(dodge)
     transforms = [Swarm(**swarm_kwargs)]
+    # `size` is a diameter in px (the transform's placement unit); the point
+    # mark's `size` is an area in px² (every other point-size surface). Draw
+    # the dot at the same diameter the transform placed it at: r = size / 2.
+    point_mark_kwargs = {"size": math.pi * (size / 2) ** 2}
     from ferrum.encoding import X, Y
 
     if orient == "vertical":
@@ -1128,6 +1133,7 @@ def desugar_swarm(
                 name="point",
                 mark="point",
                 encoding={"x": x_enc_val, "y": val},
+                mark_kwargs=point_mark_kwargs,
                 data_source="swarm",
             )
         ]
@@ -1144,6 +1150,7 @@ def desugar_swarm(
                 name="point",
                 mark="point",
                 encoding={"x": val, "y": y_enc_val},
+                mark_kwargs=point_mark_kwargs,
                 data_source="swarm",
             )
         ]
