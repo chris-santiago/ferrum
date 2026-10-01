@@ -1643,17 +1643,19 @@ pub enum RenderWarning {
     /// `resolve_continuous_scheme`). `count` is the number of stops that
     /// survived parsing.
     GradientTooFewStops { count: usize },
-    /// A layer of a layered chart carries its own positional scale that
-    /// differs from the scale establishing that axis (the first one a caller
-    /// wrote, in layer order: a continuous one establishes the axis through
-    /// `scale_resolve::establishing_caller_scale`; a categorical one owns the
-    /// band axis outright), so the layer stays out of the axis. Its scale is
-    /// partially honored: `placement` says where its marks draw instead.
-    /// `layer` and `establishing` count the way the shared-axis refusal
-    /// counts: positions among a flat chart's layers in declaration order,
-    /// or positions among an `Overlay` group's members on the composite
-    /// route (a nested `+` member numbers its own layers separately).
-    /// `channel` is `"x"`/`"y"`. One per excluded layer per channel.
+    /// A layer of a layered chart was left out of the axis another layer's
+    /// scale establishes on one channel, so its marks draw somewhere other
+    /// than that axis: `placement` says where. `layer` is the excluded
+    /// layer's position; `establishing` is the position of the layer whose
+    /// scale owns the axis; `channel` is `"x"`/`"y"`. One per excluded layer
+    /// per channel. Which scale establishes the axis, and which layers it
+    /// admits, is the rule `scale_resolve::establishing_caller_scale` and
+    /// `scale_resolve::warn_members_off_caller_scale` decide and document;
+    /// this variant only reports what they decided. `layer` and
+    /// `establishing` count the way the shared-axis refusal counts:
+    /// positions among a flat chart's layers in declaration order, or
+    /// positions among an `Overlay` group's members on the composite route
+    /// (a nested `+` member numbers its own layers separately).
     LayerScaleExcluded {
         layer: usize,
         establishing: usize,

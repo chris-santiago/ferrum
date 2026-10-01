@@ -46,7 +46,7 @@
 use crate::render::scale_resolve::{
     distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field,
     establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
-    warn_members_off_caller_scale, Channel, LayerUnion, LeafScaleContext, SharedDomain,
+    column_reads_categorical, warn_members_off_caller_scale, Channel, LayerUnion, LeafScaleContext, SharedDomain,
 };
 use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
@@ -395,6 +395,7 @@ fn resolve_channel(
                 refuse_unplaceable_overlay_members(&group, channel, leaves)?;
                 warn_members_off_caller_scale(
                     overlay_members(&group, channel, leaves),
+                    overlay_lead_categorical(&group, channel, leaves),
                     channel.as_str(),
                     ExcludedLayerPlacement::OwnScale,
                     warnings,
@@ -613,6 +614,27 @@ fn overlay_members<'g, 'a>(
     group.iter().enumerate().map(move |(position, &idx)| (position, leaf_own_scale(&leaves[idx], channel)))
 }
 
+/// Whether an `Overlay` group's first member binds a column on `channel`
+/// that [`column_reads_categorical`].
+fn overlay_lead_categorical(group: &[usize], channel: Channel, leaves: &[LeafResolveInput<'_>]) -> bool {
+    let lead = &leaves[group[0]];
+    leaf_channel_encoding(lead, channel)
+        .is_some_and(|enc| column_reads_categorical(enc, lead.final_batch, lead.transform_outputs))
+}
+
+/// A leaf's own encoding for the positional `channel`, or `None` for a
+/// non-positional channel.
+fn leaf_channel_encoding<'a>(
+    leaf: &LeafResolveInput<'a>,
+    channel: Channel,
+) -> Option<&'a crate::spec::encoding::EncodingSpec> {
+    match channel {
+        Channel::X => leaf.encoding.x.as_ref(),
+        Channel::Y => leaf.encoding.y.as_ref(),
+        Channel::Color | Channel::Size => None,
+    }
+}
+
 /// The caller's scale an `Overlay` group's axis resolves with on `channel`,
 /// with the position in `group` of the member that establishes it:
 /// [`establishing_caller_scale`] over the group's leaves in member order, the
@@ -622,7 +644,7 @@ fn overlay_caller_scale<'a>(
     channel: Channel,
     leaves: &[LeafResolveInput<'a>],
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    establishing_caller_scale(overlay_members(group, channel, leaves))
+    establishing_caller_scale(overlay_members(group, channel, leaves), overlay_lead_categorical(group, channel, leaves))
 }
 
 /// A leaf's own scale for the positional `channel`, if its encoding binds one.
@@ -630,12 +652,7 @@ fn leaf_own_scale<'a>(
     leaf: &LeafResolveInput<'a>,
     channel: Channel,
 ) -> Option<&'a crate::spec::encoding::ScaleSpec> {
-    let enc = match channel {
-        Channel::X => leaf.encoding.x.as_ref(),
-        Channel::Y => leaf.encoding.y.as_ref(),
-        Channel::Color | Channel::Size => None,
-    };
-    enc.and_then(|e| e.scale.as_ref())
+    leaf_channel_encoding(leaf, channel).and_then(|e| e.scale.as_ref())
 }
 
 /// Resolve an `Overlay` group whose axis is the caller's `scale`, the one
@@ -2725,9 +2742,11 @@ mod tests {
         assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 
-    /// An overlay whose leaf carries the caller's linear scale with no
-    /// `domain` establishes a continuous y axis, so a member whose own column
-    /// is `Utf8` refuses in the shared-axis voice, naming that member.
+    /// An overlay whose first leaf carries the caller's linear scale with no
+    /// `domain` establishes a continuous y axis, so a later member whose own
+    /// column is `Utf8` refuses in the shared-axis voice, naming that member.
+    /// (A `Utf8` first member decides its own categorical axis instead; see
+    /// `a_later_continuous_caller_scale_does_not_take_a_categorical_layer_0_axis_on_both_routes`.)
     #[test]
     fn caller_scale_overlay_refuses_a_utf8_member_on_the_shared_y_axis() {
         use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
@@ -2777,31 +2796,28 @@ mod tests {
             )
             .unwrap(),
         );
-        // The caller leaf first, then last: the text member refuses at its
-        // own position either way.
-        for (members, text_at) in [([&scaled, &text], 1), ([&text, &scaled], 0)] {
-            let fields = members.map(|m| m.spec.encoding.y.as_ref().unwrap().field.clone());
-            let tree = composite(
-                CompositeLayout::Overlay,
-                fields.iter().map(|f| leaf_node(Some("b"), Some(f))).collect(),
-                shared_both(),
-            );
-            let err = resolve_composite_scales(&tree, &members.map(input), &mut Vec::new())
-                .expect_err("a Utf8 member cannot sit on the caller scale's continuous axis");
-            match err {
-                CompositeResolveError::DomainResolve { source, .. } => assert_eq!(
-                    source,
-                    RenderError::LayerAxisColumnUnplaceable {
-                        layer: text_at,
-                        detail: Box::new(crate::render::LayerAxisColumnDetail {
-                            channel: "y".to_string(),
-                            field: "s".to_string(),
-                            dtype: "Utf8".to_string(),
-                        }),
-                    }
-                ),
-                other => panic!("expected the typed shared-axis refusal, got {other:?}"),
-            }
+        let members = [&scaled, &text];
+        let fields = members.map(|m| m.spec.encoding.y.as_ref().unwrap().field.clone());
+        let tree = composite(
+            CompositeLayout::Overlay,
+            fields.iter().map(|f| leaf_node(Some("b"), Some(f))).collect(),
+            shared_both(),
+        );
+        let err = resolve_composite_scales(&tree, &members.map(input), &mut Vec::new())
+            .expect_err("a Utf8 member cannot sit on the caller scale's continuous axis");
+        match err {
+            CompositeResolveError::DomainResolve { source, .. } => assert_eq!(
+                source,
+                RenderError::LayerAxisColumnUnplaceable {
+                    layer: 1,
+                    detail: Box::new(crate::render::LayerAxisColumnDetail {
+                        channel: "y".to_string(),
+                        field: "s".to_string(),
+                        dtype: "Utf8".to_string(),
+                    }),
+                }
+            ),
+            other => panic!("expected the typed shared-axis refusal, got {other:?}"),
         }
     }
 
@@ -2847,6 +2863,15 @@ mod tests {
     /// [`overlay_routes`] with the members binding `channel` (`X` or `Y`)
     /// and the other positional channel bound to a shared index column.
     fn overlay_routes_on(channel: Channel, members: &[Member]) -> Routes {
+        overlay_routes_with(channel, members, None)
+    }
+
+    /// [`overlay_routes_on`] with member 0's encoding typed `lead_type`.
+    fn overlay_routes_with(
+        channel: Channel,
+        members: &[Member],
+        lead_type: Option<crate::spec::encoding::DataType>,
+    ) -> Routes {
         use crate::layout::ThemeInputs;
         use crate::render::scale_resolve::resolve_scales_with_leaf_context;
 
@@ -2854,7 +2879,8 @@ mod tests {
         let index: arrow::array::ArrayRef =
             Arc::new(Float64Array::from((0..rows).map(|i| i as f64).collect::<Vec<_>>()));
         let encoding_of = |m: &Member| {
-            let own = Some(EncodingSpec { scale: m.scale.clone(), ..enc(m.field) });
+            let type_ = if std::ptr::eq(m, &members[0]) { lead_type } else { None };
+            let own = Some(EncodingSpec { scale: m.scale.clone(), type_, ..enc(m.field) });
             let mut e = Encoding::default();
             (e.x, e.y) = match channel {
                 Channel::X => (own, Some(enc("i"))),
@@ -3107,43 +3133,53 @@ mod tests {
     }
 
     /// A later layer under `CoordFlip` whose own caller y scale lands on the
-    /// panel's x axis establishes that axis as continuous, so layer 0's
-    /// string x column is refused in the shared-axis voice, naming layer 0, on
-    /// both routes. Whether a coord-exchanging layer may establish the
-    /// panel's axis at all is a recorded follow-up; this pins today's outcome
-    /// as its repro.
+    /// panel's x axis does not take that axis from layer 0, whose string x
+    /// column makes it categorical: on both routes the chart resolves, the
+    /// panel x is layer 0's band axis over its categories, and the flipped
+    /// layer is reported left out of the x axis once, with the route's
+    /// placement. The flipped layer binds a numeric column on each axis, so
+    /// its exchanged channels are servable and only the establishing rule is
+    /// in question.
     #[test]
-    fn a_flipped_layers_caller_scale_on_the_panel_x_refuses_layer_0s_string_column_on_both_routes() {
+    fn a_flipped_layers_caller_scale_does_not_take_a_categorical_layer_0_axis_on_both_routes() {
         use crate::layout::{ThemeInputs, Viewport};
         use crate::render::chart_config::ChartConfig;
+        use crate::render::scale_resolve::{resolve_scales_with_leaf_context, ScaleKind};
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
             Field::new("v", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![1.0, 5.0]))],
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 5.0])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+            ],
         )
         .unwrap();
         let caller: crate::spec::encoding::ScaleSpec =
             serde_json::from_value(serde_json::json!({"type": "linear", "nice": false, "zero": false})).unwrap();
-        let encoding = |scale: Option<crate::spec::encoding::ScaleSpec>| {
+        let encoding = |x: &str, scale: Option<crate::spec::encoding::ScaleSpec>| {
             let mut e = Encoding::default();
-            e.x = Some(enc("cat"));
+            e.x = Some(enc(x));
             e.y = Some(EncodingSpec { scale, ..enc("v") });
             e
         };
-        let plain = spec_with(encoding(None));
+        let plain = spec_with(encoding("cat", None));
         let flipped =
-            ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec_with(encoding(Some(caller.clone()))) };
-        let want = RenderError::LayerAxisColumnUnplaceable {
-            layer: 0,
-            detail: Box::new(crate::render::LayerAxisColumnDetail {
-                channel: "x".to_string(),
-                field: "cat".to_string(),
-                dtype: "Utf8".to_string(),
-            }),
+            ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec_with(encoding("w", Some(caller))) };
+        let excluded = |placement| {
+            vec![RenderWarning::LayerScaleExcluded { layer: 1, establishing: 0, channel: "x".to_string(), placement }]
+        };
+        let only_excluded = |ws: Vec<RenderWarning>| -> Vec<RenderWarning> {
+            ws.into_iter().filter(|w| matches!(w, RenderWarning::LayerScaleExcluded { .. })).collect()
+        };
+        let band_categories = |x: &ScaleKind| match x {
+            ScaleKind::Ordinal(_) => x.tick_labels(5),
+            other => panic!("panel x is {other:?}, want layer 0's band axis"),
         };
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 600.0, height: 400.0 };
@@ -3165,7 +3201,9 @@ mod tests {
             coord: spec.coord.clone(),
         };
         let flat = ChartSpec { layers: Some(vec![layer(&plain), layer(&flipped)]), ..plain.clone() };
-        assert_eq!(prepare(&flat).err(), Some(want.clone()), "+");
+        let prep = prepare(&flat).expect("+ resolves");
+        assert_eq!(band_categories(&prep.provisional_scales.x), ["a", "b"], "+ panel x");
+        assert_eq!(only_excluded(prep.warnings), excluded(ExcludedLayerPlacement::SharedAxis), "+");
 
         // `fm.layer`: each leaf resolves with its own post-flip encoding.
         let leaves: Vec<LeafOwned> = [plain, flipped]
@@ -3177,13 +3215,18 @@ mod tests {
             .collect();
         let tree = composite(
             CompositeLayout::Overlay,
-            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("cat"), Some("v"))],
+            vec![leaf_node(Some("cat"), Some("v")), leaf_node(Some("v"), Some("w"))],
             shared_both(),
         );
-        match resolve_composite_scales(&tree, &leaves.iter().map(input).collect::<Vec<_>>(), &mut Vec::new()) {
-            Err(CompositeResolveError::DomainResolve { source, .. }) => assert_eq!(source, want, "fm.layer"),
-            other => panic!("fm.layer: expected the shared-axis refusal, got {other:?}"),
-        }
+        let mut warnings = Vec::new();
+        let ctx = resolve_composite_scales(&tree, &leaves.iter().map(input).collect::<Vec<_>>(), &mut warnings)
+            .expect("fm.layer resolves");
+        let pr = (0.0, 100.0);
+        let (scales, _) =
+            resolve_scales_with_leaf_context(&leaves[0].spec, &batch, &leaves[0].outputs, pr, pr, &theme, Some(&ctx[0]))
+                .expect("fm.layer panel resolves");
+        assert_eq!(band_categories(&scales.x), ["a", "b"], "fm.layer panel x");
+        assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
     }
 
     /// A member admitted to a caller scale's axis reads its column as the
@@ -3268,26 +3311,73 @@ mod tests {
         assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 
-    /// A `Utf8` member of a group a later member's caller scale establishes
-    /// refuses in the shared-axis voice on both routes, naming the member,
-    /// here the chart-level column the flat route reads first.
+    /// Layer 0 decides its own axis when its column there reads categorical:
+    /// a later layer's continuous caller scale establishes nothing, so neither
+    /// route refuses layer 0's column, the panel axis stays categorical, and
+    /// the later layer is reported left out once, naming layer 0 as the
+    /// establishing layer, with the route's placement. Layer 0 reads
+    /// categorical through a `Utf8` column, or through a numeric column it
+    /// types nominal. The controls, layer 0 numeric and scale-less beside the
+    /// same later scale, keep the rule as it was: the later scale establishes
+    /// the axis, layer 0 joins it, and nothing warns.
     #[test]
-    fn caller_scale_established_later_refuses_a_utf8_member_on_both_routes() {
-        let members = [
-            Member { field: "s", values: Arc::new(StringArray::from(vec!["a", "b", "c"])), scale: None },
-            member("n", &[1.0, 2.0, 3.0], Some(domainless(None))),
-        ];
-        let want = RenderError::LayerAxisColumnUnplaceable {
-            layer: 0,
-            detail: Box::new(crate::render::LayerAxisColumnDetail {
-                channel: "y".to_string(),
-                field: "s".to_string(),
-                dtype: "Utf8".to_string(),
-            }),
-        };
-        let routes = overlay_routes(&members);
-        assert_eq!(routes.leaves.expect_err("fm.layer refuses"), want);
-        assert_eq!(routes.flat.expect_err("+ refuses"), want);
+    fn a_later_continuous_caller_scale_does_not_take_a_categorical_layer_0_axis_on_both_routes() {
+        use crate::spec::encoding::DataType as SpecType;
+
+        let utf8 = || Member { field: "s", values: Arc::new(StringArray::from(vec!["a", "b", "c"])), scale: None };
+        let later = || member("n", &[1.0, 2.0, 3.0], Some(domainless(None)));
+        let numeric = || member("p", &[40.0, 60.0, 80.0], None);
+        let mut failures = Vec::new();
+        for channel in [Channel::X, Channel::Y] {
+            let excluded = |placement| {
+                vec![RenderWarning::LayerScaleExcluded {
+                    layer: 1,
+                    establishing: 0,
+                    channel: channel.as_str().to_string(),
+                    placement,
+                }]
+            };
+            for (name, routes) in [
+                ("Utf8 layer 0", overlay_routes_on(channel, &[utf8(), later()])),
+                ("nominal layer 0", overlay_routes_with(channel, &[numeric(), later()], Some(SpecType::Nominal))),
+            ] {
+                let name = format!("{name} on {}", channel.as_str());
+                if routes.excluded != (excluded(ExcludedLayerPlacement::OwnScale), excluded(ExcludedLayerPlacement::SharedAxis)) {
+                    failures.push(format!("{name}: warned {:?}", routes.excluded));
+                }
+                match (&routes.leaves, &routes.flat) {
+                    (Ok(leaves), Ok(flat)) => {
+                        if (leaves[0].0, *flat) != (None, None) {
+                            failures.push(format!("{name}: panel axes {:?} / {flat:?}, want categorical", leaves[0].0));
+                        }
+                        if leaves[1].1 {
+                            failures.push(format!("{name}: the later leaf adopted a group scale"));
+                        }
+                    }
+                    (leaves, flat) => failures.push(format!(
+                        "{name}: fm.layer {:?}, + {:?}",
+                        leaves.as_ref().err(),
+                        flat.as_ref().err()
+                    )),
+                }
+            }
+
+            // The control: layer 0 numeric and scale-less.
+            let routes = overlay_routes_on(channel, &[numeric(), later()]);
+            let name = format!("numeric layer 0 on {}", channel.as_str());
+            if routes.excluded != (Vec::new(), Vec::new()) {
+                failures.push(format!("{name}: warned {:?}", routes.excluded));
+            }
+            match (routes.leaves, routes.flat) {
+                (Ok(leaves), Ok(flat)) => {
+                    if leaves != vec![(Some((1.0, 80.0)), true); 2] || flat != Some((1.0, 80.0)) {
+                        failures.push(format!("{name}: fm.layer {leaves:?}, + {flat:?}, want the joined (1, 80)"));
+                    }
+                }
+                (leaves, flat) => failures.push(format!("{name}: fm.layer {:?}, + {:?}", leaves.err(), flat.err())),
+            }
+        }
+        assert!(failures.is_empty(), "{} red cells:\n{}", failures.len(), failures.join("\n"));
     }
 
     /// A caller scale stating its own `domain` needs no data union, and a

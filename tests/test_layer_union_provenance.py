@@ -621,6 +621,120 @@ def test_categorical_first_scale_owns_the_axis_and_a_later_continuous_scale_rend
         ], f"{spelling}: expected one excluded-layer warning, got {excluded}"
 
 
+# ── layer 0's categorical column decides the axis ────────────────────────────
+
+_LEAD_NUMERIC_FRAME = pl.DataFrame({"p": [40.0, 60.0, 80.0], "v": [1.0, 2.0, 3.0]})
+_LATER_SCALED_FRAME = pl.DataFrame({"n": [1.0, 2.0, 3.0], "v": [4.0, 5.0, 6.0]})
+_FLIP_FRAME = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 5.0, 3.0], "w": [2.0, 3.0, 4.0]})
+
+
+def _point(frame, **encoding):
+    return fm.Chart(frame).mark_point().encode(**encoding)
+
+
+def _utf8_lead_and_later_linear_x():
+    return (
+        _point(pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]}), x="cat", y="v"),
+        _point(_LATER_SCALED_FRAME, x=fm.X("n", scale=fm.LinearScale()), y="v"),
+    )
+
+
+def _utf8_lead_and_later_flipped_linear_y():
+    return (
+        _point(_FLIP_FRAME, x="cat", y="v"),
+        _point(_FLIP_FRAME, x="w", y=fm.Y("v", scale=fm.LinearScale(nice=False))).coord(
+            fm.CoordFlip()
+        ),
+    )
+
+
+def _later_unnice_linear_x():
+    return _point(_LATER_SCALED_FRAME, x=fm.X("n", scale=fm.LinearScale(nice=False)), y="v")
+
+
+def _nominal_lead_and_later_linear_x():
+    return (_point(_LEAD_NUMERIC_FRAME, x="p:N", y="v"), _later_unnice_linear_x())
+
+
+def _half_steps_down_from(top: int) -> list[str]:
+    return [f"{v / 2:g}" for v in range(2 * top, 1, -1)]
+
+
+#: Each pair is `(layer 0, layer 1)`, with the x ticks layer 0's categorical
+#: column puts on the panel and the shared y ladder. Three categories each:
+#: `axis_tick_labels` drops tick groups below its minimum size, so two would
+#: read as no ticks at all.
+_CATEGORICAL_LEAD_CASES = [
+    pytest.param(
+        _utf8_lead_and_later_linear_x, ["a", "b", "c"], _half_steps_down_from(6), id="utf8-lead"
+    ),
+    pytest.param(
+        _utf8_lead_and_later_flipped_linear_y,
+        ["a", "b", "c"],
+        _half_steps_down_from(5),
+        id="utf8-lead-coordflip",
+    ),
+    pytest.param(
+        _nominal_lead_and_later_linear_x,
+        ["40", "60", "80"],
+        _half_steps_down_from(6),
+        id="nominal-typed-lead",
+    ),
+]
+
+
+@pytest.mark.parametrize(("build", "x_ticks", "y_ticks"), _CATEGORICAL_LEAD_CASES)
+def test_a_categorical_layer_0_keeps_its_axis_beside_a_later_continuous_caller_scale(
+    build, x_ticks, y_ticks
+):
+    """When layer 0 binds a categorical column on x (a string column, or a
+    numeric one typed `:N`), the panel x is layer 0's categorical axis. A later
+    layer's continuous caller scale on x, including one `CoordFlip` moves onto
+    x, does not take it: that layer is left out with one excluded-layer
+    warning and the chart renders on both spellings.
+    """
+    (layered, layered_excluded), (plus, plus_excluded) = (
+        render(chart) for chart in _both_spellings(*build())
+    )
+    for svg in (plus, layered):
+        assert axis_tick_labels(svg, axis="x") == x_ticks
+        assert axis_tick_labels(svg, axis="y") == y_ticks
+    # The later layer is the excluded one; see `_EXCLUDED_LAYER_MARKS`.
+    for spelling, svg, excluded in (
+        ("layer", layered, layered_excluded),
+        ("plus", plus, plus_excluded),
+    ):
+        got = len(point_marks(svg, axis="y"))
+        want = 3 + _EXCLUDED_LAYER_MARKS[spelling]
+        assert got == want, f"{spelling}: expected {want} point marks, got {got}"
+        assert excluded == [
+            excluded_layer_warning(spelling, layer=1, establishing=0, channel="x")
+        ], f"{spelling}: expected one excluded-layer warning, got {excluded}"
+
+
+def test_a_numeric_scale_less_layer_0_still_joins_a_later_caller_scale():
+    """The control for the categorical-lead cases: an untyped numeric layer 0
+    carries no categorical axis, so the later caller scale establishes x and
+    layer 0 joins it. The ladder spans both layers, every mark sits on it, and
+    no layer is left out.
+    """
+    lead = _point(_LEAD_NUMERIC_FRAME, x="p", y="v")
+    (layered, layered_excluded), (plus, plus_excluded) = (
+        render(chart) for chart in _both_spellings(lead, _later_unnice_linear_x())
+    )
+    all_x = [40.0, 60.0, 80.0, 1.0, 2.0, 3.0]
+    for spelling, svg, excluded in (
+        ("layer", layered, layered_excluded),
+        ("plus", plus, plus_excluded),
+    ):
+        assert axis_tick_labels(svg, axis="x") == ["10", "20", "30", "40", "50", "60", "70", "80"]
+        assert excluded == [], f"{spelling}: expected no excluded-layer warning, got {excluded}"
+        assert len(point_marks(svg, axis="x")) == len(all_x)
+        assert values_marked_on_the_ladder(svg, axis="x", values=all_x) == all_x, (
+            f"{spelling}: both layers' x values must sit at their x-ladder pixels"
+        )
+
+
 def test_stated_domain_first_scale_owns_the_axis_and_a_scale_less_layer_adopts_it():
     """A first-layer scale stating its `domain` owns y outright: a later
     domain-less caller scale does not re-open it, and a scale-less layer

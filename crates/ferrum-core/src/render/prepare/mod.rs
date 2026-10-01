@@ -1080,7 +1080,13 @@ pub fn prepare_render_inputs(
                 &transformed,
                 &transform_outputs,
             )?;
-            crate::render::scale_resolve::warn_layers_off_caller_scale(spec, channel, &mut layer_scale_warnings);
+            crate::render::scale_resolve::warn_layers_off_caller_scale(
+                spec,
+                channel,
+                &transformed,
+                &transform_outputs,
+                &mut layer_scale_warnings,
+            );
         }
     }
 

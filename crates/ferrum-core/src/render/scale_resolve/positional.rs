@@ -241,7 +241,7 @@ pub(in crate::render) fn build_axis_scale(
     // applies to its leaves; whether every layer can sit on that axis is
     // asked once per spec, before scale resolution
     // (`domain::require_layers_placeable_on_caller_scale`).
-    let explicit_scale = match (enc.scale.as_ref(), layered_caller_scale(spec, channel).map(|(_, scale)| scale)) {
+    let explicit_scale = match (enc.scale.as_ref(), layered_caller_scale(spec, channel, primary_batch, transform_outputs).map(|(_, scale)| scale)) {
         // The caller's own scale on the chart encoding.
         (Some(own), _) if !own.is_system_injected() => Some(own),
         // The scale the layers establish.

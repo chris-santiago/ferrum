@@ -620,13 +620,45 @@ impl LayerUnion<'_> {
 /// written. A categorical scale takes its categories from its own column and
 /// keeps the categorical axis's own sharing, and a group with no caller scale
 /// takes the auto path; both return `None`.
+///
+/// The first member decides its own axis when its column there reads
+/// categorical (`lead_categorical`, see [`column_reads_categorical`]): only a
+/// scale it carries itself can establish the axis, so with none the axis is
+/// that member's categorical one and a later member's scale establishes
+/// nothing.
 pub(in crate::render) fn establishing_caller_scale<'a>(
     members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
+    lead_categorical: bool,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
+    let deciding = if lead_categorical { 1 } else { usize::MAX };
+    let (idx, scale) = first_caller_scale(members.into_iter().take(deciding))?;
+    (!is_categorical_scale(scale)).then_some((idx, scale))
+}
+
+fn is_categorical_scale(scale: &crate::spec::encoding::ScaleSpec) -> bool {
     use crate::spec::encoding::ScaleSpec;
-    let (idx, scale) = first_caller_scale(members)?;
-    let categorical = matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. });
-    (!categorical).then_some((idx, scale))
+    matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. })
+}
+
+/// Whether `own` is a continuous scale a caller wrote; the bar anchor ferrum
+/// injects is none.
+fn is_continuous_caller_scale(own: Option<&crate::spec::encoding::ScaleSpec>) -> bool {
+    own.is_some_and(|s| !s.is_system_injected() && !is_categorical_scale(s))
+}
+
+/// Whether a member's column on a layered axis reads categorical: one the
+/// continuous-axis refusal cannot place
+/// ([`crate::render::arrow_cast::is_numeric`]), or one its encoding types
+/// nominal or ordinal. A column neither batch holds reads as not categorical.
+pub(in crate::render) fn column_reads_categorical(
+    enc: &crate::spec::encoding::EncodingSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> bool {
+    use crate::spec::encoding::DataType;
+    matches!(enc.type_, Some(DataType::Nominal | DataType::Ordinal))
+        || locate_field(&enc.field, primary_batch, transform_outputs)
+            .is_some_and(|located| !crate::render::arrow_cast::is_numeric(located.col.data_type()))
 }
 
 /// The first scale a caller wrote among `members`, in member order, with the
@@ -662,19 +694,36 @@ fn layer_channel_encoding<'a>(
 /// one keeps the categorical axis's own sharing, which a scale-less member
 /// joins and a member carrying another scale stays out of all the same.
 /// Nothing for the owning member, an admitted one, or a group with no caller
-/// scale. Both layering routes ask this over the members they ask
-/// [`establishing_caller_scale`] over, so they warn on the same shapes.
+/// scale. A first member whose column reads categorical and that carries no
+/// scale owns its axis itself (see [`establishing_caller_scale`]), so every
+/// later member carrying a continuous scale stays out of it; the categorical
+/// scales among the rest follow the rule above. Both layering routes ask this
+/// over the members they ask [`establishing_caller_scale`] over, with the same
+/// `lead_categorical`, so they warn on the same shapes.
 pub(in crate::render) fn warn_members_off_caller_scale<'a>(
     members: impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone,
+    lead_categorical: bool,
     channel: &str,
     placement: crate::render::ExcludedLayerPlacement,
     warnings: &mut Vec<RenderWarning>,
 ) {
-    let Some((establishing, scale)) = first_caller_scale(members.clone()) else { return };
+    let warning = |layer, establishing| RenderWarning::LayerScaleExcluded {
+        layer,
+        establishing,
+        channel: channel.to_string(),
+        placement,
+    };
+    let lead = members.clone().next().filter(|&(_, own)| lead_categorical && own.is_none_or(|s| s.is_system_injected()));
+    let off_lead = move |&(_, own): &(usize, Option<&'a crate::spec::encoding::ScaleSpec>)| {
+        lead.is_some() && is_continuous_caller_scale(own)
+    };
+    if let Some((lead, _)) = lead {
+        warnings.extend(members.clone().filter(off_lead).map(|(layer, _)| warning(layer, lead)));
+    }
+    let rest = members.filter(move |member| !off_lead(member));
+    let Some((establishing, scale)) = first_caller_scale(rest.clone()) else { return };
     let union = LayerUnion::CarryingScale(scale);
-    warnings.extend(members.filter(|&(_, own)| !union.admits(own)).map(|(layer, _)| {
-        RenderWarning::LayerScaleExcluded { layer, establishing, channel: channel.to_string(), placement }
-    }));
+    warnings.extend(rest.filter(|&(_, own)| !union.admits(own)).map(|(layer, _)| warning(layer, establishing)));
 }
 
 /// Each member of a flat layered spec's axis on `channel`, with its own
@@ -695,14 +744,34 @@ fn layered_members<'a>(
         })
 }
 
+/// Whether the first member of a flat layered spec's axis on `channel`
+/// binds a column there that [`column_reads_categorical`].
+fn layered_lead_categorical(
+    spec: &ChartSpec,
+    channel: &str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> bool {
+    let layers = spec.layers.as_deref().unwrap_or_default();
+    layered_members(spec, channel)
+        .next()
+        .and_then(|(idx, _)| layer_channel_encoding(&layers[idx], spec.coord.as_ref(), channel))
+        .is_some_and(|enc| column_reads_categorical(enc, primary_batch, transform_outputs))
+}
+
 /// The scale a flat layered spec's axis on `channel` establishes by
 /// [`establishing_caller_scale`] over its layers, with the establishing
 /// layer's index.
 pub(in crate::render) fn layered_caller_scale<'a>(
     spec: &'a ChartSpec,
     channel: &'a str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    establishing_caller_scale(layered_members(spec, channel))
+    establishing_caller_scale(
+        layered_members(spec, channel),
+        layered_lead_categorical(spec, channel, primary_batch, transform_outputs),
+    )
 }
 
 /// [`warn_members_off_caller_scale`] over a flat layered spec's layers on
@@ -711,10 +780,13 @@ pub(in crate::render) fn layered_caller_scale<'a>(
 pub(in crate::render) fn warn_layers_off_caller_scale(
     spec: &ChartSpec,
     channel: &str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) {
     warn_members_off_caller_scale(
         layered_members(spec, channel),
+        layered_lead_categorical(spec, channel, primary_batch, transform_outputs),
         channel,
         crate::render::ExcludedLayerPlacement::SharedAxis,
         warnings,
@@ -737,7 +809,10 @@ pub(in crate::render) fn require_layers_placeable_on_caller_scale(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
 ) -> Result<(), RenderError> {
-    let (Some(layers), Some((establishing, _))) = (spec.layers.as_deref(), layered_caller_scale(spec, channel)) else {
+    let (Some(layers), Some((establishing, _))) = (
+        spec.layers.as_deref(),
+        layered_caller_scale(spec, channel, primary_batch, transform_outputs),
+    ) else {
         return Ok(());
     };
     let chart_flipped = crate::spec::coord::flips_positional_channels(spec.coord.as_ref());
@@ -1269,8 +1344,12 @@ pub(in crate::render) fn positional_category_union(
             "y" => (encoding.y.as_ref(), encoding.x.as_ref()),
             _ => (None, None),
         };
-        let Some(layer_field) = layer_enc.map(|e| e.field.as_str()) else { continue };
-        if layer_field == field {
+        let Some(layer_enc) = layer_enc else { continue };
+        let layer_field = layer_enc.field.as_str();
+        // A layer carrying its own continuous scale answers to that scale and
+        // stays out of a categorical axis, as
+        // [`warn_members_off_caller_scale`] reports it.
+        if layer_field == field || is_continuous_caller_scale(layer_enc.scale.as_ref()) {
             continue;
         }
         // Absent from every batch is the normal "wrong `data_source` / not loaded
