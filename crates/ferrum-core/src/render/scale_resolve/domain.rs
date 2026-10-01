@@ -606,9 +606,40 @@ impl LayerUnion<'_> {
     }
 }
 
+/// One member of a layered axis on one channel: its index and its own scale
+/// there.
+pub(in crate::render) type AxisMember<'a> = (usize, Option<&'a crate::spec::encoding::ScaleSpec>);
+
+/// The members of one layered axis, in member order, with the one judgement
+/// the establishing-scale rule makes about the first of them. Each layering
+/// route builds it from one member list ([`layered_axis`] for the flat
+/// layered route, `composite::overlay_axis` for a composite `Overlay` group),
+/// and [`establishing_caller_scale`] and [`warn_members_off_caller_scale`]
+/// both read it, so they cannot judge different leads.
+pub(in crate::render) struct AxisMembers<I> {
+    members: I,
+    /// The first member's index when it decides its own axis: it carries no
+    /// scale of a caller's, and its column there reads categorical
+    /// ([`column_reads_categorical`]).
+    deciding_lead: Option<usize>,
+}
+
+impl<'a, I: Iterator<Item = AxisMember<'a>> + Clone> AxisMembers<I> {
+    /// `members`, with the first one classified by `reads_categorical`, which
+    /// is asked of that member's index only when it carries no caller scale.
+    pub(in crate::render) fn new(members: I, reads_categorical: impl FnOnce(usize) -> bool) -> Self {
+        let deciding_lead = members
+            .clone()
+            .next()
+            .filter(|&(_, own)| own.is_none_or(|s| s.is_system_injected()))
+            .map(|(idx, _)| idx)
+            .filter(|&idx| reads_categorical(idx));
+        Self { members, deciding_lead }
+    }
+}
+
 /// Which member's scale establishes a layered axis on one channel, for both
-/// the flat layered route and a composite `Overlay` group. `members` pairs
-/// each member's index with its own scale for the channel, in member order.
+/// the flat layered route and a composite `Overlay` group.
 ///
 /// The establishing scale is the first one a caller wrote, in member order,
 /// whatever its kind; the bar anchor ferrum injects is no scale. When it is
@@ -621,17 +652,20 @@ impl LayerUnion<'_> {
 /// keeps the categorical axis's own sharing, and a group with no caller scale
 /// takes the auto path; both return `None`.
 ///
-/// The first member decides its own axis when its column there reads
-/// categorical (`lead_categorical`, see [`column_reads_categorical`]): only a
-/// scale it carries itself can establish the axis, so with none the axis is
-/// that member's categorical one and a later member's scale establishes
-/// nothing.
-pub(in crate::render) fn establishing_caller_scale<'a>(
-    members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
-    lead_categorical: bool,
+/// The first member decides its own axis when it carries no scale and its
+/// column there reads categorical ([`AxisMembers`]): the axis is that
+/// member's categorical one, so a later member's scale establishes nothing
+/// and `None` is returned. "First" means the first member of the channel's
+/// member list, not the first layer: on `y` the flat route's list skips
+/// `independent_y` layers ([`layered_axis`]), so there the deciding member
+/// is the first layer sharing the axis.
+pub(in crate::render) fn establishing_caller_scale<'a, I: Iterator<Item = AxisMember<'a>> + Clone>(
+    axis: &AxisMembers<I>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    let deciding = if lead_categorical { 1 } else { usize::MAX };
-    let (idx, scale) = first_caller_scale(members.into_iter().take(deciding))?;
+    if axis.deciding_lead.is_some() {
+        return None;
+    }
+    let (idx, scale) = first_caller_scale(axis.members.clone())?;
     (!is_categorical_scale(scale)).then_some((idx, scale))
 }
 
@@ -640,9 +674,12 @@ fn is_categorical_scale(scale: &crate::spec::encoding::ScaleSpec) -> bool {
     matches!(scale, ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. })
 }
 
-/// Whether `own` is a continuous scale a caller wrote; the bar anchor ferrum
-/// injects is none.
-fn is_continuous_caller_scale(own: Option<&crate::spec::encoding::ScaleSpec>) -> bool {
+/// Whether a member whose own scale is `own` stays out of a categorical axis
+/// whichever member owns it: a continuous scale a caller wrote is never
+/// admitted to one, by a deciding lead ([`establishing_caller_scale`]) or by
+/// a categorical caller scale ([`LayerUnion::CarryingScale`]). The bar
+/// anchor ferrum injects is no scale.
+fn stays_off_categorical_axis(own: Option<&crate::spec::encoding::ScaleSpec>) -> bool {
     own.is_some_and(|s| !s.is_system_injected() && !is_categorical_scale(s))
 }
 
@@ -665,14 +702,15 @@ pub(in crate::render) fn column_reads_categorical(
 /// index of the member carrying it, whatever its kind; the bar anchor ferrum
 /// injects is no scale.
 fn first_caller_scale<'a>(
-    members: impl IntoIterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)>,
+    members: impl IntoIterator<Item = AxisMember<'a>>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
     members.into_iter().find_map(|(idx, own)| Some((idx, own.filter(|s| !s.is_system_injected())?)))
 }
 
-/// A layer's own encoding for the post-flip `channel`: under a layer whose
-/// effective coord flips, its authored `y` occupies the x axis (see the
-/// coordinate-space note in [`numeric_domain_union_over`]).
+/// A layer's own encoding for the post-flip `channel`, with the layer's coord
+/// flip applied: under a layer whose effective coord flips, its authored `y`
+/// occupies the x axis (see the coordinate-space note in
+/// [`numeric_domain_union_over`]).
 fn layer_channel_encoding<'a>(
     layer: &'a Layer,
     chart_coord: Option<&'a crate::spec::coord::CoordKind>,
@@ -687,22 +725,18 @@ fn layer_channel_encoding<'a>(
 }
 
 /// A warning for each member left out of the axis the first caller-written
-/// scale among `members` owns: one carrying a scale
+/// scale among the members owns: one carrying a scale
 /// [`LayerUnion::CarryingScale`] does not admit. Such a member is partially
 /// honored: its marks still draw, where `placement` says. A continuous first
 /// scale establishes the axis ([`establishing_caller_scale`]); a categorical
 /// one keeps the categorical axis's own sharing, which a scale-less member
 /// joins and a member carrying another scale stays out of all the same.
 /// Nothing for the owning member, an admitted one, or a group with no caller
-/// scale. A first member whose column reads categorical and that carries no
-/// scale owns its axis itself (see [`establishing_caller_scale`]), so every
-/// later member carrying a continuous scale stays out of it; the categorical
-/// scales among the rest follow the rule above. Both layering routes ask this
-/// over the members they ask [`establishing_caller_scale`] over, with the same
-/// `lead_categorical`, so they warn on the same shapes.
-pub(in crate::render) fn warn_members_off_caller_scale<'a>(
-    members: impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone,
-    lead_categorical: bool,
+/// scale. A deciding first member ([`AxisMembers`]) owns its axis itself, so
+/// every later member that [`stays_off_categorical_axis`] is left out of it;
+/// the categorical scales among the rest follow the rule above.
+pub(in crate::render) fn warn_members_off_caller_scale<'a, I: Iterator<Item = AxisMember<'a>> + Clone>(
+    axis: &AxisMembers<I>,
     channel: &str,
     placement: crate::render::ExcludedLayerPlacement,
     warnings: &mut Vec<RenderWarning>,
@@ -713,50 +747,39 @@ pub(in crate::render) fn warn_members_off_caller_scale<'a>(
         channel: channel.to_string(),
         placement,
     };
-    let lead = members.clone().next().filter(|&(_, own)| lead_categorical && own.is_none_or(|s| s.is_system_injected()));
-    let off_lead = move |&(_, own): &(usize, Option<&'a crate::spec::encoding::ScaleSpec>)| {
-        lead.is_some() && is_continuous_caller_scale(own)
-    };
-    if let Some((lead, _)) = lead {
-        warnings.extend(members.clone().filter(off_lead).map(|(layer, _)| warning(layer, lead)));
+    let deciding_lead = axis.deciding_lead;
+    let off_lead = move |&(_, own): &AxisMember<'a>| deciding_lead.is_some() && stays_off_categorical_axis(own);
+    if let Some(lead) = deciding_lead {
+        warnings.extend(axis.members.clone().filter(off_lead).map(|(layer, _)| warning(layer, lead)));
     }
-    let rest = members.filter(move |member| !off_lead(member));
+    let rest = axis.members.clone().filter(move |member| !off_lead(member));
     let Some((establishing, scale)) = first_caller_scale(rest.clone()) else { return };
     let union = LayerUnion::CarryingScale(scale);
     warnings.extend(rest.filter(|&(_, own)| !union.admits(own)).map(|(layer, _)| warning(layer, establishing)));
 }
 
-/// Each member of a flat layered spec's axis on `channel`, with its own
-/// scale there, in layer order. An `independent_y` layer owns its own y axis,
-/// so it is no member of the shared `y`, as in [`numeric_domain_union_over`].
-fn layered_members<'a>(
+/// The members of a flat layered spec's axis on `channel`: each layer with
+/// its own scale there, in layer order. An `independent_y` layer owns its own
+/// y axis, so it is no member of the shared `y`, as in
+/// [`numeric_domain_union_over`].
+fn layered_axis<'a>(
     spec: &'a ChartSpec,
     channel: &'a str,
-) -> impl Iterator<Item = (usize, Option<&'a crate::spec::encoding::ScaleSpec>)> + Clone + 'a {
-    spec.layers
-        .as_deref()
-        .unwrap_or_default()
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> AxisMembers<impl Iterator<Item = AxisMember<'a>> + Clone + 'a> {
+    let layers = spec.layers.as_deref().unwrap_or_default();
+    let members = layers
         .iter()
         .enumerate()
         .filter(move |(_, layer)| !(channel == "y" && layer.independent_y))
         .map(move |(idx, layer)| {
             (idx, layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()))
-        })
-}
-
-/// Whether the first member of a flat layered spec's axis on `channel`
-/// binds a column there that [`column_reads_categorical`].
-fn layered_lead_categorical(
-    spec: &ChartSpec,
-    channel: &str,
-    primary_batch: &RecordBatch,
-    transform_outputs: &HashMap<String, RecordBatch>,
-) -> bool {
-    let layers = spec.layers.as_deref().unwrap_or_default();
-    layered_members(spec, channel)
-        .next()
-        .and_then(|(idx, _)| layer_channel_encoding(&layers[idx], spec.coord.as_ref(), channel))
-        .is_some_and(|enc| column_reads_categorical(enc, primary_batch, transform_outputs))
+        });
+    AxisMembers::new(members, |idx| {
+        layer_channel_encoding(&layers[idx], spec.coord.as_ref(), channel)
+            .is_some_and(|enc| column_reads_categorical(enc, primary_batch, transform_outputs))
+    })
 }
 
 /// The scale a flat layered spec's axis on `channel` establishes by
@@ -768,10 +791,7 @@ pub(in crate::render) fn layered_caller_scale<'a>(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    establishing_caller_scale(
-        layered_members(spec, channel),
-        layered_lead_categorical(spec, channel, primary_batch, transform_outputs),
-    )
+    establishing_caller_scale(&layered_axis(spec, channel, primary_batch, transform_outputs))
 }
 
 /// [`warn_members_off_caller_scale`] over a flat layered spec's layers on
@@ -785,8 +805,7 @@ pub(in crate::render) fn warn_layers_off_caller_scale(
     warnings: &mut Vec<RenderWarning>,
 ) {
     warn_members_off_caller_scale(
-        layered_members(spec, channel),
-        layered_lead_categorical(spec, channel, primary_batch, transform_outputs),
+        &layered_axis(spec, channel, primary_batch, transform_outputs),
         channel,
         crate::render::ExcludedLayerPlacement::SharedAxis,
         warnings,
@@ -1346,10 +1365,10 @@ pub(in crate::render) fn positional_category_union(
         };
         let Some(layer_enc) = layer_enc else { continue };
         let layer_field = layer_enc.field.as_str();
-        // A layer carrying its own continuous scale answers to that scale and
-        // stays out of a categorical axis, as
-        // [`warn_members_off_caller_scale`] reports it.
-        if layer_field == field || is_continuous_caller_scale(layer_enc.scale.as_ref()) {
+        // A layer carrying its own continuous scale answers to that scale
+        // ([`stays_off_categorical_axis`], the one predicate
+        // [`warn_members_off_caller_scale`] reports it by).
+        if layer_field == field || stays_off_categorical_axis(layer_enc.scale.as_ref()) {
             continue;
         }
         // Absent from every batch is the normal "wrong `data_source` / not loaded

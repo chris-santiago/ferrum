@@ -54,7 +54,7 @@ pub use self::color::build_color_scale;
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
     apply_sort_to_domain, column_reads_categorical, establishing_caller_scale, locate_field, numeric_domain_union_over,
-    positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, LayerUnion,
+    positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
 };
 

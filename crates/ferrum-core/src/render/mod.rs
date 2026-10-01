@@ -444,9 +444,8 @@ pub enum RenderError {
     /// the ordinary "not loaded here" outcome — a member whose own coord
     /// exchanges its channels relative to the establishing member is judged
     /// by the coord-exchange gate instead (`LayerCoordUnplaceableReason::
-    /// ExchangedChannelUnservable` on the merged-flat routes;
-    /// `refuse_unplaceable_overlay_members`'s own flip-state guard on the
-    /// composite route), and `resolve={"<channel>": "independent"}` gives a
+    /// ExchangedChannelUnservable`, on the merged-flat and composite routes
+    /// alike), and `resolve={"<channel>": "independent"}` gives a
     /// member its own scale instead of refusing.
     LayerAxisColumnUnplaceable {
         layer: usize,

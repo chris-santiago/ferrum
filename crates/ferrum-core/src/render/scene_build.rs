@@ -3718,33 +3718,71 @@ fn validate_layer_coord_exchange_is_servable(
         let Some(column) = batch.column_by_name(&enc.field) else {
             continue;
         };
-        let dtype = column.data_type();
-        let (servable, axis_kind) = match scale {
-            scale_resolve::ScaleKind::Ordinal(_) => (
-                crate::render::arrow_cast::ensure_category_keyable(&enc.field, dtype).is_ok(),
-                "categorical",
-            ),
-            _ => (
-                crate::render::arrow_cast::supported_numeric_dtype(dtype),
-                "continuous",
-            ),
+        let axis = match scale {
+            scale_resolve::ScaleKind::Ordinal(_) => PanelAxisKind::Categorical,
+            _ => PanelAxisKind::Continuous,
         };
-        if !servable {
-            return Err(RenderError::LayerCoordUnplaceable {
-                layer: layer_index,
-                coord: coord_spelling(coord),
-                reason: Box::new(
-                    crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
-                        channel,
-                        column: enc.field.clone(),
-                        dtype: format!("{dtype:?}"),
-                        axis_kind,
-                    },
-                ),
-            });
-        }
+        require_exchanged_column_servable(
+            layer_index,
+            coord,
+            channel,
+            &enc.field,
+            column.data_type(),
+            axis,
+        )?;
     }
     Ok(())
+}
+
+/// The kind of panel axis an exchanged layer's column lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::render) enum PanelAxisKind {
+    Categorical,
+    Continuous,
+}
+
+/// Refuse `field` (of `dtype`), which `layer_index`'s own `coord` exchanged
+/// onto the panel's `channel` axis, when an `axis` of that kind cannot draw
+/// it. The one servability question behind
+/// [`crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable`],
+/// asked by every route that layers a member whose flip state differs from
+/// the panel's: a categorical axis serves what
+/// [`crate::render::arrow_cast::ensure_category_keyable`] admits, a
+/// continuous one what [`crate::render::arrow_cast::supported_numeric_dtype`]
+/// admits.
+pub(in crate::render) fn require_exchanged_column_servable(
+    layer_index: usize,
+    coord: &crate::spec::coord::CoordKind,
+    channel: &'static str,
+    field: &str,
+    dtype: &arrow::datatypes::DataType,
+    axis: PanelAxisKind,
+) -> Result<(), RenderError> {
+    let (servable, axis_kind) = match axis {
+        PanelAxisKind::Categorical => (
+            crate::render::arrow_cast::ensure_category_keyable(field, dtype).is_ok(),
+            "categorical",
+        ),
+        PanelAxisKind::Continuous => (
+            crate::render::arrow_cast::supported_numeric_dtype(dtype),
+            "continuous",
+        ),
+    };
+    if servable {
+        return Ok(());
+    }
+    Err(RenderError::LayerCoordUnplaceable {
+        layer: layer_index,
+        coord: coord_spelling(coord),
+        reason: Box::new(
+            crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+                channel,
+                column: field.to_owned(),
+                dtype: format!("{dtype:?}"),
+                axis_kind,
+            },
+        ),
+    })
 }
 
 #[cfg(test)]

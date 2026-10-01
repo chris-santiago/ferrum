@@ -3,7 +3,9 @@
 A ``LayerChart`` member declares a coordinate system on its own ``Chart``
 (``fm.Chart(df).mark_arc()...coord(fm.CoordPolar())``). The static shared-y
 route keeps every member a separate composite leaf, so it has always honored
-that declaration. The **merged-flat** route -- one single-panel ``Chart``
+that declaration, except that a member whose own coord exchanges its channels
+and lands a column on an axis that cannot hold it refuses there too, in the
+same voice as the merged-flat route. The **merged-flat** route -- one single-panel ``Chart``
 assembled from ``spec.layers`` -- dropped it: a secondary ``CoordFlip``
 rendered unflipped (silently, geometry identical to a chart with no flip at
 all), and a secondary ``CoordPolar`` refused with a message prescribing the
@@ -41,6 +43,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._shared_axis_refusal import composite_envelope, coord_exchange_refusal
 from tests._svg_rects import mark_layer, plot_rect, polylines, svg_elements
 
 # Control layer: one point at each end of a 0..100 square. Both endpoints are
@@ -486,9 +489,8 @@ def test_an_unserviceable_layer_flip_refuses_in_the_panel_propertys_words(route)
     instruction) is asserted verbatim alongside the diagnosable part (which axis,
     which column, which dtype).
 
-    Only the two routes that merge onto one panel appear here. The other two are
-    the control below: they give the member its own y scale or its own panel, so
-    the panel CAN hold it and it renders.
+    Static `fm.layer(...).to_svg()` refuses with the same text in the composite
+    envelope, and independent y renders it; both are pinned below.
     """
     layered = fm.layer(_shared_bar(), _shared_point_flipped())
     call = (
@@ -514,24 +516,63 @@ def test_an_unserviceable_layer_flip_refuses_in_the_panel_propertys_words(route)
     assert "Utf8" in message, message
 
 
-def test_the_routes_that_can_hold_the_flipped_member_still_render_it():
-    """The control: refusal is scoped to the panel that genuinely cannot hold it.
+def test_a_flipped_member_renders_only_where_it_gets_its_own_y_and_refuses_on_a_shared_panel():
+    """A flipped member's category lands on y; only its own y slot can draw it.
 
-    `resolve={"y": "independent"}` gives the flipped member its own y slot, which
-    IS categorical, and `fm.layer(...).to_svg()` keeps every member a separate
-    composite leaf with its own scales. Both draw all three of its marks, so
-    neither may refuse -- a gate spelled "a per-layer flip plus an ordinal axis
-    refuses" would pass the test above and break both of these.
+    `resolve={"y": "independent"}` gives the flipped member its own y slot,
+    which is categorical, so all three of its marks draw. Static
+    `fm.layer(...).to_svg()` shares one panel y axis, continuous from the bar,
+    so it refuses with the same coord-exchange text as `+` and `.interactive()`,
+    in the composite route's envelope.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         independent = fm.layer(
             _shared_bar(), _shared_point_flipped(), resolve={"y": "independent"}
         ).to_svg()
-        composite = fm.layer(_shared_bar(), _shared_point_flipped()).to_svg()
+        with pytest.raises(ValueError) as err:
+            fm.layer(_shared_bar(), _shared_point_flipped()).to_svg()
 
-    for name, svg in (("independent-y", independent), ("composite leaves", composite)):
-        assert len(_circles(svg)) == 3, f"{name}: the flipped member must draw its three marks"
+    assert len(_circles(independent)) == 3, "the flipped member must draw its three marks"
+    assert str(err.value) == composite_envelope(
+        "y", "cat", coord_exchange_refusal(1, "fm.CoordFlip", "cat", "Utf8")
+    )
+
+
+_EXCHANGE_FRAME = pl.DataFrame({"s": ["a", "b"], "v": [1.0, 2.0]})
+
+
+def _exchange_lead():
+    return fm.Chart(_EXCHANGE_FRAME).mark_point().encode(x="s", y="v")
+
+
+def _exchange_flipped():
+    return _exchange_lead().coord(fm.CoordFlip())
+
+
+@pytest.mark.parametrize(
+    ("output", "wrapped"),
+    [
+        ("plus to_svg", False),
+        ("fm.layer to_svg", True),
+        ("fm.layer interactive", False),
+    ],
+)
+def test_a_flipped_string_column_on_a_continuous_y_refuses_on_every_output(output, wrapped):
+    """Layer 1's flip lands its Utf8 `s` on layer 0's continuous y on all three outputs."""
+    render = {
+        "plus to_svg": lambda: (_exchange_lead() + _exchange_flipped()).to_svg(),
+        "fm.layer to_svg": lambda: fm.layer(_exchange_lead(), _exchange_flipped()).to_svg(),
+        "fm.layer interactive": lambda: fm.layer(
+            _exchange_lead(), _exchange_flipped()
+        )._render_interactive(),
+    }[output]
+    core = coord_exchange_refusal(1, "fm.CoordFlip", "s", "Utf8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError) as err:
+            render()
+    assert str(err.value) == (composite_envelope("y", "s", core) if wrapped else core)
 
 
 def test_a_numeric_category_column_makes_the_same_exchange_placeable():
