@@ -1024,11 +1024,18 @@ def desugar_swarm(
     Input: DataFrame with categorical column (``x_field`` when vertical, or
     ``y_field`` when horizontal) and numeric value column (the other).
 
-    ``Swarm`` (named ``"swarm"``) computes non-overlapping positions and
-    emits the original columns plus:
-    ``[swarm_x (Float64, nullable), swarm_y (Float64, nullable),
-    __pos_x_offset__ (Float64)]`` for vertical, or
-    ``__pos_y_offset__ (Float64)`` for horizontal.
+    ``Swarm`` (named ``"swarm"``) validates its columns and emits the
+    original columns plus:
+    ``[swarm_x (Float64, always null), swarm_y (Float64, the value; null on
+    a row that is never placed -- a null or NaN value, or a null category),
+    __pos_x_offset__ (Float64, a ``0.0`` placeholder)]`` for vertical, or
+    ``__pos_y_offset__`` for horizontal. A row whose ``dodge`` value is null
+    belongs to no sub-band and is dropped entirely before this output is
+    emitted, not nulled in place. Placement does not happen in the
+    transform: the cross-axis offset column is a placeholder until the
+    renderer replaces it with the packed pixel offset against the panel's
+    resolved value-axis scale, the same seam ``Jitter`` already computes its
+    own pixel offsets at.
 
     For ``orient="vertical"``, the renderer uses the original ``cat``/``val``
     columns for axis labeling, and ``__pos_x_offset__`` shifts each point
@@ -1048,19 +1055,20 @@ def desugar_swarm(
     y_field : str or None
         Field name on the y axis (value when vertical). Required.
     size : int, default 4
-        Point diameter in pixels: the transform's placement radius and the
-        drawn dot's radius are both ``size / 2``.  The rendered pixel
-        *spread* along the cross-axis (not this diameter) responds to a
-        pre-layout estimate of the chart's *value-axis* panel dimension
-        (height when vertical, width when ``orient="horizontal"``),
-        inversely: a longer value axis needs less displacement to avoid
-        collisions and produces a smaller spread at the same ``size``.
-        The cross-axis dimension has no effect.
+        Point diameter in pixels: the diameter dots are placed at render
+        time and the drawn dot's diameter are both ``size``, so the drawn
+        dot's radius is ``size / 2``.  Placement is computed at render time
+        against the panel's resolved value-axis scale (not a pre-layout
+        estimate), so the rendered centre-to-centre distance between
+        adjacent placed dots is exactly ``size + spacing`` px in every
+        layout -- a title, a facet strip, an explicit domain, a log scale,
+        or a dodge band all reshape the panel without loosening this.
     orient : {"vertical", "horizontal"}, default "vertical"
         Swarm orientation.  ``"vertical"`` means the value axis is y.
     spacing : float, default 1.0
-        Additive pixel gap between point edges (1px by default).  Subject
-        to the same value-axis-dependent spread as ``size`` above.
+        Additive pixel gap between point edges (1px by default): the
+        rendered centre-to-centre distance between adjacent placed dots is
+        ``size + spacing``.
     side : {"both", "left", "right"}, default "both"
         Which side(s) of the category axis to spread points onto.
     dodge : str or None, default None
@@ -1113,20 +1121,21 @@ def desugar_swarm(
     if dodge is not None:
         swarm_kwargs["dodge"] = str(dodge)
     transforms = [Swarm(**swarm_kwargs)]
-    # `size` is a diameter in px (the transform's placement unit); the point
+    # `size` is a diameter in px (the render-time placement unit); the point
     # mark's `size` is an area in px² (every other point-size surface). Draw
-    # the dot at the same diameter the transform placed it at: r = size / 2.
+    # the dot at the same diameter it was placed at render time: r = size / 2.
     point_mark_kwargs = {"size": math.pi * (size / 2) ** 2}
     from ferrum.encoding import X, Y
 
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
-        # emits `__pos_x_offset__` (pixel offset on the cross axis) which the
-        # renderer's standard position-offset path applies on top of the category
-        # band center — same mechanism Dodge uses (Phase 9c). That band centre
-        # only exists on an ordinal scale, so the channel is typed Nominal
-        # unless the caller declared otherwise (#171).
+        # emits `__pos_x_offset__` as a placeholder column; the renderer's
+        # standard position-offset path fills it with the packed pixel offset
+        # and applies it on top of the category band center — same mechanism
+        # Dodge uses (Phase 9c). That band centre only exists on an ordinal
+        # scale, so the channel is typed Nominal unless the caller declared
+        # otherwise (#171).
         x_enc_val = typed_positional_channel(cat, channel=X, declared_type=cat_type, sort=cat_sort)
         layers = [
             _Layer(
@@ -1139,10 +1148,11 @@ def desugar_swarm(
         ]
     else:
         # Horizontal swarm: value axis = x, category axis = y.
-        # The Rust transform receives orient="horizontal" and emits `__pos_y_offset__`
-        # (pixel offset on the y cross-axis) instead of `__pos_x_offset__`. Encoding
-        # the original field names lets the ordinal y axis render category labels
-        # correctly, and the renderer picks up `__pos_y_offset__` automatically via
+        # The Rust transform receives orient="horizontal" and emits the
+        # `__pos_y_offset__` placeholder column instead of `__pos_x_offset__`.
+        # Encoding the original field names lets the ordinal y axis render
+        # category labels correctly, and the renderer fills `__pos_y_offset__`
+        # with the packed pixel offset via
         # `render/position.rs::read_position_offsets`.
         y_enc_val = typed_positional_channel(cat, channel=Y, declared_type=cat_type, sort=cat_sort)
         layers = [

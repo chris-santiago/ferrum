@@ -1,24 +1,38 @@
 //! Swarm: greedy beeswarm placement.
 //!
-//! Output schema: input schema PLUS appended `swarm_x: Float64, swarm_y: Float64,
-//! `__pos_x_offset__: Float64` (vertical orient) or `__pos_y_offset__: Float64`
-//! (horizontal orient).
-//! `swarm_x` is the per-category cross-axis offset in *value-axis data units*
-//! (so callers can do their own conversion if needed); `swarm_y` is the original
-//! `value`. The position-offset column converts the data-unit offset to *pixels*
-//! on the cross-axis so the standard rendering path (`render/position.rs`) picks
-//! it up automatically when the desugar encodes the chart's original category
-//! field on the appropriate axis.
+//! Placement runs in two stages. This transform validates the columns and
+//! emits the layer's output schema; the dot offsets are decided at render time
+//! by [`place_offsets`], which packs each category in PIXEL space through the
+//! resolved panel scale (called from `render::position::apply_swarm`, the seam
+//! where `Jitter` computes its band-pixel offsets). Only there are the plot
+//! rect, the scale's end insets, a facet-shared or explicit domain and the
+//! scale kind all known, so only there can neighbouring centres sit exactly
+//! `point_size + spacing` px apart on every layout.
 //!
-//! Algorithm: per category, sort points by `value` ascending (stable on row index
-//! for byte-deterministic placements). For each point, try candidate offsets in
-//! the order [0, +d, -d, +2d, -2d, ...] (or restricted to one side); accept the
-//! first that doesn't overlap any already-placed point in the same category.
+//! Output schema: input schema PLUS appended `swarm_x: Float64`,
+//! `swarm_y: Float64`, and `__pos_x_offset__: Float64` (vertical orient) or
+//! `__pos_y_offset__: Float64` (horizontal orient).
+//! - `swarm_x` is always null: the cross-axis offset is a pixel quantity of the
+//!   rendered panel and has no data-unit form before layout.
+//! - `swarm_y` is the original `value`, null on a row that is never placed
+//!   (null or NaN value, null category).
+//! - The position-offset column is `0.0` on every row here; render time fills
+//!   it with the placed pixel offsets, and `render/position.rs` adds them to
+//!   the category band centre.
 //!
-//! `d = point_size + spacing`, converted from pixels to data-space along the
-//! value axis using `panel_pixel_size` from the TransformContext. Without context,
-//! falls back to `radius_data = 1.0`; callers must supply panel_pixel_size for
-//! accurate point placement.
+//! With `dodge`, rows whose dodge value is null are dropped (they belong to no
+//! sub-band).
+//!
+//! Packing: per category, every dodge group packs against one shared placed
+//! set, so no two dots of a category overlap whichever group they belong to.
+//! Within a group, points are sorted by `value` ascending (stable on row
+//! index, so placements are byte-deterministic). Each point tries cross-axis
+//! offsets in the order `[0, +d, -d, +2d, -2d, ...]` (or one side only) with
+//! `d = point_size + spacing` px, centred on its dodge group's position, and
+//! takes the first whose centre is at least `d` px from every already-placed
+//! centre in the same category: dots of diameter `point_size` whose edges are
+//! `spacing` px apart. Dodge groups sit side by side, their centres `d` px
+//! apart.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -26,10 +40,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::transform::context::TransformContext;
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 use crate::transform::numeric_util::coerce_to_float64;
 
@@ -78,108 +91,31 @@ pub(crate) struct SwarmSpec {
     pub name: Option<String>,
 }
 
-pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    apply_with_context(spec, batch, &TransformContext::default())
-}
-
-/// Partition by (category, dodge) and run swarm per sub-group, offsetting
-/// each group's cross-axis position so the groups sit side by side.
-fn apply_dodged(
-    spec: &SwarmSpec,
-    batch: &RecordBatch,
-    ctx: &TransformContext,
-    dodge_field: &str,
-) -> PyResult<RecordBatch> {
-    use std::collections::BTreeSet;
-    let schema = batch.schema();
-    let dodge_idx = schema.index_of(dodge_field).map_err(|_| {
-        PyValueError::new_err(format!("stat_swarm: dodge column '{}' not found", dodge_field))
-    })?;
-    if schema.field(dodge_idx).data_type() != &DataType::Utf8 {
-        return Err(PyValueError::new_err(format!(
-            "stat_swarm: dodge column '{}' must be Utf8", dodge_field
-        )));
+impl SwarmSpec {
+    /// The pixel step between neighbouring centres: one dot diameter plus the
+    /// edge gap.
+    fn step_px(&self) -> f64 {
+        self.point_size + self.spacing
     }
-    let dodge_arr = batch.column(dodge_idx).as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| PyValueError::new_err(format!("stat_swarm: dodge column '{dodge_field}' is Utf8 but downcast failed")))?;
-    let dodge_values: Vec<Option<String>> = (0..batch.num_rows())
-        .map(|i| if dodge_arr.is_null(i) { None } else { Some(dodge_arr.value(i).to_string()) })
-        .collect();
 
-    // Collect unique dodge groups in sorted order for deterministic sub-band assignment.
-    let dodge_groups: Vec<String> = {
-        let mut set: BTreeSet<String> = BTreeSet::new();
-        for s in dodge_values.iter().flatten() { set.insert(s.clone()); }
-        set.into_iter().collect()
-    };
-    let n_groups = dodge_groups.len().max(1);
-
-    // Sub-band width in cross-axis pixels: separate groups by (point_size + spacing).
-    let sub_band_px = spec.point_size + spec.spacing;
-    // Center offsets for each dodge group, symmetric around 0.
-    let centers: Vec<f64> = (0..n_groups)
-        .map(|i| (i as f64 - (n_groups as f64 - 1.0) / 2.0) * sub_band_px)
-        .collect();
-
-    // Run a sub-spec swarm per dodge group using the restricted SwarmSpec.
-    // The beeswarm offsets from this are then shifted by the group's center.
-    let mut combined_out: Option<RecordBatch> = None;
-    for (gi, group_val) in dodge_groups.iter().enumerate() {
-        let center_px = centers[gi];
-        // Filter batch to rows belonging to this dodge group.
-        let mask: Vec<bool> = dodge_values.iter().map(|v| {
-            v.as_deref() == Some(group_val.as_str())
-        }).collect();
-        let indices: Vec<u32> = mask.iter().enumerate()
-            .filter(|(_, &b)| b)
-            .map(|(i, _)| i as u32)
-            .collect();
-        if indices.is_empty() { continue; }
-        let idx_arr = arrow::array::UInt32Array::from(indices.clone());
-        let sub_batch = arrow::compute::take_record_batch(batch, &idx_arr)
-            .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))?;
-
-        // Run swarm on sub-batch.
-        let sub_spec = SwarmSpec { dodge: None, ..spec.clone() };
-        let sub_out = apply_with_context(&sub_spec, &sub_batch, ctx)?;
-
-        // Add the dodge group center offset to __pos_x_offset__ / __pos_y_offset__.
-        let offset_col_name = match spec.orient {
+    /// The position-offset column this orientation's cross axis reads.
+    pub(crate) fn offset_column(&self) -> &'static str {
+        match self.orient {
             SwarmOrient::Vertical => "__pos_x_offset__",
             SwarmOrient::Horizontal => "__pos_y_offset__",
-        };
-        let oci = sub_out.schema().index_of(offset_col_name)
-            .map_err(|_| PyValueError::new_err(format!("stat_swarm: offset col '{offset_col_name}' missing")))?;
-        let orig_offsets = sub_out.column(oci).as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| PyValueError::new_err(format!("stat_swarm: offset col '{offset_col_name}' not Float64")))?;
-        let shifted: Float64Array = orig_offsets.iter()
-            .map(|v| Some(v.unwrap_or(0.0) + center_px))
-            .collect();
-        let mut cols: Vec<ArrayRef> = sub_out.columns().to_vec();
-        cols[oci] = Arc::new(shifted);
-        let shifted_out = RecordBatch::try_new(sub_out.schema(), cols)
-            .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge shift: {e}")))?;
-
-        // Merge into combined output by concatenating batches.
-        combined_out = Some(match combined_out {
-            None => shifted_out,
-            Some(existing) => arrow::compute::concat_batches(&existing.schema(), &[existing, shifted_out])
-                .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge concat: {e}")))?,
-        });
+        }
     }
-
-    combined_out.ok_or_else(|| PyValueError::new_err("stat_swarm: dodge produced no output"))
 }
 
-pub(crate) fn apply_with_context(
-    spec: &SwarmSpec,
-    batch: &RecordBatch,
-    ctx: &TransformContext,
-) -> PyResult<RecordBatch> {
-    if let Some(dodge_field) = &spec.dodge {
-        return apply_dodged(spec, batch, ctx, dodge_field);
-    }
-    // 1. Validate columns.
+pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    let filtered;
+    let batch = match &spec.dodge {
+        Some(dodge_field) => {
+            filtered = drop_null_dodge_rows(batch, dodge_field)?;
+            &filtered
+        }
+        None => batch,
+    };
     let schema = batch.schema();
     let cat_idx = schema
         .index_of(&spec.category)
@@ -200,216 +136,23 @@ pub(crate) fn apply_with_context(
         .map_err(|_| PyValueError::new_err(format!(
             "stat_swarm: column '{}' not found", spec.value
         )))?;
-
-    let n = batch.num_rows();
     let val_arr = coerce_to_float64(batch.column(val_idx), "stat_swarm", &spec.value)?;
 
-    // 2. Compute value range for radius_data.
-    let mut vmin = f64::INFINITY;
-    let mut vmax = f64::NEG_INFINITY;
-    for i in 0..n {
-        if val_arr.is_null(i) {
-            continue;
-        }
-        let v = val_arr.value(i);
-        if v.is_nan() {
-            continue;
-        }
-        if v < vmin {
-            vmin = v;
-        }
-        if v > vmax {
-            vmax = v;
-        }
-    }
-
-    // radius_data: how far points need to be in value-axis units.
-    // Vertical: value axis = y = panel height. Horizontal: value axis = x = panel width.
-    let radius_data: f64 = match (spec.orient, ctx.panel_pixel_size) {
-        (SwarmOrient::Vertical, Some((_, h))) if h > 0 => {
-            let value_range = vmax - vmin;
-            if value_range.is_finite() && value_range > 0.0 {
-                (spec.point_size + spec.spacing) * (value_range / h as f64)
-            } else {
-                1.0
-            }
-        }
-        (SwarmOrient::Horizontal, Some((w, _))) if w > 0 => {
-            let value_range = vmax - vmin;
-            if value_range.is_finite() && value_range > 0.0 {
-                (spec.point_size + spec.spacing) * (value_range / w as f64)
-            } else {
-                1.0
-            }
-        }
-        _ => {
-            // No pixel context available. The production render pipeline
-            // always supplies `panel_pixel_size` (M2's pre-layout estimate,
-            // see `TransformContext::panel_pixel_size`'s doc), so this arm
-            // fires only for a direct `apply()`/
-            // `apply_with_context(TransformContext::default())` call (unit
-            // tests, notebook/WASM direct usage). Fall back to
-            // radius_data = 1.0 so placement still runs; callers that need
-            // accurate geometry must supply `panel_pixel_size` themselves.
-            1.0
-        }
-    };
-
-    // 3. Group by category. BTreeMap for deterministic iteration order.
-    // FA-7: the shared group_key helper handles Utf8/Float64 and now also
-    // int/uint/bool category columns. A null category key (KeyValue::Null) is
-    // skipped below, matching the pre-existing "None category → skip row" rule.
+    let n = batch.num_rows();
     let cat_col = batch.column(cat_idx);
-    let cat_keys: Vec<Option<KeyValue>> = (0..n)
-        .map(|i| match groupby_key_at(cat_col.as_ref(), &cat_dt, i) {
-            Some(KeyValue::Null) | None => None,
-            Some(kv) => Some(kv),
+    let swarm_y: Float64Array = (0..n)
+        .map(|i| {
+            let has_category =
+                !matches!(groupby_key_at(cat_col.as_ref(), &cat_dt, i), Some(KeyValue::Null) | None);
+            let v = (!val_arr.is_null(i)).then(|| val_arr.value(i)).filter(|v| !v.is_nan());
+            v.filter(|_| has_category)
         })
         .collect();
 
-    let mut groups: BTreeMap<KeyValue, Vec<(usize, f64)>> = BTreeMap::new();
-    for (i, cat_key) in cat_keys.iter().enumerate() {
-        if val_arr.is_null(i) {
-            continue;
-        }
-        let v = val_arr.value(i);
-        if v.is_nan() {
-            continue;
-        }
-        let key = match cat_key {
-            None => continue,
-            Some(kv) => kv.clone(),
-        };
-        groups.entry(key).or_default().push((i, v));
-    }
-
-    // 4. Per-category greedy placement.
-    let mut swarm_x: Vec<Option<f64>> = vec![None; n];
-    let mut swarm_y: Vec<Option<f64>> = vec![None; n];
-
-    let d = radius_data; // step size and overlap radius reference
-    let two_r_sq = (2.0 * d) * (2.0 * d);
-
-    for entries in groups.values_mut() {
-        // Sort by value ascending; tiebreak by row index (stable, deterministic).
-        entries.sort_by(|(idx_a, va), (idx_b, vb)| {
-            va.partial_cmp(vb)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| idx_a.cmp(idx_b))
-        });
-
-        // Already-placed: (offset, value).
-        let mut placed: Vec<(f64, f64)> = Vec::with_capacity(entries.len());
-
-        for &(row_idx, v) in entries.iter() {
-            // Generate candidate offsets in side-appropriate order.
-            let mut placed_offset: Option<f64> = None;
-            // Worst case: side=Left/Right needs 2*N steps (every other slot blocked);
-            // side=Both needs ~N steps (alternating). Use a generous upper bound.
-            let max_steps = 4 * entries.len() + 4;
-            for step in 0..=max_steps {
-                // Candidates per step.
-                let candidates: Vec<f64> = match spec.side {
-                    SwarmSide::Both => {
-                        if step == 0 {
-                            vec![0.0]
-                        } else {
-                            vec![(step as f64) * d, -(step as f64) * d]
-                        }
-                    }
-                    SwarmSide::Left => {
-                        if step == 0 {
-                            vec![0.0]
-                        } else {
-                            vec![-(step as f64) * d]
-                        }
-                    }
-                    SwarmSide::Right => {
-                        if step == 0 {
-                            vec![0.0]
-                        } else {
-                            vec![(step as f64) * d]
-                        }
-                    }
-                };
-                for cand in candidates {
-                    let mut overlaps = false;
-                    for &(po, pv) in placed.iter() {
-                        let dx = cand - po;
-                        let dy = v - pv;
-                        if dx * dx + dy * dy < two_r_sq {
-                            overlaps = true;
-                            break;
-                        }
-                    }
-                    if !overlaps {
-                        placed_offset = Some(cand);
-                        break;
-                    }
-                }
-                if placed_offset.is_some() {
-                    break;
-                }
-            }
-            // Fallback: should never trigger with the generous max_steps above; use a
-            // sign-correct sentinel for Left so we don't violate the side invariant.
-            let fallback = match spec.side {
-                SwarmSide::Left => -((max_steps as f64) * d),
-                SwarmSide::Right | SwarmSide::Both => (max_steps as f64) * d,
-            };
-            let off = placed_offset.unwrap_or(fallback);
-            placed.push((off, v));
-            swarm_x[row_idx] = Some(off);
-            swarm_y[row_idx] = Some(v);
-        }
-    }
-
-    // 5. Build output: input columns + swarm_x + swarm_y + position-offset column.
-    //
-    // Vertical: emits `__pos_x_offset__` (cross-axis = x). The inverse of the
-    // radius_data conversion: pixel_offset = swarm_x * (h / value_range).
-    // Horizontal: emits `__pos_y_offset__` (cross-axis = y), using w instead of h.
-    // Each placement slot (`radius_data` step) renders at exactly
-    // `(point_size + spacing)` pixels — the visual spacing the algorithm intends.
-    // For null offsets (skipped rows), emit 0.0 so the position-offset reader
-    // never sees a None it doesn't expect (`render/position.rs` requires non-null).
-    let pixel_per_data: f64 = match (spec.orient, ctx.panel_pixel_size) {
-        (SwarmOrient::Vertical, Some((_, h))) if h > 0 => {
-            let value_range = vmax - vmin;
-            if value_range.is_finite() && value_range > 0.0 {
-                (h as f64) / value_range
-            } else {
-                1.0
-            }
-        }
-        (SwarmOrient::Horizontal, Some((w, _))) if w > 0 => {
-            let value_range = vmax - vmin;
-            if value_range.is_finite() && value_range > 0.0 {
-                (w as f64) / value_range
-            } else {
-                1.0
-            }
-        }
-        // See the `radius_data` match above: this arm fires only for a
-        // direct `apply()` call with no render-supplied `panel_pixel_size`.
-        _ => 1.0,
-    };
-    let pos_offset: Float64Array = swarm_x
-        .iter()
-        .map(|opt| Some(opt.map(|o| o * pixel_per_data).unwrap_or(0.0)))
-        .collect();
-
     let mut out_cols: Vec<ArrayRef> = batch.columns().to_vec();
-    let sx_arr: Float64Array = swarm_x.iter().copied().collect();
-    let sy_arr: Float64Array = swarm_y.iter().copied().collect();
-    out_cols.push(Arc::new(sx_arr));
-    out_cols.push(Arc::new(sy_arr));
-    out_cols.push(Arc::new(pos_offset));
-
-    let offset_col_name = match spec.orient {
-        SwarmOrient::Vertical => "__pos_x_offset__",
-        SwarmOrient::Horizontal => "__pos_y_offset__",
-    };
+    out_cols.push(Arc::new(Float64Array::from(vec![None::<f64>; n])));
+    out_cols.push(Arc::new(swarm_y));
+    out_cols.push(Arc::new(Float64Array::from(vec![0.0; n])));
 
     let mut new_fields: Vec<Field> = schema
         .fields()
@@ -418,11 +161,142 @@ pub(crate) fn apply_with_context(
         .collect();
     new_fields.push(Field::new("swarm_x", DataType::Float64, true));
     new_fields.push(Field::new("swarm_y", DataType::Float64, true));
-    new_fields.push(Field::new(offset_col_name, DataType::Float64, false));
+    new_fields.push(Field::new(spec.offset_column(), DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(new_fields));
 
     RecordBatch::try_new(out_schema, out_cols)
         .map_err(|e| PyValueError::new_err(format!("stat_swarm: {e}")))
+}
+
+/// Validate the dodge column and drop the rows it leaves in no sub-band.
+fn drop_null_dodge_rows(batch: &RecordBatch, dodge_field: &str) -> PyResult<RecordBatch> {
+    let col = batch.column_by_name(dodge_field).ok_or_else(|| {
+        PyValueError::new_err(format!("stat_swarm: dodge column '{}' not found", dodge_field))
+    })?;
+    if col.data_type() != &DataType::Utf8 {
+        return Err(PyValueError::new_err(format!(
+            "stat_swarm: dodge column '{}' must be Utf8", dodge_field
+        )));
+    }
+    let keep = arrow::compute::is_not_null(col.as_ref())
+        .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))?;
+    arrow::compute::filter_record_batch(batch, &keep)
+        .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))
+}
+
+/// Place every row of a swarm layer's batch: the cross-axis pixel offset of
+/// each row from its category band centre.
+///
+/// `values` is the value column read per row; `to_px` maps a value to its
+/// pixel coordinate on the rendered value axis (the resolved panel scale).
+/// Rows with no value, no category, or a value the scale cannot place get
+/// offset `0.0`.
+///
+/// With `dodge`, dodge group `i` of `n` (sorted by name) is centred
+/// `(i - (n - 1) / 2) * (point_size + spacing)` px from the band centre and
+/// packs outward from there, trying its own side of the band first. All the
+/// groups of one category pack against the same placed dots, so no two dots of
+/// a category overlap whichever group they belong to.
+pub(crate) fn place_offsets(
+    spec: &SwarmSpec,
+    batch: &RecordBatch,
+    values: &[Option<f64>],
+    to_px: impl Fn(f64) -> Option<f64>,
+) -> Result<Vec<f64>, String> {
+    let n = batch.num_rows();
+    let cat_col = batch
+        .column_by_name(&spec.category)
+        .ok_or_else(|| format!("category column '{}' not found", spec.category))?;
+    let cat_dt = cat_col.data_type().clone();
+    let dodge: Option<&StringArray> = match &spec.dodge {
+        Some(field) => Some(
+            batch
+                .column_by_name(field)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| format!("dodge column '{field}' is not a Utf8 column of this batch"))?,
+        ),
+        None => None,
+    };
+    let dodge_of = |i: usize| dodge.filter(|a| !a.is_null(i)).map(|a| a.value(i));
+    let dodge_groups: Vec<&str> = (0..n).filter_map(dodge_of).collect::<BTreeSet<_>>().into_iter().collect();
+    let n_groups = dodge_groups.len().max(1) as f64;
+    let step = spec.step_px();
+    let centre_px = |name: Option<&str>| -> f64 {
+        name.and_then(|name| dodge_groups.iter().position(|g| *g == name))
+            .map_or(0.0, |gi| (gi as f64 - (n_groups - 1.0) / 2.0) * step)
+    };
+
+    // category -> dodge group -> [(row, value, value_px)]. BTreeMaps for a
+    // deterministic order: categories and dodge groups pack in sorted order.
+    type Entries = Vec<(usize, f64, f64)>;
+    let mut groups: BTreeMap<KeyValue, BTreeMap<Option<&str>, Entries>> = BTreeMap::new();
+    for (i, v) in values.iter().enumerate().take(n) {
+        let Some(v) = v.filter(|v| !v.is_nan()) else { continue };
+        let key = match groupby_key_at(cat_col.as_ref(), &cat_dt, i) {
+            Some(KeyValue::Null) | None => continue,
+            Some(kv) => kv,
+        };
+        let Some(px) = to_px(v) else { continue };
+        groups.entry(key).or_default().entry(dodge_of(i)).or_default().push((i, v, px));
+    }
+
+    let mut offsets = vec![0.0; n];
+    for by_dodge in groups.into_values() {
+        let mut placed: Vec<(f64, f64)> = Vec::new();
+        for (dodge_group, mut entries) in by_dodge {
+            // Sort by value ascending; tiebreak by row index (stable, deterministic).
+            entries.sort_by(|(ia, va, _), (ib, vb, _)| {
+                va.partial_cmp(vb).unwrap_or(Ordering::Equal).then_with(|| ia.cmp(ib))
+            });
+            let centre = centre_px(dodge_group);
+            for (row, _, px) in entries {
+                offsets[row] = pack_one(&mut placed, px, centre, step, spec.side);
+            }
+        }
+    }
+    Ok(offsets)
+}
+
+/// Greedy beeswarm placement of one dot in pixel space.
+///
+/// Takes the first cross-axis offset in `centre + [0, +step, -step, +2 step,
+/// ...]` (restricted to `side`; `-step` first when `centre` is left of the
+/// band centre) whose centre is at least `step` px from every dot in `placed`,
+/// records it there, and returns it.
+fn pack_one(placed: &mut Vec<(f64, f64)>, value_px: f64, centre: f64, step: f64, side: SwarmSide) -> f64 {
+    let min_dist_sq = step * step;
+    let free = |cand: f64| {
+        placed.iter().all(|&(po, pv)| {
+            let dx = cand - po;
+            let dy = value_px - pv;
+            dx * dx + dy * dy >= min_dist_sq
+        })
+    };
+    // Every placed dot blocks at most two slots of this lattice row, so
+    // `2 * placed + 1` steps (doubled for a one-sided swarm) always reach a
+    // free one.
+    let max_steps = 4 * placed.len() + 4;
+    let outward = if centre < 0.0 { -1.0 } else { 1.0 };
+    let candidates = (0..=max_steps).flat_map(|k| {
+        let d = k as f64 * step;
+        let pair: [Option<f64>; 2] = match (k, side) {
+            (0, _) => [Some(0.0), None],
+            (_, SwarmSide::Both) => [Some(outward * d), Some(-outward * d)],
+            (_, SwarmSide::Left) => [Some(-d), None],
+            (_, SwarmSide::Right) => [Some(d), None],
+        };
+        pair.into_iter().flatten().map(move |off| centre + off)
+    });
+    // The bound above always admits a free slot; the sentinel keeps the
+    // side invariant if it ever did not.
+    let fallback = centre
+        + match side {
+            SwarmSide::Left => -((max_steps as f64) * step),
+            SwarmSide::Right | SwarmSide::Both => (max_steps as f64) * step,
+        };
+    let off = candidates.into_iter().find(|&c| free(c)).unwrap_or(fallback);
+    placed.push((off, value_px));
+    off
 }
 
 // ---------- PyO3 wrapper ----------
@@ -438,8 +312,11 @@ use crate::transform::core::TransformSpec;
 /// ``point_size / 2`` do not overlap. Points are placed symmetrically
 /// around the category centre, or on one side only when ``side`` is set.
 ///
-/// Output: the original columns plus ``x_offset`` (Float64 per-point
-/// horizontal displacement in data units).
+/// Output: the original columns plus ``swarm_x`` (always null), ``swarm_y``
+/// (the value) and ``__pos_x_offset__`` (``__pos_y_offset__`` when
+/// horizontal). The offsets are placed when the chart renders, in pixels
+/// through the resolved panel scale, so neighbouring centres sit
+/// ``point_size + spacing`` px apart.
 ///
 /// Parameters
 /// ----------
@@ -448,8 +325,7 @@ use crate::transform::core::TransformSpec;
 /// value : str
 ///     Numeric column whose values are spread along the value axis.
 /// point_size : float, default 5.0
-///     Diameter of each point in pixels (converted to data units internally
-///     via the pre-layout panel-size estimate). Must be > 0.
+///     Diameter of each point in pixels. Must be > 0.
 /// spacing : float, default 1.0
 ///     Minimum gap between point edges, in pixels. Must be ≥ 0.
 /// side : {"both", "left", "right"}, default "both"
@@ -568,223 +444,399 @@ mod tests {
         .unwrap()
     }
 
-    fn ctx_with_panel(w: u32, h: u32) -> TransformContext {
-        TransformContext {
-            panel_pixel_size: Some((w, h)),
-            ..Default::default()
+    fn spec(point_size: f64, spacing: f64, side: SwarmSide) -> SwarmSpec {
+        SwarmSpec {
+            category: "cat".into(),
+            value: "v".into(),
+            point_size,
+            spacing,
+            side,
+            orient: SwarmOrient::Vertical,
+            name: None,
+            dodge: None,
         }
     }
 
-    fn col_f64<'a>(batch: &'a RecordBatch, name: &str) -> &'a Float64Array {
-        batch
-            .column_by_name(name)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
+    fn values(batch: &RecordBatch) -> Vec<Option<f64>> {
+        crate::render::arrow_cast::col_as_f64(batch, "v").unwrap()
+    }
+
+    /// Place with the value axis mapped 1 data unit -> `px_per_unit` px.
+    fn place(spec: &SwarmSpec, batch: &RecordBatch, px_per_unit: f64) -> Vec<f64> {
+        place_offsets(spec, batch, &values(batch), |v| Some(v * px_per_unit)).unwrap()
+    }
+
+    /// Seeded standard-normal draws (Box-Muller over ChaCha8), scaled.
+    fn normal_draws(n: usize, mean: f64, sd: f64) -> Vec<f64> {
+        use rand::{RngCore, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let mut unit = || ((rng.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+        (0..n)
+            .map(|_| {
+                let (u1, u2) = (unit(), unit());
+                mean + sd * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            })
+            .collect()
+    }
+
+    fn min_pairwise(points: &[(f64, f64)]) -> f64 {
+        let mut best = f64::INFINITY;
+        for (i, a) in points.iter().enumerate() {
+            for b in &points[i + 1..] {
+                best = best.min(((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt());
+            }
+        }
+        best
     }
 
     #[test]
     fn swarm_side_both_alternates_around_zero() {
         pyo3::Python::initialize();
-        // 5 points all clustered very close in value → forces alternating offsets.
-        let cats = vec!["A", "A", "A", "A", "A"];
-        let vals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
-        let b = make_batch(cats, vals);
-        let spec = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Both,
-            orient: SwarmOrient::Vertical,
-            name: None,
-            dodge: None,
-        };
-        // Big panel → small radius.
-        let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
-        assert_eq!(out.num_rows(), 5);
-        assert_eq!(out.num_columns(), 5); // cat, v, swarm_x, swarm_y, __pos_x_offset__
-
-        let sx = col_f64(&out, "swarm_x");
-        let mut has_pos = false;
-        let mut has_neg = false;
-        let mut has_zero = false;
-        for i in 0..5 {
-            let x = sx.value(i);
-            if x > 0.0 {
-                has_pos = true;
-            } else if x < 0.0 {
-                has_neg = true;
-            } else {
-                has_zero = true;
-            }
-        }
-        assert!(has_zero, "expected center point at offset 0");
-        assert!(has_pos, "Both side should produce positive offsets");
-        assert!(has_neg, "Both side should produce negative offsets");
+        let b = make_batch(vec!["A"; 5], vec![1.0; 5]);
+        let offsets = place(&spec(5.0, 1.0, SwarmSide::Both), &b, 1.0);
+        let mut sorted = offsets.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(sorted, vec![-12.0, -6.0, 0.0, 6.0, 12.0]);
     }
 
     #[test]
-    fn swarm_side_left_only_non_positive_offsets() {
+    fn swarm_side_left_and_right_stay_on_their_side() {
         pyo3::Python::initialize();
-        let cats = vec!["A", "A", "A", "A", "A"];
-        let vals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
-        let b = make_batch(cats.clone(), vals.clone());
-        // Left
-        let spec_l = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Left,
-            orient: SwarmOrient::Vertical,
-            name: None,
-            dodge: None,
-        };
-        let out_l = apply_with_context(&spec_l, &b, &ctx_with_panel(400, 400)).unwrap();
-        let sx_l = col_f64(&out_l, "swarm_x");
-        for i in 0..5 {
-            assert!(
-                sx_l.value(i) <= 0.0,
-                "Left side: swarm_x[{i}] = {} must be <= 0",
-                sx_l.value(i)
-            );
-        }
-        // Right
-        let spec_r = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Right,
-            orient: SwarmOrient::Vertical,
-            name: None,
-            dodge: None,
-        };
-        let out_r = apply_with_context(&spec_r, &b, &ctx_with_panel(400, 400)).unwrap();
-        let sx_r = col_f64(&out_r, "swarm_x");
-        for i in 0..5 {
-            assert!(
-                sx_r.value(i) >= 0.0,
-                "Right side: swarm_x[{i}] = {} must be >= 0",
-                sx_r.value(i)
-            );
-        }
+        let b = make_batch(vec!["A"; 5], vec![1.0; 5]);
+        let left = place(&spec(5.0, 1.0, SwarmSide::Left), &b, 1.0);
+        let right = place(&spec(5.0, 1.0, SwarmSide::Right), &b, 1.0);
+        assert_eq!(left, vec![0.0, -6.0, -12.0, -18.0, -24.0]);
+        assert_eq!(right, vec![0.0, 6.0, 12.0, 18.0, 24.0]);
     }
 
     #[test]
     fn swarm_deterministic_tiebreak() {
         pyo3::Python::initialize();
-        // Several points with identical values to force ties on value.
-        let cats = vec!["A", "A", "A", "B", "B", "A"];
-        let vals = vec![1.0, 1.0, 2.0, 1.0, 1.0, 2.0];
-        let b1 = make_batch(cats.clone(), vals.clone());
-        let b2 = make_batch(cats, vals);
-        let spec = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Both,
-            orient: SwarmOrient::Vertical,
-            name: None,
-            dodge: None,
-        };
-        let ctx = ctx_with_panel(400, 400);
-        let o1 = apply_with_context(&spec, &b1, &ctx).unwrap();
-        let o2 = apply_with_context(&spec, &b2, &ctx).unwrap();
+        let b = make_batch(vec!["A", "A", "A", "B", "B", "A"], vec![1.0, 1.0, 2.0, 1.0, 1.0, 2.0]);
+        let s = spec(5.0, 1.0, SwarmSide::Both);
+        let o1 = place(&s, &b, 1.0);
+        let o2 = place(&s, &b, 1.0);
+        assert_eq!(o1.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                   o2.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        // Categories pack independently: B's two equal values take 0 and +6.
+        assert_eq!((o1[3], o1[4]), (0.0, 6.0));
+    }
 
-        let sx1 = col_f64(&o1, "swarm_x");
-        let sx2 = col_f64(&o2, "swarm_x");
-        let sy1 = col_f64(&o1, "swarm_y");
-        let sy2 = col_f64(&o2, "swarm_y");
-        assert_eq!(sx1.len(), sx2.len());
-        for i in 0..sx1.len() {
-            assert_eq!(
-                sx1.value(i).to_bits(),
-                sx2.value(i).to_bits(),
-                "swarm_x[{i}] differs"
-            );
-            assert_eq!(
-                sy1.value(i).to_bits(),
-                sy2.value(i).to_bits(),
-                "swarm_y[{i}] differs"
-            );
+    /// On a spread column, no two placed centres in a category are closer than
+    /// `size + spacing` px in the pixel space `to_px` defines, and a dense run
+    /// is packed at exactly that distance.
+    #[test]
+    fn swarm_no_overlapping_placements_on_a_spread_column() {
+        pyo3::Python::initialize();
+        let vals = normal_draws(300, 50.0, 15.0);
+        let b = make_batch(vec!["A"; vals.len()], vals.clone());
+        for (size, spacing) in [(8.0, 0.0), (4.0, 1.0), (5.0, 2.0)] {
+            let s = spec(size, spacing, SwarmSide::Both);
+            let px_per_unit = 4.2;
+            let offsets = place(&s, &b, px_per_unit);
+            let pts: Vec<(f64, f64)> =
+                offsets.iter().zip(&vals).map(|(&o, &v)| (o, v * px_per_unit)).collect();
+            let md = min_pairwise(&pts);
+            assert!(md >= size + spacing - 1e-9, "size={size} spacing={spacing}: min centre distance {md}");
+            assert!(md < size + spacing + 0.5, "size={size} spacing={spacing}: packing too loose ({md})");
         }
     }
 
     #[test]
-    fn swarm_no_overlapping_placements() {
+    fn swarm_dodge_sub_band_spacing_equals_point_size_plus_spacing() {
         pyo3::Python::initialize();
-        // 20 points all at value=1.0 in one category. Generous panel → small radius.
-        let cats: Vec<&str> = (0..20).map(|_| "A").collect();
-        let vals: Vec<f64> = (0..20).map(|_| 1.0).collect();
-        let b = make_batch(cats, vals);
-        let spec = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Both,
-            orient: SwarmOrient::Vertical,
-            name: None,
-            dodge: None,
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "A"])),
+                Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+                Arc::new(StringArray::from(vec![Some("g2"), Some("g1"), Some("g3")])),
+            ],
+        )
+        .unwrap();
+        let s = SwarmSpec { dodge: Some("grp".into()), ..spec(7.0, 2.0, SwarmSide::Both) };
+        // One point per group: each offset is its group's centre, sorted by name.
+        assert_eq!(place(&s, &b, 1.0), vec![0.0, -9.0, 9.0]);
+    }
+
+    #[test]
+    fn swarm_transform_emits_placeholder_columns_and_drops_null_dodge_rows() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("grp", DataType::Utf8, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("A"), None, Some("A"), Some("A")])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, Some(4.0)])),
+                Arc::new(StringArray::from(vec![Some("g"), Some("g"), Some("g"), None])),
+            ],
+        )
+        .unwrap();
+        let s = SwarmSpec { dodge: Some("grp".into()), ..spec(5.0, 1.0, SwarmSide::Both) };
+        let out = apply(&s, &b).unwrap();
+        assert_eq!(out.num_rows(), 3, "the null-dodge row is dropped");
+        let col = |name: &str| {
+            out.column_by_name(name).unwrap().as_any().downcast_ref::<Float64Array>().unwrap().clone()
         };
-        let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
-        let sx = col_f64(&out, "swarm_x");
-        let sy = col_f64(&out, "swarm_y");
-        // Reproduce the radius the transform used.
-        // value_range = 0 here (all v=1.0), so transform falls back to radius_data = 1.0.
-        let radius = 1.0_f64;
-        let two_r_sq = (2.0 * radius) * (2.0 * radius);
-        let n = sx.len();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = sx.value(i) - sx.value(j);
-                let dy = sy.value(i) - sy.value(j);
-                let d2 = dx * dx + dy * dy;
-                assert!(
-                    d2 >= two_r_sq - 1e-12,
-                    "points {i} and {j} overlap: d^2 = {d2} < {two_r_sq}"
-                );
-            }
-        }
+        assert_eq!(col("swarm_x").null_count(), 3);
+        assert_eq!(col("swarm_y").iter().collect::<Vec<_>>(), vec![Some(1.0), None, None]);
+        assert_eq!(col("__pos_x_offset__").values().to_vec(), vec![0.0; 3]);
     }
 
     #[test]
     fn swarm_horizontal_emits_pos_y_offset() {
         pyo3::Python::initialize();
-        // Horizontal swarm: category on y, value on x.
-        // Use clustered values so points must be displaced (offset != 0).
-        let cats = vec!["A", "A", "A", "A", "A"];
-        let vals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
-        let b = make_batch(cats, vals);
-        let spec = SwarmSpec {
-            category: "cat".into(),
-            value: "v".into(),
-            point_size: 5.0,
-            spacing: 1.0,
-            side: SwarmSide::Both,
-            orient: SwarmOrient::Horizontal,
-            name: None,
-            dodge: None,
-        };
-        let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
-        // Output must have 5 columns: cat, v, swarm_x, swarm_y, __pos_y_offset__
+        let b = make_batch(vec!["A"; 5], vec![1.0; 5]);
+        let s = SwarmSpec { orient: SwarmOrient::Horizontal, ..spec(5.0, 1.0, SwarmSide::Both) };
+        let out = apply(&s, &b).unwrap();
         assert_eq!(out.num_columns(), 5);
-        // __pos_y_offset__ must be present; __pos_x_offset__ must NOT be present.
-        assert!(
-            out.schema().index_of("__pos_y_offset__").is_ok(),
-            "horizontal swarm must emit __pos_y_offset__"
-        );
-        assert!(
-            out.schema().index_of("__pos_x_offset__").is_err(),
-            "horizontal swarm must NOT emit __pos_x_offset__"
-        );
-        // With all values equal, points compete for the same slot and must be displaced.
-        let py_offset = col_f64(&out, "__pos_y_offset__");
-        let has_nonzero = (0..py_offset.len()).any(|i| py_offset.value(i).abs() > 1e-12);
-        assert!(has_nonzero, "horizontal swarm should have at least one non-zero offset");
+        assert!(out.schema().index_of("__pos_y_offset__").is_ok());
+        assert!(out.schema().index_of("__pos_x_offset__").is_err());
+    }
+
+    // ---- Rendered placement: the contract holds on the drawn SVG ----
+
+    /// `(cx, cy)` of every `<circle>` in an SVG.
+    fn circle_centres(svg: &str) -> Vec<(f64, f64)> {
+        let attr = |tag: &str, name: &str| -> f64 {
+            let key = format!(" {name}=\"");
+            let start = tag.find(&key).unwrap() + key.len();
+            let end = start + tag[start..].find('"').unwrap();
+            tag[start..end].parse().unwrap()
+        };
+        svg.split("<circle ")
+            .skip(1)
+            .map(|rest| {
+                let tag = &rest[..rest.find('>').unwrap()];
+                (attr(&format!(" {tag}"), "cx"), attr(&format!(" {tag}"), "cy"))
+            })
+            .collect()
+    }
+
+    fn render_output(spec_json: serde_json::Value, batch: &RecordBatch) -> crate::render::RenderOutput<String> {
+        let spec: crate::spec::chart::ChartSpec = serde_json::from_value(spec_json).unwrap();
+        crate::render::render_svg(
+            &spec,
+            batch,
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 640.0, height: 480.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .expect("swarm chart renders")
+    }
+
+    fn render(spec_json: serde_json::Value, batch: &RecordBatch) -> String {
+        render_output(spec_json, batch).bytes
+    }
+
+    /// Packed exactly: no two centres closer than `step` px (within the SVG's
+    /// 3-decimal coordinates, where two rounded centres can each move by
+    /// 0.0005 px per axis), and the dense run is not spread looser than that.
+    fn assert_packed(pts: &[(f64, f64)], step: f64, what: &str) {
+        let md = min_pairwise(pts);
+        assert!(md >= step - 0.0015, "{what}: min rendered centre distance {md:.4} < {step}");
+        assert!(md < step + 0.5, "{what}: packing too loose ({md:.4} vs {step})");
+    }
+
+    /// The chart-level shape `mark_swarm` lowers to, with `extra` merged into
+    /// the top-level spec and `y_scale` onto the value channel.
+    fn swarm_chart(size: f64, spacing: f64, horizontal: bool, extra: serde_json::Value,
+                   y_scale: Option<serde_json::Value>) -> serde_json::Value {
+        use serde_json::json;
+        let mut value = json!({"field": "v"});
+        if let Some(scale) = y_scale {
+            value["scale"] = scale;
+        }
+        let category = json!({"field": "g", "type": "nominal"});
+        let (x, y) = if horizontal { (value, category) } else { (category, value) };
+        let mut spec = json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": if horizontal { "v" } else { "g" }},
+                         "y": {"field": if horizontal { "g" } else { "v" }}},
+            "transforms": [{"type": "swarm", "category": "g", "value": "v",
+                            "point_size": size, "spacing": spacing, "side": "both",
+                            "orient": if horizontal { "horizontal" } else { "vertical" },
+                            "name": "swarm"}],
+            "layers": [{"mark": "point", "encoding": {"x": x, "y": y},
+                        "mark_style": {"size": std::f64::consts::PI * (size / 2.0).powi(2)},
+                        "data_source": "swarm", "name": "point"}],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            spec[k] = v.clone();
+        }
+        spec
+    }
+
+    fn spread_batch() -> RecordBatch {
+        let vals = normal_draws(300, 50.0, 15.0);
+        let n = vals.len();
+        let facets: Vec<&str> = (0..n).map(|i| ["F1", "F2", "F3"][i % 3]).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("f", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a"; n])),
+                Arc::new(Float64Array::from(vals)),
+                Arc::new(StringArray::from(facets)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The minimum rendered centre distance is `size + spacing` (within the
+    /// SVG's 3-decimal coordinates) under every layout that changes the value
+    /// axis' pixels per data unit: the default, a title, a shared-y facet
+    /// grid, an explicit y domain, a log y scale and a horizontal swarm.
+    #[test]
+    fn rendered_swarm_centres_sit_size_plus_spacing_apart_on_every_layout() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let batch = spread_batch();
+        let none = json!({});
+        let layouts: Vec<(&str, bool, serde_json::Value, Option<serde_json::Value>)> = vec![
+            ("default", false, none.clone(), None),
+            ("title", false, json!({"title": {"text": "A title"}}), None),
+            ("facet shared y", false,
+             json!({"facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 3}}}), None),
+            ("explicit y domain", false,
+             json!({"coord": {"kind": "cartesian", "y_domain": [0.0, 200.0], "expand": true, "clip": true}}),
+             None),
+            ("log y", false, none.clone(),
+             Some(json!({"type": "log", "base": 10.0, "clamp": false, "nice": false}))),
+            ("horizontal", true, none.clone(), None),
+        ];
+        for (size, spacing) in [(8.0, 0.0), (4.0, 1.0)] {
+            for (name, horizontal, extra, y_scale) in &layouts {
+                let svg = render(swarm_chart(size, spacing, *horizontal, extra.clone(), y_scale.clone()), &batch);
+                let pts = circle_centres(&svg);
+                assert_eq!(pts.len(), 300, "{name}: every dot drawn");
+                assert_packed(&pts, size + spacing, &format!("{name} size={size} spacing={spacing}"));
+            }
+        }
+    }
+
+    /// Dodge sub-bands sit `size + spacing` apart and no two dots of the
+    /// rendered chart overlap.
+    #[test]
+    fn rendered_dodged_swarm_does_not_overlap() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let base = spread_batch();
+        let n = base.num_rows();
+        let hue: Vec<&str> = (0..n).map(|i| if i % 2 == 0 { "p" } else { "q" }).collect();
+        let mut cols = base.columns().to_vec();
+        cols.push(Arc::new(StringArray::from(hue)));
+        let mut fields: Vec<Field> = base.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new("h", DataType::Utf8, false));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+        let mut chart = swarm_chart(8.0, 0.0, false, json!({}), None);
+        chart["transforms"][0]["dodge"] = json!("h");
+        let pts = circle_centres(&render(chart, &batch));
+        assert_eq!(pts.len(), n);
+        let md = min_pairwise(&pts);
+        assert!(md >= 8.0 - 0.0015, "dodged swarm min rendered centre distance {md:.4}");
+    }
+
+    /// A transform after the `Swarm` keeps its dots placed: the layer's data
+    /// descends from the swarm whether the later transform is unnamed (the
+    /// layer reads the chain tail) or named over that tail.
+    #[test]
+    fn rendered_swarm_stays_packed_under_a_later_transform() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let batch = spread_batch();
+        let later = [
+            ("filter", json!({"type": "filter", "predicate": "datum.v > 30"})),
+            ("calculate", json!({"type": "calculate", "as_field": "w", "expr": "datum.v * 2"})),
+            ("sample", json!({"type": "sample", "n": 200})),
+        ];
+        for (name, transform) in later {
+            for named_tail in [false, true] {
+                let mut chart = swarm_chart(8.0, 1.0, false, json!({}), None);
+                chart["transforms"][0].as_object_mut().unwrap().remove("name");
+                let mut transform = transform.clone();
+                if named_tail {
+                    transform["name"] = json!("tail");
+                    chart["layers"][0]["data_source"] = json!("tail");
+                } else {
+                    chart["layers"][0].as_object_mut().unwrap().remove("data_source");
+                }
+                chart["transforms"].as_array_mut().unwrap().push(transform);
+                let out = render_output(chart, &batch);
+                let pts = circle_centres(&out.bytes);
+                let what = format!("swarm + {name} (named tail: {named_tail})");
+                assert!(pts.len() >= 100, "{what}: {} dots drawn", pts.len());
+                assert_packed(&pts, 9.0, &what);
+                assert!(out.warnings.is_empty(), "{what}: {:?}", out.warnings);
+            }
+        }
+    }
+
+    /// A later transform that drops the swarm's placeholder column leaves rows
+    /// that are no longer the swarm's: they are not placed, and one warning
+    /// per chart (not per facet panel) names the dropped column.
+    #[test]
+    fn swarm_whose_placeholder_a_later_transform_dropped_warns() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let mut chart = swarm_chart(8.0, 1.0, false,
+                                    json!({"facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 3}}}), None);
+        chart["transforms"][0].as_object_mut().unwrap().remove("name");
+        chart["layers"][0].as_object_mut().unwrap().remove("data_source");
+        chart["transforms"].as_array_mut().unwrap().push(json!({
+            "type": "aggregate", "groupby": ["g"],
+            "ops": [{"field": "v", "fn": "mean", "as": "v"}],
+        }));
+        let out = render_output(chart, &spread_batch());
+        let swarm_warnings: Vec<String> = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, crate::render::RenderWarning::PositionAdjustSkipped { adjustment, .. }
+                                 if adjustment == "swarm"))
+            .map(|w| w.to_string())
+            .collect();
+        assert_eq!(swarm_warnings, vec![
+            "swarm could not be applied (column '__pos_x_offset__' that Swarm(category='g', value='v') \
+             places its dots by is not in the layer's data; a later transform dropped it); \
+             marks were not offset".to_string(),
+        ]);
+    }
+
+    /// A flipped layer whose chain holds an earlier Swarm of the opposite
+    /// orientation still packs the dots the layer actually draws: the
+    /// earlier Swarm's placeholder column (its own cross-axis slot) must not
+    /// leak into the later Swarm's cross column and shadow the real offsets.
+    #[test]
+    fn rendered_swarm_stays_packed_under_an_earlier_opposite_orient_swarm_on_a_flipped_layer() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let batch = spread_batch();
+        let (size, spacing) = (8.0, 1.0);
+        let mut chart = swarm_chart(size, spacing, false, json!({"coord": {"kind": "flip"}}), None);
+        chart["transforms"][0]["name"] = json!("swarm2");
+        chart["layers"][0]["data_source"] = json!("swarm2");
+        chart["transforms"].as_array_mut().unwrap().insert(0, json!({
+            "type": "swarm", "category": "g", "value": "v",
+            "point_size": size, "spacing": spacing, "side": "both", "orient": "horizontal",
+        }));
+        let out = render_output(chart, &batch);
+        let pts = circle_centres(&out.bytes);
+        assert_eq!(pts.len(), 300, "every dot drawn");
+        assert_packed(&pts, size + spacing, "chained opposite-orient swarm on a flipped layer");
     }
 }

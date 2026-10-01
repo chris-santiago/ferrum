@@ -1781,6 +1781,22 @@ fn build_panel_mark_batches(
         };
         let scales: &scale_resolve::ResolvedScales = layer_scales_owned.as_ref().unwrap_or(scales);
 
+        // A layer whose data a `Swarm` fed (the last one in its lineage) gets
+        // its dots placed here, through this panel's resolved scales, before
+        // any position adjustment.
+        let swarm = crate::transform::core::output_lineage(&spec.transforms, layer.data_source.as_deref())
+            .into_iter()
+            .rev()
+            .find_map(|t| match t {
+                crate::transform::core::TransformSpec::Swarm(swarm) => Some(swarm),
+                _ => None,
+            });
+        let swarm_placed: Option<RecordBatch> = match swarm {
+            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_flipped, warnings)?,
+            None => None,
+        };
+        let layer_batch: &RecordBatch = swarm_placed.as_ref().unwrap_or(layer_batch);
+
         // Position adjustment — always call apply_position; it is the
         // single authority for all adjustments (explicit layer.position
         // *and* encoding-level encoding.y.stack).  When neither is set

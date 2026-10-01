@@ -1067,6 +1067,86 @@ fn jitter_axis_values(
 }
 
 // ---------------------------------------------------------------------------
+// Swarm
+// ---------------------------------------------------------------------------
+
+/// Place a swarm layer's dots through the resolved panel scale.
+///
+/// The `Swarm` transform only emits the columns; the packing needs the
+/// rendered value axis (plot rect, end insets, facet-shared or explicit domain,
+/// scale kind), which exists only here, beside the band-pixel offsets `Jitter`
+/// computes in [`apply_jitter`]. The placed offsets replace the transform's
+/// placeholder offset column and land in the column of the axis that carries
+/// the category band: the value axis is `y` for a vertical swarm, `x` for a
+/// horizontal one, exchanged when the layer's coord flips its channels.
+///
+/// The placeholder column is the witness that the batch's rows are still the
+/// swarm's rows. When a later transform dropped it (or the category, value or
+/// dodge column the packing reads), the dots are left unplaced and a
+/// `PositionAdjustSkipped` warning names the missing column: `Ok(None)`.
+pub(crate) fn apply_swarm(
+    batch: &RecordBatch,
+    swarm: &crate::transform::swarm::SwarmSpec,
+    scales: &ResolvedScales,
+    coord_flipped: bool,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Option<RecordBatch>, crate::render::RenderError> {
+    use crate::transform::swarm::{place_offsets, SwarmOrient};
+    let failed = |reason: String| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Swarm",
+        reason: crate::render::PositionAdjustReason::Message(reason),
+        coord_flipped,
+    };
+    let placeholder = swarm.offset_column();
+    let read = [Some(placeholder), Some(swarm.category.as_str()), Some(swarm.value.as_str()), swarm.dodge.as_deref()];
+    if let Some(missing) = read.into_iter().flatten().find(|c| batch.column_by_name(c).is_none()) {
+        let warning = RenderWarning::PositionAdjustSkipped {
+            adjustment: "swarm".into(),
+            reason: format!(
+                "column '{missing}' that Swarm(category='{}', value='{}') places its dots by \
+                 is not in the layer's data; a later transform dropped it",
+                swarm.category, swarm.value
+            ),
+        };
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+        return Ok(None);
+    }
+    let value_on_y = matches!(swarm.orient, SwarmOrient::Vertical) != coord_flipped;
+    let (value_scale, cross_column) = if value_on_y {
+        (&scales.y, "__pos_x_offset__")
+    } else {
+        (&scales.x, "__pos_y_offset__")
+    };
+    let values = crate::render::arrow_cast::col_as_f64(batch, &swarm.value)
+        .map_err(|e| failed(e.to_string()))?;
+    let offsets = place_offsets(swarm, batch, &values, |v| value_scale.to_pixel_f64(v))
+        .map_err(failed)?;
+
+    let schema = batch.schema();
+    let (mut fields, mut cols): (Vec<Field>, Vec<ArrayRef>) = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        // Drops both the placeholder this swarm itself emitted AND the cross
+        // column it is about to push. On an unflipped layer those are the
+        // same name, already covered by `!= placeholder`; on a flipped layer
+        // they differ, and a chain whose lineage holds an earlier
+        // opposite-orient Swarm can leave the cross column's name already in
+        // the batch (that Swarm's own, stale, placeholder). Without this,
+        // pushing the real offsets below would leave two fields of that name
+        // and `column_by_name` would keep reading the stale one.
+        .filter(|(f, _)| f.name() != placeholder && f.name() != cross_column)
+        .map(|(f, c)| (f.as_ref().clone(), c.clone()))
+        .unzip();
+    fields.push(Field::new(cross_column, DataType::Float64, false));
+    cols.push(Arc::new(Float64Array::from(offsets)));
+    let new_schema = Arc::new(Schema::new(fields).with_metadata(schema.metadata().clone()));
+    RecordBatch::try_new(new_schema, cols).map(Some).map_err(|e| failed(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Stack
 // ---------------------------------------------------------------------------
 
@@ -1530,6 +1610,69 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// A flipped layer whose batch already carries the cross column under
+    /// its own name — the shape left behind by an earlier Swarm of the
+    /// opposite orientation in the same chain, whose placeholder is that
+    /// name — does not end up with two fields of that name. The stale
+    /// column (here `99.0`, standing in for an earlier Swarm's untouched
+    /// `0.0`) must be dropped, not merely shadowed by the real offsets
+    /// pushed after it.
+    #[test]
+    fn apply_swarm_drops_a_stale_cross_column_left_by_an_earlier_opposite_orient_swarm() {
+        use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            // This swarm's own placeholder, about to be dropped.
+            Field::new("__pos_x_offset__", DataType::Float64, false),
+            // Stale: the earlier, opposite-orient Swarm's own placeholder,
+            // which is THIS swarm's cross column once the layer is flipped.
+            Field::new("__pos_y_offset__", DataType::Float64, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"; 5])),
+                Arc::new(Float64Array::from(vec![1.0; 5])),
+                Arc::new(Float64Array::from(vec![0.0; 5])),
+                Arc::new(Float64Array::from(vec![99.0; 5])),
+            ],
+        )
+        .unwrap();
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 5.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        // coord_flipped=true on a Vertical swarm puts the value on x and the
+        // packed offsets into `__pos_y_offset__` — the stale column's name.
+        let out = apply_swarm(&b, &swarm, &dummy_scales(), true, &mut Vec::new())
+            .unwrap()
+            .unwrap();
+        let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(names.len(), unique.len(), "duplicate field name in {names:?}");
+        let offsets = out
+            .column_by_name("__pos_y_offset__")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        // The real packed offsets (five identical points at one category/value
+        // spread by point_size + spacing) survive; the stale 99.0 does not.
+        assert_ne!(offsets, vec![99.0; 5], "stale cross column read instead of the real offsets");
+        let mut sorted = offsets.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(sorted, vec![-12.0, -6.0, 0.0, 6.0, 12.0]);
     }
 
     #[test]

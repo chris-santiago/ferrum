@@ -307,6 +307,7 @@ impl TransformSpec {
                     Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
                         s, batch, Some(&ctx.named_outputs)),
                     Self::Bin2D(_)
+                    | Self::Swarm(_)
                     | Self::Contour(_)
                     | Self::Qq(_)
                     | Self::Linkage(_)
@@ -328,7 +329,6 @@ impl TransformSpec {
         }
         arm! {
             Raster => raster,
-            Swarm  => swarm,
             Violin => violin,
             Smooth => smooth,
             Robust => robust,
@@ -450,6 +450,30 @@ pub(crate) fn apply_transforms_named(
     Ok(outputs)
 }
 
+/// The transforms a layer reading `data_source` sees the output of, in chain
+/// order, by the rules of [`apply_transforms_named`]: for `None`
+/// ([`FINAL_OUTPUT_KEY`]) every unnamed transform; for a name, the unnamed
+/// transforms ahead of the last transform published under that name (the
+/// chained batch it ran on), then that transform. Empty when the layer reads
+/// the untransformed input (or a secondary output no transform names).
+pub(crate) fn output_lineage<'a>(
+    specs: &'a [TransformSpec],
+    data_source: Option<&str>,
+) -> Vec<&'a TransformSpec> {
+    let end = match data_source {
+        None => specs.len(),
+        Some(name) => match specs.iter().rposition(|spec| spec_name(spec) == Some(name)) {
+            Some(k) => k,
+            None => return Vec::new(),
+        },
+    };
+    let mut lineage: Vec<&TransformSpec> =
+        specs[..end].iter().filter(|spec| spec_name(spec).is_none()).collect();
+    // `end` indexes the named producer; for the chain tail it is past the end.
+    lineage.extend(specs.get(end));
+    lineage
+}
+
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
     // The module + wrapper columns of the table are unused here; we keep
     // them in the pattern so spec_name reads off the same source of truth.
@@ -478,6 +502,23 @@ mod tests {
             Field::new(name, DataType::Float64, false),
         ]));
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    /// `output_lineage` follows `apply_transforms_named`'s routing: a layer
+    /// sees the unnamed chain ahead of its source, never a named transform's
+    /// output it did not read.
+    #[test]
+    fn output_lineage_follows_the_chained_batch() {
+        let filter = |name: Option<&str>, predicate: &str| TransformSpec::Filter(FilterSpec {
+            predicate: predicate.into(), name: name.map(Into::into), param: None,
+        });
+        // f0 -> f1(name a) -> f2 -> f3(name b)
+        let specs = vec![filter(None, "f0"), filter(Some("a"), "f1"), filter(None, "f2"), filter(Some("b"), "f3")];
+        assert_eq!(output_lineage(&specs, None), vec![&specs[0], &specs[2]]);
+        assert_eq!(output_lineage(&specs, Some("a")), vec![&specs[0], &specs[1]]);
+        assert_eq!(output_lineage(&specs, Some("b")), vec![&specs[0], &specs[2], &specs[3]]);
+        assert!(output_lineage(&specs, Some("qq_line")).is_empty());
+        assert!(output_lineage(&[], None).is_empty());
     }
 
     #[test]
@@ -778,19 +819,19 @@ mod tests {
         // invocation above, update this list too, and either add a fixture
         // below or add it to `EXCLUDED` with a reason.
         const CONTEXT_AWARE_VARIANTS: &[&str] = &[
-            "Raster", "Swarm", "Violin", "Smooth", "Robust", "RegressionData", "LoessData",
+            "Raster", "Violin", "Smooth", "Robust", "RegressionData", "LoessData",
             "Kde", "LetterValue", "Impute", "Aggregate", "Summary", "BoxStats", "ErrorExtent",
             "Bin", "Kde2D", "Outliers", "TopK", "Pivot", "DataAggregate", "DensityData",
             "DataStack", "DataWindow", "JoinAggregate",
         ];
-        // Raster/Swarm/Violin read `ctx.panel_pixel_size` (see
+        // Raster/Violin read `ctx.panel_pixel_size` (see
         // `context.rs`'s module doc: they are its only readers), never
         // `ctx.warnings` — there is no warning-emitting degrade fixture to
         // build for them, so a "non-empty warnings vec" assertion cannot
-        // discriminate a misfile of these three. Genuinely impractical for
+        // discriminate a misfile of these two. Genuinely impractical for
         // THIS test's shape (a fixture built around a different ctx field
         // would need a different assertion); not silently skipped.
-        const EXCLUDED: &[&str] = &["Raster", "Swarm", "Violin"];
+        const EXCLUDED: &[&str] = &["Raster", "Violin"];
 
         let mut cases: Vec<(&'static str, TransformSpec, RecordBatch)> = Vec::new();
 

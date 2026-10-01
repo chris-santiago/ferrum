@@ -1311,15 +1311,12 @@ class StatisticalMarksMixin:
         ----------
         size : float, optional
             Point diameter in pixels: both the drawn dot's diameter and
-            the placement diameter.  Default is ``4``.  The rendered
-            *spread* of point centers along the cross-axis (not this
-            diameter itself) responds to the chart's *value-axis* panel
-            dimension using a pre-layout size estimate — panel height for
-            the default vertical orientation, panel width for
-            ``orient="horizontal"`` — and inversely: a longer value axis
-            needs less cross-axis displacement to avoid collisions, so it
-            produces a *smaller* pixel spread at the same ``size=``.  The
-            cross-axis dimension has no effect.
+            the placement diameter.  Default is ``4``.  Placement is
+            computed at render time against the panel's resolved
+            value-axis scale, so the rendered centre-to-centre distance
+            between adjacent placed dots is exactly ``size + spacing`` px
+            — a title, a facet strip, an explicit domain, a log scale, or
+            a dodge band all reshape the panel without loosening this.
         orient : {"vertical", "horizontal"} or None, optional
             Canonical orientation control.  ``"vertical"`` (default) spreads
             points along x; ``"horizontal"`` spreads along y.  When both
@@ -1329,8 +1326,9 @@ class StatisticalMarksMixin:
             ``orient="horizontal"``.  Ignored when ``orient`` is also given;
             prefer ``orient`` in new code.
         spacing : float, optional
-            Additive pixel gap between point edges.  Default is ``1.0`` (1px).
-            Subject to the same value-axis-dependent spread as ``size`` above.
+            Additive pixel gap between point edges.  Default is ``1.0`` (1px):
+            the rendered centre-to-centre distance between adjacent placed
+            dots is ``size + spacing``.
         side : {"both", "left", "right"}, default "both"
             Side of the axis on which points can be placed.
         dodge : str or None, optional

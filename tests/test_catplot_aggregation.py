@@ -923,8 +923,10 @@ class TestEdgesAndRefusals:
 # Regenerate ONLY alongside a deliberate, disclosed change to those kinds.
 _UNTOUCHED_KIND_DIGESTS = {
     "strip": "58df116006b52e53befbca7aaf908bc5f7eec1821a9377957ebc3e848b56013d",
-    # The swarm digest reflects dots drawn at diameter `size`, r = size / 2 (#161).
-    "swarm": "1aab859bef72e0eef2b311d7a8562c86799995576c84e9f5757604e5bb11049c",
+    # The swarm digest reflects dots drawn at diameter `size` (r = size / 2),
+    # packed in rendered pixels through the panel's resolved scale so centres
+    # sit `size + spacing` apart (#161).
+    "swarm": "0025f54533609a1f28565844c2444f73382347eeff4c63f808a07b77bed07a13",
     "box": "397b96d9a1c250f468ec8de85e96ce38c019a93890082fe2f7fa533de88f14c0",
     "violin": "f685cf8ddcd62bfd75cf10f8fbe4e630faa629446df2c9eb50e417580a630bb5",
     "boxen": "b5769400e6d07cfad179678c6b83ff9c9fdc7084ff0efdbd370ea3381363de74",
