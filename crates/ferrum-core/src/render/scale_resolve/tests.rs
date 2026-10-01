@@ -6693,6 +6693,59 @@ fn a_constant_opacity_column_keeps_its_literal_alpha() {
     assert!((scale.inner.to_pixel_f64(0.3).unwrap() - 0.38).abs() < 1e-9);
 }
 
+/// §4.1/§6.10 (`#108`): an explicit `scale=` RANGE is a real scale even over a
+/// constant column, same as an explicit domain. A range-only `LinearScale`
+/// over a degenerate extent resolves the ordinary clamped, un-niced linear
+/// scale and collapses to the range's midpoint through the existing
+/// degenerate-domain rule (GH #104) — 0.5 for `[0.2, 0.8]`, and still 0.5 for
+/// `[-1, 2]` once its endpoints clamp into `[0, 1]` first. `Fill` and `Stroke`
+/// both take this path; `Opacity` is excluded from the carve-out entirely (it
+/// always resolves) and is not re-asserted here.
+#[test]
+fn a_range_only_linear_scale_resolves_over_a_constant_opacity_column() {
+    let batch = appearance_batch_constant_v(0.3);
+
+    for channel in ["fill_opacity", "stroke_opacity"] {
+        let spec = appearance_spec(serde_json::json!({
+            channel: {
+                "field": "v", "type": "quantitative",
+                "scale": {"type": "linear", "range": [0.2, 0.8]},
+            },
+        }));
+        let (scales, warns) = resolve_appearance(&spec, &batch);
+        assert!(warns.is_empty(), "{channel}: no warnings expected: {warns:?}");
+        let resolved = match channel {
+            "fill_opacity" => scales.fill_opacity,
+            "stroke_opacity" => scales.stroke_opacity,
+            _ => unreachable!(),
+        };
+        let scale = resolved
+            .unwrap_or_else(|| panic!("{channel}: a range-only scale must resolve over a constant column"));
+        let at = scale.inner.to_pixel_f64(0.3).unwrap();
+        assert!((at - 0.5).abs() < 1e-9, "{channel}: range [0.2,0.8] over a constant column → 0.5; got {at}");
+
+        let clamped_spec = appearance_spec(serde_json::json!({
+            channel: {
+                "field": "v", "type": "quantitative",
+                "scale": {"type": "linear", "range": [-1.0, 2.0]},
+            },
+        }));
+        let (clamped_scales, clamped_warns) = resolve_appearance(&clamped_spec, &batch);
+        assert!(clamped_warns.is_empty(), "{channel}: no warnings expected: {clamped_warns:?}");
+        let clamped_scale = match channel {
+            "fill_opacity" => clamped_scales.fill_opacity,
+            "stroke_opacity" => clamped_scales.stroke_opacity,
+            _ => unreachable!(),
+        }
+        .unwrap_or_else(|| panic!("{channel}: a range-only scale must resolve over a constant column"));
+        let clamped_at = clamped_scale.inner.to_pixel_f64(0.3).unwrap();
+        assert!(
+            (clamped_at - 0.5).abs() < 1e-9,
+            "{channel}: range [-1,2] clamps to [0,1] first, so a constant column → 0.5; got {clamped_at}"
+        );
+    }
+}
+
 /// Byte-identity guard for the absent case (§7): a chart binding none of the
 /// appearance channels resolves none of the new scales and warns about nothing,
 /// so nothing downstream can behave differently than it did pre-batch-A.

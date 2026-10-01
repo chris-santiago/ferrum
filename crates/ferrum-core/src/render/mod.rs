@@ -1218,8 +1218,13 @@ pub enum OpacityScaleFallback {
     /// Data extent (or the `scale=` domain) onto the theme opacity band (or
     /// the `scale=` range) — the channel's ordinary default resolution.
     Linear,
-    /// `fill_opacity`/`stroke_opacity` over a constant column: no scale is
-    /// built, and each row keeps its own value as a literal alpha.
+    /// `fill_opacity`/`stroke_opacity` over a constant column with no
+    /// explicit `scale=` domain or range: no scale is built, and each row
+    /// keeps its own value as a literal alpha. An explicit domain or range
+    /// over the same constant column is a real scale instead (spec §6.10),
+    /// so this fallback is only reported when the channel's `scale=` is
+    /// non-`Linear` (which never populates domain/range overrides) and the
+    /// column is otherwise a literal alpha.
     LiteralAlpha,
 }
 

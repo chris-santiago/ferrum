@@ -145,3 +145,115 @@ class TestOpacityNoDoubleApply:
         assert any(abs(float(v) - 0.7) < 0.15 for v in stroke_opacities), (
             f"Expected stroke-opacity ~0.7; got {stroke_opacities}"
         )
+
+
+class TestRangeOnlyOpacityScaleOverConstantColumn:
+    """`#108`: an explicit range-only `LinearScale` over a constant
+    `fill_opacity`/`stroke_opacity` column is honored (the clamped range
+    midpoint), not the column's own literal value.
+    """
+
+    def test_fill_opacity_range_only_scale_resolves_to_midpoint(self, scatter_df):
+        chart = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(
+                x="x",
+                y="y",
+                fill_opacity=fm.FillOpacity("fo", scale=fm.LinearScale(range=[0.2, 0.8])),
+            )
+        )
+        svg = chart.to_svg()
+        assert svg.count('fill-opacity="0.5"') == 20
+        assert 'fill-opacity="0.3"' not in svg
+
+    def test_stroke_opacity_range_only_scale_resolves_to_midpoint(self, scatter_df):
+        chart = (
+            fm.Chart(scatter_df)
+            .mark_point(stroke="black")
+            .encode(
+                x="x",
+                y="y",
+                stroke_opacity=fm.StrokeOpacity("so", scale=fm.LinearScale(range=[0.2, 0.8])),
+            )
+        )
+        svg = chart.to_svg()
+        assert svg.count('stroke-opacity="0.5"') == 20
+        assert 'stroke-opacity="0.7"' not in svg
+
+    def test_range_clamps_before_the_midpoint_is_taken(self, scatter_df):
+        """A range outside [0, 1] clamps first, so [-1, 2] still resolves to 0.5."""
+        chart = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(
+                x="x",
+                y="y",
+                fill_opacity=fm.FillOpacity("fo", scale=fm.LinearScale(range=[-1.0, 2.0])),
+            )
+        )
+        svg = chart.to_svg()
+        assert svg.count('fill-opacity="0.5"') == 20
+
+    def test_constant_across_facet_panels_resolves_in_every_panel(self):
+        """A column constant across every facet panel still honors the
+        range-only scale in each panel, not the literal value."""
+        df = pl.DataFrame(
+            {
+                "x": list(range(12)),
+                "y": [i * 2.0 + 1.0 for i in range(12)],
+                "fo": [0.3] * 12,
+                "g": ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"],
+            }
+        )
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(
+                x="x",
+                y="y",
+                fill_opacity=fm.FillOpacity("fo", scale=fm.LinearScale(range=[0.2, 0.8])),
+                facet=fm.Facet("g"),
+            )
+        )
+        svg = chart.to_svg()
+        assert svg.count('fill-opacity="0.5"') == 12
+        assert 'fill-opacity="0.3"' not in svg
+
+    def test_no_scale_keeps_the_literal_alpha(self, scatter_df):
+        """Control: with no `scale=` at all, a constant column still keeps
+        its own literal value."""
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
+        svg = chart.to_svg()
+        assert 'fill-opacity="0.3"' in svg
+        assert 'fill-opacity="0.5"' not in svg
+
+    def test_range_less_linear_scale_keeps_the_literal_alpha(self, scatter_df):
+        """Control: an explicit `LinearScale()` with neither domain nor range
+        is the same as no scale for this purpose — still the literal value."""
+        chart = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity=fm.FillOpacity("fo", scale=fm.LinearScale()))
+        )
+        svg = chart.to_svg()
+        assert 'fill-opacity="0.3"' in svg
+        assert 'fill-opacity="0.5"' not in svg
+
+    def test_explicit_domain_case_is_unaffected(self, scatter_df):
+        """Control: an explicit domain over a constant column already
+        resolved before this fix, and still resolves the same way."""
+        chart = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(
+                x="x",
+                y="y",
+                fill_opacity=fm.FillOpacity(
+                    "fo", scale=fm.LinearScale(domain=[0.0, 1.0], range=[0.2, 0.8])
+                ),
+            )
+        )
+        svg = chart.to_svg()
+        # fo = 0.3 on domain [0, 1] onto range [0.2, 0.8] -> 0.38
+        assert 'fill-opacity="0.38"' in svg

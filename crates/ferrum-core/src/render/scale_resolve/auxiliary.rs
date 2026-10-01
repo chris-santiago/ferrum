@@ -311,6 +311,12 @@ impl OpacityChannel {
     ///
     /// `opacity` says no: mapping a constant column to the band midpoint is its
     /// established pre-batch-A behavior, which batch A does not touch.
+    ///
+    /// This predicate alone does not decide the literal-alpha path: an
+    /// explicit `scale=` domain or range over the constant column is a real
+    /// scale the caller asked for, so `is_literal_alpha` in
+    /// [`build_opacity_channel_scale`] also requires both to be absent
+    /// (spec §6.10).
     fn constant_column_is_a_literal_alpha(self) -> bool {
         match self {
             OpacityChannel::Opacity => false,
@@ -387,10 +393,15 @@ pub fn build_opacity_channel_scale(
     let overrides = linear_overrides(&op_enc.scale);
     // A constant column has no spread to lay across a band; for the two
     // channels whose values are literal alphas that means no scale at all, so
-    // each row keeps its own value. An explicit `scale=` domain is a real
-    // domain even over a constant column, so it takes precedence over this.
-    let is_literal_alpha =
-        overrides.domain.is_none() && min == max && channel.constant_column_is_a_literal_alpha();
+    // each row keeps its own value. An explicit `scale=` domain or range is a
+    // real scale even over a constant column, so either takes precedence over
+    // this (spec §6.10): a range-only `Linear` scale over a degenerate extent
+    // still builds the ordinary clamped, un-niced linear scale and resolves
+    // through the existing degenerate-domain midpoint rule (GH #104).
+    let is_literal_alpha = overrides.domain.is_none()
+        && overrides.range.is_none()
+        && min == max
+        && channel.constant_column_is_a_literal_alpha();
     if let Some(spec) = &op_enc.scale {
         if !matches!(spec, ScaleSpec::Linear { .. }) {
             let fallback = if is_literal_alpha {
