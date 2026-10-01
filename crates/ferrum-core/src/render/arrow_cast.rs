@@ -106,6 +106,57 @@ pub(crate) fn require_placeable_on_continuous_axis(
     }
 }
 
+/// The kind of panel axis an exchanged layer's column lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::render) enum PanelAxisKind {
+    Categorical,
+    Continuous,
+}
+
+impl PanelAxisKind {
+    /// The axis kind as refusal messages spell it.
+    pub(in crate::render) fn as_str(self) -> &'static str {
+        match self {
+            PanelAxisKind::Categorical => "categorical",
+            PanelAxisKind::Continuous => "continuous",
+        }
+    }
+}
+
+/// Refuse `field` (of `dtype`), which `layer_index`'s own `coord` exchanged
+/// onto the panel's `channel` axis, when an `axis` of that kind cannot draw
+/// it. The one servability question behind
+/// [`super::LayerCoordUnplaceableReason::ExchangedChannelUnservable`], asked
+/// by every route that layers a member whose flip state differs from the
+/// panel's: a categorical axis serves what [`ensure_category_keyable`]
+/// admits, a continuous one what [`supported_numeric_dtype`] admits.
+pub(in crate::render) fn require_exchanged_column_servable(
+    layer_index: usize,
+    coord: &crate::spec::coord::CoordKind,
+    channel: &'static str,
+    field: &str,
+    dtype: &DataType,
+    axis: PanelAxisKind,
+) -> Result<(), RenderError> {
+    let servable = match axis {
+        PanelAxisKind::Categorical => ensure_category_keyable(field, dtype).is_ok(),
+        PanelAxisKind::Continuous => supported_numeric_dtype(dtype),
+    };
+    if servable {
+        return Ok(());
+    }
+    Err(RenderError::LayerCoordUnplaceable {
+        layer: layer_index,
+        coord: crate::spec::coord::public_spelling(coord),
+        reason: Box::new(super::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+            channel,
+            column: field.to_owned(),
+            dtype: format!("{dtype:?}"),
+            axis_kind: axis.as_str(),
+        }),
+    })
+}
+
 /// Read any supported numeric Arrow column as `Vec<Option<f64>>`, preserving
 /// null positions. Returns `Err(ScaleResolutionFailed)` for unsupported
 /// dtypes — matches the prior `draw::col_as_f64` semantics exactly.

@@ -36,6 +36,7 @@ pass for the wrong reason.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import warnings
 
@@ -550,29 +551,96 @@ def _exchange_flipped():
     return _exchange_lead().coord(fm.CoordFlip())
 
 
-@pytest.mark.parametrize(
-    ("output", "wrapped"),
-    [
-        ("plus to_svg", False),
-        ("fm.layer to_svg", True),
-        ("fm.layer interactive", False),
-    ],
+def _plus_svg(lead, member):
+    return (lead + member).to_svg()
+
+
+def _layer_svg(lead, member):
+    return fm.layer(lead, member).to_svg()
+
+
+def _layer_interactive(lead, member):
+    return fm.layer(lead, member)._render_interactive()
+
+
+# (render, wrapped): only static `fm.layer` goes through the composite route's envelope.
+_EVERY_OUTPUT = pytest.mark.parametrize(
+    ("render", "wrapped"),
+    [(_plus_svg, False), (_layer_svg, True), (_layer_interactive, False)],
 )
-def test_a_flipped_string_column_on_a_continuous_y_refuses_on_every_output(output, wrapped):
-    """Layer 1's flip lands its Utf8 `s` on layer 0's continuous y on all three outputs."""
-    render = {
-        "plus to_svg": lambda: (_exchange_lead() + _exchange_flipped()).to_svg(),
-        "fm.layer to_svg": lambda: fm.layer(_exchange_lead(), _exchange_flipped()).to_svg(),
-        "fm.layer interactive": lambda: fm.layer(
-            _exchange_lead(), _exchange_flipped()
-        )._render_interactive(),
-    }[output]
-    core = coord_exchange_refusal(1, "fm.CoordFlip", "s", "Utf8")
+
+
+def _refusal_text(render, lead, member) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with pytest.raises(ValueError) as err:
-            render()
-    assert str(err.value) == (composite_envelope("y", "s", core) if wrapped else core)
+            render(lead, member)
+    return str(err.value)
+
+
+@_EVERY_OUTPUT
+def test_a_flipped_string_column_on_a_continuous_y_refuses_on_every_output(render, wrapped):
+    """Layer 1's flip lands its Utf8 `s` on layer 0's continuous y on all three outputs."""
+    core = coord_exchange_refusal(1, "fm.CoordFlip", "s", "Utf8")
+    text = _refusal_text(render, _exchange_lead(), _exchange_flipped())
+    assert text == (composite_envelope("y", "s", core) if wrapped else core)
+
+
+_MIRROR_FRAME = pl.DataFrame(
+    {
+        "s": ["a", "b"],
+        "v": [1.0, 2.0],
+        "t": [dt.datetime(2020, 1, 1), dt.datetime(2020, 1, 2)],
+    }
+)
+
+
+def _mirror_point():
+    return fm.Chart(_MIRROR_FRAME).mark_point()
+
+
+@_EVERY_OUTPUT
+@pytest.mark.parametrize(
+    ("lead_xy", "member_xy", "field", "dtype", "axis_kind"),
+    [
+        (("s", "v"), ("s", "v"), "s", "Utf8", "continuous"),
+        (("v", "s"), ("t", "v"), "t", "Timestamp(Millisecond, None)", "categorical"),
+    ],
+    ids=["continuous", "categorical"],
+)
+def test_a_coordless_layer_beside_a_flipped_first_layer_refuses_on_every_output(
+    render, wrapped, lead_xy, member_xy, field, dtype, axis_kind
+):
+    """The mirror: layer 0 flips, layer 1 declares no coord, so it inherits
+    `fm.CoordCartesian` and sits in the opposite space from the panel's axes.
+    Its x column lands on an x axis that cannot draw it, on either axis kind."""
+    lead = _mirror_point().encode(x=lead_xy[0], y=lead_xy[1]).coord(fm.CoordFlip())
+    member = _mirror_point().encode(x=member_xy[0], y=member_xy[1])
+    core = coord_exchange_refusal(1, "fm.CoordCartesian", field, dtype, "x", axis_kind)
+    text = _refusal_text(render, lead, member)
+    assert text == (composite_envelope("x", field, core) if wrapped else core)
+
+
+@pytest.mark.parametrize("render", [_plus_svg, _layer_svg, _layer_interactive])
+def test_a_coordless_layer_whose_columns_suit_the_flipped_axes_renders(render):
+    """The servable control for the mirror: the member's `v` lands on the panel's
+    continuous x and `s` on its categorical y, so every output draws both layers."""
+    lead = _mirror_point().encode(x="s", y="v").coord(fm.CoordFlip())
+    member = _mirror_point().encode(x="v", y="s")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = render(lead, member)
+    assert [str(w.message) for w in caught] == []
+    if render is _layer_interactive:
+        scene_json, _packed = out
+        marks = json.loads(scene_json)["panels"][0]["marks"]
+        total_nodes = sum(len(b["nodes"]) for b in marks)
+        assert total_nodes == 4, (
+            f"both layers must draw their points; got {total_nodes} nodes "
+            f"across {len(marks)} mark batches"
+        )
+    else:
+        assert len(_circles(out)) == 4
 
 
 def test_a_numeric_category_column_makes_the_same_exchange_placeable():

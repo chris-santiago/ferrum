@@ -37,15 +37,21 @@ def composite_envelope(channel: str, field: str, core: str) -> str:
 
 
 def coord_exchange_refusal(
-    layer_index: int, coord: str, field: str, dtype: str, channel: str = _CHANNEL
+    layer_index: int,
+    coord: str,
+    field: str,
+    dtype: str,
+    channel: str = _CHANNEL,
+    axis_kind: str = "continuous",
 ) -> str:
-    """The exact `LayerCoordUnplaceable` text for a member whose own coord exchanges
-    its positional channels and lands a column on a continuous panel axis that
+    """The exact `LayerCoordUnplaceable` text for a member whose coord (its own, or the
+    inherited `fm.CoordCartesian` beside a flipped first member) exchanges its
+    positional channels and lands a column on a panel axis of `axis_kind` that
     cannot draw it."""
     return (
         f"layer {layer_index}: {coord} leaves this layer's positional channels in the opposite "
-        f"space from the panel's axes, and the panel's {channel} axis is continuous while the "
-        f"column that lands on it ('{field}': {dtype}) cannot be drawn against a continuous axis "
+        f"space from the panel's axes, and the panel's {channel} axis is {axis_kind} while the "
+        f"column that lands on it ('{field}': {dtype}) cannot be drawn against a {axis_kind} axis "
         "— a layered chart (fm.layer(...) / chart + chart) merges its members onto one panel, "
         "so this coord cannot be placed on one of them. The panel's axes are resolved from the "
         "first member, so a member whose channels sit in the opposite space can only be placed "

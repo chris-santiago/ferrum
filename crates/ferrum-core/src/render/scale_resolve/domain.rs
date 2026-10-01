@@ -606,9 +606,15 @@ impl LayerUnion<'_> {
     }
 }
 
-/// One member of a layered axis on one channel: its index and its own scale
-/// there.
-pub(in crate::render) type AxisMember<'a> = (usize, Option<&'a crate::spec::encoding::ScaleSpec>);
+/// One member of a layered axis on one channel.
+#[derive(Clone, Copy)]
+pub(in crate::render) struct AxisMember<'a> {
+    /// The member's index on its route: its layer index on the flat layered
+    /// route, its position in the group on a composite `Overlay`.
+    pub(in crate::render) index: usize,
+    /// The member's own scale on the channel, if its encoding binds one.
+    pub(in crate::render) own_scale: Option<&'a crate::spec::encoding::ScaleSpec>,
+}
 
 /// The members of one layered axis, in member order, with the one judgement
 /// the establishing-scale rule makes about the first of them. Each layering
@@ -631,8 +637,8 @@ impl<'a, I: Iterator<Item = AxisMember<'a>> + Clone> AxisMembers<I> {
         let deciding_lead = members
             .clone()
             .next()
-            .filter(|&(_, own)| own.is_none_or(|s| s.is_system_injected()))
-            .map(|(idx, _)| idx)
+            .filter(|member| member.own_scale.is_none_or(|s| s.is_system_injected()))
+            .map(|member| member.index)
             .filter(|&idx| reads_categorical(idx));
         Self { members, deciding_lead }
     }
@@ -704,7 +710,9 @@ pub(in crate::render) fn column_reads_categorical(
 fn first_caller_scale<'a>(
     members: impl IntoIterator<Item = AxisMember<'a>>,
 ) -> Option<(usize, &'a crate::spec::encoding::ScaleSpec)> {
-    members.into_iter().find_map(|(idx, own)| Some((idx, own.filter(|s| !s.is_system_injected())?)))
+    members
+        .into_iter()
+        .find_map(|member| Some((member.index, member.own_scale.filter(|s| !s.is_system_injected())?)))
 }
 
 /// A layer's own encoding for the post-flip `channel`, with the layer's coord
@@ -748,14 +756,17 @@ pub(in crate::render) fn warn_members_off_caller_scale<'a, I: Iterator<Item = Ax
         placement,
     };
     let deciding_lead = axis.deciding_lead;
-    let off_lead = move |&(_, own): &AxisMember<'a>| deciding_lead.is_some() && stays_off_categorical_axis(own);
+    let off_lead =
+        move |member: &AxisMember<'a>| deciding_lead.is_some() && stays_off_categorical_axis(member.own_scale);
     if let Some(lead) = deciding_lead {
-        warnings.extend(axis.members.clone().filter(off_lead).map(|(layer, _)| warning(layer, lead)));
+        warnings.extend(axis.members.clone().filter(off_lead).map(|member| warning(member.index, lead)));
     }
     let rest = axis.members.clone().filter(move |member| !off_lead(member));
     let Some((establishing, scale)) = first_caller_scale(rest.clone()) else { return };
     let union = LayerUnion::CarryingScale(scale);
-    warnings.extend(rest.filter(|&(_, own)| !union.admits(own)).map(|(layer, _)| warning(layer, establishing)));
+    warnings.extend(
+        rest.filter(|member| !union.admits(member.own_scale)).map(|member| warning(member.index, establishing)),
+    );
 }
 
 /// The members of a flat layered spec's axis on `channel`: each layer with
@@ -773,8 +784,9 @@ fn layered_axis<'a>(
         .iter()
         .enumerate()
         .filter(move |(_, layer)| !(channel == "y" && layer.independent_y))
-        .map(move |(idx, layer)| {
-            (idx, layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()))
+        .map(move |(index, layer)| AxisMember {
+            index,
+            own_scale: layer_channel_encoding(layer, spec.coord.as_ref(), channel).and_then(|e| e.scale.as_ref()),
         });
     AxisMembers::new(members, |idx| {
         layer_channel_encoding(&layers[idx], spec.coord.as_ref(), channel)

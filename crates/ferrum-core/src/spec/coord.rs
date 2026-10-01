@@ -115,6 +115,18 @@ pub fn flips_positional_channels(coord: Option<&CoordKind>) -> bool {
     matches!(coord, Some(CoordKind::Flip))
 }
 
+/// The user-facing constructor name for a coord, for refusal messages: the
+/// caller wrote `fm.CoordFixed(...)`, not `CoordKind::Fixed { .. }`.
+pub(crate) fn public_spelling(coord: &CoordKind) -> &'static str {
+    match coord {
+        CoordKind::Cartesian { .. } => "fm.CoordCartesian",
+        CoordKind::Flip => "fm.CoordFlip",
+        CoordKind::Fixed { .. } => "fm.CoordFixed",
+        CoordKind::Polar { .. } => "fm.CoordPolar",
+        CoordKind::Geo { .. } => "fm.CoordGeo",
+    }
+}
+
 /// What *this* coord declares that belongs to the whole PANEL rather than to
 /// one layer's marks — `None` when the coord is entirely a per-layer placement
 /// rule and can therefore ride a single layer of a shared panel.

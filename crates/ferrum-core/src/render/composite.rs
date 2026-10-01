@@ -582,7 +582,7 @@ fn assign_union(domains: &[(usize, SharedDomain)], channel: Channel, out: &mut [
         // concat that renders fine standalone — each sibling keeps its own
         // physical panel either way.
         //
-        // An `Overlay` group is different (`#120`(9), N1): every member draws
+        // An `Overlay` group is different: every member draws
         // onto the ONE panel the group shares, so a member that cannot serve
         // the axis type the group establishes has nowhere else to draw. That
         // refusal is asked by [`refuse_unplaceable_overlay_members`], from
@@ -611,7 +611,10 @@ fn overlay_axis<'g, 'a>(
     channel: Channel,
     leaves: &'g [LeafResolveInput<'a>],
 ) -> AxisMembers<impl Iterator<Item = AxisMember<'a>> + Clone + 'g> {
-    let members = group.iter().enumerate().map(move |(position, &idx)| (position, leaf_own_scale(&leaves[idx], channel)));
+    let members = group
+        .iter()
+        .enumerate()
+        .map(move |(index, &idx)| AxisMember { index, own_scale: leaf_own_scale(&leaves[idx], channel) });
     AxisMembers::new(members, |position| {
         let lead = &leaves[group[position]];
         leaf_post_flip_encoding(lead, channel)
@@ -680,9 +683,9 @@ fn resolve_caller_scale_group(
     Ok(())
 }
 
-/// The Overlay-only half of `#120`(9)/N1: a member of an `Overlay` group
-/// whose own column cannot serve the CONTINUOUS axis the group establishes
-/// (through the caller scale [`establishing_caller_scale`] names over `axis`,
+/// The Overlay-only half of the shared-axis refusal: a member of an
+/// `Overlay` group whose own column cannot serve the axis the group
+/// establishes (through the caller scale [`establishing_caller_scale`] names over `axis`,
 /// the group's [`overlay_axis`], else through the first member's own domain)
 /// has nowhere else to draw, since every member of an `Overlay` shares one
 /// panel. Called from [`resolve_channel`] (the one
@@ -704,13 +707,16 @@ fn resolve_caller_scale_group(
 /// accepts a numeric sibling's column as a category key,
 /// `ensure_category_keyable`).
 ///
-/// A member whose own coord leaves its flip state different from the
-/// panel's draws its exchanged column on the panel's axis, of either kind,
-/// and is refused when that axis cannot draw it, by
-/// [`crate::render::scene_build::require_exchanged_column_servable`], the
-/// question the merged-flat routes' coord-exchange gate asks. So `+`,
-/// `fm.layer` and either output kind refuse the same shape with the same
-/// reason.
+/// A member whose flip state differs from the panel's draws its exchanged
+/// column on the panel's axis, of either kind, and is refused when that axis
+/// cannot draw it, by
+/// [`crate::render::arrow_cast::require_exchanged_column_servable`], the
+/// question the merged-flat routes' coord-exchange gate asks. The refusal
+/// names the member's own coord, or `fm.CoordCartesian` for a member that
+/// declares none beside a flipped first member: `+` stamps that coord on
+/// such a member, so the merged-flat routes name it too. So `+`, `fm.layer`
+/// and either output kind refuse a member whose flip state differs from the
+/// first member's with the same reason.
 ///
 /// Checked directly against each member's own encoding and column, not
 /// against a `SharedDomain` [`resolve_group`] would separately compute: a
@@ -746,7 +752,7 @@ fn refuse_unplaceable_overlay_members<'a>(
     // one the others are judged against, whatever its position or its
     // column's own inferred type. Otherwise the first member's own domain
     // decides.
-    use crate::render::scene_build::{require_exchanged_column_servable, PanelAxisKind};
+    use crate::render::arrow_cast::{require_exchanged_column_servable, PanelAxisKind};
     let (establishing, axis_kind) = match establishing_caller_scale(axis) {
         Some((position, _)) => (position, PanelAxisKind::Continuous),
         None => match leaf_channel_domain(&leaves[group[0]], channel)? {
@@ -758,6 +764,7 @@ fn refuse_unplaceable_overlay_members<'a>(
     let panel_flipped = crate::spec::coord::flips_positional_channels(
         leaves[group[0]].spec.coord.as_ref(),
     );
+    let inherited_cartesian = crate::spec::coord::CoordKind::default();
     for (position, &idx) in group.iter().enumerate() {
         if position == establishing {
             continue; // the establishing member; trivially placeable
@@ -765,18 +772,12 @@ fn refuse_unplaceable_overlay_members<'a>(
         let leaf = &leaves[idx];
         let member_flipped =
             crate::spec::coord::flips_positional_channels(leaf.spec.coord.as_ref());
-        // The member's own coord when it exchanges the member's channels
-        // relative to the panel. A differing flip state with no coord of the
-        // member's own has no declaration to name, so it is left as is, as
-        // the merged-flat routes leave it.
-        let exchanged_by = if member_flipped == panel_flipped {
-            None
-        } else {
-            match leaf.spec.coord.as_ref() {
-                Some(coord) => Some(coord),
-                None => continue,
-            }
-        };
+        // The coord that exchanges the member's channels relative to the
+        // panel: its own, else the Cartesian a coord-less member keeps beside
+        // a flipped first member, the coord `+` stamps on it and the
+        // merged-flat routes name.
+        let exchanged_by = (member_flipped != panel_flipped)
+            .then(|| leaf.spec.coord.as_ref().unwrap_or(&inherited_cartesian));
         if exchanged_by.is_none() && axis_kind == PanelAxisKind::Categorical {
             continue;
         }
@@ -3249,44 +3250,25 @@ mod tests {
         assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
     }
 
-    /// A later layer whose `CoordFlip` lands its string column on layer 0's
-    /// continuous y axis refuses on both routes with the same refusal, the
-    /// exchanged channel naming the column and the axis it cannot serve. A
-    /// flipped layer whose exchanged columns are numeric (servable on the
-    /// continuous y and keyable on the categorical x) renders on both.
-    #[test]
-    fn a_flipped_layers_unservable_exchanged_column_refuses_on_both_routes() {
+    /// One overlay of `lead` and `member` over `batch` on both layering
+    /// routes. `+`: the full scene build of one layered spec whose chart
+    /// coord is `lead`'s and whose member layer carries `member_layer_coord`,
+    /// the coord `+` stamps on it. `fm.layer`: the overlay's shared-scale
+    /// resolution over the two leaves as authored, a composite refusal
+    /// unwrapped to the render error it carries.
+    fn render_on_both_layering_routes(
+        batch: &RecordBatch,
+        lead: ChartSpec,
+        member: ChartSpec,
+        member_layer_coord: Option<crate::spec::coord::CoordKind>,
+    ) -> (Result<(), RenderError>, Result<(), RenderError>) {
         use crate::layout::{ThemeInputs, Viewport};
         use crate::render::chart_config::ChartConfig;
         use crate::render::config::RenderConfig;
-        use crate::render::LayerCoordUnplaceableReason;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("s", DataType::Utf8, false),
-            Field::new("v", DataType::Float64, false),
-            Field::new("w", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
-                Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
-            ],
-        )
-        .unwrap();
-        let encoding = |x: &str, y: &str| {
-            let mut e = Encoding::default();
-            e.x = Some(enc(x));
-            e.y = Some(enc(y));
-            e
-        };
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 600.0, height: 400.0 };
-        let prepare = |spec: &ChartSpec| {
-            crate::render::prepare::prepare_render_inputs(spec, &batch, &theme, viewport, &ChartConfig::default(), None)
-        };
-        let layer = |spec: &ChartSpec| Layer {
+        let layer = |spec: &ChartSpec, coord| Layer {
             mark: Mark::Point,
             encoding: spec.encoding.clone(),
             transforms: Vec::new(),
@@ -3296,64 +3278,158 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false,
-            coord: spec.coord.clone(),
+            coord,
         };
-        // Both routes for layer 0 `x="s", y="v"` and a flipped layer 1 over
-        // `(x1, y1)`: `+` through the full scene build, `fm.layer` through the
-        // overlay's shared-scale resolution.
+        let flat_spec =
+            ChartSpec { layers: Some(vec![layer(&lead, None), layer(&member, member_layer_coord)]), ..lead.clone() };
+        let flat = crate::render::render_svg(
+            &flat_spec,
+            batch,
+            &theme,
+            viewport,
+            &RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .map(|_| ());
+        let leaves: Vec<LeafOwned> = [lead, member]
+            .into_iter()
+            .map(|spec| {
+                let encoding =
+                    crate::render::prepare::prepare_render_inputs(&spec, batch, &theme, viewport, &ChartConfig::default(), None)
+                        .unwrap()
+                        .layers[0]
+                        .encoding
+                        .clone();
+                LeafOwned { encoding, outputs: outputs(batch), batch: batch.clone(), spec }
+            })
+            .collect();
+        let field = |e: &Option<EncodingSpec>| e.as_ref().map(|e| e.field.clone());
+        let nodes = leaves
+            .iter()
+            .map(|leaf| leaf_node(field(&leaf.encoding.x).as_deref(), field(&leaf.encoding.y).as_deref()))
+            .collect();
+        let tree = composite(CompositeLayout::Overlay, nodes, shared_both());
+        let layered = resolve_composite_scales(&tree, &leaves.iter().map(input).collect::<Vec<_>>(), &mut Vec::new())
+            .map(|_| ())
+            .map_err(|e| match e {
+                CompositeResolveError::DomainResolve { source, .. } => source,
+                other => panic!("unexpected composite error {other:?}"),
+            });
+        (flat, layered)
+    }
+
+    /// A batch with a string `s`, numeric `v` and `w`, and a timestamp `t`.
+    fn exchange_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
+            Field::new("t", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+                Arc::new(arrow::array::TimestampMillisecondArray::from(vec![0_i64, 1, 2])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn xy_spec(x: &str, y: &str, coord: Option<crate::spec::coord::CoordKind>) -> ChartSpec {
+        let mut e = Encoding::default();
+        e.x = Some(enc(x));
+        e.y = Some(enc(y));
+        ChartSpec { coord, ..spec_with(e) }
+    }
+
+    fn exchanged_unservable(
+        channel: &'static str,
+        column: &str,
+        dtype: &str,
+        axis_kind: &'static str,
+    ) -> crate::render::LayerCoordUnplaceableReason {
+        crate::render::LayerCoordUnplaceableReason::ExchangedChannelUnservable {
+            channel,
+            column: column.to_string(),
+            dtype: dtype.to_string(),
+            axis_kind,
+        }
+    }
+
+    /// A later layer whose `CoordFlip` lands its string column on layer 0's
+    /// continuous y axis refuses on both routes with the same refusal, the
+    /// exchanged channel naming the column and the axis it cannot serve. A
+    /// flipped layer whose exchanged columns are numeric (servable on the
+    /// continuous y and keyable on the categorical x) renders on both.
+    #[test]
+    fn a_flipped_layers_unservable_exchanged_column_refuses_on_both_routes() {
+        use crate::spec::coord::CoordKind;
+        let batch = exchange_batch();
         let routes = |x1: &str, y1: &str| {
-            let plain = spec_with(encoding("s", "v"));
-            let flipped = ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec_with(encoding(x1, y1)) };
-            let flat_spec = ChartSpec { layers: Some(vec![layer(&plain), layer(&flipped)]), ..plain.clone() };
-            let flat = crate::render::render_svg(
-                &flat_spec,
+            render_on_both_layering_routes(
                 &batch,
-                &theme,
-                viewport,
-                &RenderConfig::default(),
-                &ChartConfig::default(),
+                xy_spec("s", "v", None),
+                xy_spec(x1, y1, Some(CoordKind::Flip)),
+                Some(CoordKind::Flip),
             )
-            .map(|_| ());
-            let leaves: Vec<LeafOwned> = [plain, flipped]
-                .into_iter()
-                .map(|spec| {
-                    let encoding = prepare(&spec).unwrap().layers[0].encoding.clone();
-                    LeafOwned { encoding, outputs: outputs(&batch), batch: batch.clone(), spec }
-                })
-                .collect();
-            let tree = composite(
-                CompositeLayout::Overlay,
-                vec![leaf_node(Some("s"), Some("v")), leaf_node(Some(y1), Some(x1))],
-                shared_both(),
-            );
-            let layered = resolve_composite_scales(&tree, &leaves.iter().map(input).collect::<Vec<_>>(), &mut Vec::new())
-                .map(|_| ())
-                .map_err(|e| match e {
-                    CompositeResolveError::DomainResolve { source, .. } => source,
-                    other => panic!("unexpected composite error {other:?}"),
-                });
-            (flat, layered)
         };
 
         let (flat, layered) = routes("s", "v");
         let flat = flat.expect_err("+ refuses the flipped string column on the continuous y");
         assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal");
         match &flat {
-            RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordFlip", reason } => assert_eq!(
-                **reason,
-                LayerCoordUnplaceableReason::ExchangedChannelUnservable {
-                    channel: "y",
-                    column: "s".to_string(),
-                    dtype: "Utf8".to_string(),
-                    axis_kind: "continuous",
-                }
-            ),
+            RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordFlip", reason } => {
+                assert_eq!(**reason, exchanged_unservable("y", "s", "Utf8", "continuous"))
+            }
             other => panic!("+ refused with {other:?}"),
         }
 
         let (flat, layered) = routes("w", "v");
         assert_eq!(flat, Ok(()), "+ renders a flipped layer with servable columns");
         assert_eq!(layered, Ok(()), "fm.layer renders a flipped layer with servable columns");
+    }
+
+    /// The mirror: layer 0 flipped and a later layer declaring no coord. `+`
+    /// stamps `fm.CoordCartesian` on that layer, and `fm.layer` names the
+    /// same coord for it, so both routes refuse a column the exchange lands
+    /// on an axis that cannot draw it with the same refusal, on either kind
+    /// of panel axis: a string column on a continuous x, a timestamp on a
+    /// categorical x. A later layer whose columns suit the axes they land on
+    /// renders on both.
+    #[test]
+    fn a_coordless_layer_beside_a_flipped_first_layer_refuses_on_both_routes() {
+        use crate::spec::coord::CoordKind;
+        let batch = exchange_batch();
+        let routes = |lead: (&str, &str), member: (&str, &str)| {
+            render_on_both_layering_routes(
+                &batch,
+                xy_spec(lead.0, lead.1, Some(CoordKind::Flip)),
+                xy_spec(member.0, member.1, None),
+                Some(CoordKind::default()),
+            )
+        };
+
+        for (lead, member, column, dtype, axis_kind) in [
+            (("s", "v"), ("s", "v"), "s", "Utf8", "continuous"),
+            (("v", "s"), ("t", "v"), "t", "Timestamp(Millisecond, None)", "categorical"),
+        ] {
+            let (flat, layered) = routes(lead, member);
+            let flat = flat.expect_err("+ refuses the exchanged column the panel axis cannot draw");
+            assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal ({axis_kind} x)");
+            match &flat {
+                RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordCartesian", reason } => {
+                    assert_eq!(**reason, exchanged_unservable("x", column, dtype, axis_kind))
+                }
+                other => panic!("+ refused with {other:?}"),
+            }
+        }
+
+        let (flat, layered) = routes(("s", "v"), ("v", "s"));
+        assert_eq!(flat, Ok(()), "+ renders a coord-less layer whose columns suit the flipped panel");
+        assert_eq!(layered, Ok(()), "fm.layer renders a coord-less layer whose columns suit the flipped panel");
     }
 
     /// A member admitted to a caller scale's axis reads its column as the
