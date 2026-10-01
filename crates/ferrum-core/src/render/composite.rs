@@ -3359,11 +3359,15 @@ mod tests {
         }
     }
 
-    /// A later layer whose `CoordFlip` lands its string column on layer 0's
-    /// continuous y axis refuses on both routes with the same refusal, the
-    /// exchanged channel naming the column and the axis it cannot serve. A
-    /// flipped layer whose exchanged columns are numeric (servable on the
-    /// continuous y and keyable on the categorical x) renders on both.
+    /// A later layer whose `CoordFlip` lands a column on an axis of layer
+    /// 0's that cannot draw it refuses on both routes with the same refusal,
+    /// the exchanged channel naming the column and the axis kind it cannot
+    /// serve, on either kind of panel axis: a string column on the continuous
+    /// y, a timestamp on the categorical x. A flipped layer whose exchanged
+    /// columns suit the axes they land on renders on both: numeric columns
+    /// (servable on the continuous y and keyable on the categorical x), and
+    /// a string column landing on the categorical x, which only a categorical
+    /// judgment of that axis accepts.
     #[test]
     fn a_flipped_layers_unservable_exchanged_column_refuses_on_both_routes() {
         use crate::spec::coord::CoordKind;
@@ -3377,19 +3381,26 @@ mod tests {
             )
         };
 
-        let (flat, layered) = routes("s", "v");
-        let flat = flat.expect_err("+ refuses the flipped string column on the continuous y");
-        assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal");
-        match &flat {
-            RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordFlip", reason } => {
-                assert_eq!(**reason, exchanged_unservable("y", "s", "Utf8", "continuous"))
+        for ((x1, y1), channel, column, dtype, axis_kind) in [
+            (("s", "v"), "y", "s", "Utf8", "continuous"),
+            (("v", "t"), "x", "t", "Timestamp(Millisecond, None)", "categorical"),
+        ] {
+            let (flat, layered) = routes(x1, y1);
+            let flat = flat.expect_err("+ refuses the exchanged column the panel axis cannot draw");
+            assert_eq!(layered, Err(flat.clone()), "fm.layer refuses with the + refusal ({axis_kind} {channel})");
+            match &flat {
+                RenderError::LayerCoordUnplaceable { layer: 1, coord: "fm.CoordFlip", reason } => {
+                    assert_eq!(**reason, exchanged_unservable(channel, column, dtype, axis_kind))
+                }
+                other => panic!("+ refused with {other:?}"),
             }
-            other => panic!("+ refused with {other:?}"),
         }
 
-        let (flat, layered) = routes("w", "v");
-        assert_eq!(flat, Ok(()), "+ renders a flipped layer with servable columns");
-        assert_eq!(layered, Ok(()), "fm.layer renders a flipped layer with servable columns");
+        for (x1, y1) in [("w", "v"), ("v", "s")] {
+            let (flat, layered) = routes(x1, y1);
+            assert_eq!(flat, Ok(()), "+ renders a flipped layer x={x1}, y={y1} whose columns suit the panel");
+            assert_eq!(layered, Ok(()), "fm.layer renders a flipped layer x={x1}, y={y1} whose columns suit the panel");
+        }
     }
 
     /// The mirror: layer 0 flipped and a later layer declaring no coord. `+`
@@ -3568,6 +3579,24 @@ mod tests {
             // The control: layer 0 numeric and scale-less.
             let routes = overlay_routes_on(channel, &[numeric(), later()]);
             let name = format!("numeric layer 0 on {}", channel.as_str());
+            if routes.excluded != (Vec::new(), Vec::new()) {
+                failures.push(format!("{name}: warned {:?}", routes.excluded));
+            }
+            match (routes.leaves, routes.flat) {
+                (Ok(leaves), Ok(flat)) => {
+                    if leaves != vec![(Some((1.0, 80.0)), true); 2] || flat != Some((1.0, 80.0)) {
+                        failures.push(format!("{name}: fm.layer {leaves:?}, + {flat:?}, want the joined (1, 80)"));
+                    }
+                }
+                (leaves, flat) => failures.push(format!("{name}: fm.layer {:?}, + {:?}", leaves.err(), flat.err())),
+            }
+
+            // A layer 0 typed nominal that carries its own continuous scale
+            // does not decide a categorical axis: its scale establishes the
+            // axis, the later equal copy joins it, and nothing warns.
+            let scaled_nominal = || member("p", &[40.0, 60.0, 80.0], Some(domainless(None)));
+            let routes = overlay_routes_with(channel, &[scaled_nominal(), later()], Some(SpecType::Nominal));
+            let name = format!("nominal layer 0 with its own scale on {}", channel.as_str());
             if routes.excluded != (Vec::new(), Vec::new()) {
                 failures.push(format!("{name}: warned {:?}", routes.excluded));
             }
