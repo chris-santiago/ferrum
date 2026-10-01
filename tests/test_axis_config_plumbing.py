@@ -23,8 +23,13 @@ a silently-dropped field fails rather than passing on a bare ``"<svg" in svg``.
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import warnings
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
 
 import polars as pl
 import pytest
@@ -1142,3 +1147,465 @@ class TestConfigSurfaceColorRefusal:
     def test_band_colors_bad_entry_names_its_index(self):
         with pytest.raises(ValueError, match=r"band_colors\[1\]"):
             fm.GridConfig(band_colors=["#f0f0f0", "notacolor"])
+
+
+# ---------------------------------------------------------------------------
+# #141 — secondary-y gridlines owned by the secondary axis
+#
+# A secondary axis always carries its own ticks (the axis chrome is
+# unconditional), so every assertion here reads the secondary's own tick
+# y-positions out of the interactive scene JSON. Different axes sharing the
+# same plot height commonly land ticks at identical pixel positions by pure
+# geometry (e.g. two 11-tick axes both touching the plot's top and bottom
+# edge), so "does a gridline exist at this y" is not decidable by looking at
+# one render alone. Every assertion below instead takes the exact multiset
+# difference between a chart and a baseline that differs only in the thing
+# being toggled, so a coincidental shared tick position never produces a
+# false positive or false negative.
+# ---------------------------------------------------------------------------
+
+
+def _y2_grid_lines(chart, *, panel_index: int = 0) -> list[dict]:
+    """Every node in the interactive scene's flat ``panel.grid`` list."""
+    scene = json.loads(chart.interactive().scene_json)
+    return scene["panels"][panel_index]["grid"]
+
+
+def _y2_tick_ys(chart, *, y_slot: str, panel_index: int = 0) -> list[float]:
+    """Tick-mark y positions of the secondary axis at *y_slot*.
+
+    The axis group for a given ``y_slot`` always renders its ticks, domain
+    line and labels regardless of whether its gridlines are lit, so this
+    reads real tick positions straight from the renderer on both lit and
+    unlit charts.
+    """
+    scene = json.loads(chart.interactive().scene_json)
+    for node in scene["panels"][panel_index]["axes"]:
+        if node["type"] == "group" and node["attrs"] == [["y_slot", y_slot]]:
+            ticks = [
+                child["y1"]
+                for child in node["children"]
+                if child["type"] == "line" and child["y1"] == child["y2"]
+            ]
+            assert ticks, f"y_slot={y_slot!r} axis group has no tick marks"
+            return ticks
+    raise AssertionError(f"no y_slot={y_slot!r} axis group in panel.axes")
+
+
+def _y2_grid_entries(chart, *, panel_index: int = 0) -> Counter:
+    """Multiset of ``(rounded y1, style json)`` over every grid node."""
+    return Counter(
+        (round(g["y1"], 6), json.dumps(g["style"], sort_keys=True))
+        for g in _y2_grid_lines(chart, panel_index=panel_index)
+    )
+
+
+def _y2_added_entries(chart, baseline, *, panel_index: int = 0) -> Counter:
+    """Grid entries present in *chart* beyond what *baseline* already has."""
+    return _y2_grid_entries(chart, panel_index=panel_index) - _y2_grid_entries(
+        baseline, panel_index=panel_index
+    )
+
+
+def _assert_adds_exactly_the_ticks(
+    chart, baseline, tick_ys, *, label: str, panel_index: int = 0
+) -> list[dict]:
+    """*chart* must add exactly one gridline per *tick_ys* versus *baseline*.
+
+    Returns the added entries' styles, so callers can also check them.
+    """
+    added = _y2_added_entries(chart, baseline, panel_index=panel_index)
+    added_ys = sorted(y for (y, _style) in added.elements())
+    expected_ys = sorted(round(y, 6) for y in tick_ys)
+    assert added_ys == expected_ys, f"{label}: added y1s {added_ys} != expected ticks {expected_ys}"
+    return [json.loads(style) for (_y, style) in added.elements()]
+
+
+def _assert_adds_nothing(chart, baseline, *, label: str, panel_index: int = 0) -> None:
+    added = _y2_added_entries(chart, baseline, panel_index=panel_index)
+    assert not added, f"{label}: unexpected added gridlines {list(added.elements())}"
+
+
+def _assert_adds_exactly_these_entries(chart, baseline, expected: Counter, *, label: str) -> None:
+    """*chart* must add exactly *expected* -- position AND style fused into
+    one multiset equality, so a lit cell is pinned on both axes at once
+    rather than checking position and style as two separable claims."""
+    added = _y2_added_entries(chart, baseline)
+    assert added == expected, f"{label}: added {dict(added)} != expected {dict(expected)}"
+
+
+def _assert_matches_theme_major(baseline, baseline_style: dict, *, label: str) -> None:
+    """*baseline_style* must equal the primary axis's own gridline style.
+
+    The caller derives *baseline_style* from the secondary's own "no style"
+    render, which only proves the secondary is internally consistent with
+    itself -- a secondary drawn in the wrong default (e.g. the minor-grid
+    style) would still pass that check. Anchoring against *baseline*'s own
+    primary gridlines (which carry no secondary styling at all) proves
+    "theme major" against an independent source instead.
+    """
+    primary_styles = {style_json for (_y, style_json) in _y2_grid_entries(baseline)}
+    assert primary_styles, f"{label}: baseline has no primary gridlines to anchor theme major"
+    assert primary_styles == {json.dumps(baseline_style, sort_keys=True)}, (
+        f"{label}: secondary's theme-major default {baseline_style} does not match "
+        f"the primary axis's own gridline style {sorted(primary_styles)}"
+    )
+
+
+@pytest.fixture
+def y2_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "b": [3.0, 11.0, 7.0, 25.0, 14.0],
+            "c": [1013.0, 2117.0, 3311.0, 4207.0, 5433.0],
+        }
+    )
+
+
+def _secondary_y_route(df: pl.DataFrame, *, axis=None):
+    """route: ``SecondaryY`` desugar — appends one independent-y layer."""
+    return fm.Chart(df).mark_point().encode(x="a", y="b") + fm.SecondaryY("c", axis=axis)
+
+
+def _independent_layer_route(df: pl.DataFrame, *, axis=None):
+    """route: ``LayerChart(resolve={"y": "independent"})`` — explicit layers."""
+    return fm.layer(
+        fm.Chart(df).mark_line().encode(x="a", y="b"),
+        fm.Chart(df).mark_point().encode(x="a", y=fm.Y("c", axis=axis)),
+        resolve={"y": "independent"},
+    )
+
+
+def _three_stacked_route(df: pl.DataFrame, *, axis=None):
+    """route: three ``SecondaryY`` layers stacked on one chart.
+
+    ``axis=`` patches only the middle (designated) secondary's slot; the
+    other two stay unconfigured. This is what lets the same route exercise
+    both a per-channel show/style source (which only ever addresses one
+    secondary) and a broadcast ``axis_y2`` source (which reaches all three,
+    since it is one chart-level slot, not a per-secondary address).
+    """
+    stacked = df.with_columns(
+        (pl.col("c") * 0.5 + 1000.0).alias("c2"),
+        (pl.col("c") * 2.0 - 500.0).alias("c3"),
+    )
+    return (
+        fm.Chart(stacked).mark_point().encode(x="a", y="b")
+        + fm.SecondaryY("c")
+        + fm.SecondaryY("c2", axis=axis)
+        + fm.SecondaryY("c3")
+    )
+
+
+@dataclass(frozen=True)
+class _Y2Route:
+    """One way a chart acquires one or more secondary y axes.
+
+    ``designated_slot`` is the ``y_slot`` a per-channel ``axis=`` patches;
+    ``all_slots`` is every secondary slot on the route, which a broadcast
+    ``axis_y2=`` source reaches regardless of which one is "designated".
+    """
+
+    build: Callable[..., object]
+    designated_slot: str
+    all_slots: tuple[str, ...]
+
+
+#: Every route the design spec names: ``SecondaryY``, an explicit
+#: independent-y ``LayerChart``, and three stacked secondaries. Derived
+#: once here; every test below draws its routes from this dict rather than
+#: hand-listing them again.
+_Y2_ROUTES: dict[str, _Y2Route] = {
+    "secondary_y": _Y2Route(_secondary_y_route, "1", ("1",)),
+    "independent_y_layer": _Y2Route(_independent_layer_route, "1", ("1",)),
+    "three_stacked_secondaries": _Y2Route(_three_stacked_route, "2", ("1", "2", "3")),
+}
+
+
+@dataclass(frozen=True)
+class _Y2ShowSource:
+    """One surface that could plausibly turn a secondary's gridlines on.
+
+    ``scope`` says which axis slot(s) a ``lit`` source reaches: ``"per_channel"``
+    patches only a route's designated secondary; ``"axis_y2"`` is one
+    chart-level slot that broadcasts to every secondary on the route;
+    ``"chart"`` and ``"none"`` light nothing (isolation -- the chart-level
+    theme flag and the two shared config surfaces never fall back onto a
+    secondary).
+    """
+
+    name: str
+    lit: bool
+    scope: Literal["none", "per_channel", "axis_y2", "chart"]
+    grid_value: bool | None = None
+    chart_patch: Callable[[object], object] | None = None
+
+
+#: Every surface named in the design spec (§4.3/§6.9) that could plausibly
+#: set a secondary's grid show flag, including the no-op baseline. One
+#: declared population -- callers read ``lit``/``scope``/``grid_value``/
+#: ``chart_patch`` off each record instead of dispatching on the name.
+_Y2_SHOW_SOURCES: tuple[_Y2ShowSource, ...] = (
+    _Y2ShowSource("none", lit=False, scope="none"),
+    _Y2ShowSource("axis_y2_grid_true", lit=True, scope="axis_y2", grid_value=True),
+    _Y2ShowSource("per_channel_grid_true", lit=True, scope="per_channel", grid_value=True),
+    _Y2ShowSource(
+        "theme_grid_true",
+        lit=False,
+        scope="chart",
+        chart_patch=lambda c: c.theme(fm.Theme(grid=True)),
+    ),
+    _Y2ShowSource(
+        "configure_axis_grid_true",
+        lit=False,
+        scope="chart",
+        chart_patch=lambda c: c.configure_axis(grid=True),
+    ),
+    _Y2ShowSource(
+        "configure_grid_y_true",
+        lit=False,
+        scope="chart",
+        chart_patch=lambda c: c.configure_grid(y=True),
+    ),
+    _Y2ShowSource("axis_y2_grid_false", lit=False, scope="axis_y2", grid_value=False),
+)
+_Y2_SHOW_BY_NAME = {s.name: s for s in _Y2_SHOW_SOURCES}
+
+
+@dataclass(frozen=True)
+class _Y2StyleSource:
+    """Extra (non-``grid``) stroke fields layered onto a cell, independent
+    of which show source (if any) is lighting it. Crossing every style
+    source against every (unlit) show source is exactly spec §4.3's "style
+    without show draws nothing"; crossing it against every lit show source
+    proves the per-channel > axis_y2 > theme-major chain resolves field by
+    field, not as one all-or-nothing block.
+    """
+
+    name: str
+    axis_y2_style: dict
+    per_channel_style: dict
+
+
+_Y2_STYLE_SOURCES: tuple[_Y2StyleSource, ...] = (
+    _Y2StyleSource("no_style", {}, {}),
+    _Y2StyleSource(
+        "axis_y2_style",
+        {"grid_color": "#ff00ff", "grid_width": 4.0, "grid_dash": [2.0, 2.0], "grid_opacity": 0.5},
+        {},
+    ),
+    _Y2StyleSource(
+        "per_channel_color_wins",
+        {"grid_color": "#ff0000", "grid_width": 3.0},
+        {"grid_color": "#0000ff"},
+    ),
+)
+_Y2_STYLE_BY_NAME = {s.name: s for s in _Y2_STYLE_SOURCES}
+_Y2_NO_STYLE = _Y2_STYLE_BY_NAME["no_style"]
+
+
+def _hex_to_rgba(color: str) -> dict:
+    h = color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return {"r": r, "g": g, "b": b, "a": 255}
+
+
+def _build_y2_cell(df: pl.DataFrame, route: _Y2Route, show: _Y2ShowSource, style: _Y2StyleSource):
+    """Compose one (route, show_source, style_source) population cell."""
+    axis_kwargs = dict(style.per_channel_style)
+    if show.scope == "per_channel":
+        axis_kwargs["grid"] = show.grid_value
+    axis_y2_kwargs = dict(style.axis_y2_style)
+    if show.scope == "axis_y2":
+        axis_y2_kwargs["grid"] = show.grid_value
+
+    axis_obj = fm.Axis(**axis_kwargs) if axis_kwargs else None
+    chart = route.build(df, axis=axis_obj)
+    if axis_y2_kwargs:
+        chart = chart.configure(axis_y2=fm.AxisConfig(**axis_y2_kwargs))
+    if show.chart_patch is not None:
+        chart = show.chart_patch(chart)
+    return chart
+
+
+def _expected_grid_style(
+    baseline_style: dict, per_channel_style: dict, axis_y2_style: dict
+) -> dict:
+    """The field-by-field precedence chain: per-channel > axis_y2 > theme
+    major (*baseline_style*: the resolved style of the same cell rendered
+    with no style override, so the theme's own value is never hand-coded
+    here)."""
+
+    def pick(field_name):
+        if field_name in per_channel_style:
+            return per_channel_style[field_name]
+        if field_name in axis_y2_style:
+            return axis_y2_style[field_name]
+        return None
+
+    color = pick("grid_color")
+    width = pick("grid_width")
+    dash = pick("grid_dash")
+    opacity = pick("grid_opacity")
+    # Start from the theme-major baseline so any other style field the
+    # renderer emits (e.g. stroke_cap/stroke_join) is carried through
+    # unexamined rather than hand-listed here field by field.
+    expected = dict(baseline_style)
+    if color is not None:
+        expected["color"] = _hex_to_rgba(color)
+    if width is not None:
+        expected["width"] = width
+    if dash is not None:
+        expected["dash"] = dash
+    if opacity is not None:
+        # An explicit opacity override sets `stroke_opacity` alongside
+        # `opacity` (absent entirely when nothing overrides it).
+        expected["stroke_opacity"] = opacity
+        expected["opacity"] = opacity
+    return expected
+
+
+def _expected_grid_entries(
+    tick_ys_by_slot: dict[str, list[float]],
+    *,
+    designated_slot: str,
+    style: _Y2StyleSource,
+    baseline_style: dict,
+) -> Counter:
+    """Every (y, style) a lit cell must add, per secondary slot.
+
+    A slot other than the designated one never had a per-channel ``Axis``
+    object at all, so its style resolves from ``axis_y2`` / theme alone --
+    only the designated slot's gridlines can carry a per-channel override.
+    """
+    entries: Counter = Counter()
+    for slot, ys in tick_ys_by_slot.items():
+        per_channel = style.per_channel_style if slot == designated_slot else {}
+        expected_style = _expected_grid_style(baseline_style, per_channel, style.axis_y2_style)
+        style_json = json.dumps(expected_style, sort_keys=True)
+        for y in ys:
+            entries[(round(y, 6), style_json)] += 1
+    return entries
+
+
+class TestAxisY2GridlinesVacuity:
+    """#141 -- secondary gridlines are off unless asked."""
+
+    def test_default_is_off(self, y2_df):
+        """Vacuity baseline: an unconfigured chart lights no secondary route.
+
+        Compared against a chart that has no secondary layer at all -- the
+        primary axis's own gridline count and y-positions are unaffected by
+        whether a secondary axis exists (only its reserved plot width is),
+        so this baseline isolates "did the unlit secondary add anything".
+        """
+        primary_only = fm.Chart(y2_df).mark_point().encode(x="a", y="b")
+        for label, route in _Y2_ROUTES.items():
+            _assert_adds_nothing(route.build(y2_df), primary_only, label=label)
+
+    def test_axis_y2_grid_true_differs_from_default(self, y2_df):
+        """Vacuity control: the one surface this issue adds must move the SVG."""
+        default = _secondary_y_route(y2_df)
+        lit = default.configure(axis_y2=fm.AxisConfig(grid=True))
+        assert lit.to_svg() != default.to_svg()
+
+
+class TestAxisY2GridlinesMatrix:
+    """#141 -- the full required population: every route x every show
+    source x every style source (derived from ``_Y2_ROUTES`` /
+    ``_Y2_SHOW_SOURCES`` / ``_Y2_STYLE_SOURCES`` above, never hand-listed
+    again here).
+
+    A lit cell is pinned on position AND stroke attributes at once: the
+    expected-entries multiset fuses a gridline's y-position with its
+    resolved style into one key, so the assertion can't pass by getting
+    position right while silently drawing the wrong style (or vice versa).
+    An unlit cell must add nothing, *and* must render byte-identically to
+    the unconfigured chart -- true for every style source crossed in, which
+    is exactly spec §4.3's "style without show draws nothing".
+    """
+
+    @pytest.mark.parametrize("style_name", sorted(_Y2_STYLE_BY_NAME))
+    @pytest.mark.parametrize("show_name", sorted(_Y2_SHOW_BY_NAME))
+    @pytest.mark.parametrize("route_name", sorted(_Y2_ROUTES))
+    def test_matrix_cross(self, y2_df, route_name, show_name, style_name):
+        route = _Y2_ROUTES[route_name]
+        show = _Y2_SHOW_BY_NAME[show_name]
+        style = _Y2_STYLE_BY_NAME[style_name]
+        label = f"{route_name}/{show_name}/{style_name}"
+
+        baseline = route.build(y2_df)
+        chart = _build_y2_cell(y2_df, route, show, style)
+
+        if not show.lit:
+            _assert_adds_nothing(chart, baseline, label=label)
+            assert chart.to_svg() == baseline.to_svg(), (
+                f"{label}: a secondary that isn't shown must render byte-identically "
+                "to the unconfigured default, regardless of any style source applied"
+            )
+            return
+
+        slots = route.all_slots if show.scope == "axis_y2" else (route.designated_slot,)
+        tick_ys_by_slot = {slot: _y2_tick_ys(chart, y_slot=slot) for slot in slots}
+
+        no_style_chart = (
+            chart if style.name == "no_style" else _build_y2_cell(y2_df, route, show, _Y2_NO_STYLE)
+        )
+        flat_ys = [y for ys in tick_ys_by_slot.values() for y in ys]
+        baseline_style = _assert_adds_exactly_the_ticks(
+            no_style_chart, baseline, flat_ys, label=f"{label} (theme-major baseline)"
+        )[0]
+        _assert_matches_theme_major(baseline, baseline_style, label=label)
+
+        expected = _expected_grid_entries(
+            tick_ys_by_slot,
+            designated_slot=route.designated_slot,
+            style=style,
+            baseline_style=baseline_style,
+        )
+        _assert_adds_exactly_these_entries(chart, baseline, expected, label=label)
+
+
+class TestAxisY2GridlinesThreeStackedIsolation:
+    """A two-source interaction the single-source matrix cross above can't
+    reach: a broadcast ``axis_y2`` ``True`` together with one secondary's
+    own per-channel override.
+    """
+
+    def test_per_channel_false_overrides_a_broadcast_axis_y2_true(self, y2_df):
+        route = _Y2_ROUTES["three_stacked_secondaries"]
+        baseline = route.build(y2_df)
+        chart = route.build(y2_df, axis=fm.Axis(grid=False)).configure(
+            axis_y2=fm.AxisConfig(grid=True)
+        )
+        tick_ys = _y2_tick_ys(chart, y_slot="1") + _y2_tick_ys(chart, y_slot="3")
+        _assert_adds_exactly_the_ticks(
+            chart, baseline, tick_ys, label="outer two lit, middle overridden off"
+        )
+
+
+class TestAxisY2GridlinesFacet:
+    """Spec §4.3: faceted charts draw one set of lit secondary gridlines
+    per panel -- not a shared set collapsed onto a single panel, and not
+    missing from any panel.
+    """
+
+    def test_each_panel_gets_its_own_lit_secondary_gridlines(self, y2_df):
+        faceted_df = y2_df.with_columns(g=pl.Series(["p", "p", "p", "q", "q"]))
+        baseline = _secondary_y_route(faceted_df).facet(col="g")
+        chart = _secondary_y_route(faceted_df, axis=fm.Axis(grid=True)).facet(col="g")
+
+        scene = json.loads(chart.interactive().scene_json)
+        panel_count = len(scene["panels"])
+        assert panel_count == 2, f"expected 2 facet panels, got {panel_count}"
+
+        for panel_index in range(panel_count):
+            tick_ys = _y2_tick_ys(chart, y_slot="1", panel_index=panel_index)
+            _assert_adds_exactly_the_ticks(
+                chart,
+                baseline,
+                tick_ys,
+                label=f"panel {panel_index}",
+                panel_index=panel_index,
+            )

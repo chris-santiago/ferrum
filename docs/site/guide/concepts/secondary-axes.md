@@ -147,6 +147,24 @@ cascade: per-channel `axis=` on `SecondaryY` beats the chart-level `axis_y2` con
 
 ---
 
+## Gridlines
+
+A secondary axis draws no gridlines by default, even when the chart's theme or a shared `configure_axis(grid=True)` turns on gridlines for the primary axes — `axis_y2` is isolated from those shared surfaces for every field, including `grid`. Ask for them explicitly with `axis_y2=AxisConfig(grid=True)`, or per-channel with `axis=fm.Axis(grid=True)` on `SecondaryY`:
+
+```python
++ fm.SecondaryY(
+    field="conversion_rate",
+    mark="line",
+    axis=fm.Axis(grid=True),
+)
+```
+
+Lit gridlines are drawn at the secondary axis's own tick positions, in addition to the primary's. Style them with `grid_color`, `grid_dash`, `grid_width`, and `grid_opacity` on either surface; the per-channel `axis=` values win over the chart-level `axis_y2` config, field by field, same as every other `axis_y2` style key. There is no `configure_grid(y2=...)` slot — the secondary's gridlines are controlled through `axis_y2` (or the per-channel `axis=`) only.
+
+With three or more stacked secondary axes, each one's `grid` show flag is independent: lighting one does not light the others. This independence applies to the per-channel `axis=fm.Axis(grid=True)` form only — `axis_y2=AxisConfig(grid=True)` is one chart-level slot that broadcasts to every stacked secondary at once. To light some but not all, broadcast with `axis_y2` and then override the ones you don't want with `axis=fm.Axis(grid=False)` on that secondary, which wins per-channel.
+
+---
+
 ## Color coding the axes
 
 When a dual-axis chart has two distinct series with different units, it helps to color-code

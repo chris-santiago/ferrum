@@ -916,8 +916,10 @@ pub struct AxesInput {
     pub show_y: bool,
     /// Secondary y-axis inputs, one per `independent_y` layer, in layer order
     /// (secondary-y-axis, GH #52). Each renders on the right, stacked outward
-    /// beyond `y`'s band (slot 0 stays `y`, driving the left axis and
-    /// gridlines — see spec §6 slot contract). Empty (the default) means the
+    /// beyond `y`'s band (slot 0 stays `y`, driving the left axis and its
+    /// gridlines — see spec §6 slot contract; a secondary draws its own
+    /// gridlines only when asked, see [`AxesInput::apply_show_defaults`]).
+    /// Empty (the default) means the
     /// chart has no independent-y layer, so layout reserves no extra band and
     /// emits no extra axis — byte-identical to the pre-#52 shared path.
     pub secondary_y: Vec<AxisInput>,
@@ -940,14 +942,21 @@ impl AxesInput {
     ///
     /// Idempotent: a slot that is already `Some` is left alone, so running it
     /// twice (or after a per-channel/chart-level fill) changes nothing.
+    ///
     /// Applies to the secondary y axes too — the `axis_y2` position's own
-    /// `grid`/`domain` values reach the same slots via the shared fill path.
+    /// `grid`/`domain` values reach the same slots via the shared fill path —
+    /// with one difference: a secondary's grid defaults OFF, not to
+    /// `theme.grid.grid`. A secondary y axis draws gridlines only when the
+    /// layer's own `Axis(grid=True)` or `axis_y2=AxisConfig(grid=True)` asks,
+    /// so a dual-axis chart never gains a second, misaligned set of horizontal
+    /// lines from the theme default.
     pub(crate) fn apply_show_defaults(&mut self, theme: &super::ThemeInputs) {
-        for axis in [&mut self.x, &mut self.y]
+        let primary = [&mut self.x, &mut self.y]
             .into_iter()
-            .chain(self.secondary_y.iter_mut())
-        {
-            axis.overrides.grid.show.get_or_insert(theme.grid.grid);
+            .map(|axis| (axis, theme.grid.grid));
+        let secondary = self.secondary_y.iter_mut().map(|axis| (axis, false));
+        for (axis, grid_default) in primary.chain(secondary) {
+            axis.overrides.grid.show.get_or_insert(grid_default);
             axis.overrides
                 .domain
                 .show

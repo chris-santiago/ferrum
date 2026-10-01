@@ -384,9 +384,10 @@ pub struct AxisStyleSpec {
     /// `AxesInput::apply_show_defaults` and read by `build_grid`'s per-axis
     /// filter. It no longer writes the single global `theme.grid.grid`, which
     /// is what made `configure(axis_x=AxisConfig(grid=False))` take the y
-    /// gridlines down with it. See `chart_config_manifest.json` for the one
-    /// position that is still inert (`axis_y2`: a secondary y axis never
-    /// contributes gridlines, by design).
+    /// gridlines down with it. At the `axis_y2` position the default is off
+    /// rather than `theme.grid.grid`: a secondary y axis draws gridlines at
+    /// its own ticks only when this, or the layer's own `Axis(grid=True)`,
+    /// asks (see `chart_config_manifest.json`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -913,10 +914,9 @@ pub(crate) const AXIS_CONFIG_EXTRA_KEYS: &[&str] = &[
 /// would leak a secondary-only override onto the primary axes) — could not
 /// express them; they are now per-axis `AxisStyleOverrides` slots the
 /// `axis_y2` fill reaches like any other field. `grid` reaches the same kind
-/// of slot but stays `honored: false` here: a secondary y axis never
-/// contributes gridlines (`build_grid` takes only the panel's primary x/y
-/// pair), which is a design decision about gridline ownership rather than a
-/// wiring gap — the same disposition shape `orient` has at this position. `label_format`/
+/// of slot, with a different default: a secondary's grid is off unless asked
+/// (`AxesInput::apply_show_defaults`), and a lit secondary draws its own
+/// gridlines through `build_grid`. `label_format`/
 /// `label_format_type`/`tick_extra`/`tick_min_step`/`values` reached
 /// `AxisStyleOverrides` already, but their consumers ran on `prep.axes.x`/
 /// `.y` only; `config_apply::resync_ticks_after_axis_merge` now runs the same
@@ -2116,7 +2116,7 @@ mod tests {
     /// ever reads `entry.reason`, so `honored` needs its own consumer, not a
     /// wider net cast over `reason`.
     #[cfg(test)]
-    const KNOWN_UNHONORED_FIELDS: &[&str] = &["AxisConfigSpec.axis_y2.grid"];
+    const KNOWN_UNHONORED_FIELDS: &[&str] = &[];
 
     /// Gives `ManifestEntry::honored` teeth (spec review, T1 cycle 2): reads
     /// the flag out of every manifest entry and asserts the `honored: false`

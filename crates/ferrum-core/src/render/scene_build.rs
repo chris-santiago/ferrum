@@ -1352,9 +1352,11 @@ fn set_rect_edges(node: &mut SceneNode, is_y: bool, lo: Option<f64>, hi: Option<
 }
 
 /// Build and route this panel's grid + axis nodes (MOD-09 extraction of the
-/// inline suppress/grid/route block). Pure extraction — same suppress test, same
-/// `build_grid`, same `grid_above` computation, same above/below `route_axis`
-/// dispatch, same independent-vs-shared axis selection, same polar-axis append.
+/// inline suppress/grid/route block). Same suppress test, same `build_grid`,
+/// same `grid_above` computation, same above/below `route_axis` dispatch, same
+/// independent-vs-shared axis selection, same polar-axis append — plus each lit
+/// secondary y-axis's own gridlines, drawn after the primary's at the
+/// secondary's own tick positions (secondary-y-axis, GH #52/#141).
 #[allow(clippy::too_many_arguments)]
 fn route_panel_axes_and_grid(
     spec: &ChartSpec,
@@ -1366,9 +1368,10 @@ fn route_panel_axes_and_grid(
     // Secondary y-axes for this panel (secondary-y-axis, GH #52): one per
     // `independent_y` layer, orient Right, stacked outward beyond the
     // primary. Routed above/below marks the same way every other axis is
-    // (via `draws_above_marks()`); never contributes gridlines — slot 0 (the
-    // primary `panel_y_axis`) is the only gridline source, so these are never
-    // passed to `build_grid`. Empty on the shared path — byte-identical.
+    // (via `draws_above_marks()`). Each one whose `show_grid` is on (off
+    // unless the layer's `Axis(grid=True)` or `axis_y2.grid` asks) draws
+    // horizontal gridlines at its own ticks, after the primary's. Empty on
+    // the shared path — byte-identical.
     panel_secondary_y: &[&AxisLayout],
     // The y-slot id for each entry in `panel_secondary_y`, in the same order
     // (GH #72). Sourced from the one layer→slot plan so this router consumes the
@@ -1419,15 +1422,30 @@ fn route_panel_axes_and_grid(
             .flat_map(|node| break_grid_node(node, remap, panel.plot_area))
             .collect();
     }
-    let grid: Vec<SceneNode> = grid.into_iter().map(|g| g.node).collect();
+    let mut grid: Vec<SceneNode> = grid.into_iter().map(|g| g.node).collect();
+    // A lit secondary y axis draws its gridlines at its OWN tick positions,
+    // after the primary's and after the break loop above, so a primary-y
+    // break never remaps them (the same exemption its axis chrome has in
+    // `break_axis_nodes` below). No x axis is passed, so the baseline skip
+    // falls back to the plot bottom; no band colors, so bands stay
+    // primary-only. They stay flat top-level `Line`s in the grid block, not
+    // inside the secondary's `Group { y_slot }`: that is the shape the static
+    // mesh pixel-snaps.
+    if !suppress_axes {
+        for secondary in panel_secondary_y {
+            let lines = marks::axis::build_grid(panel.plot_area, None, Some(secondary), theme, &[]);
+            grid.extend(lines.into_iter().map(|g| g.node));
+        }
+    }
     // zindex (B5): gridlines follow their axis above/below the marks. When a
-    // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
-    // above the marks (into the annotation list) alongside that axis. Computed
-    // here so the break-axis remap below still sees the grid before routing.
+    // grid-bearing axis (primary or secondary) requests `zindex >= 1`, the
+    // whole grid block is routed above the marks (into the annotation list)
+    // alongside that axis.
     let grid_above = !suppress_axes
         && [panel_x_axis, panel_y_axis]
             .into_iter()
             .flatten()
+            .chain(panel_secondary_y.iter().copied())
             .any(|a| a.show_grid && a.draws_above_marks());
 
     // Axes — draw from the effective (possibly per-panel) AxisLayout values.
@@ -6963,14 +6981,14 @@ mod tests {
 
     // ── #52 Task 3: layout + axis emission for independent-y layers ─────────
 
-    /// Secondary y-axes never contribute gridlines — only slot 0 (the primary
-    /// `panel_y_axis`) does (spec §4: "Right axes render ticks and labels but
-    /// no gridlines"). A secondary `AxisLayout` with `show_grid: true` and a
-    /// tick count that DIFFERS from the primary's must not change the emitted
-    /// grid at all, while its own axis nodes (ticks/labels/domain line/title)
-    /// DO appear in the routed axis list — one axis per slot.
+    /// A secondary y axis whose `show_grid` is on draws horizontal gridlines
+    /// at its OWN tick positions, across the plot, after the primary's — and
+    /// one whose `show_grid` is off adds nothing. Its tick count deliberately
+    /// differs from the primary's, so the lines it adds cannot be mistaken for
+    /// the primary's. Either way its own axis nodes (ticks/labels/domain
+    /// line/title) appear in the routed axis list — one axis per slot.
     #[test]
-    fn secondary_y_axes_do_not_contribute_gridlines_but_emit_their_own_axis_nodes() {
+    fn a_lit_secondary_y_axis_draws_gridlines_at_its_own_ticks_and_emits_its_own_axis_nodes() {
         use crate::layout::text_metrics::{fixed_width, MockMetrics};
         use crate::layout::{AxisInput, AxisOrient};
 
@@ -7014,8 +7032,8 @@ mod tests {
         let mut secondary_input = AxisInput::new(
             AxisOrient::Right,
             Some("Secondary".into()),
-            // Deliberately a DIFFERENT tick count than the primary's 3 — if the
-            // grid leaked this axis's ticks, the counts below would diverge.
+            // Deliberately a DIFFERENT tick count than the primary's 3, so the
+            // gridlines it adds sit where no primary gridline does.
             vec![
                 "0".into(),
                 "25".into(),
@@ -7025,7 +7043,7 @@ mod tests {
             ],
             None,
         );
-        secondary_input.overrides.grid.show = Some(true); // deliberately try to leak into the grid
+        secondary_input.overrides.grid.show = Some(true);
         secondary_input.overrides.domain.show = Some(true);
         let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
             &secondary_input,
@@ -7071,10 +7089,65 @@ mod tests {
             &[],
         );
 
+        // The primary's gridlines come first, unchanged; then one horizontal
+        // line per secondary tick, spanning the plot, skipping the tick on the
+        // plot bottom (no x axis is passed for a secondary, so the baseline
+        // skip falls back to the plot rect's bottom edge).
         assert_eq!(
-            with_secondary.grid.len(),
-            baseline.grid.len(),
-            "a secondary y-axis must not add or alter gridlines, even with show_grid=true"
+            with_secondary.grid[..baseline.grid.len()],
+            baseline.grid[..],
+            "the primary's gridlines must come first, untouched"
+        );
+        let plot = panel.plot_area;
+        let expected_ys: Vec<f64> = secondary_y
+            .ticks
+            .iter()
+            .map(|t| t.position)
+            .filter(|p| (p - (plot.y + plot.h)).abs() >= 0.5)
+            .collect();
+        assert_eq!(
+            expected_ys.len(),
+            5,
+            "test sanity: all five secondary ticks sit off the plot bottom"
+        );
+        let added_ys: Vec<f64> = with_secondary.grid[baseline.grid.len()..]
+            .iter()
+            .map(|n| match n {
+                SceneNode::Line { x1, y1, x2, y2, .. } => {
+                    assert_eq!((*x1, *x2), (plot.x, plot.x + plot.w), "a y2 gridline spans the plot");
+                    assert_eq!(y1, y2, "a y2 gridline is horizontal");
+                    *y1
+                }
+                other => panic!("a secondary adds only flat top-level lines, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            added_ys, expected_ys,
+            "the secondary's gridlines sit at its own tick positions"
+        );
+        assert!(!with_secondary.grid_above, "a below-marks secondary keeps the grid below");
+
+        // Unlit: the same secondary with `show_grid` off adds no gridline.
+        let mut unlit_y = secondary_y.clone();
+        unlit_y.show_grid = false;
+        let unlit = route_panel_axes_and_grid(
+            &spec,
+            &scales,
+            &panel,
+            &[],
+            None,
+            Some(&primary_y),
+            &[&unlit_y],
+            &[1],
+            false,
+            false,
+            &theme,
+            &chart_config,
+            &[],
+        );
+        assert_eq!(
+            unlit.grid, baseline.grid,
+            "a secondary whose show_grid is off must not add or alter gridlines"
         );
         // But it DOES contribute its own axis nodes (ticks + domain + labels +
         // title) — one axis per slot.
@@ -7085,6 +7158,134 @@ mod tests {
             with_secondary_axis_nodes > baseline_axis_nodes,
             "secondary axis must emit its own scene nodes: baseline={baseline_axis_nodes}, with={with_secondary_axis_nodes}"
         );
+    }
+
+    /// Render `two_layer_dual_y_spec(true)` end to end under `chart_config`,
+    /// with `y1_axis` as layer 1's per-channel `Axis(...)`. Returns the
+    /// secondary axis's layout (from `render_svg`) and the interactive scene's
+    /// one panel `grid` (from `render_scene_json`, parsed back), so a test can
+    /// compare gridline positions against the secondary's ticks on the wire.
+    fn dual_y_secondary_and_scene_grid(
+        chart_config: &super::super::chart_config::ChartConfig,
+        y1_axis: Option<super::super::chart_config::AxisStyleSpec>,
+    ) -> (AxisLayout, Vec<SceneNode>) {
+        let (mut spec, batch) = two_layer_dual_y_spec(true);
+        if let Some(axis) = y1_axis {
+            let layers = spec.layers.as_mut().expect("two layers");
+            layers[1].encoding.y.as_mut().expect("layer 1 y").axis = Some(Box::new(axis));
+        }
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let config = super::super::config::RenderConfig::default();
+        let svg =
+            super::super::render_svg(&spec, &batch, &theme, viewport, &config, chart_config).unwrap();
+        let (json, _, _) =
+            super::super::render_scene_json(&spec, &batch, &theme, viewport, &config, chart_config)
+                .unwrap();
+        let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).unwrap();
+        let secondary = svg.layout.secondary_y_axes[0].clone();
+        (secondary, scene.panels[0].grid.clone())
+    }
+
+    /// Every horizontal gridline in `grid` as `(y, width)`, in paint order.
+    fn horizontal_gridlines(grid: &[SceneNode]) -> Vec<(f64, f64)> {
+        grid.iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { y1, y2, style, .. } if y1 == y2 => Some((*y1, style.width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// End to end through prepare, chart config, layout and the interactive
+    /// scene wire: a secondary y axis draws no gridlines by default (the
+    /// default theme's `grid=True` does not reach it), and draws them at its
+    /// own tick positions — appended to `panel.grid` after the primary's — when
+    /// the layer's own `Axis(grid=True)` or `axis_y2=AxisConfig(grid=True)`
+    /// asks. Gridline width follows the chain per-channel > `axis_y2` > theme
+    /// major, and `axis_y2=AxisConfig(grid=False)` matches the default.
+    #[test]
+    fn secondary_y_gridlines_are_off_by_default_and_lit_by_the_layer_axis_or_axis_y2() {
+        use super::super::chart_config::{AxisConfigSpec, AxisStyleSpec, ChartConfig};
+
+        let axis_y2 = |style: AxisStyleSpec| ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let lit = |width: Option<f64>| AxisStyleSpec {
+            grid: Some(true),
+            grid_width: width,
+            ..Default::default()
+        };
+
+        let (secondary, default_grid) =
+            dual_y_secondary_and_scene_grid(&ChartConfig::default(), None);
+        assert!(!secondary.show_grid, "a secondary's grid defaults off");
+        let plot_bottom = default_grid
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Line { x1, x2, y1, y2, .. } if x1 == x2 => Some(y1.max(*y2)),
+                _ => None,
+            })
+            .expect("test sanity: the primary draws vertical gridlines");
+        let secondary_ys: Vec<f64> = secondary
+            .ticks
+            .iter()
+            .map(|t| t.position)
+            .filter(|p| (p - plot_bottom).abs() >= 0.5)
+            .collect();
+        assert!(!secondary_ys.is_empty(), "test sanity: the secondary has ticks off the baseline");
+        let theme_width = ThemeInputs::default().sizes.grid_width;
+
+        let (_, off_grid) =
+            dual_y_secondary_and_scene_grid(&axis_y2(AxisStyleSpec {
+                grid: Some(false),
+                ..Default::default()
+            }), None);
+        assert_eq!(off_grid, default_grid, "axis_y2 grid=False renders as the default");
+
+        let cases: [(&str, ChartConfig, Option<AxisStyleSpec>, f64); 4] = [
+            ("axis_y2 grid=True", axis_y2(lit(None)), None, theme_width),
+            ("per-channel Axis(grid=True)", ChartConfig::default(), Some(lit(None)), theme_width),
+            ("axis_y2 grid_width", axis_y2(lit(Some(2.5))), None, 2.5),
+            (
+                "per-channel grid_width over axis_y2 grid_width",
+                axis_y2(lit(Some(2.5))),
+                Some(lit(Some(4.0))),
+                4.0,
+            ),
+        ];
+        for (name, chart_config, y1_axis, width) in cases {
+            let (_, grid) = dual_y_secondary_and_scene_grid(&chart_config, y1_axis);
+            assert_eq!(
+                grid[..default_grid.len()],
+                default_grid[..],
+                "{name}: the primary's gridlines come first, unchanged"
+            );
+            let added = horizontal_gridlines(&grid[default_grid.len()..]);
+            // serde_json's float parse may land one ulp off the layout's
+            // value, hence the tolerance on position (width is exact).
+            assert!(
+                added.len() == secondary_ys.len()
+                    && added
+                        .iter()
+                        .zip(&secondary_ys)
+                        .all(|(&(y, w), &tick)| (y - tick).abs() < 1e-9 && w == width),
+                "{name}: one flat line per secondary tick at width {width}; \
+                 got {added:?}, ticks {secondary_ys:?}"
+            );
+            assert_eq!(
+                grid.len() - default_grid.len(),
+                added.len(),
+                "{name}: the secondary adds only flat horizontal lines"
+            );
+        }
     }
 
     /// End-to-end (`render_svg`): a dual-axis LayerChart reserves BOTH margin
@@ -12641,6 +12842,19 @@ mod tests {
             chart_config: &super::super::chart_config::ChartConfig,
             breaks: &[break_axis::BreakRemap<'_>],
         ) -> PanelAxisGrid {
+            self.route_with_secondaries(chart_config, breaks, &[], &ThemeInputs::default())
+        }
+
+        /// [`route`](Self::route) with `secondaries` routed in as slots
+        /// 1..=n, under `theme`.
+        fn route_with_secondaries(
+            &self,
+            chart_config: &super::super::chart_config::ChartConfig,
+            breaks: &[break_axis::BreakRemap<'_>],
+            secondaries: &[&crate::layout::AxisLayout],
+            theme: &ThemeInputs,
+        ) -> PanelAxisGrid {
+            let slots: Vec<usize> = (1..=secondaries.len()).collect();
             route_panel_axes_and_grid(
                 &self.spec,
                 &self.scales,
@@ -12648,15 +12862,254 @@ mod tests {
                 &[&self.x_axis, &self.y_axis],
                 Some(&self.x_axis),
                 Some(&self.y_axis),
-                &[],
-                &[],
+                secondaries,
+                &slots,
                 true,
                 true,
-                &ThemeInputs::default(),
+                theme,
                 chart_config,
                 breaks,
             )
         }
+
+        /// A lit Right-orient secondary y axis on this panel, five ticks (so
+        /// its gridlines fall where none of the primary's three do), with a
+        /// 3px gridline width that tells its lines apart from the primary's.
+        fn lit_secondary(&self) -> crate::layout::AxisLayout {
+            use crate::layout::text_metrics::{fixed_width, MockMetrics};
+            use crate::layout::{AxisInput, AxisOrient};
+
+            let labels = ["0", "25", "50", "75", "100"];
+            let mut input =
+                AxisInput::new(AxisOrient::Right, None, labels.map(String::from).to_vec(), None);
+            input.overrides.domain.show = Some(true);
+            input.overrides.grid.show = Some(true);
+            input.overrides.grid.width = Some(SECONDARY_GRID_WIDTH);
+            let m = MockMetrics {
+                measure: fixed_width(8.0),
+                line_h_factor: 1.2,
+            };
+            crate::layout::axis::layout_y_axis(
+                &input,
+                self.plot_area(),
+                0,
+                11.0,
+                13.0,
+                8.0,
+                4.0,
+                &m,
+            )
+            .0
+        }
+    }
+
+    /// The gridline width [`GridFixture::lit_secondary`] gives its axis.
+    const SECONDARY_GRID_WIDTH: f64 = 3.0;
+
+    /// The `y` of every horizontal gridline in `nodes` drawn at
+    /// `SECONDARY_GRID_WIDTH`, in paint order.
+    fn secondary_gridline_ys(nodes: &[SceneNode]) -> Vec<f64> {
+        nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { y1, y2, style, .. }
+                    if y1 == y2 && style.width == SECONDARY_GRID_WIDTH =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A primary-y break leaves a secondary's gridlines exactly where its own
+    /// (unbroken) scale put them, as it leaves the secondary's axis chrome —
+    /// while the primary's horizontal gridlines DO move, so the pin cannot
+    /// pass on a break that never reached the grid.
+    #[test]
+    fn a_primary_y_break_leaves_the_secondary_gridlines_unremapped() {
+        let fixture = GridFixture::new();
+        let secondary = fixture.lit_secondary();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let theme = ThemeInputs::default();
+        let route = |breaks: &[break_axis::BreakRemap<'_>]| {
+            fixture.route_with_secondaries(&chart_config, breaks, &[&secondary], &theme)
+        };
+        let primary_ys = |result: &PanelAxisGrid| -> Vec<f64> {
+            result
+                .grid
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { y1, y2, style, .. }
+                        if y1 == y2 && style.width != SECONDARY_GRID_WIDTH =>
+                    {
+                        Some(*y1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let unbroken = route(&[]);
+        let (result, pixels) = grid_fixture_break(AlignAxis::Y);
+        let remap = break_axis::BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), pixels, &result);
+        let broken = route(std::slice::from_ref(&remap));
+
+        assert!(
+            !secondary_gridline_ys(&unbroken.grid).is_empty(),
+            "test sanity: the lit secondary draws gridlines"
+        );
+        assert_eq!(
+            secondary_gridline_ys(&broken.grid),
+            secondary_gridline_ys(&unbroken.grid),
+            "a primary-y break must not remap the secondary's gridlines"
+        );
+        assert_ne!(
+            primary_ys(&broken),
+            primary_ys(&unbroken),
+            "test sanity: the primary's horizontal gridlines DO move under the break"
+        );
+    }
+
+    /// A secondary with `zindex >= 1` and gridlines on moves the whole grid
+    /// block above the marks, as a primary axis does; the same secondary with
+    /// its gridlines off does not.
+    #[test]
+    fn a_lit_above_marks_secondary_routes_the_grid_block_above_the_marks() {
+        let fixture = GridFixture::new();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let theme = ThemeInputs::default();
+        let mut above = fixture.lit_secondary();
+        above.zindex = Some(1);
+
+        let lit = fixture.route_with_secondaries(&chart_config, &[], &[&above], &theme);
+        assert!(lit.grid_above, "a lit zindex>=1 secondary routes the grid above the marks");
+
+        above.show_grid = false;
+        let unlit = fixture.route_with_secondaries(&chart_config, &[], &[&above], &theme);
+        assert!(
+            !unlit.grid_above,
+            "an unlit zindex>=1 secondary has no gridlines to lift"
+        );
+        assert!(
+            !fixture.route(&chart_config, &[]).grid_above,
+            "test sanity: the primary pair alone keeps the grid below"
+        );
+    }
+
+    /// Minor gridlines on a lit secondary follow the primary's rule: drawn at
+    /// its own minor ticks only when `theme.grid.minor` is on, before its
+    /// majors.
+    #[test]
+    fn a_lit_secondary_draws_minor_gridlines_only_under_a_minor_theme() {
+        let fixture = GridFixture::new();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let mut secondary = fixture.lit_secondary();
+        let plot = fixture.plot_area();
+        // Midway between the secondary's first two majors.
+        let minor_y = (secondary.ticks[0].position + secondary.ticks[1].position) / 2.0;
+        secondary.minor_ticks = vec![crate::layout::TickLayout {
+            position: minor_y,
+            ..secondary.ticks[0].clone()
+        }];
+        let is_minor_at = |n: &SceneNode| {
+            matches!(n, SceneNode::Line { x1, y1, y2, .. }
+                if *y1 == minor_y && *y2 == minor_y && *x1 == plot.x)
+        };
+
+        let mut minor_theme = ThemeInputs::default();
+        minor_theme.grid.minor = true;
+        let with_minor =
+            fixture.route_with_secondaries(&chart_config, &[], &[&secondary], &minor_theme);
+        let without =
+            fixture.route_with_secondaries(&chart_config, &[], &[&secondary], &ThemeInputs::default());
+
+        assert_eq!(
+            with_minor.grid.iter().filter(|n| is_minor_at(n)).count(),
+            1,
+            "a minor theme draws the secondary's minor gridline"
+        );
+        assert_eq!(
+            without.grid.iter().filter(|n| is_minor_at(n)).count(),
+            0,
+            "without a minor theme the secondary draws no minor gridline"
+        );
+
+        let minor_idx = with_minor
+            .grid
+            .iter()
+            .position(is_minor_at)
+            .expect("the secondary's minor gridline is drawn");
+        let major_idx = with_minor
+            .grid
+            .iter()
+            .position(|n| matches!(n, SceneNode::Line { style, .. } if style.width == SECONDARY_GRID_WIDTH))
+            .expect("the secondary's major gridline is drawn");
+        assert!(
+            minor_idx < major_idx,
+            "the secondary's minor gridline must paint before its majors so majors render on top: minor_idx={minor_idx}, major_idx={major_idx}"
+        );
+    }
+
+    /// Band fills stay the primary y axis's: a lit secondary adds its lines
+    /// but no band of its own.
+    #[test]
+    fn grid_band_colors_stay_primary_only_with_a_lit_secondary() {
+        let fixture = GridFixture::new();
+        let secondary = fixture.lit_secondary();
+        let banded = banded_grid_config(&["#eeeeee", "#dddddd"]);
+        let theme = ThemeInputs::default();
+
+        let primary_only = fixture.route(&banded, &[]);
+        let with_secondary = fixture.route_with_secondaries(&banded, &[], &[&secondary], &theme);
+
+        assert!(!band_spans(&primary_only).is_empty(), "test sanity: the primary paints bands");
+        assert_eq!(
+            band_spans(&with_secondary),
+            band_spans(&primary_only),
+            "a lit secondary must not add or move a band fill"
+        );
+        assert!(
+            !secondary_gridline_ys(&with_secondary.grid).is_empty(),
+            "test sanity: the secondary's lines are drawn"
+        );
+    }
+
+    /// A secondary's baseline skip is the plot bottom, whatever the x axis:
+    /// with the x axis on top, its tick on the plot bottom is skipped and its
+    /// tick on the top edge (where the relocated x axis line now sits) is drawn.
+    #[test]
+    fn a_secondary_gridline_baseline_skip_is_the_plot_bottom_even_with_a_top_x_axis() {
+        let mut fixture = GridFixture::new();
+        let plot = fixture.plot_area();
+        fixture.x_axis.orient = crate::layout::AxisOrient::Top;
+        fixture.x_axis.axis_line.y = plot.y;
+        let mut secondary = fixture.lit_secondary();
+        let bottom = plot.y + plot.h;
+        // Put a tick on each plot edge (layout insets them), so the skip has
+        // a candidate at both the top x axis line and the plot bottom.
+        let last = secondary.ticks.len() - 1;
+        secondary.ticks[0].position = plot.y;
+        secondary.ticks[last].position = bottom;
+        let ticks: Vec<f64> = secondary.ticks.iter().map(|t| t.position).collect();
+        assert!(
+            ticks.iter().any(|p| (p - bottom).abs() < 0.5)
+                && ticks.iter().any(|p| (p - plot.y).abs() < 0.5),
+            "test sanity: the secondary has a tick on each plot edge; got {ticks:?}"
+        );
+
+        let routed = fixture.route_with_secondaries(
+            &super::super::chart_config::ChartConfig::default(),
+            &[],
+            &[&secondary],
+            &ThemeInputs::default(),
+        );
+        let ys = secondary_gridline_ys(&routed.grid);
+        let expected: Vec<f64> = ticks.into_iter().filter(|p| (p - bottom).abs() >= 0.5).collect();
+        assert_eq!(
+            ys, expected,
+            "the secondary skips only its plot-bottom tick, top x axis or not"
+        );
     }
 
     /// The break these tests run against a 20…320 plot rect: a `(400, 600)` gap
