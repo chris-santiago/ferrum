@@ -610,14 +610,17 @@ def _close(a: tuple[float, float], b: tuple[float, float], tol: float = 1e-2) ->
     return math.hypot(a[0] - b[0], a[1] - b[1]) < tol
 
 
+def _line_nodes_of(chart: fm.Chart) -> list[dict]:
+    """Every line node in the real scene JSON, in panel and batch order."""
+    scene = json.loads(chart.interactive().scene_json)
+    return [
+        n for p in scene["panels"] for b in p["marks"] if b["kind"] == "line" for n in b["nodes"]
+    ]
+
+
 def _single_line_node(chart: fm.Chart) -> tuple[list[tuple[float, float]], list[float]]:
     """The one line node's `(points, widths)`, read from the real scene JSON."""
-    scene = json.loads(chart.interactive().scene_json)
-    found = []
-    for panel in scene["panels"]:
-        for batch in panel["marks"]:
-            if batch["kind"] == "line":
-                found.extend(batch["nodes"])
+    found = _line_nodes_of(chart)
     assert len(found) == 1, f"expected one line node, got {len(found)}"
     node = found[0]
     return [tuple(p) for p in node["points"]], node["widths"]
@@ -1132,3 +1135,58 @@ def test_unsized_dashed_line_is_byte_identical_to_the_pre_fix_capture() -> None:
 def test_unsized_curved_round_cap_join_line_is_byte_identical_to_the_pre_fix_capture() -> None:
     svg = _vacuity_curved_chart().to_svg()
     assert hashlib.sha256(svg.encode()).hexdigest() == _VACUITY_CURVED_ROUND_SHA256
+
+
+# ---------------------------------------------------------------------------
+# Break axis: a sized line cut by a primary-y gap keeps tapering. Each piece
+# carries the unbroken line's width at every kept vertex and, at each cut,
+# the width linear in the cut's fraction of the source edge (spec §6.4); the
+# static outline is `w/2` thick there. The expected widths come from the
+# unbroken chart's scene and the data fraction of the gap edge along the
+# crossing edge, not from the broken scene under test.
+# ---------------------------------------------------------------------------
+
+_BREAK_Y = [0.0, 100.0, 500.0, 900.0]
+_BREAK_GAP = (150.0, 850.0)
+
+
+def _break_line_chart(*, broken: bool) -> fm.Chart:
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": _BREAK_Y, "v": [1.0, 2.0, 3.0, 4.0]})
+    chart = (
+        fm.Chart(df).mark_line().encode(x="x", y="y", size="v").properties(width=320, height=220)
+    )
+    return chart + fm.BreakAxis(axis="y", gap=_BREAK_GAP) if broken else chart
+
+
+def test_a_sized_line_cut_by_a_break_tapers_with_interpolated_widths_at_each_cut() -> None:
+    _, source = _single_line_node(_break_line_chart(broken=False))
+    lo, hi = _BREAK_GAP
+    y = _BREAK_Y
+    # Vertex 2 (y=500) sits in the gap: edge 1 leaves at `lo`, edge 2 re-enters at `hi`.
+    t_exit = (lo - y[1]) / (y[2] - y[1])
+    t_entry = (hi - y[2]) / (y[3] - y[2])
+    exit_w = source[1] + (source[2] - source[1]) * t_exit
+    entry_w = source[2] + (source[3] - source[2]) * t_entry
+    expected = [[source[0], source[1], exit_w], [entry_w, source[3]]]
+
+    chart = _break_line_chart(broken=True)
+    nodes = _line_nodes_of(chart)
+    assert [len(n["points"]) for n in nodes] == [3, 2]
+    for node, want in zip(nodes, expected):
+        assert node["widths"] == pytest.approx(want, abs=1e-6)
+
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 2, "one tapered outline per piece"
+    for node, outline, want in zip(nodes, outlines, expected):
+        points = [tuple(p) for p in node["points"]]
+        vertices = _outline_vertices(outline)
+        for i, (p, w) in enumerate(zip(points, want)):
+            j = i + 1 if i + 1 < len(points) else i - 1
+            nx, ny = _unit_normal(p, points[j]) if j > i else _unit_normal(points[j], p)
+            for sign in (1, -1):
+                target = (p[0] + sign * nx * w / 2, p[1] + sign * ny * w / 2)
+                assert _has_vertex_near(vertices, target), (
+                    f"vertex {i}: no corner at {target} (w={w})"
+                )
+    # The cut widths are neither endpoint's: the taper runs through the cut.
+    assert source[1] < exit_w < source[2] and source[2] < entry_w < source[3]

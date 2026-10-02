@@ -376,9 +376,73 @@ struct ClippedBand {
 /// exists to remove). Geometric comparison of the output against the input
 /// vertices is the same class of inference and fails the same way, since a
 /// crossing can land exactly on a dropped vertex's position.
+///
+/// `sources` aligns one for one with `pieces`: where on the source each
+/// piece's points came from, which is what carries a tapered stroke's widths
+/// onto its pieces ([`PolylineSplit::tapered`]).
 struct PolylineSplit {
-    pieces: Vec<Vec<(f64, f64)>>,
+    pieces: Vec<PiecePoints>,
+    sources: Vec<Vec<SourcePoint>>,
     cut: bool,
+}
+
+/// One split piece's placed vertices.
+type PiecePoints = Vec<(f64, f64)>;
+
+/// Where on a split polyline's source one piece point lies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SourcePoint {
+    /// Source vertex `i`, kept as it was.
+    Vertex(usize),
+    /// A gap-edge crossing at fraction `t` of source edge `edge` (from vertex
+    /// `edge` to vertex `edge + 1`); the edge is straight, so `t` is also its
+    /// fraction of arc length.
+    Cut { edge: usize, t: f64 },
+}
+
+impl SourcePoint {
+    /// The width at this point of a stroke whose source vertices carry
+    /// `widths`, by the taper helper's one interpolation rule.
+    fn width_in(self, widths: &[f64]) -> Option<f64> {
+        match self {
+            Self::Vertex(i) => widths.get(i).copied(),
+            Self::Cut { edge, t } => ferrum_scene::width_at(widths, edge, t),
+        }
+    }
+}
+
+impl PolylineSplit {
+    /// Each piece paired with its widths: the source width at every kept
+    /// vertex and the interpolated width at every cut. `widths` must align
+    /// with the source vertices ([`tapered_widths_align`]); a malformed list
+    /// never reaches a split, so every piece's widths come from it by the one
+    /// interpolation rule.
+    fn tapered(self, widths: Option<&[f64]>) -> Vec<(PiecePoints, Option<Vec<f64>>)> {
+        // Aligned widths cover every source vertex and edge, so `width_in`
+        // finds each one; the verbatim fallback is only the no-panic spelling.
+        let piece_widths = |sources: &[SourcePoint]| {
+            widths.map(|w| {
+                let interpolated: Option<Vec<f64>> = sources.iter().map(|s| s.width_in(w)).collect();
+                interpolated.unwrap_or_else(|| w.to_vec())
+            })
+        };
+        self.pieces
+            .into_iter()
+            .zip(self.sources)
+            .map(|(piece, sources)| (piece, piece_widths(&sources)))
+            .collect()
+    }
+}
+
+/// Whether a stroke of `vertices` vertices can be cut with its `widths`: none,
+/// or a valid list aligned one for one. A malformed list (misaligned, or a
+/// width that is non-finite or not `> 0`) is never cut: cutting would move it
+/// onto pieces it was not written for, where it could pass as aligned or
+/// lose the bad width inside a gap. The node is remapped vertex by vertex
+/// instead, keeping its vertex count and widths, so the drawing consumer
+/// refuses it with the source's own error.
+fn tapered_widths_align(vertices: usize, widths: Option<&[f64]>) -> bool {
+    widths.is_none_or(|w| ferrum_scene::validate_widths(vertices, w).is_ok())
 }
 
 /// Which of a clipped rect piece's four edges a break's gap produced — the
@@ -940,12 +1004,15 @@ impl<'a> BreakRemap<'a> {
                 push_line_pieces(&pieces, &style, out);
             }
             SceneNode::Polyline { points, style, widths } => {
+                if !tapered_widths_align(points.len(), widths.as_deref()) {
+                    let mut node = SceneNode::Polyline { points, style, widths };
+                    self.remap_node(&mut node);
+                    out.push(node);
+                    return;
+                }
                 let split = self.split_polyline(&points);
-                // An uncut split is the source vertices placed one for one, so
-                // their widths still align; a cut piece carries none.
-                let widths = if split.cut { None } else { widths };
-                for piece in split.pieces {
-                    out.push(SceneNode::Polyline { points: piece, style: style.clone(), widths: widths.clone() });
+                for (piece, widths) in split.tapered(widths.as_deref()) {
+                    out.push(SceneNode::Polyline { points: piece, style: style.clone(), widths });
                 }
             }
             // An OPEN path of straight-line commands is a polyline in path
@@ -971,13 +1038,16 @@ impl<'a> BreakRemap<'a> {
                 match straight_path_points(&commands) {
                     Some(points) => {
                         let split = self.split_polyline(&points);
-                        if split.cut {
-                            for piece in split.pieces {
+                        // `straight_path_points` yields one vertex per
+                        // command, so a well-formed `widths` aligns with
+                        // `points`.
+                        if split.cut && tapered_widths_align(points.len(), widths.as_deref()) {
+                            for (piece, widths) in split.tapered(widths.as_deref()) {
                                 out.push(SceneNode::Path {
                                     commands: path_commands(&piece, false),
                                     style: style.clone(),
                                     closed: false,
-                                    widths: None,
+                                    widths,
                                 });
                             }
                         } else {
@@ -1048,8 +1118,9 @@ impl<'a> BreakRemap<'a> {
                 (self.data_at(along), across)
             })
             .collect();
-        // Each piece is one segment index plus its vertices in `(data, across)`.
-        let mut pieces: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
+        // Each piece is one segment index plus its vertices in `(data, across)`
+        // and where on the source each came from.
+        let mut pieces: Vec<(usize, PiecePoints, Vec<SourcePoint>)> = Vec::new();
         // Whether the last piece ends exactly at the previous vertex, so the
         // next edge can continue it instead of starting a new one.
         let mut open = false;
@@ -1063,13 +1134,13 @@ impl<'a> BreakRemap<'a> {
             // place to decide that: keep it when it is visible, exactly as the
             // per-vertex model did.
             match self.segment_index(d) {
-                Some(k) => pieces.push((k, vec![(d, across)])),
+                Some(k) => pieces.push((k, vec![(d, across)], vec![SourcePoint::Vertex(0)])),
                 // Dropped: it has no visible position.
                 None => cut = true,
             }
         }
 
-        for edge in vertices.windows(2) {
+        for (e, edge) in vertices.windows(2).enumerate() {
             let ((d0, a0), (d1, a1)) = (edge[0], edge[1]);
             if !d0.is_finite() || !d1.is_finite() {
                 // A vertex with no data position at all (a pixel already parked
@@ -1079,13 +1150,9 @@ impl<'a> BreakRemap<'a> {
                 cut = true;
                 continue;
             }
-            let across_at = |d: f64| {
-                if d1 == d0 {
-                    a0
-                } else {
-                    a0 + (d - d0) / (d1 - d0) * (a1 - a0)
-                }
-            };
+            let fraction = |d: f64| if d1 == d0 { 0.0 } else { (d - d0) / (d1 - d0) };
+            let across_at = |d: f64| if d1 == d0 { a0 } else { a0 + fraction(d) * (a1 - a0) };
+            let cut_at = |d: f64| ((d, across_at(d)), SourcePoint::Cut { edge: e, t: fraction(d) });
             let (start_seg, end_seg) = (self.segment_index(d0), self.segment_index(d1));
             let spans = self.data_spans(d0, d1);
             if spans.is_empty() {
@@ -1104,30 +1171,28 @@ impl<'a> BreakRemap<'a> {
                 // Substituting an interpolated gap-edge crossing for a source
                 // endpoint IS the cut, whichever end it happens at.
                 cut |= !from_vertex || !to_vertex;
-                let entry = if from_vertex { (d0, a0) } else { (d_in, across_at(d_in)) };
-                let exit = if to_vertex { (d1, a1) } else { (d_out, across_at(d_out)) };
+                let entry = if from_vertex { ((d0, a0), SourcePoint::Vertex(e)) } else { cut_at(d_in) };
+                let exit = if to_vertex { ((d1, a1), SourcePoint::Vertex(e + 1)) } else { cut_at(d_out) };
                 match pieces.last_mut() {
-                    Some((piece_seg, pts)) if open && *piece_seg == k && from_vertex => {
-                        pts.push(exit);
+                    Some((piece_seg, pts, srcs)) if open && *piece_seg == k && from_vertex => {
+                        pts.push(exit.0);
+                        srcs.push(exit.1);
                     }
-                    _ => pieces.push((k, vec![entry, exit])),
+                    _ => pieces.push((k, vec![entry.0, exit.0], vec![entry.1, exit.1])),
                 }
                 open = to_vertex;
             }
         }
 
-        PolylineSplit {
-            pieces: pieces
-                .into_iter()
-                .map(|(k, pts)| {
-                    let seg = &self.result.segments[k];
-                    pts.into_iter()
-                        .map(|(d, across)| self.join(seg.pixel_for(d), across))
-                        .collect()
-                })
-                .collect(),
-            cut,
-        }
+        let (pieces, sources) = pieces
+            .into_iter()
+            .map(|(k, pts, srcs)| {
+                let seg = &self.result.segments[k];
+                let placed = pts.into_iter().map(|(d, across)| self.join(seg.pixel_for(d), across)).collect();
+                (placed, srcs)
+            })
+            .unzip();
+        PolylineSplit { pieces, sources, cut }
     }
 
     /// Re-place one fixed-size glyph — the [`BreakPlacement::MoveGlyph`] model.

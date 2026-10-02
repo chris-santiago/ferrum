@@ -2648,3 +2648,231 @@ fn realign_keys_composes_across_two_remap_passes_without_colliding() {
          output already used it; got {second_keys:?}"
     );
 }
+
+// ── Tapered strokes across a break ───────────────────────────────────────
+//
+// A tapered piece keeps the source width at every kept vertex and takes
+// `ferrum_scene::width_at` of the source edge at every cut, where the cut
+// fraction is the crossing's fraction of the source edge. Fixture arithmetic
+// against `guide_break()` as above (data_at(px) = (400 - px) * 2.5, gap
+// (150, 850)).
+
+fn node_widths(node: &SceneNode) -> Option<Vec<f64>> {
+    match node {
+        SceneNode::Polyline { widths, .. } | SceneNode::Path { widths, .. } => widths.clone(),
+        other => panic!("expected a Polyline or Path, got {other:?}"),
+    }
+}
+
+fn assert_widths(node: &SceneNode, expected: &[f64], ctx: &str) {
+    let got = node_widths(node).unwrap_or_else(|| panic!("{ctx}: the piece lost its widths"));
+    assert_eq!(got.len(), expected.len(), "{ctx}: one width per vertex; got {got:?}");
+    for (g, w) in got.iter().zip(expected) {
+        assert!((g - w).abs() < 1e-12, "{ctx}: got {got:?}, want {expected:?}");
+    }
+}
+
+#[test]
+fn a_tapered_polyline_cut_by_a_gap_keeps_vertex_widths_and_interpolates_at_each_cut() {
+    let br = guide_break();
+    // Data 0, 125, 500 (in the gap), 900, 1000.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (2.0, 350.0), (10.0, 200.0), (20.0, 40.0), (25.0, 0.0)],
+        style: stroke(),
+        widths: Some(vec![1.0, 2.0, 6.0, 4.0, 8.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 2, "cut into two pieces; got {:?}", split.nodes);
+    // Edge 1 runs data 125 -> 500 and leaves at 150: t = 25 / 375.
+    assert_widths(
+        &split.nodes[0],
+        &[1.0, 2.0, 2.0 + 4.0 / 15.0],
+        "the lower piece",
+    );
+    assert_eq!(node_widths(&split.nodes[0]).unwrap()[..2], [1.0, 2.0], "kept vertices keep their exact widths");
+    // Edge 2 runs data 500 -> 900 and re-enters at 850: t = 350 / 400.
+    assert_widths(&split.nodes[1], &[4.25, 4.0, 8.0], "the upper piece");
+    assert_eq!(node_widths(&split.nodes[1]).unwrap()[1..], [4.0, 8.0], "kept vertices keep their exact widths");
+}
+
+#[test]
+fn a_tapered_straight_path_cut_by_a_gap_carries_widths_on_both_pieces() {
+    let br = guide_break();
+    let node = SceneNode::Path {
+        commands: vec![
+            PathCmd::MoveTo { x: 0.0, y: 400.0 },
+            PathCmd::LineTo { x: 50.0, y: 200.0 },
+            PathCmd::LineTo { x: 100.0, y: 40.0 },
+        ],
+        style: fill_stroke(),
+        closed: false,
+        widths: Some(vec![2.0, 6.0, 4.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 2, "cut into two pieces; got {:?}", split.nodes);
+    // Leaving at data 150 of 0 -> 500 (t = 0.3), re-entering at 850 of
+    // 500 -> 900 (t = 0.875).
+    assert_widths(&split.nodes[0], &[2.0, 3.2], "the lower piece");
+    assert_widths(&split.nodes[1], &[4.25, 4.0], "the upper piece");
+}
+
+#[test]
+fn a_tapered_edge_crossing_two_gaps_interpolates_both_ends_of_its_middle_piece() {
+    let br = apply_break_to_scale((0.0, 1000.0), &[[150.0, 400.0], [600.0, 850.0]], (400.0, 0.0), 12.0);
+    let remap = BreakRemap::new(AlignAxis::Y, (0.0, 1000.0), (400.0, 0.0), &br);
+    // One edge, data 0 -> 1000, widths 2 -> 12: every cut is t = data / 1000.
+    let node = SceneNode::Polyline { points: vec![(0.0, 400.0), (10.0, 0.0)], style: stroke(), widths: Some(vec![2.0, 12.0]) };
+    let split = remap.split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 3, "one piece per segment; got {:?}", split.nodes);
+    assert_widths(&split.nodes[0], &[2.0, 3.5], "the lower piece");
+    assert_widths(&split.nodes[1], &[6.0, 8.0], "the middle piece is cut at both ends");
+    assert_widths(&split.nodes[2], &[10.5, 12.0], "the upper piece");
+}
+
+#[test]
+fn an_uncut_tapered_polyline_and_straight_path_keep_their_widths() {
+    let br = guide_break();
+    // Data 900 -> 1000: wholly inside the upper segment.
+    let polyline = SceneNode::Polyline { points: vec![(0.0, 40.0), (10.0, 0.0)], style: stroke(), widths: Some(vec![3.0, 5.0]) };
+    let path = SceneNode::Path {
+        commands: vec![PathCmd::MoveTo { x: 0.0, y: 40.0 }, PathCmd::VLineTo { y: 0.0 }],
+        style: fill_stroke(),
+        closed: false,
+        widths: Some(vec![3.0, 5.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![polyline, path]);
+    assert_eq!(split.nodes.len(), 2);
+    assert!(!split.is_reindexed(), "nothing was cut");
+    assert_eq!(node_widths(&split.nodes[0]), Some(vec![3.0, 5.0]));
+    assert_eq!(node_widths(&split.nodes[1]), Some(vec![3.0, 5.0]));
+}
+
+#[test]
+fn a_curved_tapered_path_is_remapped_with_its_widths_unchanged() {
+    let br = guide_break();
+    let node = SceneNode::Path {
+        commands: vec![
+            PathCmd::MoveTo { x: 0.0, y: 400.0 },
+            PathCmd::CubicTo { c1x: 10.0, c1y: 400.0, c2x: 20.0, c2y: 40.0, x: 30.0, y: 40.0 },
+        ],
+        style: fill_stroke(),
+        closed: false,
+        widths: Some(vec![2.0, 6.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 1, "a curve is remapped, not cut");
+    assert_eq!(node_widths(&split.nodes[0]), Some(vec![2.0, 6.0]));
+}
+
+#[test]
+fn an_untapered_cut_polyline_stays_untapered() {
+    let br = guide_break();
+    let split = guide_remap(&br).split_nodes(vec![polyline(vec![(0.0, 400.0), (10.0, 200.0), (20.0, 40.0)])]);
+    assert_eq!(split.nodes.len(), 2);
+    assert!(split.nodes.iter().all(|n| node_widths(n).is_none()), "no widths appear on an untapered line");
+}
+
+#[test]
+fn a_tapered_polyline_whose_first_vertex_is_in_a_gap_starts_at_the_far_edge_cut() {
+    let br = guide_break();
+    // Data 500 (in the gap), 900, 1000: the leading vertex has no visible
+    // position, so the one piece starts where edge 0 re-enters at 850.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 200.0), (10.0, 40.0), (20.0, 0.0)],
+        style: stroke(),
+        widths: Some(vec![2.0, 6.0, 8.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 1, "one visible piece; got {:?}", split.nodes);
+    // Edge 0 runs data 500 -> 900 and re-enters at 850: t = 350 / 400.
+    assert_widths(&split.nodes[0], &[5.5, 6.0, 8.0], "the piece after the gap");
+}
+
+#[test]
+fn a_cut_measures_its_width_along_the_drawn_edge_from_a_clamped_vertex() {
+    let br = guide_break();
+    // Vertex 0 sits below the domain (px 480 is data -200), so it draws at
+    // the domain floor, data 0, carrying its own width. The drawn edge runs
+    // data 0 -> 500 and leaves at 150, so the cut sits at t = 0.3 of it for
+    // both its cross-axis position and its width; measuring t along the
+    // unclamped edge (-200 -> 500, t = 0.5) would put a 7.0 width on a cut
+    // drawn at 30% of the edge.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 480.0), (10.0, 200.0)],
+        style: stroke(),
+        widths: Some(vec![2.0, 12.0]),
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 1, "only the lower piece is visible; got {:?}", split.nodes);
+    let SceneNode::Polyline { points, .. } = &split.nodes[0] else { panic!("{:?}", split.nodes[0]) };
+    assert_eq!(points.len(), 2);
+    assert!((points[1].0 - 3.0).abs() < 1e-12, "the cut is drawn at t = 0.3; got {points:?}");
+    assert_widths(&split.nodes[0], &[2.0, 5.0], "the clamped piece");
+}
+
+/// The error the drawing consumer reports for every output node of `node`.
+fn taper_errors(node: SceneNode) -> Vec<Result<(), ferrum_scene::TaperError>> {
+    let br = guide_break();
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    split
+        .nodes
+        .iter()
+        .map(|n| match n {
+            SceneNode::Polyline { points, widths: Some(w), .. } => ferrum_scene::validate_widths(points.len(), w),
+            SceneNode::Path { commands, widths: Some(w), .. } => ferrum_scene::validate_widths(commands.len(), w),
+            other => panic!("expected a tapered Polyline or Path, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn an_invalid_width_inside_a_gap_still_reaches_its_own_refusal() {
+    use ferrum_scene::TaperError;
+    // Data 0, 500 (in the gap), 1000: cutting would interpolate the 0 width
+    // away at both gap edges. The node is kept whole so the consumer refuses
+    // the width the caller wrote, at its own index.
+    let polyline = SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (10.0, 200.0), (20.0, 0.0)],
+        style: stroke(),
+        widths: Some(vec![2.0, 0.0, 4.0]),
+    };
+    let want = Err(TaperError::InvalidWidth { index: 1, value: 0.0 });
+    assert_eq!(taper_errors(polyline), vec![want.clone()]);
+    let path = SceneNode::Path {
+        commands: vec![
+            PathCmd::MoveTo { x: 0.0, y: 400.0 },
+            PathCmd::LineTo { x: 10.0, y: 200.0 },
+            PathCmd::LineTo { x: 20.0, y: 0.0 },
+        ],
+        style: fill_stroke(),
+        closed: false,
+        widths: Some(vec![2.0, 0.0, 4.0]),
+    };
+    assert_eq!(taper_errors(path), vec![want]);
+}
+
+#[test]
+fn an_invalid_width_at_a_kept_vertex_refuses_as_invalid_not_misaligned() {
+    use ferrum_scene::TaperError;
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (10.0, 200.0), (20.0, 0.0)],
+        style: stroke(),
+        widths: Some(vec![f64::NAN, 3.0, 4.0]),
+    };
+    let errors = taper_errors(node);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(matches!(errors[0], Err(TaperError::InvalidWidth { index: 0, .. })), "{errors:?}");
+}
+
+#[test]
+fn a_misaligned_width_list_never_lands_on_a_piece_of_matching_length() {
+    use ferrum_scene::TaperError;
+    // Three vertices, two widths: data 0, 500 (in the gap), 1000 cut into
+    // two two-point pieces, so a verbatim copy would pass as aligned on both.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (10.0, 200.0), (20.0, 0.0)],
+        style: stroke(),
+        widths: Some(vec![2.0, 4.0]),
+    };
+    assert_eq!(taper_errors(node), vec![Err(TaperError::Misaligned { points: 3, widths: 2 })]);
+}
