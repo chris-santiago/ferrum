@@ -200,6 +200,7 @@ pub(crate) fn emit_shape_nodes(
                 ],
                 style,
                 closed: true,
+                widths: None,
             }]
         }
         ShapeKind::TriangleUp => {
@@ -214,6 +215,7 @@ pub(crate) fn emit_shape_nodes(
                 ],
                 style,
                 closed: true,
+                widths: None,
             }]
         }
         ShapeKind::TriangleDown => {
@@ -228,6 +230,7 @@ pub(crate) fn emit_shape_nodes(
                 ],
                 style,
                 closed: true,
+                widths: None,
             }]
         }
         ShapeKind::VLine => {

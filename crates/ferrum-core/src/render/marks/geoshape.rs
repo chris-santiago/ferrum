@@ -237,7 +237,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
                 let [x, y] = to_pixel(c);
                 (x, y)
             }).collect();
-            acc.push(SceneNode::Polyline { points: pixel_pts, style: stroke_style.clone() }, row.row_idx);
+            acc.push(SceneNode::Polyline { points: pixel_pts, style: stroke_style.clone(), widths: None }, row.row_idx);
         }
     }
 

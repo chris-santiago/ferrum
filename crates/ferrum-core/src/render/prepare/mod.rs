@@ -122,6 +122,20 @@ pub struct LayerPrepared {
     ///
     /// [`x_is_own`]: LayerPrepared::x_is_own
     pub y_is_own: bool,
+    /// Whether THIS layer's own encoding declared `size` / `stroke_width`,
+    /// captured before the merge the way [`x_is_own`] is. A line's width
+    /// bindings outrank inherited ones: `scene_build` drops an inherited
+    /// `size` or `stroke_width` from a line layer's `DrawCtx` encoding
+    /// whenever the layer has another width source, so only a layer that
+    /// binds both itself meets the width-conflict refusal.
+    ///
+    /// [`x_is_own`]: LayerPrepared::x_is_own
+    pub size_is_own: bool,
+    /// Whether THIS layer declared its own `stroke_width` channel — see
+    /// [`size_is_own`].
+    ///
+    /// [`size_is_own`]: LayerPrepared::size_is_own
+    pub stroke_width_is_own: bool,
     /// The coordinate system this layer's marks are placed in, already resolved
     /// against the chart's (`#172`(1)): the layer's own
     /// [`Layer::coord`](crate::spec::layer::Layer::coord) when it declares one,
@@ -153,6 +167,8 @@ impl LayerPrepared {
             color_is_own: spec.encoding.color.is_some(),
             x_is_own: spec.encoding.x.is_some(),
             y_is_own: spec.encoding.y.is_some(),
+            size_is_own: spec.encoding.size.is_some(),
+            stroke_width_is_own: spec.encoding.stroke_width.is_some(),
             // A chart with no `layers` has no per-layer coord to resolve: its
             // sole layer's coordinate system IS the chart's.
             coord: spec.coord.clone(),
@@ -178,6 +194,8 @@ impl LayerPrepared {
         // 13 spec c3) — see `x_is_own`'s doc comment on [`LayerPrepared`].
         let x_is_own = layer.encoding.x.is_some();
         let y_is_own = layer.encoding.y.is_some();
+        let size_is_own = layer.encoding.size.is_some();
+        let stroke_width_is_own = layer.encoding.stroke_width.is_some();
         let mut encoding = layer.encoding.clone();
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the
@@ -204,6 +222,8 @@ impl LayerPrepared {
             color_is_own,
             x_is_own,
             y_is_own,
+            size_is_own,
+            stroke_width_is_own,
             coord: layer.effective_coord(spec.coord.as_ref()).cloned(),
         }
     }

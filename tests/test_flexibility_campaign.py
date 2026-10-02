@@ -2510,7 +2510,7 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
 
 
 def test_r7_promoted_color_channel_is_independent_copy() -> None:
-    """_promote_layer_color must assign a copy, not an alias of the layer's channel.
+    """_promote_layer_channels must assign a copy, not an alias of the layer's channel.
 
     When (base + highlight) promotes the highlight layer's color encoding to
     chart level, the chart-level channel and the layer's channel must be

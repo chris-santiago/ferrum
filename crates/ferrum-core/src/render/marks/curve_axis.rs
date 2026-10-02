@@ -183,7 +183,7 @@ fn render(mark: Mark, shape: Shape) -> Vec<SceneNode> {
         mark_style: &mark_style,
     };
     match spec.mark {
-        Mark::Line => super::line::build(&ctx).nodes,
+        Mark::Line => super::line::build(&ctx).expect("a line with no width binding never refuses").nodes,
         Mark::Area => super::area::build(&ctx).nodes,
         Mark::Ribbon => super::ribbon::build(&ctx).nodes,
         ref other => panic!("this module covers the line family only, got {other:?}"),

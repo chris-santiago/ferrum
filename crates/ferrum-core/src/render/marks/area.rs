@@ -391,6 +391,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             commands: cmds,
             style,
             closed: true,
+            widths: None,
         });
 
         // The one style both border modes paint with: same minimum-1px width
@@ -422,6 +423,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 commands: line_cmds,
                 style: border_style(),
                 closed: false,
+                widths: None,
             });
         }
 
@@ -432,6 +434,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 commands: top_cmds,
                 style: border_style(),
                 closed: false,
+                widths: None,
             });
 
             // Bottom edge: trace the y2 edge when bound, else the same straight
@@ -445,6 +448,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 commands: bottom_cmds,
                 style: border_style(),
                 closed: false,
+                widths: None,
             });
         }
 

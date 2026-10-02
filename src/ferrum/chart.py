@@ -105,7 +105,7 @@ from ferrum.composition import (
     _ChartOperatorMixin,
     _expand_layers,
     _merge_top_transforms,
-    _promote_layer_color,
+    _promote_layer_channels,
     _validate_share_modes,
     _warn_on_layer_conflicts,
 )
@@ -2415,12 +2415,12 @@ class Chart(
             new._tooltip_promoted = lhs._tooltip_promoted
         else:
             new._tooltip_promoted = "tooltip" in new._encoding or "tooltip_fields" in new._encoding
-        # D2: when the LHS has no color encoding, promote the first layer's
-        # color encoding to chart level so the Rust renderer can build the
-        # correct color scale.  Without this, build_color_scale sees
-        # spec.encoding.color = None and returns no color scale, causing every
-        # layer with a color encoding to fall back to the theme default color.
-        _promote_layer_color(new)
+        # Rust builds every auxiliary scale (color, size, shape, opacity
+        # family, stroke dash) from the chart-level encoding only, so promote
+        # the first layer-level binding of each channel the LHS left unbound.
+        # Without this, a layer's binding draws as if absent whenever it is
+        # not the leading chart's.
+        _promote_layer_channels(new)
         # Merge RHS selections and conditionals into the layered chart
         # so interactive features from all layers are preserved.
         if rhs._selections:

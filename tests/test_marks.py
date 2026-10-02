@@ -21,9 +21,9 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
     ``orient_coord_flip()``) but is never emitted into the wire-level style
     dict -- ``to_mark_kwargs_dict()`` only returns fields the renderer
     actually reads."""
-    m = MarkBase("bar", size=100, orient="horizontal")
+    m = MarkBase("bar", stroke_width=100, orient="horizontal")
     d = m.to_mark_kwargs_dict()
-    assert d == {"size": 100}  # orient is consumed separately, not a wire field
+    assert d == {"stroke_width": 100}  # orient is consumed separately, not a wire field
 
 
 def test_markbase_rejects_transform_only_kwargs_directly():

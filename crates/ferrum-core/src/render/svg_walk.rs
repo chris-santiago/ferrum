@@ -338,6 +338,7 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
             commands,
             style,
             closed: _,
+            widths: _,
         } => {
             let d = path_cmds_to_d(commands);
             // Anchor: first MoveTo coordinates.
@@ -371,7 +372,7 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
                 svg.image_data_url(*x, *y, *w, *h, url);
             }
         },
-        SceneNode::Polyline { points, style } => {
+        SceneNode::Polyline { points, style, widths: _ } => {
             svg.polyline(points, &to_svg_stroke(style));
         }
         SceneNode::Polygon { rings, style } => {

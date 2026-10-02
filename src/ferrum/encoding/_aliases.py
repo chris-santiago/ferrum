@@ -67,30 +67,26 @@ def _channel_field(ch: object) -> str | None:
     return field
 
 
-def resolve_color_alias(enc: dict) -> object | None:
-    """Return the value ``color`` would resolve to under the alias rules, read-only.
+def resolve_channel_alias(enc: dict, channel: str) -> object | None:
+    """Return the value *channel* would resolve to under the alias rules, read-only.
 
     Side-effect-free by construction: does not mutate *enc*, does not warn,
     and does not consult ``detail`` at all. Reads ``_ENCODING_ALIASES``
     directly (the same table :func:`apply_channel_aliases` drives) rather
     than calling that function, because callers that only need to know
-    "what would this encoding's color be" -- ``composition._promote_layer_color``
-    resolving a layer's chart-level color-scale promotion at ``Chart + Chart``
+    "what would this encoding's *channel* be" -- ``composition._promote_layer_channels``
+    resolving a layer's chart-level scale promotion at ``Chart + Chart``
     merge time, before ``Chart.to_spec()``'s later, warning-emitting alias
     pass ever runs -- must never trigger the ``stroke_dropped_by_color``
-    warning as a side effect of asking the question (2026-08-27 P1
-    remediation, quality-review finding: the prior fix instead built a
-    ``detail``-stripped throwaway copy of the encoding to suppress
-    :func:`alias_detail_channel`'s warning, a comment-enforced invariant
-    that this read-only resolver makes structurally impossible to violate).
+    warning as a side effect of asking the question.
 
-    Returns ``None`` when neither ``color``, ``fill``, nor ``stroke`` is
-    present in *enc*.
+    Returns ``None`` when neither *channel* nor any alias source targeting
+    it (``fill``/``stroke`` for ``color``) is present in *enc*.
     """
-    if "color" in enc:
-        return enc["color"]
+    if channel in enc:
+        return enc[channel]
     for rule in _ENCODING_ALIASES:
-        if rule.target == "color" and rule.source in enc:
+        if rule.target == channel and rule.source in enc:
             return enc[rule.source]
     return None
 

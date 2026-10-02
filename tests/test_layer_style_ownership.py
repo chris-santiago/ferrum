@@ -355,7 +355,7 @@ _XY = {"x": "x", "y": "y"}
 PROBES: dict[str, FieldProbe] = {
     "size": FieldProbe(
         "size",
-        "bar",
+        "line",
         {"size": 30},
         "point",
         "point",

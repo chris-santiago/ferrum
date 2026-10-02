@@ -1610,11 +1610,22 @@ struct LayerGeometryFlags {
     /// Whether this layer declared its own `y` channel — see
     /// [`LayerPrepared::y_is_own`].
     y_is_own: bool,
+    /// Whether this layer declared its own `size` channel — see
+    /// [`LayerPrepared::size_is_own`].
+    size_is_own: bool,
+    /// Whether this layer's OWN mark kwargs set a constant `size=`.
+    has_own_literal_size: bool,
+    /// Whether this layer declared its own `stroke_width` channel — see
+    /// [`LayerPrepared::stroke_width_is_own`].
+    stroke_width_is_own: bool,
+    /// Whether this layer's OWN mark kwargs set a constant `stroke_width=`.
+    has_own_literal_stroke_width: bool,
 }
 
-/// The two DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
-/// needs before a mark builder sees its encoding: the own-color exemption and
-/// the own-span-axis normalization for rule/tick. Neither ever touches
+/// The DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
+/// needs before a mark builder sees its encoding: the own-color exemption,
+/// the own-span-axis normalization for rule/tick, and the own-width
+/// precedence for line. None ever touches
 /// `layer.encoding` itself — both apply to a clone, so scale domains, axis
 /// chrome, position grouping, and the legend keep reading the merged
 /// encoding unchanged, while the geometry sees only the shape THIS layer
@@ -1687,6 +1698,20 @@ struct LayerGeometryFlags {
 /// that OWN `y` as present, so those composite ticks are unaffected and keep
 /// the fixed `tick_size*2.0` length regardless of the `band_size` they set on
 /// themselves).
+///
+/// **Own-width precedence for line.** A line's `size` and `stroke_width` both
+/// set its width, and a line that binds both itself refuses
+/// (`RenderError::LineWidthConflict`). An inherited binding of either is not
+/// the layer's choice: a bubble scatter's `size` reaches every layer of
+/// `point.encode(size=...) + line(stroke_width=3)` through the chart level,
+/// and the line must keep its own 3 px. So an inherited width binding yields
+/// to any width the layer binds itself, own encoding or own constant kwarg,
+/// on the same channel or the other one (an own `size=5` beside an inherited
+/// `size` field draws the constant, as an own literal paint drops an
+/// inherited `color`), and between two inherited ones the
+/// `stroke_width` (a width in pixels) is kept over the `size` (a taper). The
+/// scale and the legend keep reading the merged `size`, so the other layers
+/// keep it.
 fn layer_geometry_encoding(
     merged: crate::spec::encoding::Encoding,
     mark: crate::spec::mark::Mark,
@@ -1706,6 +1731,18 @@ fn layer_geometry_encoding(
             (true, false) => encoding.y = None,
             (false, true) => encoding.x = None,
             _ => {}
+        }
+    }
+    if mark == crate::spec::mark::Mark::Line {
+        let size_inherited = encoding.size.is_some() && !flags.size_is_own;
+        let stroke_width_inherited = encoding.stroke_width.is_some() && !flags.stroke_width_is_own;
+        let owns_size = flags.size_is_own || flags.has_own_literal_size;
+        let owns_stroke_width = flags.stroke_width_is_own || flags.has_own_literal_stroke_width;
+        if stroke_width_inherited && (owns_size || owns_stroke_width) {
+            encoding.stroke_width = None;
+        }
+        if size_inherited && (owns_size || owns_stroke_width || stroke_width_inherited) {
+            encoding.size = None;
         }
     }
     encoding
@@ -1841,7 +1878,11 @@ fn build_panel_mark_batches(
         // Refuses with `RenderError::InvalidColor` on an unparseable
         // `fill=`/`stroke=` (batch-A Task 8) — the same build-seam refusal
         // discipline as `validate_mark_encoding` below.
-        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)?;
+        // A per-layer refusal names its layer only on a layered chart; an
+        // unlayered chart's one layer is the chart itself.
+        let name_layer = |e: RenderError| if spec.layers.is_some() { e.in_layer(li) } else { e };
+        let mark_style =
+            draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark).map_err(name_layer)?;
 
         let has_own_literal_paint = mark_style.paint.stroke_source
             == crate::render::draw::PaintSource::UserColor
@@ -1854,6 +1895,10 @@ fn build_panel_mark_batches(
                 has_own_literal_paint,
                 x_is_own: layer.x_is_own,
                 y_is_own: layer.y_is_own,
+                size_is_own: layer.size_is_own,
+                has_own_literal_size: mark_style.line.size.is_some(),
+                stroke_width_is_own: layer.stroke_width_is_own,
+                has_own_literal_stroke_width: mark_style.line.stroke_width.is_some(),
             },
         );
         // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
@@ -1913,7 +1958,7 @@ fn build_panel_mark_batches(
             scales,
         )?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped)?;
-        let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
+        let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
         // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
         // exemption boundary (a builder that returns empty for a legitimate
@@ -2805,6 +2850,7 @@ fn build_polar_axes(
                 angle: 0.0,
             },
             closed: true,
+            widths: None,
         });
     }
 
@@ -3801,6 +3847,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
@@ -3854,6 +3901,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
@@ -3905,6 +3953,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
@@ -4171,6 +4220,8 @@ mod tests {
             color_is_own: false,
             x_is_own: false,
             y_is_own: true,
+            size_is_own: false,
+            stroke_width_is_own: false,
             coord: None,
         }
     }
@@ -9683,7 +9734,16 @@ mod tests {
         x_is_own: bool,
         y_is_own: bool,
     ) -> LayerGeometryFlags {
-        LayerGeometryFlags { color_is_own, has_own_literal_paint, x_is_own, y_is_own }
+        LayerGeometryFlags {
+            color_is_own,
+            has_own_literal_paint,
+            x_is_own,
+            y_is_own,
+            size_is_own: false,
+            has_own_literal_size: false,
+            stroke_width_is_own: false,
+            has_own_literal_stroke_width: false,
+        }
     }
 
     fn xy_encoding() -> crate::spec::encoding::Encoding {

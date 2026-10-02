@@ -219,10 +219,11 @@ mod tests {
                 stroke_join: Some(StrokeJoin::Round),
                 stroke_opacity: 0.8,
             },
+            widths: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         let back: SceneNode = serde_json::from_str(&json).unwrap();
-        if let SceneNode::Polyline { points: pts, style } = &back {
+        if let SceneNode::Polyline { points: pts, style, widths: None } = &back {
             assert_eq!(pts.len(), 4);
             assert!((pts[0].0 - 0.0).abs() < 1e-9);
             assert!((pts[3].1 - 75.0).abs() < 1e-9);
@@ -245,6 +246,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         let back: SceneNode = serde_json::from_str(&json).unwrap();
@@ -268,6 +270,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         let back: SceneNode = serde_json::from_str(&json).unwrap();

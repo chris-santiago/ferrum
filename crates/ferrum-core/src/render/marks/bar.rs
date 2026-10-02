@@ -331,7 +331,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end,
             ctx.mark_style.paint.corner_radius,
         );
-        acc.push(SceneNode::Path { commands, style, closed: true }, i);
+        acc.push(SceneNode::Path { commands, style, closed: true, widths: None }, i);
         spans.push((angle_start, angle_end));
     }
 

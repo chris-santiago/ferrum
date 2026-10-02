@@ -419,7 +419,7 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
                     return Some(i);
                 }
             }
-            SceneNode::Polyline { points, style } => {
+            SceneNode::Polyline { points, style, widths: _ } => {
                 let tol = style.width.max(MIN_TOLERANCE);
                 for pair in points.windows(2) {
                     if dist_to_segment(x, y, pair[0].0, pair[0].1, pair[1].0, pair[1].1) <= tol {
@@ -441,6 +441,7 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
                 commands,
                 style,
                 closed,
+                widths: _,
             } if *closed && style.fill.is_some() => {
                 let vertices: Vec<[f64; 2]> = commands
                     .iter()
@@ -1783,6 +1784,7 @@ mod bug_hunt_tests {
             commands,
             style: fill_stroke_with_fill(),
             closed: true,
+            widths: None,
         }];
         // Click inside the band.
         assert!(
@@ -1825,6 +1827,7 @@ mod bug_hunt_tests {
                 angle: 0.0,
             },
             closed: true,
+            widths: None,
         }];
         // Interior click should miss an unfilled path (no point-in-polygon).
         assert!(
@@ -1881,6 +1884,7 @@ mod bug_hunt_tests {
                 commands,
                 style: fill_stroke_with_fill(),
                 closed: true,
+                widths: None,
             }],
             data_indices: Some(vec![0]),
             ..MarkBatch::default()
@@ -2829,6 +2833,7 @@ mod tests {
             commands: vec![ferrum_scene::PathCmd::MoveTo { x: 0.0, y: 0.0 }, ferrum_scene::PathCmd::Close],
             style: default_style(),
             closed: true,
+            widths: None,
         }
     }
 

@@ -837,10 +837,12 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
             commands,
             style,
             closed,
+            widths,
         } => SceneNode::Path {
             commands: commands.iter().map(|c| transform_path_cmd(c, ls)).collect(),
             style: transform_fill_stroke(style, mag),
             closed: *closed,
+            widths: widths.as_ref().map(|w| w.iter().map(|v| v * mag).collect()),
         },
         SceneNode::Text {
             x,
@@ -882,9 +884,10 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
                 .collect(),
             style: transform_fill_stroke(style, mag),
         },
-        SceneNode::Polyline { points, style } => SceneNode::Polyline {
+        SceneNode::Polyline { points, style, widths } => SceneNode::Polyline {
             points: points.iter().map(|(x, y)| ls.apply(*x, *y)).collect(),
             style: transform_stroke_style(style, mag),
+            widths: widths.as_ref().map(|w| w.iter().map(|v| v * mag).collect()),
         },
         SceneNode::Group { attrs, children } => SceneNode::Group {
             attrs: attrs.clone(),
@@ -1737,10 +1740,11 @@ fn collect_nodes(
                 commands,
                 style,
                 closed,
+                widths: _,
             } => {
                 tessellate::tessellate_path(commands, style, *closed, batch_cap, batch_join, mesh);
             }
-            SceneNode::Polyline { points, style } => {
+            SceneNode::Polyline { points, style, widths: _ } => {
                 let mut s = style.clone();
                 if s.stroke_cap.is_none() {
                     s.stroke_cap = batch_cap;
@@ -3358,6 +3362,7 @@ mod tests {
         let nodes = vec![SceneNode::Polyline {
             points,
             style: default_stroke_style(),
+            widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
         let data = load_scene(&scene);
@@ -3377,6 +3382,7 @@ mod tests {
         let nodes = vec![SceneNode::Polyline {
             points: vec![(100.0, 100.0), (400.0, 300.0)],
             style: default_stroke_style(),
+            widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
         let data = load_scene(&scene);
@@ -3399,6 +3405,7 @@ mod tests {
             commands,
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Area, nodes);
         let data = load_scene(&scene);
@@ -3435,6 +3442,7 @@ mod tests {
             commands,
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Arc, nodes);
         let data = load_scene(&scene);
@@ -3468,6 +3476,7 @@ mod tests {
             commands,
             style,
             closed: false,
+            widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Ribbon, nodes);
         let data = load_scene(&scene);
@@ -3509,6 +3518,7 @@ mod tests {
                     commands,
                     style: default_fill_stroke(),
                     closed: true,
+                    widths: None,
                 }
             })
             .collect();
@@ -3812,11 +3822,13 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         };
         let polygon = hex_polygon(350.0, 200.0, 20.0);
         let polyline = SceneNode::Polyline {
             points: vec![(50.0, 350.0), (150.0, 320.0), (250.0, 340.0)],
             style: default_stroke_style(),
+            widths: None,
         };
         let text = SceneNode::Text {
             x: 250.0,
@@ -5551,6 +5563,7 @@ mod tests {
             ],
             style: default_fill_stroke(),
             closed: true,
+            widths: None,
         };
         let text_style = TextStyle {
             font_size: 14.0,
@@ -7130,9 +7143,10 @@ mod tests {
         let node = SceneNode::Polyline {
             points: vec![(1.0, 1.0), (2.0, 2.0)],
             style: gap_fix_stroke_style(1.0),
+            widths: None,
         };
         match transform_node(&node, &ls) {
-            SceneNode::Polyline { points, style } => {
+            SceneNode::Polyline { points, style, widths: None } => {
                 assert!((points[0].0 - 12.0).abs() < 1e-9);
                 assert!((points[0].1 - 3.0).abs() < 1e-9);
                 assert!((points[1].0 - 14.0).abs() < 1e-9);
@@ -7140,6 +7154,35 @@ mod tests {
                 assert!((style.width - 4.0).abs() < 1e-9);
             }
             other => panic!("expected Polyline, got {other:?}"),
+        }
+    }
+
+    /// A tapered stroke's per-vertex widths scale by the layout `mag` exactly
+    /// as its constant `width` does (4x here, as `style.width` 1 -> 4 above).
+    #[test]
+    fn transform_node_scales_tapered_widths_like_the_stroke_width() {
+        let ls = gap_fix_layout_scale();
+        let polyline = SceneNode::Polyline {
+            points: vec![(1.0, 1.0), (2.0, 2.0)],
+            style: gap_fix_stroke_style(1.0),
+            widths: Some(vec![1.0, 2.5]),
+        };
+        let path = SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 2.0, y: 2.0 },
+            ],
+            style: gap_fix_fill_stroke(1.0, 0.0),
+            closed: false,
+            widths: Some(vec![1.0, 2.5]),
+        };
+        for node in [polyline, path] {
+            match transform_node(&node, &ls) {
+                SceneNode::Polyline { widths: Some(w), .. } | SceneNode::Path { widths: Some(w), .. } => {
+                    assert!((w[0] - 4.0).abs() < 1e-9 && (w[1] - 10.0).abs() < 1e-9, "{w:?}");
+                }
+                other => panic!("expected a tapered stroke, got {other:?}"),
+            }
         }
     }
 
@@ -7153,12 +7196,14 @@ mod tests {
             ],
             style: gap_fix_fill_stroke(1.0, 0.0),
             closed: true,
+            widths: None,
         };
         match transform_node(&node, &ls) {
             SceneNode::Path {
                 commands,
                 style,
                 closed,
+                widths: None,
             } => {
                 assert!(closed);
                 assert!((style.stroke_width - 4.0).abs() < 1e-9);

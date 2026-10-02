@@ -347,6 +347,9 @@ pub(crate) fn render_composite_scene(
     // a group whose intersection degenerated) leaves that leaf laying out on
     // its own terms and keeping its chrome.
     let mut overlay_groups = plan_overlay_groups(tree, n);
+    // Read before the imposition pre-pass prunes the map: a group whose rect
+    // could not be shared is still one layered chart, its members still layers.
+    let layer_of = overlay_layer_indices(&overlay_groups);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
 
     // Declared extent alignment (#182 follow-up). A jointplot's marginals and a
@@ -388,11 +391,16 @@ pub(crate) fn render_composite_scene(
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = (!ctx.is_empty()).then_some(ctx);
+        // A per-layer refusal from an overlay member names its layer inside
+        // the envelope, as the resolve pass's `LayerCoordUnplaceable` does.
         let (mut scene, leaf_warnings, bundle) =
             render_leaf(leaf, ctx_opt).map_err(|source| CompositeRenderError::LeafRender {
                 kind: "leaf",
                 index: i,
-                source,
+                source: match layer_of[i] {
+                    Some(layer) => source.in_layer(layer),
+                    None => source,
+                },
             })?;
         // Uniquify each leaf's raw-fragment clip ids exactly once, keyed by the
         // leaf's global pre-order index so colorbar/legend-clip/inset def ids stay
@@ -833,6 +841,20 @@ fn plan_overlay_groups(tree: &CompositeNode, n_leaves: usize) -> Vec<Option<usiz
     let mut leaf_cursor = 0usize;
     plan_overlay_group_walk(tree, &mut leaf_cursor, &mut groups);
     groups
+}
+
+/// Each leaf's layer index within its all-leaf `Overlay` group (the group's
+/// child position, the `position` the resolve pass names a member by), read
+/// off an unpruned [`plan_overlay_groups`] map: a non-primary member names
+/// its leader, and a leader is the leaf its next neighbour names. `None` for
+/// a leaf in no group.
+fn overlay_layer_indices(groups: &[Option<usize>]) -> Vec<Option<usize>> {
+    (0..groups.len())
+        .map(|i| match groups[i] {
+            Some(start) => Some(i - start),
+            None => (groups.get(i + 1) == Some(&Some(i))).then_some(0),
+        })
+        .collect()
 }
 
 fn plan_overlay_group_walk(
@@ -5428,6 +5450,165 @@ mod tests {
         );
     }
 
+    /// A line leaf binding both `size=` and `stroke_width=`, which refuses.
+    fn conflicting_line_spec() -> ChartSpec {
+        ChartSpec {
+            mark: Mark::Line,
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                size: Some(10.0),
+                stroke_width: Some(2.5),
+                ..Default::default()
+            }),
+            ..scatter_spec()
+        }
+    }
+
+    /// Render `tree`, whose leaves are `specs` in pre-order.
+    fn render_leaves(tree: &CompositeNode, specs: Vec<ChartSpec>) -> Result<SceneGraph, CompositeRenderError> {
+        let holds: Vec<LeafHold> = specs.into_iter().map(|spec| LeafHold { spec, ..hold() }).collect();
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        render_composite_scene(tree, &leaves, &ThemeInputs::default()).map(|(scene, ..)| scene)
+    }
+
+    /// The width-conflict refusal a composite render raises for `tree`, whose
+    /// leaves are `specs` in pre-order.
+    fn width_conflict_message(tree: &CompositeNode, specs: Vec<ChartSpec>) -> String {
+        let err = render_leaves(tree, specs).expect_err("a line binding size and stroke_width must refuse");
+        assert!(
+            matches!(
+                &err,
+                CompositeRenderError::LeafRender { source: RenderError::LineWidthConflict { .. }, .. }
+            ),
+            "{err:?}"
+        );
+        err.to_string()
+    }
+
+    const WIDTH_CONFLICT: &str = "mark_line: size and stroke_width both set the line's width \
+        (size=10, stroke_width=2.5); bind only one. size= sets a dot-diameter width that can \
+        taper along the line; stroke_width= sets a width in pixels.";
+
+    /// `fm.layer(a, b)`: the refusal names the offending layer inside the
+    /// composite envelope, the leader included.
+    #[test]
+    fn overlay_width_conflict_names_its_layer_inside_the_envelope() {
+        let ok = scatter_spec;
+        let bad = conflicting_line_spec;
+        assert_eq!(
+            width_conflict_message(&overlay_tree(ok(), bad()), vec![ok(), bad()]),
+            format!("failed to render composite leaf leaf #1: layer 1: {WIDTH_CONFLICT}")
+        );
+        assert_eq!(
+            width_conflict_message(&overlay_tree(bad(), ok()), vec![bad(), ok()]),
+            format!("failed to render composite leaf leaf #0: layer 0: {WIDTH_CONFLICT}")
+        );
+    }
+
+    /// `fm.layer(a, line)`: an overlay member is a chart of its own, so its
+    /// width bindings are all its own. A line leaf binding both refuses in
+    /// every field/constant pairing, naming its layer, and a line leaf with
+    /// only its own `stroke_width` beside a sized point leaf draws.
+    #[test]
+    fn overlay_width_conflict_refuses_in_every_pairing_and_a_lone_stroke_width_draws() {
+        let field = |name: &str| Some(EncodingSpec { field: name.into(), ..Default::default() });
+        let line = |size, stroke_width, size_kwarg, stroke_width_kwarg| {
+            let mut spec = conflicting_line_spec();
+            spec.encoding.size = size;
+            spec.encoding.stroke_width = stroke_width;
+            spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+                size: size_kwarg,
+                stroke_width: stroke_width_kwarg,
+                ..Default::default()
+            });
+            spec
+        };
+        let cells = [
+            (line(field("y"), field("x"), None, None), "'y'", "'x'"),
+            (line(field("y"), None, None, Some(2.5)), "'y'", "2.5"),
+            (line(None, field("x"), Some(10.0), None), "10", "'x'"),
+            (line(None, None, Some(10.0), Some(2.5)), "10", "2.5"),
+        ];
+        for (bad, size, stroke_width) in cells {
+            let text = format!(
+                "mark_line: size and stroke_width both set the line's width (size={size}, \
+                 stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width that \
+                 can taper along the line; stroke_width= sets a width in pixels."
+            );
+            let ok = scatter_spec;
+            assert_eq!(
+                width_conflict_message(&overlay_tree(ok(), bad.clone()), vec![ok(), bad.clone()]),
+                format!("failed to render composite leaf leaf #1: layer 1: {text}")
+            );
+            assert_eq!(
+                width_conflict_message(&overlay_tree(bad.clone(), ok()), vec![bad, ok()]),
+                format!("failed to render composite leaf leaf #0: layer 0: {text}")
+            );
+        }
+        let sized_point = || ChartSpec {
+            encoding: Encoding { size: field("y"), ..scatter_spec().encoding },
+            ..scatter_spec()
+        };
+        let stroked = || line(None, None, None, Some(3.0));
+        for specs in [vec![sized_point(), stroked()], vec![stroked(), sized_point()]] {
+            let tree = overlay_tree(specs[0].clone(), specs[1].clone());
+            let scene = render_leaves(&tree, specs).unwrap_or_else(|e| panic!("{e}"));
+            let widths: Vec<_> = scene.panels.iter()
+                .flat_map(|p| p.marks.iter().flat_map(|b| b.nodes.iter()))
+                .filter_map(|n| match n {
+                    SceneNode::Polyline { style, widths, .. } => Some((style.width, widths.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(widths, vec![(3.0, None)]);
+        }
+    }
+
+    /// `fm.layer(ok, bad)` where `bad` carries a constant `size=` its mark
+    /// cannot draw: the refusal names the layer inside the envelope.
+    #[test]
+    fn overlay_out_of_range_constant_size_names_its_layer() {
+        let bad = || ChartSpec {
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { size: Some(-4.0), ..Default::default() }),
+            ..scatter_spec()
+        };
+        let ok = scatter_spec;
+        let message = |tree: &CompositeNode, specs| {
+            render_leaves(tree, specs).map(|_| ()).expect_err("a negative point size must refuse").to_string()
+        };
+        let text = "mark_point(size=...) must be a non-negative number; received -4";
+        assert_eq!(
+            message(&overlay_tree(ok(), bad()), vec![ok(), bad()]),
+            format!("failed to render composite leaf leaf #1: layer 1: {text}")
+        );
+        assert_eq!(
+            message(&overlay_tree(bad(), ok()), vec![bad(), ok()]),
+            format!("failed to render composite leaf leaf #0: layer 0: {text}")
+        );
+    }
+
+    /// `fm.hconcat(ok, fm.layer(ok, bad))`: the layer index is the member's
+    /// position in its overlay, not its leaf index in the figure. A leaf in
+    /// no overlay is no layer and carries no prefix.
+    #[test]
+    fn nested_overlay_width_conflict_names_its_layer_not_its_leaf() {
+        let ok = scatter_spec;
+        let bad = conflicting_line_spec;
+        let nested = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(0), overlay_tree(ok(), bad())],
+        );
+        assert_eq!(
+            width_conflict_message(&nested, vec![ok(), ok(), bad()]),
+            format!("failed to render composite leaf leaf #2: layer 1: {WIDTH_CONFLICT}")
+        );
+        // Vacuity control: the same line as a plain grid cell is no layer.
+        let flat = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        assert_eq!(
+            width_conflict_message(&flat, vec![ok(), bad()]),
+            format!("failed to render composite leaf leaf #1: {WIDTH_CONFLICT}")
+        );
+    }
+
     /// Build a 2-leaf shared-x/y Overlay tree from two specs.
     fn overlay_tree(spec0: ChartSpec, spec1: ChartSpec) -> CompositeNode {
         let mut tree = composite(
@@ -5489,6 +5670,11 @@ mod tests {
             ],
         );
         assert_eq!(plan_overlay_groups(&mixed, 3), vec![None, None, Some(1)]);
+        assert_eq!(
+            overlay_layer_indices(&plan_overlay_groups(&mixed, 3)),
+            vec![None, Some(0), Some(1)],
+            "a group's leader is layer 0 and a leaf in no group is no layer"
+        );
     }
 
     #[test]

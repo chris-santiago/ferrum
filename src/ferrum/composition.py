@@ -4475,61 +4475,49 @@ def _warn_on_layer_conflicts(lhs, rhs) -> None:
         )
 
 
-def _promote_layer_color(new) -> None:
-    """Promote the first layer's ``ChannelBase`` color encoding to chart level when absent.
+def _promote_layer_channels(new) -> None:
+    """Promote each auxiliary channel's first layer-level binding to chart level when absent.
 
-    When the LHS of ``Chart + Chart`` has no color encoding, the merged chart
-    inherits ``_encoding["color"] = None`` from the LHS clone.  The Rust
-    renderer builds the chart-level color scale from ``spec.encoding.color``
-    only, so a ``None`` chart-level color means no color scale is created —
-    every layer that carries a layer-level color encoding then falls back to
-    the theme default color, collapsing all categories to one.
+    Rust builds every auxiliary (non-positional) scale -- color, size, shape,
+    the opacity family, stroke dash; the set is
+    :func:`ferrum.encoding._auxiliary_scale_channels` -- from
+    ``spec.encoding`` only. When the LHS of ``Chart + Chart`` does not bind a
+    channel, the merged chart inherits no chart-level binding for it from
+    the LHS clone, so no scale is built and a layer that binds the channel
+    draws as if it did not: ``point + sized_line`` drew an untapered line
+    while ``sized_line + point`` tapered it.
 
-    This function scans the merged layers in order and promotes the first
-    layer that carries a ``ChannelBase`` color encoding (not a plain string
-    shorthand) to the chart level, so ``build_color_scale`` can see the
-    scheme and build the correct domain.
+    For each channel this scans the merged layers in order and promotes the
+    first layer that carries a ``ChannelBase`` binding, so the result does
+    not depend on layer order. Once promoted, the channel is chart-level:
+    every layer that does not bind it inherits it, exactly as a leading
+    chart's own binding is inherited. A later layer binding a different
+    field keeps that binding on its layer and is drawn through the first
+    binder's scale. A mark-kwarg constant (``mark_point(size=30)``) is mark
+    style, not an encoding, so it never blocks promotion.
 
-    A layer whose color arrives as ``fill``/``stroke`` rather than ``color``
-    directly is resolved through :func:`ferrum.encoding._aliases.resolve_color_alias`
-    -- the same ``_ENCODING_ALIASES`` table :func:`~ferrum.encoding._aliases.apply_channel_aliases`
-    drives, exposed as a side-effect-free, read-only resolution (no
-    mutation, no warning, no ``detail`` involvement at all) -- because this
-    is the merge-time seam that actually decides whether a layer's color
-    renders; the serialization-time alias in ``_build_layers_list`` runs too
-    late to influence this promotion decision, and reading the raw,
-    un-aliased ``layer.encoding.get("color")`` here would silently miss a
-    fill/stroke-only layer. Fixed 2026-08-27 (P1 remediation, spec-review
-    finding) -- previously a layer whose only color channel was
-    ``fill``/``stroke`` was never promoted, so no chart-level color scale
-    was built and every such layer silently rendered in the theme default
-    color with no legend, identical to having no color channel at all. An
-    earlier version of this fix called the full, warning-emitting
-    ``apply_channel_aliases`` on a ``detail``-stripped throwaway copy of the
-    layer's encoding instead; ``resolve_color_alias`` replaces that
-    comment-enforced invariant with a resolver that structurally cannot
-    warn (quality-review finding).
+    A layer's binding is read through
+    :func:`ferrum.encoding._aliases.resolve_channel_alias`, so a
+    ``fill``/``stroke``-only layer promotes its color the same way
+    ``to_spec()``'s later alias pass would resolve it, without that pass's
+    warning side effect.
 
-    Plain string-valued color encodings (e.g. ``"class"`` from composite-mark
-    desugars like ``mark_roc``) are intentionally skipped — they are
-    layer-internal shorthands and must not be promoted to chart level because
-    ``_build_encoding_specs`` expects ``ChannelBase`` objects there.
+    Plain string-valued bindings (e.g. ``"class"`` from composite-mark
+    desugars like ``mark_roc``) are skipped: they are layer-internal
+    shorthands, and ``_build_encoding_specs`` expects ``ChannelBase`` objects
+    at chart level.
 
-    This is a no-op when:
-    - the chart-level color encoding is already set (first encoding-bearing
-      layer already won via the LHS clone), or
-    - no layer carries a ``ChannelBase`` color encoding (directly or via
-      fill/stroke alias).
+    The promoted channel is a copy of the layer's, never an alias of it.
     """
-    from ferrum.encoding._aliases import resolve_color_alias
+    from ferrum.encoding import _auxiliary_scale_channels
+    from ferrum.encoding._aliases import resolve_channel_alias
     from ferrum.encoding.base import ChannelBase
 
-    if new._encoding.get("color") is not None:
-        return
-    for layer in new._layers or []:
-        color_ch = layer.encoding.get("color")
-        if color_ch is None:
-            color_ch = resolve_color_alias(layer.encoding)
-        if isinstance(color_ch, ChannelBase):
-            new._encoding["color"] = copy.copy(color_ch)
-            return
+    for channel in _auxiliary_scale_channels():
+        if new._encoding.get(channel) is not None:
+            continue
+        for layer in new._layers or []:
+            bound = resolve_channel_alias(layer.encoding, channel)
+            if isinstance(bound, ChannelBase):
+                new._encoding[channel] = copy.copy(bound)
+                break

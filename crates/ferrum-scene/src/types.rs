@@ -455,6 +455,17 @@ pub enum SceneNode {
         commands: Vec<PathCmd>,
         style: FillStroke,
         closed: bool,
+        /// Per-command stroke width in scene pixels (full width, not half):
+        /// `widths[i]` is the width at command `i`'s endpoint, so
+        /// `widths.len() == commands.len()`. Only the line mark writes it, on
+        /// an open path (`closed == false`, no `Close` command) whose width
+        /// tapers with its `size` channel; `style.stroke_width` then carries
+        /// the series' constant width, so a reader that ignores `widths`
+        /// stays well-defined. Every value is finite and `> 0`. `None`, the
+        /// case for every other path, is omitted on the wire, so scenes
+        /// without it serialize byte-identically to before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        widths: Option<Vec<f64>>,
     },
     Text {
         x: f64,
@@ -491,6 +502,13 @@ pub enum SceneNode {
     Polyline {
         points: Vec<(f64, f64)>,
         style: StrokeStyle,
+        /// Per-vertex stroke width in scene pixels (full width, not half),
+        /// aligned with `points` (`widths.len() == points.len()`). Same
+        /// contract as [`SceneNode::Path`]'s `widths`: only the line mark
+        /// writes it, `style.width` keeps the series' constant width, every
+        /// value is finite and `> 0`, and `None` is omitted on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        widths: Option<Vec<f64>>,
     },
     Group {
         attrs: Vec<(String, String)>,

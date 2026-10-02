@@ -732,14 +732,14 @@ impl<'a> BreakRemap<'a> {
             // `BREAK_HIDDEN`, or the stroke running straight across the break
             // band — the two halves of one mark disagreeing (#230-1).
             stroke @ SceneNode::Path { closed: false, .. } => self.split_node_into(stroke, out),
-            SceneNode::Path { commands, style, closed: true } => {
+            SceneNode::Path { commands, style, closed: true, widths } => {
                 match polygon_points(&commands) {
                     Some(points) => self.clip_polygon_into(&points, &style, out),
                     // A closed ring the polygon reader will not take is CURVED,
                     // and neither the clip nor the split can cut a placed curve
                     // faithfully, so it keeps the per-vertex fallback.
                     None => {
-                        let mut node = SceneNode::Path { commands, style, closed: true };
+                        let mut node = SceneNode::Path { commands, style, closed: true, widths };
                         self.remap_node(&mut node);
                         out.push(node);
                     }
@@ -777,6 +777,7 @@ impl<'a> BreakRemap<'a> {
                 commands: path_commands(&clipped, true),
                 style: style.clone(),
                 closed: true,
+                widths: None,
             });
         }
     }
@@ -914,8 +915,8 @@ impl<'a> BreakRemap<'a> {
                 });
                 push_line_pieces(&pieces, &style, out);
             }
-            SceneNode::Path { commands, style, closed: true } => {
-                let mut head = SceneNode::Path { commands, style, closed: true };
+            SceneNode::Path { commands, style, closed: true, widths } => {
+                let mut head = SceneNode::Path { commands, style, closed: true, widths };
                 match shaft {
                     Some(ShaftTip::Placed(x1, y1, x2, y2)) => {
                         self.remap_arrowhead(&mut head, Some((x1, y1, x2, y2)));
@@ -938,9 +939,13 @@ impl<'a> BreakRemap<'a> {
                 let pieces = self.split_polyline(&[(x1, y1), (x2, y2)]).pieces;
                 push_line_pieces(&pieces, &style, out);
             }
-            SceneNode::Polyline { points, style } => {
-                for piece in self.split_polyline(&points).pieces {
-                    out.push(SceneNode::Polyline { points: piece, style: style.clone() });
+            SceneNode::Polyline { points, style, widths } => {
+                let split = self.split_polyline(&points);
+                // An uncut split is the source vertices placed one for one, so
+                // their widths still align; a cut piece carries none.
+                let widths = if split.cut { None } else { widths };
+                for piece in split.pieces {
+                    out.push(SceneNode::Polyline { points: piece, style: style.clone(), widths: widths.clone() });
                 }
             }
             // An OPEN path of straight-line commands is a polyline in path
@@ -962,7 +967,7 @@ impl<'a> BreakRemap<'a> {
             // never inferred from the pieces here: `remap_node` is the sentinel
             // path, so a false "uncut" reading hides an in-gap vertex at
             // `BREAK_HIDDEN` — exactly the #230-1 spike this mechanism removes.
-            SceneNode::Path { commands, style, closed: false } => {
+            SceneNode::Path { commands, style, closed: false, widths } => {
                 match straight_path_points(&commands) {
                     Some(points) => {
                         let split = self.split_polyline(&points);
@@ -972,16 +977,17 @@ impl<'a> BreakRemap<'a> {
                                     commands: path_commands(&piece, false),
                                     style: style.clone(),
                                     closed: false,
+                                    widths: None,
                                 });
                             }
                         } else {
-                            let mut node = SceneNode::Path { commands, style, closed: false };
+                            let mut node = SceneNode::Path { commands, style, closed: false, widths };
                             self.remap_node(&mut node);
                             out.push(node);
                         }
                     }
                     None => {
-                        let mut node = SceneNode::Path { commands, style, closed: false };
+                        let mut node = SceneNode::Path { commands, style, closed: false, widths };
                         self.remap_node(&mut node);
                         out.push(node);
                     }

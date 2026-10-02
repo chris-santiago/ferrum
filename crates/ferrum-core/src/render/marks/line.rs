@@ -19,6 +19,12 @@
 //!   detail subdivides each color group. Used by parallel_coordinates so
 //!   multiple samples within a class each get their own polyline.
 //! - Otherwise: one polyline over all rows in batch order.
+//!
+//! Width: a `size` field tapers each series along its length, every vertex
+//! as wide as a point of the same value is across (see [`dot_diameter`]); a
+//! constant `size=` kwarg is the same mapping at one width. `size` and
+//! `stroke_width` both bound on one line refuse
+//! ([`RenderError::LineWidthConflict`]).
 
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, x_field, y_field, DrawCtx};
@@ -27,19 +33,67 @@ use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stro
 use crate::render::marks::curve::{StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
+use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBinding};
 
 /// `mark_line` spells its step risers with the `HLineTo`/`VLineTo` shorthand.
 /// See [`StepSpelling`] for why the two spellings coexist.
 const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// The diameter of a point of area `area` (px²), `2·sqrt(area/π)`: the width
+/// a line takes to be as wide as that point is across. One size scale and one
+/// legend therefore stay true when a point and a line share a size field.
+pub(crate) fn dot_diameter(area: f64) -> f64 {
+    2.0 * (area / std::f64::consts::PI).sqrt()
+}
+
+/// The width of one drawn vertex of a line sized by `field`: the dot diameter
+/// of its `(value, area)` on the size scale, or `fallback` (the series'
+/// constant width) for a row with no usable size. A width that is not finite
+/// and `> 0` refuses ([`RenderError::LineWidthNotPositive`]) rather than
+/// reaching the scene's `widths`.
+fn vertex_width(field: &str, sample: Option<(f64, f64)>, fallback: f64) -> Result<f64, RenderError> {
+    let width = sample.map_or(fallback, |(_, area)| dot_diameter(area));
+    if width.is_finite() && width > 0.0 {
+        return Ok(width);
+    }
+    let field = field.to_owned();
+    let source = match sample {
+        Some((value, area)) => NonPositiveLineWidth::Scaled { field, value, area },
+        None => NonPositiveLineWidth::Fallback { field, width },
+    };
+    Err(RenderError::LineWidthNotPositive { layer: None, source: Box::new(source) })
+}
+
+/// Refuse a line whose `size` and `stroke_width` are both bound, each by a
+/// field or by a constant kwarg (a theme width is never a binding).
+fn refuse_width_conflict(ctx: &DrawCtx) -> Result<(), RenderError> {
+    let binding = |field: Option<&crate::spec::encoding::EncodingSpec>, constant: Option<f64>| {
+        field
+            .map(|e| WidthBinding::Field(e.field.clone()))
+            .or(constant.map(WidthBinding::Constant))
+    };
+    let encoding = &ctx.spec.encoding;
+    let size = binding(encoding.size.as_ref(), ctx.mark_style.line.size);
+    let stroke_width = binding(encoding.stroke_width.as_ref(), ctx.mark_style.line.stroke_width);
+    match (size, stroke_width) {
+        (Some(size), Some(stroke_width)) => Err(RenderError::LineWidthConflict {
+            layer: None,
+            sources: Box::new(LineWidthSources { size, stroke_width }),
+        }),
+        _ => Ok(()),
+    }
+}
+
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{
         to_scene_fill_stroke, to_scene_stroke, ClearablePaint, MarkBuildResult, MetadataColumns,
         PaintChannels,
     };
     use ferrum_scene::MarkBatchKind;
 
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Line);
+    refuse_width_conflict(ctx)?;
+
+    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Line));
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -149,6 +203,22 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // Per-row `(value, area)` from an encoded `size`, through the shared size
+    // scale. A null, non-finite or unmappable row is `None` and takes its
+    // series' constant width below (see `vertex_width`).
+    let size_areas = match (&spec.encoding.size, &ctx.scales.size) {
+        (Some(enc), Some(scale)) => col_as_f64(ctx.batch, &enc.field).ok().map(|values| {
+            let areas = values
+                .iter()
+                .map(|v| {
+                    v.filter(|v| v.is_finite())
+                        .and_then(|v| scale.inner.to_pixel_f64(v).map(|area| (v, area)))
+                })
+                .collect::<Vec<Option<(f64, f64)>>>();
+            (enc.field.as_str(), areas)
+        }),
+        _ => None,
+    };
     // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
     // Defaults: opacity → mark_style.paint.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
@@ -193,6 +263,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.mark_style.paint.stroke_dash.as_deref(),
         );
         let effective_dash = dash_vec.as_deref();
+        // One width per kept point, aligned with `points`.
+        let point_widths: Option<Vec<f64>> = size_areas
+            .as_ref()
+            .map(|(field, areas)| {
+                row_indices
+                    .iter()
+                    .map(|&i| vertex_width(field, areas.get(i).copied().flatten(), group_stroke_width))
+                    .collect::<Result<Vec<f64>, RenderError>>()
+            })
+            .transpose()?;
 
         // One series' stroke color: the color channel paints each group its own
         // palette color, and a series with no color channel takes the constant
@@ -218,7 +298,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .cleared_or(with_opacity(stroke_color, group_opacity));
 
         let node = if use_path {
-            let cmds = trace.subpath(&points);
+            let (cmds, cmd_points) = trace.subpath_with_rows(&points);
+            // Each command takes the width of the point whose run it ends in.
+            let widths = point_widths.map(|widths| {
+                cmd_points
+                    .iter()
+                    .map(|&p| widths.get(p).copied().unwrap_or(group_stroke_width))
+                    .collect()
+            });
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
             // Both node shapes carry the SAME `stroke_paint`, so a cleared stroke
@@ -241,6 +328,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 commands: cmds,
                 style,
                 closed: false,
+                widths,
             }
         } else {
             let mut stroke_style = to_scene_stroke(
@@ -258,6 +346,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ferrum_scene::SceneNode::Polyline {
                 points: points.clone(),
                 style: stroke_style,
+                widths: point_widths,
             }
         };
         acc.push(node, first);
@@ -265,7 +354,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (nodes, data_indices) = acc.finalize();
 
-    MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta)
+    Ok(MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta))
 }
 
 #[cfg(test)]
@@ -320,7 +409,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 1);
     }
 
@@ -340,7 +429,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert!(result.nodes.is_empty());
     }
 
@@ -371,7 +460,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 3);
     }
 
@@ -409,7 +498,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 6);
     }
 
@@ -437,7 +526,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 1);
     }
 
@@ -481,7 +570,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         // 3 series → 3 polylines; none should be missing due to the integer dtype
         let polyline_count = result.nodes.iter()
             .filter(|n| matches!(n, SceneNode::Polyline { .. }))
@@ -526,7 +615,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2, "expected one polyline per group");
         let di = result.data_indices.as_ref().expect("data_indices must be Some");
@@ -572,7 +661,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // Path variant: nodes are Path, not Polyline.
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count(), 2,
@@ -607,7 +696,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 1, "single series → one polyline");
         let di = result.data_indices.as_ref().expect("data_indices must be Some");
@@ -651,7 +740,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let polyline_count = result.nodes.iter()
             .filter(|n| matches!(n, SceneNode::Polyline { .. }))
             .count();
@@ -698,7 +787,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let fill_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Path { style, .. } = n { Some(style.fill_opacity) } else { None }
@@ -734,7 +823,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let path = result.nodes.iter().find_map(|n| {
             if let SceneNode::Path { style, .. } = n { Some(style) } else { None }
         }).expect("basis interpolation must emit a Path node");
@@ -809,7 +898,7 @@ mod tests {
         assert_eq!(domain.len(), 3,
             "legend domain must carry 3 distinct group values (\"0\", \"1\", \"2\"); got {domain:?}");
 
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let polylines: Vec<&ferrum_scene::StrokeStyle> = result.nodes.iter()
             .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style) } else { None })
             .collect();
@@ -862,7 +951,7 @@ mod tests {
         };
         assert_eq!(domain, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
 
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let polylines: Vec<&ferrum_scene::StrokeStyle> = result.nodes.iter()
             .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style) } else { None })
             .collect();
@@ -919,7 +1008,7 @@ mod tests {
         assert!(matches!(ctx.scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
             "explicit Quantitative color must resolve ColorScale::Continuous; got {:?}", ctx.scales.color);
 
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let polylines = result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count();
         assert_eq!(polylines, 1,
             "quantitative color must emit exactly 1 merged polyline over all rows, not fragment per distinct value; got {polylines}");
@@ -941,7 +1030,7 @@ mod tests {
         assert!(matches!(ctx.scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
             "inferred Float64 color must resolve ColorScale::Continuous; got {:?}", ctx.scales.color);
 
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let polylines = result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count();
         assert_eq!(polylines, 1,
             "inferred quantitative color must emit exactly 1 merged polyline over all rows, not fragment per distinct value; got {polylines}");
@@ -974,7 +1063,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some(interpolate.into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         result.nodes.into_iter().find_map(|n| {
             if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
         }).expect("non-linear interpolation must emit a Path node")
@@ -1057,7 +1146,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some("monotone".into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+        let cmds = super::build(&ctx).unwrap().nodes.into_iter().find_map(|n| {
             if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
         }).expect("a curved line must emit a Path");
 
@@ -1098,7 +1187,7 @@ mod tests {
         let overrides = MarkKwargsSpec { interpolate: Some("step-after".into()), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+        let cmds = super::build(&ctx).unwrap().nodes.into_iter().find_map(|n| {
             if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
         }).expect("a stepped line must emit a Path");
 
@@ -1197,7 +1286,7 @@ mod tests {
         let overrides = MarkKwargsSpec { clip: Some(false), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let polyline_ys: Vec<f64> = result.nodes.iter().find_map(|n| {
             if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
@@ -1230,7 +1319,7 @@ mod tests {
         let scales = narrow_domain_scales();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let polyline_ys: Vec<f64> = result.nodes.iter().find_map(|n| {
             if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
@@ -1266,12 +1355,599 @@ mod tests {
         let ctx_unset = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &unset_style };
         let ctx_true = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &true_style };
 
-        let ys_unset: Vec<f64> = super::build(&ctx_unset).nodes.iter().find_map(|n| {
+        let ys_unset: Vec<f64> = super::build(&ctx_unset).unwrap().nodes.iter().find_map(|n| {
             if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
         }).unwrap();
-        let ys_true: Vec<f64> = super::build(&ctx_true).nodes.iter().find_map(|n| {
+        let ys_true: Vec<f64> = super::build(&ctx_true).unwrap().nodes.iter().find_map(|n| {
             if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
         }).unwrap();
         assert_eq!(ys_unset, ys_true, "clip=Some(true) must be byte-identical to clip unset");
+    }
+
+    // ── Width: `size` tapers the line, `mark_line(size=)` is a constant ──
+    //
+    // Expected widths are computed here from the resolved size scale and the
+    // dot-diameter rule written out (`2·sqrt(area/π)`), independently of
+    // `dot_diameter`, and the series' end widths are also pinned against the
+    // theme's default area band.
+
+    /// x/y over four rows plus the size column `v` and a stroke-width column
+    /// `w`.
+    fn width_batch(v: Vec<Option<f64>>) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, true),
+            Field::new("w", DataType::Float64, false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 3.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(v)),
+            Arc::new(Float64Array::from(vec![2.0, 2.0, 2.0, 2.0])),
+        ]).unwrap()
+    }
+
+    fn sized_spec(size_field: bool, stroke_width_field: bool) -> ChartSpec {
+        let mut spec = line_spec();
+        if size_field {
+            spec.encoding.size = Some(EncodingSpec { field: "v".into(), ..Default::default() });
+        }
+        if stroke_width_field {
+            spec.encoding.stroke_width = Some(EncodingSpec { field: "w".into(), ..Default::default() });
+        }
+        spec
+    }
+
+    /// Build the line and return its nodes, plus each row's expected tapered
+    /// width (`None` where the size value is null).
+    fn build_width_case(
+        spec: &ChartSpec,
+        batch: &arrow::record_batch::RecordBatch,
+        overrides: &MarkKwargsSpec,
+    ) -> Result<(Vec<SceneNode>, Vec<Option<f64>>), RenderError> {
+        build_width_case_themed(spec, batch, overrides, ThemeInputs::default())
+    }
+
+    fn build_width_case_themed(
+        spec: &ChartSpec,
+        batch: &arrow::record_batch::RecordBatch,
+        overrides: &MarkKwargsSpec,
+        theme: ThemeInputs,
+    ) -> Result<(Vec<SceneNode>, Vec<Option<f64>>), RenderError> {
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(Some(overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
+        let expected: Vec<Option<f64>> = match &scales.size {
+            Some(scale) => col_as_f64(batch, "v").unwrap().iter()
+                .map(|v| v.and_then(|v| scale.inner.to_pixel_f64(v))
+                    .map(|area| 2.0 * (area / std::f64::consts::PI).sqrt()))
+                .collect(),
+            None => vec![None; batch.num_rows()],
+        };
+        super::build(&ctx).map(|r| (r.nodes, expected))
+    }
+
+    fn assert_widths(got: &[f64], want: &[f64]) {
+        assert_eq!(got.len(), want.len(), "widths {got:?} vs {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-9, "widths {got:?} vs {want:?}");
+        }
+    }
+
+    const ASCENDING: [Option<f64>; 4] = [Some(1.0), Some(2.0), Some(3.0), Some(4.0)];
+
+    #[test]
+    fn sized_line_polyline_carries_the_dot_diameter_at_every_vertex() {
+        let (nodes, expected) =
+            build_width_case(&sized_spec(true, false), &width_batch(ASCENDING.to_vec()), &MarkKwargsSpec::default()).unwrap();
+        let [SceneNode::Polyline { points, style, widths: Some(widths) }] = nodes.as_slice() else {
+            panic!("expected one tapered polyline, got {nodes:?}");
+        };
+        let expected: Vec<f64> = expected.into_iter().map(Option::unwrap).collect();
+        assert_eq!(widths.len(), points.len());
+        assert_widths(widths, &expected);
+        assert!(widths.windows(2).all(|p| p[0] < p[1]), "widths must rise with the size column: {widths:?}");
+        // The size column spans the theme's whole area band [4, 36] px².
+        let theme = ThemeInputs::default();
+        let pi = std::f64::consts::PI;
+        assert!((widths[0] - 2.0 * (theme.sizes.point_size_min / pi).sqrt()).abs() < 1e-9);
+        assert!((widths[3] - 2.0 * (theme.sizes.point_size_max / pi).sqrt()).abs() < 1e-9);
+        // The constant fallback width stays on the style for readers that
+        // ignore `widths`.
+        assert_eq!(style.width, theme.sizes.line_stroke_width);
+    }
+
+    #[test]
+    fn a_null_size_row_takes_the_series_constant_width() {
+        let v = vec![Some(1.0), None, Some(3.0), Some(4.0)];
+        let (nodes, expected) =
+            build_width_case(&sized_spec(true, false), &width_batch(v), &MarkKwargsSpec::default()).unwrap();
+        let [SceneNode::Polyline { widths: Some(widths), .. }] = nodes.as_slice() else {
+            panic!("expected one tapered polyline, got {nodes:?}");
+        };
+        let constant = ThemeInputs::default().sizes.line_stroke_width;
+        assert_widths(widths, &[expected[0].unwrap(), constant, expected[2].unwrap(), expected[3].unwrap()]);
+    }
+
+    /// Each command of a bent line takes the width of the row whose run it
+    /// ends in: a curve endpoint its row's width, a step's tread and riser the
+    /// width of the row at whose level they run.
+    #[test]
+    fn sized_bent_lines_carry_one_width_per_command() {
+        let cases: [(&str, &[usize]); 6] = [
+            ("monotone", &[0, 1, 2, 3]),
+            ("cardinal", &[0, 1, 2, 3]),
+            ("basis", &[0, 0, 1, 2, 3, 3]),
+            ("step", &[0, 0, 1, 1, 1, 2, 2, 2, 3, 3]),
+            ("step-before", &[0, 1, 1, 2, 2, 3, 3]),
+            ("step-after", &[0, 0, 1, 1, 2, 2, 3]),
+        ];
+        // The cases cover every bent method the vocabulary publishes.
+        let mut covered: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
+        covered.sort_unstable();
+        let mut bent: Vec<String> = crate::render::marks::curve::interpolate_accepted_values()
+            .into_iter()
+            .filter(|m| m != "linear")
+            .collect();
+        bent.sort_unstable();
+        assert_eq!(covered, bent);
+
+        for (method, rows) in cases {
+            let overrides = MarkKwargsSpec { interpolate: Some(method.into()), ..Default::default() };
+            let (nodes, expected) =
+                build_width_case(&sized_spec(true, false), &width_batch(ASCENDING.to_vec()), &overrides).unwrap();
+            let [SceneNode::Path { commands, closed: false, widths: Some(widths), .. }] = nodes.as_slice() else {
+                panic!("{method}: expected one open tapered path, got {nodes:?}");
+            };
+            assert_eq!(widths.len(), commands.len(), "{method}: one width per command");
+            let want: Vec<f64> = rows.iter().map(|&r| expected[r].unwrap()).collect();
+            assert_widths(widths, &want);
+        }
+    }
+
+    #[test]
+    fn an_unsized_line_carries_no_widths_under_every_interpolate() {
+        for method in crate::render::marks::curve::interpolate_accepted_values() {
+            let overrides = MarkKwargsSpec { interpolate: Some(method.clone()), ..Default::default() };
+            let (nodes, _) =
+                build_width_case(&sized_spec(false, false), &width_batch(ASCENDING.to_vec()), &overrides).unwrap();
+            assert_eq!(nodes.len(), 1, "{method}");
+            assert!(
+                matches!(&nodes[0], SceneNode::Polyline { widths: None, .. } | SceneNode::Path { widths: None, .. }),
+                "{method}: {nodes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn constant_size_kwarg_is_a_constant_dot_diameter_width() {
+        let want = 2.0 * (50.0 / std::f64::consts::PI).sqrt();
+        for method in ["linear", "monotone"] {
+            let overrides = MarkKwargsSpec { size: Some(50.0), interpolate: Some(method.into()), ..Default::default() };
+            let (nodes, _) =
+                build_width_case(&sized_spec(false, false), &width_batch(ASCENDING.to_vec()), &overrides).unwrap();
+            match nodes.as_slice() {
+                [SceneNode::Polyline { style, widths: None, .. }] => assert!((style.width - want).abs() < 1e-12),
+                [SceneNode::Path { style, widths: None, .. }] => assert!((style.stroke_width - want).abs() < 1e-12),
+                other => panic!("{method}: expected one constant-width line, got {other:?}"),
+            }
+        }
+    }
+
+    /// An encoded `size` outranks the constant `size=`; the constant is the
+    /// width a null row falls back to.
+    #[test]
+    fn encoded_size_outranks_the_constant_size_kwarg() {
+        let v = vec![Some(1.0), None, Some(3.0), Some(4.0)];
+        let overrides = MarkKwargsSpec { size: Some(50.0), ..Default::default() };
+        let (nodes, expected) = build_width_case(&sized_spec(true, false), &width_batch(v), &overrides).unwrap();
+        let [SceneNode::Polyline { style, widths: Some(widths), .. }] = nodes.as_slice() else {
+            panic!("expected one tapered polyline, got {nodes:?}");
+        };
+        let constant = 2.0 * (50.0 / std::f64::consts::PI).sqrt();
+        assert_widths(widths, &[expected[0].unwrap(), constant, expected[2].unwrap(), expected[3].unwrap()]);
+        assert!((style.width - constant).abs() < 1e-12);
+    }
+
+    fn conflict_text(size: &str, stroke_width: &str) -> String {
+        format!(
+            "mark_line: size and stroke_width both set the line's width (size={size}, \
+             stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width that \
+             can taper along the line; stroke_width= sets a width in pixels."
+        )
+    }
+
+    /// `size` and `stroke_width` both bound refuses, for every pairing of a
+    /// field and a constant kwarg; either one alone does not.
+    #[test]
+    fn size_and_stroke_width_both_bound_refuse_in_every_pairing() {
+        // (size field?, size kwarg, stroke_width field?, stroke_width kwarg, size text, stroke_width text)
+        let cells = [
+            (true, None, true, None, "'v'", "'w'"),
+            (true, None, false, Some(2.5), "'v'", "2.5"),
+            (false, Some(10.0), true, None, "10", "'w'"),
+            (false, Some(10.0), false, Some(2.5), "10", "2.5"),
+        ];
+        for (size_field, size, sw_field, stroke_width, s_text, w_text) in cells {
+            let overrides = MarkKwargsSpec { size, stroke_width, ..Default::default() };
+            let err = build_width_case(&sized_spec(size_field, sw_field), &width_batch(ASCENDING.to_vec()), &overrides)
+                .expect_err("size and stroke_width together must refuse");
+            assert!(matches!(err, RenderError::LineWidthConflict { layer: None, .. }), "{err:?}");
+            assert_eq!(err.to_string(), conflict_text(s_text, w_text));
+        }
+        // Vacuity control: each binding alone draws.
+        for (size_field, size, sw_field, stroke_width) in
+            [(true, None, false, None), (false, Some(10.0), false, None), (false, None, true, None), (false, None, false, Some(2.5))]
+        {
+            let overrides = MarkKwargsSpec { size, stroke_width, ..Default::default() };
+            let (nodes, _) =
+                build_width_case(&sized_spec(size_field, sw_field), &width_batch(ASCENDING.to_vec()), &overrides).unwrap();
+            assert_eq!(nodes.len(), 1);
+        }
+    }
+
+    fn test_layer(mark: Mark, encoding: Encoding, mark_style: Option<MarkKwargsSpec>) -> crate::spec::layer::Layer {
+        crate::spec::layer::Layer {
+            mark,
+            encoding,
+            transforms: Vec::new(),
+            mark_style,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+        }
+    }
+
+    /// `a + b + ...` as `Chart.__add__` writes it to the wire: the leading
+    /// layer's encoding is the chart's, and a later layer's `size` promotes
+    /// to the chart level when the chart binds none, so every layer that
+    /// does not bind `size` inherits it. `stroke_width` is no auxiliary
+    /// scale channel and never promotes.
+    fn added(layers: Vec<crate::spec::layer::Layer>) -> ChartSpec {
+        let mut spec = line_spec();
+        spec.mark = layers[0].mark;
+        spec.encoding = layers[0].encoding.clone();
+        if spec.encoding.size.is_none() {
+            spec.encoding.size = layers.iter().find_map(|l| l.encoding.size.clone());
+        }
+        spec.layers = Some(layers);
+        spec
+    }
+
+    fn render_static(spec: &ChartSpec) -> Result<String, RenderError> {
+        crate::render::render_svg(
+            spec,
+            &width_batch(ASCENDING.to_vec()),
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 400.0, height: 300.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .map(|out| out.bytes)
+    }
+
+    fn render_interactive(spec: &ChartSpec) -> Result<ferrum_scene::SceneGraph, RenderError> {
+        let (json, _, _) = crate::render::render_scene_json(
+            spec,
+            &width_batch(ASCENDING.to_vec()),
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 400.0, height: 300.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )?;
+        Ok(serde_json::from_str(&json).expect("the scene wire JSON parses"))
+    }
+
+    /// The one line node layer `li` draws on the first panel: its style
+    /// width and its per-vertex widths.
+    fn line_of(scene: &ferrum_scene::SceneGraph, li: usize) -> (f64, Option<Vec<f64>>) {
+        match scene.panels[0].marks[li].nodes.as_slice() {
+            [SceneNode::Polyline { style, widths, .. }] => (style.width, widths.clone()),
+            other => panic!("layer {li}: expected one polyline, got {other:?}"),
+        }
+    }
+
+    /// The `stroke-width` of every `<polyline>` in a static SVG.
+    fn svg_polyline_widths(svg: &str) -> Vec<f64> {
+        svg.split("<polyline").skip(1)
+            .map(|el| {
+                let el = &el[..el.find('>').expect("a closed tag")];
+                let at = el.find(" stroke-width=\"").expect("a stroke-width attribute") + " stroke-width=\"".len();
+                el[at..at + el[at..].find('"').unwrap()].parse().unwrap()
+            })
+            .collect()
+    }
+
+    /// Every pairing of a field and a constant kwarg for a line's two width
+    /// channels, with the text the refusal renders for each.
+    #[allow(clippy::type_complexity)]
+    fn width_conflict_cells() -> [(Encoding, Option<MarkKwargsSpec>, &'static str, &'static str); 4] {
+        let kwargs = |size, stroke_width| Some(MarkKwargsSpec { size, stroke_width, ..Default::default() });
+        [
+            (sized_spec(true, true).encoding, None, "'v'", "'w'"),
+            (sized_spec(true, false).encoding, kwargs(None, Some(2.5)), "'v'", "2.5"),
+            (sized_spec(false, true).encoding, kwargs(Some(10.0), None), "10", "'w'"),
+            (line_spec().encoding, kwargs(Some(10.0), Some(2.5)), "10", "2.5"),
+        ]
+    }
+
+    /// A line that itself binds both `size` and `stroke_width` refuses in
+    /// every field/constant pairing, in either layer position on a layered
+    /// chart (naming its layer) and unprefixed on its own.
+    #[test]
+    fn a_line_binding_both_widths_refuses_flat_and_in_either_layer_position() {
+        let point = test_layer(Mark::Point, line_spec().encoding, None);
+        for (encoding, mark_style, size, stroke_width) in width_conflict_cells() {
+            let text = conflict_text(size, stroke_width);
+            let line = test_layer(Mark::Line, encoding.clone(), mark_style.clone());
+            for (layers, li) in [(vec![line.clone(), point.clone()], 0), (vec![point.clone(), line.clone()], 1)] {
+                let spec = added(layers);
+                let want = format!("layer {li}: {text}");
+                assert_eq!(render_static(&spec).err().map(|e| e.to_string()), Some(want.clone()));
+                assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(want));
+            }
+            let mut flat = line_spec();
+            flat.encoding = encoding;
+            flat.mark_style = mark_style;
+            assert_eq!(render_static(&flat).err().map(|e| e.to_string()), Some(text.clone()));
+            assert_eq!(render_interactive(&flat).err().map(|e| e.to_string()), Some(text));
+        }
+    }
+
+    /// A line layer's own `stroke_width` (a kwarg or its own encoding)
+    /// outranks a `size` it only inherits from a sibling: the line keeps its
+    /// own pixel width, untapered, the sibling's dots keep the size, and
+    /// nothing refuses, in either layer order, on both output kinds.
+    #[test]
+    fn a_line_layers_own_stroke_width_outranks_a_size_it_inherits() {
+        let xy = line_spec().encoding;
+        let sized_point = test_layer(Mark::Point, sized_spec(true, false).encoding, None);
+        let plain_point = test_layer(Mark::Point, xy.clone(), None);
+        let own_widths = [
+            (test_layer(Mark::Line, xy.clone(), Some(MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() })), Some(3.0)),
+            (test_layer(Mark::Line, sized_spec(false, true).encoding, None), None),
+        ];
+        for (line, kwarg_width) in own_widths {
+            for line_first in [true, false] {
+                let order = |partner: &crate::spec::layer::Layer| {
+                    if line_first { vec![line.clone(), partner.clone()] } else { vec![partner.clone(), line.clone()] }
+                };
+                let (li, pi) = if line_first { (0, 1) } else { (1, 0) };
+                let spec = added(order(&sized_point));
+                assert!(spec.encoding.size.is_some(), "the size reaches the chart level, so the line inherits it");
+                let scene = render_interactive(&spec).unwrap_or_else(|e| panic!("line_first={line_first}: {e}"));
+                // The line draws exactly the style it draws beside an unsized
+                // partner, with no taper.
+                let control = render_interactive(&added(order(&plain_point))).unwrap();
+                let (width, widths) = line_of(&scene, li);
+                assert_eq!((width, widths.clone()), line_of(&control, li), "line_first={line_first}");
+                assert_eq!(widths, None);
+                if let Some(kwarg_width) = kwarg_width {
+                    assert_eq!(width, kwarg_width);
+                }
+                // The dots stay sized by `v` (ascending 1..4).
+                let radii: Vec<f64> = scene.panels[0].marks[pi].nodes.iter()
+                    .map(|n| match n { SceneNode::Circle { r, .. } => *r, other => panic!("{other:?}") })
+                    .collect();
+                assert_eq!(radii.len(), 4);
+                assert!(radii.windows(2).all(|w| w[0] < w[1]), "sized dots: {radii:?}");
+                let svg = render_static(&spec).unwrap_or_else(|e| panic!("line_first={line_first}: {e}"));
+                assert_eq!(svg_polyline_widths(&svg), vec![width]);
+            }
+        }
+        // Vacuity control: without its own stroke_width the same line tapers
+        // by the size it inherits, in either order.
+        let bare = test_layer(Mark::Line, xy, None);
+        for (layers, li) in [(vec![bare.clone(), sized_point.clone()], 0), (vec![sized_point, bare], 1)] {
+            let (_, widths) = line_of(&render_interactive(&added(layers)).unwrap(), li);
+            assert_eq!(widths.map(|w| w.len()), Some(4));
+        }
+    }
+
+    /// A line layer's own constant width kwarg outranks an inherited field on
+    /// the same channel: beside a sibling's `size='v'` a `size=5` line draws
+    /// untapered at `dot_diameter(5)`, and beside a leading line's
+    /// `stroke_width='w'` a `stroke_width=3` line draws 3 px, in either layer
+    /// order, on both output kinds, while the sibling keeps its own binding.
+    #[test]
+    fn a_line_layers_own_width_kwarg_outranks_the_same_field_it_inherits() {
+        let xy = line_spec().encoding;
+        let kwargs = |size, stroke_width| Some(MarkKwargsSpec { size, stroke_width, ..Default::default() });
+        // (sibling binding the field, unbound control sibling, own-kwarg line, its width)
+        let cases = [
+            (
+                test_layer(Mark::Point, sized_spec(true, false).encoding, None),
+                test_layer(Mark::Point, xy.clone(), None),
+                test_layer(Mark::Line, xy.clone(), kwargs(Some(5.0), None)),
+                dot_diameter(5.0),
+            ),
+            (
+                test_layer(Mark::Line, sized_spec(false, true).encoding, None),
+                test_layer(Mark::Line, xy.clone(), None),
+                test_layer(Mark::Line, xy.clone(), kwargs(None, Some(3.0))),
+                3.0,
+            ),
+        ];
+        for (sibling, control_sibling, line, want) in cases {
+            let sibling_is_line = sibling.mark == Mark::Line;
+            for line_first in [true, false] {
+                let order = |sibling: &crate::spec::layer::Layer| {
+                    if line_first { vec![line.clone(), sibling.clone()] } else { vec![sibling.clone(), line.clone()] }
+                };
+                let (li, si) = if line_first { (0, 1) } else { (1, 0) };
+                let spec = added(order(&sibling));
+                let scene = render_interactive(&spec).unwrap_or_else(|e| panic!("line_first={line_first}: {e}"));
+                let control = render_interactive(&added(order(&control_sibling))).unwrap();
+                assert_eq!(line_of(&scene, li), (want, None), "line_first={line_first}");
+                assert_eq!(line_of(&scene, li), line_of(&control, li), "line_first={line_first}");
+                let svg = render_static(&spec).unwrap_or_else(|e| panic!("line_first={line_first}: {e}"));
+                let svg_widths = svg_polyline_widths(&svg);
+                let control_widths = svg_polyline_widths(&render_static(&added(order(&control_sibling))).unwrap());
+                if sibling_is_line {
+                    // The sibling keeps its own `stroke_width` field.
+                    assert_eq!(line_of(&scene, si).0, 2.0, "line_first={line_first}");
+                    assert_eq!(svg_widths[li], control_widths[li], "line_first={line_first}");
+                    assert_eq!(svg_widths[si], 2.0, "line_first={line_first}");
+                } else {
+                    // The sibling's dots stay sized by `v` (ascending 1..4).
+                    let radii: Vec<f64> = scene.panels[0].marks[si].nodes.iter()
+                        .map(|n| match n { SceneNode::Circle { r, .. } => *r, other => panic!("{other:?}") })
+                        .collect();
+                    assert_eq!(radii.len(), 4);
+                    assert!(radii.windows(2).all(|w| w[0] < w[1]), "sized dots: {radii:?}");
+                    assert_eq!(svg_widths, control_widths, "line_first={line_first}");
+                }
+            }
+        }
+    }
+
+    /// The precedence extends to every way a width can be inherited: a line
+    /// that owns `size` outranks a `stroke_width` field it inherits from the
+    /// leading layer and tapers, and a line that owns neither but inherits
+    /// both keeps the inherited `stroke_width` and draws untapered.
+    #[test]
+    fn an_inherited_width_never_conflicts_with_another_width() {
+        let stroked = test_layer(Mark::Line, sized_spec(false, true).encoding, None);
+        let sized = test_layer(Mark::Line, sized_spec(true, false).encoding, None);
+        let sized_point = test_layer(Mark::Point, sized_spec(true, false).encoding, None);
+        let bare = test_layer(Mark::Line, line_spec().encoding, None);
+
+        let spec = added(vec![stroked.clone(), sized]);
+        assert!(spec.encoding.stroke_width.is_some() && spec.encoding.size.is_some());
+        let scene = render_interactive(&spec).unwrap();
+        assert_eq!(line_of(&scene, 0).1, None, "the stroked line keeps its own pixel width");
+        assert_eq!(line_of(&scene, 1).1.map(|w| w.len()), Some(4), "the sized line tapers");
+        render_static(&spec).unwrap();
+
+        let spec = added(vec![stroked, sized_point, bare]);
+        let scene = render_interactive(&spec).unwrap();
+        assert_eq!(line_of(&scene, 2), line_of(&scene, 0), "both inherited: the stroke_width wins");
+        assert_eq!(line_of(&scene, 2).1, None);
+        render_static(&spec).unwrap();
+    }
+
+    // ── Every drawn width is finite and positive, or the line refuses ──
+
+    /// A size scale whose range starts at 0 maps the domain minimum to area
+    /// 0, a dot with no diameter: that vertex has no width to draw, and the
+    /// line refuses instead of substituting its constant width.
+    #[test]
+    fn a_size_mapping_to_zero_area_refuses_naming_the_value() {
+        let mut spec = sized_spec(true, false);
+        let scale = |range: &str| serde_json::from_str(&format!(r#"{{"type":"linear","domain":[1,4],"range":{range}}}"#)).unwrap();
+        spec.encoding.size.as_mut().unwrap().scale = Some(scale("[0,36]"));
+        let err = build_width_case(&spec, &width_batch(ASCENDING.to_vec()), &MarkKwargsSpec::default())
+            .expect_err("a zero-area vertex must refuse");
+        assert!(matches!(err, RenderError::LineWidthNotPositive { layer: None, .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "mark_line: size 'v' value 1 maps to area 0 on the size scale, which gives no positive \
+             line width. Every width along a line must be positive; give the size scale a range above 0."
+        );
+        // Vacuity control: the same scale starting above 0 draws every vertex.
+        spec.encoding.size.as_mut().unwrap().scale = Some(scale("[4,36]"));
+        let (nodes, _) = build_width_case(&spec, &width_batch(ASCENDING.to_vec()), &MarkKwargsSpec::default()).unwrap();
+        let [SceneNode::Polyline { widths: Some(widths), .. }] = nodes.as_slice() else {
+            panic!("expected one tapered polyline, got {nodes:?}");
+        };
+        assert!(widths.iter().all(|w| w.is_finite() && *w > 0.0), "{widths:?}");
+    }
+
+    /// A row with no usable size takes the series' constant width; when that
+    /// width is the theme's `line_stroke_width=0`, the vertex has no width and
+    /// the line refuses. Without such a row the zero theme width never reaches
+    /// `widths` and the line draws.
+    #[test]
+    fn a_null_size_row_on_a_zero_default_width_refuses() {
+        let mut theme = ThemeInputs::default();
+        theme.sizes.line_stroke_width = 0.0;
+        let spec = sized_spec(true, false);
+        let with_null = vec![Some(1.0), None, Some(3.0), Some(4.0)];
+        let err = build_width_case_themed(&spec, &width_batch(with_null), &MarkKwargsSpec::default(), theme.clone())
+            .expect_err("a zero fallback width must refuse");
+        assert!(matches!(err, RenderError::LineWidthNotPositive { layer: None, .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "mark_line: size 'v' has a row with no usable size (null, non-finite or off the scale), \
+             which takes the line's default width 0. Every width along a line must be positive; set \
+             a positive Theme(line_stroke_width=)."
+        );
+        // Vacuity control: every row sized, the zero theme width stays on the
+        // style and every vertex width is positive.
+        let (nodes, _) =
+            build_width_case_themed(&spec, &width_batch(ASCENDING.to_vec()), &MarkKwargsSpec::default(), theme).unwrap();
+        let [SceneNode::Polyline { style, widths: Some(widths), .. }] = nodes.as_slice() else {
+            panic!("expected one tapered polyline, got {nodes:?}");
+        };
+        assert_eq!(style.width, 0.0);
+        assert!(widths.iter().all(|w| w.is_finite() && *w > 0.0), "{widths:?}");
+    }
+
+    /// A hand-built wire spec reaches render without Python's constructor
+    /// check: a non-positive or non-finite constant `size=` on a line
+    /// refuses there and never reaches `dot_diameter`, and a negative or
+    /// non-finite one on a point refuses before it becomes a NaN radius. On a
+    /// layered chart both refusals, and a zero-area vertex, name their layer.
+    #[test]
+    fn wire_door_refuses_out_of_range_constant_size_and_names_the_layer() {
+        let sized = |mark, value| {
+            let mut spec = line_spec();
+            spec.mark = mark;
+            spec.mark_style = Some(MarkKwargsSpec { size: Some(value), ..Default::default() });
+            spec
+        };
+        for (value, text) in [(-4.0, "-4"), (0.0, "0"), (f64::NAN, "NaN")] {
+            let err = render_static(&sized(Mark::Line, value)).err().unwrap_or_else(|| panic!("size={value} must refuse"));
+            assert!(matches!(err, RenderError::MarkSizeOutOfRange { mark: Mark::Line, .. }), "{err:?}");
+            assert_eq!(err.to_string(), format!("mark_line(size=...) must be a positive number; received {text}"));
+        }
+        // A point's radius is `sqrt(size / PI)`: a negative or non-finite
+        // area has none and refuses on both output kinds. Zero stays an
+        // invisible dot.
+        for (value, text) in [(-4.0, "-4"), (f64::NAN, "NaN"), (f64::INFINITY, "inf")] {
+            let spec = sized(Mark::Point, value);
+            let expected = format!("mark_point(size=...) must be a non-negative number; received {text}");
+            let err = render_static(&spec).err().unwrap_or_else(|| panic!("point size={value} must refuse"));
+            assert!(matches!(err, RenderError::MarkSizeOutOfRange { mark: Mark::Point, .. }), "{err:?}");
+            assert_eq!(err.to_string(), expected);
+            let err = render_interactive(&spec).err().unwrap_or_else(|| panic!("point size={value} must refuse"));
+            assert_eq!(err.to_string(), expected);
+        }
+        // Vacuity controls: a positive constant draws on both marks, and a
+        // point keeps its zero-area dot.
+        for (mark, value) in [(Mark::Line, 10.0), (Mark::Point, 10.0), (Mark::Point, 0.0)] {
+            assert!(render_static(&sized(mark, value)).is_ok(), "{mark:?} size={value}");
+            assert!(render_interactive(&sized(mark, value)).is_ok(), "{mark:?} size={value}");
+        }
+
+        // On a layered chart an out-of-range constant names its layer.
+        let xy = line_spec().encoding;
+        let bad = |mark, value| test_layer(mark, xy.clone(), Some(MarkKwargsSpec { size: Some(value), ..Default::default() }));
+        for (mark, value, text) in [
+            (Mark::Line, 0.0, "mark_line(size=...) must be a positive number; received 0"),
+            (Mark::Point, -4.0, "mark_point(size=...) must be a non-negative number; received -4"),
+        ] {
+            let partner = test_layer(Mark::Point, xy.clone(), None);
+            for (layers, li) in [(vec![bad(mark, value), partner.clone()], 0), (vec![partner, bad(mark, value)], 1)] {
+                let spec = added(layers);
+                let want = format!("layer {li}: {text}");
+                assert_eq!(render_static(&spec).err().map(|e| e.to_string()), Some(want.clone()));
+                assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(want));
+            }
+        }
+
+        // The size field is chart-level (the one size scale), inherited by
+        // both layers; the line is layer 1.
+        let mut layered = sized_spec(true, false);
+        layered.encoding.size.as_mut().unwrap().scale =
+            Some(serde_json::from_str(r#"{"type":"linear","domain":[1,4],"range":[0,36]}"#).unwrap());
+        layered.layers = Some(vec![test_layer(Mark::Point, xy.clone(), None), test_layer(Mark::Line, xy, None)]);
+        let err = render_static(&layered).err().expect("the line layer must refuse");
+        assert!(err.to_string().starts_with("layer 1: mark_line: size 'v' value 1 maps to area 0"), "{err}");
     }
 }

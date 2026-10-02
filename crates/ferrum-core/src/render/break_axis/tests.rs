@@ -492,6 +492,7 @@ fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
         commands: vec![PathCmd::HLineTo { x: 110.0 }],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     remap(AlignAxis::X, &br).remap_node(&mut on_x);
     let SceneNode::Path { commands, .. } = &on_x else { panic!() };
@@ -505,6 +506,7 @@ fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
         commands: vec![PathCmd::HLineTo { x: 110.0 }],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     remap(AlignAxis::Y, &br).remap_node(&mut on_y);
     let SceneNode::Path { commands, .. } = &on_y else { panic!() };
@@ -519,6 +521,7 @@ fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
         commands: vec![PathCmd::VLineTo { y: 110.0 }],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     remap(AlignAxis::Y, &br).remap_node(&mut on_y);
     let SceneNode::Path { commands, .. } = &on_y else { panic!() };
@@ -532,6 +535,7 @@ fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
         commands: vec![PathCmd::VLineTo { y: 110.0 }],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     remap(AlignAxis::X, &br).remap_node(&mut on_x);
     let SceneNode::Path { commands, .. } = &on_x else { panic!() };
@@ -1048,6 +1052,7 @@ fn closed_area_path_clips_per_segment_without_hidden_spikes() {
         ],
         style: fill_stroke(),
         closed: true,
+        widths: None,
     };
     let clipped = guide_remap(&br).clip_nodes(vec![node]);
     assert_eq!(clipped.nodes.len(), 2, "the area clips into two bands");
@@ -1084,6 +1089,7 @@ fn an_open_border_path_in_an_extent_batch_is_cut_like_its_fill() {
         ],
         style: fill_stroke(),
         closed: true,
+        widths: None,
     };
     // The border: the top line, rising from data 0 to data 900 across the
     // gap, so it is cut at data 150 (pixel 206) and resumes at data 850
@@ -1095,6 +1101,7 @@ fn an_open_border_path_in_an_extent_batch_is_cut_like_its_fill() {
         ],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     let clipped = guide_remap(&br).clip_nodes(vec![fill, border]);
     assert_eq!(clipped.nodes.len(), 4, "2 fill bands + 2 border pieces");
@@ -1141,6 +1148,7 @@ fn an_open_border_path_with_a_vertex_inside_a_gap_is_cut_not_spiked() {
         ],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     let clipped = guide_remap(&br).clip_nodes(vec![border]);
     assert_eq!(clipped.nodes.len(), 2, "cut into two; got {:?}", clipped.nodes);
@@ -1176,6 +1184,7 @@ fn curved_path_falls_back_to_per_vertex_remap() {
         ],
         style: fill_stroke(),
         closed: true,
+        widths: None,
     };
     let clipped = guide_remap(&br).clip_nodes(vec![node]);
     assert_eq!(clipped.nodes.len(), 1, "a curved path is not polygon-clipped");
@@ -1463,6 +1472,7 @@ fn glyph_inside_a_gap_hides_whole_and_is_never_dropped() {
         ],
         style: fill_stroke(),
         closed: true,
+        widths: None,
     };
     // The diamond's own exact data anchor: symmetric, centered on data 500.
     remap.remap_glyph_node(&mut diamond, (10.0, 200.0));
@@ -1596,6 +1606,7 @@ fn polyline_vertices_are_placed_on_the_broken_scale() {
             stroke_join: None,
             stroke_opacity: 1.0,
         },
+        widths: None,
     };
     guide_remap(&br).remap_node(&mut line);
     let SceneNode::Polyline { points, .. } = &line else { panic!() };
@@ -1616,7 +1627,7 @@ fn polyline_vertices_are_placed_on_the_broken_scale() {
 // crossing point below is expected to land exactly on one of them.
 
 fn polyline(points: Vec<(f64, f64)>) -> SceneNode {
-    SceneNode::Polyline { points, style: stroke() }
+    SceneNode::Polyline { points, style: stroke(), widths: None }
 }
 
 fn polyline_points(node: &SceneNode) -> Vec<(f64, f64)> {
@@ -1822,6 +1833,7 @@ fn a_step_path_of_straight_commands_splits() {
         ],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     let split = guide_remap(&br).split_nodes(vec![step]);
     assert_eq!(split.nodes.len(), 2, "the vertical leg is cut at the gap; got {:?}", split.nodes);
@@ -1845,7 +1857,7 @@ fn a_step_path_of_straight_commands_splits() {
 /// `(150, 850)`, so segment 0 carries data `0..150` over pixels `400..206`
 /// and data `d` there places at `400 - d * 194 / 150`.
 fn step_path(commands: Vec<PathCmd>) -> SceneNode {
-    SceneNode::Path { commands, style: fill_stroke(), closed: false }
+    SceneNode::Path { commands, style: fill_stroke(), closed: false, widths: None }
 }
 
 fn path_commands_of(node: &SceneNode) -> &[PathCmd] {
@@ -2028,6 +2040,7 @@ fn a_curved_path_falls_back_to_the_per_vertex_model() {
         ],
         style: fill_stroke(),
         closed: false,
+        widths: None,
     };
     let mut expected = curved.clone();
     let remap = guide_remap(&br);

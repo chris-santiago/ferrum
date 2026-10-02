@@ -20,6 +20,24 @@ from ferrum._validate import (
     validate_optional_vocabulary,
 )
 
+# `size` is honored by exactly two of the 13 primitive marks --
+# `_PRIMITIVE_MARK_EXTRAS["point"]` and `["line"]` below -- the only marks
+# whose renderer actually reads a constant `size=`: `resolve_mark_style`
+# (draw.rs) writes it into `style.point.point_size`, which the point mark
+# (`marks/point.rs`, the circle radius) reads back out. The line mark reads
+# its own `size=` from a separate field, `style.line.size`
+# (`marks/line.rs`, the constant taper width). Every other primitive --
+# area, bar, rule, text, tick, rect, segment, arc, image, geoshape, label --
+# refuses a constant `size=` at construction, naming the mark and -- where
+# the mark has an analogous width/font kwarg of its own -- pointing to it
+# (`_SIZE_REFUSAL_POINTER` below): it never reaches a renderer that reads
+# it, so accepting it would be an accepted-but-inert kwarg. A non-positive
+# constant `size=` on point or line is refused for the same reason it is
+# honored there at all: the value means something. Composite, statistical,
+# and diagnostic marks (every mark name with no entry in
+# `_PRIMITIVE_MARK_EXTRAS`) are out of scope for this refusal -- see
+# `_COMPOSITE_FALLBACK_KWARGS` below.
+
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
 # instead of ``fill``.  Fill-primary marks (bar, area, point, rect, arc,
@@ -172,7 +190,6 @@ _VALID_POINT_SHAPES: frozenset[str] = frozenset(
 # any one mark family.
 _UNIVERSAL_MARK_KWARGS: frozenset[str] = frozenset(
     [
-        "size",
         "stroke",
         "fill",
         "opacity",
@@ -198,8 +215,8 @@ _UNIVERSAL_MARK_KWARGS: frozenset[str] = frozenset(
 # against the Rust section headers by
 # ``tests/marks/test_mark_honored_kwargs.py``.
 _PRIMITIVE_MARK_EXTRAS: dict[str, frozenset[str]] = {
-    "point": frozenset({"filled", "shape"}),
-    "line": frozenset({"interpolate", "stroke_cap", "stroke_join"}),
+    "point": frozenset({"filled", "shape", "size"}),
+    "line": frozenset({"interpolate", "stroke_cap", "stroke_join", "size"}),
     "area": frozenset({"interpolate", "stroke_join", "line", "borders"}),
     "bar": frozenset({"orient", "zero"}),
     "rule": frozenset(),
@@ -219,16 +236,40 @@ _PRIMITIVE_MARK_EXTRAS: dict[str, frozenset[str]] = {
 #: ``MarkBase``/``Chart._set_mark`` validate directly); every composite,
 #: statistical, and diagnostic mark name (``"boxplot"``, ``"density"``,
 #: ``"roc"``, …) reached through :func:`mark_honors` falls back to
-#: :data:`_UNIVERSAL_MARK_KWARGS` — as of this writing every one of those
-#: marks' own ``**kwargs`` surface only ever exercises the universal set
-#: (mark-specific behavior on composite marks is threaded through named
-#: parameters instead, e.g. ``mark_ribbon(interpolate=...)``, never through
-#: ``**mark_kwargs``), so the fallback is exact, not an approximation. A
-#: future composite mark that wants to honor a mark-specific field must add
-#: an explicit entry here rather than relying on the fallback.
+#: :data:`_COMPOSITE_FALLBACK_KWARGS`, not :data:`_UNIVERSAL_MARK_KWARGS` --
+#: see that fallback's own docstring for why ``size`` rejoins it there. A
+#: future composite mark that wants to honor some OTHER mark-specific field
+#: must add an explicit entry here rather than relying on the fallback.
 MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
     mark: _UNIVERSAL_MARK_KWARGS | extras for mark, extras in _PRIMITIVE_MARK_EXTRAS.items()
 }
+
+#: Fallback honored set for every mark name with no entry in
+#: :data:`MARK_HONORED_KWARGS` (every composite, statistical, and
+#: diagnostic mark -- ``"boxplot"``, ``"density"``, ``"roc"``, …). The
+#: constant-``size=`` refusal above names only the 13 primitives: it
+#: refuses an inert ``size=`` on the 11 primitives whose renderer never
+#: reads it, but a composite mark's own ``size=`` (when it takes one as a
+#: named parameter, e.g. ``mark_boxplot``/``mark_swarm``) is consumed
+#: before `**mark_kwargs` ever sees it, and whatever a composite mark's
+#: ``**mark_kwargs`` catch-all DOES forward is spread across every one of
+#: its layers by ``apply_user_mark_kwargs`` -- including, for marks with an
+#: internal point sub-layer, a layer where ``size=`` still draws something.
+#: Composite marks are out of scope for the refusal; this fallback keeps
+#: their universal-plus-``size`` vocabulary unchanged.
+_COMPOSITE_FALLBACK_KWARGS: frozenset[str] = _UNIVERSAL_MARK_KWARGS | frozenset({"size"})
+
+#: Primitives where `size` is honored because it names that mark's own
+#: width/area knob (point's circle radius, line's taper width) -- derived
+#: from :data:`_PRIMITIVE_MARK_EXTRAS` rather than hand-listed, so it tracks
+#: whichever primitives declare `size` there. A composite mark's own
+#: `size=` parameter reaches the same real-number coercion through
+#: :data:`_COMPOSITE_FALLBACK_KWARGS` but means something else per
+#: composite (e.g. `mark_boxplot(size=)`'s box-width fraction), so it is
+#: not a member of this set and is not positivity-checked here.
+_MARKS_WHERE_SIZE_IS_A_MARK_SIZE: frozenset[str] = frozenset(
+    mark for mark, extras in _PRIMITIVE_MARK_EXTRAS.items() if "size" in extras
+)
 
 
 _ANY_HONORED_MARK_KWARG: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
@@ -255,8 +296,8 @@ def mark_honors(mark_name: str, kwarg: str) -> bool:
 
     Looks up :data:`MARK_HONORED_KWARGS`; a *mark_name* with no explicit
     entry (every non-primitive mark) falls back to
-    :data:`_UNIVERSAL_MARK_KWARGS` — see :data:`MARK_HONORED_KWARGS`'s
-    docstring for why that fallback is exact today.
+    :data:`_COMPOSITE_FALLBACK_KWARGS` — see that fallback's docstring for
+    why it is exact today.
 
     Examples
     --------
@@ -264,15 +305,17 @@ def mark_honors(mark_name: str, kwarg: str) -> bool:
     True
     >>> mark_honors("bar", "arrow")
     False
+    >>> mark_honors("bar", "size")
+    False
     >>> mark_honors("boxplot", "opacity")
     True
     """
-    return kwarg in MARK_HONORED_KWARGS.get(mark_name, _UNIVERSAL_MARK_KWARGS)
+    return kwarg in MARK_HONORED_KWARGS.get(mark_name, _COMPOSITE_FALLBACK_KWARGS)
 
 
 def _honored_set_for(mark_name: str) -> frozenset[str]:
     """The honored set :func:`mark_honors` actually consulted for *mark_name*."""
-    return MARK_HONORED_KWARGS.get(mark_name, _UNIVERSAL_MARK_KWARGS)
+    return MARK_HONORED_KWARGS.get(mark_name, _COMPOSITE_FALLBACK_KWARGS)
 
 
 def _mark_kwarg_error(mark_name: str, key: str) -> str:
@@ -294,6 +337,35 @@ def _mark_kwarg_error(mark_name: str, key: str) -> str:
     if key not in _VALID_MARK_KWARGS:
         return f"mark_{mark_name}: unknown keyword argument {key!r}. Honored: {honored}"
     return f"mark_{mark_name}: keyword argument {key!r} is not honored by mark_{mark_name}. Honored: {honored}"
+
+
+#: For a primitive mark that refuses a constant `size=` (every one but
+#: point/line), the mark's own kwarg that plays the same "how big/thick is
+#: this mark" role, named in the refusal so the caller has somewhere to go.
+#: A mark absent here (`area`, `bar`, `arc`, `image`, `geoshape`) has no
+#: such analog, and the refusal omits the pointer sentence.
+_SIZE_REFUSAL_POINTER: dict[str, str] = {
+    "rule": "stroke_width",
+    "segment": "stroke_width",
+    "text": "font_size",
+    "label": "font_size",
+    "tick": "band_size",
+    "rect": "band_size",
+}
+
+
+def _inert_size_error(mark_name: str, value: Any) -> str:
+    """Build the refusal for a constant `size=` on a primitive mark that never draws it.
+
+    Names the mark the caller invoked and the value it passed, and, when
+    *mark_name* has one, points to its own width/font kwarg
+    (:data:`_SIZE_REFUSAL_POINTER`) as the actual knob for that role.
+    """
+    message = f"mark_{mark_name}(size=...) has no effect on mark_{mark_name}; received {value!r}."
+    pointer = _SIZE_REFUSAL_POINTER.get(mark_name)
+    if pointer is None:
+        return message
+    return f"{message} Set {pointer}= instead."
 
 
 def _mark_kwargs_error_plural(mark_name: str, keys: list[str]) -> str:
@@ -380,6 +452,10 @@ class MarkBase:
     ------
     TypeError
         If any keyword argument is not honored by *mark_name*.
+    ValueError
+        If a constant ``size=`` is passed to a primitive mark whose
+        renderer never reads it (every primitive but ``point``/``line``),
+        or if ``size=`` on ``point``/``line`` is not a positive number.
 
     Examples
     --------
@@ -405,6 +481,12 @@ class MarkBase:
                 canonical = color_target
             else:
                 canonical = _MARK_KWARG_ALIASES.get(k, k)
+            # A constant `size=` on a primitive mark that never draws it
+            # gets its own, more specific refusal (naming the mark's own
+            # width/font kwarg where one exists) ahead of the generic
+            # not-honored door below.
+            if canonical == "size" and not mark_honors(mark_name, canonical):
+                raise ValueError(_inert_size_error(mark_name, v))
             # A kwarg the mark does not honor is refused as such before its
             # value is judged.
             if not mark_honors(mark_name, canonical):
@@ -420,6 +502,23 @@ class MarkBase:
                 v = coerce_non_negative_int(f"mark_{mark_name}({k}=...)", v)
             elif canonical in _REAL_MARK_KWARGS:
                 v = coerce_finite_real(f"mark_{mark_name}({k}=...)", v)
+                # Positivity matters only where `size` is this primitive's
+                # own width/area knob (point's circle radius, line's taper
+                # width) -- `_MARKS_WHERE_SIZE_IS_A_MARK_SIZE`. A composite
+                # mark's own same-named `size=` parameter reaches this same
+                # real-number coercion through `_COMPOSITE_FALLBACK_KWARGS`
+                # but means something else per composite (e.g.
+                # `mark_boxplot(size=)`'s box-width fraction), so it is not
+                # gated here.
+                if (
+                    canonical == "size"
+                    and mark_name in _MARKS_WHERE_SIZE_IS_A_MARK_SIZE
+                    and v is not None
+                    and v <= 0
+                ):
+                    raise ValueError(
+                        f"mark_{mark_name}({k}=...) must be a positive number; received {v!r}"
+                    )
             resolved[canonical] = v
         # Validate shape= value for point marks. The constant shape is a fixed
         # string that must name one of the glyphs supported by the Rust renderer;
@@ -478,7 +577,7 @@ class MarkBase:
 
         Examples
         --------
-        >>> mb = MarkBase("bar", size=40, opacity=0.8)
+        >>> mb = MarkBase("point", size=40, opacity=0.8)
         >>> mb.to_mark_kwargs_dict()
         {'size': 40, 'opacity': 0.8}
         """

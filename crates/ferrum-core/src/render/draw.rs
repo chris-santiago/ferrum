@@ -333,6 +333,13 @@ pub struct LineStyle {
     pub stroke_cap: Option<String>,
     /// S3: stroke_join (line/area).
     pub stroke_join: Option<String>,
+    /// `mark_line`'s constant `size=` (a dot area in px², drawn at its
+    /// diameter) and `stroke_width=` (px) exactly as written. The resolved
+    /// width lives in [`MarkPaint::stroke_width`]; these keep the bindings
+    /// visible so the line build can refuse the two together, which a theme
+    /// width never is.
+    pub size: Option<f64>,
+    pub stroke_width: Option<f64>,
 }
 
 /// `mark_area`-only overrides: whether to draw the area's top border line and
@@ -579,7 +586,20 @@ pub fn resolve_mark_style(
     // --- Apply MarkKwargsSpec overrides (if any) ---
     let Some(o) = overrides else { return Ok(style) };
 
-    if let Some(size) = o.size { style.point.point_size = size; }
+    if let Some(size) = o.size {
+        // A line's width is the diameter of a dot of area `size`, which a
+        // non-positive area does not have; a point's radius is
+        // `sqrt(size / PI)`, which a negative area does not have.
+        let drawable = match mark {
+            Mark::Line => size.is_finite() && size > 0.0,
+            Mark::Point => size.is_finite() && size >= 0.0,
+            _ => true,
+        };
+        if !drawable {
+            return Err(RenderError::MarkSizeOutOfRange { layer: None, mark: *mark, value: size });
+        }
+        style.point.point_size = size;
+    }
     if let Some(opacity) = o.opacity { style.paint.opacity = opacity; }
     if let Some(cr) = o.corner_radius { style.paint.corner_radius = cr; }
     if let Some(sw) = o.stroke_width { style.paint.stroke_width = sw; }
@@ -644,6 +664,16 @@ pub fn resolve_mark_style(
     if let Some(sz) = o.arrow_size { style.segment.arrow_size = Some(sz); }
     // `#172`(2): the producer's declared value axis (line family)
     if let Some(va) = o.value_axis { style.misc.value_axis = Some(va); }
+    // A constant `size=` on a line is a width: the diameter of a dot of that
+    // area. Beside a `stroke_width=` it is refused by the line build, which
+    // reads both bindings from `style.line`.
+    if matches!(mark, Mark::Line) {
+        style.line.size = o.size;
+        style.line.stroke_width = o.stroke_width;
+        if let (Some(area), None) = (o.size, o.stroke_width) {
+            style.paint.stroke_width = super::marks::line::dot_diameter(area);
+        }
+    }
 
     Ok(style)
 }
@@ -1492,7 +1522,7 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
         Mark::Rule => super::marks::rule::build(ctx),
         Mark::Segment => super::marks::segment::build(ctx),
         Mark::Point => Ok(super::marks::point::build(ctx)),
-        Mark::Line => Ok(super::marks::line::build(ctx)),
+        Mark::Line => super::marks::line::build(ctx),
         Mark::Bar => Ok(super::marks::bar::build(ctx)),
         Mark::Area => Ok(super::marks::area::build(ctx)),
         Mark::Text => super::marks::text::build(ctx),

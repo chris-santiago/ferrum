@@ -2,12 +2,14 @@ pub mod dash;
 pub mod error;
 pub mod parameter;
 pub mod selection;
+pub mod taper;
 pub mod types;
 
 pub use dash::*;
 pub use error::*;
 pub use parameter::*;
 pub use selection::*;
+pub use taper::*;
 pub use types::*;
 
 #[cfg(test)]
@@ -591,6 +593,72 @@ mod tests {
         )
         .expect("deserialize");
         assert_eq!(with_null.color, None);
+    }
+
+    // ── Polyline / Path `widths` (tapered line) ─────────────────────────────
+
+    fn stroke_fixture() -> StrokeStyle {
+        StrokeStyle {
+            color: Some(Color::rgb(1, 2, 3)),
+            width: 1.5,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        }
+    }
+
+    fn fill_stroke_fixture() -> FillStroke {
+        FillStroke {
+            fill: None,
+            stroke: Some(Color::rgb(1, 2, 3)),
+            stroke_width: 1.5,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+
+    fn polyline_fixture(widths: Option<Vec<f64>>) -> SceneNode {
+        SceneNode::Polyline { points: vec![(0.0, 0.0), (1.0, 2.0)], style: stroke_fixture(), widths }
+    }
+
+    fn path_fixture(widths: Option<Vec<f64>>) -> SceneNode {
+        SceneNode::Path {
+            commands: vec![PathCmd::MoveTo { x: 0.0, y: 0.0 }, PathCmd::LineTo { x: 1.0, y: 2.0 }],
+            style: fill_stroke_fixture(),
+            closed: false,
+            widths,
+        }
+    }
+
+    /// The bytes these two nodes serialized to before `widths` existed,
+    /// captured from the pre-field build. Absent `widths` must reproduce them
+    /// exactly, and they must still load (as `widths: None`).
+    const PRE_WIDTHS_POLYLINE_JSON: &str = r#"{"type":"polyline","points":[[0.0,0.0],[1.0,2.0]],"style":{"color":{"r":1,"g":2,"b":3,"a":255},"width":1.5,"opacity":1.0,"dash":null,"stroke_cap":null,"stroke_join":null}}"#;
+    const PRE_WIDTHS_PATH_JSON: &str = r#"{"type":"path","commands":[{"op":"move_to","x":0.0,"y":0.0},{"op":"line_to","x":1.0,"y":2.0}],"style":{"fill":null,"stroke":{"r":1,"g":2,"b":3,"a":255},"stroke_width":1.5,"opacity":1.0,"stroke_dash":null},"closed":false}"#;
+
+    #[test]
+    fn absent_widths_serialize_byte_identically_to_the_pre_field_capture() {
+        assert_eq!(serde_json::to_string(&polyline_fixture(None)).unwrap(), PRE_WIDTHS_POLYLINE_JSON);
+        assert_eq!(serde_json::to_string(&path_fixture(None)).unwrap(), PRE_WIDTHS_PATH_JSON);
+        let polyline: SceneNode = serde_json::from_str(PRE_WIDTHS_POLYLINE_JSON).unwrap();
+        let path: SceneNode = serde_json::from_str(PRE_WIDTHS_PATH_JSON).unwrap();
+        assert_eq!(polyline, polyline_fixture(None));
+        assert_eq!(path, path_fixture(None));
+    }
+
+    #[test]
+    fn present_widths_serialize_aligned_and_round_trip() {
+        for node in [polyline_fixture(Some(vec![2.0, 4.5])), path_fixture(Some(vec![2.0, 4.5]))] {
+            let json = serde_json::to_string(&node).unwrap();
+            assert!(json.ends_with(r#","widths":[2.0,4.5]}"#), "widths must serialize last, aligned: {json}");
+            let back: SceneNode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, node);
+        }
     }
 
     fn text_style(color: Option<Color>) -> TextStyle {

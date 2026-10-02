@@ -99,6 +99,83 @@ class TestBandSizeSettlesFinding154:
 
 
 # ---------------------------------------------------------------------------
+# #116: a constant size= refuses at construction on every primitive mark
+# whose renderer never reads it; only point/line (and point's circle/square
+# aliases) keep size=.
+# ---------------------------------------------------------------------------
+
+_SIZE_REFUSING_PRIMITIVES = sorted(
+    mark for mark in _PRIMITIVE_MARK_EXTRAS if "size" not in MARK_HONORED_KWARGS[mark]
+)
+
+#: Literal expected refusal text for every refusing primitive, pointer and
+#: no-pointer forms alike -- hand-written, not derived from
+#: ``_inert_size_error``, so a dropped/swapped/mis-pointed
+#: ``_SIZE_REFUSAL_POINTER`` entry or a drifted message template fails this
+#: test instead of passing vacuously against its own production oracle.
+_SIZE_REFUSAL_MESSAGES: dict[str, str] = {
+    "arc": "mark_arc(size=...) has no effect on mark_arc; received 20.",
+    "area": "mark_area(size=...) has no effect on mark_area; received 20.",
+    "bar": "mark_bar(size=...) has no effect on mark_bar; received 20.",
+    "geoshape": "mark_geoshape(size=...) has no effect on mark_geoshape; received 20.",
+    "image": "mark_image(size=...) has no effect on mark_image; received 20.",
+    "label": "mark_label(size=...) has no effect on mark_label; received 20. Set font_size= instead.",
+    "rect": "mark_rect(size=...) has no effect on mark_rect; received 20. Set band_size= instead.",
+    "rule": "mark_rule(size=...) has no effect on mark_rule; received 20. Set stroke_width= instead.",
+    "segment": (
+        "mark_segment(size=...) has no effect on mark_segment; received 20. "
+        "Set stroke_width= instead."
+    ),
+    "text": "mark_text(size=...) has no effect on mark_text; received 20. Set font_size= instead.",
+    "tick": "mark_tick(size=...) has no effect on mark_tick; received 20. Set band_size= instead.",
+}
+
+
+class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
+    def test_population_is_every_primitive_but_point_and_line(self):
+        """Vacuity control: the refusing population is derived from the
+        registry, not hand-listed, and must land on exactly the 13
+        primitives minus point/line -- neither empty nor everything."""
+        assert _SIZE_REFUSING_PRIMITIVES == sorted(set(_PRIMITIVE_MARK_EXTRAS) - {"point", "line"})
+        assert len(_SIZE_REFUSING_PRIMITIVES) == 11
+        # The literal-pin table below must track this registry-derived
+        # population exactly, so the two cannot drift apart.
+        assert set(_SIZE_REFUSAL_MESSAGES) == set(_SIZE_REFUSING_PRIMITIVES)
+
+    @pytest.mark.parametrize("mark_name", _SIZE_REFUSING_PRIMITIVES)
+    def test_constant_size_raises_naming_mark_and_pointer(self, mark_name):
+        with pytest.raises(ValueError) as exc_info:
+            getattr(fm.Chart(None), f"mark_{mark_name}")(size=20)
+        assert str(exc_info.value) == _SIZE_REFUSAL_MESSAGES[mark_name]
+
+    @pytest.mark.parametrize("ctor", ["mark_point", "mark_circle", "mark_square", "mark_line"])
+    def test_size_still_accepted_by_point_line_and_point_aliases(self, ctor):
+        """Positive control: point, line, and point's circle/square aliases
+        (which forward to mark_point) still accept a constant size= -- only
+        the 11 sibling primitives above refuse it."""
+        chart = getattr(fm.Chart(None), ctor)(size=20)
+        assert chart._mark_kwargs.get("size") == 20
+
+    def test_composite_mark_own_size_is_unaffected(self):
+        """A composite mark's own ``size=`` (forwarded through its
+        ``**mark_kwargs`` catch-all, validated against
+        ``_COMPOSITE_FALLBACK_KWARGS`` rather than a primitive's narrower
+        vocabulary) is not one of the 11 refusing primitives above and
+        keeps its own, composite-specific meaning -- including a
+        non-positive value such as ``0``, which is not a point/line
+        magnitude and is not positivity-checked."""
+        df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        chart = fm.Chart(df).mark_density(size=0).encode(x="v:Q")
+        # Discriminating: 0 survives as the literal value on the resolved
+        # area layer's mark_kwargs. If density's size= were routed through
+        # the primitive's positivity check instead of its own composite
+        # vocabulary, resolving the pending mark would raise "must be a
+        # positive number" for exactly this value, not return it unchanged.
+        assert chart._resolve_pending()._mark_kwargs == {"size": 0}
+        chart.to_svg()  # the full render pipeline accepts the inert field too
+
+
+# ---------------------------------------------------------------------------
 # mark_honors()/MARK_HONORED_KWARGS direct-unit coverage.
 # ---------------------------------------------------------------------------
 

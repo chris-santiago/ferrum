@@ -168,6 +168,7 @@ fn build_zigzag_indicator(
             angle: 0.0,
         },
         closed: false,
+        widths: None,
     }]
 }
 
@@ -226,5 +227,6 @@ fn build_wave_indicator(
             angle: 0.0,
         },
         closed: false,
+        widths: None,
     }]
 }

@@ -238,9 +238,23 @@ impl Trace {
     /// Trace `points` as a NEW subpath: a `MoveTo` at `points[0]` followed by
     /// the segments this trace's method prescribes.
     pub(crate) fn subpath(self, points: &[(f64, f64)]) -> Vec<PathCmd> {
+        self.subpath_with_rows(points).0
+    }
+
+    /// [`subpath`](Self::subpath), plus one entry per emitted command naming
+    /// the index into `points` whose run that command ends in.
+    ///
+    /// A command ending at a data point names that point; a step method's
+    /// tread and riser name the point whose level they run at (so a run held
+    /// at one row's value is tagged with that row throughout); `basis`, which
+    /// does not pass through its interior points, tags each span with the
+    /// point it is pulled toward. This is what lets a per-point attribute (a
+    /// tapered line's width) follow the commands without re-deriving each
+    /// method's command layout.
+    pub(crate) fn subpath_with_rows(self, points: &[(f64, f64)]) -> (Vec<PathCmd>, Vec<usize>) {
         let mut cmds = Vec::with_capacity(points.len() * 3 + 1);
-        self.push(&mut cmds, points, Lead::Move);
-        cmds
+        let rows = self.push(&mut cmds, points, Lead::Move);
+        (cmds, rows)
     }
 
     /// Continue an already-open subpath BACKWARDS along `forward_points`,
@@ -259,15 +273,33 @@ impl Trace {
         mirrored.push(cmds, &reversed, Lead::Line);
     }
 
-    /// Emit the lead command reaching `points[0]`, then the segments.
-    fn push(self, cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], lead: Lead) {
+    /// Emit the lead command reaching `points[0]`, then the segments; returns
+    /// each emitted command's source row (see
+    /// [`subpath_with_rows`](Self::subpath_with_rows)).
+    fn push(self, cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], lead: Lead) -> Vec<usize> {
         let uv: Vec<(f64, f64)> = points.iter().map(|&p| self.axis.to_uv(p)).collect();
-        let Some(&first) = uv.first() else { return };
-        cmds.push(match lead {
+        let mut out = Emit { cmds, rows: Vec::new() };
+        let Some(&first) = uv.first() else { return out.rows };
+        out.push(0, match lead {
             Lead::Move => self.axis.move_to(first),
             Lead::Line => self.axis.line_to(first),
         });
-        self.push_segments(cmds, &uv);
+        self.push_segments(&mut out, &uv);
+        out.rows
+    }
+}
+
+/// A command sink that records, beside each command, the index of the source
+/// point whose run the command ends in.
+struct Emit<'a> {
+    cmds: &'a mut Vec<PathCmd>,
+    rows: Vec<usize>,
+}
+
+impl Emit<'_> {
+    fn push(&mut self, row: usize, cmd: PathCmd) {
+        self.cmds.push(cmd);
+        self.rows.push(row);
     }
 }
 
@@ -283,7 +315,7 @@ impl Trace {
     /// Append the segments joining `uv[0]` to `uv[len - 1]`, in
     /// `(independent, dependent)` space. The command reaching `uv[0]` has
     /// already been emitted by the caller.
-    fn push_segments(self, cmds: &mut Vec<PathCmd>, uv: &[(f64, f64)]) {
+    fn push_segments(self, cmds: &mut Emit, uv: &[(f64, f64)]) {
         let (points, step, axis) = (uv, self.step, self.axis);
         // A curve needs a neighbourhood to shape itself against: with two
         // points there is exactly one segment and no curvature to describe, so
@@ -300,56 +332,62 @@ impl Trace {
 
         match method {
             Interpolate::Linear => {
-                for &p in &points[1..] {
-                    cmds.push(axis.line_to(p));
+                for (row, &p) in points.iter().enumerate().skip(1) {
+                    cmds.push(row, axis.line_to(p));
                 }
             }
             // The three step methods differ only in WHERE the riser sits: at
             // the segment midpoint, at its start, or at its end.
+            // `prev`/`cur` tag each command with the row whose level it ends
+            // at: a tread ending at the previous level belongs to the
+            // previous row's run, a riser ends at the current row's level.
             Interpolate::Step => {
-                for window in points.windows(2) {
+                for (prev, window) in points.windows(2).enumerate() {
+                    let cur = prev + 1;
                     let ((pu, pv), (cu, cv)) = (window[0], window[1]);
                     let mid_u = (pu + cu) / 2.0;
                     match step {
                         StepSpelling::Shorthand => {
-                            cmds.push(axis.tread_to(mid_u));
-                            cmds.push(axis.riser_to(cv));
-                            cmds.push(axis.tread_to(cu));
+                            cmds.push(prev, axis.tread_to(mid_u));
+                            cmds.push(cur, axis.riser_to(cv));
+                            cmds.push(cur, axis.tread_to(cu));
                         }
                         StepSpelling::Vertices => {
-                            cmds.push(axis.line_to((mid_u, pv)));
-                            cmds.push(axis.line_to((mid_u, cv)));
-                            cmds.push(axis.line_to((cu, cv)));
+                            cmds.push(prev, axis.line_to((mid_u, pv)));
+                            cmds.push(cur, axis.line_to((mid_u, cv)));
+                            cmds.push(cur, axis.line_to((cu, cv)));
                         }
                     }
                 }
             }
             Interpolate::StepBefore => {
-                for window in points.windows(2) {
+                for (prev, window) in points.windows(2).enumerate() {
+                    let cur = prev + 1;
                     let ((pu, _), (cu, cv)) = (window[0], window[1]);
                     match step {
                         StepSpelling::Shorthand => {
-                            cmds.push(axis.riser_to(cv));
-                            cmds.push(axis.tread_to(cu));
+                            cmds.push(cur, axis.riser_to(cv));
+                            cmds.push(cur, axis.tread_to(cu));
                         }
                         StepSpelling::Vertices => {
-                            cmds.push(axis.line_to((pu, cv)));
-                            cmds.push(axis.line_to((cu, cv)));
+                            cmds.push(cur, axis.line_to((pu, cv)));
+                            cmds.push(cur, axis.line_to((cu, cv)));
                         }
                     }
                 }
             }
             Interpolate::StepAfter => {
-                for window in points.windows(2) {
+                for (prev, window) in points.windows(2).enumerate() {
+                    let cur = prev + 1;
                     let ((_, pv), (cu, cv)) = (window[0], window[1]);
                     match step {
                         StepSpelling::Shorthand => {
-                            cmds.push(axis.tread_to(cu));
-                            cmds.push(axis.riser_to(cv));
+                            cmds.push(prev, axis.tread_to(cu));
+                            cmds.push(cur, axis.riser_to(cv));
                         }
                         StepSpelling::Vertices => {
-                            cmds.push(axis.line_to((cu, pv)));
-                            cmds.push(axis.line_to((cu, cv)));
+                            cmds.push(prev, axis.line_to((cu, pv)));
+                            cmds.push(cur, axis.line_to((cu, cv)));
                         }
                     }
                 }
@@ -374,7 +412,7 @@ impl Trace {
 /// interval; its secant is defined as `0` rather than dividing, which collapses
 /// that segment's control points onto its endpoints (a straight join) instead
 /// of producing NaN coordinates.
-fn push_monotone(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis) {
+fn push_monotone(cmds: &mut Emit, points: &[(f64, f64)], axis: CurveAxis) {
     let n = points.len();
 
     // Interval widths and secant slopes.
@@ -425,7 +463,7 @@ fn push_monotone(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis
         let (u0, v0) = points[i];
         let (u1, v1) = points[i + 1];
         let third = widths[i] / 3.0;
-        cmds.push(axis.cubic_to(
+        cmds.push(i + 1, axis.cubic_to(
             (u0 + third, v0 + tangents[i] * third),
             (u1 - third, v1 - tangents[i + 1] * third),
             (u1, v1),
@@ -440,31 +478,33 @@ fn push_monotone(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis
 /// interior, and finishes with the mirrored straight join back to the last
 /// point — d3's exact spelling, kept so `basis` output matches the reference
 /// implementation the docs point users at.
-fn push_basis(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis) {
+fn push_basis(cmds: &mut Emit, points: &[(f64, f64)], axis: CurveAxis) {
     let n = points.len();
     let (first, second) = (points[0], points[1]);
-    cmds.push(axis.line_to((
+    cmds.push(0, axis.line_to((
         (5.0 * first.0 + second.0) / 6.0,
         (5.0 * first.1 + second.1) / 6.0,
     )));
     for i in 2..n {
-        push_basis_segment(cmds, points[i - 2], points[i - 1], points[i], axis);
+        push_basis_segment(cmds, i - 1, points[i - 2], points[i - 1], points[i], axis);
     }
     // Closing segment: the last point is repeated as the spline's trailing
     // control point, then joined straight.
-    push_basis_segment(cmds, points[n - 2], points[n - 1], points[n - 1], axis);
-    cmds.push(axis.line_to(points[n - 1]));
+    push_basis_segment(cmds, n - 1, points[n - 2], points[n - 1], points[n - 1], axis);
+    cmds.push(n - 1, axis.line_to(points[n - 1]));
 }
 
-/// One B-spline span over the control triple `(a, b, c)`.
+/// One B-spline span over the control triple `(a, b, c)`, ending near `b`
+/// (the point at index `row`).
 fn push_basis_segment(
-    cmds: &mut Vec<PathCmd>,
+    cmds: &mut Emit,
+    row: usize,
     a: (f64, f64),
     b: (f64, f64),
     c: (f64, f64),
     axis: CurveAxis,
 ) {
-    cmds.push(axis.cubic_to(
+    cmds.push(row, axis.cubic_to(
         ((2.0 * a.0 + b.0) / 3.0, (2.0 * a.1 + b.1) / 3.0),
         ((a.0 + 2.0 * b.0) / 3.0, (a.1 + 2.0 * b.1) / 3.0),
         (
@@ -484,14 +524,14 @@ const CARDINAL_K: f64 = 1.0 / 6.0;
 /// point ACROSS the end segment, which makes the end tangent vanish and the
 /// terminal control point coincide with the endpoint. Mirrored here so
 /// `cardinal` matches the reference implementation.
-fn push_cardinal(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis) {
+fn push_cardinal(cmds: &mut Emit, points: &[(f64, f64)], axis: CurveAxis) {
     let n = points.len();
     for i in 0..n - 1 {
         let prev = if i == 0 { points[1] } else { points[i - 1] };
         let next = if i + 2 < n { points[i + 2] } else { points[n - 2] };
         let (u0, v0) = points[i];
         let (u1, v1) = points[i + 1];
-        cmds.push(axis.cubic_to(
+        cmds.push(i + 1, axis.cubic_to(
             (u0 + CARDINAL_K * (u1 - prev.0), v0 + CARDINAL_K * (v1 - prev.1)),
             (u1 + CARDINAL_K * (u0 - next.0), v1 + CARDINAL_K * (v0 - next.1)),
             (u1, v1),

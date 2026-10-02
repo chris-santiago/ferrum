@@ -146,6 +146,41 @@ pub(crate) struct LayerAxisColumnDetail {
     pub(crate) dtype: String,
 }
 
+/// What bound one of a line's width sources: a column (rendered `'name'`)
+/// or a constant mark kwarg (rendered as its number).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WidthBinding {
+    Field(String),
+    Constant(f64),
+}
+
+impl std::fmt::Display for WidthBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Field(name) => write!(f, "'{name}'"),
+            Self::Constant(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// The boxed payload of [`RenderError::LineWidthConflict`]: the two bindings
+/// that each set the line's width.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LineWidthSources {
+    pub(crate) size: WidthBinding,
+    pub(crate) stroke_width: WidthBinding,
+}
+
+/// Where a [`RenderError::LineWidthNotPositive`] width came from.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NonPositiveLineWidth {
+    /// The row's size `value` in `field` maps to `area` on the size scale.
+    Scaled { field: String, value: f64, area: f64 },
+    /// A row of `field` with no usable size (null, non-finite, or off the
+    /// scale) takes the line's default width `width`.
+    Fallback { field: String, width: f64 },
+}
+
 /// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`],
 /// [`RenderError::OrdinalFormatOnTemporalScale`] or
 /// [`RenderError::NumberFormatOnTemporalScale`] refusal names: where the
@@ -596,6 +631,42 @@ pub enum RenderError {
     /// ignored; it refuses instead. Python's `Layer` refuses the same input at
     /// construction; this refuses a hand-built spec that carries one.
     LayerTransformsUnsupported { layer: usize, count: usize },
+    /// A line mark binds both `size` and `stroke_width` (each a field or a
+    /// constant kwarg; a theme width is never bound). The two set the same
+    /// stroke's width in different units, `size` as a dot-diameter that can
+    /// taper along the line and `stroke_width` in pixels, so there is no
+    /// honest way to draw one and ignore the other: REFUSE MALFORMED.
+    ///
+    /// Decided once, in the line mark build, so every door (a Python chart, a
+    /// figure function, a hand-built wire spec) reaches it. `layer` is `None`
+    /// on an unlayered chart; the per-layer draw loop names the layer index
+    /// on a layered one, which `Display` prefixes as `layer {i}: `.
+    LineWidthConflict {
+        layer: Option<usize>,
+        /// Boxed, for `clippy::result_large_err` and nothing else, the same
+        /// reason [`Self::LayerAxisColumnUnplaceable`]'s `detail` is boxed.
+        sources: Box<LineWidthSources>,
+    },
+    /// A constant `size=` (a dot area) that the mark cannot draw: on a line,
+    /// zero, negative or not finite, since the line's width is the diameter
+    /// of a dot of that area; on a point, negative or not finite, since the
+    /// radius is `sqrt(size / PI)` (zero is a legal invisible dot). REFUSE
+    /// MALFORMED. Python's mark constructors refuse the same values; this
+    /// refuses a hand-built spec that carries one. `layer` is filled the way
+    /// [`Self::LineWidthConflict`]'s is.
+    MarkSizeOutOfRange { layer: Option<usize>, mark: crate::spec::mark::Mark, value: f64 },
+    /// A drawn vertex of a sized line would take a width that is not finite
+    /// and `> 0`, the scene's `widths` contract: its size value maps to a
+    /// non-positive area on the size scale, or a row with no usable size
+    /// falls back to a non-positive default width. Neither has a width to
+    /// draw, and substituting another would misreport the data, so the line
+    /// refuses. `layer` is filled the way [`Self::LineWidthConflict`]'s is.
+    LineWidthNotPositive {
+        layer: Option<usize>,
+        /// Boxed for `clippy::result_large_err`, as `LineWidthConflict`'s
+        /// `sources` is.
+        source: Box<NonPositiveLineWidth>,
+    },
     /// A sort-field object (`{"field": ..., "op": ..., "order": ...}`)
     /// reaches render without a string `"field"`, or naming an `"op"`/
     /// `"order"` outside [`crate::spec::encoding::sort::SortOp::ACCEPTED`]/
@@ -881,6 +952,11 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayeredChartMarkStyle { .. }
         // A layer index and a transform count, no channel token.
         | RenderError::LayerTransformsUnsupported { .. }
+        // A layer index and two width bindings, no channel token.
+        | RenderError::LineWidthConflict { .. }
+        // A mark and a number; a field name and a width.
+        | RenderError::MarkSizeOutOfRange { .. }
+        | RenderError::LineWidthNotPositive { .. }
         // `location` is a WIRE channel name (or "layers[i].{channel}"/
         // "facet.sort"/"facet.row_sort"), the authored key the check walked
         // `spec.encoding`/`spec.layers`/`spec.facet` under directly — same
@@ -1196,11 +1272,70 @@ impl std::fmt::Display for RenderError {
                 None => write!(f, "could not normalize string columns to Utf8: {reason}"),
                 Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
             },
+            Self::LineWidthConflict { layer, sources } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                let LineWidthSources { size, stroke_width } = &**sources;
+                write!(
+                    f,
+                    "mark_line: size and stroke_width both set the line's width (size={size}, \
+                     stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width \
+                     that can taper along the line; stroke_width= sets a width in pixels."
+                )
+            }
+            Self::MarkSizeOutOfRange { layer, mark, value } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                let bound = if matches!(mark, crate::spec::mark::Mark::Line) { "positive" } else { "non-negative" };
+                write!(f, "mark_{}(size=...) must be a {bound} number; received {value}", mark.as_str())
+            }
+            Self::LineWidthNotPositive { layer, source } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                match &**source {
+                    NonPositiveLineWidth::Scaled { field, value, area } => write!(
+                        f,
+                        "mark_line: size '{field}' value {value} maps to area {area} on the size \
+                         scale, which gives no positive line width. Every width along a line must \
+                         be positive; give the size scale a range above 0."
+                    ),
+                    NonPositiveLineWidth::Fallback { field, width } => write!(
+                        f,
+                        "mark_line: size '{field}' has a row with no usable size (null, \
+                         non-finite or off the scale), which takes the line's default width \
+                         {width}. Every width along a line must be positive; set a positive \
+                         Theme(line_stroke_width=)."
+                    ),
+                }
+            }
         }
     }
 }
 
 impl std::error::Error for RenderError {}
+
+impl RenderError {
+    /// Name the layer a per-layer refusal came from, for the refusals whose
+    /// text carries a `layer {i}: ` prefix only on a layered chart. Every
+    /// other error passes through unchanged.
+    pub(crate) fn in_layer(self, index: usize) -> Self {
+        match self {
+            Self::LineWidthConflict { layer: None, sources } => {
+                Self::LineWidthConflict { layer: Some(index), sources }
+            }
+            Self::LineWidthNotPositive { layer: None, source } => {
+                Self::LineWidthNotPositive { layer: Some(index), source }
+            }
+            Self::MarkSizeOutOfRange { layer: None, mark, value } => {
+                Self::MarkSizeOutOfRange { layer: Some(index), mark, value }
+            }
+            other => other,
+        }
+    }
+}
 
 /// Which resolution an opacity-family channel fell back to when its `scale=`
 /// carried a non-`Linear` spec (see [`RenderWarning::UnsupportedOpacityScale`]).

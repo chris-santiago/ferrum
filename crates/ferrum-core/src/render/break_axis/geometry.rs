@@ -159,6 +159,7 @@ pub(super) fn rounded_rect_piece(
         commands: square_cut_rounded_rect_path(x, y, w, h, corner_radius, cut),
         style,
         closed: true,
+        widths: None,
     }
 }
 

@@ -70,7 +70,7 @@ def _circle_fills(svg: str) -> list[str]:
     wire-level ``EncodingSpec`` dict -- a channel can round-trip correctly
     through ``_build_layers_list``'s serialization-time alias while still
     never rendering distinct colors, if an earlier merge-time seam (e.g.
-    ``composition._promote_layer_color``) reads the raw, un-aliased
+    ``composition._promote_layer_channels``) reads the raw, un-aliased
     encoding and never builds a chart-level color scale for it. See
     ``TestLayeredFillStrokeAlias``.
     """
@@ -488,14 +488,14 @@ class TestLayeredFillStrokeAlias:
 
     This is a render-level check, not a wire-dict check: whether a layer's
     color is ever promoted to a chart-level color scale is decided at
-    MERGE time by ``composition._promote_layer_color`` -- which runs before
-    ``_build_layers_list``'s serialization-time alias -- so a correct
+    MERGE time by ``composition._promote_layer_channels`` -- which runs
+    before ``_build_layers_list``'s serialization-time alias, reading each
+    layer's own un-aliased encoding through
+    ``encoding._aliases.resolve_channel_alias`` -- so a correct
     ``layer_enc["color"]`` wire entry does not by itself prove the chart
-    renders in color. `_promote_layer_color` reading the raw, un-aliased
-    ``layer.encoding.get("color")`` was exactly the bug the wire-only
-    version of this test missed: `fill=`/`stroke=` on an overlay layer
-    rendered byte-identically to no color channel at all (single theme-
-    default fill, no legend) even though the wire dict looked correct.
+    renders in color: `fill=`/`stroke=` on an overlay layer must resolve to
+    a promoted color channel, with a legend, not a theme-default fill and
+    no legend, even though the wire dict looks correct either way.
     """
 
     def test_per_layer_fill_renders_distinct_colors_with_legend(self):

@@ -266,6 +266,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
             commands,
             style,
             closed: true,
+            widths: None,
         }, i);
         spans.push((angle_start, angle_end));
     }
@@ -379,6 +380,7 @@ fn build_nominal_theta(
             commands,
             style,
             closed: true,
+            widths: None,
         }, i);
         spans.push((angle_start, angle_end));
     }
@@ -475,6 +477,7 @@ fn build_annular(
             commands,
             style,
             closed: true,
+            widths: None,
         }, i);
         spans.push((angle_start, angle_end));
     }

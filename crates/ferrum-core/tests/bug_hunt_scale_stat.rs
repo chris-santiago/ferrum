@@ -148,6 +148,7 @@ fn path_zero_length_line_round_trips() {
         ],
         style: default_fill_stroke(),
         closed: false,
+        widths: None,
     };
     let json = serde_json::to_string(&node).expect("serialize zero-length line");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -163,6 +164,7 @@ fn path_single_moveto_round_trips() {
         commands: vec![PathCmd::MoveTo { x: 50.0, y: 50.0 }],
         style: default_fill_stroke(),
         closed: false,
+        widths: None,
     };
     let json = serde_json::to_string(&node).expect("serialize single-moveto path");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -178,6 +180,7 @@ fn path_empty_commands_round_trips() {
         commands: vec![],
         style: default_fill_stroke(),
         closed: false,
+        widths: None,
     };
     let json = serde_json::to_string(&node).expect("serialize empty-commands path");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -543,6 +546,7 @@ fn panel_with_annotations_round_trips() {
             angle: 0.0,
         },
         closed: false,
+        widths: None,
     };
     let mut panel = make_panel(vec![]);
     panel.annotations = vec![annotation];
@@ -784,6 +788,7 @@ fn path_nan_coordinates_serialize_without_panic() {
         ],
         style: default_fill_stroke(),
         closed: true,
+        widths: None,
     };
     let json = serde_json::to_string(&node).expect("NaN path serializes");
     assert!(!json.contains("NaN"), "JSON must not contain literal 'NaN'");

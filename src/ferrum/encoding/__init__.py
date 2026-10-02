@@ -43,6 +43,7 @@ from ferrum.encoding.text import (
 )
 from ferrum.encoding.facet import Facet, FacetRow, FacetCol
 from ferrum.encoding._aliases import apply_channel_aliases
+from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS
 
 __all__ = [
     "X",
@@ -126,6 +127,25 @@ def _channel_class_map() -> dict:
         "facet_row": FacetRow,
         "facet_col": FacetCol,
     }
+
+
+@functools.cache
+def _auxiliary_scale_channels() -> tuple[str, ...]:
+    """Return the channels Rust builds an auxiliary (non-positional) scale for.
+
+    A channel qualifies when it renders as its own ``EncodingSpec``
+    (``_RENDERER_HONORED_CHANNELS``), its class honors ``scale=``, and it
+    draws no axis. Order follows ``_RENDERER_HONORED_CHANNELS``, so
+    ``color`` comes first. Rust reads every one of these scales from the
+    chart-level encoding only, which is why ``Chart + Chart`` promotes a
+    layer-level binding of each (``composition._promote_layer_channels``).
+    """
+    classes = _channel_class_map()
+    return tuple(
+        name
+        for name in _RENDERER_HONORED_CHANNELS
+        if "scale" in classes[name]._honored_kwargs and "axis" not in classes[name]._honored_kwargs
+    )
 
 
 def _channel_class_for(name: str):

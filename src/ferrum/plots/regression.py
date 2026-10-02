@@ -40,7 +40,7 @@ from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice, validate_optional_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import Color, X, Y
-from ferrum.encoding._aliases import resolve_color_alias
+from ferrum.encoding._aliases import resolve_channel_alias
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.statistical import desugar_smooth
@@ -557,7 +557,7 @@ def _fit_chart_from_named_transform(
     is active on the sibling scatter layer -- ``hue=``, or any of
     ``color=``/``fill=``/``stroke=`` in keyword or ``encode=`` dict form,
     resolved once as ``lmplot``'s ``color_active`` through
-    ``ferrum.encoding._aliases.resolve_color_alias`` so a future alias needs
+    ``ferrum.encoding._aliases.resolve_channel_alias`` so a future alias needs
     no change here -- that pooled fit must not visually impersonate one color
     level, so its band and line take the neutral theme token instead. See
     ``build_fit_layers``.
@@ -1214,12 +1214,12 @@ def lmplot(
     # warn_drop), and `hue=`/`color=`/`fill=`/`stroke=` each reach this chart
     # two ways (a bare keyword via `**encode_kwargs`, merged into `enc`
     # above, or the separate `encode=` dict `_finalize_chart` applies later).
-    # Resolving through `resolve_color_alias` over the merged effective
+    # Resolving through `resolve_channel_alias` over the merged effective
     # encoding -- the same alias table, already read for exactly this "what
-    # would color resolve to" question by `composition.py`'s layer-color
+    # would color resolve to" question by `composition.py`'s layer-channel
     # promotion -- covers a future alias automatically, with no enumeration
     # here to fall behind.
-    color_active = resolve_color_alias({**enc, **(encode or {})}) is not None
+    color_active = resolve_channel_alias({**enc, **(encode or {})}, "color") is not None
 
     # ---- Scatter layer (optional) --------------------------------------
     scatter_layer = None

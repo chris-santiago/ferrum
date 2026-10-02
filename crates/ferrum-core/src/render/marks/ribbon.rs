@@ -344,6 +344,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 commands: cmds,
                 style,
                 closed: true,
+                widths: None,
             },
             representative_row,
         );

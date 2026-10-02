@@ -97,6 +97,7 @@ pub(crate) fn arrowhead_path_with_opacity(
             angle: 0.0,
         },
         closed: true,
+        widths: None,
     }
 }
 
@@ -180,7 +181,7 @@ mod tests {
         let points = arrowhead_triangle(0.0, 0.0, 10.0, 0.0, 4.0).unwrap();
         let color = ferrum_scene::Color { r: 0x12, g: 0x34, b: 0x56, a: 0xff };
         let node = arrowhead_path(points, color);
-        let ferrum_scene::SceneNode::Path { commands, style, closed } = node else {
+        let ferrum_scene::SceneNode::Path { commands, style, closed, widths: None } = node else {
             panic!("expected Path node");
         };
         assert!(closed);
