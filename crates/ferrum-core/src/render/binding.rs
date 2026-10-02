@@ -222,7 +222,7 @@ pub fn render_composite_svg(
     let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
         .map_err(composite_render_err_to_py)?;
     emit_warnings(py, &warnings)?;
-    Ok(super::svg_walk::walk_svg(&scene, c.embed_fonts))
+    super::svg_walk::walk_svg(&scene, c.embed_fonts).map_err(render_err_to_py)
 }
 
 /// Render a composite chart tree to an interactive scene (JSON + packed bytes).

@@ -3,15 +3,25 @@
 //! [`SceneNode::Path`](crate::SceneNode::Path) `widths` field shares.
 //!
 //! A tapered centerline is a list of vertices with one full width (scene px)
-//! per vertex. Along a segment the width is linear in arc length between the
-//! segment's two vertex widths ([`width_at`]); a cut at any parameter (a dash
-//! boundary, a break-axis crossing, a curve flattening step) takes its width
-//! from that rule, so every backend agrees on the width at every point.
+//! per vertex. Along a straight segment the width is linear in arc length
+//! between the segment's two vertex widths ([`width_at`]); a cut at any
+//! parameter (a dash boundary, a break-axis crossing) takes its width from that
+//! rule, so every backend agrees on the width at every point.
+//!
+//! A tapered [`SceneNode::Path`](crate::SceneNode::Path) carries one width per
+//! command endpoint, and its curve commands are flattened by
+//! [`flatten_tapered_path`] before anything else reads it. Along a curve
+//! command the width is linear in the curve parameter between the previous
+//! endpoint's width and the command's own: each flattened vertex takes
+//! [`width_at`] with the curve parameter as its fraction. Once flattened, the
+//! centerline is straight segments and the arc-length rule holds along each.
 //!
 //! Pure f64 arithmetic: deterministic, no randomness, and no allocation beyond
-//! the pieces [`dash_tapered`] returns.
+//! the centerlines and pieces the functions return.
 
 use std::fmt;
+
+use crate::PathCmd;
 
 /// A tapered stroke's `widths` that cannot be drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +30,10 @@ pub enum TaperError {
     Misaligned { points: usize, widths: usize },
     /// A width is non-finite or not `> 0`.
     InvalidWidth { index: usize, value: f64 },
+    /// A tapered path is closed (`closed == true` or a `Close` command): a
+    /// tapered stroke is an open centerline, so a closing segment has no
+    /// width to draw.
+    Closed,
 }
 
 impl fmt::Display for TaperError {
@@ -33,6 +47,7 @@ impl fmt::Display for TaperError {
                 f,
                 "tapered stroke width {index} is {value}; every width must be finite and greater than 0"
             ),
+            Self::Closed => write!(f, "tapered stroke is a closed path; a tapered stroke must be an open path"),
         }
     }
 }
@@ -153,6 +168,156 @@ pub fn dash_tapered(
     Ok(pieces)
 }
 
+/// Straight segments each curve command is flattened into before outlining.
+const CURVE_SEGMENTS: usize = 16;
+
+/// Flatten a tapered path into its subpaths' centerlines, one vertex width
+/// each, ready for [`dash_tapered`] and outlining. `widths[i]` is the width
+/// at command `i`'s endpoint; along a curve the width is [`width_at`] the
+/// curve parameter between the previous endpoint's width and the command's
+/// own. Quadratic, cubic and arc commands become [`CURVE_SEGMENTS`] straight
+/// segments each; a command with no current point starts a subpath at its
+/// endpoint. Refuses misaligned or non-positive `widths` and a `Close`
+/// command.
+pub fn flatten_tapered_path(commands: &[PathCmd], widths: &[f64]) -> Result<Vec<TaperPiece>, TaperError> {
+    validate_widths(commands.len(), widths)?;
+    let mut subpaths: Vec<TaperPiece> = Vec::new();
+    for (i, (cmd, &w)) in commands.iter().zip(widths).enumerate() {
+        let current = subpaths.last().and_then(|s| s.points.last().copied());
+        let start = match (cmd, current) {
+            (PathCmd::Close, _) => return Err(TaperError::Closed),
+            (PathCmd::MoveTo { .. }, _) | (_, None) => {
+                subpaths.push(TaperPiece { points: vec![command_end(cmd, (0.0, 0.0))], widths: vec![w] });
+                continue;
+            }
+            (_, Some(current)) => current,
+        };
+        let Some(sub) = subpaths.last_mut() else { continue };
+        // A current point means an earlier command, so segment `i - 1` runs
+        // from that command's endpoint width to this one's.
+        let mut push = |t: f64, p: (f64, f64)| {
+            sub.points.push(p);
+            // `current` is `Some` only past the first command, so `i >= 1`
+            // here and both `widths[i - 1]` and `widths[i]` are in bounds
+            // (validate_widths above already sized `widths` to `commands`);
+            // `width_at` is never `None`. `w` is an unreachable fallback,
+            // kept only because `width_at` returns `Option`.
+            sub.widths.push(width_at(widths, i - 1, t).unwrap_or(w));
+        };
+        let steps = (1..=CURVE_SEGMENTS).map(|k| k as f64 / CURVE_SEGMENTS as f64);
+        match *cmd {
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                for t in steps {
+                    let u = 1.0 - t;
+                    push(t, (
+                        u * u * start.0 + 2.0 * u * t * cx + t * t * x,
+                        u * u * start.1 + 2.0 * u * t * cy + t * t * y,
+                    ));
+                }
+            }
+            PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+                for t in steps {
+                    let u = 1.0 - t;
+                    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                    push(t, (
+                        a * start.0 + b * c1x + c * c2x + d * x,
+                        a * start.1 + b * c1y + c * c2y + d * y,
+                    ));
+                }
+            }
+            PathCmd::ArcTo { rx, ry, rotation, large_arc, sweep, x, y } => {
+                match arc_center(start, rx, ry, rotation, large_arc, sweep, (x, y)) {
+                    Some(arc) => steps.for_each(|t| push(t, arc.at(t))),
+                    None => push(1.0, (x, y)),
+                }
+            }
+            _ => push(1.0, command_end(cmd, start)),
+        }
+    }
+    Ok(subpaths)
+}
+
+/// The endpoint a command reaches from `current`.
+fn command_end(cmd: &PathCmd, current: (f64, f64)) -> (f64, f64) {
+    match *cmd {
+        PathCmd::MoveTo { x, y }
+        | PathCmd::LineTo { x, y }
+        | PathCmd::QuadTo { x, y, .. }
+        | PathCmd::CubicTo { x, y, .. }
+        | PathCmd::ArcTo { x, y, .. } => (x, y),
+        PathCmd::HLineTo { x } => (x, current.1),
+        PathCmd::VLineTo { y } => (current.0, y),
+        PathCmd::Close => current,
+    }
+}
+
+/// An SVG elliptical arc in centre parameterization.
+struct CenterArc {
+    center: (f64, f64),
+    radii: (f64, f64),
+    /// `(cos, sin)` of the ellipse's x-axis rotation.
+    axis: (f64, f64),
+    start_angle: f64,
+    sweep_angle: f64,
+}
+
+impl CenterArc {
+    /// The point at fraction `t` of the arc's parameter.
+    fn at(&self, t: f64) -> (f64, f64) {
+        let theta = self.start_angle + self.sweep_angle * t;
+        let (ex, ey) = (self.radii.0 * theta.cos(), self.radii.1 * theta.sin());
+        let (c, s) = self.axis;
+        (self.center.0 + c * ex - s * ey, self.center.1 + s * ex + c * ey)
+    }
+}
+
+/// SVG's endpoint-to-centre arc conversion (SVG 1.1 implementation notes
+/// F.6.5, with F.6.6's out-of-range radii scaled up). `None` where SVG draws
+/// the arc as a straight line: a zero radius or coincident endpoints.
+fn arc_center(
+    from: (f64, f64),
+    rx: f64,
+    ry: f64,
+    rotation_deg: f64,
+    large_arc: bool,
+    sweep: bool,
+    to: (f64, f64),
+) -> Option<CenterArc> {
+    let (mut rx, mut ry) = (rx.abs(), ry.abs());
+    if rx == 0.0 || ry == 0.0 || from == to {
+        return None;
+    }
+    let phi = rotation_deg.to_radians();
+    let (c, s) = (phi.cos(), phi.sin());
+    let (dx, dy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
+    let (x1, y1) = (c * dx + s * dy, -s * dx + c * dy);
+    let lambda = (x1 * x1) / (rx * rx) + (y1 * y1) / (ry * ry);
+    if lambda > 1.0 {
+        rx *= lambda.sqrt();
+        ry *= lambda.sqrt();
+    }
+    let num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1;
+    let den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
+    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
+    let coef = sign * (num.max(0.0) / den).sqrt();
+    let (cx1, cy1) = (coef * rx * y1 / ry, -coef * ry * x1 / rx);
+    let center = (
+        c * cx1 - s * cy1 + (from.0 + to.0) / 2.0,
+        s * cx1 + c * cy1 + (from.1 + to.1) / 2.0,
+    );
+    let angle = |u: (f64, f64), v: (f64, f64)| (u.0 * v.1 - u.1 * v.0).atan2(u.0 * v.0 + u.1 * v.1);
+    let u = ((x1 - cx1) / rx, (y1 - cy1) / ry);
+    let v = ((-x1 - cx1) / rx, (-y1 - cy1) / ry);
+    let start_angle = angle((1.0, 0.0), u);
+    let mut sweep_angle = angle(u, v);
+    if !sweep && sweep_angle > 0.0 {
+        sweep_angle -= std::f64::consts::TAU;
+    } else if sweep && sweep_angle < 0.0 {
+        sweep_angle += std::f64::consts::TAU;
+    }
+    Some(CenterArc { center, radii: (rx, ry), axis: (c, s), start_angle, sweep_angle })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +426,53 @@ mod tests {
     fn dashing_refuses_misaligned_widths() {
         assert_eq!(
             dash_tapered(&[(0.0, 0.0), (1.0, 0.0)], &[1.0], &[1.0, 1.0]),
+            Err(TaperError::Misaligned { points: 2, widths: 1 })
+        );
+    }
+
+    #[test]
+    fn a_curve_flattens_with_widths_linear_in_its_parameter() {
+        let commands = [
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::QuadTo { cx: 5.0, cy: 10.0, x: 10.0, y: 0.0 },
+            PathCmd::LineTo { x: 20.0, y: 0.0 },
+        ];
+        let subpaths = flatten_tapered_path(&commands, &[2.0, 10.0, 4.0]).unwrap();
+        assert_eq!(subpaths.len(), 1, "{subpaths:?}");
+        let sub = &subpaths[0];
+        assert_eq!(sub.points.len(), CURVE_SEGMENTS + 2);
+        for k in 0..=CURVE_SEGMENTS {
+            let t = k as f64 / CURVE_SEGMENTS as f64;
+            let (u, p) = (1.0 - t, &sub.points[k]);
+            assert!(close(p.0, 10.0 * u * t + 10.0 * t * t) && close(p.1, 20.0 * u * t), "vertex {k}: {p:?}");
+            assert!(close(sub.widths[k], 2.0 + 8.0 * t), "width {k}: {}", sub.widths[k]);
+        }
+        assert_eq!(sub.points[CURVE_SEGMENTS + 1], (20.0, 0.0));
+        assert_eq!(sub.widths[CURVE_SEGMENTS + 1], 4.0);
+    }
+
+    #[test]
+    fn a_move_starts_a_new_subpath_at_its_own_width() {
+        let commands = [
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::HLineTo { x: 5.0 },
+            PathCmd::MoveTo { x: 0.0, y: 9.0 },
+            PathCmd::VLineTo { y: 3.0 },
+        ];
+        let subpaths = flatten_tapered_path(&commands, &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let want = vec![
+            TaperPiece { points: vec![(0.0, 0.0), (5.0, 0.0)], widths: vec![1.0, 2.0] },
+            TaperPiece { points: vec![(0.0, 9.0), (0.0, 3.0)], widths: vec![3.0, 4.0] },
+        ];
+        assert_eq!(subpaths, want);
+    }
+
+    #[test]
+    fn flattening_refuses_a_close_and_misaligned_widths() {
+        let closed = [PathCmd::MoveTo { x: 0.0, y: 0.0 }, PathCmd::LineTo { x: 1.0, y: 0.0 }, PathCmd::Close];
+        assert_eq!(flatten_tapered_path(&closed, &[1.0, 1.0, 1.0]), Err(TaperError::Closed));
+        assert_eq!(
+            flatten_tapered_path(&closed[..2], &[1.0]),
             Err(TaperError::Misaligned { points: 2, widths: 1 })
         );
     }

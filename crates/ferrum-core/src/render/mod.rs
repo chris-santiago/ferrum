@@ -667,6 +667,11 @@ pub enum RenderError {
         /// `sources` is.
         source: Box<NonPositiveLineWidth>,
     },
+    /// A stroke node's `widths` breaks the scene contract the static SVG
+    /// outline needs: misaligned with its vertices, a width that is not
+    /// finite and `> 0`, or a closed path. The line mark never writes such a
+    /// node, so this guards the scene seam rather than user input.
+    TaperedStrokeMalformed { source: ferrum_scene::TaperError },
     /// A sort-field object (`{"field": ..., "op": ..., "order": ...}`)
     /// reaches render without a string `"field"`, or naming an `"op"`/
     /// `"order"` outside [`crate::spec::encoding::sort::SortOp::ACCEPTED`]/
@@ -957,6 +962,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // A mark and a number; a field name and a width.
         | RenderError::MarkSizeOutOfRange { .. }
         | RenderError::LineWidthNotPositive { .. }
+        // A scene-contract fault, no channel token.
+        | RenderError::TaperedStrokeMalformed { .. }
         // `location` is a WIRE channel name (or "layers[i].{channel}"/
         // "facet.sort"/"facet.row_sort"), the authored key the check walked
         // `spec.encoding`/`spec.layers`/`spec.facet` under directly — same
@@ -1311,11 +1318,20 @@ impl std::fmt::Display for RenderError {
                     ),
                 }
             }
+            Self::TaperedStrokeMalformed { source } => {
+                write!(f, "mark_line: the tapered line cannot be drawn: {source}")
+            }
         }
     }
 }
 
 impl std::error::Error for RenderError {}
+
+impl From<ferrum_scene::TaperError> for RenderError {
+    fn from(source: ferrum_scene::TaperError) -> Self {
+        Self::TaperedStrokeMalformed { source }
+    }
+}
 
 impl RenderError {
     /// Name the layer a per-layer refusal came from, for the refusals whose
@@ -2711,7 +2727,7 @@ pub fn render_svg(
     let scene = scene_build::build_scene(
         spec, &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
     )?;
-    let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
+    let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts)?;
 
     Ok(RenderOutput { bytes: svg_string, layout, warnings })
 }
@@ -5226,7 +5242,7 @@ mod orchestration_tests {
             &spec, &prep, &layout, theme_ref, &cfg, &mut warnings,
             &ChartConfig::default(), None,
         ).unwrap();
-        let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts);
+        let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts).unwrap();
 
         if old_svg != new_svg {
             let old_chars: Vec<char> = old_svg.chars().collect();

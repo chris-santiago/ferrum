@@ -4,6 +4,8 @@
 use crate::layout::Rect;
 use crate::layout::TextAnchor;
 
+use ferrum_scene::{StrokeCap, StrokeJoin, TaperPiece};
+
 use super::color::{fmt_svg, Color};
 use super::FLOAT_PRECISION;
 
@@ -224,6 +226,29 @@ impl SvgBuffer {
         self.buf.push_str("/>");
     }
 
+    /// Emit a variable-width stroke as one filled outline `<path>`.
+    ///
+    /// The filled region is the union, over every piece, of each segment's
+    /// trapezoid (half-width `w/2` at each end, perpendicular to the
+    /// segment), each interior join and the two end caps, so a dashed stroke
+    /// caps every dash. Every ring winds the same way: under the default
+    /// nonzero fill a point that several rings cover (a join, a hairpin, a
+    /// self-crossing) is painted once. `style` carries the stroke's paint as
+    /// the fill; the element writes `stroke="none"`.
+    pub fn tapered_stroke(&mut self, pieces: &[TaperPiece], ends: (StrokeCap, StrokeJoin), style: &FillStroke) {
+        let mut d = String::new();
+        for piece in pieces {
+            for ring in outline_rings(&piece.points, &piece.widths, ends) {
+                push_ring(&mut d, &ring);
+            }
+        }
+        self.buf.push_str("<path");
+        push_attr(&mut self.buf, "d", &d);
+        push_fill_stroke(&mut self.buf, style);
+        push_attr(&mut self.buf, "stroke", "none");
+        self.buf.push_str("/>");
+    }
+
     pub fn text(&mut self, x: f64, y: f64, content: &str, style: &TextStyle) {
         self.buf.push_str("<text");
         push_attr(&mut self.buf, "x", &fmt_f(x));
@@ -423,6 +448,161 @@ fn push_stroke(buf: &mut String, s: &Stroke) {
     if s.stroke_opacity < 1.0 {
         push_attr(buf, "stroke-opacity", &fmt_f(s.stroke_opacity));
     }
+}
+
+type Point = (f64, f64);
+
+/// Straight segments a half circle of a round cap or join is drawn with.
+const ROUND_SEGMENTS: f64 = 16.0;
+
+/// The rings whose union is one tapered centerline's stroke (see
+/// [`SvgBuffer::tapered_stroke`]). A run of coincident vertices keeps the
+/// first one's width; a single vertex is a zero-length stroke, which SVG
+/// draws as a dot under a round cap and an axis-aligned square under a
+/// square one.
+fn outline_rings(points: &[Point], widths: &[f64], (cap, join): (StrokeCap, StrokeJoin)) -> Vec<Vec<Point>> {
+    let mut vertices: Vec<(Point, f64)> = Vec::with_capacity(points.len());
+    for (&p, &w) in points.iter().zip(widths) {
+        if vertices.last().is_none_or(|(q, _)| *q != p) {
+            vertices.push((p, w / 2.0));
+        }
+    }
+    let mut rings = Vec::new();
+    let (Some(&(first, first_r)), Some(&(last, last_r))) = (vertices.first(), vertices.last()) else {
+        return rings;
+    };
+    if vertices.len() == 1 {
+        // Two caps back to back along x: a disk, or a square `w` wide.
+        rings.extend(cap_ring(first, first_r, (1.0, 0.0), cap));
+        rings.extend(cap_ring(first, first_r, (-1.0, 0.0), cap));
+        return rings;
+    }
+    let dirs: Vec<Point> = vertices.windows(2).map(|s| unit(s[0].0, s[1].0)).collect();
+    for (s, &d) in vertices.windows(2).zip(&dirs) {
+        let n = normal(d);
+        let ((p0, r0), (p1, r1)) = (s[0], s[1]);
+        rings.push(vec![along(p0, n, r0), along(p1, n, r1), along(p1, n, -r1), along(p0, n, -r0)]);
+    }
+    for (i, d) in dirs.windows(2).enumerate() {
+        let (v, r) = vertices[i + 1];
+        rings.extend(join_ring(v, r, d[0], d[1], join));
+    }
+    let (d_first, d_last) = (dirs[0], dirs[dirs.len() - 1]);
+    rings.extend(cap_ring(first, first_r, (-d_first.0, -d_first.1), cap));
+    rings.extend(cap_ring(last, last_r, d_last, cap));
+    rings
+}
+
+fn unit(a: Point, b: Point) -> Point {
+    let len = (b.0 - a.0).hypot(b.1 - a.1);
+    ((b.0 - a.0) / len, (b.1 - a.1) / len)
+}
+
+fn normal(d: Point) -> Point {
+    (-d.1, d.0)
+}
+
+fn along(p: Point, d: Point, by: f64) -> Point {
+    (p.0 + d.0 * by, p.1 + d.1 * by)
+}
+
+/// `r`-radius arc about `c` from angle `start` through `sweep` radians.
+fn arc(c: Point, r: f64, start: f64, sweep: f64) -> Vec<Point> {
+    let steps = (sweep.abs() / std::f64::consts::PI * ROUND_SEGMENTS).ceil().max(1.0) as usize;
+    (0..=steps)
+        .map(|k| {
+            let a = start + sweep * k as f64 / steps as f64;
+            (c.0 + r * a.cos(), c.1 + r * a.sin())
+        })
+        .collect()
+}
+
+/// The cap at end `p` (half-width `r`) of a stroke leaving it along `out`.
+fn cap_ring(p: Point, r: f64, out: Point, cap: StrokeCap) -> Option<Vec<Point>> {
+    let n = normal(out);
+    match cap {
+        StrokeCap::Butt => None,
+        StrokeCap::Square => {
+            let tip = along(p, out, r);
+            Some(vec![along(p, n, r), along(tip, n, r), along(tip, n, -r), along(p, n, -r)])
+        }
+        StrokeCap::Round => {
+            let start = n.1.atan2(n.0);
+            Some(arc(p, r, start, -std::f64::consts::PI))
+        }
+    }
+}
+
+/// The join at interior vertex `v` (half-width `r`) between a segment
+/// arriving along `d0` and one leaving along `d1`, on the outer side of the
+/// turn. A miter past SVG's default limit of 4 bevels.
+fn join_ring(v: Point, r: f64, d0: Point, d1: Point, join: StrokeJoin) -> Option<Vec<Point>> {
+    let cross = d0.0 * d1.1 - d0.1 * d1.0;
+    let dot = d0.0 * d1.0 + d0.1 * d1.1;
+    if cross == 0.0 && dot > 0.0 {
+        return None;
+    }
+    let side = if cross > 0.0 { -1.0 } else { 1.0 };
+    let (n0, n1) = (normal(d0), normal(d1));
+    let (a, b) = ((n0.0 * side, n0.1 * side), (n1.0 * side, n1.1 * side));
+    let bevel = vec![v, along(v, a, r), along(v, b, r)];
+    match join {
+        StrokeJoin::Bevel => Some(bevel),
+        // miter length / stroke width = 1 / cos(turn / 2), and
+        // cos²(turn / 2) = (1 + dot) / 2, so the limit 4 is `1 + dot >= 1/8`.
+        StrokeJoin::Miter if 1.0 + dot >= 1.0 / 8.0 => {
+            let tip = along(v, (a.0 + b.0, a.1 + b.1), r / (1.0 + dot));
+            Some(vec![v, along(v, a, r), tip, along(v, b, r)])
+        }
+        StrokeJoin::Miter => Some(bevel),
+        StrokeJoin::Round => {
+            let start = a.1.atan2(a.0);
+            let mut sweep = b.1.atan2(b.0) - start;
+            if sweep > std::f64::consts::PI {
+                sweep -= std::f64::consts::TAU;
+            } else if sweep <= -std::f64::consts::PI {
+                sweep += std::f64::consts::TAU;
+            }
+            // A full reversal turns half a circle either way; the outer side
+            // is the one ahead of the arriving segment.
+            let mid = start + sweep / 2.0;
+            if cross == 0.0 && mid.cos() * d0.0 + mid.sin() * d0.1 < 0.0 {
+                sweep = -sweep;
+            }
+            let mut ring = vec![v];
+            ring.extend(arc(v, r, start, sweep));
+            Some(ring)
+        }
+    }
+}
+
+/// Append one closed ring to a path's `d`, wound positively (shoelace area
+/// `> 0`) so every ring of an outline adds to the nonzero winding count.
+/// A ring with no area paints nothing and is skipped.
+fn push_ring(d: &mut String, ring: &[Point]) {
+    let n = ring.len();
+    let twice_area: f64 = (0..n).map(|i| ring[i].0 * ring[(i + 1) % n].1 - ring[(i + 1) % n].0 * ring[i].1).sum();
+    if n < 3 || twice_area.abs() < 1e-12 {
+        return;
+    }
+    let mut ring = ring.to_vec();
+    if twice_area < 0.0 {
+        ring.reverse();
+    }
+    for (i, (x, y)) in ring.iter().enumerate() {
+        if i == 0 {
+            if !d.is_empty() {
+                d.push(' ');
+            }
+            d.push('M');
+        } else {
+            d.push_str(" L");
+        }
+        d.push_str(&fmt_f(*x));
+        d.push(' ');
+        d.push_str(&fmt_f(*y));
+    }
+    d.push_str(" Z");
 }
 
 /// Format a float for SVG attribute output.

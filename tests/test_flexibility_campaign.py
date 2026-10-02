@@ -2000,69 +2000,20 @@ def test_t2b_spec_type_is_temporal_for_unannotated_datetime_us(
 # ---------------------------------------------------------------------------
 
 import base64
-import struct
-import zlib
 import warnings
+
+from tests._snapshots import decode_png_rgba  # noqa: E402
 
 
 def _decode_png_alpha(png_bytes: bytes) -> tuple[list[list[int]], int, int]:
     """Decode an RGBA PNG blob and return (alpha_grid, width, height).
 
-    alpha_grid[row][col] is the alpha channel value (0-255).  Proper
-    reconstruction of all five PNG filter types is applied so the result
-    is accurate even when the encoder uses Sub/Up/Average/Paeth filters.
+    alpha_grid[row][col] is the alpha channel value (0-255). A thin wrapper
+    around the shared decoder in tests/_snapshots.py; this caller only needs
+    the alpha channel, not the full RGBA pixel.
     """
-    pos = 8  # skip 8-byte PNG signature
-    chunks: dict[bytes, bytes] = {}
-    while pos < len(png_bytes):
-        length = struct.unpack(">I", png_bytes[pos : pos + 4])[0]
-        ctype = png_bytes[pos + 4 : pos + 8]
-        data = png_bytes[pos + 8 : pos + 8 + length]
-        chunks[ctype] = chunks.get(ctype, b"") + data
-        pos += 12 + length
-        if ctype == b"IEND":
-            break
-
-    w, h = struct.unpack(">II", chunks[b"IHDR"][:8])
-    color_type = struct.unpack("B", chunks[b"IHDR"][9:10])[0]
-    bpp = 4 if color_type == 6 else 3  # RGBA=6, RGB=2
-
-    raw = zlib.decompress(chunks[b"IDAT"])
-    stride = 1 + w * bpp
-
-    def _paeth(a: int, b: int, c: int) -> int:
-        p = a + b - c
-        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-        if pa <= pb and pa <= pc:
-            return a
-        elif pb <= pc:
-            return b
-        return c
-
-    reconstructed: list[bytearray] = []
-    for r in range(h):
-        ftype = raw[r * stride]
-        row = bytearray(raw[r * stride + 1 : r * stride + 1 + w * bpp])
-        prev = reconstructed[r - 1] if r > 0 else bytearray(w * bpp)
-        if ftype == 1:  # Sub
-            for i in range(bpp, len(row)):
-                row[i] = (row[i] + row[i - bpp]) & 0xFF
-        elif ftype == 2:  # Up
-            for i in range(len(row)):
-                row[i] = (row[i] + prev[i]) & 0xFF
-        elif ftype == 3:  # Average
-            for i in range(len(row)):
-                a = row[i - bpp] if i >= bpp else 0
-                row[i] = (row[i] + (a + prev[i]) // 2) & 0xFF
-        elif ftype == 4:  # Paeth
-            for i in range(len(row)):
-                a = row[i - bpp] if i >= bpp else 0
-                b_val = prev[i]
-                c = prev[i - bpp] if i >= bpp else 0
-                row[i] = (row[i] + _paeth(a, b_val, c)) & 0xFF
-        reconstructed.append(row)
-
-    alpha = [[reconstructed[r][c * bpp + 3] for c in range(w)] for r in range(h)]
+    rows, w, h = decode_png_rgba(png_bytes)
+    alpha = [[rows[r][c][3] for c in range(w)] for r in range(h)]
     return alpha, w, h
 
 

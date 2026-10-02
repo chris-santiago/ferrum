@@ -8,7 +8,9 @@ what a golden actually renders as.
 from __future__ import annotations
 
 import re
+import struct
 import sys
+import zlib
 from pathlib import Path
 from typing import Iterable
 
@@ -103,6 +105,50 @@ def rasterize_svg(svg: str | bytes, *, dpi: int = 96) -> bytes:
     if isinstance(svg, bytes):
         svg = svg.decode("utf-8")
     return bytes(resvg_py.svg_to_bytes(svg_string=svg, dpi=dpi))
+
+
+def decode_png_rgba(png: bytes) -> tuple[list[list[tuple[int, int, int, int]]], int, int]:
+    """Decode a PNG into ``(rows, width, height)``, ``rows[y][x]`` an RGBA tuple.
+
+    Applies the PNG filter-byte reconstruction (None/Sub/Up/Average/Paeth)
+    per scanline, without a PIL dependency. An RGB (no alpha channel) source
+    reports alpha 255 for every pixel. Shared by every test that needs to
+    sample a rendered pixel's color or alpha channel, so a stdlib PNG
+    decoder exists exactly once in the test suite.
+    """
+    pos, chunks = 8, {}
+    while pos < len(png):
+        n = struct.unpack(">I", png[pos : pos + 4])[0]
+        t = png[pos + 4 : pos + 8]
+        chunks[t] = chunks.get(t, b"") + png[pos + 8 : pos + 8 + n]
+        pos += 12 + n
+    w, h = struct.unpack(">II", chunks[b"IHDR"][:8])
+    bpp = 4 if chunks[b"IHDR"][9] == 6 else 3
+    raw, stride = zlib.decompress(chunks[b"IDAT"]), 1 + w * bpp
+    rows: list[bytearray] = []
+    for r in range(h):
+        ftype, row = raw[r * stride], bytearray(raw[r * stride + 1 : (r + 1) * stride])
+        prev = rows[-1] if rows else bytearray(w * bpp)
+        for i in range(len(row)):
+            a = row[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if ftype == 1:
+                row[i] = (row[i] + a) & 255
+            elif ftype == 2:
+                row[i] = (row[i] + b) & 255
+            elif ftype == 3:
+                row[i] = (row[i] + (a + b) // 2) & 255
+            elif ftype == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                row[i] = (row[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(row)
+    pixels = [
+        [tuple(row[x * bpp : x * bpp + bpp]) + ((255,) if bpp == 3 else ()) for x in range(w)]
+        for row in rows
+    ]
+    return pixels, w, h
 
 
 def snapshot_golden(

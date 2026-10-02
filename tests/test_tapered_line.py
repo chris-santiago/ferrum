@@ -33,6 +33,7 @@ unaffected, when one line layer binds both channels itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -42,6 +43,8 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._core import interpolate_accepted_values, stroke_dash_palette
+from tests._snapshots import decode_png_rgba, rasterize_svg
 
 _DF = pl.DataFrame(
     {
@@ -528,3 +531,604 @@ def test_non_positive_constant_size_refuses_with_the_exact_message(cell: str) ->
 def test_positive_constant_size_still_renders(mark: str) -> None:
     _sized_chart(mark, 5).to_svg()
     _sized_chart(mark, 5).interactive()
+
+
+# ---------------------------------------------------------------------------
+# `#116` static SVG outline walker (spec §6.5). Every assertion below reads
+# the real `to_svg()`/`to_png()`/`save()` output of a real `fm.Chart`, never
+# a hand-built scene. PNG rasterization and decoding go through
+# `tests._snapshots`'s shared `rasterize_svg`/`decode_png_rgba`; only the
+# outline `<path>` grammar is parsed here directly, and that grammar is:
+# ``M{x} {y} L{x} {y} ... Z`` per ring, numbers 3-decimal `fmt_f` form, rings
+# concatenated with no separator other than the next ``M``.
+# ---------------------------------------------------------------------------
+
+
+def _outline_elements(svg: str) -> list[str]:
+    """Every outline `<path ... stroke="none"/>` element in *svg*, in order."""
+    return [m for m in re.findall(r"<path[^>]*/>", svg) if ' stroke="none"' in m]
+
+
+def _outline_vertices(el: str) -> list[tuple[float, float]]:
+    """Every vertex of every ring in outline element *el*, flattened.
+
+    The ``M``/``L``/``Z`` letters never match the numeric regex, so scanning
+    the whole ``d`` string (ring boundaries included) yields the same
+    vertices as parsing ring-by-ring.
+    """
+    d = re.search(r' d="([^"]*)"', el).group(1)
+    return [(float(a), float(b)) for a, b in re.findall(r"(-?[\d.]+) (-?[\d.]+)", d)]
+
+
+def _outline_rings(el: str) -> list[list[tuple[float, float]]]:
+    """Every ring of outline element *el* as its own vertex list."""
+    d = re.search(r' d="([^"]*)"', el).group(1)
+    rings = []
+    for piece in d.split("M")[1:]:
+        piece = piece.strip()
+        if piece.endswith("Z"):
+            piece = piece[:-1].strip()
+        rings.append([(float(a), float(b)) for a, b in re.findall(r"(-?[\d.]+) (-?[\d.]+)", piece)])
+    return rings
+
+
+def _ring_area(ring: list[tuple[float, float]]) -> float:
+    """The shoelace area of one ring, in absolute SVG-coordinate units."""
+    total = 0.0
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]):
+        total += x0 * y1 - x1 * y0
+    return abs(total) / 2
+
+
+def _outline_area(el: str) -> float:
+    """The real painted area of outline element *el*: the sum of its rings'
+    absolute areas (Rust's own `painted_area`, mirrored for the Python
+    door, spec §6.5's dash contract)."""
+    return sum(_ring_area(ring) for ring in _outline_rings(el))
+
+
+def _unit_normal(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    """The unit normal of segment a->b, per spec §6.5: `n = (-dy, dx)/|b-a|`."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    return (-dy / length, dx / length)
+
+
+def _unit_tangent(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    return (dx / length, dy / length)
+
+
+def _has_vertex_near(
+    vertices: list[tuple[float, float]], target: tuple[float, float], tol: float = 1e-2
+) -> bool:
+    return any(math.hypot(vx - target[0], vy - target[1]) < tol for vx, vy in vertices)
+
+
+def _close(a: tuple[float, float], b: tuple[float, float], tol: float = 1e-2) -> bool:
+    return math.hypot(a[0] - b[0], a[1] - b[1]) < tol
+
+
+def _single_line_node(chart: fm.Chart) -> tuple[list[tuple[float, float]], list[float]]:
+    """The one line node's `(points, widths)`, read from the real scene JSON."""
+    scene = json.loads(chart.interactive().scene_json)
+    found = []
+    for panel in scene["panels"]:
+        for batch in panel["marks"]:
+            if batch["kind"] == "line":
+                found.extend(batch["nodes"])
+    assert len(found) == 1, f"expected one line node, got {len(found)}"
+    node = found[0]
+    return [tuple(p) for p in node["points"]], node["widths"]
+
+
+# ---------------------------------------------------------------------------
+# Matrix: interpolate family (derived from `interpolate_accepted_values()`) x
+# dash state {no dash, constant dash, encoded dash} x opacity {1, 0.5} x
+# color grouping {off, on}. Rust's own `svg_walk.rs` matrix covers {no dash,
+# constant dash} exhaustively against hand-built scenes; the "encoded dash"
+# column is covered here instead, driven through the real Python door end
+# to end.
+# ---------------------------------------------------------------------------
+
+_MATRIX_X = [0.0, 1.0, 2.0, 3.0]
+_MATRIX_Y = [0.0, 1.0, 0.0, 1.0]
+_MATRIX_V = [1.0, 2.0, 3.0, 4.0]
+
+
+def _matrix_chart(
+    interpolate: str, dash_state: str, opacity: float | None, grouped: bool, *, sized: bool
+) -> fm.Chart:
+    groups = ["a", "b"] if grouped else ["a"]
+    df = pl.DataFrame(
+        {
+            "x": _MATRIX_X * len(groups),
+            "y": _MATRIX_Y * len(groups),
+            "v": _MATRIX_V * len(groups),
+            "g": [g for g in groups for _ in _MATRIX_X],
+        }
+    )
+    mark_kwargs: dict = {"interpolate": interpolate}
+    if opacity is not None:
+        mark_kwargs["opacity"] = opacity
+    if dash_state == "constant":
+        mark_kwargs["stroke_dash"] = [6.0, 3.0]
+    encoding_kwargs: dict = {}
+    if sized:
+        encoding_kwargs["size"] = "v"
+    if grouped:
+        encoding_kwargs["color"] = "g"
+    if dash_state == "encoded":
+        encoding_kwargs["stroke_dash"] = "g"
+    chart = fm.Chart(df).mark_line(**mark_kwargs).encode(x="x", y="y", **encoding_kwargs)
+    return chart.properties(width=240, height=160)
+
+
+def test_sized_line_outlines_under_every_interpolate_dash_state_opacity_and_grouping() -> None:
+    interpolate_families = interpolate_accepted_values()
+    dash_states = ("none", "constant", "encoded")
+    opacities: tuple[float | None, ...] = (None, 0.5)
+    groupings = (False, True)
+    # The real dash palette (never a Python-side mirror of it): a categorical
+    # `stroke_dash` field assigns domain position j the palette's own pattern
+    # j, position 0 always solid. Series 0 (group "a", first-appearance
+    # order) is therefore always solid under "encoded"; series 1 (group "b")
+    # is the one that carries a real dash.
+    palette = stroke_dash_palette()
+    cells = 0
+    for interpolate in interpolate_families:
+        for dash_state in dash_states:
+            for opacity in opacities:
+                for grouped in groupings:
+                    cell = f"{interpolate}/{dash_state}/opacity={opacity}/grouped={grouped}"
+                    sized_svg = _matrix_chart(
+                        interpolate, dash_state, opacity, grouped, sized=True
+                    ).to_svg()
+                    control_svg = _matrix_chart(
+                        interpolate, dash_state, opacity, grouped, sized=False
+                    ).to_svg()
+
+                    outlines = _outline_elements(sized_svg)
+                    series = 2 if grouped else 1
+                    assert len(outlines) == series, f"{cell}: one outline per series"
+                    assert "<polyline" not in sized_svg, f"{cell}: no stroked polyline"
+                    for el in outlines:
+                        assert "stroke-dasharray" not in el, f"{cell}: {el}"
+                        assert "stroke-width" not in el, f"{cell}: {el}"
+                        assert ("rgba(" in el) == (opacity is not None), (
+                            f"{cell}: opacity on fill: {el}"
+                        )
+
+                    # Vacuity control: the unsized twin outlines nothing and
+                    # differs from the sized render.
+                    assert _outline_elements(control_svg) == [], f"{cell}: unsized twin outlines"
+                    assert sized_svg != control_svg, cell
+
+                    # Dashing actually happened: each dashed series paints
+                    # the pattern's on-fraction of its undashed twin's area,
+                    # within 0.02 (mirrors the Rust matrix's area-ratio
+                    # check, `sized_lines_outline_under_every_interpolate_
+                    # dash_opacity_and_grouping` in `svg_walk/tests.rs`).
+                    # Ring counts don't discriminate on curves: a dash gap
+                    # can drop or add a whole flattened segment either way.
+                    if dash_state != "none":
+                        undashed_svg = _matrix_chart(
+                            interpolate, "none", opacity, grouped, sized=True
+                        ).to_svg()
+                        undashed_outlines = _outline_elements(undashed_svg)
+                        assert len(undashed_outlines) == series, f"{cell}: undashed twin series"
+                        for i, (dashed_el, undashed_el) in enumerate(
+                            zip(outlines, undashed_outlines)
+                        ):
+                            ratio = _outline_area(dashed_el) / _outline_area(undashed_el)
+                            if dash_state == "constant":
+                                pattern = [6.0, 3.0]
+                            else:  # encoded: series i's own assigned pattern
+                                pattern = palette[i]
+                            expected = sum(pattern[0::2]) / sum(pattern) if pattern else 1.0
+                            assert abs(ratio - expected) <= 0.02, (
+                                f"{cell} series {i}: dashed paints {ratio:.3f} of the "
+                                f"undashed area, want {expected:.3f}"
+                            )
+                    cells += 1
+    assert cells == len(interpolate_families) * len(dash_states) * len(opacities) * len(groupings)
+
+
+# ---------------------------------------------------------------------------
+# Per-vertex half-thickness: for the default (linear) interpolate family, the
+# outline carries, at every vertex and for every adjacent segment, a corner
+# at `p_i +/- (w_i/2) * n` (spec §6.5), where `w_i` is the real per-vertex
+# width read from the scene (`.interactive()`'s `widths`), not a value this
+# test derives independently.
+# ---------------------------------------------------------------------------
+
+
+def test_static_outline_half_thickness_equals_half_the_scene_width_at_every_vertex() -> None:
+    df = pl.DataFrame(
+        {"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 2.0, 0.5, 3.0], "v": [1.0, 2.0, 3.0, 4.0]}
+    )
+    chart = (
+        fm.Chart(df).mark_line().encode(x="x", y="y", size="v").properties(width=320, height=220)
+    )
+    points, widths = _single_line_node(chart)
+
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 1
+    vertices = _outline_vertices(outlines[0])
+
+    for i, (p, w) in enumerate(zip(points, widths)):
+        half = w / 2
+        neighbor_idxs = [j for j in (i - 1, i + 1) if 0 <= j < len(points)]
+        assert neighbor_idxs, f"vertex {i} has no adjacent segment"
+        for j in neighbor_idxs:
+            other = points[j]
+            nx, ny = _unit_normal(p, other) if j == i + 1 else _unit_normal(other, p)
+            for sign in (1, -1):
+                target = (p[0] + sign * nx * half, p[1] + sign * ny * half)
+                assert _has_vertex_near(vertices, target), (
+                    f"vertex {i}: missing corner at {target} (w={w})"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Caps: butt (and the unset default) end flush at the vertex, square extends
+# by `w/2` along the outward tangent, round's end vertices lie on the
+# radius-`w/2` circle around the endpoint (spec §6.5).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cap", (None, "butt", "round", "square"))
+def test_caps_follow_the_stroke_cap(cap: str | None) -> None:
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "v": [10.0, 10.0]})
+    kwargs = {} if cap is None else {"stroke_cap": cap}
+    chart = (
+        fm.Chart(df)
+        .mark_line(**kwargs)
+        .encode(x="x", y="y", size="v")
+        .properties(width=300, height=200)
+    )
+    points, widths = _single_line_node(chart)
+    p0, p1 = points[0], points[1]
+    half = widths[0] / 2
+    tx, ty = _unit_tangent(p0, p1)
+    nx, ny = _unit_normal(p0, p1)
+
+    vertices = _outline_vertices(_outline_elements(chart.to_svg())[0])
+    # Outward tangential projection of every vertex relative to p0: positive
+    # means the cap reaches back past the vertex (square/round); ~0 means
+    # flush (butt/unset).
+    projections = [-((vx - p0[0]) * tx + (vy - p0[1]) * ty) for vx, vy in vertices]
+    reach = max(projections)
+
+    if cap in (None, "butt"):
+        assert reach <= half * 0.1, f"cap={cap}: reaches {reach}, expected flush"
+        for sign in (1, -1):
+            assert _has_vertex_near(vertices, (p0[0] + sign * nx * half, p0[1] + sign * ny * half))
+    elif cap == "square":
+        assert math.isclose(reach, half, rel_tol=0.05), (
+            f"cap=square: reach {reach}, expected {half}"
+        )
+    else:  # round
+        assert reach > half * 0.3, f"cap=round: reach {reach}, expected a bulge past flush"
+        near_p0 = [
+            (vx, vy) for vx, vy in vertices if math.hypot(vx - p0[0], vy - p0[1]) < half * 1.2
+        ]
+        assert len(near_p0) >= 3, "round cap should add arc vertices beyond the two corners"
+        for vx, vy in near_p0:
+            dist = math.hypot(vx - p0[0], vy - p0[1])
+            assert math.isclose(dist, half, rel_tol=0.1), (
+                f"cap=round: vertex at radius {dist}, expected {half}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Joins: with no join set, a tapered line uses bevel (not SVG's untapered
+# miter default) -- an outer join ring of exactly the vertex plus its two
+# segment corners, nothing farther. Round adds several arc vertices, all at
+# radius `w/2` from the vertex. Miter adds exactly one vertex strictly past
+# `w/2` (spec §6.5).
+# ---------------------------------------------------------------------------
+
+
+def _join_ring_other_distances(chart: fm.Chart, p1: tuple[float, float]) -> list[float]:
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 1
+    for ring in _outline_rings(outlines[0]):
+        if any(_close(v, p1) for v in ring):
+            others = [v for v in ring if not _close(v, p1)]
+            return [math.hypot(vx - p1[0], vy - p1[1]) for vx, vy in others]
+    raise AssertionError(f"no ring contains the joint vertex {p1}")
+
+
+@pytest.mark.parametrize("join", (None, "bevel", "round", "miter"))
+def test_joins_follow_the_stroke_join(join: str | None) -> None:
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 0.0, 1.0], "v": [20.0, 20.0, 20.0]})
+    kwargs = {} if join is None else {"stroke_join": join}
+    chart = (
+        fm.Chart(df)
+        .mark_line(**kwargs)
+        .encode(x="x", y="y", size="v")
+        .properties(width=300, height=200)
+    )
+    points, widths = _single_line_node(chart)
+    p1 = points[1]
+    half = widths[1] / 2
+
+    distances = _join_ring_other_distances(chart, p1)
+
+    if join in (None, "bevel"):
+        assert len(distances) == 2, (
+            f"join={join}: expected exactly the two corners, got {distances}"
+        )
+        for d in distances:
+            assert math.isclose(d, half, rel_tol=0.05), (
+                f"join={join}: corner at {d}, expected {half}"
+            )
+    elif join == "round":
+        assert len(distances) > 2, "join=round: expected arc vertices beyond the two corners"
+        for d in distances:
+            assert math.isclose(d, half, rel_tol=0.1), (
+                f"join=round: vertex at {d}, expected radius {half}"
+            )
+    else:  # miter
+        assert len(distances) == 3, (
+            f"join=miter: expected the two corners plus one tip, got {distances}"
+        )
+        tip = max(distances)
+        assert tip > half * 1.05, f"join=miter: tip at {tip}, expected strictly past {half}"
+
+
+def test_no_join_set_renders_identically_to_bevel() -> None:
+    """With no `stroke_join=`, a tapered line uses bevel -- not SVG's
+    untapered-line miter default (spec §6.5, disclosed in `ferrum-spec.md`
+    and the changelog). Compared by outline geometry, not full SVG bytes:
+    an explicit `stroke_join="bevel"` wraps the batch in an inert
+    `<g stroke-linejoin="bevel">` that an outline never reads (the join is
+    baked into the fill geometry), so the two SVGs differ by that wrapper
+    even though the painted shape is identical."""
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 0.0, 1.0], "v": [20.0, 20.0, 20.0]})
+    default_svg = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x", y="y", size="v")
+        .properties(width=300, height=200)
+        .to_svg()
+    )
+    bevel_svg = (
+        fm.Chart(df)
+        .mark_line(stroke_join="bevel")
+        .encode(x="x", y="y", size="v")
+        .properties(width=300, height=200)
+        .to_svg()
+    )
+    default_rings = _outline_rings(_outline_elements(default_svg)[0])
+    bevel_rings = _outline_rings(_outline_elements(bevel_svg)[0])
+    assert default_rings == bevel_rings
+
+
+# ---------------------------------------------------------------------------
+# Dashed outlines: multiple on-pieces separated by real gaps along the
+# stroke, with widths that vary (interpolated), not one width reused for
+# every piece. The data is a horizontal line so each on-piece's width is
+# simply its own y-extent -- a real property of the real rendered geometry,
+# not a hand-built expectation.
+# ---------------------------------------------------------------------------
+
+
+def test_dashed_outlines_alternate_along_arc_length_with_interpolated_widths() -> None:
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "y": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "v": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    chart = (
+        fm.Chart(df)
+        .mark_line(stroke_dash=[6.0, 3.0])
+        .encode(x="x", y="y", size="v")
+        .properties(width=400, height=120)
+    )
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 1
+    rings = _outline_rings(outlines[0])
+    assert len(rings) > 1, "a dashed tapered line must fragment into multiple rings"
+
+    spans = sorted(
+        (
+            (
+                min(x for x, _ in r),
+                max(x for x, _ in r),
+                max(y for _, y in r) - min(y for _, y in r),
+            )
+            for r in rings
+        ),
+        key=lambda s: s[0],
+    )
+
+    # Merge rings that abut (a width-interpolation cut at a data vertex, not
+    # a real dash gap) into on-pieces, tracking each piece's max y-extent
+    # (its width) and x-range.
+    pieces: list[list[float]] = []  # [xmin, xmax, width]
+    for xmin, xmax, width in spans:
+        if pieces and xmin - pieces[-1][1] < 0.5:
+            pieces[-1][1] = max(pieces[-1][1], xmax)
+            pieces[-1][2] = max(pieces[-1][2], width)
+        else:
+            pieces.append([xmin, xmax, width])
+
+    assert len(pieces) > 1, "the dash pattern must produce more than one on-piece"
+
+    # Real gaps exist between consecutive on-pieces (the off-dash length).
+    gaps = [pieces[i + 1][0] - pieces[i][1] for i in range(len(pieces) - 1)]
+    assert all(g > 1.0 for g in gaps), f"expected real off-dash gaps, got {gaps}"
+
+    # Widths are bounded by the real scene widths and are not all equal --
+    # interpolation along arc length, not one reused width.
+    _, widths = _single_line_node(chart)
+    piece_widths = [p[2] for p in pieces]
+    assert min(piece_widths) >= min(widths) - 0.5
+    assert max(piece_widths) <= max(widths) + 0.5
+    assert max(piece_widths) - min(piece_widths) > 1.0, piece_widths
+    # Monotone overall: later on-pieces (farther along the line) are no
+    # thinner than earlier ones, matching the monotone size encoding.
+    assert piece_widths[0] < piece_widths[-1]
+
+
+# ---------------------------------------------------------------------------
+# Hairpin at opacity 0.5 paints its self-overlap once. Rasterized through the
+# real `resvg` path (`tests/_snapshots.py`'s `rasterize_svg`), no covered
+# pixel in the overlap column may be darker than the midpoint between the
+# real single- and double-coverage blends of the stroke onto this chart's
+# own background -- that rules out a doubled fill -- and the real
+# single-coverage blend must actually appear. A plain "every covered pixel
+# shares one color" check false-fails on real anti-aliased edge pixels,
+# which blend lighter than single coverage, not darker.
+# ---------------------------------------------------------------------------
+
+
+def _blend(
+    bg: tuple[int, int, int], fg: tuple[int, int, int], alpha: float
+) -> tuple[int, int, int]:
+    return tuple(round(bg[i] * (1 - alpha) + fg[i] * alpha) for i in range(3))
+
+
+def test_hairpin_at_half_opacity_paints_its_overlap_once() -> None:
+    df = pl.DataFrame({"x": [0.0, 10.0, 0.0], "y": [0.0, 0.0, 0.2], "v": [30.0, 30.0, 30.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_line(stroke="#ff0000", opacity=0.5)
+        .encode(x="x", y=fm.Y("y", scale=fm.LinearScale(domain=[-50.0, 50.0])), size="v")
+        .properties(width=400, height=300)
+        .configure_grid(x=False, y=False)
+    )
+    svg = chart.to_svg()
+    outlines = _outline_elements(svg)
+    assert len(outlines) == 1, "the hairpin must paint through one outline"
+    vertices = _outline_vertices(outlines[0])
+    xmin = min(v[0] for v in vertices)
+    xmax = max(v[0] for v in vertices)
+    ymin = min(v[1] for v in vertices)
+    ymax = max(v[1] for v in vertices)
+
+    png = rasterize_svg(svg)
+    rows, w, h = decode_png_rgba(png)
+    background = rows[0][0][:3]
+    col = int((xmin + xmax) / 2)
+    column = [rows[y][col] for y in range(max(0, int(ymin) - 2), min(h, int(ymax) + 3))]
+    covered = [p for p in column if p[:3] != background]
+    assert covered, "expected the hairpin to paint the sampled column"
+
+    single = _blend(background, (255, 0, 0), 0.5)
+    double = _blend(single, (255, 0, 0), 0.5)
+    midpoint_green = (single[1] + double[1]) / 2
+
+    # Anti-aliased edge pixels blend *toward the background* (lighter, a
+    # higher green channel than single coverage) -- that is not a defect.
+    # A real double-paint pulls a pixel *darker* than single coverage,
+    # toward the double-coverage blend, which is the one thing this test
+    # must never see.
+    greens = [p[1] for p in covered]
+    assert min(greens) > midpoint_green, (
+        f"a pixel in the overlap column is darker than single coverage "
+        f"(green {min(greens)} vs the single/double midpoint {midpoint_green}): {sorted(set(covered))}"
+    )
+    assert any(abs(g - single[1]) <= 2 for g in greens), (
+        f"the single-coverage blend {single} never appears in the column: {sorted(set(covered))}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PNG: sample the actual pixel thickness of the rendered red stroke at three
+# points along the line, and check it against the real per-vertex widths the
+# scene carries -- not merely that `to_png()` returns bytes.
+# ---------------------------------------------------------------------------
+
+
+def _is_red(pixel: tuple[int, int, int, int]) -> bool:
+    return pixel[0] > 200 and pixel[1] < 200
+
+
+def test_to_png_pixel_thickness_matches_the_tapered_widths() -> None:
+    df = pl.DataFrame(
+        {"x": [0.0, 1.0, 2.0, 3.0], "y": [1.0, 1.0, 1.0, 1.0], "v": [1.0, 2.0, 3.0, 4.0]}
+    )
+    chart = (
+        fm.Chart(df)
+        .mark_line(stroke="#ff0000")
+        .encode(x="x", y="y", size="v")
+        .properties(width=400, height=200)
+    )
+    points, widths = _single_line_node(chart)
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 1
+
+    xs = [p[0] for p in points]
+    xmin, xmax = min(xs), max(xs)
+
+    png = chart.to_png(scale=1.0)
+    rows, w, h = decode_png_rgba(png)
+    sx = w / 400
+
+    def red_thickness(frac: float) -> int:
+        col = int((xmin + (xmax - xmin) * frac) * sx)
+        return sum(1 for y in range(h) if _is_red(rows[y][col]))
+
+    measured = [red_thickness(f) for f in (0.02, 0.5, 0.98)]
+    expected = [round(widths[0]), round((widths[1] + widths[2]) / 2), round(widths[-1])]
+
+    # Anti-aliasing at the outline's edges counts a fringe pixel or two as
+    # "red" on each side, so allow a couple of pixels of slack -- the real
+    # signal this proves is that thickness tracks the real per-vertex
+    # widths, not a constant, untapered stroke.
+    assert measured == sorted(measured), f"thickness should grow along the line: {measured}"
+    for got, want in zip(measured, expected):
+        assert abs(got - want) <= 2, f"measured {measured}, expected approximately {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Vacuity control: an unsized line, dashed or curved under a round cap/join,
+# renders byte-identically whether or not the tapered-outline path exists in
+# the walker, since that path only fires when `widths` is present on the
+# scene node. Pinned as a sha256 of the untapered capture (taken via a
+# file-copy revert of `svg_walk.rs`/`svg.rs`/`mod.rs`/`binding.rs`/
+# `taper.rs`, rebuilt, then restored) rather than the capture itself
+# (fixture file or inline literal): every ferrum SVG embeds a multi-
+# hundred-KB base64 font body, which "byte-equal to the untapered capture"
+# does not need on disk to check.
+# ---------------------------------------------------------------------------
+
+
+def _vacuity_dashed_chart() -> fm.Chart:
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 0.0, 1.0]})
+    return (
+        fm.Chart(df)
+        .mark_line(stroke_dash=[6.0, 3.0])
+        .encode(x="x", y="y")
+        .properties(width=300, height=200)
+    )
+
+
+def _vacuity_curved_chart() -> fm.Chart:
+    df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 2.0, 0.5, 3.0]})
+    return (
+        fm.Chart(df)
+        .mark_line(interpolate="monotone", stroke_cap="round", stroke_join="round")
+        .encode(x="x", y="y")
+        .properties(width=300, height=200)
+    )
+
+
+_VACUITY_DASHED_SHA256 = "3b028bba7df8b3da830ada230fb4ff8e1833dfe2d26eb933016ee588e73b29dd"
+_VACUITY_CURVED_ROUND_SHA256 = "5c2ef095759762d842ea6e4eeff56d7381e0c35fed60b7113284b915c5a0b6dc"
+
+
+def test_unsized_dashed_line_is_byte_identical_to_the_pre_fix_capture() -> None:
+    svg = _vacuity_dashed_chart().to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _VACUITY_DASHED_SHA256
+
+
+def test_unsized_curved_round_cap_join_line_is_byte_identical_to_the_pre_fix_capture() -> None:
+    svg = _vacuity_curved_chart().to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest() == _VACUITY_CURVED_ROUND_SHA256
