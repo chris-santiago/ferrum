@@ -9,6 +9,8 @@ pub enum WasmRenderError {
     SceneDeserialization(String),
     TextureUpload(String),
     ShaderCompilation(String),
+    /// A tapered stroke whose `widths` the shared taper validation refuses.
+    TaperedStroke(ferrum_scene::TaperError),
 }
 
 impl std::fmt::Display for WasmRenderError {
@@ -19,7 +21,14 @@ impl std::fmt::Display for WasmRenderError {
             Self::SceneDeserialization(msg) => write!(f, "scene deserialization failed: {msg}"),
             Self::TextureUpload(msg) => write!(f, "texture upload failed: {msg}"),
             Self::ShaderCompilation(msg) => write!(f, "shader compilation failed: {msg}"),
+            Self::TaperedStroke(e) => write!(f, "mark_line: the tapered line cannot be drawn: {e}"),
         }
+    }
+}
+
+impl From<ferrum_scene::TaperError> for WasmRenderError {
+    fn from(e: ferrum_scene::TaperError) -> Self {
+        Self::TaperedStroke(e)
     }
 }
 

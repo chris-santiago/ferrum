@@ -618,7 +618,7 @@ mod tests {
             interaction: ferrum_scene::InteractionConfig::default(),
             chart_description: None,
         };
-        load_scene(&scene).draw_commands
+        load_scene(&scene).unwrap().draw_commands
     }
 
     /// [`resolve_conditionals_with_packed`] for a scene with no packed batches:

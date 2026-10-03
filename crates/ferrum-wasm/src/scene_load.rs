@@ -530,7 +530,7 @@ impl SceneCollector {
         nodes: &[SceneNode],
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
-    ) {
+    ) -> Result<(), TaperError> {
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -541,8 +541,9 @@ impl SceneCollector {
             &mut self.raws,
             batch_cap,
             batch_join,
-        );
+        )?;
         self.emit(None);
+        Ok(())
     }
 
     /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
@@ -554,7 +555,7 @@ impl SceneCollector {
         target: MarkDrawTarget,
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
-    ) {
+    ) -> Result<(), TaperError> {
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -565,8 +566,9 @@ impl SceneCollector {
             &mut self.raws,
             batch_cap,
             batch_join,
-        );
+        )?;
         self.emit(Some(target));
+        Ok(())
     }
 
     /// Collect `nodes` into the annotation mesh.
@@ -582,7 +584,7 @@ impl SceneCollector {
         nodes: &[SceneNode],
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
-    ) {
+    ) -> Result<(), TaperError> {
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -593,10 +595,11 @@ impl SceneCollector {
             &mut self.raws,
             batch_cap,
             batch_join,
-        );
+        )?;
         // Emit draw commands for any Circle/Rect annotation nodes so they
         // appear at the correct z-order (after mark batches).
         self.emit(None);
+        Ok(())
     }
 
     /// Emit draw commands for any circles/rects added since the last snapshot.
@@ -1039,11 +1042,14 @@ pub fn bake_panels(scene: &SceneGraph) -> Vec<Panel> {
         .collect()
 }
 
-pub fn load_scene(scene: &SceneGraph) -> SceneData {
+/// Load `scene` into GPU-ready buffers. Refuses a tapered stroke whose
+/// `widths` the shared taper validation rejects rather than drawing it.
+pub fn load_scene(scene: &SceneGraph) -> Result<SceneData, TaperError> {
     load_scene_with_packed(scene, &[])
 }
 
-pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneData {
+/// [`load_scene`] with the packed binary instance sidecar.
+pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<SceneData, TaperError> {
     let mut collector = SceneCollector::new();
     let mut batch_meta = HashMap::new();
 
@@ -1070,7 +1076,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let background = scene.background.as_ref().map(|c| color_to_linear(c, 1.0));
 
     // Title: non-mark → static mesh
-    collector.collect_static(&scene.title, None, None);
+    collector.collect_static(&scene.title, None, None)?;
 
     // Batch E Task 9: the clip-escape rect substituted for a
     // `MarkBatch::clip == false` batch's scissor/clip. The full scene extent
@@ -1131,7 +1137,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 }
             })
             .collect();
-        collector.collect_static(&snapped_grid, None, None);
+        collector.collect_static(&snapped_grid, None, None)?;
 
         // Below-marks content (GH #89B): text annotations with `z ==
         // "below_marks"`. A typed sibling of `grid`, collected immediately
@@ -1139,7 +1145,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         // same visual position these nodes held before this slot existed
         // (previously appended onto `grid` itself). No pixel-snapping: that
         // pass is Line-specific (gridlines); `below_marks` carries Text nodes.
-        collector.collect_static(&maybe_transform_nodes(&panel.below_marks, ls), None, None);
+        collector.collect_static(&maybe_transform_nodes(&panel.below_marks, ls), None, None)?;
 
         let effective_plot_area = if ls.is_identity() {
             panel.plot_area
@@ -1223,7 +1229,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 // draws byte-identically to the former per-panel recording.
                 let mesh_start = collector.mesh.indices.len() as u32;
                 let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
-                collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join);
+                collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join)?;
                 let mesh_end = collector.mesh.indices.len() as u32;
                 collector.record_mark_mesh_panel(
                     mesh_start,
@@ -1236,8 +1242,8 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         }
 
         // Axes, strip titles: non-mark → static mesh
-        collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None);
-        collector.collect_static(&maybe_transform_nodes(&panel.strip_title, ls), None, None);
+        collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None)?;
+        collector.collect_static(&maybe_transform_nodes(&panel.strip_title, ls), None, None)?;
         // Above-marks axis/grid chrome (GH #89B): nodes from an axis or its
         // gridlines whose effective `zindex >= 1`. A typed sibling of
         // `annotations`, routed to annotation_mesh (drawn after mark mesh)
@@ -1245,17 +1251,17 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         // above-marks user annotations always paint above above-marks axis
         // chrome (previously the two were commingled in one list with chrome
         // prefixed ahead of user content, so chrome painted OVER it).
-        collector.collect_annotation(&maybe_transform_nodes(&panel.chrome_above, ls), None, None);
+        collector.collect_annotation(&maybe_transform_nodes(&panel.chrome_above, ls), None, None)?;
         // Annotations: route to annotation_mesh so they appear above data
         // marks in WASM (matching SVG painter order).
-        collector.collect_annotation(&maybe_transform_nodes(&panel.annotations, ls), None, None);
+        collector.collect_annotation(&maybe_transform_nodes(&panel.annotations, ls), None, None)?;
     }
 
     // Legend, decorations: non-mark → static mesh
-    collector.collect_static(&scene.legend, None, None);
-    collector.collect_static(&scene.decorations, None, None);
+    collector.collect_static(&scene.legend, None, None)?;
+    collector.collect_static(&scene.decorations, None, None)?;
 
-    SceneData {
+    Ok(SceneData {
         circle_instances: collector.circles,
         rect_instances: collector.rects,
         mesh_buffers: collector.mesh,
@@ -1276,7 +1282,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             .iter()
             .map(|p| panel_slot_count(&p.coord))
             .collect(),
-    }
+    })
 }
 
 // ── Packed sidecar section flags ────────────────────────────────────────────
@@ -1683,7 +1689,7 @@ fn collect_nodes(
     raws: &mut Vec<RawFragmentData>,
     batch_cap: Option<StrokeCap>,
     batch_join: Option<StrokeJoin>,
-) {
+) -> Result<(), TaperError> {
     for node in nodes {
         match node {
             SceneNode::Circle { cx, cy, r, style } => {
@@ -1740,11 +1746,21 @@ fn collect_nodes(
                 commands,
                 style,
                 closed,
-                widths: _,
+                widths: None,
             } => {
                 tessellate::tessellate_path(commands, style, *closed, batch_cap, batch_join, mesh);
             }
-            SceneNode::Polyline { points, style, widths: _ } => {
+            SceneNode::Path {
+                commands,
+                style,
+                closed,
+                widths: Some(widths),
+            } => {
+                tessellate::tessellate_tapered_path(
+                    commands, widths, style, *closed, batch_cap, batch_join, mesh,
+                )?;
+            }
+            SceneNode::Polyline { points, style, widths } => {
                 let mut s = style.clone();
                 if s.stroke_cap.is_none() {
                     s.stroke_cap = batch_cap;
@@ -1752,7 +1768,10 @@ fn collect_nodes(
                 if s.stroke_join.is_none() {
                     s.stroke_join = batch_join;
                 }
-                tessellate::tessellate_polyline(points, &s, mesh);
+                match widths {
+                    None => tessellate::tessellate_polyline(points, &s, mesh),
+                    Some(widths) => tessellate::tessellate_tapered_polyline(points, widths, &s, mesh)?,
+                }
             }
             SceneNode::Polygon { rings, style } => {
                 tessellate::tessellate_polygon(rings, style, mesh);
@@ -1793,7 +1812,7 @@ fn collect_nodes(
             SceneNode::Group { children, .. } => {
                 collect_nodes(
                     children, circles, rects, mesh, texts, images, raws, batch_cap, batch_join,
-                );
+                )?;
             }
             SceneNode::Raw { svg, anchor } => {
                 let anchor_str = match anchor {
@@ -1807,6 +1826,7 @@ fn collect_nodes(
             }
         }
     }
+    Ok(())
 }
 
 fn decode_image_quad(x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) -> Option<ImageQuad> {
@@ -2618,7 +2638,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(data.circle_instances.len(), 1);
         let ci = &data.circle_instances[0];
         assert!(
@@ -2719,7 +2739,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(data.rect_instances.len(), 1);
         let ri = &data.rect_instances[0];
         assert!(
@@ -2837,7 +2857,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let ci = &data.circle_instances[0];
         assert!(
             (ci.stroke_opacity - 1.0).abs() < 1e-6,
@@ -2937,7 +2957,7 @@ mod tests {
     #[test]
     fn polygon_tessellation_produces_nonzero_mesh() {
         let scene = make_scene_with_polygons(vec![hex_polygon(200.0, 200.0, 20.0)]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "polygon tessellation must produce vertices"
@@ -2964,7 +2984,7 @@ mod tests {
             })
             .collect();
         let scene = make_scene_with_polygons(nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         // 20 hexagons × 4 triangles each (fan tessellation of a 6-gon) = 80
         // triangles minimum. Each triangle = 3 indices.
         assert!(
@@ -3007,7 +3027,7 @@ mod tests {
             },
         };
         let scene = make_scene_with_polygons(vec![node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             data.mesh_buffers.vertices.len() >= 8,
             "polygon with hole must tessellate to ≥8 vertices; got {}",
@@ -3041,7 +3061,7 @@ mod tests {
             },
         };
         let scene = make_scene_with_polygons(vec![node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         // Stroke-only polygon still produces mesh vertices (stroke tessellation),
         // but we mainly want to ensure it doesn't panic.
         assert!(
@@ -3056,7 +3076,7 @@ mod tests {
             .map(|i| hex_polygon(100.0 + i as f64 * 60.0, 200.0, 20.0))
             .collect();
         let scene = make_scene_with_polygons(nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         for (i, v) in data.mesh_buffers.vertices.iter().enumerate() {
             assert!(
                 v.position[0].is_finite() && v.position[1].is_finite(),
@@ -3094,7 +3114,7 @@ mod tests {
             },
         };
         let scene = make_scene_with_polygons(vec![node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         // Degenerate polygon with <3 points should be skipped.
         assert!(
             data.mesh_buffers.vertices.is_empty(),
@@ -3222,7 +3242,7 @@ mod tests {
             },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(data.circle_instances.len(), 3, "3 circles → 3 instances");
         let c = &data.circle_instances[0];
         assert!((c.center[0] - 100.0).abs() < 1e-3);
@@ -3246,7 +3266,7 @@ mod tests {
                 style,
             }],
         );
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let c = &data.circle_instances[0];
         assert!((c.stroke_opacity - 0.7).abs() < 1e-3);
         assert!((c.stroke_dash - 1.0).abs() < 1e-3, "6,3 → dashed index 1");
@@ -3284,7 +3304,7 @@ mod tests {
             },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Bar, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(data.rect_instances.len(), 3, "3 rects → 3 instances");
         let r = &data.rect_instances[0];
         assert!((r.position[0] - 60.0).abs() < 1e-3);
@@ -3305,7 +3325,7 @@ mod tests {
                 corner_radius: 5.5,
             }],
         );
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let r = &data.rect_instances[0];
         assert!((r.corner_radius - 5.5).abs() < 1e-3);
     }
@@ -3322,7 +3342,7 @@ mod tests {
             style: default_stroke_style(),
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "Line node must produce mesh vertices"
@@ -3346,7 +3366,7 @@ mod tests {
             })
             .collect();
         let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             data.mesh_buffers.indices.len() >= 10 * 6,
             "10 lines must produce ≥60 indices; got {}",
@@ -3365,7 +3385,7 @@ mod tests {
             widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "Polyline must produce mesh vertices"
@@ -3385,8 +3405,117 @@ mod tests {
             widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(!data.mesh_buffers.vertices.is_empty());
+    }
+
+    /// An untapered polyline and path load to exactly the vertices their
+    /// constant-width tessellators emit: the tapered branch never touches a
+    /// node without `widths`.
+    #[test]
+    fn untapered_strokes_load_byte_identical_to_the_constant_tessellators() {
+        use ferrum_scene::PathCmd;
+        let points = vec![(50.0, 300.0), (150.0, 100.0), (250.0, 250.0), (350.0, 50.0)];
+        let style = StrokeStyle { dash: Some(vec![6.0, 3.0]), ..default_stroke_style() };
+        let commands = vec![
+            PathCmd::MoveTo { x: 60.0, y: 200.0 },
+            PathCmd::CubicTo { c1x: 120.0, c1y: 40.0, c2x: 220.0, c2y: 340.0, x: 300.0, y: 120.0 },
+        ];
+        let fill_stroke = FillStroke {
+            fill: None,
+            stroke: Some(Color { r: 10, g: 20, b: 30, a: 255 }),
+            stroke_width: 3.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let nodes = vec![
+            SceneNode::Polyline { points: points.clone(), style: style.clone(), widths: None },
+            SceneNode::Path { commands: commands.clone(), style: fill_stroke.clone(), closed: false, widths: None },
+        ];
+        let data = load_scene(&make_scene_with_nodes(MarkBatchKind::Line, nodes)).unwrap();
+
+        let mut expected: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate::tessellate_polyline(&points, &style, &mut expected);
+        tessellate::tessellate_path(&commands, &fill_stroke, false, None, None, &mut expected);
+        assert_eq!(
+            bytemuck::cast_slice::<MeshVertex, u8>(&data.mesh_buffers.vertices),
+            bytemuck::cast_slice::<MeshVertex, u8>(&expected.vertices)
+        );
+        assert_eq!(data.mesh_buffers.indices, expected.indices);
+    }
+
+    /// A tapered stroke's widths reach the mesh scaled by the panel's layout
+    /// `mag`, exactly as a constant stroke width does.
+    #[test]
+    fn tapered_stroke_half_widths_scale_by_the_layout_mag() {
+        let nodes = vec![SceneNode::Polyline {
+            points: vec![(10.0, 10.0), (60.0, 10.0)],
+            style: default_stroke_style(),
+            widths: Some(vec![2.0, 6.0]),
+        }];
+        let mut scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
+        scene.panels[0].layout_scale = LayoutScale { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let data = load_scene(&scene).unwrap();
+        let mut half_widths: Vec<f32> = data.mesh_buffers.vertices.iter().map(|v| v.half_width).collect();
+        half_widths.sort_by(f32::total_cmp);
+        half_widths.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+        // mag 2: widths 2 and 6 draw 4 and 12 px wide.
+        assert_eq!(half_widths, vec![2.0, 6.0]);
+    }
+
+    /// A malformed tapered stroke anywhere in the scene, including nested in
+    /// a group outside the marks, refuses the whole load through the shared
+    /// taper validation instead of drawing.
+    #[test]
+    fn malformed_tapered_stroke_refuses_the_scene_load() {
+        use ferrum_scene::PathCmd;
+        let misaligned = SceneNode::Polyline {
+            points: vec![(10.0, 10.0), (60.0, 10.0), (90.0, 40.0)],
+            style: default_stroke_style(),
+            widths: Some(vec![2.0, 6.0]),
+        };
+        let scene = make_scene_with_nodes(MarkBatchKind::Line, vec![misaligned.clone()]);
+        assert_eq!(load_scene(&scene).err(), Some(TaperError::Misaligned { points: 3, widths: 2 }));
+
+        let mut scene = make_scene_with_nodes(MarkBatchKind::Line, vec![]);
+        scene.panels[0].annotations = vec![SceneNode::Group {
+            attrs: Default::default(),
+            children: vec![SceneNode::Path {
+                commands: vec![PathCmd::MoveTo { x: 0.0, y: 0.0 }, PathCmd::LineTo { x: 5.0, y: 5.0 }],
+                style: FillStroke {
+                    fill: None,
+                    stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+                    stroke_width: 1.0,
+                    opacity: 1.0,
+                    stroke_dash: None,
+                    stroke_opacity: 1.0,
+                    fill_opacity: 1.0,
+                    angle: 0.0,
+                },
+                closed: false,
+                widths: Some(vec![1.0, -1.0]),
+            }],
+        }];
+        assert_eq!(load_scene(&scene).err(), Some(TaperError::InvalidWidth { index: 1, value: -1.0 }));
+
+        // Control: the same polyline with aligned widths loads.
+        let SceneNode::Polyline { points, style, .. } = misaligned else { unreachable!() };
+        let ok = SceneNode::Polyline { points, style, widths: Some(vec![2.0, 6.0, 4.0]) };
+        assert!(load_scene(&make_scene_with_nodes(MarkBatchKind::Line, vec![ok])).is_ok());
+    }
+
+    /// The refusal reaches JS as the typed tapered-stroke error naming the
+    /// shared validation's reason.
+    #[test]
+    fn tapered_refusal_reads_as_the_wasm_render_error() {
+        let e = crate::error::WasmRenderError::from(TaperError::Misaligned { points: 3, widths: 2 });
+        assert_eq!(
+            e.to_string(),
+            "mark_line: the tapered line cannot be drawn: tapered stroke has 2 widths for 3 vertices; it needs one width per vertex"
+        );
     }
 
     // ── Path (arc / area / ribbon marks) ──────────────────────────────
@@ -3408,7 +3537,7 @@ mod tests {
             widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Area, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "closed Path must produce mesh vertices"
@@ -3445,7 +3574,7 @@ mod tests {
             widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Arc, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "arc wedge Path must produce mesh vertices"
@@ -3479,7 +3608,7 @@ mod tests {
             widths: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Ribbon, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
             "open stroke-only cubic Path must produce mesh vertices"
@@ -3523,7 +3652,7 @@ mod tests {
             })
             .collect();
         let scene = make_scene_with_nodes(MarkBatchKind::Arc, wedges);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             data.mesh_buffers.indices.len() >= 3 * 3,
             "3 arc wedges must produce ≥9 indices; got {}",
@@ -3556,7 +3685,7 @@ mod tests {
             SceneNode::Text { x: 1.0, y: 1.0, content: "cleared".into(), style: cleared, slot: None },
             SceneNode::Text { x: 2.0, y: 2.0, content: "painted".into(), style: painted, slot: None },
         ];
-        let data = load_scene(&make_scene_with_nodes(MarkBatchKind::Text, nodes));
+        let data = load_scene(&make_scene_with_nodes(MarkBatchKind::Text, nodes)).unwrap();
         let contents: Vec<&str> = data.text_elements.iter().map(|t| t.content.as_str()).collect();
         assert_eq!(contents, ["painted"], "a cleared text node must emit no overlay element");
     }
@@ -3596,7 +3725,7 @@ mod tests {
             },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.text_elements.len(),
             2,
@@ -3633,7 +3762,7 @@ mod tests {
             slot: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(
             data.circle_instances.is_empty(),
             "text must not produce circles"
@@ -3689,7 +3818,7 @@ mod tests {
         );
         let decoded: SceneGraph = serde_json::from_str(&json).expect("deserialize scene");
 
-        let data = load_scene(&decoded);
+        let data = load_scene(&decoded).unwrap();
         assert_eq!(data.text_elements.len(), 1);
         assert_eq!(
             data.text_elements[0].slot,
@@ -3738,7 +3867,7 @@ mod tests {
         let decoded: SceneGraph =
             serde_json::from_str(&json).expect("legacy-shaped scene JSON must still deserialize");
 
-        let data = load_scene(&decoded);
+        let data = load_scene(&decoded).unwrap();
         assert_eq!(data.text_elements.len(), 1);
         assert_eq!(
             data.text_elements[0].slot, None,
@@ -3771,7 +3900,7 @@ mod tests {
             children,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.circle_instances.len(),
             1,
@@ -3925,7 +4054,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(data.circle_instances.len(), 1, "1 circle from point batch");
         assert_eq!(data.rect_instances.len(), 1, "1 rect from bar batch");
         assert!(
@@ -4157,7 +4286,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene_with_packed(&scene, &packed);
+        let data = load_scene_with_packed(&scene, &packed).unwrap();
         assert_eq!(data.circle_instances.len(), 3);
         assert!((data.circle_instances[0].fill_color[0] - 1.0).abs() < 1e-6);
         assert!((data.circle_instances[1].center[0] - 100.0).abs() < 1e-6);
@@ -4993,7 +5122,7 @@ mod tests {
             interaction: InteractionConfig::default(),
             chart_description: None,
         };
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(data.circle_instances.is_empty());
         assert!(data.rect_instances.is_empty());
         assert!(data.text_elements.is_empty());
@@ -5044,7 +5173,7 @@ mod tests {
             },
             None,
             None,
-        );
+        ).unwrap();
 
         assert_eq!(collector.circles.len(), 1);
         // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
@@ -5103,7 +5232,7 @@ mod tests {
             },
             None,
             None,
-        );
+        ).unwrap();
 
         assert_eq!(collector.rects.len(), 1);
         assert!(
@@ -5222,7 +5351,7 @@ mod tests {
     #[test]
     fn draw_commands_created_for_each_batch() {
         let scene = make_blend_test_scene();
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         // 3 circles total across 2 batches.
         assert_eq!(data.circle_instances.len(), 3);
@@ -5244,7 +5373,7 @@ mod tests {
     #[test]
     fn draw_commands_normal_batch_not_additive() {
         let scene = make_blend_test_scene();
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let circle_cmds: Vec<_> = data
             .draw_commands
@@ -5263,7 +5392,7 @@ mod tests {
     #[test]
     fn draw_commands_additive_batch_flagged() {
         let scene = make_blend_test_scene();
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let circle_cmds: Vec<_> = data
             .draw_commands
@@ -5282,7 +5411,7 @@ mod tests {
     #[test]
     fn draw_commands_instance_ranges_are_contiguous() {
         let scene = make_blend_test_scene();
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let circle_cmds: Vec<_> = data
             .draw_commands
@@ -5302,7 +5431,7 @@ mod tests {
     #[test]
     fn draw_commands_cover_all_instances() {
         let scene = make_blend_test_scene();
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let total_circles: u32 = data
             .draw_commands
@@ -5396,7 +5525,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let rect_cmds: Vec<_> = data
             .draw_commands
             .iter()
@@ -5441,7 +5570,7 @@ mod tests {
             style,
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let ci = &data.circle_instances[0];
         // stroke_color.a should be linearized raw alpha ≈ color_to_linear(black, 1.0)[3] = 1.0
         // NOT color_to_linear(black, 0.5)[3] = 0.5 (the old buggy behavior)
@@ -5483,7 +5612,7 @@ mod tests {
             corner_radius: 0.0,
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Bar, vec![node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         let ri = &data.rect_instances[0];
         // stroke_color.a = (200/255)*1.0 (raw), linearized alpha is unchanged
         let expected_raw = 200.0_f32 / 255.0;
@@ -5652,7 +5781,7 @@ mod tests {
         };
 
         // Load via the full load_scene path (which now uses SceneCollector internally).
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         // Verify instance counts.
         assert_eq!(data.circle_instances.len(), 1, "exactly 1 circle");
@@ -5804,7 +5933,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         // Grid line → static_mesh (not annotation_mesh).
         assert!(
@@ -5915,7 +6044,7 @@ mod tests {
             style: default_stroke_style(),
         };
         let scene = scene_with_slots(vec![], vec![below_marks_line], vec![], vec![], vec![]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert!(
             !data.static_mesh_buffers.vertices.is_empty(),
@@ -5940,7 +6069,7 @@ mod tests {
             style: default_stroke_style(),
         };
         let scene = scene_with_slots(vec![], vec![], vec![], vec![chrome_line], vec![]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert!(
             !data.annotation_mesh_buffers.vertices.is_empty(),
@@ -6010,7 +6139,7 @@ mod tests {
             vec![chrome_circle],
             vec![annotation_circle],
         );
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let first_circle_cmd = data
             .draw_commands
@@ -6146,7 +6275,7 @@ mod tests {
     fn probe_rect_spans(
         scene: &SceneGraph,
     ) -> (SceneData, Vec<(std::ops::Range<usize>, Vec<f32>)>) {
-        let data = load_scene(scene);
+        let data = load_scene(scene).unwrap();
         let spans = batch_instance_spans(InstanceLayout {
             panels: &scene.panels,
             packed_batch_meta: &data.packed_batch_meta,
@@ -6281,7 +6410,7 @@ mod tests {
                 strip_rects: 1,
             },
         ]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let tagged: Vec<(bool, usize, Option<usize>)> = data
             .draw_commands
@@ -6338,7 +6467,7 @@ mod tests {
             vec![chrome_line],
             vec![annotation_line],
         );
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let first_chrome_idx = data
             .annotation_mesh_buffers
@@ -6380,7 +6509,7 @@ mod tests {
             style: default_stroke_style(),
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         // At least some mesh indices must have been produced for the assertion
         // to be meaningful.
@@ -6431,7 +6560,7 @@ mod tests {
         }];
         let mut scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
         scene.panels[0].marks[0].clip = false;
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert_eq!(data.mark_mesh_panels.len(), 1);
         let panel = &data.mark_mesh_panels[0];
@@ -6463,7 +6592,7 @@ mod tests {
         }];
         let mut scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
         scene.panels[0].marks[0].clip = false;
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let mark_cmd = data
             .draw_commands
@@ -6487,7 +6616,7 @@ mod tests {
             style: default_fill_stroke(),
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         let mark_cmd = data
             .draw_commands
@@ -6599,7 +6728,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert_eq!(
             data.mark_mesh_panels.len(),
@@ -6641,7 +6770,7 @@ mod tests {
             style: default_fill_stroke(),
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![circle_node]);
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert!(
             data.mark_mesh_panels.is_empty(),
@@ -6796,7 +6925,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
 
         assert_eq!(
             data.panel_count, 2,
@@ -7641,7 +7770,7 @@ mod tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.circle_instances.len(),
             2,
@@ -8219,7 +8348,7 @@ mod bug_hunt_tests {
             style,
         }];
         let mut collector = SceneCollector::new();
-        collector.collect_annotation(&nodes, None, None);
+        collector.collect_annotation(&nodes, None, None).unwrap();
         assert_eq!(
             collector.circles.len(),
             1,
@@ -8268,7 +8397,7 @@ mod bug_hunt_tests {
             style,
         }];
         let mut collector = SceneCollector::new();
-        collector.collect_annotation(&nodes, None, None);
+        collector.collect_annotation(&nodes, None, None).unwrap();
         assert!(
             !collector.annotation_mesh.vertices.is_empty(),
             "Line annotation must go to annotation_mesh"
@@ -8308,7 +8437,7 @@ mod bug_hunt_tests {
             style,
         }];
         let mut collector = SceneCollector::new();
-        collector.collect_static(&nodes, None, None);
+        collector.collect_static(&nodes, None, None).unwrap();
         assert!(
             !collector.static_mesh.vertices.is_empty(),
             "Line via collect_static must go to static_mesh"
@@ -8470,7 +8599,7 @@ mod bug_hunt_tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.raw_fragments.len(),
             1,
@@ -8509,7 +8638,7 @@ mod bug_hunt_tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.raw_fragments.len(),
             1,
@@ -8548,7 +8677,7 @@ mod bug_hunt_tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.raw_fragments.len(),
             2,
@@ -8590,7 +8719,7 @@ mod bug_hunt_tests {
             chart_description: None,
         };
 
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert_eq!(
             data.raw_fragments.len(),
             1,
@@ -9077,7 +9206,7 @@ mod bug_hunt_interactive_slots {
     /// per-(panel, slot) affines by.
     #[test]
     fn bug_hunt_load_scene_threads_y_slots_into_all_gpu_metadata() {
-        let data = load_scene(&dual_slot_scene(1));
+        let data = load_scene(&dual_slot_scene(1)).unwrap();
         assert_eq!(
             data.panel_slot_counts,
             vec![2],
@@ -9115,7 +9244,7 @@ mod bug_hunt_interactive_slots {
     #[test]
     #[should_panic(expected = "out of range for panel 0")]
     fn bug_hunt_out_of_range_batch_slot_loads_but_index_debug_asserts() {
-        let data = load_scene(&dual_slot_scene(7));
+        let data = load_scene(&dual_slot_scene(7)).unwrap();
         // The raw slot id is preserved on the command…
         let mark_cmds: Vec<&DrawCommand> =
             data.draw_commands.iter().filter(|c| c.is_mark).collect();
@@ -9142,7 +9271,7 @@ mod bug_hunt_interactive_slots {
             interaction: InteractionConfig::default(),
             chart_description: None,
         };
-        let data = load_scene(&scene);
+        let data = load_scene(&scene).unwrap();
         assert!(data.panel_slot_counts.is_empty());
         assert_eq!(data.panel_count, 1, "panel_count floors at 1");
         assert_eq!(

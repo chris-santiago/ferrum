@@ -122,6 +122,143 @@ pub fn tessellate_polyline(
     stroke_path_dashed(&path, style.dash.as_deref(), &opts, color, buffers);
 }
 
+/// Tessellate a [`SceneNode::Polyline`] that carries `widths`: one width per
+/// vertex, laid out and dashed by the shared taper helper so a dash cut takes
+/// the width interpolated at the cut. Refuses misaligned or non-positive
+/// `widths` before drawing anything.
+pub fn tessellate_tapered_polyline(
+    points: &[(f64, f64)],
+    widths: &[f64],
+    style: &StrokeStyle,
+    buffers: &mut VertexBuffers<MeshVertex, u32>,
+) -> Result<(), TaperError> {
+    let pieces = dash_tapered(points, widths, style.dash.as_deref().unwrap_or(&[]))?;
+    let Some(c) = &style.color else { return Ok(()) };
+    let color = color_to_f32(c, style.opacity * style.stroke_opacity);
+    let mut opts = StrokeOptions::default();
+    apply_cap_join(&mut opts, style.stroke_cap, style.stroke_join);
+    stroke_tapered(&pieces, &opts, color, buffers);
+    Ok(())
+}
+
+/// Tessellate a [`SceneNode::Path`] that carries `widths`: one width per
+/// command endpoint, flattened and dashed by the shared taper helper. A
+/// tapered path is an open stroke, so its fill is not drawn. Refuses a closed
+/// path and misaligned or non-positive `widths` before drawing anything.
+pub fn tessellate_tapered_path(
+    commands: &[PathCmd],
+    widths: &[f64],
+    style: &FillStroke,
+    closed: bool,
+    batch_cap: Option<StrokeCap>,
+    batch_join: Option<StrokeJoin>,
+    buffers: &mut VertexBuffers<MeshVertex, u32>,
+) -> Result<(), TaperError> {
+    let pieces = dash_tapered_path(commands, closed, widths, style.stroke_dash.as_deref().unwrap_or(&[]))?;
+    let Some(stroke) = &style.stroke else { return Ok(()) };
+    let color = color_to_f32(stroke, style.opacity * style.stroke_opacity);
+    let mut opts = StrokeOptions::default();
+    apply_cap_join(&mut opts, batch_cap, batch_join);
+    stroke_tapered(&pieces, &opts, color, buffers);
+    Ok(())
+}
+
+/// Stroke tapered on-pieces, each one subpath whose vertices carry their
+/// width as a path attribute.
+///
+/// Lyon strokes at the widest width (so its fold, join and round-subdivision
+/// decisions hold for every vertex) with its fixed-width normals, which are
+/// perpendicular to the centerline. Each vertex then takes half its own
+/// interpolated width as `half_width`, so the shader offsets it by that width
+/// along the screen-space perpendicular: the edge between two vertices is the
+/// straight line joining their offsets, and the thickness at every vertex is
+/// its width in screen pixels under any affine, uniform or not. Lyon's
+/// variable-width mode is not used because it tilts the normal off the
+/// perpendicular by the taper's slope, which the shader's inverse-transpose
+/// turns into a thickness error under `sx != sy`. Every turn is bracketed by
+/// [`bracket_turns`] so its one miter-length normal stays inside the join.
+fn stroke_tapered(
+    pieces: &[TaperPiece],
+    opts: &StrokeOptions,
+    color: [f32; 4],
+    buffers: &mut VertexBuffers<MeshVertex, u32>,
+) {
+    let widest = pieces.iter().flat_map(|p| &p.widths).fold(0.0_f64, |a, &w| a.max(w));
+    let mut builder = LyonPath::builder_with_attributes(1);
+    for piece in pieces.iter().map(bracket_turns) {
+        let mut vertices = piece.points.iter().zip(&piece.widths);
+        let Some((&(x, y), &w)) = vertices.next() else { continue };
+        builder.begin(point(x as f32, y as f32), &[w as f32]);
+        for (&(x, y), &w) in vertices {
+            builder.line_to(point(x as f32, y as f32), &[w as f32]);
+        }
+        builder.end(false);
+    }
+    let path = builder.build();
+    let opts = opts.with_line_width(widest as f32);
+    stroke_to_mesh(&path, &opts, color, buffers, |v| {
+        v.interpolated_attributes().first().copied().unwrap_or_default() / 2.0
+    });
+}
+
+/// Turns flatter than this (cosine of the angle between two segments) are
+/// left unbracketed: their miter normal is within 0.01% of unit length.
+const COS_STRAIGHT: f64 = 0.9998;
+
+/// `piece` with a vertex added on each segment either side of every turn,
+/// where that segment's inner offset line meets the other's.
+///
+/// Lyon joins a turn's inner side at one vertex whose normal is the miter
+/// vector, longer than unit. The shader maps a normal to screen space by the
+/// affine's inverse-transpose, which is exact for a unit perpendicular but
+/// not for a miter under `sx != sy`: unbracketed, the misplaced inner vertex
+/// tilts both adjacent edges along their whole length and thickens the
+/// stroke. A bracketing vertex is collinear with its segment, so the outline
+/// is unchanged, and it carries a unit perpendicular normal, so every edge
+/// away from the join is exact under any affine and the miter only shapes
+/// the join itself. A bracket sits `w/2 * tan(turn/2)` from the turn (the
+/// inner lines' meeting point, `w` the widest of the three vertices) or
+/// halfway along a shorter segment; its width is the taper's at that point.
+fn bracket_turns(piece: &TaperPiece) -> TaperPiece {
+    let (points, widths) = (&piece.points, &piece.widths);
+    let (Some(&first), Some(&first_width)) = (points.first(), widths.first()) else {
+        return piece.clone();
+    };
+    if points.len() != widths.len() {
+        return piece.clone();
+    }
+    let mut out = TaperPiece { points: vec![first], widths: vec![first_width] };
+    for i in 1..points.len() {
+        let p = points[i];
+        let Some(&next) = points.get(i + 1) else {
+            out.points.push(p);
+            out.widths.push(widths[i]);
+            break;
+        };
+        let prev = points[i - 1];
+        let (l1, l2) = ((p.0 - prev.0).hypot(p.1 - prev.1), (next.0 - p.0).hypot(next.1 - p.1));
+        let (t1, t2) = (((p.0 - prev.0) / l1, (p.1 - prev.1) / l1), ((next.0 - p.0) / l2, (next.1 - p.1) / l2));
+        let cos = (t1.0 * t2.0 + t1.1 * t2.1).clamp(-1.0, 1.0);
+        if !(l1 > 0.0 && l2 > 0.0 && cos < COS_STRAIGHT) {
+            out.points.push(p);
+            out.widths.push(widths[i]);
+            continue;
+        }
+        let half = widths[i - 1].max(widths[i]).max(widths[i + 1]) / 2.0;
+        let reach = half * ((1.0 - cos) / (1.0 + cos)).sqrt();
+        let (d1, d2) = (reach.min(l1 / 2.0), reach.min(l2 / 2.0));
+        let before = (p.0 - t1.0 * d1, p.1 - t1.1 * d1);
+        let after = (p.0 + t2.0 * d2, p.1 + t2.1 * d2);
+        out.points.extend([before, p, after]);
+        out.widths.extend([
+            width_at(widths, i - 1, 1.0 - d1 / l1).unwrap_or(widths[i]),
+            widths[i],
+            width_at(widths, i, d2 / l2).unwrap_or(widths[i]),
+        ]);
+    }
+    out
+}
+
 pub fn tessellate_polygon(
     rings: &[Vec<[f64; 2]>],
     style: &FillStroke,
@@ -294,18 +431,31 @@ fn stroke_path_dashed(
         }
         _ => path,
     };
+    stroke_to_mesh(to_tessellate, opts, color, buffers, |v| v.line_width() / 2.0);
+}
 
+/// The one stroke sink: tessellate `path` into `buffers`, each vertex taking
+/// its position and unit-scale normal from lyon and its `half_width` from
+/// `half_width`, the only thing that differs between a constant-width stroke
+/// (lyon's line width) and a tapered one (the vertex's width attribute).
+fn stroke_to_mesh(
+    path: &LyonPath,
+    opts: &StrokeOptions,
+    color: [f32; 4],
+    buffers: &mut VertexBuffers<MeshVertex, u32>,
+    half_width: impl Fn(&mut StrokeVertex) -> f32,
+) {
     let mut tess = StrokeTessellator::new();
     let _ = tess.tessellate_path(
-        to_tessellate,
+        path,
         opts,
-        &mut BuffersBuilder::new(buffers, move |v: StrokeVertex| MeshVertex {
+        &mut BuffersBuilder::new(buffers, move |mut v: StrokeVertex| MeshVertex {
+            half_width: half_width(&mut v),
             position: v.position_on_path().to_array(),
             normal: {
                 let n = v.normal();
                 [n.x, n.y]
             },
-            half_width: v.line_width() / 2.0,
             color,
         }),
     );
@@ -1033,6 +1183,254 @@ mod tests {
             "a linear trace of the same points must hug the chord; got {max_deviation}"
         );
     }
+
+    // ── Tapered strokes (`widths`) ───────────────────────────────────────
+
+    /// The on-screen offset the mesh shader gives `v` under the affine
+    /// `diag(sx, sy)`: the inverse-transpose direction of the normal, at
+    /// `half_width * |normal|` (mirrors `mesh.wgsl`'s `vs_main`).
+    fn shader_offset(v: &MeshVertex, sx: f32, sy: f32) -> (f32, f32) {
+        let (nx, ny) = (v.normal[0], v.normal[1]);
+        let (dx, dy) = (sy * nx, sx * ny);
+        let len = dx.hypot(dy);
+        let mag = v.half_width * nx.hypot(ny);
+        (dx / len * mag, dy / len * mag)
+    }
+
+    fn tapered(points: &[(f64, f64)], widths: &[f64], dash: Option<Vec<f64>>) -> Vec<MeshVertex> {
+        let style = StrokeStyle { dash, ..make_stroke_style(1.0, 1.0) };
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_tapered_polyline(points, widths, &style, &mut buffers).expect("well-formed widths");
+        assert!(!buffers.indices.is_empty(), "a tapered stroke must tessellate geometry");
+        buffers.vertices
+    }
+
+    /// Every vertex of a tapered stroke carries half the taper's width at the
+    /// centerline point it sits on (a turn's bracketing vertices included), so
+    /// `half_width` varies along the stroke and equals `widths[i] / 2` at each
+    /// centerline vertex.
+    #[test]
+    fn tapered_stroke_half_width_is_each_vertex_width_over_two() {
+        let points = [(0.0, 0.0), (50.0, 20.0), (100.0, 0.0)];
+        let widths = [2.0, 6.0, 10.0];
+        let vertices = tapered(&points, &widths, None);
+        let mut seen = [false; 3];
+        for v in &vertices {
+            let (x, y) = (v.position[0] as f64, v.position[1] as f64);
+            if let Some(i) = points.iter().position(|p| (p.0 - x).hypot(p.1 - y) < 1e-3) {
+                seen[i] = true;
+            }
+            let (segment, t) = points
+                .windows(2)
+                .enumerate()
+                .find_map(|(i, pair)| {
+                    let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+                    let len = (x1 - x0).hypot(y1 - y0);
+                    let t = ((x - x0) * (x1 - x0) + (y - y0) * (y1 - y0)) / (len * len);
+                    let off = ((x - x0) * (y1 - y0) - (y - y0) * (x1 - x0)).abs() / len;
+                    ((-1e-6..=1.0 + 1e-6).contains(&t) && off < 1e-3).then_some((i, t))
+                })
+                .unwrap_or_else(|| panic!("vertex off the centerline: {:?}", v.position));
+            let want = width_at(&widths, segment, t).expect("segment in range") / 2.0;
+            assert!(
+                (v.half_width as f64 - want).abs() < 1e-4,
+                "vertex at {:?}: half_width {} != {want}",
+                v.position,
+                v.half_width
+            );
+        }
+        assert_eq!(seen, [true; 3], "every centerline vertex must emit stroke vertices");
+    }
+
+    /// The screen-space contract: under the identity, a uniform zoom and a
+    /// non-uniform rescale alike, every vertex of a straight tapered stroke
+    /// is offset perpendicular to the on-screen centerline by exactly half
+    /// its width, so the on-screen thickness at each vertex is its width.
+    #[test]
+    fn tapered_stroke_thickness_is_its_width_on_screen_under_any_affine() {
+        let points = [(0.0, 0.0), (40.0, 30.0), (100.0, 75.0)];
+        let widths = [2.0, 8.0, 14.0];
+        let vertices = tapered(&points, &widths, None);
+        for (sx, sy) in [(1.0_f32, 1.0_f32), (2.5, 2.5), (3.0, 1.0), (1.0, 4.0)] {
+            let (tx, ty) = (100.0 * sx, 75.0 * sy);
+            let len = tx.hypot(ty);
+            let (tx, ty) = (tx / len, ty / len);
+            for v in &vertices {
+                let (ox, oy) = shader_offset(v, sx, sy);
+                let along = ox * tx + oy * ty;
+                let across = (ox * -ty + oy * tx).abs();
+                assert!(
+                    along.abs() < 1e-3,
+                    "sx={sx} sy={sy}: offset at {:?} leans {along} px along the centerline",
+                    v.position
+                );
+                assert!(
+                    (across - v.half_width).abs() < 1e-3,
+                    "sx={sx} sy={sy}: offset at {:?} is {across} px across, want {}",
+                    v.position,
+                    v.half_width
+                );
+            }
+        }
+    }
+
+    /// How far the tessellated stroke covers the screen along `dir` (a unit
+    /// screen vector) either side of the scene point `at`, under the affine
+    /// `diag(sx, sy)`: every triangle is placed where the shader puts its
+    /// vertices and the line is marched in 0.01 px steps.
+    fn screen_extent(
+        buffers: &VertexBuffers<MeshVertex, u32>,
+        (sx, sy): (f32, f32),
+        at: (f32, f32),
+        dir: (f32, f32),
+    ) -> f32 {
+        let screen: Vec<(f32, f32)> = buffers
+            .vertices
+            .iter()
+            .map(|v| {
+                let (ox, oy) = shader_offset(v, sx, sy);
+                (v.position[0] * sx + ox, v.position[1] * sy + oy)
+            })
+            .collect();
+        let inside = |q: (f32, f32)| {
+            buffers.indices.chunks_exact(3).any(|t| {
+                let [a, b, c] = [screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]];
+                let side = |p: (f32, f32), r: (f32, f32)| (r.0 - p.0) * (q.1 - p.1) - (r.1 - p.1) * (q.0 - p.0);
+                let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+                !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+            })
+        };
+        let centre = (at.0 * sx, at.1 * sy);
+        let reach = |sign: f32| {
+            let mut t = 0.0_f32;
+            while inside((centre.0 + sign * t * dir.0, centre.1 + sign * t * dir.1)) {
+                t += 0.01;
+            }
+            t
+        };
+        reach(1.0) + reach(-1.0)
+    }
+
+    /// The screen-space contract across turns: mid-segment on a zigzag, the
+    /// stroke's on-screen thickness perpendicular to the on-screen centerline
+    /// is the width there at rest and under a non-uniform rescale either way.
+    #[test]
+    fn tapered_zigzag_keeps_its_width_on_screen_under_non_uniform_rescale() {
+        let points = [(0.0, 0.0), (40.0, 30.0), (80.0, 0.0), (120.0, 30.0)];
+        let widths = [4.0, 8.0, 12.0, 16.0];
+        let style = make_stroke_style(1.0, 1.0);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_tapered_polyline(&points, &widths, &style, &mut buffers).expect("well-formed widths");
+        for (sx, sy) in [(1.0_f32, 1.0_f32), (3.0, 1.0), (1.0, 3.0)] {
+            for (seg, pair) in points.windows(2).enumerate() {
+                let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+                let mid = (((x0 + x1) / 2.0) as f32, ((y0 + y1) / 2.0) as f32);
+                let (tx, ty) = ((x1 - x0) as f32 * sx, (y1 - y0) as f32 * sy);
+                let len = tx.hypot(ty);
+                let normal = (-ty / len, tx / len);
+                let want = ((widths[seg] + widths[seg + 1]) / 2.0) as f32;
+                let got = screen_extent(&buffers, (sx, sy), mid, normal);
+                assert!(
+                    (got - want).abs() < 0.05,
+                    "sx={sx} sy={sy} segment {seg}: {got} px thick on screen, want {want}"
+                );
+            }
+        }
+    }
+
+    /// A dashed tapered stroke draws only its on-dashes, and each dash's cut
+    /// ends carry the width interpolated at the cut.
+    #[test]
+    fn dashed_tapered_stroke_keeps_interpolated_widths_at_cuts() {
+        let vertices = tapered(&[(0.0, 0.0), (100.0, 0.0)], &[2.0, 12.0], Some(vec![10.0, 10.0]));
+        let mut xs: Vec<f32> = Vec::new();
+        for v in &vertices {
+            let x = v.position[0];
+            assert!(
+                (v.half_width - (2.0 + 0.1 * x) / 2.0).abs() < 1e-3,
+                "x={x}: half_width {} is not the interpolated width",
+                v.half_width
+            );
+            assert!(
+                (x % 20.0) <= 10.0 + 1e-3 || (x % 20.0) >= 20.0 - 1e-3,
+                "x={x} lies inside an off-dash"
+            );
+            if !xs.iter().any(|seen| (seen - x).abs() < 1e-3) {
+                xs.push(x);
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        let want = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0];
+        assert_eq!(xs.len(), want.len(), "dash ends {xs:?}");
+        for (x, w) in xs.iter().zip(want) {
+            assert!((x - w).abs() < 1e-3, "dash ends {xs:?}");
+        }
+    }
+
+    /// A tapered curve tessellates from the shared flattener: its endpoints
+    /// take their command widths and every vertex between lies within them.
+    #[test]
+    fn tapered_curve_takes_its_endpoint_widths() {
+        let commands = [
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::CubicTo { c1x: 30.0, c1y: 60.0, c2x: 70.0, c2y: -60.0, x: 100.0, y: 0.0 },
+        ];
+        let style = FillStroke {
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            ..make_fill_stroke_style(1.0, 1.0, 1.0)
+        };
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_tapered_path(&commands, &[2.0, 10.0], &style, false, None, None, &mut buffers)
+            .expect("well-formed widths");
+        let at = |x: f32| {
+            buffers
+                .vertices
+                .iter()
+                .filter(|v| (v.position[0] - x).abs() < 1e-3 && v.position[1].abs() < 1e-3)
+                .map(|v| v.half_width)
+                .collect::<Vec<_>>()
+        };
+        assert!(!at(0.0).is_empty() && at(0.0).iter().all(|h| (h - 1.0).abs() < 1e-4), "{:?}", at(0.0));
+        assert!(!at(100.0).is_empty() && at(100.0).iter().all(|h| (h - 5.0).abs() < 1e-4), "{:?}", at(100.0));
+        let distinct = buffers.vertices.iter().filter(|v| v.half_width > 1.01 && v.half_width < 4.99).count();
+        assert!(distinct > 0, "the width must vary between the curve's endpoints");
+        assert!(buffers.vertices.iter().all(|v| v.half_width >= 1.0 - 1e-4 && v.half_width <= 5.0 + 1e-4));
+    }
+
+    /// A malformed tapered stroke is refused through the shared validation
+    /// and draws nothing.
+    #[test]
+    fn malformed_tapered_stroke_is_refused_and_draws_nothing() {
+        let style = make_stroke_style(1.0, 1.0);
+        let points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        for (widths, want) in [
+            (vec![1.0, 2.0], TaperError::Misaligned { points: 3, widths: 2 }),
+            (vec![1.0, 0.0, 2.0], TaperError::InvalidWidth { index: 1, value: 0.0 }),
+        ] {
+            let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+            assert_eq!(tessellate_tapered_polyline(&points, &widths, &style, &mut buffers), Err(want));
+            assert!(buffers.vertices.is_empty(), "a refused stroke must draw nothing");
+        }
+
+        let fill_stroke = FillStroke {
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            ..make_fill_stroke_style(1.0, 1.0, 1.0)
+        };
+        let open = [PathCmd::MoveTo { x: 0.0, y: 0.0 }, PathCmd::LineTo { x: 10.0, y: 0.0 }];
+        let with_close = [open[0].clone(), open[1].clone(), PathCmd::Close];
+        for (commands, closed, widths) in [
+            (&open[..], true, vec![1.0, 2.0]),
+            (&with_close[..], false, vec![1.0, 2.0, 2.0]),
+        ] {
+            let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+            assert_eq!(
+                tessellate_tapered_path(commands, &widths, &fill_stroke, closed, None, None, &mut buffers),
+                Err(TaperError::Closed)
+            );
+            assert!(buffers.vertices.is_empty(), "a refused path must draw nothing");
+        }
+    }
+
 }
 
 fn apply_cap_join(opts: &mut StrokeOptions, cap: Option<StrokeCap>, join: Option<StrokeJoin>) {

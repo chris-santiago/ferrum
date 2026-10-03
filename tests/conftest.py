@@ -35,6 +35,25 @@ def curved_xy_df() -> pl.DataFrame:
     return pl.DataFrame({"x": xs, "y": ys})
 
 
+@pytest.fixture(scope="module")
+def browser():
+    """One headless system-Chrome per module for the ``wasm_pixels`` captures.
+
+    Skips when Playwright cannot launch the system Chrome channel; checked
+    here, lazily, so collecting the suite never launches a browser.
+    """
+    from tests import _pixel_capture as pc
+
+    if not pc.chrome_available():
+        pytest.skip("system Chrome is not available")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        b = p.chromium.launch(channel="chrome", headless=True, args=pc.LAUNCH_ARGS)
+        yield b
+        b.close()
+
+
 # umap removed from Python deps in Phase 11d — handled at Rust level (manifolds-rs).
 _REQUIRED_FOR_PHASE_10 = ("sklearn", "shap", "scipy", "skops")
 

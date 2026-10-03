@@ -152,7 +152,8 @@ impl WasmRenderer {
         let scene: ferrum_scene::SceneGraph = serde_json::from_str(scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
 
-        let data = scene_load::load_scene_with_packed(&scene, packed_data);
+        let data = scene_load::load_scene_with_packed(&scene, packed_data)
+            .map_err(|e| JsValue::from(WasmRenderError::from(e)))?;
         let text_json = text_json::build_overlay_json(&data);
         let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &data);
         let clear_color = data.background;

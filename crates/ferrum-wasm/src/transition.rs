@@ -197,7 +197,7 @@ impl SceneSnapshot {
     pub(crate) fn from_scene_json(scene_json: &str) -> Result<Self, WasmRenderError> {
         let scene: ferrum_scene::SceneGraph = serde_json::from_str(scene_json)
             .map_err(|e| WasmRenderError::SceneDeserialization(e.to_string()))?;
-        let data = crate::scene_load::load_scene(&scene);
+        let data = crate::scene_load::load_scene(&scene)?;
         Ok(Self::from_scene_data(data, scene.panels))
     }
 
@@ -1623,11 +1623,11 @@ mod keyed_pairing_tests {
         let old_scene = scene_of(banded_rect_panel(2, &[0.0, 10.0], &["a", "b"]));
         let new_scene = scene_of(banded_rect_panel(2, &[100.0, 300.0], &["b", "a"]));
         let old = SceneSnapshot::from_scene_data(
-            crate::scene_load::load_scene(&old_scene),
+            crate::scene_load::load_scene(&old_scene).unwrap(),
             old_scene.panels.clone(),
         );
         let new = SceneSnapshot::from_scene_data(
-            crate::scene_load::load_scene(&new_scene),
+            crate::scene_load::load_scene(&new_scene).unwrap(),
             new_scene.panels.clone(),
         );
 
@@ -1727,7 +1727,7 @@ mod keyed_pairing_tests {
         let data = crate::scene_load::load_scene_with_packed(
             &scene,
             &packed_bytes_with_keys(instances, keys),
-        );
+        ).unwrap();
         SceneSnapshot::from_scene_data(data, scene.panels)
     }
 
@@ -1786,7 +1786,7 @@ mod keyed_pairing_tests {
         // `MarkBatch::keys`, and the two pair.
         let old = packed_snapshot(&circles(&[0.0, 10.0]), &["a", "b"]);
         let new_scene = scene_of(panel(2, Some(&["b", "a"])));
-        let new_data = crate::scene_load::load_scene(&new_scene);
+        let new_data = crate::scene_load::load_scene(&new_scene).unwrap();
         let new = SceneSnapshot::from_scene_data(new_data, new_scene.panels);
 
         let plan = plan_transition(old.side(), new.side());

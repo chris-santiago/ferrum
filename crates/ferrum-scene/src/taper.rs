@@ -237,6 +237,26 @@ pub fn flatten_tapered_path(commands: &[PathCmd], widths: &[f64]) -> Result<Vec<
     Ok(subpaths)
 }
 
+/// The on-pieces of a tapered path's stroke: its centerlines flattened by
+/// [`flatten_tapered_path`], each dashed by [`dash_tapered`] (an empty `dash`
+/// draws each centerline whole). Refuses a closed path (`closed == true` or a
+/// `Close` command) and misaligned or non-positive `widths`.
+pub fn dash_tapered_path(
+    commands: &[PathCmd],
+    closed: bool,
+    widths: &[f64],
+    dash: &[f64],
+) -> Result<Vec<TaperPiece>, TaperError> {
+    if closed {
+        return Err(TaperError::Closed);
+    }
+    let mut pieces = Vec::new();
+    for centerline in flatten_tapered_path(commands, widths)? {
+        pieces.extend(dash_tapered(&centerline.points, &centerline.widths, dash)?);
+    }
+    Ok(pieces)
+}
+
 /// The endpoint a command reaches from `current`.
 fn command_end(cmd: &PathCmd, current: (f64, f64)) -> (f64, f64) {
     match *cmd {
@@ -488,5 +508,23 @@ mod tests {
         for piece in &a {
             assert_eq!(piece.points.len(), piece.widths.len());
         }
+    }
+
+    #[test]
+    fn a_tapered_path_dashes_each_flattened_subpath_and_refuses_closed() {
+        let commands = [
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 10.0, y: 0.0 },
+            PathCmd::MoveTo { x: 0.0, y: 5.0 },
+            PathCmd::LineTo { x: 10.0, y: 5.0 },
+        ];
+        let widths = [2.0, 4.0, 6.0, 8.0];
+        let pieces = dash_tapered_path(&commands, false, &widths, &[4.0, 2.0]).expect("open path");
+        assert_eq!(pieces.len(), 4, "{pieces:?}");
+        assert_piece(&pieces[0], &[(0.0, 0.0), (4.0, 0.0)], &[2.0, 2.8]);
+        assert_piece(&pieces[1], &[(6.0, 0.0), (10.0, 0.0)], &[3.2, 4.0]);
+        assert_piece(&pieces[2], &[(0.0, 5.0), (4.0, 5.0)], &[6.0, 6.8]);
+        assert_piece(&pieces[3], &[(6.0, 5.0), (10.0, 5.0)], &[7.2, 8.0]);
+        assert_eq!(dash_tapered_path(&commands, true, &widths, &[]), Err(TaperError::Closed));
     }
 }

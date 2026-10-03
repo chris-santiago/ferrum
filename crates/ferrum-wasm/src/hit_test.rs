@@ -419,8 +419,13 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
                     return Some(i);
                 }
             }
-            SceneNode::Polyline { points, style, widths: _ } => {
-                let tol = style.width.max(MIN_TOLERANCE);
+            SceneNode::Polyline { points, style, widths } => {
+                // A tapered stroke is as wide as its widest vertex.
+                let width = match widths {
+                    Some(w) => w.iter().copied().fold(0.0, f64::max),
+                    None => style.width,
+                };
+                let tol = width.max(MIN_TOLERANCE);
                 for pair in points.windows(2) {
                     if dist_to_segment(x, y, pair[0].0, pair[0].1, pair[1].0, pair[1].1) <= tol {
                         return Some(i);
@@ -1602,6 +1607,24 @@ mod bug_hunt_tests {
             opacity: 1.0,
             font_family: "sans-serif".into(),
         }
+    }
+
+    /// A tapered polyline's hover tolerance comes from its widest vertex,
+    /// as a constant stroke's comes from its width.
+    #[test]
+    fn tapered_polyline_hit_tolerance_is_its_max_width() {
+        let polyline = |widths: Option<Vec<f64>>| {
+            vec![SceneNode::Polyline {
+                points: vec![(0.0, 0.0), (100.0, 0.0)],
+                style: stroke_style(),
+                widths,
+            }]
+        };
+        let tapered = polyline(Some(vec![2.0, 20.0]));
+        assert_eq!(hit_test_lines(&tapered, 10.0, 15.0), Some(0), "15 px off a 20 px-wide taper is a hit");
+        assert_eq!(hit_test_lines(&tapered, 10.0, 25.0), None, "25 px off is a miss");
+        // Control: the same geometry without widths keeps its constant tolerance.
+        assert_eq!(hit_test_lines(&polyline(None), 10.0, 15.0), None);
     }
 
     // Tick — emits Line nodes; hit_test_batch must route to hit_test_lines.

@@ -956,18 +956,6 @@ def _row_param(row: Row) -> Any:
 # ── The oracle test ──────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
-def browser():
-    if not pc.chrome_available():
-        pytest.skip("system Chrome is not available")
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        b = p.chromium.launch(channel="chrome", headless=True, args=pc.LAUNCH_ARGS)
-        yield b
-        b.close()
-
-
 @pytest.mark.parametrize("row", [_row_param(r) for r in ROWS])
 def test_conditional_channel_pixels(row: Row, browser: Any, tmp_path: Path) -> None:
     fx = _build_fixture(row, tmp_path)

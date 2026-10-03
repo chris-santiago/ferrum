@@ -196,6 +196,41 @@ def brush_drag(page: Any, start: tuple[float, float], end: tuple[float, float]) 
     _settle(page)
 
 
+_ZOOM_TRANSFORM_JS = """() => {
+  for (const e of document.querySelectorAll('div')) {
+    if (e.__zoom) return [e.__zoom.k, e.__zoom.x, e.__zoom.y];
+  }
+  return null;
+}"""
+
+
+def zoom_transform(page: Any) -> tuple[float, float, float]:
+    """Return the chart's current d3-zoom transform ``(k, x, y)``.
+
+    The runtime forwards exactly this transform to the focus panel's affine
+    (``renderer.setTransform(focusPanel, k, x, y)``): a canvas point ``p``
+    draws at ``p * k + (x, y)`` CSS pixels. d3-zoom keeps the transform on
+    the element it is attached to (the chart wrapper ``div``) as ``__zoom``.
+    """
+    t = page.evaluate(_ZOOM_TRANSFORM_JS)
+    if t is None:
+        raise RuntimeError("zoom_transform: no element carries a d3-zoom transform")
+    k, x, y = t
+    return float(k), float(x), float(y)
+
+
+def wheel_zoom(page: Any, client_point: tuple[float, float], delta_y: float) -> None:
+    """Zoom the focus panel by a real DOM wheel event at a client-space point.
+
+    A negative *delta_y* zooms in, anchored at *client_point*. Read the
+    resulting transform with :func:`zoom_transform`.
+    """
+    page.mouse.move(*client_point)
+    page.mouse.wheel(0, delta_y)
+    page.mouse.move(*_OFF_CHART)
+    _settle(page)
+
+
 def screenshot(page: Any) -> bytes:
     """Capture the page as PNG bytes.
 
