@@ -31,7 +31,7 @@ mod scale;
 
 use std::collections::HashSet;
 
-use ferrum_scene::{FillStroke, PathCmd, SceneNode};
+use ferrum_scene::{FillStroke, PathCmd, SceneNode, VertexRow};
 
 use crate::render::marks;
 use crate::spec::axis::AlignAxis;
@@ -93,6 +93,14 @@ pub struct ClippedNodes {
     /// The rebuilt node list, in paint order.
     pub nodes: Vec<SceneNode>,
     sources: Vec<usize>,
+    /// Per emitted node, where on its source each vertex lies when a split
+    /// cut the source's vertices into it; `None` when the node kept its
+    /// source's vertices one for one.
+    vertex_sources: Vec<Option<Vec<SourcePoint>>>,
+    /// Per source node, its width-vertex count
+    /// ([`ferrum_scene::width_vertices`]): what its `vertex_rows` entry must
+    /// align with before a split may read rows off it.
+    source_vertices: Vec<usize>,
     source_len: usize,
 }
 
@@ -147,6 +155,39 @@ impl ClippedNodes {
         } else {
             Err(sidecar)
         }
+    }
+
+    /// Realign a batch's `vertex_rows` (one row list per node, one row per
+    /// width vertex): a node that kept its source's vertices keeps its rows,
+    /// and a split piece reads each vertex's row off where on the source it
+    /// lies ([`SourcePoint::row_in`]). Unlike the per-node sidecars this
+    /// applies whether or not the batch was reindexed, since a cut can change
+    /// a node's vertices without changing the node count.
+    ///
+    /// `Err` hands the sidecar back untouched when it does not carry one list
+    /// per source node, or a source's list does not carry one row per vertex:
+    /// reading rows off a misaligned list could hand a piece rows it was not
+    /// written for that pass as aligned. The caller reports it
+    /// ([`SidecarRealign::realign_vertex_rows`]) and the drawing consumer
+    /// refuses the misaligned rows.
+    fn realign_vertex_rows(&self, sidecar: Vec<Vec<VertexRow>>) -> Result<Vec<Vec<VertexRow>>, Vec<Vec<VertexRow>>> {
+        let sidecar = self.checked_sidecar(sidecar)?;
+        if sidecar.iter().zip(&self.source_vertices).any(|(rows, &vertices)| rows.len() != vertices) {
+            return Err(sidecar);
+        }
+        let realigned: Option<Vec<Vec<VertexRow>>> = self
+            .sources
+            .iter()
+            .zip(&self.vertex_sources)
+            .map(|(&src, points)| {
+                let rows = sidecar.get(src)?;
+                match points {
+                    None => Some(rows.clone()),
+                    Some(points) => points.iter().map(|p| p.row_in(rows)).collect(),
+                }
+            })
+            .collect();
+        realigned.ok_or(sidecar)
     }
 
     /// Start realigning a batch's per-node sidecars, accumulating whether any
@@ -287,6 +328,23 @@ impl SidecarRealign<'_> {
         self.clipped.realign_keys(sidecar)
     }
 
+    /// Realign the batch's `vertex_rows` via
+    /// [`ClippedNodes::realign_vertex_rows`], recording a list-count
+    /// mismatch exactly like [`SidecarRealign::realign`], and a source whose
+    /// rows do not align with its own vertices the same way.
+    pub fn realign_vertex_rows(&mut self, sidecar: Option<Vec<Vec<VertexRow>>>) -> Option<Vec<Vec<VertexRow>>> {
+        if self.note_if_misaligned(&sidecar) {
+            return sidecar;
+        }
+        match self.clipped.realign_vertex_rows(sidecar?) {
+            Ok(rows) => Some(rows),
+            Err(rows) => {
+                self.misaligned = true;
+                Some(rows)
+            }
+        }
+    }
+
     /// The misalignment check [`SidecarRealign::realign`] and
     /// [`SidecarRealign::realign_keys`] both perform before touching
     /// [`ClippedNodes`] — one implementation of "does this sidecar's length
@@ -321,22 +379,44 @@ impl SidecarRealign<'_> {
 /// segment walk's shaft pairing) rather than `&self` alone.
 fn rebuild_nodes(
     nodes: Vec<SceneNode>,
-    mut place: impl FnMut(SceneNode, &mut Vec<SceneNode>),
+    mut place: impl FnMut(SceneNode, &mut NodeSink),
 ) -> ClippedNodes {
     let source_len = nodes.len();
-    let mut out = Vec::with_capacity(source_len);
+    let mut out = NodeSink { nodes: Vec::with_capacity(source_len), vertex_sources: Vec::with_capacity(source_len) };
     let mut sources = Vec::with_capacity(source_len);
+    let source_vertices = nodes.iter().map(ferrum_scene::width_vertices).collect();
     for (idx, node) in nodes.into_iter().enumerate() {
-        let before = out.len();
+        let before = out.nodes.len();
         place(node, &mut out);
         // Checked BEFORE the resize it guards: `resize` to a shorter length
         // would truncate `sources` and silently corrupt the provenance of every
         // earlier node, so an assert placed after it fires only once the damage
         // is done. `place` is append-only by contract; this is the enforcement.
-        debug_assert!(out.len() >= before, "`place` must not shrink the output");
-        sources.resize(out.len(), idx);
+        debug_assert!(out.nodes.len() >= before, "`place` must not shrink the output");
+        sources.resize(out.nodes.len(), idx);
     }
-    ClippedNodes { nodes: out, sources, source_len }
+    ClippedNodes { nodes: out.nodes, sources, vertex_sources: out.vertex_sources, source_vertices, source_len }
+}
+
+/// The nodes one rewrite emits, each with where on its source its vertices
+/// lie when a split cut them ([`ClippedNodes::realign_vertex_rows`]).
+struct NodeSink {
+    nodes: Vec<SceneNode>,
+    vertex_sources: Vec<Option<Vec<SourcePoint>>>,
+}
+
+impl NodeSink {
+    /// Emit a node that keeps its source's vertices one for one.
+    fn push(&mut self, node: SceneNode) {
+        self.nodes.push(node);
+        self.vertex_sources.push(None);
+    }
+
+    /// Emit one split piece whose vertices lie at `sources` on its source.
+    fn push_piece(&mut self, node: SceneNode, sources: Vec<SourcePoint>) {
+        self.nodes.push(node);
+        self.vertex_sources.push(Some(sources));
+    }
 }
 
 /// What a segment batch's most recent shaft left behind for the arrowhead that
@@ -409,15 +489,29 @@ impl SourcePoint {
             Self::Cut { edge, t } => ferrum_scene::width_at(widths, edge, t),
         }
     }
+
+    /// The source row at this point of a stroke whose vertices carry `rows`:
+    /// a kept vertex's own row, and at a cut the edge's two ends at `t`, so
+    /// the runtime interpolates their widths by the taper helper's one rule.
+    fn row_in(self, rows: &[VertexRow]) -> Option<VertexRow> {
+        match self {
+            Self::Vertex(i) => rows.get(i).cloned(),
+            Self::Cut { edge, t } => Some(VertexRow::Cut {
+                from: Box::new(rows.get(edge)?.clone()),
+                to: Box::new(rows.get(edge + 1)?.clone()),
+                t,
+            }),
+        }
+    }
 }
 
 impl PolylineSplit {
-    /// Each piece paired with its widths: the source width at every kept
-    /// vertex and the interpolated width at every cut. `widths` must align
-    /// with the source vertices ([`tapered_widths_align`]); a malformed list
-    /// never reaches a split, so every piece's widths come from it by the one
-    /// interpolation rule.
-    fn tapered(self, widths: Option<&[f64]>) -> Vec<(PiecePoints, Option<Vec<f64>>)> {
+    /// Each piece paired with its widths and its source points: the source
+    /// width at every kept vertex and the interpolated width at every cut.
+    /// `widths` must align with the source vertices
+    /// ([`tapered_widths_align`]); a malformed list never reaches a split, so
+    /// every piece's widths come from it by the one interpolation rule.
+    fn tapered(self, widths: Option<&[f64]>) -> Vec<(PiecePoints, Option<Vec<f64>>, Vec<SourcePoint>)> {
         // Aligned widths cover every source vertex and edge, so `width_in`
         // finds each one; the verbatim fallback is only the no-panic spelling.
         let piece_widths = |sources: &[SourcePoint]| {
@@ -429,7 +523,10 @@ impl PolylineSplit {
         self.pieces
             .into_iter()
             .zip(self.sources)
-            .map(|(piece, sources)| (piece, piece_widths(&sources)))
+            .map(|(piece, sources)| {
+                let widths = piece_widths(&sources);
+                (piece, widths, sources)
+            })
             .collect()
     }
 }
@@ -762,7 +859,7 @@ impl<'a> BreakRemap<'a> {
         rebuild_nodes(nodes, |node, out| self.clip_node_into(node, out))
     }
 
-    fn clip_node_into(&self, node: SceneNode, out: &mut Vec<SceneNode>) {
+    fn clip_node_into(&self, node: SceneNode, out: &mut NodeSink) {
         match node {
             SceneNode::Rect { x, y, w, h, style, corner_radius } => {
                 let is_y = self.is_y();
@@ -832,7 +929,7 @@ impl<'a> BreakRemap<'a> {
     /// own segment's affine. Mapping per segment rather than per vertex is
     /// what removes the `BREAK_HIDDEN` spikes: no vertex can reverse-map into
     /// a gap, because the clip already cut the polygon at the gap's edges.
-    fn clip_polygon_into(&self, points: &[(f64, f64)], style: &FillStroke, out: &mut Vec<SceneNode>) {
+    fn clip_polygon_into(&self, points: &[(f64, f64)], style: &FillStroke, out: &mut NodeSink) {
         for seg in &self.result.segments {
             let Some(clipped) = self.clip_ring_to_segment(points, seg) else {
                 continue;
@@ -997,7 +1094,7 @@ impl<'a> BreakRemap<'a> {
         })
     }
 
-    fn split_node_into(&self, node: SceneNode, out: &mut Vec<SceneNode>) {
+    fn split_node_into(&self, node: SceneNode, out: &mut NodeSink) {
         match node {
             SceneNode::Line { x1, y1, x2, y2, style } => {
                 let pieces = self.split_polyline(&[(x1, y1), (x2, y2)]).pieces;
@@ -1011,8 +1108,8 @@ impl<'a> BreakRemap<'a> {
                     return;
                 }
                 let split = self.split_polyline(&points);
-                for (piece, widths) in split.tapered(widths.as_deref()) {
-                    out.push(SceneNode::Polyline { points: piece, style: style.clone(), widths });
+                for (piece, widths, sources) in split.tapered(widths.as_deref()) {
+                    out.push_piece(SceneNode::Polyline { points: piece, style: style.clone(), widths }, sources);
                 }
             }
             // An OPEN path of straight-line commands is a polyline in path
@@ -1042,13 +1139,14 @@ impl<'a> BreakRemap<'a> {
                         // command, so a well-formed `widths` aligns with
                         // `points`.
                         if split.cut && tapered_widths_align(points.len(), widths.as_deref()) {
-                            for (piece, widths) in split.tapered(widths.as_deref()) {
-                                out.push(SceneNode::Path {
+                            for (piece, widths, sources) in split.tapered(widths.as_deref()) {
+                                let node = SceneNode::Path {
                                     commands: path_commands(&piece, false),
                                     style: style.clone(),
                                     closed: false,
                                     widths,
-                                });
+                                };
+                                out.push_piece(node, sources);
                             }
                         } else {
                             let mut node = SceneNode::Path { commands, style, closed: false, widths };

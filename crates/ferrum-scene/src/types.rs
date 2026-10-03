@@ -296,6 +296,30 @@ pub struct MarkBatch {
     /// the scissor escape described above.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub clip: bool,
+    /// Per node, the source row of every vertex a stroke width sits on,
+    /// aligned like that node's `widths` (one entry per `Polyline` point, one
+    /// per `Path` command; [`crate::validate_vertex_rows`]). Only `mark_line`
+    /// writes it, and only on a line whose own layer binds a `size`
+    /// conditional: the interactive runtime gives each vertex the
+    /// dot-diameter width of its own row's active branch
+    /// ([`crate::dot_diameter`]). Static output ignores it. `None` everywhere
+    /// else, omitted on the wire, so every other batch is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_rows: Option<Vec<Vec<VertexRow>>>,
+}
+
+/// Where one width vertex of a line lies on its source rows
+/// ([`MarkBatch::vertex_rows`]). On the wire a kept vertex is its row number
+/// and a cut is `{"from": .., "to": .., "t": ..}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum VertexRow {
+    /// A vertex drawn at its own source row.
+    Row(usize),
+    /// A vertex a break cut a fraction `t` along the edge from `from` to
+    /// `to`: its width is [`crate::width_at`] of the two ends' widths at `t`.
+    /// An end is itself a cut when a second break cut a piece's cut edge.
+    Cut { from: Box<VertexRow>, to: Box<VertexRow>, t: f64 },
 }
 
 /// Hand-written, not derived: a derived `Default` gives `clip: false`, which
@@ -322,6 +346,7 @@ impl Default for MarkBatch {
             polar_spans: None,
             glyph_anchors: None,
             clip: true,
+            vertex_rows: None,
         }
     }
 }

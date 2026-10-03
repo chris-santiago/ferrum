@@ -2876,3 +2876,118 @@ fn a_misaligned_width_list_never_lands_on_a_piece_of_matching_length() {
     };
     assert_eq!(taper_errors(node), vec![Err(TaperError::Misaligned { points: 3, widths: 2 })]);
 }
+
+// ── Per-vertex rows across a break ───────────────────────────────────────
+//
+// A line whose layer binds a size conditional carries each width vertex's
+// source row (`MarkBatch::vertex_rows`). A split piece keeps the row of every
+// kept vertex and gives each cut the edge's two ends and its fraction `t`, so
+// the runtime interpolates the two rows' widths there, and the rows stay
+// aligned with the piece's own vertices.
+
+fn rows(of: &[usize]) -> Vec<VertexRow> {
+    of.iter().copied().map(VertexRow::Row).collect()
+}
+
+fn cut(from: VertexRow, to: VertexRow, t: f64) -> VertexRow {
+    VertexRow::Cut { from: Box::new(from), to: Box::new(to), t }
+}
+
+/// `got` equals `want` with every cut fraction within `1e-9`.
+fn assert_rows_eq(got: &[Vec<VertexRow>], want: &[Vec<VertexRow>]) {
+    fn same(a: &VertexRow, b: &VertexRow) -> bool {
+        match (a, b) {
+            (VertexRow::Row(a), VertexRow::Row(b)) => a == b,
+            (VertexRow::Cut { from: fa, to: ta, t: a }, VertexRow::Cut { from: fb, to: tb, t: b }) => {
+                (a - b).abs() < 1e-9 && same(fa, fb) && same(ta, tb)
+            }
+            _ => false,
+        }
+    }
+    let ok = got.len() == want.len()
+        && got.iter().zip(want).all(|(g, w)| g.len() == w.len() && g.iter().zip(w).all(|(g, w)| same(g, w)));
+    assert!(ok, "got {got:?}, want {want:?}");
+}
+
+#[test]
+fn a_cut_line_realigns_its_vertex_rows_onto_each_piece() {
+    let br = guide_break();
+    // Data 0, 125, 500 (in the gap), 900, 1000; untapered, as a conditional
+    // line is.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (2.0, 350.0), (10.0, 200.0), (20.0, 40.0), (25.0, 0.0)],
+        style: stroke(),
+        widths: None,
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.nodes.len(), 2, "cut into two pieces; got {:?}", split.nodes);
+    // Lower piece: vertices 0, 1, then the cut at t = 1/15 of edge 1 (rows
+    // 11 to 12). Upper piece: the cut at t = 7/8 of edge 2 (rows 12 to 13),
+    // then vertices 3, 4.
+    let realigned = split.realign_vertex_rows(vec![rows(&[10, 11, 12, 13, 14])]).expect("aligned rows realign");
+    assert_rows_eq(
+        &realigned,
+        &[
+            vec![VertexRow::Row(10), VertexRow::Row(11), cut(VertexRow::Row(11), VertexRow::Row(12), 1.0 / 15.0)],
+            vec![cut(VertexRow::Row(12), VertexRow::Row(13), 7.0 / 8.0), VertexRow::Row(13), VertexRow::Row(14)],
+        ],
+    );
+    assert_eq!(split.realigner().realign_vertex_rows(None), None, "a batch with no rows gains none");
+}
+
+#[test]
+fn a_one_piece_cut_realigns_its_vertex_rows_without_reindexing_the_batch() {
+    let br = guide_break();
+    // Data 500 (in the gap), 900, 1000: one piece, so the batch is not
+    // reindexed, but its first vertex is now the cut on edge 0 at t = 7/8.
+    let node = SceneNode::Polyline {
+        points: vec![(0.0, 200.0), (10.0, 40.0), (20.0, 0.0)],
+        style: stroke(),
+        widths: None,
+    };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert!(!split.is_reindexed(), "one piece from one source keeps the batch's indexing");
+    let realigned = split.realign_vertex_rows(vec![rows(&[5, 6, 7])]).expect("aligned rows realign");
+    assert_rows_eq(&realigned, &[vec![cut(VertexRow::Row(5), VertexRow::Row(6), 7.0 / 8.0), VertexRow::Row(6), VertexRow::Row(7)]]);
+}
+
+#[test]
+fn an_uncut_line_keeps_its_vertex_rows() {
+    let br = guide_break();
+    // Data 0 and 125: both below the gap.
+    let node = SceneNode::Polyline { points: vec![(0.0, 400.0), (2.0, 350.0)], style: stroke(), widths: None };
+    let split = guide_remap(&br).split_nodes(vec![node]);
+    assert_eq!(split.realign_vertex_rows(vec![rows(&[3, 4])]), Ok(vec![rows(&[3, 4])]));
+}
+
+/// A second break cutting a piece's cut edge nests the first cut as an end.
+#[test]
+fn a_cut_of_a_cut_edge_nests_the_first_cut() {
+    let first = cut(VertexRow::Row(1), VertexRow::Row(2), 0.25);
+    let point = SourcePoint::Cut { edge: 0, t: 0.5 };
+    assert_eq!(point.row_in(&[first.clone(), VertexRow::Row(3)]), Some(cut(first, VertexRow::Row(3), 0.5)));
+}
+
+/// A source whose rows do not carry one row per vertex is never read off:
+/// the sidecar comes back untouched, and the realigner reports it.
+#[test]
+fn misaligned_vertex_rows_are_handed_back_and_reported() {
+    let br = guide_break();
+    let crossing = || SceneNode::Polyline {
+        points: vec![(0.0, 400.0), (2.0, 350.0), (10.0, 200.0), (20.0, 40.0), (25.0, 0.0)],
+        style: stroke(),
+        widths: None,
+    };
+    for bad in [rows(&[10, 11, 12, 13]), rows(&[10, 11, 12, 13, 14, 15])] {
+        let split = guide_remap(&br).split_nodes(vec![crossing()]);
+        assert_eq!(split.realign_vertex_rows(vec![bad.clone()]), Err(vec![bad.clone()]));
+        let mut realign = split.realigner();
+        assert_eq!(realign.realign_vertex_rows(Some(vec![bad.clone()])), Some(vec![bad]));
+        assert!(realign.misaligned(), "a misaligned row list is reported");
+    }
+    // Control: the aligned list realigns and reports nothing.
+    let split = guide_remap(&br).split_nodes(vec![crossing()]);
+    let mut realign = split.realigner();
+    assert!(realign.realign_vertex_rows(Some(vec![rows(&[10, 11, 12, 13, 14])])).is_some());
+    assert!(!realign.misaligned());
+}

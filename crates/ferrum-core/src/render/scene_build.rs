@@ -726,7 +726,7 @@ pub fn build_scene(
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
         pan_enabled: !spec.selections.is_empty(),
-        conditionals: spec.conditionals.clone(),
+        conditionals: spec.conditionals.iter().map(|c| c.encoding.clone()).collect(),
         linked_panels: Vec::new(),
         tick_levels,
         toolbar: true,
@@ -1908,10 +1908,14 @@ fn build_panel_mark_batches(
         // drawing rather than about the chart's primary layer. That read is why
         // `LayerChart(bar, arc).interactive()` refused: the arc layer's own
         // `CoordPolar` never reached the builder that needed it.
+        // `conditionals`: only the ones this layer declared, so a line is
+        // restyled by (and checks the branches of) its own `size` conditional
+        // and never a sibling layer's.
         let layer_spec = ChartSpec {
             mark: layer.mark,
             encoding: layer_spec_encoding,
             coord: layer_coord,
+            conditionals: spec.conditionals.iter().filter(|c| c.declared_by(li)).cloned().collect(),
             ..spec.clone()
         };
         let ctx = DrawCtx {
@@ -2060,6 +2064,7 @@ fn build_panel_mark_batches(
             // batch before this field existed. `mark_function(clip=False)`
             // (T11, Python) is the only producer that sets `false`.
             clip: mark_style.misc.clip.unwrap_or(true),
+            vertex_rows: result.vertex_rows,
         });
     }
 
@@ -3528,26 +3533,30 @@ fn install_rebuilt_nodes(
     rebuilt: break_axis::ClippedNodes,
     warnings: &mut Vec<RenderWarning>,
 ) {
+    // One realigner for the whole batch: it applies the same wrong-length
+    // pass-through `ClippedNodes::realign` always did, and reports it once
+    // instead of leaving a release build to ship misattributed tooltips in
+    // silence.
+    let mut realign = rebuilt.realigner();
     if rebuilt.is_reindexed() {
-        // One realigner for the whole batch: it applies the same wrong-length
-        // pass-through `ClippedNodes::realign` always did, and reports it once
-        // instead of leaving a release build to ship misattributed tooltips in
-        // silence.
-        let mut realign = rebuilt.realigner();
         batch.data_indices = realign.realign(batch.data_indices.take());
         batch.tooltips = realign.realign(batch.tooltips.take());
         batch.hrefs = realign.realign(batch.hrefs.take());
         batch.descriptions = realign.realign(batch.descriptions.take());
         batch.keys = realign.realign_keys(batch.keys.take());
         batch.polar_spans = realign.realign(batch.polar_spans.take());
-        if realign.misaligned() {
-            warnings.push(RenderWarning::BreakClipSidecarMisaligned {
-                // The serde spelling, not a `Debug` string: the two agree only
-                // because every variant is one word today, and a user-visible
-                // message must not depend on that.
-                mark: batch.kind.wire_name().to_string(),
-            });
-        }
+    }
+    // Per-vertex rows follow each node's own vertices, which a cut can change
+    // without reindexing the batch; `None` (every batch but a line under a
+    // size conditional) stays `None`.
+    batch.vertex_rows = realign.realign_vertex_rows(batch.vertex_rows.take());
+    if realign.misaligned() {
+        warnings.push(RenderWarning::BreakClipSidecarMisaligned {
+            // The serde spelling, not a `Debug` string: the two agree only
+            // because every variant is one word today, and a user-visible
+            // message must not depend on that.
+            mark: batch.kind.wire_name().to_string(),
+        });
     }
     batch.nodes = rebuilt.nodes;
 }
@@ -11837,6 +11846,58 @@ mod tests {
             RenderWarning::BreakClipSidecarMisaligned { mark } => assert_eq!(mark, "bar"),
             other => panic!("expected BreakClipSidecarMisaligned, got {other:?}"),
         }
+    }
+
+    /// A line's `vertex_rows` that does not carry one row per vertex is
+    /// reported through the same warning when a break splits the line, and
+    /// handed on untouched for the runtime to refuse; an aligned list
+    /// realigns silently.
+    #[test]
+    fn misaligned_vertex_rows_warn_when_the_break_splits_a_line() {
+        use ferrum_scene::VertexRow;
+        let result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remap = y_remap(&result);
+        // Data ~67, 500 (in the gap), ~933: the split cuts it into two pieces.
+        let line = SceneNode::Polyline {
+            points: vec![(10.0, 300.0), (20.0, 170.0), (30.0, 40.0)],
+            style: ferrum_scene::StrokeStyle {
+                color: None,
+                width: 1.5,
+                opacity: 1.0,
+                dash: None,
+                stroke_cap: None,
+                stroke_join: None,
+                stroke_opacity: 1.0,
+            },
+            widths: None,
+        };
+        let rows = |n: usize| (0..n).map(VertexRow::Row).collect::<Vec<_>>();
+        let run = |vertex_rows: Vec<VertexRow>| {
+            let mut batch = MarkBatch {
+                kind: ferrum_scene::MarkBatchKind::Line,
+                nodes: vec![line.clone()],
+                data_indices: Some(vec![0]),
+                vertex_rows: Some(vec![vertex_rows]),
+                ..MarkBatch::default()
+            };
+            let mut warnings: Vec<RenderWarning> = Vec::new();
+            remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+            (batch, warnings)
+        };
+
+        let (batch, warnings) = run(rows(2));
+        assert_eq!(batch.nodes.len(), 2, "test sanity: the split must cut the line");
+        assert_eq!(batch.vertex_rows, Some(vec![rows(2)]), "handed on untouched");
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::BreakClipSidecarMisaligned { mark } => assert_eq!(mark, "line"),
+            other => panic!("expected BreakClipSidecarMisaligned, got {other:?}"),
+        }
+
+        let (batch, warnings) = run(rows(3));
+        assert!(warnings.is_empty(), "got {warnings:?}");
+        assert_eq!(batch.vertex_rows.map(|r| r.len()), Some(2), "one row list per piece");
     }
 
     /// The matching silence: an ALIGNED sidecar realigns cleanly and pushes

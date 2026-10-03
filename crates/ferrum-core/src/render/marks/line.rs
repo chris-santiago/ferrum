@@ -24,7 +24,12 @@
 //! as wide as a point of the same value is across (see [`dot_diameter`]); a
 //! constant `size=` kwarg is the same mapping at one width. `size` and
 //! `stroke_width` both bound on one line refuse
-//! ([`RenderError::LineWidthConflict`]).
+//! ([`RenderError::LineWidthConflict`]). A `size` conditional the line's own
+//! layer declares (`size=fm.when(sel).then(a).otherwise(b)`) is a size
+//! binding too: it draws the series' constant width here and records each
+//! width vertex's source row on the batch (`vertex_rows`), so the interactive
+//! runtime can redraw every vertex at its own row's active branch. A sibling
+//! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, x_field, y_field, DrawCtx};
@@ -39,12 +44,7 @@ use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBi
 /// See [`StepSpelling`] for why the two spellings coexist.
 const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
-/// The diameter of a point of area `area` (px²), `2·sqrt(area/π)`: the width
-/// a line takes to be as wide as that point is across. One size scale and one
-/// legend therefore stay true when a point and a line share a size field.
-pub(crate) fn dot_diameter(area: f64) -> f64 {
-    2.0 * (area / std::f64::consts::PI).sqrt()
-}
+pub(crate) use ferrum_scene::dot_diameter;
 
 /// The width of one drawn vertex of a line sized by `field`: the dot diameter
 /// of its `(value, area)` on the size scale, or `fallback` (the series'
@@ -64,16 +64,46 @@ fn vertex_width(field: &str, sample: Option<(f64, f64)>, fallback: f64) -> Resul
     Err(RenderError::LineWidthNotPositive { layer: None, source: Box::new(source) })
 }
 
+/// Every `size` conditional this line's layer declared (the per-layer spec
+/// carries only its own layer's conditionals). The interactive runtime folds
+/// all of them, so each one's branches are checked.
+fn size_conditionals(spec: &crate::spec::chart::ChartSpec) -> Vec<&ferrum_scene::ConditionalEncoding> {
+    spec.conditionals
+        .iter()
+        .map(|c| &c.encoding)
+        .filter(|cond| {
+            [&cond.if_selected, &cond.if_not].into_iter().any(|b| matches!(b, ferrum_scene::EncodingValue::Size { .. }))
+        })
+        .collect()
+}
+
+/// Refuse a `size` conditional with a branch whose dot diameter is not a
+/// positive width.
+fn refuse_non_positive_branch(cond: &ferrum_scene::ConditionalEncoding) -> Result<(), RenderError> {
+    for branch in [&cond.if_selected, &cond.if_not] {
+        let ferrum_scene::EncodingValue::Size { value: area } = *branch else { continue };
+        let width = dot_diameter(area);
+        if !(width.is_finite() && width > 0.0) {
+            let selection = cond.selection_name.clone();
+            let source = NonPositiveLineWidth::Conditional { selection, area };
+            return Err(RenderError::LineWidthNotPositive { layer: None, source: Box::new(source) });
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a line whose `size` and `stroke_width` are both bound, each by a
-/// field or by a constant kwarg (a theme width is never a binding).
-fn refuse_width_conflict(ctx: &DrawCtx) -> Result<(), RenderError> {
+/// field or by a constant kwarg, and `size` also by its own conditional (a
+/// theme width is never a binding).
+fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), RenderError> {
     let binding = |field: Option<&crate::spec::encoding::EncodingSpec>, constant: Option<f64>| {
         field
             .map(|e| WidthBinding::Field(e.field.clone()))
             .or(constant.map(WidthBinding::Constant))
     };
     let encoding = &ctx.spec.encoding;
-    let size = binding(encoding.size.as_ref(), ctx.mark_style.line.size);
+    let size = binding(encoding.size.as_ref(), ctx.mark_style.line.size)
+        .or(size_conditional.then_some(WidthBinding::Conditional));
     let stroke_width = binding(encoding.stroke_width.as_ref(), ctx.mark_style.line.stroke_width);
     match (size, stroke_width) {
         (Some(size), Some(stroke_width)) => Err(RenderError::LineWidthConflict {
@@ -91,7 +121,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     };
     use ferrum_scene::MarkBatchKind;
 
-    refuse_width_conflict(ctx)?;
+    let conditionals = size_conditionals(ctx.spec);
+    let size_conditional = !conditionals.is_empty();
+    refuse_width_conflict(ctx, size_conditional)?;
+    conditionals.into_iter().try_for_each(refuse_non_positive_branch)?;
 
     let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Line));
 
@@ -232,6 +265,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // that row (bug #6). Before the fix, `data_indices` carried one entry per
     // *contributing row* while metadata was full-row, so the lengths diverged.
     let mut acc = MarkNodes::with_capacity(groups.len());
+    // Per node, the source row of each width vertex (see `vertex_rows`).
+    let mut vertex_rows: Vec<Vec<ferrum_scene::VertexRow>> = Vec::new();
 
     for (key, rows) in groups {
         let mut points: Vec<(f64, f64)> = Vec::new();
@@ -297,15 +332,11 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .stroke_paint()
             .cleared_or(with_opacity(stroke_color, group_opacity));
 
-        let node = if use_path {
+        let (node, vertex_points) = if use_path {
             let (cmds, cmd_points) = trace.subpath_with_rows(&points);
             // Each command takes the width of the point whose run it ends in.
-            let widths = point_widths.map(|widths| {
-                cmd_points
-                    .iter()
-                    .map(|&p| widths.get(p).copied().unwrap_or(group_stroke_width))
-                    .collect()
-            });
+            // `cmd_points` index `points`, which `point_widths` matches one for one.
+            let widths = point_widths.map(|widths| cmd_points.iter().map(|&p| widths[p]).collect());
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
             // Both node shapes carry the SAME `stroke_paint`, so a cleared stroke
@@ -324,12 +355,13 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                     angle: 0.0,
                 },
             );
-            ferrum_scene::SceneNode::Path {
+            let node = ferrum_scene::SceneNode::Path {
                 commands: cmds,
                 style,
                 closed: false,
                 widths,
-            }
+            };
+            (node, cmd_points)
         } else {
             let mut stroke_style = to_scene_stroke(
                 stroke_paint,
@@ -343,18 +375,27 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             // Polyline uses `StrokeStyle`, which has no fill channel — the
             // fill_opacity channel only applies to the `Path` (FillStroke)
             // variant emitted under non-linear interpolation.
-            ferrum_scene::SceneNode::Polyline {
+            let node = ferrum_scene::SceneNode::Polyline {
                 points: points.clone(),
                 style: stroke_style,
                 widths: point_widths,
-            }
+            };
+            (node, (0..points.len()).collect())
         };
         acc.push(node, first);
+        if size_conditional {
+            vertex_rows.push(
+                // `vertex_points` index `points`, which `row_indices` matches
+                // one for one.
+                vertex_points.iter().map(|&p| ferrum_scene::VertexRow::Row(row_indices[p])).collect(),
+            );
+        }
     }
 
     let (nodes, data_indices) = acc.finalize();
 
-    Ok(MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta))
+    let result = MarkBuildResult::populated(MarkBatchKind::Line, nodes, data_indices, &meta);
+    Ok(if size_conditional { result.with_vertex_rows(vertex_rows) } else { result })
 }
 
 #[cfg(test)]
@@ -1415,10 +1456,7 @@ mod tests {
         overrides: &MarkKwargsSpec,
         theme: ThemeInputs,
     ) -> Result<(Vec<SceneNode>, Vec<Option<f64>>), RenderError> {
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(Some(overrides), &theme, &Mark::Line).unwrap();
-        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
         let expected: Vec<Option<f64>> = match &scales.size {
             Some(scale) => col_as_f64(batch, "v").unwrap().iter()
                 .map(|v| v.and_then(|v| scale.inner.to_pixel_f64(v))
@@ -1426,7 +1464,21 @@ mod tests {
                 .collect(),
             None => vec![None; batch.num_rows()],
         };
-        super::build(&ctx).map(|r| (r.nodes, expected))
+        build_line(spec, batch, overrides, &theme).map(|r| (r.nodes, expected))
+    }
+
+    /// Build the line over a 100×100 panel.
+    fn build_line(
+        spec: &ChartSpec,
+        batch: &arrow::record_batch::RecordBatch,
+        overrides: &MarkKwargsSpec,
+        theme: &ThemeInputs,
+    ) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), theme).unwrap();
+        let mark_style = resolve_mark_style(Some(overrides), theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec, panel: &panel, theme, scales: &scales, batch, mark_style: &mark_style };
+        super::build(&ctx)
     }
 
     fn assert_widths(got: &[f64], want: &[f64]) {
@@ -1949,5 +2001,254 @@ mod tests {
         layered.layers = Some(vec![test_layer(Mark::Point, xy.clone(), None), test_layer(Mark::Line, xy, None)]);
         let err = render_static(&layered).err().expect("the line layer must refuse");
         assert!(err.to_string().starts_with("layer 1: mark_line: size 'v' value 1 maps to area 0"), "{err}");
+    }
+
+    // ── A size conditional: the base width here, each vertex's row recorded ──
+
+    fn size_conditional(selected: f64, unselected: f64) -> ferrum_scene::ConditionalEncoding {
+        ferrum_scene::ConditionalEncoding {
+            selection_name: "s".into(),
+            channel: ferrum_scene::ChannelName::Size,
+            if_selected: ferrum_scene::EncodingValue::Size { value: selected },
+            if_not: ferrum_scene::EncodingValue::Size { value: unselected },
+        }
+    }
+
+    fn with_size_conditional(mut spec: ChartSpec, selected: f64, unselected: f64) -> ChartSpec {
+        spec.conditionals = vec![size_conditional(selected, unselected).into()];
+        spec
+    }
+
+    /// `spec` with one `size` conditional declared by `layers` (`None`: the
+    /// whole chart).
+    fn with_scoped_size_conditional(mut spec: ChartSpec, selected: f64, unselected: f64, layers: Option<Vec<usize>>) -> ChartSpec {
+        spec.conditionals = vec![crate::spec::chart::ChartConditional { encoding: size_conditional(selected, unselected), layers }];
+        spec
+    }
+
+    /// The row numbers of a node's vertex rows, none of them a cut.
+    fn row_numbers(rows: &[ferrum_scene::VertexRow]) -> Vec<usize> {
+        rows.iter()
+            .map(|row| match row {
+                ferrum_scene::VertexRow::Row(r) => *r,
+                cut => panic!("an unbroken line has no cut vertex, got {cut:?}"),
+            })
+            .collect()
+    }
+
+    fn all_row_numbers(rows: Option<Vec<Vec<ferrum_scene::VertexRow>>>) -> Option<Vec<Vec<usize>>> {
+        rows.map(|rows| rows.iter().map(|r| row_numbers(r)).collect())
+    }
+
+    #[test]
+    fn a_size_conditional_records_each_vertex_row_and_draws_the_base_width() {
+        let batch = width_batch(ASCENDING.to_vec());
+        let theme = ThemeInputs::default();
+        let none = MarkKwargsSpec::default();
+        let plain = build_line(&line_spec(), &batch, &none, &theme).unwrap();
+        let conditional = build_line(&with_size_conditional(line_spec(), 100.0, 20.0), &batch, &none, &theme).unwrap();
+        assert_eq!(conditional.nodes, plain.nodes, "the line draws exactly as an unconditional one");
+        assert_eq!(all_row_numbers(conditional.vertex_rows), Some(vec![vec![0, 1, 2, 3]]));
+        assert_eq!(plain.vertex_rows, None, "an unconditional line records no rows");
+    }
+
+    #[test]
+    fn a_size_conditional_step_line_records_one_row_per_command() {
+        let batch = width_batch(ASCENDING.to_vec());
+        let step = MarkKwargsSpec { interpolate: Some("step".into()), ..Default::default() };
+        let result =
+            build_line(&with_size_conditional(line_spec(), 100.0, 20.0), &batch, &step, &ThemeInputs::default()).unwrap();
+        let [SceneNode::Path { commands, widths: None, .. }] = result.nodes.as_slice() else {
+            panic!("expected one untapered path, got {:?}", result.nodes);
+        };
+        let rows = &all_row_numbers(result.vertex_rows).expect("rows recorded")[0];
+        assert_eq!(rows.len(), commands.len(), "one row per command, aligned like `widths`");
+        assert_eq!((rows[0], rows[rows.len() - 1]), (0, 3));
+        assert!(rows.windows(2).all(|w| w[0] <= w[1]), "a step walks the rows in order: {rows:?}");
+    }
+
+    #[test]
+    fn a_size_conditional_records_each_series_own_rows() {
+        use arrow::array::Int64Array;
+        // Three color groups interleaved row by row: group g holds rows g, g+3, g+6, g+9.
+        let groups: Vec<i64> = (0..12).map(|i| (i % 3) as i64).collect();
+        let (batch, spec) = make_grouped_color_batch_and_spec(Arc::new(Int64Array::from(groups)), DataType::Int64);
+        let result = build_line(
+            &with_size_conditional(spec, 100.0, 20.0),
+            &batch,
+            &MarkKwargsSpec::default(),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let rows = all_row_numbers(result.vertex_rows).expect("rows recorded");
+        let mut sorted = rows.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![vec![0, 3, 6, 9], vec![1, 4, 7, 10], vec![2, 5, 8, 11]]);
+        let firsts: Vec<usize> = rows.iter().map(|r| r[0]).collect();
+        assert_eq!(result.data_indices, Some(firsts), "each node's rows start at its own representative row");
+    }
+
+    #[test]
+    fn a_size_conditional_branch_with_no_positive_width_refuses() {
+        let batch = width_batch(ASCENDING.to_vec());
+        for (selected, unselected, bad) in [(0.0, 20.0, "0"), (100.0, -4.0, "-4")] {
+            let spec = with_size_conditional(line_spec(), selected, unselected);
+            let err = build_line(&spec, &batch, &MarkKwargsSpec::default(), &ThemeInputs::default())
+                .err()
+                .expect("a non-positive branch must refuse");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "mark_line: size=fm.when(...) on selection 's' has a branch of size {bad}, which gives \
+                     no positive line width. Every width along a line must be positive; give every branch \
+                     a size above 0."
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn every_size_conditional_on_a_line_has_its_branches_checked() {
+        // The runtime folds every size conditional a line carries, so a
+        // non-positive branch on the second one refuses as on the first.
+        let batch = width_batch(ASCENDING.to_vec());
+        let mut later = size_conditional(100.0, 0.0);
+        later.selection_name = "t".into();
+        let mut spec = line_spec();
+        spec.conditionals = vec![size_conditional(100.0, 20.0).into(), later.into()];
+        let err = build_line(&spec, &batch, &MarkKwargsSpec::default(), &ThemeInputs::default())
+            .err()
+            .expect("the second conditional's size-0 branch must refuse");
+        assert_eq!(
+            err.to_string(),
+            "mark_line: size=fm.when(...) on selection 't' has a branch of size 0, which gives no positive \
+             line width. Every width along a line must be positive; give every branch a size above 0."
+        );
+    }
+
+    // ── Scope: a size conditional reaches only the line whose layer declared it ──
+
+    /// A layered point (layer 0) + line (layer 1) over the one shared batch.
+    fn point_then_line() -> ChartSpec {
+        let xy = line_spec().encoding;
+        added(vec![test_layer(Mark::Point, xy.clone(), None), test_layer(Mark::Line, xy, None)])
+    }
+
+    /// The line batch (layer 1) of a `point_then_line` scene.
+    fn line_batch(scene: &ferrum_scene::SceneGraph) -> &ferrum_scene::MarkBatch {
+        let batch = &scene.panels[0].marks[1];
+        assert_eq!(batch.kind, ferrum_scene::MarkBatchKind::Line);
+        batch
+    }
+
+    #[test]
+    fn a_sibling_layers_size_conditional_neither_restyles_nor_refuses_a_line() {
+        // The point layer's own conditional, with a size-0 branch a point
+        // accepts and a line could not draw: the plain line renders untouched.
+        let point_scoped = with_scoped_size_conditional(point_then_line(), 100.0, 0.0, Some(vec![0]));
+        assert!(render_static(&point_scoped).is_ok(), "{:?}", render_static(&point_scoped).err());
+        let scene = render_interactive(&point_scoped).unwrap();
+        assert_eq!(line_batch(&scene).vertex_rows, None, "the overlay line carries no vertex rows");
+        let plain = render_interactive(&point_then_line()).unwrap();
+        assert_eq!(line_batch(&scene).nodes, line_batch(&plain).nodes, "the line draws as with no conditional");
+        assert_eq!(scene.interaction.conditionals, vec![size_conditional(100.0, 0.0)], "points keep it chart-wide");
+
+        // Controls: the line's own layer, or the whole chart, declaring it
+        // records the rows and checks the branches.
+        for layers in [Some(vec![1]), Some(vec![0, 1]), None] {
+            let spec = with_scoped_size_conditional(point_then_line(), 100.0, 20.0, layers.clone());
+            let scene = render_interactive(&spec).unwrap();
+            assert_eq!(all_row_numbers(line_batch(&scene).vertex_rows.clone()), Some(vec![vec![0, 1, 2, 3]]), "{layers:?}");
+            let refused = with_scoped_size_conditional(point_then_line(), 100.0, 0.0, layers.clone());
+            let want = "layer 1: mark_line: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
+                        positive line width. Every width along a line must be positive; give every branch a size above 0.";
+            assert_eq!(render_static(&refused).err().map(|e| e.to_string()).as_deref(), Some(want), "{layers:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_binding_a_conditional_size_and_stroke_width_refuses() {
+        let text = |w: &str| {
+            format!(
+                "mark_line: size and stroke_width both set the line's width (size=fm.when(...), stroke_width={w}); \
+                 bind only one. size= sets a dot-diameter width that can taper along the line; stroke_width= sets \
+                 a width in pixels."
+            )
+        };
+        let kwarg = || MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() };
+        let mut by_kwarg = with_size_conditional(line_spec(), 100.0, 20.0);
+        by_kwarg.mark_style = Some(kwarg());
+        let by_field = with_size_conditional(sized_spec(false, true), 100.0, 20.0);
+        for (spec, w) in [(by_kwarg, "3"), (by_field, "'w'")] {
+            assert_eq!(render_static(&spec).err().map(|e| e.to_string()), Some(text(w)));
+            assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(text(w)));
+        }
+
+        // Layered: the line's own conditional refuses naming its layer; the
+        // point's leaves the 3 px line alone.
+        let xy = line_spec().encoding;
+        let layered = added(vec![test_layer(Mark::Point, xy.clone(), None), test_layer(Mark::Line, xy, Some(kwarg()))]);
+        let own = with_scoped_size_conditional(layered.clone(), 100.0, 20.0, Some(vec![1]));
+        assert_eq!(render_static(&own).err().map(|e| e.to_string()), Some(format!("layer 1: {}", text("3"))));
+        let sibling = with_scoped_size_conditional(layered, 100.0, 20.0, Some(vec![0]));
+        let scene = render_interactive(&sibling).unwrap();
+        assert_eq!(line_of(&scene, 1), (3.0, None));
+        assert_eq!(line_batch(&scene).vertex_rows, None);
+    }
+
+    #[test]
+    fn a_conditional_naming_a_layer_the_chart_lacks_refuses() {
+        let layered = with_scoped_size_conditional(point_then_line(), 100.0, 20.0, Some(vec![0, 2]));
+        let want = "conditionals[0].layers names layer 2, but the chart has 2 layer(s); name only the layers that \
+                    declared the conditional.";
+        assert_eq!(render_static(&layered).err().map(|e| e.to_string()).as_deref(), Some(want));
+        assert_eq!(render_interactive(&layered).err().map(|e| e.to_string()).as_deref(), Some(want));
+        let unlayered = with_scoped_size_conditional(line_spec(), 100.0, 20.0, Some(vec![1]));
+        assert_eq!(
+            render_static(&unlayered).err().map(|e| e.to_string()).as_deref(),
+            Some("conditionals[0].layers names layer 1, but the chart has 1 layer(s); name only the layers that \
+                  declared the conditional.")
+        );
+        // Control: layer 0 is the unlayered chart's one layer.
+        assert!(render_static(&with_scoped_size_conditional(line_spec(), 100.0, 20.0, Some(vec![0]))).is_ok());
+    }
+
+    /// A point selection holds the clicked mark's `data_indices` entry, and a
+    /// line's vertex rows must index the same rows for membership to mean the
+    /// same data. Every layer reads the one merged batch (`chart + chart`
+    /// diagonal-concats a second frame onto it), so a shared frame gives the
+    /// line exactly the point's rows, and a second frame gives it rows no
+    /// point owns.
+    #[test]
+    fn a_lines_vertex_rows_index_the_batch_the_selection_indexes() {
+        let spec = with_scoped_size_conditional(point_then_line(), 100.0, 20.0, Some(vec![1]));
+        let scene = render_interactive(&spec).unwrap();
+        let point = &scene.panels[0].marks[0];
+        assert_eq!(point.data_indices, Some(vec![0, 1, 2, 3]));
+        assert_eq!(all_row_numbers(line_batch(&scene).vertex_rows.clone()), Some(vec![vec![0, 1, 2, 3]]));
+
+        // Diagonal concat: the point's frame fills rows 0..4, the line's 4..8.
+        let half = |lo: bool| -> Arc<dyn arrow::array::Array> {
+            Arc::new(Float64Array::from((0..8).map(|i| ((i < 4) == lo).then_some(i as f64)).collect::<Vec<_>>()))
+        };
+        let schema = Schema::new(["x", "y", "x2", "y2"].map(|n| Field::new(n, DataType::Float64, true)).to_vec());
+        let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), vec![half(true), half(true), half(false), half(false)]).unwrap();
+        let mut line_xy = line_spec().encoding;
+        line_xy.x = Some(EncodingSpec { field: "x2".into(), ..Default::default() });
+        line_xy.y = Some(EncodingSpec { field: "y2".into(), ..Default::default() });
+        let mut spec = added(vec![test_layer(Mark::Point, line_spec().encoding, None), test_layer(Mark::Line, line_xy, None)]);
+        spec = with_scoped_size_conditional(spec, 100.0, 20.0, Some(vec![1]));
+        let (json, _, _) = crate::render::render_scene_json(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 400.0, height: 300.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .unwrap();
+        let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0, 1, 2, 3]));
+        assert_eq!(all_row_numbers(line_batch(&scene).vertex_rows.clone()), Some(vec![vec![4, 5, 6, 7]]));
     }
 }

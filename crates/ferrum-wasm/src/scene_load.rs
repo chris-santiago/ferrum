@@ -700,6 +700,14 @@ fn scalar_scale_factor(ls: &LayoutScale) -> f64 {
     (ls.sx * ls.sy).abs().sqrt()
 }
 
+/// A stroke width in layout px, baked by `ls` as [`bake_panels`] bakes every
+/// stroke width: the width a restyle gives a node of a BAKED panel whose
+/// `layout_scale` is `ls`.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn baked_stroke_width(ls: &LayoutScale, width: f64) -> f64 {
+    width * scalar_scale_factor(ls)
+}
+
 fn transform_fill_stroke(style: &FillStroke, mag: f64) -> FillStroke {
     let mut style = style.clone();
     style.stroke_width *= mag;
@@ -1147,99 +1155,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<
         // pass is Line-specific (gridlines); `below_marks` carries Text nodes.
         collector.collect_static(&maybe_transform_nodes(&panel.below_marks, ls), None, None)?;
 
-        let effective_plot_area = if ls.is_identity() {
-            panel.plot_area
-        } else {
-            transform_rect(&panel.plot_area, ls)
-        };
-        let panel_plot_area_arr = [
-            effective_plot_area.x as f32,
-            effective_plot_area.y as f32,
-            effective_plot_area.w as f32,
-            effective_plot_area.h as f32,
-        ];
-
-        for (batch_idx, batch) in panel.marks.iter().enumerate() {
-            let additive = batch_uses_additive_blend(batch.blend);
-
-            // Batch E Task 9: a clip-exempt batch (`MarkBatch::clip ==
-            // false`) still tracks pan/zoom (`is_mark: true`, unchanged) but
-            // is exempted from the panel-boundary scissor. Two different
-            // exemption shapes, per quality review's scissor-equivalence
-            // nit:
-            //   - Instanced draw commands (packed circle/rect batches, and
-            //     any circle/rect nodes `collect_mark` finds inside a mesh
-            //     batch) use `plot_area: None` — `render.rs`'s
-            //     `ensure_scissor!` treats `None` as the literal "no
-            //     scissor" pass-default, with no float-scale truncation
-            //     risk. `Some(full_scene_rect)` would force a real scissor
-            //     rect that can lose up to 1px at the far edge after
-            //     `(pa[2] * scale_x) as u32` truncation on a
-            //     non-exactly-representable surface/scene ratio.
-            //   - The mesh path's `MarkMeshPanel::plot_area` field is a
-            //     plain `[f32; 4]` (no `Option`), so it genuinely needs a
-            //     rect: the full scene extent, which still scales to the
-            //     entire render target and is functionally equivalent to
-            //     "no scissor" (see `scene_full_extent`'s doc comment).
-            // Every batch before this field existed has `clip == true` and
-            // resolves to the exact values this loop always used
-            // (`Some(panel_plot_area_arr)` / `panel_plot_area_arr`), so this
-            // is byte-identical for the default path.
-            let batch_draw_plot_area = if batch.clip {
-                Some(panel_plot_area_arr)
-            } else {
-                None
-            };
-            let batch_mesh_plot_area_arr = if batch.clip {
-                panel_plot_area_arr
-            } else {
-                scene_full_extent
-            };
-
-            // Provenance for every command this batch emits: which (panel,
-            // batch) owns the instances, and how to draw them. Recorded on the
-            // command so `batch_instance_spans` can address this batch's
-            // instances without re-deriving the flat-array layout (GH #105).
-            let target = MarkDrawTarget {
-                panel_id: panel_idx,
-                batch_idx,
-                y_slot: batch.y_slot,
-                plot_area: batch_draw_plot_area,
-                additive,
-            };
-
-            // If this batch has packed binary instances, emit a draw command
-            // from the packed metadata (the instances were already added by
-            // unpack_binary_instances above, and already layout-scaled by
-            // `apply_layout_scale_to_packed_instances`). Otherwise, collect
-            // from nodes.
-            let key = (panel_idx as u32, batch_idx as u32);
-            if let Some(meta) = batch_meta.get(&key) {
-                collector.draw_commands.push(DrawCommand::new(
-                    meta.kind,
-                    meta.instance_start,
-                    meta.instance_count,
-                    Some(target),
-                ));
-            } else {
-                // Mark batches → mark mesh (zoom transform). Record this
-                // batch's mesh index range tagged with its y-slot so the render
-                // loop can bind the (panel, slot) affine (secondary-y, #52).
-                // Single-y charts emit one slot-0 range per mesh batch, which
-                // draws byte-identically to the former per-panel recording.
-                let mesh_start = collector.mesh.indices.len() as u32;
-                let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
-                collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join)?;
-                let mesh_end = collector.mesh.indices.len() as u32;
-                collector.record_mark_mesh_panel(
-                    mesh_start,
-                    mesh_end,
-                    batch_mesh_plot_area_arr,
-                    panel_idx,
-                    batch.y_slot,
-                );
-            }
-        }
+        collect_panel_marks(&mut collector, panel_idx, panel, ls, &batch_meta, scene_full_extent)?;
 
         // Axes, strip titles: non-mark → static mesh
         collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None)?;
@@ -1283,6 +1199,136 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<
             .map(|p| panel_slot_count(&p.coord))
             .collect(),
     })
+}
+
+/// Collect `panel`'s mark batches into the mark mesh and their instance draw
+/// commands, under the panel's `ls` layout scale. A batch in `batch_meta`
+/// (packed) emits a draw command from its sidecar; every other batch is
+/// tessellated from its nodes. `scene_full_extent` is the scissor a clip-exempt
+/// batch's mesh draws under.
+fn collect_panel_marks(
+    collector: &mut SceneCollector,
+    panel_idx: usize,
+    panel: &Panel,
+    ls: &ferrum_scene::LayoutScale,
+    batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
+    scene_full_extent: [f32; 4],
+) -> Result<(), TaperError> {
+    let effective_plot_area = if ls.is_identity() {
+        panel.plot_area
+    } else {
+        transform_rect(&panel.plot_area, ls)
+    };
+    let panel_plot_area_arr = [
+        effective_plot_area.x as f32,
+        effective_plot_area.y as f32,
+        effective_plot_area.w as f32,
+        effective_plot_area.h as f32,
+    ];
+
+    for (batch_idx, batch) in panel.marks.iter().enumerate() {
+        let additive = batch_uses_additive_blend(batch.blend);
+
+        // Batch E Task 9: a clip-exempt batch (`MarkBatch::clip ==
+        // false`) still tracks pan/zoom (`is_mark: true`, unchanged) but
+        // is exempted from the panel-boundary scissor. Two different
+        // exemption shapes, per quality review's scissor-equivalence
+        // nit:
+        //   - Instanced draw commands (packed circle/rect batches, and
+        //     any circle/rect nodes `collect_mark` finds inside a mesh
+        //     batch) use `plot_area: None` — `render.rs`'s
+        //     `ensure_scissor!` treats `None` as the literal "no
+        //     scissor" pass-default, with no float-scale truncation
+        //     risk. `Some(full_scene_rect)` would force a real scissor
+        //     rect that can lose up to 1px at the far edge after
+        //     `(pa[2] * scale_x) as u32` truncation on a
+        //     non-exactly-representable surface/scene ratio.
+        //   - The mesh path's `MarkMeshPanel::plot_area` field is a
+        //     plain `[f32; 4]` (no `Option`), so it genuinely needs a
+        //     rect: the full scene extent, which still scales to the
+        //     entire render target and is functionally equivalent to
+        //     "no scissor" (see `scene_full_extent`'s doc comment).
+        // Every batch before this field existed has `clip == true` and
+        // resolves to the exact values this loop always used
+        // (`Some(panel_plot_area_arr)` / `panel_plot_area_arr`), so this
+        // is byte-identical for the default path.
+        let batch_draw_plot_area = if batch.clip {
+            Some(panel_plot_area_arr)
+        } else {
+            None
+        };
+        let batch_mesh_plot_area_arr = if batch.clip {
+            panel_plot_area_arr
+        } else {
+            scene_full_extent
+        };
+
+        // Provenance for every command this batch emits: which (panel,
+        // batch) owns the instances, and how to draw them. Recorded on the
+        // command so `batch_instance_spans` can address this batch's
+        // instances without re-deriving the flat-array layout (GH #105).
+        let target = MarkDrawTarget {
+            panel_id: panel_idx,
+            batch_idx,
+            y_slot: batch.y_slot,
+            plot_area: batch_draw_plot_area,
+            additive,
+        };
+
+        // If this batch has packed binary instances, emit a draw command
+        // from the packed metadata (the instances were already added by
+        // unpack_binary_instances above, and already layout-scaled by
+        // `apply_layout_scale_to_packed_instances`). Otherwise, collect
+        // from nodes.
+        let key = (panel_idx as u32, batch_idx as u32);
+        if let Some(meta) = batch_meta.get(&key) {
+            collector.draw_commands.push(DrawCommand::new(
+                meta.kind,
+                meta.instance_start,
+                meta.instance_count,
+                Some(target),
+            ));
+        } else {
+            // Mark batches → mark mesh (zoom transform). Record this
+            // batch's mesh index range tagged with its y-slot so the render
+            // loop can bind the (panel, slot) affine (secondary-y, #52).
+            // Single-y charts emit one slot-0 range per mesh batch, which
+            // draws byte-identically to the former per-panel recording.
+            ferrum_scene::validate_vertex_rows(batch)?;
+            let mesh_start = collector.mesh.indices.len() as u32;
+            let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
+            collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join)?;
+            let mesh_end = collector.mesh.indices.len() as u32;
+            collector.record_mark_mesh_panel(
+                mesh_start,
+                mesh_end,
+                batch_mesh_plot_area_arr,
+                panel_idx,
+                batch.y_slot,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Re-tessellate the mark mesh of `panels`, which must be BAKED
+/// ([`bake_panels`]): their layout scale is already in their geometry, so it
+/// is not applied again. The mesh and its per-batch ranges come out exactly as
+/// [`load_scene_with_packed`] builds them for the same nodes, which is what
+/// lets a restyled stroke replace the loaded mark mesh. Packed batches carry
+/// no nodes and add nothing. `scene_full_extent` is the scene's
+/// `[0, 0, width, height]`.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn mark_mesh(
+    panels: &[Panel],
+    scene_full_extent: [f32; 4],
+) -> Result<(VertexBuffers<MeshVertex, u32>, Vec<MarkMeshPanel>), TaperError> {
+    let mut collector = SceneCollector::new();
+    let identity = ferrum_scene::LayoutScale::identity();
+    for (panel_idx, panel) in panels.iter().enumerate() {
+        collect_panel_marks(&mut collector, panel_idx, panel, &identity, &HashMap::new(), scene_full_extent)?;
+    }
+    Ok((collector.mesh, collector.mark_mesh_panels))
 }
 
 // ── Packed sidecar section flags ────────────────────────────────────────────

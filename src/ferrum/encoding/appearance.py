@@ -64,10 +64,15 @@ class Color(ChannelBase):
 
 
 class Size(ChannelBase):
-    """Size channel — maps a field to mark size (point area in square pixels).
+    """Size channel — maps a field to a point's area or a line's width.
 
-    For point marks the size value corresponds to the area of the mark in
-    square pixels.
+    The size scale maps each value to an area in square pixels. A point mark
+    draws that area. A line mark draws the diameter of a dot with that area,
+    ``2 * sqrt(area / pi)`` pixels, at each vertex, so the line tapers along
+    its length and a line and a point sharing one size encoding agree: the
+    line is as wide as the dot drawn for the same value. A line that binds
+    ``size`` cannot also bind ``stroke_width``; rendering such a line raises
+    ``ValueError``.
 
     Parameters
     ----------
@@ -76,7 +81,8 @@ class Size(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
     scale : Scale, optional
-        Explicit scale override.
+        Explicit scale override. Its ``range`` is in area units (square
+        pixels) for every mark, a line included.
     title : str, optional
         Legend title override.
 
@@ -90,7 +96,16 @@ class Size(ChannelBase):
     pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
     ``fm.when(sel).then(...).otherwise(...)``) to switch size based on
     selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    (``ferrum-spec.md`` §3.10). On a line, a conditional size draws the base
+    width in static output; in the interactive view each vertex redraws at
+    the dot-diameter width of its row's active branch. Every branch must be
+    positive on such a line, and a conditional size plus ``stroke_width``
+    raises ``ValueError`` as any other size does. A conditional encoded on
+    the chart as a whole (a layered chart, or a composite such as
+    ``mark_line(point=True)``) applies to every layer, lines included, as a
+    field size does; one encoded on a single layer's own chart or ``Layer``
+    applies to that layer only, so a line beside it is neither restyled nor
+    checked.
 
     When ``size`` and ``color`` are both mapped to the same field, ferrum merges
     them into a single combined legend block.
@@ -100,6 +115,7 @@ class Size(ChannelBase):
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", size=fm.Size("weight"))
     >>> fm.Chart(df).encode(x="hp", y="mpg", size=fm.Size("pop", legend=None))
+    >>> fm.Chart(df).mark_line().encode(x="year", y="price", size=fm.Size("volume"))
     """
 
     _channel_name = "size"

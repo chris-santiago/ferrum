@@ -2340,7 +2340,11 @@ def relplot(
     hue : str or encoding, optional
         Column name to map to color (one group per level).
     size : str or encoding, optional
-        Column name to map to the ``Size`` channel (point area or line width).
+        Column name to map to the ``Size`` channel.  With
+        ``kind="scatter"`` it sets each point's area; with ``kind="line"``
+        each line tapers along its length, its width at every vertex the
+        diameter of a point of that row's area, ``2 * sqrt(area / pi)``
+        pixels.
     style : str or encoding, optional
         Column name to map to ``Shape`` (scatter) or ``StrokeDash`` (line).
     col : str, optional

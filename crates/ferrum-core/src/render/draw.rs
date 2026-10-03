@@ -854,6 +854,11 @@ pub struct MarkBuildResult {
     /// `MoveGlyphAndConnector` builders (`point.rs`, `tick.rs`, `text.rs`,
     /// `image.rs`, `label.rs`); `None` for every other mark.
     pub glyph_anchors: Option<Vec<(f64, f64)>>,
+    /// Per-node source row of every width vertex, threaded straight onto
+    /// `MarkBatch::vertex_rows` — see that field's doc. Populated only by
+    /// `line.rs` when the line's own layer declares a `size` conditional;
+    /// `None` for every other mark.
+    pub vertex_rows: Option<Vec<Vec<ferrum_scene::VertexRow>>>,
     /// Why `nodes` is empty, when it is (#118) — spec §4's silent-empty
     /// policy. `None` covers every LEGITIMATE empty a mark builder can
     /// produce: a zero-row input batch, a documented per-row null/non-finite/
@@ -911,13 +916,18 @@ impl MarkBuildResult {
         self
     }
 
+    pub fn with_vertex_rows(mut self, rows: Vec<Vec<ferrum_scene::VertexRow>>) -> Self {
+        self.vertex_rows = Some(rows);
+        self
+    }
+
     pub fn with_empty_reason(mut self, reason: Option<EmptyReason>) -> Self {
         self.empty_reason = reason;
         self
     }
 
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, empty_reason: None }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, vertex_rows: None, empty_reason: None }
     }
 
     /// Like [`empty`](Self::empty), but names why — for a builder that

@@ -24,7 +24,8 @@ pub(crate) const CROSSFILTER_DIM_OPACITY: f64 = 0.15;
 
 /// Resolve conditional encodings against the current selection state,
 /// rebuild GPU buffers with updated instance colors, render a frame, and
-/// return the serialized selection state JSON.
+/// return the serialized selection state JSON, plus the restyled panels when
+/// a line was redrawn ([`redraw_conditional_lines`]).
 ///
 /// Called by both `handle_click` and `handle_drag` after they update the
 /// selection state. Centralising this ensures that if `SceneData` gains a
@@ -46,7 +47,7 @@ pub(crate) fn apply_conditionals_and_render(
     interaction_state: &crate::selection_state::InteractionState,
     gpu: &crate::gpu::GpuContext,
     pipelines: &crate::pipelines::RenderPipelines,
-) -> Result<String, wasm_bindgen::JsValue> {
+) -> Result<(String, Option<Vec<Panel>>), wasm_bindgen::JsValue> {
     // Apply conditional encodings to produce dimmed/highlighted instance colors.
     let updates = resolve_conditionals_with_packed(
         InstanceLayout {
@@ -60,16 +61,25 @@ pub(crate) fn apply_conditionals_and_render(
         &loaded_data.rect_instances,
     );
 
-    // Re-upload only the instance buffers that changed (circle and rect
-    // colors). Mesh, static mesh, annotation mesh, images, and uniforms are
-    // unaffected by selection changes and do not need to be re-uploaded.
+    // Re-upload the instance buffers (circle and rect styles), and the mark
+    // mesh only when a size conditional restyles a line. Static mesh,
+    // annotation mesh, images, and uniforms are unaffected by selection
+    // changes and are not re-uploaded.
     loaded_buffers.update_instances(gpu, &updates.circle_instances, &updates.rect_instances);
+    let restyled = redraw_conditional_lines(
+        panels,
+        conditionals,
+        &interaction_state.selections,
+        loaded_data,
+        loaded_buffers,
+        gpu,
+    )?;
     crate::render::render_frame(gpu, pipelines, loaded_buffers, loaded_data.background)
         .map_err(wasm_bindgen::JsValue::from)?;
 
     // Serialize current selection state for Python sync.
     let state_json = interaction_state.to_json();
-    Ok(state_json)
+    Ok((state_json, restyled))
 }
 
 pub struct ConditionalUpdates {
@@ -333,38 +343,13 @@ pub(crate) fn apply_conditional_to_batch(
 
     for (node_idx, node) in batch.nodes.iter().enumerate() {
         let data_idx = data_indices.get(node_idx).copied();
-
-        let selected = match sel {
-            SelectionState::Interval { .. } => {
-                // Spatial containment: check if mark center is inside brush.
-                let pos = match node {
-                    SceneNode::Circle { cx, cy, .. } => Some((*cx, *cy)),
-                    SceneNode::Rect { x, y, w, h, .. } => Some((*x + *w / 2.0, *y + *h / 2.0)),
-                    _ => None,
-                };
-                pos.is_some_and(|(mx, my)| sel.contains_point(mx, my))
-            }
-            SelectionState::Point { field_values, .. } if !field_values.is_empty() => {
-                // Field-value matching: check if this mark's tooltip contains
-                // matching values for all selection fields. This enables
-                // cross-panel linked selection where panels have different
-                // datasets and data indices cannot be shared.
-                batch
-                    .tooltips
-                    .as_ref()
-                    .and_then(|tips| tips.get(node_idx))
-                    .map(|tip| {
-                        tooltip_matches(field_values, |fname| {
-                            tip.fields
-                                .iter()
-                                .find(|f| f.name == fname)
-                                .map(|f| f.value.clone())
-                        })
-                    })
-                    .unwrap_or(false)
-            }
-            _ => data_idx.is_some_and(|di| sel.contains(di)),
+        // Spatial containment reads the mark's center.
+        let center = match node {
+            SceneNode::Circle { cx, cy, .. } => Some((*cx, *cy)),
+            SceneNode::Rect { x, y, w, h, .. } => Some((*x + *w / 2.0, *y + *h / 2.0)),
+            _ => None,
         };
+        let selected = mark_selected(sel, batch, node_idx, data_idx, center);
 
         let value = if selected { if_selected } else { if_not };
 
@@ -384,6 +369,187 @@ pub(crate) fn apply_conditional_to_batch(
             _ => {}
         }
     }
+}
+
+/// Whether the mark at `node_idx` of a non-packed `batch` is in `sel`, the
+/// unpacked membership rules [`packed_instance_selected`] mirrors:
+/// - `Interval` → spatial containment of `pos` (`None` is never inside);
+/// - `Point` with non-empty `field_values` → the node's tooltip carries every
+///   selected field value, which is what links panels whose datasets (and so
+///   data indices) differ;
+/// - `Point` with `indices` only → `data_idx` membership.
+///
+/// A circle or rect asks once per node (its center, its row); a line asks once
+/// per width vertex (that vertex's point and source row), so the field-value
+/// rule reads the series' own tooltip for every vertex.
+fn mark_selected(
+    sel: &SelectionState,
+    batch: &MarkBatch,
+    node_idx: usize,
+    data_idx: Option<usize>,
+    pos: Option<(f64, f64)>,
+) -> bool {
+    match sel {
+        SelectionState::Interval { .. } => pos.is_some_and(|(x, y)| sel.contains_point(x, y)),
+        SelectionState::Point { field_values, .. } if !field_values.is_empty() => batch
+            .tooltips
+            .as_ref()
+            .and_then(|tips| tips.get(node_idx))
+            .is_some_and(|tip| {
+                tooltip_matches(field_values, |fname| {
+                    tip.fields
+                        .iter()
+                        .find(|f| f.name == fname)
+                        .map(|f| f.value.clone())
+                })
+            }),
+        _ => data_idx.is_some_and(|di| sel.contains(di)),
+    }
+}
+
+/// `panels` (BAKED, [`crate::scene_load::bake_panels`]) with every line that
+/// carries `vertex_rows` redrawn under the active selections: each width
+/// vertex takes the dot diameter ([`ferrum_scene::dot_diameter`]) of the area
+/// its own row's branch of each `size` conditional picks, a later conditional
+/// outranking an earlier one as [`resolve_conditionals_with_packed`] layers
+/// them, baked by the panel's layout scale as every stroke width is
+/// ([`crate::scene_load::baked_stroke_width`]). A vertex a break cut between
+/// two rows takes the two rows' widths interpolated at the cut
+/// ([`ferrum_scene::width_at`]). A vertex no active `size` conditional
+/// reaches keeps its loaded width, and a line none reaches keeps its loaded
+/// `widths`, so with every selection empty the panels tessellate exactly as
+/// loaded. `None` when no line carries `vertex_rows`: nothing to redraw. The
+/// loader has already refused rows that do not align with their nodes
+/// ([`ferrum_scene::validate_vertex_rows`]).
+///
+/// Every panel is cloned, not only those holding a restyled line: the mark
+/// mesh is one buffer whose per-panel index ranges [`crate::scene_load::mark_mesh`]
+/// rebuilds from all panels at once, and the result is kept whole as the
+/// panel slice hit-testing reads.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn conditional_line_panels(
+    panels: &[Panel],
+    conditionals: &[ConditionalEncoding],
+    selections: &HashMap<String, SelectionState>,
+) -> Option<Vec<Panel>> {
+    if !panels.iter().flat_map(|p| &p.marks).any(|b| b.vertex_rows.is_some()) {
+        return None;
+    }
+    let active: Vec<(&ConditionalEncoding, &SelectionState)> = conditionals
+        .iter()
+        .filter_map(|cond| Some((cond, selections.get(&cond.selection_name)?)))
+        .filter(|(_, sel)| !matches!(sel, SelectionState::Empty))
+        .collect();
+    let mut panels = panels.to_vec();
+    for panel in &mut panels {
+        let ls = panel.layout_scale;
+        for batch in &mut panel.marks {
+            let Some(rows) = batch.vertex_rows.as_ref() else { continue };
+            let widths: Vec<Option<Vec<f64>>> = rows
+                .iter()
+                .enumerate()
+                .map(|(node_idx, rows)| vertex_widths(batch, node_idx, rows, &active, &ls))
+                .collect();
+            for (node, widths) in batch.nodes.iter_mut().zip(widths) {
+                if let (SceneNode::Polyline { widths: slot, .. } | SceneNode::Path { widths: slot, .. }, Some(w)) =
+                    (node, widths)
+                {
+                    *slot = Some(w);
+                }
+            }
+        }
+    }
+    Some(panels)
+}
+
+/// One line node's widths under the `active` conditionals (see
+/// [`conditional_line_panels`]), or `None` to keep it as loaded: no active
+/// `size` conditional reaches it.
+#[cfg(any(target_arch = "wasm32", test))]
+fn vertex_widths(
+    batch: &MarkBatch,
+    node_idx: usize,
+    rows: &[ferrum_scene::VertexRow],
+    active: &[(&ConditionalEncoding, &SelectionState)],
+    ls: &ferrum_scene::LayoutScale,
+) -> Option<Vec<f64>> {
+    let (points, base, loaded) = match batch.nodes.get(node_idx)? {
+        SceneNode::Polyline { points, style, widths } => (points.clone(), style.width, widths),
+        SceneNode::Path { commands, style, widths, .. } => {
+            (ferrum_scene::command_endpoints(commands), style.stroke_width, widths)
+        }
+        _ => return None,
+    };
+    // The branch width (baked px) a row draws at `point`, or `None` when no
+    // active conditional's branch for that row is a size.
+    let row_width = |row: usize, point: (f64, f64)| {
+        let area = active.iter().fold(None, |area, (cond, sel)| {
+            let selected = mark_selected(sel, batch, node_idx, Some(row), Some(point));
+            match if selected { &cond.if_selected } else { &cond.if_not } {
+                EncodingValue::Size { value } => Some(*value),
+                _ => area,
+            }
+        });
+        area.map(|area| crate::scene_load::baked_stroke_width(ls, ferrum_scene::dot_diameter(area)))
+    };
+    let mut reached = false;
+    let widths = points
+        .iter()
+        .zip(rows)
+        .enumerate()
+        .map(|(i, (&point, row))| {
+            let base = loaded.as_ref().and_then(|w| w.get(i).copied()).unwrap_or(base);
+            let width = resolve_vertex_width(row, base, &|r| row_width(r, point));
+            reached |= width.is_some();
+            width.unwrap_or(base)
+        })
+        .collect();
+    reached.then_some(widths)
+}
+
+/// The width of one vertex at `row`: its row's branch width, or at a cut the
+/// two ends' widths interpolated at `t`, an end no conditional reaches
+/// drawing `base`. `None` when no conditional reaches any row of it.
+#[cfg(any(target_arch = "wasm32", test))]
+fn resolve_vertex_width(
+    row: &ferrum_scene::VertexRow,
+    base: f64,
+    row_width: &dyn Fn(usize) -> Option<f64>,
+) -> Option<f64> {
+    match row {
+        ferrum_scene::VertexRow::Row(r) => row_width(*r),
+        ferrum_scene::VertexRow::Cut { from, to, t } => {
+            let (from, to) = (resolve_vertex_width(from, base, row_width), resolve_vertex_width(to, base, row_width));
+            if from.is_none() && to.is_none() {
+                return None;
+            }
+            ferrum_scene::width_at(&[from.unwrap_or(base), to.unwrap_or(base)], 0, *t)
+        }
+    }
+}
+
+/// Re-tessellate the mark mesh when a selection restyles a line's width (see
+/// [`conditional_line_panels`]) and upload it, returning the restyled BAKED
+/// panels for hit-testing (a restyled line's hover tolerance is its restyled
+/// width); `None` for a scene with no such line. A restyled width the shared
+/// taper validation refuses is a typed error.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn redraw_conditional_lines(
+    panels: &[Panel],
+    conditionals: &[ConditionalEncoding],
+    selections: &HashMap<String, SelectionState>,
+    loaded_data: &crate::scene_load::SceneData,
+    loaded_buffers: &mut crate::render::GpuBuffers,
+    gpu: &crate::gpu::GpuContext,
+) -> Result<Option<Vec<Panel>>, wasm_bindgen::JsValue> {
+    let Some(lines) = conditional_line_panels(panels, conditionals, selections) else {
+        return Ok(None);
+    };
+    let extent = [0.0, 0.0, loaded_data.width, loaded_data.height];
+    let (mesh, mesh_panels) = crate::scene_load::mark_mesh(&lines, extent)
+        .map_err(|e| wasm_bindgen::JsValue::from(crate::error::WasmRenderError::TaperedStroke(e)))?;
+    loaded_buffers.update_mark_mesh(gpu, &mesh, mesh_panels);
+    Ok(Some(lines))
 }
 
 /// Mutable view over the fill/stroke fields shared by [`CircleInstance`] and
@@ -3771,5 +3937,309 @@ mod tests {
 
         let result_false = tooltip_matches(&field_values, |_| Some("false".to_string()));
         assert!(!result_false, "'false' string must not match Bool(true)");
+    }
+
+    // ── a size conditional on a line ────────────────────────────────────────
+
+    fn size_conditional() -> ConditionalEncoding {
+        ConditionalEncoding {
+            selection_name: "s".to_string(),
+            channel: ChannelName::Size,
+            if_selected: EncodingValue::Size { value: 100.0 },
+            if_not: EncodingValue::Size { value: 20.0 },
+        }
+    }
+
+    fn selections_of(sel: SelectionState) -> HashMap<String, SelectionState> {
+        HashMap::from([("s".to_string(), sel)])
+    }
+
+    fn point_selection(indices: &[usize]) -> HashMap<String, SelectionState> {
+        selections_of(SelectionState::Point { indices: indices.to_vec(), field_values: Vec::new() })
+    }
+
+    fn line_stroke() -> ferrum_scene::StrokeStyle {
+        ferrum_scene::StrokeStyle {
+            color: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            width: 1.5,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        }
+    }
+
+    /// A one-panel scene drawing `node` as its only line batch.
+    fn line_scene(node: SceneNode) -> ferrum_scene::SceneGraph {
+        use ferrum_scene::{CoordKind, Rect};
+        let area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 };
+        let panel = Panel {
+            id: 0,
+            plot_area: area.clone(),
+            clip: area,
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
+            grid: vec![],
+            marks: vec![MarkBatch { kind: ferrum_scene::MarkBatchKind::Line, nodes: vec![node], ..MarkBatch::default() }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
+        };
+        ferrum_scene::SceneGraph {
+            width: EXTENT[2] as f64,
+            height: EXTENT[3] as f64,
+            background: None,
+            title: vec![],
+            panels: vec![panel],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: ferrum_scene::InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    /// One line node whose width vertices come from `rows`, the shape
+    /// `mark_line` emits under a size conditional.
+    fn conditional_line_scene(node: SceneNode, rows: Vec<usize>) -> ferrum_scene::SceneGraph {
+        conditional_line_scene_rows(node, rows.into_iter().map(ferrum_scene::VertexRow::Row).collect())
+    }
+
+    fn conditional_line_scene_rows(node: SceneNode, rows: Vec<ferrum_scene::VertexRow>) -> ferrum_scene::SceneGraph {
+        let mut scene = line_scene(node);
+        let batch = &mut scene.panels[0].marks[0];
+        batch.data_indices = match rows.first() {
+            Some(ferrum_scene::VertexRow::Row(r)) => Some(vec![*r]),
+            _ => Some(vec![0]),
+        };
+        batch.vertex_rows = Some(vec![rows]);
+        scene
+    }
+
+    fn zigzag() -> SceneNode {
+        SceneNode::Polyline {
+            points: vec![(60.0, 100.0), (160.0, 100.0), (260.0, 200.0), (360.0, 300.0)],
+            style: line_stroke(),
+            widths: None,
+        }
+    }
+
+    fn node_widths(panels: &[Panel]) -> Option<Vec<f64>> {
+        match &panels[0].marks[0].nodes[0] {
+            SceneNode::Polyline { widths, .. } | SceneNode::Path { widths, .. } => widths.clone(),
+            other => panic!("not a line node: {other:?}"),
+        }
+    }
+
+    fn mesh_bytes(mesh: &lyon::tessellation::VertexBuffers<crate::tessellate::MeshVertex, u32>) -> (Vec<u8>, Vec<u32>) {
+        (bytemuck::cast_slice(&mesh.vertices).to_vec(), mesh.indices.clone())
+    }
+
+    const EXTENT: [f32; 4] = [0.0, 0.0, 500.0, 400.0];
+
+    /// A point selection redraws each vertex at the dot diameter of its own
+    /// row's branch, and the redrawn mesh is the tapered tessellation of
+    /// exactly those widths: the same bytes the loader produces for a line
+    /// that carried them.
+    #[test]
+    fn a_selection_redraws_each_line_vertex_at_its_own_rows_branch() {
+        let scene = conditional_line_scene(zigzag(), vec![10, 11, 12, 13]);
+        let conditionals = [size_conditional()];
+        let lines = conditional_line_panels(&scene.panels, &conditionals, &point_selection(&[11, 13]))
+            .expect("a line carrying vertex_rows is redrawn");
+
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        assert_eq!(node_widths(&lines), Some(vec![off, on, off, on]));
+
+        let (mesh, ranges) = crate::scene_load::mark_mesh(&lines, EXTENT).unwrap();
+        let mut tapered = scene.clone();
+        if let SceneNode::Polyline { widths, .. } = &mut tapered.panels[0].marks[0].nodes[0] {
+            *widths = Some(vec![off, on, off, on]);
+        }
+        let want = load_scene(&tapered).unwrap();
+        assert_eq!(mesh_bytes(&mesh), mesh_bytes(&want.mesh_buffers));
+        assert_eq!(format!("{ranges:?}"), format!("{:?}", want.mark_mesh_panels));
+
+        // Every vertex sits between the two branches' half-widths (a turn's
+        // bracketing vertices take the interpolated width), reaching both.
+        let half_widths: Vec<f32> = mesh.vertices.iter().map(|v| v.half_width).collect();
+        let (lo, hi) = half_widths.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &w| (lo.min(w), hi.max(w)));
+        assert!((lo - (off / 2.0) as f32).abs() < 1e-4 && (hi - (on / 2.0) as f32).abs() < 1e-4, "{lo}..{hi}");
+
+        let base = load_scene(&scene).unwrap();
+        assert_ne!(mesh_bytes(&mesh), mesh_bytes(&base.mesh_buffers), "the redraw must change the loaded mesh");
+    }
+
+    /// Clicking a mark outside the line (its row is no vertex's) puts every
+    /// vertex on the unselected branch: one constant width along the line.
+    #[test]
+    fn a_selection_missing_every_row_draws_the_unselected_branch_throughout() {
+        let scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &point_selection(&[4])).unwrap();
+        assert_eq!(node_widths(&lines), Some(vec![ferrum_scene::dot_diameter(20.0); 4]));
+    }
+
+    /// With no active selection the line keeps no `widths` and tessellates
+    /// byte for byte as it loaded, so clearing a selection restores it.
+    #[test]
+    fn an_empty_selection_tessellates_the_line_as_loaded() {
+        let scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        let base = load_scene(&scene).unwrap();
+        for selections in [selections_of(SelectionState::Empty), HashMap::new()] {
+            let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &selections).unwrap();
+            assert_eq!(node_widths(&lines), None);
+            let (mesh, _) = crate::scene_load::mark_mesh(&lines, EXTENT).unwrap();
+            assert_eq!(mesh_bytes(&mesh), mesh_bytes(&base.mesh_buffers));
+        }
+    }
+
+    /// A brush selects a stepped path's vertices by containment of each
+    /// command's endpoint, the `H`/`V` shorthand included.
+    #[test]
+    fn a_brush_selects_each_step_vertex_by_its_endpoint() {
+        use ferrum_scene::{FillStroke, PathCmd};
+        let step = SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 60.0, y: 100.0 },
+                PathCmd::HLineTo { x: 160.0 },
+                PathCmd::VLineTo { y: 200.0 },
+                PathCmd::HLineTo { x: 260.0 },
+            ],
+            style: FillStroke {
+                fill: None,
+                stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+                stroke_width: 1.5,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+            closed: false,
+            widths: None,
+        };
+        let scene = conditional_line_scene(step, vec![0, 0, 1, 1]);
+        let brush = SelectionState::Interval { x_range: Some((150.0, 300.0)), y_range: Some((150.0, 250.0)) };
+        let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &selections_of(brush)).unwrap();
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        // Endpoints (60,100) (160,100) (160,200) (260,200): only the last two
+        // fall inside the brush's y band.
+        assert_eq!(node_widths(&lines), Some(vec![off, off, on, on]));
+        assert!(crate::scene_load::mark_mesh(&lines, EXTENT).is_ok());
+    }
+
+    /// Restyled widths are baked like every other stroke width: times the
+    /// panel's layout `mag`.
+    #[test]
+    fn restyled_widths_scale_by_the_layout_mag() {
+        let mut scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        scene.panels[0].layout_scale = LayoutScale { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let baked = crate::scene_load::bake_panels(&scene);
+        let lines = conditional_line_panels(&baked, &[size_conditional()], &point_selection(&[0])).unwrap();
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        assert_eq!(node_widths(&lines), Some(vec![2.0 * on, 2.0 * off, 2.0 * off, 2.0 * off]));
+    }
+
+    /// Under a non-identity layout (`sx != sy`, translated) the redrawn mesh
+    /// of the baked panels is byte for byte the loader's mesh, ranges and plot
+    /// area for the same widths: at rest, and restyled against a line that
+    /// loaded with the restyled widths in its own unbaked space.
+    #[test]
+    fn a_non_identity_layout_redraw_matches_the_loaded_mesh() {
+        let layout = LayoutScale { sx: 2.0, sy: 1.5, tx: 10.0, ty: 20.0 };
+        let mut scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        scene.panels[0].layout_scale = layout;
+        let baked = crate::scene_load::bake_panels(&scene);
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        let mut tapered = scene.clone();
+        if let SceneNode::Polyline { widths, .. } = &mut tapered.panels[0].marks[0].nodes[0] {
+            *widths = Some(vec![on, off, off, off]);
+        }
+        for (selections, loaded) in [(HashMap::new(), &scene), (point_selection(&[0]), &tapered)] {
+            let lines = conditional_line_panels(&baked, &[size_conditional()], &selections).unwrap();
+            let (mesh, ranges) = crate::scene_load::mark_mesh(&lines, EXTENT).unwrap();
+            let want = load_scene(loaded).unwrap();
+            assert_eq!(mesh_bytes(&mesh), mesh_bytes(&want.mesh_buffers));
+            assert_eq!(format!("{ranges:?}"), format!("{:?}", want.mark_mesh_panels));
+        }
+
+        let mut identity = tapered.clone();
+        identity.panels[0].layout_scale = LayoutScale::identity();
+        let at_identity = load_scene(&identity).unwrap();
+        assert_ne!(
+            mesh_bytes(&load_scene(&tapered).unwrap().mesh_buffers),
+            mesh_bytes(&at_identity.mesh_buffers),
+            "the layout must move the mesh, or the equality above proves nothing"
+        );
+    }
+
+    /// A loaded scene whose rows do not carry one row per vertex, or one list
+    /// per line, is refused when it loads, in the voice of a misaligned
+    /// `widths`, and never drawn at a guessed width; a scene with no such
+    /// line needs no redraw.
+    #[test]
+    fn misaligned_vertex_rows_refuse_at_load() {
+        use ferrum_scene::TaperError;
+        let short = conditional_line_scene(zigzag(), vec![0, 1, 2]);
+        let err = load_scene(&short).err();
+        assert_eq!(err, Some(TaperError::RowsMisaligned { points: 4, rows: 3 }));
+        assert_eq!(
+            crate::error::WasmRenderError::from(err.unwrap()).to_string(),
+            "mark_line: the tapered line cannot be drawn: tapered stroke has 3 vertex rows for 4 vertices; it \
+             needs one row per vertex"
+        );
+        let mut two_lists = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        two_lists.panels[0].marks[0].vertex_rows.as_mut().unwrap().push(vec![]);
+        assert_eq!(load_scene(&two_lists).err(), Some(TaperError::RowListsMisaligned { nodes: 1, lists: 2 }));
+        assert!(load_scene(&conditional_line_scene(zigzag(), vec![0, 1, 2, 3])).is_ok(), "aligned rows load");
+
+        let plain = line_scene(zigzag());
+        assert!(conditional_line_panels(&plain.panels, &[size_conditional()], &point_selection(&[0])).is_none());
+    }
+
+    /// A vertex a break cut between rows on different branches draws the two
+    /// branch widths interpolated at the cut, by the taper helper's rule.
+    #[test]
+    fn a_cut_vertex_interpolates_its_two_rows_branch_widths() {
+        use ferrum_scene::VertexRow;
+        let cut = |from, to, t| VertexRow::Cut { from: Box::new(VertexRow::Row(from)), to: Box::new(VertexRow::Row(to)), t };
+        // Rows 1 (unselected) and 2 (selected) meet at a cut a quarter along.
+        let rows = vec![VertexRow::Row(1), cut(1, 2, 0.25), VertexRow::Row(2), VertexRow::Row(2)];
+        let scene = conditional_line_scene_rows(zigzag(), rows);
+        let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &point_selection(&[2])).unwrap();
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        let at_cut = off + (on - off) * 0.25;
+        assert_eq!(node_widths(&lines), Some(vec![off, at_cut, on, on]));
+        // A cut nested in a cut interpolates its inner end first.
+        let nested = VertexRow::Cut { from: Box::new(cut(1, 2, 0.5)), to: Box::new(VertexRow::Row(2)), t: 0.5 };
+        let scene = conditional_line_scene_rows(zigzag(), vec![VertexRow::Row(1), nested, VertexRow::Row(2), VertexRow::Row(2)]);
+        let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &point_selection(&[2])).unwrap();
+        let inner = off + (on - off) * 0.5;
+        assert_eq!(node_widths(&lines).unwrap()[1], inner + (on - inner) * 0.5);
+    }
+
+    /// A restyled line is hit-tested at the width it draws: a point beyond
+    /// its loaded width but within the selected branch's misses on the loaded
+    /// panels and hits on the restyled ones.
+    #[test]
+    fn a_restyled_line_hits_at_its_restyled_width() {
+        let scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        let lines = conditional_line_panels(&scene.panels, &[size_conditional()], &point_selection(&[0, 1, 2, 3])).unwrap();
+        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+        let plan = crate::hit_test::SlotRescalePlan { slot_rescales: &[], panel_slot_counts: &[1] };
+        // 8 px below the first segment: beyond the loaded 1.5 px, within the
+        // selected branch's ~11.3 px.
+        let (x, y) = (110.0, 108.0);
+        assert!(crate::hit_test::hit_test(&scene.panels, x, y, &zoom, &plan).is_none());
+        assert!(crate::hit_test::hit_test(&lines, x, y, &zoom, &plan).is_some());
     }
 }

@@ -94,7 +94,7 @@ pub struct ChartSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selections: Vec<ferrum_scene::SelectionSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditionals: Vec<ferrum_scene::ConditionalEncoding>,
+    pub conditionals: Vec<ChartConditional>,
     /// Reactive parameters (D6): `fm.param` variables and selections, unified.
     /// Read by the static resolver (for `domainParam` substitution) and by WASM
     /// (for live reactive wiring). Additive — empty by default, omitted from
@@ -106,6 +106,41 @@ pub struct ChartSpec {
     /// encoding channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_description: Option<String>,
+}
+
+/// One `ChartSpec.conditionals` entry: the conditional the interactive
+/// runtime applies, and which layers declared it.
+///
+/// `layers` names the indices into `ChartSpec.layers` whose own encoding
+/// declared the conditional (`chart + chart` keeps each operand's
+/// declaration on that operand's layers). `None` (absent on the wire) is a
+/// declaration by the whole chart, every layer of it, which is every
+/// unlayered chart's and every pre-scope spec's. Only a line reads it: a
+/// `size` conditional restyles a line's width, and has its branches checked,
+/// only when the line's layer declared it. Points and rects apply every
+/// conditional chart-wide. The scene's `interaction.conditionals` carries
+/// the bare [`ferrum_scene::ConditionalEncoding`]: the runtime never reads a
+/// scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChartConditional {
+    #[serde(flatten)]
+    pub encoding: ferrum_scene::ConditionalEncoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<usize>>,
+}
+
+impl ChartConditional {
+    /// Whether layer `layer` declared this conditional.
+    pub fn declared_by(&self, layer: usize) -> bool {
+        self.layers.as_ref().is_none_or(|layers| layers.contains(&layer))
+    }
+}
+
+impl From<ferrum_scene::ConditionalEncoding> for ChartConditional {
+    /// A conditional declared by the whole chart.
+    fn from(encoding: ferrum_scene::ConditionalEncoding) -> Self {
+        Self { encoding, layers: None }
+    }
 }
 
 #[pymethods]

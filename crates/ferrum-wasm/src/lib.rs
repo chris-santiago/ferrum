@@ -122,6 +122,20 @@ struct LoadedScene {
     /// panel today; only a ratio-fitted composite panel actually differs from
     /// `scene.panels`.
     baked_panels: Vec<ferrum_scene::Panel>,
+    /// `baked_panels` with every line a `size` conditional restyled at the
+    /// last selection change (`conditional::redraw_conditional_lines`);
+    /// `None` until one is. `baked_panels` stays the loaded geometry the
+    /// redraw starts from.
+    restyled_panels: Option<Vec<ferrum_scene::Panel>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LoadedScene {
+    /// The panels hit-testing reads: the restyled ones once a selection has
+    /// restyled a line, so a line's hover tolerance is the width it draws.
+    fn hit_panels(&self) -> &[ferrum_scene::Panel] {
+        self.restyled_panels.as_deref().unwrap_or(&self.baked_panels)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -193,6 +207,7 @@ impl WasmRenderer {
             buffers,
             scene,
             baked_panels,
+            restyled_panels: None,
         });
 
         if let Some(ref loaded) = self.loaded {
@@ -333,6 +348,7 @@ impl WasmRenderer {
                     buffers: final_buffers,
                     scene: final_scene,
                     baked_panels: final_baked_panels,
+                    restyled_panels: None,
                 });
             }
         }
@@ -380,9 +396,10 @@ impl WasmRenderer {
 
         // Update selection state via Rust hit-test (authoritative — operates on actual scene data).
         // Pass spatial index for O(log n) circle/rect hit-testing. Baked
-        // geometry (D4a amendment addendum) — see `LoadedScene::baked_panels`.
+        // geometry (D4a amendment addendum) — see `LoadedScene::baked_panels`
+        // and `LoadedScene::hit_panels`.
         self.interaction_state.handle_click_with_index(
-            &loaded.baked_panels,
+            loaded.hit_panels(),
             &self.selections,
             x as f64,
             y as f64,
@@ -552,9 +569,10 @@ impl WasmRenderer {
 
         // Spatial-index + scene-graph hit-test (covers both packed and
         // non-packed batches via the R-tree built in load_scene). Baked
-        // geometry (D4a amendment addendum).
+        // geometry (D4a amendment addendum), restyled lines at their drawn
+        // width (`LoadedScene::hit_panels`).
         if let Some(hr) = hit_test::hit_test_nearest_with_index(
-            &loaded.baked_panels,
+            loaded.hit_panels(),
             x as f64,
             y as f64,
             &self.zoom,
@@ -723,7 +741,7 @@ impl WasmRenderer {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok("{}".to_string());
         };
-        conditional::apply_conditionals_and_render(
+        let (state_json, restyled) = conditional::apply_conditionals_and_render(
             &loaded.baked_panels,
             &loaded.scene.interaction.conditionals,
             &loaded.data,
@@ -731,7 +749,9 @@ impl WasmRenderer {
             &self.interaction_state,
             &self.gpu,
             &self.pipelines,
-        )
+        )?;
+        loaded.restyled_panels = restyled;
+        Ok(state_json)
     }
 
     /// D6 crossfilter (`BindingRole::Filter`): dim marks on each bound target
@@ -853,6 +873,14 @@ impl WasmRenderer {
         }
 
         loaded.buffers.update_instances(&self.gpu, &circles, &rects);
+        loaded.restyled_panels = conditional::redraw_conditional_lines(
+            &loaded.baked_panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data,
+            &mut loaded.buffers,
+            &self.gpu,
+        )?;
         render::render_frame(
             &self.gpu,
             &self.pipelines,

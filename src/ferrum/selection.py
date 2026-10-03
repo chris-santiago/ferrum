@@ -248,6 +248,14 @@ class ConditionalSpec:
         The originating ``Selection``, carried so callers
         (``Chart.encode`` / ``Chart.conditional``) can auto-register it without
         a separate ``.add_selection()`` call.
+    layers : tuple of int or None, default None
+        Indices of the chart layers that declared this conditional. Set by
+        the layering entry points (``chart + chart``, ``Chart.layer()``,
+        ``chart + SecondaryY(...)``) and by ``Chart.to_spec()`` on a layered
+        chart. ``None`` means the whole chart declared it, which on an
+        unlayered chart is its one layer. A size conditional restyles a line
+        only when the line's own layer is listed; points and rects apply
+        every conditional chart-wide.
 
     Examples
     --------
@@ -263,6 +271,7 @@ class ConditionalSpec:
     if_not: Any
     channel: str | None = None
     selection: Selection | None = None
+    layers: tuple[int, ...] | None = None
 
     def to_spec_dict(self, *, params: dict[str, Parameter] | None = None) -> dict:
         """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape.
@@ -288,7 +297,7 @@ class ConditionalSpec:
             if self.channel is not None
             else _infer_conditional_channel(self.if_selected, self.if_not)
         )
-        return {
+        spec = {
             "selection_name": self.selection_name,
             "channel": channel,
             "if_selected": _resolve_encoding_value(
@@ -296,6 +305,9 @@ class ConditionalSpec:
             ),
             "if_not": _resolve_encoding_value(self.if_not, channel=channel, params=params),
         }
+        if self.layers is not None:
+            spec["layers"] = list(self.layers)
+        return spec
 
 
 def selection_point(

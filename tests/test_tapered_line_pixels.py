@@ -820,3 +820,183 @@ def test_two_loads_of_a_tapered_line_are_byte_identical(browser: Any, tmp_path: 
     assert frames[0] == frames[1], (
         f"two loads of one chart capture different frames (committed bundle: {_BUNDLE_PATH})"
     )
+
+
+# ── A conditional size on a line ─────────────────────────────────────────────
+
+_COND_LINE_DF = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [3.0, 3.0, 4.0, 5.0]})
+# The companion sits away from the line; its own opacity conditional is the
+# proof that the click registered a selection.
+_COND_COMPANION_DF = pl.DataFrame({"x": [4.0], "y": [1.0]})
+_COND_SELECTED_SIZE = 100.0
+_COND_UNSELECTED_SIZE = 20.0
+
+
+def _conditional_size_line() -> Any:
+    sel = fm.selection_point(name="s", clear="false")
+    size = fm.when(sel).then(_COND_SELECTED_SIZE).otherwise(_COND_UNSELECTED_SIZE)
+    line = (
+        fm.Chart(_COND_LINE_DF)
+        .mark_line(color="black")
+        .encode(x="x", y="y", size=size)
+        .configure_grid(x=False, y=False)
+    )
+    companion = (
+        fm.Chart(_COND_COMPANION_DF)
+        .mark_point(size=400, fill="#16a34a")
+        .encode(x="x", y="y", opacity=sel.when(fm.value(0.2)).otherwise(fm.value(1.0)))
+    )
+    return (line + companion).add_selection(sel)
+
+
+def _line_thickness(img: Image, device_pt: tuple[float, float]) -> float:
+    """Device-px ink of the one stroke crossing the column through *device_pt*."""
+    x, y = round(device_pt[0]), round(device_pt[1])
+    runs = _column_runs(img, x, y - 40, y + 40, _INK)
+    assert len(runs) == 1, f"expected one stroke crossing at {device_pt}, got {runs}"
+    return runs[0].integral
+
+
+@dataclass(frozen=True)
+class Click:
+    """Captures either side of one click, at the clicked mark and at each probe."""
+
+    before: Image
+    after: Image
+    clicked_before: tuple[int, ...]
+    clicked_after: tuple[int, ...]
+    probes: list[tuple[float, float]]  # device px
+
+
+def _click(
+    chart: Any,
+    svg: str,
+    at: tuple[float, float],
+    probes: list[tuple[float, float]],
+    browser: Any,
+    tmp_path: Path,
+) -> Click:
+    """Export *chart*, click its SVG point *at*, and capture before and after.
+
+    *probes* are SVG points, returned mapped to device px.
+    """
+    svg_w, svg_h = pc.parse_svg_size(svg)
+    html = tmp_path / "chart.html"
+    chart.interactive().save(str(html))
+    page, rect = _load_on_whole_pixels(browser, html)
+    try:
+        device_at = pc.svg_to_device(rect, svg_w, svg_h, at)
+        before_png = pc.screenshot(page)
+        pc.click_at(page, pc.svg_to_client(rect, svg_w, svg_h, at))
+        after_png = pc.screenshot(page)
+        clicked_before, clicked_after = (
+            pc.sample_pixels(page, png, [device_at])[0] for png in (before_png, after_png)
+        )
+        return Click(
+            before=Image.from_png(before_png, linear=True),
+            after=Image.from_png(after_png, linear=True),
+            clicked_before=clicked_before,
+            clicked_after=clicked_after,
+            probes=[pc.svg_to_device(rect, svg_w, svg_h, p) for p in probes],
+        )
+    finally:
+        page.close()
+
+
+def _assert_click_registered(click: Click) -> None:
+    assert math.dist(click.clicked_before[:3], click.clicked_after[:3]) > 10, (
+        f"the click never registered: the companion's opacity conditional did not change "
+        f"({click.clicked_before} -> {click.clicked_after}; committed bundle: {_BUNDLE_PATH})"
+    )
+
+
+def _polyline_points(svg: str) -> list[tuple[float, float]]:
+    pts = re.search(r'<polyline[^>]*\bpoints="([^"]+)"', svg).group(1).split()
+    return [(float(p.split(",")[0]), float(p.split(",")[1])) for p in pts]
+
+
+def _green_circles(svg: str) -> list[tuple[float, float]]:
+    found = re.findall(r'<circle[^>]*\bcx="([-\d.]+)"[^>]*\bcy="([-\d.]+)"[^>]*#16a34a', svg)
+    return [(float(cx), float(cy)) for cx, cy in found]
+
+
+def _dot_diameter(size: float) -> float:
+    return 2 * math.sqrt(size / math.pi)
+
+
+def test_a_click_restyles_a_line_carrying_a_conditional_size(browser: Any, tmp_path: Path) -> None:
+    """Clicking the companion selects it and leaves every line row unselected,
+    so the line must redraw at the unselected branch's dot-diameter width
+    ``2*sqrt(20/pi)`` CSS px, measured on its horizontal first segment."""
+    chart = _conditional_size_line()
+    svg = chart.to_svg()
+    (x0, y0), (x1, _) = _polyline_points(svg)[:2]
+    (companion,) = _green_circles(svg)
+    click = _click(chart, svg, companion, [((x0 + x1) / 2, y0)], browser, tmp_path)
+    _assert_click_registered(click)
+
+    (on_line,) = click.probes
+    before = _line_thickness(click.before, on_line)
+    after = _line_thickness(click.after, on_line)
+    assert before == pytest.approx(1.5 * _DPR, abs=_THICKNESS_TOL)
+    expected = _dot_diameter(_COND_UNSELECTED_SIZE) * _DPR
+    assert after == pytest.approx(expected, abs=_THICKNESS_TOL), (
+        f"line thickness {before:.2f} -> {after:.2f} device px after the click; "
+        f"the unselected branch draws {expected:.2f} (committed bundle: {_BUNDLE_PATH})"
+    )
+
+
+# The line and its companion read one frame, so a companion click selects the
+# same row number the line's vertex carries. The companion row sits two y
+# units below the line.
+_COND_SHARED_DF = pl.DataFrame(
+    {"x": [1.0, 2.0, 3.0, 4.0], "y": [3.0, 3.0, 4.0, 5.0], "below": [1.0, 1.0, 1.0, 1.0]}
+)
+
+
+def _conditional_size_line_sharing_rows() -> Any:
+    sel = fm.selection_point(name="s", clear="false")
+    size = fm.when(sel).then(_COND_SELECTED_SIZE).otherwise(_COND_UNSELECTED_SIZE)
+    line = (
+        fm.Chart(_COND_SHARED_DF)
+        .mark_line(color="black")
+        .encode(x="x", y="y", size=size)
+        .configure_grid(x=False, y=False)
+    )
+    companion = (
+        fm.Chart(_COND_SHARED_DF)
+        .mark_point(fill="#16a34a")
+        .encode(x="x", y="below", opacity=sel.when(fm.value(0.2)).otherwise(fm.value(1.0)))
+    )
+    return (line + companion).add_selection(sel)
+
+
+def test_a_click_selecting_a_line_row_draws_that_vertex_at_the_selected_width(
+    browser: Any, tmp_path: Path
+) -> None:
+    """Clicking the companion on row 0 selects row 0, so the line's first
+    vertex draws the selected branch's width and its second the unselected
+    one. The first segment is horizontal and tapers linearly between them, so
+    its midpoint reads their mean: neither branch alone, which a runtime
+    ignoring membership (every vertex unselected) or applying the selected
+    branch everywhere would draw."""
+    chart = _conditional_size_line_sharing_rows()
+    svg = chart.to_svg()
+    (x0, y0), (x1, _) = _polyline_points(svg)[:2]
+    row_0 = min(_green_circles(svg))
+    click = _click(chart, svg, row_0, [((x0 + x1) / 2, y0)], browser, tmp_path)
+    _assert_click_registered(click)
+
+    (mid,) = click.probes
+    before = _line_thickness(click.before, mid)
+    after = _line_thickness(click.after, mid)
+    assert before == pytest.approx(1.5 * _DPR, abs=_THICKNESS_TOL)
+    selected = _dot_diameter(_COND_SELECTED_SIZE)
+    unselected = _dot_diameter(_COND_UNSELECTED_SIZE)
+    expected = (selected + unselected) / 2 * _DPR
+    assert after == pytest.approx(expected, abs=_THICKNESS_TOL), (
+        f"line thickness {before:.2f} -> {after:.2f} device px at the first segment's "
+        f"midpoint; a selected row 0 and an unselected row 1 draw {expected:.2f}, every "
+        f"vertex unselected draws {unselected * _DPR:.2f} and every vertex selected "
+        f"{selected * _DPR:.2f} (committed bundle: {_BUNDLE_PATH})"
+    )

@@ -352,6 +352,7 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
         independent_y=True,
     )
     existing_layers, top_xforms = _expand_layers(new)
+    new._conditionals = _scoped_conditionals(new._conditionals, existing_layers)
     new._transforms = top_xforms
     new._layers = existing_layers + [secondary_layer]
     return new
@@ -432,6 +433,27 @@ def _conditional_on_wire(chart: "Chart", wire: str) -> Optional["ConditionalSpec
     return next((c for c in chart._conditionals if _channel_claimed_by(c) == wire), None)
 
 
+def _scoped_conditionals(conditionals: list, layers: list, *, offset: int = 0) -> list:
+    """Stamp each conditional with the indices of the layers that declared it.
+
+    A conditional without a stamp was declared on the chart as a whole, so it
+    belongs to every one of *layers* (lines included, as a chart-level field
+    ``size`` is inherited by every layer); a conditional declared on one
+    layer's own ``Layer`` keeps that layer's stamp. Every stamp is then
+    shifted by *offset*, the index *layers* start at in the chart they are
+    merged into. Called wherever a chart's layers are
+    fixed: before ``+``, ``Chart.layer()`` or ``SecondaryY`` appends layers,
+    and by ``Chart.to_spec()`` on a layered chart.
+    """
+    scope = tuple(range(max(len(layers), 1)))
+    return [
+        replace(c, layers=tuple(i + offset for i in (scope if c.layers is None else c.layers)))
+        if isinstance(c, ConditionalSpec)
+        else c
+        for c in conditionals
+    ]
+
+
 def _conditional_declaration_label(spec: "ConditionalSpec", *, whose: str) -> str:
     """Name a conditional declaration that carries no parameter spelling of its own.
 
@@ -475,6 +497,7 @@ def _append_conditional(
     claimed_here: dict[str, str],
     context: str,
     declare: Callable[[str], str],
+    layers: tuple[int, ...] | None = None,
 ) -> None:
     """Record one conditional on *target*, refusing a wire-channel collision.
 
@@ -488,7 +511,9 @@ def _append_conditional(
     called this (``"encode()"`` or ``"Chart.layer()"``) and *declare* formats
     one entry's own key into that entry's declaration text (``"encode(color=...)"``
     or ``"Layer(encoding={'color': ...})"``) -- both required, not defaulted,
-    so a caller cannot silently inherit the wrong voice.
+    so a caller cannot silently inherit the wrong voice. *layers* stamps the
+    indices of the layers that declared the conditional (``None``: the whole
+    chart, see :func:`_scoped_conditionals`).
 
     **Collision rule.** A wire channel carries at most one conditional. Two
     declarations that resolve to the same channel — ``encode(color=condA,
@@ -547,7 +572,7 @@ def _append_conditional(
             )
         )
     claimed_here[wire] = source_key
-    target._conditionals.append(replace(spec, channel=wire))
+    target._conditionals.append(replace(spec, channel=wire, layers=layers))
     sel = spec.selection
     if sel is not None:
         _append_unique_by_name(target._selections, sel)
@@ -631,6 +656,7 @@ def _strip_layer_conditionals(
     encoding: dict,
     *,
     claimed_here: dict[str, str],
+    layer_index: int,
 ) -> dict:
     """Lift a layer-declared channel's ``condition=`` into *target*'s chart-level conditionals.
 
@@ -679,6 +705,9 @@ def _strip_layer_conditionals(
         call (mirrors ``encode()``'s per-call ``claimed_here``) -- so two
         layers attached in the same call declaring a conditional on the
         same wire channel collide exactly as two ``encode()`` kwargs would.
+    layer_index :
+        The index this layer takes in *target*; every conditional it lifts is
+        stamped as declared by that layer alone.
 
     Returns
     -------
@@ -706,6 +735,7 @@ def _strip_layer_conditionals(
                 claimed_here=claimed_here,
                 context="Chart.layer()",
                 declare=declare,
+                layers=(layer_index,),
             )
             continue
         if isinstance(channel, ChannelBase):
@@ -725,6 +755,7 @@ def _strip_layer_conditionals(
                     claimed_here=claimed_here,
                     context="Chart.layer()",
                     declare=declare,
+                    layers=(layer_index,),
                 )
                 if wire != name:
                     alias_conditional_sources[wire] = name
@@ -1201,7 +1232,25 @@ class Chart(
         stroke : str, optional
             Stroke colour override.
         stroke_width : float, optional
-            Line width in pixels.  Default is ``2``.
+            Line width in pixels.  Defaults to the theme's
+            ``line_stroke_width`` (``1.5`` in the default theme).
+        size : float, optional
+            Line width as a dot area in square pixels: the line draws
+            ``2 * sqrt(size / pi)`` pixels wide, the diameter of a point of
+            that area.  Must be a positive number.  A ``size`` encoding
+            outranks it and tapers the line per vertex.  ``size`` and
+            ``stroke_width`` both set the line's width, so a line that binds
+            both (each as a kwarg or an encoding) raises ``ValueError`` when
+            rendered. A conditional ``size=fm.when(sel).then(a).otherwise(b)``
+            on the line draws the base width in static output; the
+            interactive view redraws each vertex at the width of its row's
+            active branch as the selection changes. Every branch must be
+            positive, and a conditional ``size`` plus ``stroke_width`` raises
+            ``ValueError`` like any other ``size``. A conditional encoded on
+            the chart as a whole (including ``mark_line(point=True)`` and a
+            layered chart) applies to every layer, lines included, as a
+            field ``size`` does; one encoded on another layer's own chart or
+            ``Layer`` leaves this line's width alone.
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         interpolate : str, optional
@@ -1232,6 +1281,11 @@ class Chart(
         >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
         >>> fm.Chart(df).mark_line(stroke_width=3, interpolate="monotone").encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
+
+        A line that tapers with ``y``:
+
+        >>> fm.Chart(df).mark_line().encode(x="x", y="y", size="y")
+        Chart(mark='line', encoding=['x', 'y', 'size'])
         """
         point_overlay = kwargs.pop("point", False)
         line_chart = self._set_mark("line", **kwargs)
@@ -2047,6 +2101,10 @@ class Chart(
         resolved = self._resolve_pending()
         new = resolved._clone()
         existing, _ = _expand_layers(new)
+        if new._mark is not None or new._layers is not None:
+            # A markless chart's conditionals are chart-level: they stay
+            # unstamped so ``to_spec`` scopes them to every attached layer.
+            new._conditionals = _scoped_conditionals(new._conditionals, existing)
         converted = []
         # wire channel -> the encode key that claimed it in THIS layer() call,
         # shared across every layer being attached (mirrors encode()'s
@@ -2077,7 +2135,10 @@ class Chart(
                         name=ly.name,
                         mark=ly.mark,
                         encoding=_strip_layer_conditionals(
-                            new, ly.encoding, claimed_here=claimed_here
+                            new,
+                            ly.encoding,
+                            claimed_here=claimed_here,
+                            layer_index=len(existing) + len(converted),
                         ),
                         mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
                     )
@@ -2422,7 +2483,10 @@ class Chart(
         # not the leading chart's.
         _promote_layer_channels(new)
         # Merge RHS selections and conditionals into the layered chart
-        # so interactive features from all layers are preserved.
+        # so interactive features from all layers are preserved. Each side's
+        # conditionals keep the layers that declared them, the RHS's shifted
+        # past the LHS's layers.
+        new._conditionals = _scoped_conditionals(lhs._conditionals, lhs_layers)
         if rhs._selections:
             from ferrum.parameter import VariableParameter
 
@@ -2438,14 +2502,15 @@ class Chart(
         if rhs._conditionals:
             # One-conditional-per-wire-channel, enforced across the merge
             # too (2026-09-11, batch-H close cycle 4): the wire's
-            # `conditionals` list is flat and scope-free (every conditional
-            # applies to every mark batch in every panel -- see
+            # `conditionals` list is flat, and the interactive runtime applies
+            # every conditional to every point and rect batch in every panel
+            # (only a line reads its `layers` scope -- see
             # `_append_conditional`'s docstring), so two conditionals
             # colliding on one channel is exactly as undefined here as it
             # is within one `encode()` call. Checked against `new._conditionals`
             # as it accumulates, so a third+ chart in a chained
             # `a + b + c` merge collides against everything merged so far.
-            for cond in rhs._conditionals:
+            for cond in _scoped_conditionals(rhs._conditionals, rhs_layers, offset=len(lhs_layers)):
                 wire = _channel_claimed_by(cond)
                 earlier = _conditional_on_wire(new, wire) if wire is not None else None
                 if earlier is not None:
@@ -3391,8 +3456,11 @@ class Chart(
             kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
             self._inject_selection_tooltips(kw, resolved._selections)
         if resolved._conditionals:
+            conditionals = resolved._conditionals
+            if resolved._layers:
+                conditionals = _scoped_conditionals(conditionals, resolved._layers)
             kw["conditionals"] = json.dumps(
-                [c.to_spec_dict(params=param_registry) for c in resolved._conditionals]
+                [c.to_spec_dict(params=param_registry) for c in conditionals]
             )
 
         if params_list:

@@ -47,7 +47,13 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from ferrum._core import interpolate_accepted_values, stroke_dash_palette
+from ferrum import ChartSpec
+from ferrum._core import (
+    interpolate_accepted_values,
+    render_interactive,
+    render_svg,
+    stroke_dash_palette,
+)
 from tests._snapshots import decode_png_rgba, rasterize_svg
 
 _DF = pl.DataFrame(
@@ -1362,3 +1368,288 @@ def test_a_rule_inheriting_the_size_field_keeps_the_line_swatches(route: str) ->
     swatches = _legend_swatches(route, chart)
     assert [k for k, _ in swatches] == ["line"] * len(radii)
     assert [w for _, w in swatches] == pytest.approx([2 * r for r in radii], abs=2e-3)
+
+
+# ---------------------------------------------------------------------------
+# Python doors. `relplot(kind="line", size=)` draws the same taper as
+# `mark_line().encode(size=)`; a hand-built wire spec reaches the width
+# refusal through the same line build as a Python chart; a conditional
+# `size` draws the base appearance statically, as it does on a point.
+# ---------------------------------------------------------------------------
+
+
+def _endpoint_half_thickness(
+    vertices: list[tuple[float, float]], end: tuple[float, float]
+) -> float:
+    """Half the outline's thickness at a butt-capped end: its corners are the
+    outline vertices nearest the centerline's endpoint."""
+    return min(math.dist(v, end) for v in vertices)
+
+
+def test_relplot_line_size_tapers_its_outline_from_the_low_to_the_high_value() -> None:
+    df = pl.DataFrame(
+        {"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 0.5, 1.5], "v": [1.0, 2.0, 3.0, 4.0]}
+    )
+    chart = fm.relplot(df, x="x", y="y", size="v", kind="line", height=220, aspect=1.5)
+    points, widths = _single_line_node(chart)
+
+    outlines = _outline_elements(chart.to_svg())
+    assert len(outlines) == 1
+    vertices = _outline_vertices(outlines[0])
+    low = _endpoint_half_thickness(vertices, points[0])
+    high = _endpoint_half_thickness(vertices, points[-1])
+    assert low == pytest.approx(widths[0] / 2, abs=1e-2)
+    assert high == pytest.approx(widths[-1] / 2, abs=1e-2)
+    assert high > low + 1.0
+
+
+_WIRE_CONFLICT = {
+    "data": {"kind": "named", "name": "default"},
+    "mark": "line",
+    "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "size": {"field": "v"}},
+    "mark_style": {"stroke_width": 2.0},
+}
+
+
+@pytest.mark.parametrize("output_kind", ("static", "interactive"))
+def test_a_hand_built_wire_spec_reaches_the_width_refusal(output_kind: str) -> None:
+    renderer = render_svg if output_kind == "static" else render_interactive
+    with pytest.raises(ValueError) as exc:
+        renderer(
+            ChartSpec.from_json(json.dumps(_WIRE_CONFLICT)), _DF.to_arrow(), viewport=(400.0, 300.0)
+        )
+    assert str(exc.value) == _CONFLICT_CORE
+
+    # Control: the same wire without `stroke_width` renders.
+    unconflicted = {k: v for k, v in _WIRE_CONFLICT.items() if k != "mark_style"}
+    renderer(ChartSpec.from_json(json.dumps(unconflicted)), _DF.to_arrow(), viewport=(400.0, 300.0))
+
+
+def _conditional_size_chart(mark: str) -> fm.Chart:
+    sel = fm.selection_point(name="s", clear="false")
+    size = fm.when(sel).then(100).otherwise(20)
+    return getattr(fm.Chart(_DF), mark)().encode(x="x", y="y", size=size).add_selection(sel)
+
+
+def test_a_conditional_size_draws_a_line_at_its_base_width_as_it_does_a_point(recwarn) -> None:
+    line = _line_nodes(_conditional_size_chart("mark_line"))
+    base_line = _line_nodes(fm.Chart(_DF).mark_line().encode(x="x", y="y"))
+    assert len(line) == 1
+    assert "widths" not in line[0]
+    assert line[0]["style"]["width"] == base_line[0]["style"]["width"] == 1.5
+    svg = _conditional_size_chart("mark_line").to_svg()
+    assert re.findall(r'<polyline[^>]*\bstroke-width="([\d.]+)"', svg) == ["1.5"]
+    assert not _outline_elements(svg)
+
+    radii = _point_radii(_conditional_size_chart("mark_point"))
+    assert radii == _point_radii(fm.Chart(_DF).mark_point().encode(x="x", y="y"))
+    assert not recwarn.list, [str(w.message) for w in recwarn.list]
+
+
+# ---------------------------------------------------------------------------
+# A size conditional restyles, and checks positivity on, every line in the
+# layers that declared it. One declared on the chart as a whole (a layered
+# chart, `mark_line(point=True)`) belongs to every layer, lines included, as a
+# field `size` does; one declared on a single layer's own chart or `Layer`
+# stays on that layer, so an overlay line beside a point layer's
+# `size=fm.when(...)` keeps its own width. Points and rects keep it chart-wide.
+# ---------------------------------------------------------------------------
+
+_COND_SEL = fm.selection_point(name="s", clear="false")
+
+_COND_CONFLICT = (
+    "mark_line: size and stroke_width both set the line's width (size=fm.when(...), "
+    "stroke_width=3); bind only one. size= sets a dot-diameter width that can taper "
+    "along the line; stroke_width= sets a width in pixels."
+)
+_COND_BRANCH_ZERO = (
+    "mark_line: size=fm.when(...) on selection 's' has a branch of size 0, which gives "
+    "no positive line width. Every width along a line must be positive; give every "
+    "branch a size above 0."
+)
+
+
+def _cond_size(otherwise: float) -> Any:
+    return fm.when(_COND_SEL).then(100).otherwise(otherwise)
+
+
+def _cond_point(otherwise: float = 0) -> fm.Chart:
+    return fm.Chart(_DF).mark_point().encode(x="x", y="y", size=_cond_size(otherwise))
+
+
+def _plain_line() -> fm.Chart:
+    return fm.Chart(_DF).mark_line().encode(x="x", y="y")
+
+
+def _cond_line(otherwise: float = 20, **mark_kwargs: Any) -> fm.Chart:
+    return fm.Chart(_DF).mark_line(**mark_kwargs).encode(x="x", y="y", size=_cond_size(otherwise))
+
+
+def _scene_line_batches(chart: Any) -> list[dict]:
+    scene = json.loads(chart.interactive().scene_json)
+    return [b for p in scene["panels"] for b in p["marks"] if b["kind"] == "line"]
+
+
+def _conditional_stamps(chart: fm.Chart) -> list[list[int] | None]:
+    wire = json.loads(chart.to_spec().to_json())
+    return [c.get("layers") for c in wire["conditionals"]]
+
+
+_SIBLING_ROUTES = {
+    "plus_point_first": lambda: (_cond_point() + _plain_line()).add_selection(_COND_SEL),
+    "plus_line_first": lambda: (_plain_line() + _cond_point()).add_selection(_COND_SEL),
+    "fm_layer_point_first": lambda: fm.layer(_cond_point(), _plain_line()),
+    "fm_layer_line_first": lambda: fm.layer(_plain_line(), _cond_point()),
+    "independent_y": lambda: fm.LayerChart(
+        _cond_point(), _plain_line(), resolve={"y": "independent"}
+    ),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_SIBLING_ROUTES))
+def test_a_sibling_layers_conditional_size_neither_restyles_nor_refuses_a_line(
+    route: str,
+) -> None:
+    chart = _SIBLING_ROUTES[route]()
+    svg = chart.to_svg()
+    assert re.findall(r'<polyline[^>]*\bstroke-width="([\d.]+)"', svg) == ["1.5"]
+    batches = _scene_line_batches(chart)
+    assert len(batches) == 1
+    assert "vertex_rows" not in batches[0]
+    assert [n["style"]["width"] for n in batches[0]["nodes"]] == [1.5]
+    scene = json.loads(chart.interactive().scene_json)
+    assert [c["channel"] for c in scene["interaction"]["conditionals"]] == ["size"]
+
+
+def _cond_line_with_points(otherwise: float = 20, **mark_kwargs: Any) -> fm.Chart:
+    return (
+        fm.Chart(_DF)
+        .mark_line(point=True, **mark_kwargs)
+        .encode(x="x", y="y", size=_cond_size(otherwise))
+    )
+
+
+def _two_lines_chart_level(then: float = 100) -> fm.Chart:
+    size = fm.when(_COND_SEL).then(then).otherwise(20)
+    return (_plain_line() + _plain_line()).encode(size=size).add_selection(_COND_SEL)
+
+
+def test_a_chart_level_conditional_size_restyles_every_line_of_a_layered_chart() -> None:
+    batches = _scene_line_batches(_two_lines_chart_level())
+    assert [b.get("vertex_rows") for b in batches] == [[[0, 1, 2, 3]], [[0, 1, 2, 3]]]
+
+
+@pytest.mark.parametrize("output", ["to_svg", "interactive"])
+def test_a_chart_level_conditional_size_with_a_zero_branch_refuses_on_layered_lines(
+    output: str,
+) -> None:
+    with pytest.raises(ValueError) as exc:
+        _render(_two_lines_chart_level(then=0), output)
+    assert str(exc.value) == f"layer 0: {_COND_BRANCH_ZERO}"
+
+
+def test_a_conditional_size_on_mark_line_point_true_restyles_the_line() -> None:
+    batches = _scene_line_batches(_cond_line_with_points().add_selection(_COND_SEL))
+    assert [b.get("vertex_rows") for b in batches] == [[[0, 1, 2, 3]]]
+
+
+@pytest.mark.parametrize("output", ["to_svg", "interactive"])
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"otherwise": 0}, _COND_BRANCH_ZERO),
+        ({"stroke_width": 3}, _COND_CONFLICT),
+    ],
+    ids=["otherwise_zero", "stroke_width"],
+)
+def test_a_conditional_size_on_mark_line_point_true_refuses_like_a_plain_line(
+    kwargs: dict, message: str, output: str
+) -> None:
+    with pytest.raises(ValueError) as exc:
+        _render(_cond_line_with_points(**kwargs).add_selection(_COND_SEL), output)
+    assert str(exc.value) == f"layer 0: {message}"
+
+
+@pytest.mark.parametrize(
+    ("build", "stamps"),
+    [
+        (lambda: _cond_point() + _plain_line(), [[0]]),
+        (lambda: _plain_line() + _cond_point(), [[1]]),
+        (lambda: _cond_line() + _plain_line() + _cond_point(), None),
+        (lambda: _plain_line() + _cond_line(), [[1]]),
+        (
+            lambda: _base().layer(
+                fm.Layer(
+                    mark="line",
+                    encoding={"x": fm.X("x"), "y": fm.Y("y"), "size": _cond_size(20)},
+                )
+            ),
+            [[1]],
+        ),
+        (lambda: (_base() + _plain_line() + _base()).encode(size=_cond_size(0)), [[0, 1, 2]]),
+        (
+            lambda: (
+                fm.Chart(_DF)
+                .encode(x="x", y="y", size=_cond_size(20))
+                .layer(fm.Layer(mark="line"), fm.Layer(mark="point"))
+            ),
+            [[0, 1, 2]],
+        ),
+        (lambda: _cond_line_with_points(), [[0, 1]]),
+        (lambda: _cond_line() + fm.SecondaryY("v", mark="point"), [[0]]),
+        (lambda: _cond_line(), [None]),
+    ],
+    ids=[
+        "point_plus_line",
+        "line_plus_point",
+        "two_size_conditionals_collide",
+        "line_owns_it_on_the_right",
+        "layer_encoding",
+        "chart_level_on_layered_takes_every_layer",
+        "markless_chart_level_takes_every_attached_layer",
+        "line_point_composite_takes_both_layers",
+        "secondary_y",
+        "unlayered_whole_chart",
+    ],
+)
+def test_every_layering_route_stamps_the_layers_that_declared_the_conditional(
+    build: Any, stamps: list | None
+) -> None:
+    if stamps is None:
+        # Control: scope does not lift the one-conditional-per-wire-channel rule.
+        with pytest.raises(ValueError, match="both declare a conditional on the 'size'"):
+            build()
+        return
+    assert _conditional_stamps(build()) == stamps
+
+
+@pytest.mark.parametrize("layered", [False, True], ids=["unlayered", "layered"])
+def test_a_line_encoding_its_own_conditional_size_carries_vertex_rows(layered: bool) -> None:
+    chart = (_base() + _cond_line() if layered else _cond_line()).add_selection(_COND_SEL)
+    batches = _scene_line_batches(chart)
+    assert [b.get("vertex_rows") for b in batches] == [[[0, 1, 2, 3]]]
+    assert re.findall(r'<polyline[^>]*\bstroke-width="([\d.]+)"', chart.to_svg()) == ["1.5"]
+
+
+@pytest.mark.parametrize("output", ["to_svg", "interactive"])
+@pytest.mark.parametrize("layered", [False, True], ids=["unlayered", "layered"])
+def test_a_non_positive_branch_on_a_lines_own_conditional_size_refuses(
+    layered: bool, output: str
+) -> None:
+    line = _cond_line(otherwise=0)
+    chart = (_base() + line) if layered else line
+    with pytest.raises(ValueError) as exc:
+        _render(chart.add_selection(_COND_SEL), output)
+    assert str(exc.value) == (f"layer 1: {_COND_BRANCH_ZERO}" if layered else _COND_BRANCH_ZERO)
+
+
+@pytest.mark.parametrize("output", ["to_svg", "interactive"])
+@pytest.mark.parametrize("layered", [False, True], ids=["unlayered", "layered"])
+def test_a_conditional_size_plus_stroke_width_on_one_line_refuses(
+    layered: bool, output: str
+) -> None:
+    line = _cond_line(stroke_width=3)
+    chart = (_base() + line) if layered else line
+    with pytest.raises(ValueError) as exc:
+        _render(chart.add_selection(_COND_SEL), output)
+    assert str(exc.value) == (f"layer 1: {_COND_CONFLICT}" if layered else _COND_CONFLICT)

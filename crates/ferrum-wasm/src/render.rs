@@ -204,79 +204,20 @@ impl GpuBuffers {
             )
         };
 
-        let (mesh_vertex_buffer, mesh_index_buffer) = if scene.mesh_buffers.vertices.is_empty() {
-            (None, None)
-        } else {
-            (
-                Some(
-                    gpu.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("mesh_verts"),
-                            contents: bytemuck::cast_slice(&scene.mesh_buffers.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }),
-                ),
-                Some(
-                    gpu.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("mesh_idx"),
-                            contents: bytemuck::cast_slice(&scene.mesh_buffers.indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        }),
-                ),
-            )
-        };
-
-        let (static_mesh_vertex_buffer, static_mesh_index_buffer) =
-            if scene.static_mesh_buffers.vertices.is_empty() {
-                (None, None)
-            } else {
-                (
-                    Some(
-                        gpu.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("static_mesh_verts"),
-                                contents: bytemuck::cast_slice(&scene.static_mesh_buffers.vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            }),
-                    ),
-                    Some(
-                        gpu.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("static_mesh_idx"),
-                                contents: bytemuck::cast_slice(&scene.static_mesh_buffers.indices),
-                                usage: wgpu::BufferUsages::INDEX,
-                            }),
-                    ),
-                )
-            };
-
-        let (annotation_mesh_vertex_buffer, annotation_mesh_index_buffer) = if scene
-            .annotation_mesh_buffers
-            .vertices
-            .is_empty()
-        {
-            (None, None)
-        } else {
-            (
-                Some(
-                    gpu.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("annotation_mesh_verts"),
-                            contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }),
-                ),
-                Some(
-                    gpu.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("annotation_mesh_idx"),
-                            contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        }),
-                ),
-            )
-        };
+        let (mesh_vertex_buffer, mesh_index_buffer) =
+            upload_mesh(gpu, "mesh_verts", "mesh_idx", &scene.mesh_buffers);
+        let (static_mesh_vertex_buffer, static_mesh_index_buffer) = upload_mesh(
+            gpu,
+            "static_mesh_verts",
+            "static_mesh_idx",
+            &scene.static_mesh_buffers,
+        );
+        let (annotation_mesh_vertex_buffer, annotation_mesh_index_buffer) = upload_mesh(
+            gpu,
+            "annotation_mesh_verts",
+            "annotation_mesh_idx",
+            &scene.annotation_mesh_buffers,
+        );
 
         let image_draws = scene
             .image_quads
@@ -415,6 +356,44 @@ impl GpuBuffers {
             )
         };
     }
+
+    /// Replace the mark mesh (and its per-batch ranges) with a re-tessellated
+    /// one, leaving instance, static, annotation, image and uniform buffers
+    /// alone. Called when a selection restyles a stroke's width.
+    pub fn update_mark_mesh(
+        &mut self,
+        gpu: &GpuContext,
+        mesh: &lyon::tessellation::VertexBuffers<crate::tessellate::MeshVertex, u32>,
+        mark_mesh_panels: Vec<MarkMeshPanel>,
+    ) {
+        (self.mesh_vertex_buffer, self.mesh_index_buffer) = upload_mesh(gpu, "mesh_verts", "mesh_idx", mesh);
+        self.mesh_index_count = mesh.indices.len() as u32;
+        self.mark_mesh_panels = mark_mesh_panels;
+    }
+}
+
+/// One mesh's vertex and index buffers, or `None` for both when it has no
+/// vertices.
+fn upload_mesh(
+    gpu: &GpuContext,
+    vertex_label: &str,
+    index_label: &str,
+    mesh: &lyon::tessellation::VertexBuffers<crate::tessellate::MeshVertex, u32>,
+) -> (Option<wgpu::Buffer>, Option<wgpu::Buffer>) {
+    if mesh.vertices.is_empty() {
+        return (None, None);
+    }
+    let buffer = |label: &str, contents: &[u8], usage| {
+        gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage,
+        })
+    };
+    (
+        Some(buffer(vertex_label, bytemuck::cast_slice(&mesh.vertices), wgpu::BufferUsages::VERTEX)),
+        Some(buffer(index_label, bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX)),
+    )
 }
 
 fn upload_image_quad(

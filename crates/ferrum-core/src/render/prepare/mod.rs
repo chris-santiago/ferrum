@@ -1518,6 +1518,12 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// layer with its own non-empty `transforms`
 /// ([`RenderError::LayerTransformsUnsupported`]): no layer runs them.
 fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
+    let layer_count = spec.layers.as_ref().map_or(1, Vec::len);
+    for (index, cond) in spec.conditionals.iter().enumerate() {
+        if let Some(&layer) = cond.layers.iter().flatten().find(|&&l| l >= layer_count) {
+            return Err(RenderError::ConditionalLayerOutOfRange { index, layer, layers: layer_count });
+        }
+    }
     let raw: Vec<LayerPrepared> = match &spec.layers {
         None => vec![LayerPrepared::from_chart_only(spec)],
         Some(layer_vec) if spec.mark_style.is_some() => {

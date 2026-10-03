@@ -85,7 +85,7 @@ pub(crate) fn resolve_conditional_field_names(
     let mut seen = std::collections::HashSet::<String>::new();
     let mut out = Vec::<String>::new();
 
-    for cond in &spec.conditionals {
+    for cond in spec.conditionals.iter().map(|c| &c.encoding) {
         if cond.channel != channel {
             continue;
         }
@@ -462,7 +462,7 @@ pub(crate) fn build_color_legend(
                 // Conditional-color case: find the first Color conditional with a
                 // Field branch and use its field name as the title.
                 use ferrum_scene::EncodingValue;
-                spec.conditionals.iter().find_map(|cond| {
+                spec.conditionals.iter().map(|c| &c.encoding).find_map(|cond| {
                     if cond.channel != ChannelName::Color {
                         return None;
                     }
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn resolve_conditional_field_names_collects_color_field() {
         let mut spec = empty_spec();
-        spec.conditionals = vec![color_field_cond("cat")];
+        spec.conditionals = vec![color_field_cond("cat").into()];
         assert_eq!(
             resolve_conditional_field_names(&spec, ChannelName::Color),
             vec!["cat".to_string()]
@@ -1426,7 +1426,7 @@ mod tests {
         // Two branches referencing the same field across two conditionals.
         let mut c2 = color_field_cond("cat");
         c2.if_not = EncodingValue::Field { name: "cat".into() };
-        spec.conditionals = vec![color_field_cond("cat"), c2, color_field_cond("other")];
+        spec.conditionals = vec![color_field_cond("cat").into(), c2.into(), color_field_cond("other").into()];
         assert_eq!(
             resolve_conditional_field_names(&spec, ChannelName::Color),
             vec!["cat".to_string(), "other".to_string()]
@@ -2460,7 +2460,7 @@ mod tests {
         let mut spec = empty_spec();
         let mut size_cond = color_field_cond("sz");
         size_cond.channel = ChannelName::Size;
-        spec.conditionals = vec![color_field_cond("cat"), size_cond];
+        spec.conditionals = vec![color_field_cond("cat").into(), size_cond.into()];
         // Color channel sees only "cat"; Size channel sees only "sz".
         assert_eq!(
             resolve_conditional_field_names(&spec, ChannelName::Color),

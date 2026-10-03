@@ -4285,7 +4285,7 @@ fn conditional_color_field_builds_legend_entries() {
                 a: 255,
             },
         },
-    }];
+    }.into()];
 
     let batch = cat_batch();
     let prep = prepare_render_inputs(
@@ -4360,7 +4360,7 @@ fn base_color_chart_legend_unchanged_by_conditional_fix() {
                 a: 255,
             },
         },
-    }];
+    }.into()];
 
     let p = prep(&spec, &batch_pop());
     // The categorical arm (not the conditional arm) should have populated legend_entries.

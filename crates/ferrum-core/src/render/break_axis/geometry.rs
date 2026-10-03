@@ -71,7 +71,7 @@ pub(super) fn set_triangle_vertices(node: &mut SceneNode, points: [(f64, f64); 3
 pub(super) fn push_line_pieces(
     pieces: &[Vec<(f64, f64)>],
     style: &ferrum_scene::StrokeStyle,
-    out: &mut Vec<SceneNode>,
+    out: &mut super::NodeSink,
 ) {
     for piece in pieces {
         debug_assert_eq!(

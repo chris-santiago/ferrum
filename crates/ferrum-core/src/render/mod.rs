@@ -146,12 +146,15 @@ pub(crate) struct LayerAxisColumnDetail {
     pub(crate) dtype: String,
 }
 
-/// What bound one of a line's width sources: a column (rendered `'name'`)
-/// or a constant mark kwarg (rendered as its number).
+/// What bound one of a line's width sources: a column (rendered `'name'`),
+/// a constant mark kwarg (rendered as its number), or a `size` conditional
+/// (rendered `fm.when(...)`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WidthBinding {
     Field(String),
     Constant(f64),
+    /// The line's own `size` conditional (`size=fm.when(...)`).
+    Conditional,
 }
 
 impl std::fmt::Display for WidthBinding {
@@ -159,6 +162,7 @@ impl std::fmt::Display for WidthBinding {
         match self {
             Self::Field(name) => write!(f, "'{name}'"),
             Self::Constant(value) => write!(f, "{value}"),
+            Self::Conditional => write!(f, "fm.when(...)"),
         }
     }
 }
@@ -179,6 +183,8 @@ pub(crate) enum NonPositiveLineWidth {
     /// A row of `field` with no usable size (null, non-finite, or off the
     /// scale) takes the line's default width `width`.
     Fallback { field: String, width: f64 },
+    /// A `size` conditional on `selection` has a branch of `area`.
+    Conditional { selection: String, area: f64 },
 }
 
 /// The public entry a [`RenderError::TimeFormatOnNonTemporalScale`],
@@ -631,6 +637,11 @@ pub enum RenderError {
     /// ignored; it refuses instead. Python's `Layer` refuses the same input at
     /// construction; this refuses a hand-built spec that carries one.
     LayerTransformsUnsupported { layer: usize, count: usize },
+    /// `conditionals[index].layers` names layer `layer`, but the chart has
+    /// only `layers` layers (one when it is unlayered). The scope could only
+    /// be ignored, so it refuses instead. Python stamps a conditional with the
+    /// layers that declared it; this refuses a hand-built spec.
+    ConditionalLayerOutOfRange { index: usize, layer: usize, layers: usize },
     /// A line mark binds both `size` and `stroke_width` (each a field or a
     /// constant kwarg; a theme width is never bound). The two set the same
     /// stroke's width in different units, `size` as a dot-diameter that can
@@ -957,6 +968,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayeredChartMarkStyle { .. }
         // A layer index and a transform count, no channel token.
         | RenderError::LayerTransformsUnsupported { .. }
+        // Two indices and a layer count, no channel token.
+        | RenderError::ConditionalLayerOutOfRange { .. }
         // A layer index and two width bindings, no channel token.
         | RenderError::LineWidthConflict { .. }
         // A mark and a number; a field name and a width.
@@ -1205,6 +1218,11 @@ impl std::fmt::Display for RenderError {
                  effect: a layered chart is styled per layer. Move the style onto each layer's \
                  own mark_style."
             ),
+            Self::ConditionalLayerOutOfRange { index, layer, layers } => write!(
+                f,
+                "conditionals[{index}].layers names layer {layer}, but the chart has {layers} \
+                 layer(s); name only the layers that declared the conditional."
+            ),
             Self::LayerTransformsUnsupported { layer, count } => write!(
                 f,
                 "layer {layer}: layers[{layer}].transforms carries {count} transform(s), but a \
@@ -1315,6 +1333,12 @@ impl std::fmt::Display for RenderError {
                          non-finite or off the scale), which takes the line's default width \
                          {width}. Every width along a line must be positive; set a positive \
                          Theme(line_stroke_width=)."
+                    ),
+                    NonPositiveLineWidth::Conditional { selection, area } => write!(
+                        f,
+                        "mark_line: size=fm.when(...) on selection '{selection}' has a branch of \
+                         size {area}, which gives no positive line width. Every width along a line \
+                         must be positive; give every branch a size above 0."
                     ),
                 }
             }
