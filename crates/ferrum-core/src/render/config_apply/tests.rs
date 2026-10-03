@@ -2574,6 +2574,7 @@ mod pipeline_order_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         (spec, batch)

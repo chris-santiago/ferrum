@@ -33,6 +33,7 @@ from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
 from ferrum.plots._helpers import (
     _compose_compare,
+    _figure_entry,
     _finalize_chart,
     _order_compare_rows,
     _require,
@@ -1472,6 +1473,7 @@ def shap_chart(
     return builder(source, **builder_kwargs)
 
 
+@_figure_entry
 def pdp_chart(
     model: Any,
     X: Any = None,

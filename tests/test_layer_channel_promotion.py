@@ -358,7 +358,7 @@ def test_a_channel_without_a_constant_cell_has_no_mark_kwarg(channel: str) -> No
 
 
 def _without_promotion(monkeypatch) -> None:
-    monkeypatch.setattr(chart_module, "_promote_layer_channels", lambda new: None)
+    monkeypatch.setattr(chart_module, "_promote_layer_channels", lambda new, authored: None)
 
 
 def test_an_unbound_layered_chart_is_byte_identical_with_and_without_promotion(monkeypatch) -> None:

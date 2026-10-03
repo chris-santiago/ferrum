@@ -32,6 +32,7 @@ from ferrum._validate import validate_choice
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
+    _figure_entry,
     _finalize_chart,
     _is_raw_tabular_data,
     _resolve_first_param,
@@ -436,6 +437,7 @@ def rank2d_chart(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def parallel_coordinates_chart(
     data: Any,
     *,

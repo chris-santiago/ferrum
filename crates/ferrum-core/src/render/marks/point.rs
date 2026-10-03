@@ -543,6 +543,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -643,6 +644,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -708,6 +710,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -811,6 +814,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -888,6 +892,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -1411,7 +1416,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1535,7 +1540,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
             filled: Some(false),
@@ -1604,6 +1609,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1676,6 +1682,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -1785,6 +1792,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -1848,6 +1856,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 

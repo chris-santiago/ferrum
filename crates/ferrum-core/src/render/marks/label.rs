@@ -279,6 +279,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -370,6 +371,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         use arrow::array::StringArray;

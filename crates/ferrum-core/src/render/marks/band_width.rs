@@ -175,6 +175,7 @@ fn render_nodes(
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
     let theme = ThemeInputs::default();

@@ -729,6 +729,11 @@ class SpecBuildMixin:
             # `"flip"` token the way the chart-level slot's does.
             if layer.coord is not None:
                 layer_dict["coord"] = _coord_wire(layer.coord)
+            # The public entry that emitted this layer, voiced by Rust's
+            # per-layer render refusals; absent for a layer the caller
+            # declared directly, so those specs are unchanged.
+            if layer.entry is not None:
+                layer_dict["entry"] = layer.entry
             out.append(layer_dict)
         return out
 

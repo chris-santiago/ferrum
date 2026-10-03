@@ -842,6 +842,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -1051,6 +1052,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -1184,6 +1186,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1314,6 +1317,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1403,6 +1407,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1497,6 +1502,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1584,6 +1590,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1663,6 +1670,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = ThemeInputs::default();
@@ -1825,6 +1833,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, false)]));

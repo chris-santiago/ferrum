@@ -1066,6 +1066,7 @@ fn line_chart(size: bool, grouped: bool, kwargs: MarkKwargsSpec) -> ChartSpec {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     }
 }
@@ -1139,4 +1140,42 @@ fn sized_lines_outline_under_every_interpolate_dash_opacity_and_grouping() {
         }
     }
     assert_eq!(cells, crate::render::marks::curve::interpolate_accepted_values().len() * 8);
+}
+
+/// A zero-length on-dash on a tapered line draws a dot at each on-position,
+/// as a constant-width SVG stroke with the same dash and cap does: a disk of
+/// radius `w/2` under a round cap, a `w`-wide square turned to the line under
+/// a square cap, and nothing under a butt cap. The line runs diagonally, 45
+/// px long, so `[0, 10]` puts a dot at 0, 10, 20, 30 and 40 px along it.
+#[test]
+fn a_zero_length_dash_draws_a_dot_at_each_on_position_by_its_cap() {
+    let (end, widths) = ((27.0, 36.0), [4.0, 4.0]);
+    let (h, n, r) = ((0.6, 0.8), (-0.8, 0.6), 2.0);
+    let dots: Vec<(f64, f64)> = (0..5).map(|k| (h.0 * 10.0 * k as f64, h.1 * 10.0 * k as f64)).collect();
+    let rings = |cap: StrokeCap| {
+        let node = polyline(&[(0.0, 0.0), end], Some(&widths), Some(vec![0.0, 10.0]));
+        the_outline(&walk(&line_scene(vec![node], Some(cap), None))).1
+    };
+    let nearest = |v: (f64, f64)| dots.iter().map(|d| distance(v, *d)).fold(f64::INFINITY, f64::min);
+
+    let round = rings(StrokeCap::Round);
+    for dot in &dots {
+        assert!(has_vertex(&round, (dot.0 + r * n.0, dot.1 + r * n.1)), "round: a disk about {dot:?}");
+        assert!(has_vertex(&round, (dot.0 - r * n.0, dot.1 - r * n.1)), "round: a disk about {dot:?}");
+    }
+    assert!(vertices(&round).iter().all(|v| (nearest(*v) - r).abs() < 2e-3), "round: only disks of radius w/2");
+
+    let square = rings(StrokeCap::Square);
+    for dot in &dots {
+        for (a, b) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let corner = (dot.0 + r * (a * h.0 + b * n.0), dot.1 + r * (a * h.1 + b * n.1));
+            assert!(has_vertex(&square, corner), "square: corner {corner:?} of the dot at {dot:?}");
+        }
+    }
+    assert!(
+        vertices(&square).iter().all(|v| nearest(*v) < r * 2f64.sqrt() + 2e-3),
+        "square: only the dots' squares"
+    );
+
+    assert!(rings(StrokeCap::Butt).is_empty(), "butt: a zero-length dash draws nothing");
 }

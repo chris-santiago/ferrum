@@ -106,6 +106,13 @@ pub struct ChartSpec {
     /// encoding channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_description: Option<String>,
+    /// The public entry the caller invoked that produced this chart (e.g.
+    /// `"mark_smooth"` for the single line it lowers to). A refusal raised
+    /// while drawing a layer names this entry in place of the mark's own
+    /// primitive; a layer's own [`Layer::entry`] outranks it. `None` names
+    /// the primitive, and the field is omitted from the wire then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 /// One `ChartSpec.conditionals` entry: the conditional the interactive
@@ -173,6 +180,7 @@ impl ChartSpec {
         angle = None,                                             // Task 10: per-element rotation degrees
         fill_opacity = None,                                      // per-element fill-opacity SVG attribute
         chart_description = None,                                 // G1: chart-level accessibility desc
+        entry = None,                                             // public entry named by render refusals
     ))]
     fn new(
         mark: &str,
@@ -211,6 +219,7 @@ impl ChartSpec {
         angle: Option<&Bound<'_, PyAny>>,
         fill_opacity: Option<&Bound<'_, PyAny>>,
         chart_description: Option<String>,
+        entry: Option<String>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -298,6 +307,7 @@ impl ChartSpec {
             conditionals,
             params,
             chart_description,
+            entry,
         })
     }
 
@@ -637,6 +647,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -770,6 +781,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
@@ -803,6 +815,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
@@ -839,6 +852,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
@@ -902,8 +916,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None, entry: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None, entry: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));

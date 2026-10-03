@@ -7,7 +7,9 @@
 //! where `Jitter` computes its band-pixel offsets). Only there are the plot
 //! rect, the scale's end insets, a facet-shared or explicit domain and the
 //! scale kind all known, so only there can neighbouring centres sit exactly
-//! `point_size + spacing` px apart on every layout.
+//! `point_size + spacing` px apart on every layout. There too, a point layer
+//! with no size of its own takes the dot diameter `point_size`
+//! ([`SwarmSpec::dot_area`]), so the drawn dots match their placement.
 //!
 //! Output schema: input schema PLUS appended `swarm_x: Float64`,
 //! `swarm_y: Float64`, and `__pos_x_offset__: Float64` (vertical orient) or
@@ -96,6 +98,12 @@ impl SwarmSpec {
     /// edge gap.
     fn step_px(&self) -> f64 {
         self.point_size + self.spacing
+    }
+
+    /// The area (px²) of a point mark `point_size` px across: the size a
+    /// swarm-fed point layer with no size of its own draws its dots at.
+    pub(crate) fn dot_area(&self) -> f64 {
+        std::f64::consts::PI * (self.point_size / 2.0).powi(2)
     }
 
     /// The position-offset column this orientation's cross axis reads.
@@ -316,7 +324,9 @@ use crate::transform::core::TransformSpec;
 /// (the value) and ``__pos_x_offset__`` (``__pos_y_offset__`` when
 /// horizontal). The offsets are placed when the chart renders, in pixels
 /// through the resolved panel scale, so neighbouring centres sit
-/// ``point_size + spacing`` px apart.
+/// ``point_size + spacing`` px apart. A point layer drawing this output with
+/// no size of its own (no ``size=`` and no ``size`` encoding) draws each dot
+/// ``point_size`` px across, so dot edges sit ``spacing`` px apart.
 ///
 /// Parameters
 /// ----------
@@ -564,6 +574,32 @@ mod tests {
         assert_eq!(place(&s, &b, 1.0), vec![0.0, -9.0, 9.0]);
     }
 
+    /// Tied values in two dodge groups: each group packs outward from its own
+    /// sub-band, so the left group's second dot steps further left rather
+    /// than into the right group's sub-band (which it packs first, while
+    /// that slot is still free), and the right group's steps further right.
+    #[test]
+    fn a_dodge_group_left_of_centre_packs_outward_to_the_left_first() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"; 4])),
+                Arc::new(Float64Array::from(vec![5.0; 4])),
+                Arc::new(StringArray::from(vec![Some("g1"), Some("g1"), Some("g2"), Some("g2")])),
+            ],
+        )
+        .unwrap();
+        let s = SwarmSpec { dodge: Some("grp".into()), ..spec(7.0, 2.0, SwarmSide::Both) };
+        // Sub-band centres sit at -4.5 and +4.5 (step 9 apart).
+        assert_eq!(place(&s, &b, 1.0), vec![-4.5, -13.5, 4.5, 13.5]);
+    }
+
     #[test]
     fn swarm_transform_emits_placeholder_columns_and_drops_null_dodge_rows() {
         pyo3::Python::initialize();
@@ -676,6 +712,55 @@ mod tests {
             spec[k] = v.clone();
         }
         spec
+    }
+
+    /// Every rendered circle's radius.
+    fn circle_radii(svg: &str) -> Vec<f64> {
+        svg.split("<circle ")
+            .skip(1)
+            .map(|rest| {
+                let tag = &rest[..rest.find('>').unwrap()];
+                let start = tag.find(" r=\"").unwrap() + 4;
+                tag[start..start + tag[start..].find('"').unwrap()].parse().unwrap()
+            })
+            .collect()
+    }
+
+    /// A `Swarm`-fed point layer that sets no size of its own draws each dot
+    /// `point_size` px across, the diameter the swarm placed it by, on the
+    /// layered route and on the flat `Chart.transform(Swarm(...)).mark_point()`
+    /// route; a constant or field size of the layer's own still wins.
+    #[test]
+    fn a_swarm_fed_point_layer_with_no_size_draws_at_the_placement_diameter() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let batch = spread_batch();
+        let (size, spacing) = (8.0, 1.0);
+        let mut layered = swarm_chart(size, spacing, false, json!({}), None);
+        layered["layers"][0].as_object_mut().unwrap().remove("mark_style");
+        let mut flat = layered.clone();
+        let flat_obj = flat.as_object_mut().unwrap();
+        flat_obj.remove("layers");
+        flat_obj["encoding"]["x"] = json!({"field": "g", "type": "nominal"});
+        flat_obj["transforms"][0].as_object_mut().unwrap().remove("name");
+        for (route, chart) in [("layered", layered.clone()), ("flat", flat)] {
+            let svg = render(chart, &batch);
+            let radii = circle_radii(&svg);
+            assert_eq!(radii.len(), 300, "{route}: every dot drawn");
+            assert!(radii.iter().all(|r| *r == size / 2.0), "{route}: radii {:?}", &radii[..3]);
+            assert_packed(&circle_centres(&svg), size + spacing, route);
+        }
+
+        let mut own_constant = layered.clone();
+        own_constant["layers"][0]["mark_style"] = json!({"size": 100.0});
+        let want = (100.0 / std::f64::consts::PI).sqrt();
+        let radii = circle_radii(&render(own_constant, &batch));
+        assert!(radii.iter().all(|r| (r - want).abs() < 5e-4), "own constant: {:?}", &radii[..3]);
+
+        let mut own_field = layered;
+        own_field["layers"][0]["encoding"]["size"] = json!({"field": "v"});
+        let radii = circle_radii(&render(own_field, &batch));
+        assert!(radii.iter().any(|r| *r != radii[0]), "a size field still varies the radius");
     }
 
     fn spread_batch() -> RecordBatch {

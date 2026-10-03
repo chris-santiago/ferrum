@@ -22,21 +22,13 @@ from ferrum._validate import (
 
 # `size` is honored by exactly two of the 13 primitive marks --
 # `_PRIMITIVE_MARK_EXTRAS["point"]` and `["line"]` below -- the only marks
-# whose renderer actually reads a constant `size=`: `resolve_mark_style`
-# (draw.rs) writes it into `style.point.point_size`, which the point mark
-# (`marks/point.rs`, the circle radius) reads back out. The line mark reads
-# its own `size=` from a separate field, `style.line.size`
-# (`marks/line.rs`, the constant taper width). Every other primitive --
-# area, bar, rule, text, tick, rect, segment, arc, image, geoshape, label --
-# refuses a constant `size=` at construction, naming the mark and -- where
-# the mark has an analogous width/font kwarg of its own -- pointing to it
-# (`_SIZE_REFUSAL_POINTER` below): it never reaches a renderer that reads
-# it, so accepting it would be an accepted-but-inert kwarg. A non-positive
-# constant `size=` on point or line is refused for the same reason it is
-# honored there at all: the value means something. Composite, statistical,
-# and diagnostic marks (every mark name with no entry in
-# `_PRIMITIVE_MARK_EXTRAS`) are out of scope for this refusal -- see
-# `_COMPOSITE_FALLBACK_KWARGS` below.
+# whose renderer reads a constant `size=` (the point's circle area, the
+# line's constant taper width). Every other primitive refuses a constant
+# `size=` at construction (`_inert_size_error`), pointing to the mark's own
+# width/font kwarg where it has one (`_SIZE_REFUSAL_POINTER`). A composite
+# mark accepts `size=` here (`_COMPOSITE_FALLBACK_KWARGS`) and refuses it
+# once its desugar has run if none of the marks it emits draws it
+# (`refuse_size_no_layer_draws`).
 
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
@@ -246,17 +238,13 @@ MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
 
 #: Fallback honored set for every mark name with no entry in
 #: :data:`MARK_HONORED_KWARGS` (every composite, statistical, and
-#: diagnostic mark -- ``"boxplot"``, ``"density"``, ``"roc"``, …). The
-#: constant-``size=`` refusal above names only the 13 primitives: it
-#: refuses an inert ``size=`` on the 11 primitives whose renderer never
-#: reads it, but a composite mark's own ``size=`` (when it takes one as a
-#: named parameter, e.g. ``mark_boxplot``/``mark_swarm``) is consumed
-#: before `**mark_kwargs` ever sees it, and whatever a composite mark's
-#: ``**mark_kwargs`` catch-all DOES forward is spread across every one of
-#: its layers by ``apply_user_mark_kwargs`` -- including, for marks with an
-#: internal point sub-layer, a layer where ``size=`` still draws something.
-#: Composite marks are out of scope for the refusal; this fallback keeps
-#: their universal-plus-``size`` vocabulary unchanged.
+#: diagnostic mark -- ``"boxplot"``, ``"density"``, ``"roc"``, …). It keeps
+#: ``size``: a composite's catch-all ``size=`` is spread over every mark it
+#: emits and drawn by an emitted point or line, and a composite whose
+#: emitted marks draw no ``size`` refuses it after its desugar runs
+#: (:func:`refuse_size_no_layer_draws`). A composite that takes ``size`` as
+#: a named parameter (``mark_boxplot``, ``mark_swarm``) consumes it before
+#: the catch-all sees it.
 _COMPOSITE_FALLBACK_KWARGS: frozenset[str] = _UNIVERSAL_MARK_KWARGS | frozenset({"size"})
 
 #: Primitives where `size` is honored because it names that mark's own
@@ -355,7 +343,7 @@ _SIZE_REFUSAL_POINTER: dict[str, str] = {
 
 
 def _inert_size_error(mark_name: str, value: Any) -> str:
-    """Build the refusal for a constant `size=` on a primitive mark that never draws it.
+    """Build the refusal for a constant `size=` on a mark that never draws it.
 
     Names the mark the caller invoked and the value it passed, and, when
     *mark_name* has one, points to its own width/font kwarg
@@ -366,6 +354,23 @@ def _inert_size_error(mark_name: str, value: Any) -> str:
     if pointer is None:
         return message
     return f"{message} Set {pointer}= instead."
+
+
+def refuse_size_no_layer_draws(entry: str, size: Any, drawn_marks: list) -> None:
+    """Refuse a composite mark's constant `size=` when none of its emitted marks draws it.
+
+    A composite, statistical or diagnostic mark spreads its catch-all
+    `size=` over every mark it emits, and only a point or line
+    (:data:`_MARKS_WHERE_SIZE_IS_A_MARK_SIZE`) draws it. *drawn_marks* are
+    the primitive marks the desugar emitted; when none of them draws `size`
+    the kwarg is inert, and the refusal names *entry* -- the public call the
+    caller invoked, which is the composite's own `mark_*` name unless a
+    figure function stamped its own name over it. Called by the composite
+    dispatcher once the desugar has run, which is the first point the
+    emitted marks are known.
+    """
+    if not any(mark in _MARKS_WHERE_SIZE_IS_A_MARK_SIZE for mark in drawn_marks):
+        raise ValueError(f"{entry}(size=...) has no effect on {entry}; received {size!r}.")
 
 
 def _mark_kwargs_error_plural(mark_name: str, keys: list[str]) -> str:

@@ -49,6 +49,7 @@ from ferrum.plots._helpers import (
     _column_or_literal_color,
     _compose_compare,
     _field_name,
+    _figure_entry,
     _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
@@ -828,6 +829,7 @@ def _build_fit(method: str, req: _FitRequest) -> Chart:
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def lmplot(
     data: Any,
     *,
@@ -1284,6 +1286,7 @@ def lmplot(
     )
 
 
+@_figure_entry
 def residplot(
     data: Any,
     *,
@@ -1650,6 +1653,7 @@ def residplot(
     )
 
 
+@_figure_entry
 def regplot(
     data: Any,
     *,
@@ -1987,6 +1991,7 @@ def residuals_chart(
     return _residuals_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def prediction_error_chart(
     model: Any = None,
     X: Any = None,

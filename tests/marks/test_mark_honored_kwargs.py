@@ -156,23 +156,28 @@ class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
         chart = getattr(fm.Chart(None), ctor)(size=20)
         assert chart._mark_kwargs.get("size") == 20
 
-    def test_composite_mark_own_size_is_unaffected(self):
-        """A composite mark's own ``size=`` (forwarded through its
-        ``**mark_kwargs`` catch-all, validated against
-        ``_COMPOSITE_FALLBACK_KWARGS`` rather than a primitive's narrower
-        vocabulary) is not one of the 11 refusing primitives above and
-        keeps its own, composite-specific meaning -- including a
-        non-positive value such as ``0``, which is not a point/line
-        magnitude and is not positivity-checked."""
+    def test_composite_mark_size_refuses_where_no_emitted_mark_draws_it(self):
+        """A composite mark's catch-all ``size=`` refuses, in the primitives'
+        voice and naming the composite, once its desugar shows none of the
+        marks it emits draws ``size`` (density emits one area)."""
         df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0]})
         chart = fm.Chart(df).mark_density(size=0).encode(x="v:Q")
-        # Discriminating: 0 survives as the literal value on the resolved
-        # area layer's mark_kwargs. If density's size= were routed through
-        # the primitive's positivity check instead of its own composite
-        # vocabulary, resolving the pending mark would raise "must be a
-        # positive number" for exactly this value, not return it unchanged.
-        assert chart._resolve_pending()._mark_kwargs == {"size": 0}
-        chart.to_svg()  # the full render pipeline accepts the inert field too
+        with pytest.raises(ValueError) as exc_info:
+            chart.to_svg()
+        assert str(exc_info.value) == (
+            "mark_density(size=...) has no effect on mark_density; received 0."
+        )
+
+    def test_composite_mark_size_reaches_the_point_it_emits_unchecked(self):
+        """A composite that emits a point keeps its catch-all ``size=`` on
+        that point, with the composite's own meaning: ``0`` is not a
+        point/line magnitude here and is not positivity-checked."""
+        df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        resolved = fm.Chart(df).mark_qq(size=0).encode(x="v:Q")._resolve_pending()
+        assert [(ly.mark, (ly.mark_kwargs or {}).get("size")) for ly in resolved._layers] == [
+            ("point", 0),
+            ("rule", 0),
+        ]
 
 
 # ---------------------------------------------------------------------------

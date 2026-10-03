@@ -410,7 +410,8 @@ fn mark_selected(
 /// `panels` (BAKED, [`crate::scene_load::bake_panels`]) with every line that
 /// carries `vertex_rows` redrawn under the active selections: each width
 /// vertex takes the dot diameter ([`ferrum_scene::dot_diameter`]) of the area
-/// its own row's branch of each `size` conditional picks, a later conditional
+/// its own row's branch of each `size` conditional the batch names in
+/// `size_conditionals` (its own layer's) picks, a later conditional
 /// outranking an earlier one as [`resolve_conditionals_with_packed`] layers
 /// them, baked by the panel's layout scale as every stroke width is
 /// ([`crate::scene_load::baked_stroke_width`]). A vertex a break cut between
@@ -435,16 +436,23 @@ pub(crate) fn conditional_line_panels(
     if !panels.iter().flat_map(|p| &p.marks).any(|b| b.vertex_rows.is_some()) {
         return None;
     }
-    let active: Vec<(&ConditionalEncoding, &SelectionState)> = conditionals
-        .iter()
-        .filter_map(|cond| Some((cond, selections.get(&cond.selection_name)?)))
-        .filter(|(_, sel)| !matches!(sel, SelectionState::Empty))
-        .collect();
     let mut panels = panels.to_vec();
     for panel in &mut panels {
         let ls = panel.layout_scale;
         for batch in &mut panel.marks {
             let Some(rows) = batch.vertex_rows.as_ref() else { continue };
+            // Only the conditionals this line's own layer declared, in scene
+            // order, each with a non-empty selection.
+            let active: Vec<(&ConditionalEncoding, &SelectionState)> = batch
+                .size_conditionals
+                .iter()
+                .flatten()
+                .filter_map(|&i| {
+                    let cond = conditionals.get(i)?;
+                    Some((cond, selections.get(&cond.selection_name)?))
+                })
+                .filter(|(_, sel)| !matches!(sel, SelectionState::Empty))
+                .collect();
             let widths: Vec<Option<Vec<f64>>> = rows
                 .iter()
                 .enumerate()
@@ -4008,8 +4016,9 @@ mod tests {
         }
     }
 
-    /// One line node whose width vertices come from `rows`, the shape
-    /// `mark_line` emits under a size conditional.
+    /// One line node whose width vertices come from `rows`, answering to the
+    /// scene's first conditional: the shape `mark_line` emits under a size
+    /// conditional.
     fn conditional_line_scene(node: SceneNode, rows: Vec<usize>) -> ferrum_scene::SceneGraph {
         conditional_line_scene_rows(node, rows.into_iter().map(ferrum_scene::VertexRow::Row).collect())
     }
@@ -4022,6 +4031,8 @@ mod tests {
             _ => Some(vec![0]),
         };
         batch.vertex_rows = Some(vec![rows]);
+        batch.size_conditionals = Some(vec![0]);
+        scene.interaction.conditionals = vec![size_conditional()];
         scene
     }
 
@@ -4241,5 +4252,70 @@ mod tests {
         let (x, y) = (110.0, 108.0);
         assert!(crate::hit_test::hit_test(&scene.panels, x, y, &zoom, &plan).is_none());
         assert!(crate::hit_test::hit_test(&lines, x, y, &zoom, &plan).is_some());
+    }
+
+    /// A line answers only to the conditionals its batch names. A composite
+    /// sibling leaf's `size` conditional (a point's, with a size-0 branch a
+    /// point may draw and a line may not) neither restyles the line nor
+    /// leaves it a width the mesh refuses, alone or beside the line's own.
+    #[test]
+    fn a_line_folds_only_the_size_conditionals_its_batch_names() {
+        let sibling = ConditionalEncoding {
+            selection_name: "p".to_string(),
+            if_not: EncodingValue::Size { value: 0.0 },
+            ..size_conditional()
+        };
+        let mut scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        scene.interaction.conditionals.push(sibling);
+        let conditionals = scene.interaction.conditionals.clone();
+        let sibling_only =
+            HashMap::from([("p".to_string(), SelectionState::Point { indices: vec![9], field_values: Vec::new() })]);
+        let lines = conditional_line_panels(&scene.panels, &conditionals, &sibling_only).unwrap();
+        assert_eq!(node_widths(&lines), None, "the sibling's conditional does not reach the line");
+        assert!(crate::scene_load::mark_mesh(&lines, EXTENT).is_ok());
+
+        let mut both = sibling_only;
+        both.extend(point_selection(&[1]));
+        let lines = conditional_line_panels(&scene.panels, &conditionals, &both).unwrap();
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        assert_eq!(node_widths(&lines), Some(vec![off, on, off, off]), "its own conditional still restyles it");
+    }
+
+    /// A non-size conditional after the line's `size` conditional does not
+    /// unset the size branch each vertex picked.
+    #[test]
+    fn a_later_non_size_conditional_keeps_each_vertex_on_its_size_branch() {
+        let color = |r| EncodingValue::Color { value: Color { r, g: 0, b: 0, a: 255 } };
+        let mut scene = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        scene.interaction.conditionals.push(ConditionalEncoding {
+            selection_name: "s".to_string(),
+            channel: ChannelName::Color,
+            if_selected: color(255),
+            if_not: color(0),
+        });
+        scene.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
+        let lines =
+            conditional_line_panels(&scene.panels, &scene.interaction.conditionals, &point_selection(&[1])).unwrap();
+        let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
+        assert_eq!(node_widths(&lines), Some(vec![off, on, off, off]));
+    }
+
+    /// The loader refuses a line whose `size_conditionals` do not pair with
+    /// its `vertex_rows` or name a conditional the scene lacks.
+    #[test]
+    fn unpaired_or_out_of_range_size_conditionals_refuse_at_load() {
+        use ferrum_scene::TaperError;
+        let mut unpaired = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        unpaired.panels[0].marks[0].size_conditionals = None;
+        assert_eq!(load_scene(&unpaired).err(), Some(TaperError::SizeConditionalsUnpaired));
+        let mut stray = line_scene(zigzag());
+        stray.panels[0].marks[0].size_conditionals = Some(vec![]);
+        assert_eq!(load_scene(&stray).err(), Some(TaperError::SizeConditionalsUnpaired));
+        let mut out_of_range = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        out_of_range.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
+        assert_eq!(
+            load_scene(&out_of_range).err(),
+            Some(TaperError::SizeConditionalOutOfRange { index: 1, conditionals: 1 })
+        );
     }
 }

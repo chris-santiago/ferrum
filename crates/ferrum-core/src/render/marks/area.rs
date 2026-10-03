@@ -501,6 +501,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -576,6 +577,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let spec_no_y2 = ChartSpec {
@@ -682,7 +684,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         (batch, spec)
     }
@@ -756,7 +758,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -872,7 +874,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -943,7 +945,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1008,7 +1010,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1073,7 +1075,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1158,7 +1160,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1256,7 +1258,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1354,7 +1356,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1593,7 +1595,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1685,7 +1687,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1790,7 +1792,7 @@ mod tests {
             coord: Some(crate::spec::coord::CoordKind::Flip),
             mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1848,7 +1850,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -1911,7 +1913,7 @@ mod tests {
             coord: Some(crate::spec::coord::CoordKind::Flip),
             mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
@@ -2041,7 +2043,7 @@ mod tests {
             // producers `series_curve_axis` knew about before see nothing.
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };

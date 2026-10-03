@@ -185,7 +185,35 @@ fn stroke_tapered(
 ) {
     let widest = pieces.iter().flat_map(|p| &p.widths).fold(0.0_f64, |a, &w| a.max(w));
     let mut builder = LyonPath::builder_with_attributes(1);
-    for piece in pieces.iter().map(bracket_turns) {
+    // Square dots, each a butt-capped run one width long along its heading,
+    // which is the square a square cap draws turned to the line; lyon's own
+    // square cap on a zero-length subpath stays axis-aligned.
+    let mut squares = LyonPath::builder_with_attributes(1);
+    let mut any_square = false;
+    for piece in pieces {
+        if let ([(x, y)], [w]) = (piece.points.as_slice(), piece.widths.as_slice()) {
+            // A zero-length on-dash (see `TaperPiece`): a round cap's disk is
+            // lyon's cap on a zero-length subpath; a butt cap draws nothing.
+            let w32 = [*w as f32];
+            match opts.start_cap {
+                LineCap::Round => {
+                    builder.begin(point(*x as f32, *y as f32), &w32);
+                    builder.line_to(point(*x as f32, *y as f32), &w32);
+                    builder.end(false);
+                }
+                LineCap::Square => {
+                    let (hx, hy) = piece.heading.unwrap_or((1.0, 0.0));
+                    let r = w / 2.0;
+                    squares.begin(point((x - hx * r) as f32, (y - hy * r) as f32), &w32);
+                    squares.line_to(point((x + hx * r) as f32, (y + hy * r) as f32), &w32);
+                    squares.end(false);
+                    any_square = true;
+                }
+                LineCap::Butt => {}
+            }
+            continue;
+        }
+        let piece = bracket_turns(piece);
         let mut vertices = piece.points.iter().zip(&piece.widths);
         let Some((&(x, y), &w)) = vertices.next() else { continue };
         builder.begin(point(x as f32, y as f32), &[w as f32]);
@@ -196,9 +224,12 @@ fn stroke_tapered(
     }
     let path = builder.build();
     let opts = opts.with_line_width(widest as f32);
-    stroke_to_mesh(&path, &opts, color, buffers, |v| {
-        v.interpolated_attributes().first().copied().unwrap_or_default() / 2.0
-    });
+    let half_width = |v: &mut StrokeVertex| v.interpolated_attributes().first().copied().unwrap_or_default() / 2.0;
+    stroke_to_mesh(&path, &opts, color, buffers, half_width);
+    if any_square {
+        let butt = opts.with_line_cap(LineCap::Butt);
+        stroke_to_mesh(&squares.build(), &butt, color, buffers, half_width);
+    }
 }
 
 /// Turns flatter than this (cosine of the angle between two segments) are
@@ -227,7 +258,7 @@ fn bracket_turns(piece: &TaperPiece) -> TaperPiece {
     if points.len() != widths.len() {
         return piece.clone();
     }
-    let mut out = TaperPiece { points: vec![first], widths: vec![first_width] };
+    let mut out = TaperPiece::run(vec![first], vec![first_width]);
     for i in 1..points.len() {
         let p = points[i];
         let Some(&next) = points.get(i + 1) else {
@@ -1365,6 +1396,53 @@ mod tests {
         for (x, w) in xs.iter().zip(want) {
             assert!((x - w).abs() < 1e-3, "dash ends {xs:?}");
         }
+    }
+
+    /// A zero-length on-dash on a tapered line draws a dot at each
+    /// on-position, matching the static outline and a constant-width SVG
+    /// stroke: a disk of radius `w/2` under a round cap, a `w`-wide square
+    /// turned to the line under a square cap, and nothing under a butt cap.
+    /// The line runs diagonally, 45 px long, so `[0, 10]` puts a dot at 0,
+    /// 10, 20, 30 and 40 px along it.
+    #[test]
+    fn a_zero_length_dash_draws_a_dot_at_each_on_position_by_its_cap() {
+        let (h, n, r) = ((0.6f32, 0.8f32), (-0.8f32, 0.6f32), 2.0f32);
+        let dots: Vec<(f32, f32)> = (0..5).map(|k| (h.0 * 10.0 * k as f32, h.1 * 10.0 * k as f32)).collect();
+        let mesh = |cap: StrokeCap| {
+            let style = StrokeStyle { dash: Some(vec![0.0, 10.0]), stroke_cap: Some(cap), ..make_stroke_style(1.0, 1.0) };
+            let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+            tessellate_tapered_polyline(&[(0.0, 0.0), (27.0, 36.0)], &[4.0, 4.0], &style, &mut buffers).unwrap();
+            buffers
+        };
+        // Where each vertex lands on screen at rest: its centerline point
+        // pushed out along its normal by its half width.
+        let ends = |buffers: &VertexBuffers<MeshVertex, u32>| -> Vec<(f32, f32)> {
+            buffers
+                .vertices
+                .iter()
+                .map(|v| (v.position[0] + v.normal[0] * v.half_width, v.position[1] + v.normal[1] * v.half_width))
+                .collect()
+        };
+        let dist = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1);
+        let nearest = |v: (f32, f32)| dots.iter().map(|d| dist(v, *d)).fold(f32::INFINITY, f32::min);
+
+        let round = ends(&mesh(StrokeCap::Round));
+        assert!(round.iter().all(|v| (nearest(*v) - r).abs() < 1e-3), "round: only disks of radius w/2");
+        for dot in &dots {
+            let on_disk = round.iter().filter(|v| (dist(**v, *dot) - r).abs() < 1e-3).count();
+            assert!(on_disk >= 8, "round: a disk about {dot:?}, {on_disk} vertices");
+        }
+
+        let square = ends(&mesh(StrokeCap::Square));
+        for dot in &dots {
+            for (a, b) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let corner = (dot.0 + r * (a * h.0 + b * n.0), dot.1 + r * (a * h.1 + b * n.1));
+                assert!(square.iter().any(|v| dist(*v, corner) < 1e-3), "square: corner {corner:?} of {dot:?}");
+            }
+        }
+        assert!(square.iter().all(|v| nearest(*v) < r * 2f32.sqrt() + 1e-3), "square: only the dots' squares");
+
+        assert!(mesh(StrokeCap::Butt).indices.is_empty(), "butt: a zero-length dash draws nothing");
     }
 
     /// A tapered curve tessellates from the shared flattener: its endpoints

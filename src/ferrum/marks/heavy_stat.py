@@ -5,7 +5,6 @@ Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
 """
 
 from __future__ import annotations
-import math
 import warnings
 from typing import Any, Optional
 
@@ -1120,11 +1119,10 @@ def desugar_swarm(
     )
     if dodge is not None:
         swarm_kwargs["dodge"] = str(dodge)
+    # The point layer sets no size of its own: the renderer draws a
+    # swarm-fed point layer with no size at the transform's placement
+    # diameter (`point_size`), so placed and drawn diameter agree, r = size / 2.
     transforms = [Swarm(**swarm_kwargs)]
-    # `size` is a diameter in px (the render-time placement unit); the point
-    # mark's `size` is an area in px² (every other point-size surface). Draw
-    # the dot at the same diameter it was placed at render time: r = size / 2.
-    point_mark_kwargs = {"size": math.pi * (size / 2) ** 2}
     from ferrum.encoding import X, Y
 
     if orient == "vertical":
@@ -1142,7 +1140,6 @@ def desugar_swarm(
                 name="point",
                 mark="point",
                 encoding={"x": x_enc_val, "y": val},
-                mark_kwargs=point_mark_kwargs,
                 data_source="swarm",
             )
         ]
@@ -1160,7 +1157,6 @@ def desugar_swarm(
                 name="point",
                 mark="point",
                 encoding={"x": val, "y": y_enc_val},
-                mark_kwargs=point_mark_kwargs,
                 data_source="swarm",
             )
         ]

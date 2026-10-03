@@ -35,6 +35,7 @@ from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _color_field_for,
     _compose_compare,
+    _figure_entry,
     _finalize_chart,
     _resolve_source,
 )
@@ -907,6 +908,7 @@ def _class_balance_chart_from_dataframe(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def roc_chart(
     model: Any = None,
     X: Any = None,
@@ -1023,6 +1025,7 @@ def roc_chart(
     )
 
 
+@_figure_entry
 def pr_chart(
     model: Any = None,
     X: Any = None,
@@ -1150,6 +1153,7 @@ def pr_chart(
     )
 
 
+@_figure_entry
 def calibration_chart(
     model: Any = None,
     X: Any = None,
@@ -1266,6 +1270,7 @@ def calibration_chart(
     )
 
 
+@_figure_entry
 def gain_chart(
     model: Any = None,
     X: Any = None,
@@ -1361,6 +1366,7 @@ def gain_chart(
     )
 
 
+@_figure_entry
 def lift_chart(
     model: Any = None,
     X: Any = None,
@@ -1634,6 +1640,7 @@ def class_prediction_error_chart(
     )
 
 
+@_figure_entry
 def discrimination_threshold_chart(
     model: Any = None,
     X: Any = None,

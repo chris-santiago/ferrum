@@ -1610,16 +1610,9 @@ struct LayerGeometryFlags {
     /// Whether this layer declared its own `y` channel — see
     /// [`LayerPrepared::y_is_own`].
     y_is_own: bool,
-    /// Whether this layer declared its own `size` channel — see
-    /// [`LayerPrepared::size_is_own`].
-    size_is_own: bool,
-    /// Whether this layer's OWN mark kwargs set a constant `size=`.
-    has_own_literal_size: bool,
-    /// Whether this layer declared its own `stroke_width` channel — see
-    /// [`LayerPrepared::stroke_width_is_own`].
-    stroke_width_is_own: bool,
-    /// Whether this layer's OWN mark kwargs set a constant `stroke_width=`.
-    has_own_literal_stroke_width: bool,
+    /// The inherited width bindings this layer yields — see
+    /// [`LayerPrepared::yielded_widths`].
+    yielded_widths: crate::render::prepare::YieldedWidths,
 }
 
 /// The DrawCtx-local normalizations every per-layer synthetic `ChartSpec`
@@ -1699,19 +1692,10 @@ struct LayerGeometryFlags {
 /// the fixed `tick_size*2.0` length regardless of the `band_size` they set on
 /// themselves).
 ///
-/// **Own-width precedence for line.** A line's `size` and `stroke_width` both
-/// set its width, and a line that binds both itself refuses
-/// (`RenderError::LineWidthConflict`). An inherited binding of either is not
-/// the layer's choice: a bubble scatter's `size` reaches every layer of
-/// `point.encode(size=...) + line(stroke_width=3)` through the chart level,
-/// and the line must keep its own 3 px. So an inherited width binding yields
-/// to any width the layer binds itself, own encoding or own constant kwarg,
-/// on the same channel or the other one (an own `size=5` beside an inherited
-/// `size` field draws the constant, as an own literal paint drops an
-/// inherited `color`), and between two inherited ones the
-/// `stroke_width` (a width in pixels) is kept over the `size` (a taper). The
-/// scale and the legend keep reading the merged `size`, so the other layers
-/// keep it.
+/// **Own-width precedence for line.** The inherited width bindings a line
+/// yields to a width it owns ([`LayerPrepared::yielded_widths`]) are dropped
+/// here. The scale keeps reading the merged `size`, so the other layers keep
+/// it, and the size legend asks the same precedence which layers draw it.
 fn layer_geometry_encoding(
     merged: crate::spec::encoding::Encoding,
     mark: crate::spec::mark::Mark,
@@ -1733,17 +1717,11 @@ fn layer_geometry_encoding(
             _ => {}
         }
     }
-    if mark == crate::spec::mark::Mark::Line {
-        let size_inherited = encoding.size.is_some() && !flags.size_is_own;
-        let stroke_width_inherited = encoding.stroke_width.is_some() && !flags.stroke_width_is_own;
-        let owns_size = flags.size_is_own || flags.has_own_literal_size;
-        let owns_stroke_width = flags.stroke_width_is_own || flags.has_own_literal_stroke_width;
-        if stroke_width_inherited && (owns_size || owns_stroke_width) {
-            encoding.stroke_width = None;
-        }
-        if size_inherited && (owns_size || owns_stroke_width || stroke_width_inherited) {
-            encoding.size = None;
-        }
+    if flags.yielded_widths.size {
+        encoding.size = None;
+    }
+    if flags.yielded_widths.stroke_width {
+        encoding.stroke_width = None;
     }
     encoding
 }
@@ -1836,16 +1814,12 @@ fn build_panel_mark_batches(
         };
         let scales: &scale_resolve::ResolvedScales = layer_scales_owned.as_ref().unwrap_or(scales);
 
-        // A layer whose data a `Swarm` fed (the last one in its lineage) gets
-        // its dots placed here, through this panel's resolved scales, before
-        // any position adjustment.
-        let swarm = crate::transform::core::output_lineage(&spec.transforms, layer.data_source.as_deref())
-            .into_iter()
-            .rev()
-            .find_map(|t| match t {
-                crate::transform::core::TransformSpec::Swarm(swarm) => Some(swarm),
-                _ => None,
-            });
+        // A layer whose data a `Swarm` fed (as the transform routing
+        // recorded it) gets its dots placed here, through this panel's
+        // resolved scales, before any position adjustment.
+        let swarm = prep
+            .transform_swarms
+            .get(layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY));
         let swarm_placed: Option<RecordBatch> = match swarm {
             Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_flipped, warnings)?,
             None => None,
@@ -1878,11 +1852,34 @@ fn build_panel_mark_batches(
         // Refuses with `RenderError::InvalidColor` on an unparseable
         // `fill=`/`stroke=` (batch-A Task 8) — the same build-seam refusal
         // discipline as `validate_mark_encoding` below.
-        // A per-layer refusal names its layer only on a layered chart; an
-        // unlayered chart's one layer is the chart itself.
-        let name_layer = |e: RenderError| if spec.layers.is_some() { e.in_layer(li) } else { e };
-        let mark_style =
+        // A per-layer refusal names its layer only on a layered chart (an
+        // unlayered chart's one layer is the chart itself), and names the
+        // public entry that produced the layer when the layer records one.
+        let entry = spec
+            .layers
+            .as_ref()
+            .and_then(|layers| layers.get(li))
+            .and_then(|l| l.entry.as_deref())
+            .or(spec.entry.as_deref());
+        let name_layer = |e: RenderError| {
+            let e = match entry {
+                Some(entry) => e.with_entry(entry),
+                None => e,
+            };
+            if spec.layers.is_some() { e.in_layer(li) } else { e }
+        };
+        let mut mark_style =
             draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark).map_err(name_layer)?;
+        // A swarm-fed point layer that sizes its dots neither by a constant
+        // nor by a field draws them at the diameter the swarm placed them by,
+        // so neighbours sit `spacing` px apart edge to edge.
+        if let Some(swarm) = swarm.filter(|_| {
+            layer.mark == crate::spec::mark::Mark::Point
+                && layer.mark_style.as_ref().and_then(|m| m.size).is_none()
+                && layer.encoding.size.is_none()
+        }) {
+            mark_style.point.point_size = swarm.dot_area();
+        }
 
         let has_own_literal_paint = mark_style.paint.stroke_source
             == crate::render::draw::PaintSource::UserColor
@@ -1895,10 +1892,7 @@ fn build_panel_mark_batches(
                 has_own_literal_paint,
                 x_is_own: layer.x_is_own,
                 y_is_own: layer.y_is_own,
-                size_is_own: layer.size_is_own,
-                has_own_literal_size: mark_style.line.size.is_some(),
-                stroke_width_is_own: layer.stroke_width_is_own,
-                has_own_literal_stroke_width: mark_style.line.stroke_width.is_some(),
+                yielded_widths: layer.yielded_widths(),
             },
         );
         // `coord`: this layer's own (`#172`(1), bound at the top of the loop).
@@ -2064,6 +2058,17 @@ fn build_panel_mark_batches(
             // batch before this field existed. `mark_function(clip=False)`
             // (T11, Python) is the only producer that sets `false`.
             clip: mark_style.misc.clip.unwrap_or(true),
+            // The `size` conditionals this line's own layer declared (the
+            // ones `line.rs` recorded `vertex_rows` for), as indices into
+            // the scene's `interaction.conditionals`.
+            size_conditionals: result.vertex_rows.as_ref().map(|_| {
+                spec.conditionals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.declared_by(li) && c.encoding.sets_size())
+                    .map(|(i, _)| i)
+                    .collect()
+            }),
             vertex_rows: result.vertex_rows,
         });
     }
@@ -4038,6 +4043,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         spec.params = params;
@@ -4475,6 +4481,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4602,6 +4609,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let mut layer1 = y_enc("y1");
         layer1.independent_y = layer1_independent;
@@ -4628,6 +4636,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -4680,6 +4689,7 @@ mod tests {
             name: None,
             independent_y: independent,
             coord: None,
+            entry: None,
         };
 
         let spec = ChartSpec {
@@ -4708,6 +4718,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -4983,6 +4994,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
@@ -5001,6 +5013,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
 
         let spec = ChartSpec {
@@ -5025,6 +5038,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -5224,6 +5238,7 @@ mod tests {
             name: Some("line".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let reference_layer = Layer {
             mark: Mark::Line,
@@ -5250,6 +5265,7 @@ mod tests {
             name: Some("reference".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5283,6 +5299,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -5531,6 +5548,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let bar_layer = Layer {
             mark: Mark::Bar,
@@ -5549,6 +5567,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5574,6 +5593,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5646,6 +5666,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let text_layer = Layer {
             mark: Mark::Text,
@@ -5658,6 +5679,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5681,6 +5703,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5914,6 +5937,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let point_layer = Layer {
             mark: Mark::Point,
@@ -5926,6 +5950,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5943,6 +5968,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -6066,6 +6092,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -6141,6 +6168,7 @@ mod tests {
             name: Some(name.into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -6161,6 +6189,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -6294,6 +6323,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -6376,6 +6406,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -6528,6 +6559,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -7209,6 +7241,54 @@ mod tests {
             unlit.grid, baseline.grid,
             "a secondary whose show_grid is off must not add or alter gridlines"
         );
+        // Coord dimension, over every coord kind the wire accepts (plus none):
+        // a coord that suppresses Cartesian axes suppresses the lit
+        // secondary's gridlines with the primary's; every other coord draws
+        // them exactly as the default does.
+        let unknown = serde_json::from_value::<crate::spec::coord::CoordKind>(serde_json::json!({"kind": "?"}))
+            .unwrap_err()
+            .to_string();
+        let kinds: Vec<crate::spec::coord::CoordKind> = unknown
+            .split("expected one of ")
+            .nth(1)
+            .expect("serde lists the coord kinds")
+            .split(", ")
+            .map(|name| {
+                let name = name.trim().trim_matches('`');
+                serde_json::from_value(serde_json::json!({"kind": name})).expect("each kind deserializes alone")
+            })
+            .collect();
+        let coords: Vec<Option<crate::spec::coord::CoordKind>> =
+            std::iter::once(None).chain(kinds.into_iter().map(Some)).collect();
+        let suppressing = coords
+            .iter()
+            .filter(|c| crate::spec::coord::suppresses_cartesian_axes(c.as_ref()))
+            .count();
+        assert!(suppressing > 0 && suppressing < coords.len(), "vacuity: both outcomes occur in {coords:?}");
+        for coord in coords {
+            let mut coord_spec = spec.clone();
+            coord_spec.coord = coord.clone();
+            let routed = route_panel_axes_and_grid(
+                &coord_spec,
+                &scales,
+                &panel,
+                &[],
+                None,
+                Some(&primary_y),
+                &[&secondary_y],
+                &[1],
+                false,
+                false,
+                &theme,
+                &chart_config,
+                &[],
+            );
+            if crate::spec::coord::suppresses_cartesian_axes(coord.as_ref()) {
+                assert!(routed.grid.is_empty(), "{coord:?}: no gridline survives, got {:?}", routed.grid);
+            } else {
+                assert_eq!(routed.grid, with_secondary.grid, "{coord:?}: the lit secondary draws as by default");
+            }
+        }
         // But it DOES contribute its own axis nodes (ticks + domain + labels +
         // title) — one axis per slot.
         let baseline_axis_nodes = baseline.axes_below.len() + baseline.axes_above.len();
@@ -7938,6 +8018,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -8077,6 +8158,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -8272,6 +8354,7 @@ mod tests {
             name: Some("point".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let reference_layer = Layer {
             mark: Mark::Rule,
@@ -8294,6 +8377,7 @@ mod tests {
             name: Some("reference".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -8322,6 +8406,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -8526,6 +8611,7 @@ mod tests {
             name: Some("scatter".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let tick_layer = Layer {
             mark: Mark::Tick,
@@ -8547,6 +8633,7 @@ mod tests {
             name: Some("rug".into()),
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -8574,6 +8661,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -9003,6 +9091,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let layer1 = Layer {
             mark: Mark::Point,
@@ -9019,6 +9108,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
 
         let spec = ChartSpec {
@@ -9052,6 +9142,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -9338,6 +9429,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -9466,6 +9558,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -9600,6 +9693,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -9748,10 +9842,7 @@ mod tests {
             has_own_literal_paint,
             x_is_own,
             y_is_own,
-            size_is_own: false,
-            has_own_literal_size: false,
-            stroke_width_is_own: false,
-            has_own_literal_stroke_width: false,
+            yielded_widths: Default::default(),
         }
     }
 
@@ -10083,6 +10174,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -10256,6 +10348,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord,
+            entry: None,
         };
         spec.layers = Some(vec![layer(None), layer(coord)]);
         (spec, batch)
@@ -10371,6 +10464,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -10391,6 +10485,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let (cat_field, cat_col): (Field, arrow::array::ArrayRef) = if utf8_categories {
@@ -11150,6 +11245,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -12046,6 +12142,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -12255,6 +12352,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -12523,6 +12621,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -13598,6 +13697,7 @@ mod coord_flip_y2_merge_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -13770,6 +13870,7 @@ mod coord_flip_y2_merge_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![

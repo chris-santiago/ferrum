@@ -59,6 +59,15 @@ pub struct Layer {
     /// and refuses; see [`crate::spec::coord::panel_scoped_property`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coord: Option<crate::spec::coord::CoordKind>,
+    /// The public entry the caller invoked that produced this layer (e.g.
+    /// `"mark_smooth"` for the fit line it desugars into). A refusal raised
+    /// while drawing the layer names this entry in place of the mark's own
+    /// primitive (`mark_line`), so a caller who never wrote `mark_line` reads
+    /// the entry they did write. `None` (every primitive layer, and every spec
+    /// written before the field existed) names the mark's own primitive; the
+    /// field is omitted from the wire then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 impl Layer {
@@ -102,6 +111,7 @@ mod tests {
             mark_style: None,
             data_source: None,
         position: None, blend: None, name: None, independent_y: false, coord: None,
+        entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -125,6 +135,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -147,6 +158,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -162,6 +174,7 @@ mod tests {
             mark_style: None,
             data_source: Some("box".into()),
             position: None, blend: None, name: None, independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -185,6 +198,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(json.contains(r#""position""#));
@@ -201,6 +215,7 @@ mod tests {
             mark_style: None,
             data_source: None,
             position: None, blend: None, name: None, independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(!json.contains("position"), "position=None must be omitted: {json}");
@@ -215,6 +230,7 @@ mod tests {
             mark_style: None,
             data_source: None,
         position: None, blend: None, name: None, independent_y: false, coord: None,
+        entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -244,6 +260,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: true, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -266,6 +283,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -291,6 +309,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         }
     }
 

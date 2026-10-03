@@ -151,21 +151,24 @@ def test_regplot_row_raises_typeerror_naming_lmplot(df):
 def test_regplot_logx_is_named_param_and_matches_lmplot(df):
     chart = fm.regplot(df, x="x", y="y", logx=True)
     equivalent = fm.lmplot(df, x="x", y="y", logx=True)
-    assert chart.to_json() == equivalent.to_json()
+    # regplot is lmplot voiced as regplot: the same spec, every layer naming regplot.
+    assert chart.to_json() == equivalent._with_entry("regplot").to_json()
     assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
 
 
 def test_regplot_show_metrics_is_named_param_and_matches_lmplot(df):
     chart = fm.regplot(df, x="x", y="y", show_metrics=False)
     equivalent = fm.lmplot(df, x="x", y="y", show_metrics=False)
-    assert chart.to_json() == equivalent.to_json()
+    # regplot is lmplot voiced as regplot: the same spec, every layer naming regplot.
+    assert chart.to_json() == equivalent._with_entry("regplot").to_json()
     assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
 
 
 def test_regplot_x_bins_is_named_param_and_matches_lmplot(df):
     chart = fm.regplot(df, x="x", y="y", x_bins=5)
     equivalent = fm.lmplot(df, x="x", y="y", x_bins=5)
-    assert chart.to_json() == equivalent.to_json()
+    # regplot is lmplot voiced as regplot: the same spec, every layer naming regplot.
+    assert chart.to_json() == equivalent._with_entry("regplot").to_json()
     assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
 
 
@@ -177,7 +180,8 @@ def test_regplot_x_estimator_is_named_param_and_matches_lmplot(df):
     # downstream of the spec.
     chart = fm.regplot(df, x="x", y="y", x_bins=5, x_estimator="max")
     equivalent = fm.lmplot(df, x="x", y="y", x_bins=5, x_estimator="max")
-    assert chart.to_json() == equivalent.to_json()
+    # regplot is lmplot voiced as regplot: the same spec, every layer naming regplot.
+    assert chart.to_json() == equivalent._with_entry("regplot").to_json()
     assert chart.to_json() != fm.regplot(df, x="x", y="y", x_bins=5).to_json()
 
 

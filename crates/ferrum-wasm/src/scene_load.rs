@@ -1051,13 +1051,19 @@ pub fn bake_panels(scene: &SceneGraph) -> Vec<Panel> {
 }
 
 /// Load `scene` into GPU-ready buffers. Refuses a tapered stroke whose
-/// `widths` the shared taper validation rejects rather than drawing it.
+/// `widths` the shared taper validation rejects rather than drawing it, and a
+/// line whose `size_conditionals` do not pair with its `vertex_rows` or name
+/// a conditional the scene lacks.
 pub fn load_scene(scene: &SceneGraph) -> Result<SceneData, TaperError> {
     load_scene_with_packed(scene, &[])
 }
 
 /// [`load_scene`] with the packed binary instance sidecar.
 pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<SceneData, TaperError> {
+    let conditionals = scene.interaction.conditionals.len();
+    for batch in scene.panels.iter().flat_map(|p| &p.marks) {
+        ferrum_scene::validate_size_conditionals(batch, conditionals)?;
+    }
     let mut collector = SceneCollector::new();
     let mut batch_meta = HashMap::new();
 

@@ -5,7 +5,8 @@ Shared by the ``ferrum.plots.*`` domain modules.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterable, NamedTuple
+import functools
+from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
@@ -511,6 +512,35 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _stamp_entry(chart: Any, entry: str) -> Any:
+    """Return *chart* with every leaf chart's layers naming *entry*."""
+    from ferrum.chart import Chart
+
+    if isinstance(chart, Chart):
+        return chart._with_entry(entry)
+    return chart._rebuild_with_charts(lambda child: _stamp_entry(child, entry))
+
+
+def _figure_entry(fn: _F) -> _F:
+    """Make the figure function *fn* the public entry its drawn layers name.
+
+    A render refusal about a layer (a line's ``size`` and ``stroke_width``
+    both set, a size that is not a positive number) names the public call
+    the user made, so the layers a figure function draws speak as that
+    function, not as the ``mark_*`` method or primitive it used to draw
+    them. Applies to every leaf of a composite result.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return _stamp_entry(fn(*args, **kwargs), fn.__name__)
+
+    return wrapper  # type: ignore[return-value]
 
 
 def _compose_compare(

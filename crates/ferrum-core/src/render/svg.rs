@@ -238,7 +238,7 @@ impl SvgBuffer {
     pub fn tapered_stroke(&mut self, pieces: &[TaperPiece], ends: (StrokeCap, StrokeJoin), style: &FillStroke) {
         let mut d = String::new();
         for piece in pieces {
-            for ring in outline_rings(&piece.points, &piece.widths, ends) {
+            for ring in outline_rings(&piece.points, &piece.widths, piece.heading, ends) {
                 push_ring(&mut d, &ring);
             }
         }
@@ -458,9 +458,15 @@ const ROUND_SEGMENTS: f64 = 16.0;
 /// The rings whose union is one tapered centerline's stroke (see
 /// [`SvgBuffer::tapered_stroke`]). A run of coincident vertices keeps the
 /// first one's width; a single vertex is a zero-length stroke, which SVG
-/// draws as a dot under a round cap and an axis-aligned square under a
-/// square one.
-fn outline_rings(points: &[Point], widths: &[f64], (cap, join): (StrokeCap, StrokeJoin)) -> Vec<Vec<Point>> {
+/// draws as a dot under a round cap and a square under a square one, the
+/// square turned to `heading` (a zero-length on-dash's direction along the
+/// line) or axis-aligned without one.
+fn outline_rings(
+    points: &[Point],
+    widths: &[f64],
+    heading: Option<Point>,
+    (cap, join): (StrokeCap, StrokeJoin),
+) -> Vec<Vec<Point>> {
     let mut vertices: Vec<(Point, f64)> = Vec::with_capacity(points.len());
     for (&p, &w) in points.iter().zip(widths) {
         if vertices.last().is_none_or(|(q, _)| *q != p) {
@@ -472,9 +478,11 @@ fn outline_rings(points: &[Point], widths: &[f64], (cap, join): (StrokeCap, Stro
         return rings;
     };
     if vertices.len() == 1 {
-        // Two caps back to back along x: a disk, or a square `w` wide.
-        rings.extend(cap_ring(first, first_r, (1.0, 0.0), cap));
-        rings.extend(cap_ring(first, first_r, (-1.0, 0.0), cap));
+        // Two caps back to back along the heading: a disk, or a square `w`
+        // wide.
+        let (hx, hy) = heading.unwrap_or((1.0, 0.0));
+        rings.extend(cap_ring(first, first_r, (hx, hy), cap));
+        rings.extend(cap_ring(first, first_r, (-hx, -hy), cap));
         return rings;
     }
     let dirs: Vec<Point> = vertices.windows(2).map(|s| unit(s[0].0, s[1].0)).collect();
@@ -829,6 +837,32 @@ mod tests {
     use crate::render::color::{from_rgb, from_rgba};
 
     fn vp() -> Rect { Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 } }
+
+    /// SVG's default miter limit is 4: a join miters while its miter length
+    /// over the stroke width, `1 / cos(turn / 2)`, is at most 4, that is up
+    /// to a turn of `2 acos(1/4)` (about 151.04°), and bevels past it. Every
+    /// whole-degree turn in the 120°..=151° band miters with its tip
+    /// `r / cos(turn / 2)` from the vertex; 152° and sharper bevel.
+    #[test]
+    fn a_tapered_join_miters_up_to_the_limit_of_4_and_bevels_past_it() {
+        let (v, r) = ((5.0, 5.0), 2.0);
+        let limit = 2.0 * (0.25f64).acos().to_degrees();
+        assert!((151.0..152.0).contains(&limit), "test sanity: the limit turn is {limit}");
+        for degrees in (120..=170).step_by(1) {
+            let turn = (degrees as f64).to_radians();
+            let ring = join_ring(v, r, (1.0, 0.0), (turn.cos(), turn.sin()), StrokeJoin::Miter)
+                .expect("a turning join draws a ring");
+            if degrees <= 151 {
+                assert_eq!(ring.len(), 4, "{degrees}°: a miter within the limit");
+                let reach = ring.iter().map(|p| (p.0 - v.0).hypot(p.1 - v.1)).fold(0.0, f64::max);
+                let want = r / (turn / 2.0).cos();
+                assert!((reach - want).abs() < 1e-9, "{degrees}°: tip {reach} != {want}");
+                assert!(want / (2.0 * r) <= 4.0, "{degrees}°: ratio within the limit");
+            } else {
+                assert_eq!(ring.len(), 3, "{degrees}°: a bevel past the limit");
+            }
+        }
+    }
 
     #[test]
     fn fmt_f_drops_trailing_zeros() {

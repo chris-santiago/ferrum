@@ -20,6 +20,7 @@ use crate::layout::{
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
+use crate::transform::swarm::SwarmSpec;
 
 use super::scale_resolve::{apply_sort_to_domain, SortContext};
 use super::scale_resolve::ResolvedScales;
@@ -311,6 +312,57 @@ impl LayerPrepared {
             }
         }
     }
+
+    /// The inherited width bindings this layer gives up to a width it owns.
+    ///
+    /// A line's `size` and `stroke_width` both set its width, and a line that
+    /// binds both itself refuses (`RenderError::LineWidthConflict`). An
+    /// inherited binding of either is not the layer's choice: a bubble
+    /// scatter's `size` reaches every layer of
+    /// `point.encode(size=...) + line(stroke_width=3)` through the chart
+    /// level, and the line must keep its own 3 px. So an inherited width
+    /// binding yields to any width the layer binds itself, own encoding or
+    /// own constant kwarg, on the same channel or the other one (an own
+    /// `size=5` beside an inherited `size` field draws the constant), and
+    /// between two inherited ones the `stroke_width` (a width in pixels) is
+    /// kept over the `size` (a taper). Every other mark yields nothing.
+    ///
+    /// The one precedence rule: the scene build drops what is yielded from
+    /// the layer's drawing encoding, and [`Self::drawn_size_field`] (the size
+    /// legend's question) reads the same answer.
+    pub(in crate::render) fn yielded_widths(&self) -> YieldedWidths {
+        if self.mark != crate::spec::mark::Mark::Line {
+            return YieldedWidths::default();
+        }
+        let kwargs = self.mark_style.as_ref();
+        let owns_size = self.size_is_own || kwargs.is_some_and(|m| m.size.is_some());
+        let owns_stroke_width =
+            self.stroke_width_is_own || kwargs.is_some_and(|m| m.stroke_width.is_some());
+        let size_inherited = self.encoding.size.is_some() && !self.size_is_own;
+        let stroke_width_inherited = self.encoding.stroke_width.is_some() && !self.stroke_width_is_own;
+        YieldedWidths {
+            size: size_inherited && (owns_size || owns_stroke_width || stroke_width_inherited),
+            stroke_width: stroke_width_inherited && (owns_size || owns_stroke_width),
+        }
+    }
+
+    /// The `size` field this layer draws, after width precedence: `None` when
+    /// its mark draws no encoded size, when it binds no size field, or when
+    /// it is a line that yields an inherited `size` to a width of its own
+    /// ([`Self::yielded_widths`]).
+    pub(in crate::render) fn drawn_size_field(&self) -> Option<&str> {
+        let size = self.encoding.size.as_ref()?;
+        (self.mark.draws_size_channel() && !self.yielded_widths().size).then_some(size.field.as_str())
+    }
+}
+
+/// Which inherited width bindings a layer yields ([`LayerPrepared::yielded_widths`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::render) struct YieldedWidths {
+    /// The inherited `size` binding is dropped from the drawing encoding.
+    pub(in crate::render) size: bool,
+    /// The inherited `stroke_width` binding is dropped from the drawing encoding.
+    pub(in crate::render) stroke_width: bool,
 }
 
 /// Normalize Arrow string columns to `Utf8` (`StringArray`).
@@ -405,6 +457,11 @@ pub struct PreparedInputs {
     /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY` via
     /// [`PreparedInputs::final_batch`].
     pub transform_outputs: HashMap<String, RecordBatch>,
+    /// Per `transform_outputs` key, the `Swarm` whose rows that batch still
+    /// is, as the transform routing recorded it
+    /// ([`crate::transform::core::apply_transforms_named`]). A layer reading
+    /// such a key has its dots placed at render time by that `Swarm`.
+    pub(in crate::render) transform_swarms: HashMap<String, SwarmSpec>,
     /// Scales resolved once during prepare **for tick-label generation only**.
     /// Their pixel ranges are not panel-specific, so the final per-panel scales —
     /// whose ranges differ per panel — are resolved fresh by
@@ -1051,7 +1108,7 @@ pub fn prepare_render_inputs(
     // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
     // here, above `scale_warnings`' construction below, so both land in the
     // one `PreparedInputs.warnings` vec this function returns.
-    let (transform_outputs, transform_warnings) =
+    let (transform_outputs, transform_warnings, transform_swarms) =
         run_transforms_with_facet(spec, &normalized, viewport, theme)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
@@ -1276,6 +1333,7 @@ pub fn prepare_render_inputs(
 
     Ok(PreparedInputs {
         transform_outputs,
+        transform_swarms,
         provisional_scales,
         axes,
         facet_groups,
@@ -1294,6 +1352,15 @@ pub fn prepare_render_inputs(
         y_slot_plan,
     })
 }
+
+/// What [`run_transforms_with_facet`] produces: every published output batch,
+/// the transform warnings drained from the run, and the `Swarm` each output
+/// descends from ([`PreparedInputs::transform_swarms`]).
+type TransformRun = (
+    HashMap<String, RecordBatch>,
+    Vec<crate::transform::context::TransformWarning>,
+    HashMap<String, SwarmSpec>,
+);
 
 /// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
 ///
@@ -1325,13 +1392,7 @@ fn run_transforms_with_facet(
     normalized: &RecordBatch,
     viewport: crate::layout::Viewport,
     theme: &crate::layout::ThemeInputs,
-) -> Result<
-    (
-        HashMap<String, RecordBatch>,
-        Vec<crate::transform::context::TransformWarning>,
-    ),
-    RenderError,
-> {
+) -> Result<TransformRun, RenderError> {
     let Some(fspec) = &spec.facet else {
         // No facet: unchanged pipeline (single partition = full batch); one
         // panel occupies the whole estimated viewport.
@@ -1343,7 +1404,7 @@ fn run_transforms_with_facet(
             )),
             ..TransformContext::default()
         };
-        let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
+        let (mut outputs, swarms) = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
         // #162: drain whatever this run's (possibly per-step-cloned, but
@@ -1351,7 +1412,7 @@ fn run_transforms_with_facet(
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
         // `ctx.clone()` in `apply_transforms_named`.
         let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-        return Ok((normalize_transform_outputs(outputs)?, warnings));
+        return Ok((normalize_transform_outputs(outputs)?, warnings, swarms));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1415,10 +1476,14 @@ fn run_transforms_with_facet(
     let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, normalized);
 
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+    // Every partition runs the same transforms, so each routes the same
+    // `Swarm` to the same key.
+    let mut swarms: HashMap<String, SwarmSpec> = HashMap::new();
     for ((col_value, row_value), partition_batch) in &partitions {
-        let mut panel_outputs =
+        let (mut panel_outputs, panel_swarms) =
             apply_transforms_named(&effective_transforms, partition_batch, &ctx)
                 .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+        swarms.extend(panel_swarms);
         // D10: per-panel imputation.
         apply_impute_to_final(&mut panel_outputs, spec);
         // Re-inject the col field (and row field when in grid mode) into every
@@ -1458,7 +1523,7 @@ fn run_transforms_with_facet(
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
     let warnings = ctx.warnings.borrow_mut().drain(..).collect();
-    Ok((normalize_transform_outputs(combined)?, warnings))
+    Ok((normalize_transform_outputs(combined)?, warnings, swarms))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output

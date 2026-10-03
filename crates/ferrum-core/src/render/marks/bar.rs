@@ -952,6 +952,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1005,6 +1006,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1134,7 +1136,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
@@ -1203,7 +1205,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("feature", DataType::Utf8, false),
@@ -1276,7 +1278,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("feature", DataType::Utf8, false),
@@ -1344,6 +1346,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1387,6 +1390,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1434,6 +1438,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1471,6 +1476,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1507,6 +1513,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1552,6 +1559,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1604,6 +1612,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1674,6 +1683,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1721,6 +1731,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1766,6 +1777,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1815,6 +1827,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1860,6 +1873,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -1902,6 +1916,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         // lo=[5,7], hi=[10,12]: bars should float entirely above the baseline.
@@ -1958,6 +1973,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         // lo=-3, hi=2: bar must span across zero (both sides of baseline).
@@ -2069,6 +2085,7 @@ mod tests {
                 axis_x: None, axis_y: None,
                 selections: Vec::new(), conditionals: Vec::new(),
                 chart_description: None,
+                entry: None,
                 params: Vec::new(),
             };
             let schema = Arc::new(Schema::new(vec![
@@ -2135,6 +2152,7 @@ mod tests {
                 axis_x: None, axis_y: None,
                 selections: Vec::new(), conditionals: Vec::new(),
                 chart_description: None,
+                entry: None,
                 params: Vec::new(),
             };
             let schema = Arc::new(Schema::new(vec![
@@ -2208,6 +2226,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2303,6 +2322,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2407,6 +2427,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2505,7 +2526,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8,    false),
@@ -2574,7 +2595,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x",   DataType::Float64, false),
@@ -2651,7 +2672,7 @@ mod tests {
             mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8,    true),  // nullable
@@ -2738,7 +2759,7 @@ mod tests {
             mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, true),
@@ -2802,7 +2823,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8,    false),
@@ -2858,7 +2879,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("xval", DataType::Float64, true),   // nullable — row 1 will be null
@@ -2926,7 +2947,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("xval", DataType::Float64, true),   // nullable — row 1 will be null
@@ -2994,7 +3015,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat",  DataType::Utf8,    false),
@@ -3059,7 +3080,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g",  DataType::Utf8,    false),
@@ -3114,7 +3135,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g",  DataType::Utf8,    false),
@@ -3165,7 +3186,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         // Two categories (a, b), two dodge groups per category (4 rows).
         let mut fields = vec![
@@ -3260,7 +3281,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -3389,7 +3410,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("v", DataType::Float64, false),
@@ -3490,7 +3511,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
@@ -3573,7 +3594,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
@@ -3663,7 +3684,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
@@ -3745,7 +3766,7 @@ mod tests {
             coord: None, mark_style: None, position: Some(pos), title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
@@ -3793,6 +3814,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -3850,6 +3872,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -3932,6 +3955,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4022,6 +4046,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![

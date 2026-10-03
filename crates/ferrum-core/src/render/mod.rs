@@ -651,9 +651,13 @@ pub enum RenderError {
     /// Decided once, in the line mark build, so every door (a Python chart, a
     /// figure function, a hand-built wire spec) reaches it. `layer` is `None`
     /// on an unlayered chart; the per-layer draw loop names the layer index
-    /// on a layered one, which `Display` prefixes as `layer {i}: `.
+    /// on a layered one, which `Display` prefixes as `layer {i}: `. `entry`
+    /// is the public entry that produced the layer ([`crate::spec::layer::Layer::entry`],
+    /// e.g. `mark_smooth`), which the text names in place of `mark_line`;
+    /// `None` names `mark_line`.
     LineWidthConflict {
         layer: Option<usize>,
+        entry: Option<String>,
         /// Boxed, for `clippy::result_large_err` and nothing else, the same
         /// reason [`Self::LayerAxisColumnUnplaceable`]'s `detail` is boxed.
         sources: Box<LineWidthSources>,
@@ -665,15 +669,17 @@ pub enum RenderError {
     /// MALFORMED. Python's mark constructors refuse the same values; this
     /// refuses a hand-built spec that carries one. `layer` is filled the way
     /// [`Self::LineWidthConflict`]'s is.
-    MarkSizeOutOfRange { layer: Option<usize>, mark: crate::spec::mark::Mark, value: f64 },
+    MarkSizeOutOfRange { layer: Option<usize>, entry: Option<String>, mark: crate::spec::mark::Mark, value: f64 },
     /// A drawn vertex of a sized line would take a width that is not finite
     /// and `> 0`, the scene's `widths` contract: its size value maps to a
     /// non-positive area on the size scale, or a row with no usable size
     /// falls back to a non-positive default width. Neither has a width to
     /// draw, and substituting another would misreport the data, so the line
-    /// refuses. `layer` is filled the way [`Self::LineWidthConflict`]'s is.
+    /// refuses. `layer` and `entry` are filled the way
+    /// [`Self::LineWidthConflict`]'s are.
     LineWidthNotPositive {
         layer: Option<usize>,
+        entry: Option<String>,
         /// Boxed for `clippy::result_large_err`, as `LineWidthConflict`'s
         /// `sources` is.
         source: Box<NonPositiveLineWidth>,
@@ -1297,46 +1303,52 @@ impl std::fmt::Display for RenderError {
                 None => write!(f, "could not normalize string columns to Utf8: {reason}"),
                 Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
             },
-            Self::LineWidthConflict { layer, sources } => {
+            Self::LineWidthConflict { layer, entry, sources } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
+                let entry = entry.as_deref().unwrap_or("mark_line");
                 let LineWidthSources { size, stroke_width } = &**sources;
                 write!(
                     f,
-                    "mark_line: size and stroke_width both set the line's width (size={size}, \
+                    "{entry}: size and stroke_width both set the line's width (size={size}, \
                      stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width \
                      that can taper along the line; stroke_width= sets a width in pixels."
                 )
             }
-            Self::MarkSizeOutOfRange { layer, mark, value } => {
+            Self::MarkSizeOutOfRange { layer, entry, mark, value } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
                 let bound = if matches!(mark, crate::spec::mark::Mark::Line) { "positive" } else { "non-negative" };
-                write!(f, "mark_{}(size=...) must be a {bound} number; received {value}", mark.as_str())
+                match entry {
+                    Some(entry) => write!(f, "{entry}")?,
+                    None => write!(f, "mark_{}", mark.as_str())?,
+                }
+                write!(f, "(size=...) must be a {bound} number; received {value}")
             }
-            Self::LineWidthNotPositive { layer, source } => {
+            Self::LineWidthNotPositive { layer, entry, source } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
+                let entry = entry.as_deref().unwrap_or("mark_line");
                 match &**source {
                     NonPositiveLineWidth::Scaled { field, value, area } => write!(
                         f,
-                        "mark_line: size '{field}' value {value} maps to area {area} on the size \
+                        "{entry}: size '{field}' value {value} maps to area {area} on the size \
                          scale, which gives no positive line width. Every width along a line must \
                          be positive; give the size scale a range above 0."
                     ),
                     NonPositiveLineWidth::Fallback { field, width } => write!(
                         f,
-                        "mark_line: size '{field}' has a row with no usable size (null, \
+                        "{entry}: size '{field}' has a row with no usable size (null, \
                          non-finite or off the scale), which takes the line's default width \
                          {width}. Every width along a line must be positive; set a positive \
                          Theme(line_stroke_width=)."
                     ),
                     NonPositiveLineWidth::Conditional { selection, area } => write!(
                         f,
-                        "mark_line: size=fm.when(...) on selection '{selection}' has a branch of \
+                        "{entry}: size=fm.when(...) on selection '{selection}' has a branch of \
                          size {area}, which gives no positive line width. Every width along a line \
                          must be positive; give every branch a size above 0."
                     ),
@@ -1363,14 +1375,32 @@ impl RenderError {
     /// other error passes through unchanged.
     pub(crate) fn in_layer(self, index: usize) -> Self {
         match self {
-            Self::LineWidthConflict { layer: None, sources } => {
-                Self::LineWidthConflict { layer: Some(index), sources }
+            Self::LineWidthConflict { layer: None, entry, sources } => {
+                Self::LineWidthConflict { layer: Some(index), entry, sources }
             }
-            Self::LineWidthNotPositive { layer: None, source } => {
-                Self::LineWidthNotPositive { layer: Some(index), source }
+            Self::LineWidthNotPositive { layer: None, entry, source } => {
+                Self::LineWidthNotPositive { layer: Some(index), entry, source }
             }
-            Self::MarkSizeOutOfRange { layer: None, mark, value } => {
-                Self::MarkSizeOutOfRange { layer: Some(index), mark, value }
+            Self::MarkSizeOutOfRange { layer: None, entry, mark, value } => {
+                Self::MarkSizeOutOfRange { layer: Some(index), entry, mark, value }
+            }
+            other => other,
+        }
+    }
+
+    /// Name the public entry a per-layer refusal's layer came from
+    /// ([`crate::spec::layer::Layer::entry`]), for the same refusals
+    /// [`Self::in_layer`] names a layer on. Every other error passes through
+    /// unchanged.
+    pub(crate) fn with_entry(self, name: &str) -> Self {
+        let entry = Some(name.to_owned());
+        match self {
+            Self::LineWidthConflict { layer, entry: None, sources } => Self::LineWidthConflict { layer, entry, sources },
+            Self::LineWidthNotPositive { layer, entry: None, source } => {
+                Self::LineWidthNotPositive { layer, entry, source }
+            }
+            Self::MarkSizeOutOfRange { layer, entry: None, mark, value } => {
+                Self::MarkSizeOutOfRange { layer, entry, mark, value }
             }
             other => other,
         }
@@ -2091,6 +2121,26 @@ pub struct RenderOutput<T> {
     pub bytes: T,
     pub layout: crate::layout::LayoutResult,
     pub warnings: Vec<RenderWarning>,
+}
+
+/// `(kind, size)` per circle or line of a scene's legend, in order: a
+/// circle's radius, a line's stroke width.
+#[cfg(test)]
+pub(crate) fn legend_swatches(scene: &ferrum_scene::SceneGraph) -> Vec<(&'static str, f64)> {
+    use ferrum_scene::SceneNode;
+    fn walk(nodes: &[SceneNode], out: &mut Vec<(&'static str, f64)>) {
+        for node in nodes {
+            match node {
+                SceneNode::Circle { r, .. } => out.push(("circle", *r)),
+                SceneNode::Line { style, .. } => out.push(("line", style.width)),
+                SceneNode::Group { children, .. } => walk(children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&scene.legend, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -2873,6 +2923,7 @@ mod orchestration_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2992,6 +3043,7 @@ mod orchestration_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -3784,6 +3836,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -3929,7 +3982,7 @@ mod orchestration_tests {
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         }
     }
 
@@ -4099,6 +4152,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4178,6 +4232,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4239,6 +4294,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4398,6 +4454,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -4833,6 +4890,7 @@ mod orchestration_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -4916,6 +4974,7 @@ mod orchestration_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         (spec, batch)
@@ -5115,6 +5174,7 @@ mod orchestration_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let err = render_svg(
@@ -5190,6 +5250,7 @@ mod orchestration_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -5336,6 +5397,7 @@ mod orchestration_tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         (spec, batch)
@@ -5507,6 +5569,7 @@ mod orchestration_tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -5521,6 +5584,7 @@ mod orchestration_tests {
             blend: None,
             name: None,
             independent_y: true, coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             data: DataRef::default(),
@@ -5541,6 +5605,7 @@ mod orchestration_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5768,6 +5833,7 @@ mod png_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5805,6 +5871,7 @@ mod png_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5887,6 +5954,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -5942,6 +6010,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -5980,6 +6049,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -6017,6 +6087,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -6054,6 +6125,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(
@@ -6105,6 +6177,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         };
         let result = render_svg(

@@ -68,6 +68,7 @@ fn a_flip_moves_value_axis_into_post_flip_space_with_the_channels() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
 
@@ -1301,6 +1302,7 @@ fn spec_color_facet() -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     }
 }
@@ -1543,6 +1545,7 @@ fn base_spec() -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     }
 }
@@ -1949,7 +1952,7 @@ fn smooth_facet_panel_rank_deficient_degrades_instead_of_refusing() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
         .expect("a facet panel too sparse for degree=3 must degrade, not fail the chart");
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
     // #162: the sparse 'few' panel's degenerate fit must warn.
@@ -2008,7 +2011,7 @@ fn smooth_groupby_rank_deficient_degrades_symmetrically_with_facet() {
     };
     let theme = crate::layout::ThemeInputs::default();
 
-    let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+    let (outputs, warnings, _) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
         .expect("a groupby group too sparse for degree=3 must degrade, not fail the chart");
     let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
     assert!(
@@ -2588,6 +2591,7 @@ fn single_layer_spec() -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     }
 }
@@ -2651,6 +2655,7 @@ fn prepare_multi_layer_produces_multiple_layer_prepared() {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         },
         Layer {
             mark: Mark::Line,
@@ -2663,6 +2668,7 @@ fn prepare_multi_layer_produces_multiple_layer_prepared() {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         },
     ]);
     let batch = price_weight_batch();
@@ -2851,6 +2857,7 @@ fn layer_own_transforms_refused_naming_the_layer() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     };
     let prepare = |spec: &ChartSpec| {
         prepare_render_inputs(
@@ -2961,6 +2968,7 @@ fn refuse_malformed_sort_specs_layer_channel_names_the_layer() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     };
     let mut spec = single_layer_spec();
     spec.layers = Some(vec![layer(None), layer(Some(serde_json::json!({"field": 1})))]);
@@ -3119,6 +3127,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         }]),
         coord: None,
         mark_style: None,
@@ -3129,6 +3138,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
     assert!(
@@ -3307,6 +3317,7 @@ fn unknown_data_source_raises_clear_error() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     }]);
     let batch = price_weight_batch();
     let err = prepare_render_inputs(
@@ -5323,6 +5334,7 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5342,6 +5354,7 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
         name: None,
         independent_y: true,
         coord: None,
+        entry: None,
     };
 
     let spec = ChartSpec {
@@ -5366,6 +5379,7 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
 
@@ -5448,6 +5462,7 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5470,6 +5485,7 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
         name: None,
         independent_y: true,
         coord: None,
+        entry: None,
     };
 
     let spec = ChartSpec {
@@ -5494,6 +5510,7 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
 
@@ -5573,6 +5590,7 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
         name: None,
         independent_y: false,
         coord: None,
+        entry: None,
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5588,6 +5606,7 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
         name: None,
         independent_y: true,
         coord: None,
+        entry: None,
     };
 
     let spec = ChartSpec {
@@ -5612,6 +5631,7 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
 
@@ -5679,6 +5699,7 @@ fn prepare_render_inputs_no_independent_y_layer_leaves_secondary_y_empty() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     };
     let schema = Arc::new(Schema::new(vec![
@@ -5771,6 +5792,7 @@ fn sorted_bar_spec(sort: serde_json::Value, flipped: bool) -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
     }
 }
@@ -6020,6 +6042,7 @@ fn utf8view_and_large_utf8_raw_input_render_byte_identical_svg_to_utf8() {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }

@@ -596,7 +596,7 @@ pub fn resolve_mark_style(
             _ => true,
         };
         if !drawable {
-            return Err(RenderError::MarkSizeOutOfRange { layer: None, mark: *mark, value: size });
+            return Err(RenderError::MarkSizeOutOfRange { layer: None, entry: None, mark: *mark, value: size });
         }
         style.point.point_size = size;
     }
@@ -1904,6 +1904,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
 
@@ -2107,6 +2108,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2257,7 +2259,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None, params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -2330,7 +2332,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None, params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![

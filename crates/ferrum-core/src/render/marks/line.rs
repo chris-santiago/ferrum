@@ -61,19 +61,18 @@ fn vertex_width(field: &str, sample: Option<(f64, f64)>, fallback: f64) -> Resul
         Some((value, area)) => NonPositiveLineWidth::Scaled { field, value, area },
         None => NonPositiveLineWidth::Fallback { field, width },
     };
-    Err(RenderError::LineWidthNotPositive { layer: None, source: Box::new(source) })
+    Err(RenderError::LineWidthNotPositive { layer: None, entry: None, source: Box::new(source) })
 }
 
 /// Every `size` conditional this line's layer declared (the per-layer spec
 /// carries only its own layer's conditionals). The interactive runtime folds
-/// all of them, so each one's branches are checked.
+/// all of them (the batch names them in `size_conditionals`), so each one's
+/// branches are checked.
 fn size_conditionals(spec: &crate::spec::chart::ChartSpec) -> Vec<&ferrum_scene::ConditionalEncoding> {
     spec.conditionals
         .iter()
         .map(|c| &c.encoding)
-        .filter(|cond| {
-            [&cond.if_selected, &cond.if_not].into_iter().any(|b| matches!(b, ferrum_scene::EncodingValue::Size { .. }))
-        })
+        .filter(|cond| cond.sets_size())
         .collect()
 }
 
@@ -86,7 +85,7 @@ fn refuse_non_positive_branch(cond: &ferrum_scene::ConditionalEncoding) -> Resul
         if !(width.is_finite() && width > 0.0) {
             let selection = cond.selection_name.clone();
             let source = NonPositiveLineWidth::Conditional { selection, area };
-            return Err(RenderError::LineWidthNotPositive { layer: None, source: Box::new(source) });
+            return Err(RenderError::LineWidthNotPositive { layer: None, entry: None, source: Box::new(source) });
         }
     }
     Ok(())
@@ -108,6 +107,7 @@ fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), Re
     match (size, stroke_width) {
         (Some(size), Some(stroke_width)) => Err(RenderError::LineWidthConflict {
             layer: None,
+            entry: None,
             sources: Box::new(LineWidthSources { size, stroke_width }),
         }),
         _ => Ok(()),
@@ -430,6 +430,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        entry: None,
         params: Vec::new(),
         }
     }
@@ -910,7 +911,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, params: Vec::new(),
+            chart_description: None, entry: None, params: Vec::new(),
         };
         (batch, spec)
     }
@@ -1652,6 +1653,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         }
     }
 
@@ -1881,6 +1883,50 @@ mod tests {
         assert_eq!(line_of(&scene, 2), line_of(&scene, 0), "both inherited: the stroke_width wins");
         assert_eq!(line_of(&scene, 2).1, None);
         render_static(&spec).unwrap();
+    }
+
+    /// The size legend asks the width precedence the line draws by: a line
+    /// whose own `stroke_width=3` outranks the `size` it inherits draws no
+    /// size, so beside a sized rule, or alone under a chart-level size, there
+    /// is no size legend; beside a sized point the point's circles. A line
+    /// without its own width draws the inherited size, so the same rule
+    /// pairing shows line swatches at the dot diameter of each entry.
+    #[test]
+    fn the_size_legend_follows_the_width_the_line_draws() {
+        let xy = line_spec().encoding;
+        let sized = |mut encoding: Encoding| {
+            encoding.size = Some(EncodingSpec { field: "v".into(), ..Default::default() });
+            encoding
+        };
+        let own_width = Some(MarkKwargsSpec { stroke_width: Some(3.0), ..Default::default() });
+        let stroked = test_layer(Mark::Line, xy.clone(), own_width);
+        let bare = test_layer(Mark::Line, xy.clone(), None);
+        let rule_y = Encoding { y: xy.y.clone(), ..Default::default() };
+        let sized_rule = test_layer(Mark::Rule, sized(rule_y), None);
+        let sized_point = test_layer(Mark::Point, sized(xy.clone()), None);
+        let swatches = |spec: &ChartSpec| {
+            let scene = render_interactive(spec).unwrap_or_else(|e| panic!("{e}"));
+            assert!(render_static(spec).is_ok());
+            crate::render::legend_swatches(&scene)
+        };
+
+        let reference = swatches(&added(vec![sized_point.clone()]));
+        assert!(!reference.is_empty() && reference.iter().all(|(k, _)| *k == "circle"), "{reference:?}");
+
+        assert_eq!(swatches(&added(vec![stroked.clone(), sized_rule.clone()])), Vec::new());
+        let chart_level_only = ChartSpec { encoding: sized(xy.clone()), ..added(vec![stroked.clone()]) };
+        assert_eq!(swatches(&chart_level_only), Vec::new());
+        assert_eq!(swatches(&added(vec![stroked, sized_point])), reference);
+
+        // Vacuity control: the bare line draws the inherited size.
+        let lines = swatches(&added(vec![bare.clone(), sized_rule]));
+        let want: Vec<(&str, f64)> = reference.iter().map(|(_, r)| ("line", 2.0 * r)).collect();
+        assert_eq!(lines.len(), want.len(), "{lines:?}");
+        for ((kind, width), (_, w)) in lines.iter().zip(&want) {
+            assert_eq!(*kind, "line", "{lines:?}");
+            assert!((width - w).abs() < 1e-9, "{lines:?} vs {want:?}");
+        }
+        assert_eq!(swatches(&ChartSpec { encoding: sized(xy), ..added(vec![bare]) }), lines);
     }
 
     // ── Every drawn width is finite and positive, or the line refuses ──
@@ -2163,6 +2209,117 @@ mod tests {
             let want = "layer 1: mark_line: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
                         positive line width. Every width along a line must be positive; give every branch a size above 0.";
             assert_eq!(render_static(&refused).err().map(|e| e.to_string()).as_deref(), Some(want), "{layers:?}");
+        }
+    }
+
+    /// A line answers to its layer's `size` conditionals and no other: a
+    /// later color conditional beside its size conditional is neither named
+    /// on the batch nor branch-checked as a width, and the line renders.
+    #[test]
+    fn a_later_non_size_conditional_is_not_one_the_line_answers_to() {
+        let mut spec = with_size_conditional(line_spec(), 100.0, 20.0);
+        let color = |r| ferrum_scene::EncodingValue::Color { value: ferrum_scene::Color { r, g: 0, b: 0, a: 255 } };
+        spec.conditionals.push(
+            ferrum_scene::ConditionalEncoding {
+                selection_name: "s".into(),
+                channel: ferrum_scene::ChannelName::Color,
+                if_selected: color(255),
+                if_not: color(0),
+            }
+            .into(),
+        );
+        assert!(render_static(&spec).is_ok(), "{:?}", render_static(&spec).err());
+        let scene = render_interactive(&spec).unwrap();
+        let batch = &scene.panels[0].marks[0];
+        assert_eq!(batch.size_conditionals, Some(vec![0]));
+        assert_eq!(all_row_numbers(batch.vertex_rows.clone()), Some(vec![vec![0, 1, 2, 3]]));
+        assert_eq!(scene.interaction.conditionals.len(), 2);
+    }
+
+    /// A layer that records the public entry which produced it (a composite
+    /// such as `mark_smooth` desugaring into a fit line) names that entry,
+    /// not `mark_line`, in every per-layer line refusal; a layer that records
+    /// none keeps `mark_line`, and an unlayered chart is unchanged.
+    #[test]
+    fn a_line_refusal_names_the_public_entry_its_layer_records() {
+        let xy = line_spec().encoding;
+        let layered = |entry: Option<&str>, line_style: MarkKwargsSpec| {
+            let mut line = test_layer(Mark::Line, xy.clone(), Some(line_style));
+            line.entry = entry.map(Into::into);
+            added(vec![test_layer(Mark::Point, xy.clone(), None), line])
+        };
+        let conflict = MarkKwargsSpec { size: Some(40.0), stroke_width: Some(3.0), ..Default::default() };
+        let conflict_text = |entry: &str| {
+            format!(
+                "layer 1: {entry}: size and stroke_width both set the line's width (size=40, stroke_width=3); bind \
+                 only one. size= sets a dot-diameter width that can taper along the line; stroke_width= sets a \
+                 width in pixels."
+            )
+        };
+        let bad_size = MarkKwargsSpec { size: Some(-4.0), ..Default::default() };
+        let size_text = |entry: &str| format!("layer 1: {entry}(size=...) must be a positive number; received -4");
+        let branch_text = |entry: &str| {
+            format!(
+                "layer 1: {entry}: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
+                 positive line width. Every width along a line must be positive; give every branch a size above 0."
+            )
+        };
+        for (entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "mark_line")] {
+            let refusal = |spec: &ChartSpec| render_static(spec).err().map(|e| e.to_string());
+            assert_eq!(refusal(&layered(entry, conflict.clone())), Some(conflict_text(named)), "{entry:?}");
+            assert_eq!(refusal(&layered(entry, bad_size.clone())), Some(size_text(named)), "{entry:?}");
+            let branch = with_scoped_size_conditional(layered(entry, MarkKwargsSpec::default()), 100.0, 0.0, None);
+            assert_eq!(refusal(&branch), Some(branch_text(named)), "{entry:?}");
+            assert_eq!(render_interactive(&branch).err().map(|e| e.to_string()), Some(branch_text(named)));
+        }
+    }
+
+    /// A chart that records the public entry which produced it (a composite
+    /// such as `mark_smooth` lowering to one unlayered line) names that entry
+    /// in every line refusal, without a layer prefix; a chart that records
+    /// none keeps `mark_line`. On a layered chart the chart's entry names
+    /// every layer that records none, and a layer's own entry outranks it.
+    #[test]
+    fn a_line_refusal_names_the_public_entry_its_chart_records() {
+        let conflict = MarkKwargsSpec { size: Some(40.0), stroke_width: Some(3.0), ..Default::default() };
+        let conflict_text = |entry: &str| {
+            format!(
+                "{entry}: size and stroke_width both set the line's width (size=40, stroke_width=3); bind only \
+                 one. size= sets a dot-diameter width that can taper along the line; stroke_width= sets a width in \
+                 pixels."
+            )
+        };
+        let bad_size = MarkKwargsSpec { size: Some(-4.0), ..Default::default() };
+        let size_text = |entry: &str| format!("{entry}(size=...) must be a positive number; received -4");
+        let branch_text = |entry: &str| {
+            format!(
+                "{entry}: size=fm.when(...) on selection 's' has a branch of size 0, which gives no positive line \
+                 width. Every width along a line must be positive; give every branch a size above 0."
+            )
+        };
+        let flat = |entry: Option<&str>, style: Option<MarkKwargsSpec>| ChartSpec {
+            mark_style: style,
+            entry: entry.map(Into::into),
+            ..line_spec()
+        };
+        let refusal = |spec: &ChartSpec| render_static(spec).err().map(|e| e.to_string());
+        for (entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "mark_line")] {
+            assert_eq!(refusal(&flat(entry, Some(conflict.clone()))), Some(conflict_text(named)), "{entry:?}");
+            assert_eq!(refusal(&flat(entry, Some(bad_size.clone()))), Some(size_text(named)), "{entry:?}");
+            let branch = with_size_conditional(flat(entry, None), 100.0, 0.0);
+            assert_eq!(refusal(&branch), Some(branch_text(named)), "{entry:?}");
+            assert_eq!(render_interactive(&branch).err().map(|e| e.to_string()), Some(branch_text(named)));
+        }
+
+        let xy = line_spec().encoding;
+        let layered = |layer_entry: Option<&str>| {
+            let mut line = test_layer(Mark::Line, xy.clone(), Some(conflict.clone()));
+            line.entry = layer_entry.map(Into::into);
+            ChartSpec { entry: Some("lmplot".into()), ..added(vec![test_layer(Mark::Point, xy.clone(), None), line]) }
+        };
+        for (layer_entry, named) in [(Some("mark_smooth"), "mark_smooth"), (None, "lmplot")] {
+            let want = format!("layer 1: {}", conflict_text(named));
+            assert_eq!(refusal(&layered(layer_entry)), Some(want), "{layer_entry:?}");
         }
     }
 

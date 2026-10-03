@@ -38,7 +38,7 @@ from ferrum._validate import as_finite_real, coerce_positive_int, validate_choic
 from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
-from ferrum.plots._helpers import _field_name, _finalize_chart
+from ferrum.plots._helpers import _field_name, _figure_entry, _finalize_chart
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +432,7 @@ def _warn_inert_bins(*, kind: str, bins: Any) -> None:
     )
 
 
+@_figure_entry
 def displot(
     data: Any,
     *,
@@ -2302,6 +2303,7 @@ def _catplot_build(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def relplot(
     data: Any,
     *,

@@ -40,6 +40,7 @@ from ferrum._validate import coerce_finite_real, validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.plots._helpers import (
     _field_name,
+    _figure_entry,
     _finalize_chart,
     _merge_layers,
     _unique_col_name,
@@ -92,6 +93,7 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def pairplot(
     data: Any,
     *,
@@ -1254,6 +1256,7 @@ def _clustermap_build(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def jointplot(
     data: Any,
     *,

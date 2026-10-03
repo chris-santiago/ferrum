@@ -1263,21 +1263,27 @@ def y2_df() -> pl.DataFrame:
     )
 
 
-def _secondary_y_route(df: pl.DataFrame, *, axis=None):
+def _base_chart(df: pl.DataFrame, mark: str, coord):
+    """``fm.Chart(df).mark_<mark>()``, under *coord* when one is given."""
+    chart = getattr(fm.Chart(df), f"mark_{mark}")()
+    return chart if coord is None else chart.coord(coord)
+
+
+def _secondary_y_route(df: pl.DataFrame, *, axis=None, coord=None):
     """route: ``SecondaryY`` desugar — appends one independent-y layer."""
-    return fm.Chart(df).mark_point().encode(x="a", y="b") + fm.SecondaryY("c", axis=axis)
+    return _base_chart(df, "point", coord).encode(x="a", y="b") + fm.SecondaryY("c", axis=axis)
 
 
-def _independent_layer_route(df: pl.DataFrame, *, axis=None):
+def _independent_layer_route(df: pl.DataFrame, *, axis=None, coord=None):
     """route: ``LayerChart(resolve={"y": "independent"})`` — explicit layers."""
     return fm.layer(
-        fm.Chart(df).mark_line().encode(x="a", y="b"),
-        fm.Chart(df).mark_point().encode(x="a", y=fm.Y("c", axis=axis)),
+        _base_chart(df, "line", coord).encode(x="a", y="b"),
+        _base_chart(df, "point", coord).encode(x="a", y=fm.Y("c", axis=axis)),
         resolve={"y": "independent"},
     )
 
 
-def _three_stacked_route(df: pl.DataFrame, *, axis=None):
+def _three_stacked_route(df: pl.DataFrame, *, axis=None, coord=None):
     """route: three ``SecondaryY`` layers stacked on one chart.
 
     ``axis=`` patches only the middle (designated) secondary's slot; the
@@ -1291,7 +1297,7 @@ def _three_stacked_route(df: pl.DataFrame, *, axis=None):
         (pl.col("c") * 2.0 - 500.0).alias("c3"),
     )
     return (
-        fm.Chart(stacked).mark_point().encode(x="a", y="b")
+        _base_chart(stacked, "point", coord).encode(x="a", y="b")
         + fm.SecondaryY("c")
         + fm.SecondaryY("c2", axis=axis)
         + fm.SecondaryY("c3")
@@ -1509,6 +1515,59 @@ class TestAxisY2GridlinesVacuity:
         default = _secondary_y_route(y2_df)
         lit = default.configure(axis_y2=fm.AxisConfig(grid=True))
         assert lit.to_svg() != default.to_svg()
+
+
+#: Every coordinate system a chart can declare (each public ``fm.Coord*``
+#: class), plus ``None`` for no ``.coord()`` call at all.
+_Y2_COORDS: tuple[str | None, ...] = (
+    *sorted(name for name in dir(fm) if name.startswith("Coord")),
+    None,
+)
+
+
+def _has_y_slot_axis(chart, y_slot: str) -> bool:
+    scene = json.loads(chart.interactive().scene_json)
+    return any(
+        node["type"] == "group" and node["attrs"] == [["y_slot", y_slot]]
+        for node in scene["panels"][0]["axes"]
+    )
+
+
+class TestAxisY2GridlinesCoord:
+    """#141 -- a lit secondary draws its gridlines only where the coordinate
+    system draws Cartesian axis chrome.
+
+    A coordinate system that draws no Cartesian axes (polar, geo) owns no
+    secondary tick to rule a line at, so a lit ``axis_y2`` adds nothing;
+    every other one adds exactly one gridline per secondary tick. Which
+    coords draw axes is read off each render's own axis groups, not listed.
+    """
+
+    @pytest.mark.parametrize("route_name", sorted(_Y2_ROUTES))
+    def test_both_outcomes_occur(self, y2_df, route_name):
+        route = _Y2_ROUTES[route_name]
+        outcomes = {
+            _has_y_slot_axis(_coord_cell(y2_df, route, coord), route.designated_slot)
+            for coord in _Y2_COORDS
+        }
+        assert outcomes == {True, False}
+
+    @pytest.mark.parametrize("coord", _Y2_COORDS, ids=str)
+    @pytest.mark.parametrize("route_name", sorted(_Y2_ROUTES))
+    def test_a_lit_secondary_rules_lines_only_where_axes_are_drawn(self, y2_df, route_name, coord):
+        route = _Y2_ROUTES[route_name]
+        unlit = _coord_cell(y2_df, route, coord)
+        lit = unlit.configure(axis_y2=fm.AxisConfig(grid=True))
+        label = f"{route_name} x {coord}"
+        if not _has_y_slot_axis(lit, route.designated_slot):
+            _assert_adds_nothing(lit, unlit, label=label)
+            return
+        ticks = [y for slot in route.all_slots for y in _y2_tick_ys(lit, y_slot=slot)]
+        _assert_adds_exactly_the_ticks(lit, unlit, ticks, label=label)
+
+
+def _coord_cell(df: pl.DataFrame, route: _Y2Route, coord: str | None):
+    return route.build(df, coord=None if coord is None else getattr(fm, coord)())
 
 
 class TestAxisY2GridlinesMatrix:

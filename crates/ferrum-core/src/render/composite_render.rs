@@ -676,13 +676,23 @@ impl LeafLegendBundle {
         })
     }
 
-    /// This bundle with its size block drawing `symbol` swatches.
-    fn with_size_symbol(&self, symbol: SymbolKind) -> LeafLegendBundle {
+    /// This leaf's size block, `None` without one.
+    fn size_block(&self) -> Option<&AuxLegendInput> {
+        self.aux.iter().find(|a| matches!(a, AuxLegendInput::Size { .. }))
+    }
+
+    /// This bundle with `block` as its size block, drawing `symbol` swatches.
+    /// A shared size scale gives every participant the same entries, so a
+    /// block another participant built stands in for one this leaf lacks.
+    fn with_size_block(&self, block: &AuxLegendInput, symbol: SymbolKind) -> LeafLegendBundle {
         let mut bundle = self.clone();
-        for a in &mut bundle.aux {
-            if let AuxLegendInput::Size { symbol: s, .. } = a {
-                *s = symbol;
-            }
+        let mut block = block.clone();
+        if let AuxLegendInput::Size { symbol: s, .. } = &mut block {
+            *s = symbol;
+        }
+        match bundle.aux.iter_mut().find(|a| matches!(a, AuxLegendInput::Size { .. })) {
+            Some(own) => *own = block,
+            None => bundle.aux.insert(0, block),
         }
         bundle
     }
@@ -1529,34 +1539,39 @@ fn descend_channel(
 /// pre-order (design §8.4); if every participating leaf is user-disabled (all
 /// bundles empty) no band is emitted, matching design §4.
 ///
-/// The band speaks for every participating leaf, so its size block draws line
-/// swatches only when each participant's own size block does: one
-/// participant drawing the size field as dots keeps the band's circles.
+/// The band speaks for every participating leaf. Its size block is the first
+/// participant's that has one (a leaf none of whose marks draws the size field
+/// has none), and it draws line swatches only when each participant's own size
+/// block does: one participant drawing the size field as dots keeps the band's
+/// circles.
 fn apply_legend_band(
     scene: &mut SceneGraph,
     merge_ctx: &MergeCtx<'_>,
     leaf_range: std::ops::Range<usize>,
     flags: BandFlags,
 ) {
-    let mut participants = leaf_range.filter_map(|i| {
-        let ctx = &merge_ctx.contexts[i];
-        let participates =
-            (flags.color && ctx.color.is_some()) || (flags.size && ctx.size.is_some());
-        if !participates {
-            return None;
-        }
-        match &merge_ctx.bundles[i] {
-            Some(b) if !b.is_empty() => Some(b),
-            _ => None,
-        }
-    });
-    let Some(bundle) = participants.next() else { return };
-    let draws_dots = |b: &LeafLegendBundle| b.size_symbol() == Some(SymbolKind::Circle);
-    if bundle.size_symbol() == Some(SymbolKind::Line) && participants.any(draws_dots) {
-        draw_legend_band(scene, &bundle.with_size_symbol(SymbolKind::Circle), flags);
-    } else {
+    let participants: Vec<&LeafLegendBundle> = leaf_range
+        .filter_map(|i| {
+            let ctx = &merge_ctx.contexts[i];
+            let participates =
+                (flags.color && ctx.color.is_some()) || (flags.size && ctx.size.is_some());
+            if !participates {
+                return None;
+            }
+            match &merge_ctx.bundles[i] {
+                Some(b) if !b.is_empty() => Some(b),
+                _ => None,
+            }
+        })
+        .collect();
+    let Some(&bundle) = participants.first() else { return };
+    let Some(size_block) = participants.iter().find_map(|b| b.size_block()) else {
         draw_legend_band(scene, bundle, flags);
-    }
+        return;
+    };
+    let draws_dots = participants.iter().any(|b| b.size_symbol() == Some(SymbolKind::Circle));
+    let symbol = if draws_dots { SymbolKind::Circle } else { SymbolKind::Line };
+    draw_legend_band(scene, &bundle.with_size_block(size_block, symbol), flags);
 }
 
 /// Lay out the band's legend content (color block + size aux) in a sandbox,
@@ -2312,8 +2327,14 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
             scene.title.clear();
         }
 
+        // This child's conditionals are appended after every earlier
+        // child's, so each line's indices into them shift by as many.
+        let conditional_base = merged.interaction.conditionals.len();
         for mut panel in scene.panels.drain(..) {
             place_panel(&mut panel, &t);
+            for index in panel.marks.iter_mut().flat_map(|b| b.size_conditionals.iter_mut().flatten()) {
+                *index += conditional_base;
+            }
             merged.panels.push(panel);
         }
 
@@ -2835,6 +2856,7 @@ mod tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 
@@ -2937,6 +2959,7 @@ mod tests {
             name: None,
             independent_y,
             coord: None,
+            entry: None,
         };
         ChartSpec {
             data: DataRef::default(),
@@ -2961,6 +2984,7 @@ mod tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 
@@ -3391,6 +3415,46 @@ mod tests {
         // Second panel baked to the right of the first (identity ls, translated).
         assert!(scene.panels[1].layout_scale.is_identity());
         assert!(scene.panels[1].plot_area.x > scene.panels[0].plot_area.x + 300.0);
+    }
+
+    /// Every leaf's conditionals land in the one merged scene list, so a
+    /// sized line leaf's `size_conditionals` must index its own leaf's
+    /// conditional there, never a sibling leaf's, in either leaf order and
+    /// with the sibling's conditional before or after its own.
+    #[test]
+    fn a_line_leaf_names_only_its_own_size_conditional_in_the_merged_scene() {
+        let size = |name: &str, unselected: f64| ferrum_scene::ConditionalEncoding {
+            selection_name: name.into(),
+            channel: ferrum_scene::ChannelName::Size,
+            if_selected: ferrum_scene::EncodingValue::Size { value: 100.0 },
+            if_not: ferrum_scene::EncodingValue::Size { value: unselected },
+        };
+        let line = ChartSpec { mark: Mark::Line, conditionals: vec![size("t", 20.0).into()], ..scatter_spec() };
+        let point = ChartSpec { conditionals: vec![size("p", 0.0).into()], ..scatter_spec() };
+        for line_first in [true, false] {
+            let specs = if line_first { [line.clone(), point.clone()] } else { [point.clone(), line.clone()] };
+            let tree = composite(
+                CompositeLayout::Hconcat,
+                vec![leaf_node_with(specs[0].clone(), 0), leaf_node_with(specs[1].clone(), 1)],
+            );
+            let holds = specs.map(|spec| LeafHold { spec, ..hold() });
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            assert_eq!(scene.interaction.conditionals.len(), 2, "both leaves' conditionals are merged");
+            let line_batch = scene
+                .panels
+                .iter()
+                .flat_map(|p| &p.marks)
+                .find(|b| b.kind == ferrum_scene::MarkBatchKind::Line)
+                .expect("the line leaf draws a line batch");
+            let named: Vec<&str> = line_batch
+                .size_conditionals
+                .iter()
+                .flatten()
+                .map(|&i| scene.interaction.conditionals[i].selection_name.as_str())
+                .collect();
+            assert_eq!(named, vec!["t"], "line leaf first: {line_first}");
+        }
     }
 
     /// Cross-task verification (#52): a dual-axis LayerChart leaf nested inside a
@@ -4881,6 +4945,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         }]);
         spec
     }
@@ -7749,6 +7814,101 @@ mod tests {
             2,
             "band must not add or drop panels"
         );
+    }
+
+    /// A layered leaf with a chart-level `size` on `s` and a numeric `color`
+    /// on `x` over `layers` (wire layer objects).
+    fn sized_layers_spec(layers: &[serde_json::Value]) -> ChartSpec {
+        let mut s = scatter_spec();
+        s.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s.encoding.color = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+        s.layers = Some(layers.iter().map(|l| serde_json::from_value(l.clone()).unwrap()).collect());
+        s
+    }
+
+    /// A shared size and color band over two leaves: the band's size block
+    /// comes from a leaf whose marks draw the size field, never from one whose
+    /// only line yields it to its own `stroke_width=2`. The first leaf is
+    /// always such a line beside a rule (which draws the color, so the leaf
+    /// has a colorbar and the band takes its legend from it). Beside a second
+    /// such leaf the band draws the colorbar and no size swatch; beside a
+    /// point leaf the point's circles; beside a sized line leaf the line's
+    /// dot-diameter widths.
+    #[test]
+    fn a_shared_band_draws_size_swatches_only_from_leaves_that_draw_size() {
+        let yielding = || {
+            sized_layers_spec(&[
+                serde_json::json!({"mark": "line", "mark_style": {"stroke_width": 2.0}}),
+                serde_json::json!({"mark": "rule", "encoding": {"y": {"field": "y"}}}),
+            ])
+        };
+        let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
+        let band = |second: ChartSpec| {
+            let h0 = color_hold_with(yielding(), batch.clone(), ThemeInputs::default());
+            let h1 = color_hold_with(second, batch.clone(), ThemeInputs::default());
+            let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+            let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
+            let mut tree = composite(CompositeLayout::Hconcat, vec![leaf(0), leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                resolve.size = Some(RM::Shared);
+                resolve.color = Some(RM::Shared);
+            }
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            crate::render::legend_swatches(&scene)
+        };
+        // The colorbar's tick lines lead every band below.
+        let colorbar = band(yielding());
+        assert!(!colorbar.is_empty() && colorbar.iter().all(|(k, w)| *k == "line" && *w == 1.0), "{colorbar:?}");
+        let size_block = |second: ChartSpec| {
+            let all = band(second);
+            assert_eq!(all[..colorbar.len()], colorbar[..], "{all:?}");
+            all[colorbar.len()..].to_vec()
+        };
+        let circles = size_block(sized_layers_spec(&[serde_json::json!({"mark": "point"})]));
+        assert!(!circles.is_empty() && circles.iter().all(|(k, _)| *k == "circle"), "{circles:?}");
+        let lines = size_block(sized_layers_spec(&[serde_json::json!({"mark": "line"})]));
+        let want: Vec<(&str, f64)> = circles.iter().map(|(_, r)| ("line", 2.0 * r)).collect();
+        assert_eq!(lines.len(), want.len(), "{lines:?}");
+        for ((kind, width), (_, w)) in lines.iter().zip(&want) {
+            assert_eq!(*kind, "line", "{lines:?}");
+            assert!((width - w).abs() < 1e-9, "{lines:?} vs {want:?}");
+        }
+    }
+
+    /// Every member of an overlay draws its own size legend, so a member whose
+    /// only line yields the size to its own `stroke_width=2` draws none: the
+    /// overlay's swatches are exactly the point member's circles, in either
+    /// member order. A member whose line draws the size adds its own block.
+    #[test]
+    fn an_overlay_member_whose_line_yields_the_size_draws_no_size_legend() {
+        let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
+        let size_only = |layer: serde_json::Value| {
+            let mut s = sized_layers_spec(&[layer]);
+            s.encoding.color = None;
+            s
+        };
+        let yielding = || size_only(serde_json::json!({"mark": "line", "mark_style": {"stroke_width": 2.0}}));
+        let point = || size_only(serde_json::json!({"mark": "point"}));
+        let drawing_line = || size_only(serde_json::json!({"mark": "line"}));
+        let overlay = |specs: [ChartSpec; 2]| {
+            let holds = specs.map(|s| color_hold_with(s, batch.clone(), ThemeInputs::default()));
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
+            let tree = composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]);
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            crate::render::legend_swatches(&scene)
+        };
+        let circles = {
+            let hold = color_hold_with(point(), batch.clone(), ThemeInputs::default());
+            let leaves = [leaf_input(&hold, 300.0, 200.0)];
+            let tree = composite(CompositeLayout::Overlay, vec![CompositeNode::Leaf { spec: Box::new(point()), data: 0, label: None }]);
+            crate::render::legend_swatches(&render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap().0)
+        };
+        assert!(!circles.is_empty() && circles.iter().all(|(k, _)| *k == "circle"), "{circles:?}");
+        assert_eq!(overlay([yielding(), point()]), circles);
+        assert_eq!(overlay([point(), yielding()]), circles);
+        // Vacuity control: a drawing line member adds a block of its own.
+        assert_eq!(overlay([drawing_line(), point()]).len(), 2 * circles.len());
     }
 
     /// A point spec with color AND size mapped to the SAME numeric field `s` —

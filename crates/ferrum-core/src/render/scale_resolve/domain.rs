@@ -1538,6 +1538,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         }
     }
 

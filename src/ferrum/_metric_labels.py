@@ -543,6 +543,7 @@ def _apply_metric_label(
     """
     from ferrum._coerce import to_arrow_table
     from ferrum.chart import Chart
+    from ferrum.composition import _promote_layer_channels
 
     base = _without_metric_label_layer(base)
     x_col = x_col_override or _resolve_field(base._encoding.get("x"))
@@ -635,7 +636,12 @@ def _apply_metric_label(
         .mark_text(align="right", baseline="hanging", dx=-4, dy=4)
         .encode(x=_LABEL_X_COL, y=_LABEL_Y_COL, text=_LABEL_TEXT_COL)
     )
-    return base_aug + annot_layer
+    merged = base_aug + annot_layer
+    # A metric label is drawn in its curve's hue, so the base's own channel
+    # bindings, a composite's layer-level color included, become the merged
+    # chart's: each series' label inherits its color and the legend titles it.
+    _promote_layer_channels(merged, [layer.encoding for layer in merged._layers or []])
+    return merged
 
 
 @dataclass(frozen=True)

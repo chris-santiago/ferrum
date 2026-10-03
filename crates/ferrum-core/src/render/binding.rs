@@ -1994,6 +1994,7 @@ mod chart_config_gate_tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
@@ -2364,6 +2365,7 @@ mod composite_leaf_bounds_tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         };
         CompositeNode::Leaf { spec: Box::new(spec), data, label: None }
     }
@@ -2483,6 +2485,7 @@ mod composite_leaf_binding_tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 
@@ -2714,6 +2717,7 @@ mod composite_warning_tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 

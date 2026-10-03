@@ -14,6 +14,7 @@ from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
 from ferrum._overrides import _FIGURE_CHROME_KEYS
 from ferrum._validate import validate_choice
+from ferrum.selection import ConditionalSpec
 from ferrum.title import Title
 
 _SHARE_MODES = ("shared", "independent")
@@ -4322,7 +4323,10 @@ def _expand_layers(c) -> tuple[list, list]:
 
     Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
     ``None``) -- splat their layers as-is and carry their top-level transforms
-    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list.
+    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list,
+    and the public entry a flat chart speaks as (``Chart._entry``) moves onto
+    that layer: the caller rebuilding a chart from these layers clears its
+    own ``_entry``, so the entry names this operand's layer and no other.
 
     Transforms are returned as plain PyO3 objects.  The named-transform path
     (routing a layer's output to a specific ``data_source``) is handled in
@@ -4354,6 +4358,7 @@ def _expand_layers(c) -> tuple[list, list]:
             encoding=dict(c._encoding),
             mark_kwargs=_layer_mark_kwargs(c),
             position=c._position,
+            entry=c._entry,
         )
     ], _top_transforms(c)
 
@@ -4475,8 +4480,8 @@ def _warn_on_layer_conflicts(lhs, rhs) -> None:
         )
 
 
-def _promote_layer_channels(new) -> None:
-    """Promote each auxiliary channel's first layer-level binding to chart level when absent.
+def _promote_layer_channels(new, authored: list[dict]) -> None:
+    """Promote each auxiliary channel's first user-authored binding to chart level when absent.
 
     Rust builds every auxiliary (non-positional) scale -- color, size, shape,
     the opacity family, stroke dash; the set is
@@ -4487,27 +4492,31 @@ def _promote_layer_channels(new) -> None:
     draws as if it did not: ``point + sized_line`` drew an untapered line
     while ``sized_line + point`` tapered it.
 
-    For each channel this scans the merged layers in order and promotes the
-    first layer that carries a ``ChannelBase`` binding, so the result does
-    not depend on layer order. Once promoted, the channel is chart-level:
-    every layer that does not bind it inherits it, exactly as a leading
-    chart's own binding is inherited. A later layer binding a different
-    field keeps that binding on its layer and is drawn through the first
-    binder's scale. A mark-kwarg constant (``mark_point(size=30)``) is mark
-    style, not an encoding, so it never blocks promotion.
+    *authored* is the encodings the caller wrote that arrive in this merge,
+    in layer order: the right operand's chart-level encoding for
+    ``chart + chart`` (a flat chart's whole encoding, or a layered chart's
+    shared one, including what its own merges promoted), and each public
+    ``Layer``'s encoding for ``Chart.layer()``. For each channel the first
+    of them that carries a ``ChannelBase`` binding is promoted, so the
+    result does not depend on layer order. Once promoted, the channel is
+    chart-level: every layer that does not bind it inherits it, exactly as
+    a leading chart's own binding is inherited. A later binding of a
+    different field keeps that binding on its layer and is drawn through
+    the first binder's scale. A mark-kwarg constant (``mark_point(size=30)``)
+    is mark style, not an encoding, so it never blocks promotion.
 
-    A layer's binding is read through
+    A layer a composite mark or figure function emitted keeps its own
+    layer-level bindings local: its encoding is never in *authored*, so
+    ``importance_chart(compare=...) + rule`` does not recolor the
+    composite's error rules or title its legend after its ``model`` color.
+
+    A binding is read through
     :func:`ferrum.encoding._aliases.resolve_channel_alias`, so a
-    ``fill``/``stroke``-only layer promotes its color the same way
+    ``fill``/``stroke``-only encoding promotes its color the same way
     ``to_spec()``'s later alias pass would resolve it, without that pass's
     warning side effect.
 
-    Plain string-valued bindings (e.g. ``"class"`` from composite-mark
-    desugars like ``mark_roc``) are skipped: they are layer-internal
-    shorthands, and ``_build_encoding_specs`` expects ``ChannelBase`` objects
-    at chart level.
-
-    The promoted channel is a copy of the layer's, never an alias of it.
+    The promoted channel is a copy of the authored one, never an alias of it.
     """
     from ferrum.encoding import _auxiliary_scale_channels
     from ferrum.encoding._aliases import resolve_channel_alias
@@ -4516,8 +4525,57 @@ def _promote_layer_channels(new) -> None:
     for channel in _auxiliary_scale_channels():
         if new._encoding.get(channel) is not None:
             continue
-        for layer in new._layers or []:
-            bound = resolve_channel_alias(layer.encoding, channel)
+        for encoding in authored:
+            bound = resolve_channel_alias(encoding, channel)
             if isinstance(bound, ChannelBase):
                 new._encoding[channel] = copy.copy(bound)
                 break
+
+
+def _bind_operand_conditionals(layers: list, conditionals: list) -> list:
+    """Give one ``chart + chart`` operand's own conditionals to the layers it contributes.
+
+    A conditional on an operand chart was declared on that chart alone, so
+    after the merge it belongs to that operand's layers and to no other
+    layer: a size conditional on a scatter does not restyle the trend line
+    added beside it. Every conditional in *conditionals* that none of
+    *layers* already owns (one declared on a ``Layer``'s own encoding, or
+    bound by an earlier merge, keeps its owners) is attached to each of
+    *layers*, by identity. Called once per operand by ``Chart.__add__``,
+    which is the one verb that combines two charts as peers; the verbs
+    that attach layers to a host chart (``Chart.layer()``,
+    ``chart + SecondaryY(...)``) leave the host's conditionals unbound, so
+    they reach every layer exactly as the host's field encodings do.
+    """
+    owned = {id(c) for layer in layers for c in layer.conditionals}
+    unbound = tuple(
+        c for c in conditionals if isinstance(c, ConditionalSpec) and id(c) not in owned
+    )
+    if not unbound:
+        return layers
+    return [replace(layer, conditionals=layer.conditionals + unbound) for layer in layers]
+
+
+def _conditional_layer_scopes(conditionals: list, layers: list) -> list[list[int] | None]:
+    """Return, per conditional, the indices of the layers it belongs to.
+
+    The one place declaration provenance becomes wire layer indices,
+    computed by ``Chart.to_spec()`` against the final layer list so it
+    cannot depend on the order or the verbs the layers were attached by. A
+    conditional owned by some layers (see ``_Layer.conditionals``) belongs
+    to exactly those; one no layer owns was declared on the chart as a
+    whole and belongs to every layer, lines included, as a chart-level
+    field ``size`` is inherited by every layer. An entry that is not a
+    ``ConditionalSpec`` (``Chart.conditional()`` accepts any object with a
+    ``to_spec_dict``) carries no scope and gets ``None``.
+    """
+    every = list(range(len(layers)))
+    return [
+        (
+            [i for i, layer in enumerate(layers) if any(c is own for own in layer.conditionals)]
+            or every
+        )
+        if isinstance(c, ConditionalSpec)
+        else None
+        for c in conditionals
+    ]

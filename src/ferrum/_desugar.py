@@ -52,7 +52,7 @@ from ferrum._layer import (
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
-from ferrum.marks.base import MarkBase
+from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1167,6 +1167,18 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     transform_kwargs = ctx.transform_kwargs
 
     result = desugar_fn(x_field, y_field, **transform_kwargs)
+    # Every layer this desugar emits (or, when it lowers to one unlayered
+    # mark, the chart itself) names the public entry the caller invoked, so
+    # a render refusal about it speaks as that call -- including the size=
+    # refusal just below, so a figure function forwarding size= to a
+    # composite that draws neither point nor line refuses in its own voice.
+    entry = chart._pending_stat_mark.entry or f"mark_{kind}"
+    if "size" in style_dict:
+        refuse_size_no_layer_draws(
+            entry,
+            style_kwargs["size"],
+            [lyr.mark for lyr in result.layers] if result.layers is not None else [result.mark],
+        )
     new = chart._clone()
     new._pending_stat_mark = None
 
@@ -1180,12 +1192,18 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         if chart._layers:
             _prior_layers = list(chart._layers)
         else:
+            # A figure function's voice covers the primitive it drew before
+            # this composite too; a plain `mark_point().mark_smooth()` chain's
+            # point keeps its own.
             _prior_layers = [
-                _build_prior_layer(
-                    _prior_mark,
-                    chart._encoding,
-                    chart._mark_kwargs,
-                    chart._position,
+                replace(
+                    _build_prior_layer(
+                        _prior_mark,
+                        chart._encoding,
+                        chart._mark_kwargs,
+                        chart._position,
+                    ),
+                    entry=chart._pending_stat_mark.entry,
                 )
             ]
 
@@ -1199,7 +1217,10 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         # `_aim_layer_kwargs` just recorded for the keys aimed here.  The
         # prior primitive layer is left untouched.
         emitted = [
-            apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs), style_dict)
+            replace(
+                apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs), style_dict),
+                entry=entry,
+            )
             for lyr in result.layers
         ]
         # Scale-through-desugar propagation (design spec §6, GH #45
@@ -1250,12 +1271,14 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
                 single_mark_kwargs, style_dict, single_caller_keys
             ),
             data_source="smooth",
+            entry=entry,
         )
         new._transforms = list(chart._transforms) + list(transforms)
         new._layers = _prior_layers + [smooth_layer]
         new._mark = None
         return new
     new._mark = mark
+    new._entry = entry
     new._transforms = list(chart._transforms) + list(transforms)
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named

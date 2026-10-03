@@ -396,6 +396,10 @@ impl TransformSpec {
 /// resolve to this key.
 pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 
+/// The batch every transform output key publishes, and, per key, the `Swarm`
+/// whose rows that batch still is ([`apply_transforms_named`]).
+pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, HashMap<String, SwarmSpec>);
+
 /// Apply each transform; record named outputs with fan-out semantics.
 ///
 /// - **Named transforms** (`name = Some(...)`) run on the CURRENT chained
@@ -408,6 +412,14 @@ pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 /// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
 /// the original input when no unnamed transforms ran.
 ///
+/// Beside the batches, the routing itself records, per published key, the
+/// last `Swarm` that batch descends from through the chain (a later
+/// transform after it keeps it; a secondary output descends from none).
+/// Swarm placement runs at render time against the panel's resolved scale
+/// (`render::position::apply_swarm`) and reads that record, so the one
+/// routing rule decides both which batch a layer reads and which `Swarm`
+/// places it.
+///
 /// **Semantics note (Phase 9 finalize):** Earlier the named branch ran on the
 /// ORIGINAL batch (true fan-out from the input). Phase 9's compound desugars
 /// (mark_contour's Kde2D→Contour, clustermap's Linkage→Reorder→Unpivot,
@@ -419,14 +431,26 @@ pub(crate) fn apply_transforms_named(
     specs: &[TransformSpec],
     batch: &RecordBatch,
     ctx: &TransformContext,
-) -> PyResult<HashMap<String, RecordBatch>> {
+) -> PyResult<NamedOutputs> {
     let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+    let mut swarms: HashMap<String, SwarmSpec> = HashMap::new();
     let mut current = batch.clone();
+    let mut current_swarm: Option<&SwarmSpec> = None;
+    let publish = |swarms: &mut HashMap<String, SwarmSpec>, key: String, swarm: Option<&SwarmSpec>| match swarm {
+        Some(swarm) => swarms.insert(key, swarm.clone()),
+        None => swarms.remove(&key),
+    };
     for spec in specs {
         // Each transform sees the named outputs accumulated so far via the
         // context (Phase 9 finalize: enables Reorder(from='<named_output>')).
         let mut step_ctx = ctx.clone();
         step_ctx.named_outputs = outputs.clone();
+        // The Swarm whose rows this step's output is: this step's own, or
+        // the one its chained input already carried.
+        let fed = match spec {
+            TransformSpec::Swarm(swarm) => Some(swarm),
+            _ => current_swarm,
+        };
         if let Some(name) = spec_name(spec) {
             // Named: run on the CURRENT chained batch (prior unnamed tail).
             // Does not advance the chained pipeline pointer.
@@ -434,44 +458,25 @@ pub(crate) fn apply_transforms_named(
             // Secondary outputs first — explicit `name` (registered below)
             // wins on key collision.
             for (key, b) in spec.secondary_outputs(&current, &result)? {
+                publish(&mut swarms, key.clone(), None);
                 outputs.insert(key, b);
             }
+            publish(&mut swarms, name.to_string(), fed);
             outputs.insert(name.to_string(), result);
         } else {
             // Unnamed: chained.
             let input = current.clone();
             current = spec.apply_with_context(&current, &step_ctx)?;
+            current_swarm = fed;
             for (key, b) in spec.secondary_outputs(&input, &current)? {
+                publish(&mut swarms, key.clone(), None);
                 outputs.insert(key, b);
             }
         }
     }
+    publish(&mut swarms, FINAL_OUTPUT_KEY.to_string(), current_swarm);
     outputs.insert(FINAL_OUTPUT_KEY.to_string(), current);
-    Ok(outputs)
-}
-
-/// The transforms a layer reading `data_source` sees the output of, in chain
-/// order, by the rules of [`apply_transforms_named`]: for `None`
-/// ([`FINAL_OUTPUT_KEY`]) every unnamed transform; for a name, the unnamed
-/// transforms ahead of the last transform published under that name (the
-/// chained batch it ran on), then that transform. Empty when the layer reads
-/// the untransformed input (or a secondary output no transform names).
-pub(crate) fn output_lineage<'a>(
-    specs: &'a [TransformSpec],
-    data_source: Option<&str>,
-) -> Vec<&'a TransformSpec> {
-    let end = match data_source {
-        None => specs.len(),
-        Some(name) => match specs.iter().rposition(|spec| spec_name(spec) == Some(name)) {
-            Some(k) => k,
-            None => return Vec::new(),
-        },
-    };
-    let mut lineage: Vec<&TransformSpec> =
-        specs[..end].iter().filter(|spec| spec_name(spec).is_none()).collect();
-    // `end` indexes the named producer; for the chain tail it is past the end.
-    lineage.extend(specs.get(end));
-    lineage
+    Ok((outputs, swarms))
 }
 
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
@@ -504,21 +509,66 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
     }
 
-    /// `output_lineage` follows `apply_transforms_named`'s routing: a layer
-    /// sees the unnamed chain ahead of its source, never a named transform's
-    /// output it did not read.
+    /// The routing records, per published key, the last `Swarm` that batch
+    /// descends from through the chain: a named Swarm's own output, a later
+    /// transform after an unnamed Swarm, and the chain tail all carry it; a
+    /// named branch taken before any Swarm, or a name a later non-Swarm
+    /// output replaced, carries none.
     #[test]
-    fn output_lineage_follows_the_chained_batch() {
-        let filter = |name: Option<&str>, predicate: &str| TransformSpec::Filter(FilterSpec {
-            predicate: predicate.into(), name: name.map(Into::into), param: None,
-        });
-        // f0 -> f1(name a) -> f2 -> f3(name b)
-        let specs = vec![filter(None, "f0"), filter(Some("a"), "f1"), filter(None, "f2"), filter(Some("b"), "f3")];
-        assert_eq!(output_lineage(&specs, None), vec![&specs[0], &specs[2]]);
-        assert_eq!(output_lineage(&specs, Some("a")), vec![&specs[0], &specs[1]]);
-        assert_eq!(output_lineage(&specs, Some("b")), vec![&specs[0], &specs[2], &specs[3]]);
-        assert!(output_lineage(&specs, Some("qq_line")).is_empty());
-        assert!(output_lineage(&[], None).is_empty());
+    fn routing_records_the_swarm_each_output_descends_from() {
+        use crate::transform::swarm::SwarmSpec;
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let swarm = |name: Option<&str>, value: &str| {
+            TransformSpec::Swarm(SwarmSpec {
+                category: "g".into(),
+                value: value.into(),
+                point_size: 5.0,
+                spacing: 1.0,
+                side: Default::default(),
+                orient: Default::default(),
+                dodge: None,
+                name: name.map(Into::into),
+            })
+        };
+        let filter = |name: Option<&str>| {
+            TransformSpec::Filter(FilterSpec { predicate: "datum.v > 0".into(), name: name.map(Into::into), param: None })
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+            ],
+        )
+        .unwrap();
+        let specs = vec![
+            swarm(Some("x"), "v"),
+            filter(Some("x")),
+            filter(None),
+            swarm(Some("sw"), "v"),
+            filter(Some("before")),
+            swarm(None, "w"),
+            filter(None),
+            filter(Some("after")),
+        ];
+        let (outputs, swarms) = apply_transforms_named(&specs, &batch, &TransformContext::default()).unwrap();
+        let fed = |key: &str| swarms.get(key).map(|s| (s.value.clone(), s.name.clone()));
+        assert_eq!(fed("x"), None, "a later non-Swarm output under the same name replaces the Swarm's");
+        assert_eq!(fed("sw"), Some(("v".into(), Some("sw".into()))));
+        assert_eq!(fed("before"), None, "a named branch off a Swarm-free chain");
+        assert_eq!(fed("after"), Some(("w".into(), None)), "a named branch off the chained Swarm");
+        assert_eq!(fed(FINAL_OUTPUT_KEY), Some(("w".into(), None)), "the chain tail after the unnamed Swarm");
+        let mut keys: Vec<&String> = swarms.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["__final__", "after", "sw"]);
+        assert!(["x", "before"].iter().all(|k| outputs.contains_key(*k)));
     }
 
     #[test]
@@ -558,7 +608,7 @@ mod tests {
     fn test_apply_transforms_empty_returns_input_unchanged() {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
         let ctx = TransformContext::default();
-        let outputs = apply_transforms_named(&[], &batch, &ctx).unwrap();
+        let (outputs, _) = apply_transforms_named(&[], &batch, &ctx).unwrap();
         let out = &outputs[FINAL_OUTPUT_KEY];
         assert_eq!(out.num_rows(), 3);
         assert_eq!(out.num_columns(), 1);
@@ -599,7 +649,7 @@ mod tests {
         // pipeline failed with a schema-mismatch error; it now coerces the count
         // column and sums it. Ten input rows → total_count 10.
         let ctx = TransformContext::default();
-        let outputs = apply_transforms_named(&pipeline, &batch, &ctx).unwrap();
+        let (outputs, _) = apply_transforms_named(&pipeline, &batch, &ctx).unwrap();
         let out = &outputs[FINAL_OUTPUT_KEY];
         assert_eq!(out.schema().field(0).name(), "total_count");
         let totals = out

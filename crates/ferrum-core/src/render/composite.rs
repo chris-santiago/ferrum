@@ -1131,6 +1131,7 @@ mod tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 
@@ -2218,6 +2219,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         };
         ChartSpec {
             encoding: chart_enc,
@@ -2269,6 +2271,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let line_layer = Layer {
             mark: Mark::Line,
@@ -2281,6 +2284,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let spec = ChartSpec {
             encoding: chart_enc,
@@ -2974,6 +2978,7 @@ mod tests {
                 name: None,
                 independent_y: false,
                 coord: None,
+                entry: None,
             })
             .collect();
         let flat_spec = ChartSpec { encoding: layers[0].encoding.clone(), layers: Some(layers), ..base_spec() };
@@ -3220,6 +3225,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: spec.coord.clone(),
+            entry: None,
         };
         let flat = ChartSpec { layers: Some(vec![layer(&plain), layer(&flipped)]), ..plain.clone() };
         let prep = prepare(&flat).expect("+ resolves");
@@ -3279,6 +3285,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord,
+            entry: None,
         };
         let flat_spec =
             ChartSpec { layers: Some(vec![layer(&lead, None), layer(&member, member_layer_coord)]), ..lead.clone() };
@@ -3703,6 +3710,7 @@ mod tests {
             name: None,
             independent_y: false,
             coord: None,
+            entry: None,
         };
         let scaled = Encoding {
             x: Some(enc("i")),

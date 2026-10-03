@@ -38,6 +38,12 @@ pub enum TaperError {
     RowsMisaligned { points: usize, rows: usize },
     /// A batch's `vertex_rows` does not carry exactly one row list per node.
     RowListsMisaligned { nodes: usize, lists: usize },
+    /// A batch carries one of `vertex_rows` and `size_conditionals` without
+    /// the other.
+    SizeConditionalsUnpaired,
+    /// A batch's `size_conditionals` names conditional `index` of a scene
+    /// that has `conditionals`.
+    SizeConditionalOutOfRange { index: usize, conditionals: usize },
 }
 
 impl fmt::Display for TaperError {
@@ -59,6 +65,14 @@ impl fmt::Display for TaperError {
             Self::RowListsMisaligned { nodes, lists } => write!(
                 f,
                 "tapered line batch has {lists} vertex row lists for {nodes} lines; it needs one list per line"
+            ),
+            Self::SizeConditionalsUnpaired => write!(
+                f,
+                "tapered line batch carries only one of vertex_rows and size_conditionals; it needs both or neither"
+            ),
+            Self::SizeConditionalOutOfRange { index, conditionals } => write!(
+                f,
+                "tapered line batch answers to size conditional {index}, but the scene has {conditionals} conditionals"
             ),
         }
     }
@@ -104,6 +118,20 @@ pub fn validate_vertex_rows(batch: &MarkBatch) -> Result<(), TaperError> {
     Ok(())
 }
 
+/// Check that `batch` carries [`MarkBatch::size_conditionals`](crate::MarkBatch::size_conditionals)
+/// exactly when it carries `vertex_rows`, and that every index names one of
+/// the scene's `conditionals`.
+pub fn validate_size_conditionals(batch: &MarkBatch, conditionals: usize) -> Result<(), TaperError> {
+    match (&batch.vertex_rows, &batch.size_conditionals) {
+        (None, None) => Ok(()),
+        (Some(_), Some(indices)) => match indices.iter().find(|&&i| i >= conditionals) {
+            Some(&index) => Err(TaperError::SizeConditionalOutOfRange { index, conditionals }),
+            None => Ok(()),
+        },
+        _ => Err(TaperError::SizeConditionalsUnpaired),
+    }
+}
+
 /// How many width vertices `node` has, the count its `widths` and its
 /// batch's `vertex_rows` entry align with: one per `Polyline` point, one per
 /// `Path` command, none for any other node.
@@ -140,15 +168,27 @@ pub fn command_endpoints(commands: &[PathCmd]) -> Vec<(f64, f64)> {
 
 /// One on-piece of a dashed tapered centerline: its vertices and their widths,
 /// aligned one for one.
+///
+/// A piece of one vertex is a zero-length on-dash, a dot: it draws its two
+/// caps back to back, a disk under a round cap and a square `w` wide under a
+/// square one, and nothing under a butt cap, as a constant-width SVG stroke
+/// does. `heading` is the centerline's unit direction there, which orients a
+/// square dot; `None` on every piece of two or more vertices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaperPiece {
     pub points: Vec<(f64, f64)>,
     pub widths: Vec<f64>,
+    pub heading: Option<(f64, f64)>,
 }
 
 impl TaperPiece {
+    /// A piece with no dot heading.
+    pub fn run(points: Vec<(f64, f64)>, widths: Vec<f64>) -> Self {
+        Self { points, widths, heading: None }
+    }
+
     fn start(point: (f64, f64), width: f64) -> Self {
-        Self { points: vec![point], widths: vec![width] }
+        Self::run(vec![point], vec![width])
     }
 
     /// Append a vertex, skipping one that repeats the last (a dash boundary
@@ -170,7 +210,9 @@ impl TaperPiece {
 /// pattern with no positive length, or with a negative or non-finite entry,
 /// draws solid (one piece, the whole centerline), as SVG does. Each piece's
 /// end widths are interpolated at its cut points by [`width_at`]. A zero-length
-/// on-dash yields no piece.
+/// on-dash yields a one-vertex piece headed along the segment it sits on (a
+/// dot; see [`TaperPiece`]); one falling exactly on a vertex is taken on the
+/// segment that leaves it.
 pub fn dash_tapered(
     points: &[(f64, f64)],
     widths: &[f64],
@@ -181,7 +223,7 @@ pub fn dash_tapered(
         || dash.iter().any(|d| !d.is_finite() || *d < 0.0)
         || dash.iter().sum::<f64>() <= 0.0;
     if solid {
-        return Ok(vec![TaperPiece { points: points.to_vec(), widths: widths.to_vec() }]);
+        return Ok(vec![TaperPiece::run(points.to_vec(), widths.to_vec())]);
     }
 
     let mut pieces = Vec::new();
@@ -211,9 +253,10 @@ pub fn dash_tapered(
             match current.take() {
                 Some(mut piece) => {
                     piece.push(cut, width);
-                    if piece.points.len() >= 2 {
-                        pieces.push(piece);
+                    if piece.points.len() == 1 {
+                        piece.heading = Some(((x1 - x0) / length, (y1 - y0) / length));
                     }
+                    pieces.push(piece);
                 }
                 None => current = Some(TaperPiece::start(cut, width)),
             }
@@ -250,7 +293,7 @@ pub fn flatten_tapered_path(commands: &[PathCmd], widths: &[f64]) -> Result<Vec<
         let start = match (cmd, current) {
             (PathCmd::Close, _) => return Err(TaperError::Closed),
             (PathCmd::MoveTo { .. }, _) | (_, None) => {
-                subpaths.push(TaperPiece { points: vec![command_end(cmd, (0.0, 0.0))], widths: vec![w] });
+                subpaths.push(TaperPiece::start(command_end(cmd, (0.0, 0.0)), w));
                 continue;
             }
             (_, Some(current)) => current,
@@ -495,11 +538,38 @@ mod tests {
         assert_eq!(pieces.len(), 2, "{pieces:?}");
     }
 
+    /// A zero-length on-dash is a one-vertex piece (a dot) at its on-position,
+    /// at the width there and headed along the segment it sits on; one on a
+    /// vertex is headed along the segment leaving it.
+    #[test]
+    fn a_zero_length_on_dash_yields_a_dot_headed_along_its_segment() {
+        // An L: 10 px along x then 10 px along y, widths 2 -> 4 -> 6.
+        let points = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let pieces = dash_tapered(&points, &[2.0, 4.0, 6.0], &[0.0, 5.0]).unwrap();
+        let dot = |p: (f64, f64), w: f64, heading: (f64, f64)| TaperPiece {
+            points: vec![p],
+            widths: vec![w],
+            heading: Some(heading),
+        };
+        assert_eq!(
+            pieces,
+            vec![
+                dot((0.0, 0.0), 2.0, (1.0, 0.0)),
+                dot((5.0, 0.0), 3.0, (1.0, 0.0)),
+                dot((10.0, 0.0), 4.0, (0.0, 1.0)),
+                dot((10.0, 5.0), 5.0, (0.0, 1.0)),
+            ]
+        );
+        // A positive on-dash keeps its run, headed by none.
+        let runs = dash_tapered(&points, &[2.0, 4.0, 6.0], &[1.0, 4.0]).unwrap();
+        assert!(runs.iter().all(|p| p.points.len() == 2 && p.heading.is_none()), "{runs:?}");
+    }
+
     #[test]
     fn a_pattern_with_no_positive_length_draws_solid() {
         let points = [(0.0, 0.0), (3.0, 0.0), (3.0, 4.0)];
         let widths = [1.0, 2.0, 3.0];
-        let whole = vec![TaperPiece { points: points.to_vec(), widths: widths.to_vec() }];
+        let whole = vec![TaperPiece::run(points.to_vec(), widths.to_vec())];
         for dash in [&[][..], &[0.0, 0.0], &[2.0, -1.0], &[f64::NAN, 1.0]] {
             assert_eq!(dash_tapered(&points, &widths, dash).unwrap(), whole, "dash {dash:?}");
         }
@@ -544,8 +614,8 @@ mod tests {
         ];
         let subpaths = flatten_tapered_path(&commands, &[1.0, 2.0, 3.0, 4.0]).unwrap();
         let want = vec![
-            TaperPiece { points: vec![(0.0, 0.0), (5.0, 0.0)], widths: vec![1.0, 2.0] },
-            TaperPiece { points: vec![(0.0, 9.0), (0.0, 3.0)], widths: vec![3.0, 4.0] },
+            TaperPiece::run(vec![(0.0, 0.0), (5.0, 0.0)], vec![1.0, 2.0]),
+            TaperPiece::run(vec![(0.0, 9.0), (0.0, 3.0)], vec![3.0, 4.0]),
         ];
         assert_eq!(subpaths, want);
     }

@@ -162,8 +162,10 @@ _BASELINE = {
         # validation), so the baseline mark_style gained an explicit
         # "interpolate":"linear" key. The default renders byte-identically
         # (see tests/marks/test_ribbon.py::test_ribbon_default_interpolate_is_byte_identical_to_pre_fix)
-        # since "linear" is also Rust's mark_style default.
-        "json": '{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"name":"ribbon"}]}',
+        # since "linear" is also Rust's mark_style default. The emitted layer
+        # names the public entry that produced it ("entry":"mark_ribbon"),
+        # which Rust's line-width refusals voice; the render is unchanged.
+        "json": '{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"name":"ribbon","entry":"mark_ribbon"}]}',
         "shape": {
             "layers": [
                 {

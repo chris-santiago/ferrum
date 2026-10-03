@@ -1499,6 +1499,7 @@ class StatisticalMarksMixin:
             # compose via + so it becomes a proper layer alongside existing layers.
             fn_chart = self.__class__(synthetic)
             fn_chart._mark = mark
+            fn_chart._entry = "mark_function"
             if line_mark_kwargs:
                 fn_chart._mark_kwargs = {**fn_chart._mark_kwargs, **line_mark_kwargs}
             if remap:
@@ -1510,6 +1511,7 @@ class StatisticalMarksMixin:
 
         new = self._clone()
         new._mark = mark
+        new._entry = "mark_function"
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if line_mark_kwargs:

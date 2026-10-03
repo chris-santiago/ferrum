@@ -25,6 +25,7 @@ from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _compose_compare,
     _dedupe_aggregated,
+    _figure_entry,
     _finalize_chart,
     _order_compare_rows,
     _require,
@@ -344,6 +345,7 @@ def _alpha_selection_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def learning_curve_chart(
     model: Any,
     X: Any = None,
@@ -452,6 +454,7 @@ def learning_curve_chart(
     return _learning_curve_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def validation_curve_chart(
     model: Any,
     X: Any = None,
@@ -698,6 +701,7 @@ def cv_scores_chart(
     return _cv_scores_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def alpha_selection_chart(
     model: Any,
     X: Any = None,

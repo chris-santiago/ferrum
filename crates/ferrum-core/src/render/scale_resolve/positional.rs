@@ -2230,6 +2230,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         };
         let theme = crate::layout::ThemeInputs::default();
@@ -2268,6 +2269,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            entry: None,
             params: Vec::new(),
         }
     }
@@ -2359,6 +2361,7 @@ mod tests {
             blend: None,
             name: None,
             independent_y: false, coord: None,
+            entry: None,
         }
     }
 

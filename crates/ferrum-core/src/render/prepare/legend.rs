@@ -995,13 +995,14 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 /// neutral/default color, i.e. a plain size legend, byte-identical to the
 /// no-color-merge case.
 ///
-/// `size_symbol` is the swatch the size block draws ([`size_legend_symbol`]).
+/// `size_symbol` is the swatch the size block draws ([`size_legend_symbol`]),
+/// `None` when no layer draws size and so no size block is emitted.
 fn build_aux_legends(
     spec: &ChartSpec,
     transformed: &RecordBatch,
     scales: &ResolvedScales,
     state: ColorLegendState,
-    size_symbol: SymbolKind,
+    size_symbol: Option<SymbolKind>,
 ) -> AuxLegends {
     use crate::render::format::format_value_with_spec;
     use crate::scale::ticks::nice_ticks;
@@ -1027,7 +1028,7 @@ fn build_aux_legends(
     let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channel_pairs(spec);
 
     // ── Size legend ──────────────────────────────────────────────────────
-    if let (Some(size_scale), Some(size_enc)) = (&scales.size, size_enc) {
+    if let (Some(size_scale), Some(size_enc), Some(size_symbol)) = (&scales.size, size_enc, size_symbol) {
         let disabled = legend_channel_disabled(Some(size_enc));
         let same_field_as_color = color_field == Some(size_enc.field.as_str());
         // Merge into a categorical color legend → suppress (color labels it).
@@ -1297,20 +1298,24 @@ fn channel_consumer_marks(
 }
 
 /// The marks that draw the size channel bound to `field`: every layer whose
-/// (post-inheritance) size encoding binds `field`, kept only when its mark
-/// draws an encoded size. A layer that only inherits the field onto a mark
-/// that never draws size (a rule beside a line) is no consumer. In layer
-/// order.
+/// drawn size field ([`super::LayerPrepared::drawn_size_field`]) is `field`,
+/// in layer order. A layer that only inherits the field onto a mark that
+/// never draws size (a rule beside a line), or a line that yields it to a
+/// width of its own (`line(stroke_width=2)` beside a sized rule), is no
+/// consumer.
 pub(in crate::render) fn size_drawing_marks(
     layers: &[super::LayerPrepared],
     field: &str,
 ) -> Vec<crate::spec::mark::Mark> {
-    let mut marks = channel_consumer_marks(layers, field, |e| e.size.as_ref());
-    marks.retain(|m| m.draws_size_channel());
-    marks
+    layers
+        .iter()
+        .filter(|l| l.drawn_size_field() == Some(field))
+        .map(|l| l.mark)
+        .collect()
 }
 
-/// The swatch a size legend draws. A line draws its size as a dot-diameter
+/// The swatch a size legend draws, `None` when no layer draws the size field
+/// and so there is no size legend. A line draws its size as a dot-diameter
 /// width, so when every layer drawing the size field is a line, the legend
 /// draws line swatches at that width; any other consumer draws the size as
 /// a dot or a font size, and the legend keeps circles. Consumers are
@@ -1321,16 +1326,16 @@ fn size_legend_symbol(
     spec: &ChartSpec,
     layers: &[super::LayerPrepared],
     sibling_draws_dots: bool,
-) -> SymbolKind {
+) -> Option<SymbolKind> {
     use crate::spec::mark::Mark;
-    let Some(size_enc) = spec.encoding.size.as_ref() else {
-        return SymbolKind::Circle;
-    };
+    let size_enc = spec.encoding.size.as_ref()?;
     let consumers = size_drawing_marks(layers, &size_enc.field);
-    if !sibling_draws_dots && !consumers.is_empty() && consumers.iter().all(|m| *m == Mark::Line) {
-        SymbolKind::Line
+    if consumers.is_empty() {
+        None
+    } else if !sibling_draws_dots && consumers.iter().all(|m| *m == Mark::Line) {
+        Some(SymbolKind::Line)
     } else {
-        SymbolKind::Circle
+        Some(SymbolKind::Circle)
     }
 }
 
@@ -1391,6 +1396,7 @@ mod tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 
@@ -2183,54 +2189,113 @@ mod tests {
         (scales, spec)
     }
 
-    /// The size block a set of consumer marks builds, given whether a
-    /// composite sibling draws the field as dots.
-    fn size_block_for(marks: &[Mark], sibling_draws_dots: bool) -> (SymbolKind, Vec<f64>) {
-        let (scales, spec) = size_only_fixture();
-        let layers: Vec<LayerPrepared> = marks
-            .iter()
-            .map(|&m| {
-                let mut l = layer_with_mark_and_color(m, None);
-                l.encoding.size = spec.encoding.size.clone();
-                l
-            })
-            .collect();
-        let ctx = LeafScaleContext { size_scale_has_non_line_sibling: sibling_draws_dots, ..Default::default() };
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, Some(&ctx), &mut Vec::new());
-        bundle
-            .aux_legends
-            .iter()
-            .find_map(|a| match a {
-                AuxLegendInput::Size { entries, symbol, .. } => {
-                    Some((*symbol, entries.iter().map(|e| e.radius).collect()))
-                }
-                _ => None,
-            })
-            .expect("a size legend renders")
+    /// A layer carrying the fixture's size field as an inherited binding.
+    fn inheriting_size(mark: Mark) -> LayerPrepared {
+        let mut l = layer_with_mark_and_color(mark, None);
+        l.encoding.size = size_only_fixture().1.encoding.size;
+        l
     }
 
-    /// Every non-empty set of size consumers drawn from {line, point}, alone
-    /// or beside a composite sibling drawing dots: the block draws line
-    /// swatches exactly when every consumer is a line and no sibling draws
-    /// dots, and the entries' radii never depend on the swatch.
-    #[test]
-    fn size_legend_symbol_matrix_over_consumers_and_composite_siblings() {
-        let kinds = [Mark::Line, Mark::Point];
-        let consumer_sets: Vec<Vec<Mark>> = (1..1u32 << kinds.len())
-            .map(|bits| kinds.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, m)| *m).collect())
-            .collect();
-        let (_, reference_radii) = size_block_for(&[Mark::Point], false);
-        for marks in &consumer_sets {
-            for sibling_draws_dots in [false, true] {
-                let (symbol, radii) = size_block_for(marks, sibling_draws_dots);
-                let lines_only = marks.iter().all(|m| *m == Mark::Line) && !sibling_draws_dots;
-                let want = if lines_only { SymbolKind::Line } else { SymbolKind::Circle };
-                assert_eq!(symbol, want, "consumers {marks:?}, sibling draws dots: {sibling_draws_dots}");
-                assert_eq!(radii, reference_radii, "the swatch never changes an entry's radius");
+    /// A line carrying the fixture's size field as an inherited binding
+    /// beside its own constant `stroke_width=2`, which outranks it.
+    fn line_yielding_size() -> LayerPrepared {
+        let mut l = inheriting_size(Mark::Line);
+        l.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec { stroke_width: Some(2.0), ..Default::default() });
+        l
+    }
+
+    /// The size block `layers` build, given whether a composite sibling draws
+    /// the field as dots: its swatch and entry radii, `None` without a block.
+    fn size_block_of(layers: &[LayerPrepared], sibling_draws_dots: bool) -> Option<(SymbolKind, Vec<f64>)> {
+        let (scales, spec) = size_only_fixture();
+        let ctx = LeafScaleContext { size_scale_has_non_line_sibling: sibling_draws_dots, ..Default::default() };
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, layers, Some(&ctx), &mut Vec::new());
+        let mut blocks = bundle.aux_legends.iter().filter_map(|a| match a {
+            AuxLegendInput::Size { entries, symbol, .. } => Some((*symbol, entries.iter().map(|e| e.radius).collect())),
+            _ => None,
+        });
+        let block = blocks.next();
+        assert!(blocks.next().is_none(), "at most one size block");
+        block
+    }
+
+    /// A size-field layer the matrix places: a mark that draws an inherited
+    /// size, or a line whose own `stroke_width` outranks the size it inherits.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum SizeLayer {
+        Draws(Mark),
+        LineYielding,
+    }
+
+    impl SizeLayer {
+        fn prepared(self) -> LayerPrepared {
+            match self {
+                SizeLayer::Draws(mark) => inheriting_size(mark),
+                SizeLayer::LineYielding => line_yielding_size(),
             }
         }
-        // Vacuity control: the two single-consumer cells disagree.
-        assert_ne!(size_block_for(&[Mark::Line], false).0, size_block_for(&[Mark::Point], false).0);
+    }
+
+    /// Every set of size layers drawn from {line, point, a line whose own
+    /// `stroke_width` outranks the size}, the empty set included, alone or
+    /// beside each mark that never draws `size` (every mark
+    /// `draws_size_channel` rejects), alone or beside a composite sibling
+    /// drawing dots. The drawers are the line and point layers only: with no
+    /// drawer there is no size block, else the block draws line swatches
+    /// exactly when every drawer is a line and no sibling draws dots. So a
+    /// lone rule, area, bar, tick or rect layer with an encoded `size`, or a
+    /// `stroke_width=2` line beside one, has no size legend. The entries'
+    /// radii never depend on the swatch.
+    #[test]
+    fn size_legend_symbol_matrix_over_consumers_and_composite_siblings() {
+        macro_rules! every_mark {
+            ($($V:ident => $name:ident,)*) => { vec![$(Mark::$V),*] };
+        }
+        let non_drawing: Vec<Mark> =
+            crate::for_each_mark!(every_mark).into_iter().filter(|m| !m.draws_size_channel()).collect();
+        assert!(non_drawing.contains(&Mark::Rule), "test sanity: the population is derived, not empty");
+        let kinds = [SizeLayer::Draws(Mark::Line), SizeLayer::Draws(Mark::Point), SizeLayer::LineYielding];
+        let layer_sets: Vec<Vec<SizeLayer>> = (0..1u32 << kinds.len())
+            .map(|bits| kinds.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, k)| *k).collect())
+            .collect();
+        let (_, reference_radii) = size_block_of(&[inheriting_size(Mark::Point)], false).expect("a point draws size");
+        let mut outcomes: Vec<Option<SymbolKind>> = Vec::new();
+        for set in &layer_sets {
+            for filler in std::iter::once(None).chain(non_drawing.iter().copied().map(Some)) {
+                let layers: Vec<LayerPrepared> =
+                    set.iter().map(|k| k.prepared()).chain(filler.map(inheriting_size)).collect();
+                if layers.is_empty() {
+                    continue;
+                }
+                let drawers: Vec<Mark> = set
+                    .iter()
+                    .filter_map(|k| match k {
+                        SizeLayer::Draws(m) => Some(*m),
+                        SizeLayer::LineYielding => None,
+                    })
+                    .collect();
+                for sibling_draws_dots in [false, true] {
+                    let block = size_block_of(&layers, sibling_draws_dots);
+                    let want = if drawers.is_empty() {
+                        None
+                    } else if drawers.iter().all(|m| *m == Mark::Line) && !sibling_draws_dots {
+                        Some(SymbolKind::Line)
+                    } else {
+                        Some(SymbolKind::Circle)
+                    };
+                    let cell = format!("layers {set:?} + {filler:?}, sibling draws dots: {sibling_draws_dots}");
+                    assert_eq!(block.as_ref().map(|b| b.0), want, "{cell}");
+                    if let Some((_, radii)) = &block {
+                        assert_eq!(radii, &reference_radii, "the swatch never changes an entry's radius: {cell}");
+                    }
+                    if !outcomes.contains(&want) {
+                        outcomes.push(want);
+                    }
+                }
+            }
+        }
+        // Vacuity control: every outcome occurs.
+        assert_eq!(outcomes.len(), 3, "{outcomes:?}");
     }
 
     /// A layer that does not draw the size field is not a consumer: a point
@@ -2285,7 +2350,9 @@ mod tests {
             field: "v".into(),
             ..Default::default()
         });
-        let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
+        let mut point = layer_with_mark_and_color(Mark::Point, Some("v"));
+        point.encoding.size = spec.encoding.size.clone();
+        let layers = vec![point];
         let mut warnings = Vec::new();
         let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "the merge still folds the colorbar into the size legend");

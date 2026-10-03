@@ -1449,10 +1449,11 @@ def test_a_conditional_size_draws_a_line_at_its_base_width_as_it_does_a_point(re
 # ---------------------------------------------------------------------------
 # A size conditional restyles, and checks positivity on, every line in the
 # layers that declared it. One declared on the chart as a whole (a layered
-# chart, `mark_line(point=True)`) belongs to every layer, lines included, as a
-# field `size` does; one declared on a single layer's own chart or `Layer`
-# stays on that layer, so an overlay line beside a point layer's
-# `size=fm.when(...)` keeps its own width. Points and rects keep it chart-wide.
+# chart, `mark_line(point=True)`, the host of `Chart.layer()` or `SecondaryY`)
+# belongs to every layer, lines included, as a field `size` does; one declared
+# on an operand of `chart + chart` or on a `Layer`'s own encoding stays on
+# those layers, so an overlay line beside a point layer's `size=fm.when(...)`
+# keeps its own width. Points and rects keep it chart-wide.
 # ---------------------------------------------------------------------------
 
 _COND_SEL = fm.selection_point(name="s", clear="false")
@@ -1596,7 +1597,9 @@ def test_a_conditional_size_on_mark_line_point_true_refuses_like_a_plain_line(
             [[0, 1, 2]],
         ),
         (lambda: _cond_line_with_points(), [[0, 1]]),
-        (lambda: _cond_line() + fm.SecondaryY("v", mark="point"), [[0]]),
+        # SecondaryY attaches a layer to its host, which shares its conditional
+        # with that layer the way it shares a field `size`.
+        (lambda: _cond_line() + fm.SecondaryY("v", mark="point"), [[0, 1]]),
         (lambda: _cond_line(), [None]),
     ],
     ids=[

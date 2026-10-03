@@ -34,6 +34,7 @@ from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _compose_compare,
+    _figure_entry,
     _finalize_chart,
     _is_raw_tabular_data,
     _reject_compare,
@@ -515,6 +516,7 @@ def _cluster_diagnostics_chart(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def pca_scree_chart(
     model: Any,
     X: Any = None,  # noqa: N803 — matches ferrum-spec.md parameter name
@@ -663,6 +665,7 @@ def pca_scree_chart(
     return _pca_scree_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def cluster_diagnostics(
     model: Any = _UNSET,
     *,
@@ -1086,6 +1089,7 @@ def manifold_chart(
     return _manifold_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def elbow_chart(
     model: Any,
     X: Any,

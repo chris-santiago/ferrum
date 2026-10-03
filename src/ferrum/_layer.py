@@ -75,6 +75,24 @@ class _Layer:
     #: only when set, so a layer that declares none round-trips byte-identically
     #: with a pre-`#172` spec (see ``Layer::coord`` in Rust ``spec/layer.rs``).
     coord: Any = None
+    #: The public entry the caller invoked to produce this layer
+    #: (``"mark_smooth"`` for every layer ``mark_smooth(...)`` emits,
+    #: ``"lmplot"`` for every layer of an ``lmplot`` chart), so a render-time
+    #: refusal about this layer names the call the caller wrote rather than
+    #: the primitive the layer draws. ``None`` for a layer the caller declared
+    #: as that primitive itself. Serialized onto the wire
+    #: layer dict only when set (``Layer::entry`` in Rust ``spec/layer.rs``).
+    entry: Optional[str] = None
+    #: The ``ConditionalSpec`` objects this layer declared, held by identity.
+    #: A conditional is owned by a layer when it was declared on that layer's
+    #: own ``Layer(encoding=...)``, or on the chart the layer came from when
+    #: that chart became one operand of ``chart + chart`` (see
+    #: :func:`ferrum.composition._bind_operand_conditionals`). A conditional
+    #: no layer owns was declared on the chart as a whole and reaches every
+    #: layer. ``Chart.to_spec()`` turns ownership into wire layer indices once,
+    #: against the final layer list (:func:`ferrum.composition._conditional_layer_scopes`).
+    #: Never serialized and never compared.
+    conditionals: tuple = field(default=(), compare=False, repr=False)
 
 
 def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:
@@ -375,3 +393,8 @@ class _PendingMark:
     #: (e.g. ``catplot``), voiced by the desugar's warnings; ``None`` means
     #: the ``mark_*`` method itself.
     voice: _EntryVoice | None = None
+    #: The public entry every layer this mark emits names, when a figure
+    #: function called the ``mark_*`` method on the caller's behalf (e.g.
+    #: ``lmplot``); ``None`` means the ``mark_*`` method itself. See
+    #: ``_Layer.entry``.
+    entry: str | None = None

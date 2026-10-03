@@ -923,6 +923,7 @@ mod tests {
             conditionals: Vec::new(),
             params: Vec::new(),
             chart_description: None,
+            entry: None,
         }
     }
 

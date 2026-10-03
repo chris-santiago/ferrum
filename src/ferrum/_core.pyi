@@ -144,6 +144,7 @@ class ChartSpec:
         angle: Union[str, EncodingSpec, None] = None,
         fill_opacity: Union[str, EncodingSpec, None] = None,
         chart_description: Optional[str] = None,
+        entry: Optional[str] = None,
     ) -> None: ...
     def to_json(self) -> str: ...
     @classmethod

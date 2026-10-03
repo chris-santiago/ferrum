@@ -84,6 +84,14 @@ pub struct ConditionalEncoding {
     pub if_not: EncodingValue,
 }
 
+impl ConditionalEncoding {
+    /// Whether either branch is a size: the conditionals a sized line's
+    /// width answers to.
+    pub fn sets_size(&self) -> bool {
+        [&self.if_selected, &self.if_not].into_iter().any(|b| matches!(b, EncodingValue::Size { .. }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EncodingValue {
