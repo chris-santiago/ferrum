@@ -285,6 +285,13 @@ pub struct LegendEntryLayout {
     /// which had no dash concept at all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dash_pattern: Option<Vec<f64>>,
+    /// Stroke width (px) of this entry's `SymbolKind::Line` swatch. Set on a
+    /// size-legend entry whose consumers are all lines: the swatch draws the
+    /// entry's dot diameter, the width the lines draw at that value, and
+    /// outranks the legend-level `symbol_stroke_width`. `None` on every other
+    /// entry, which keeps the legend-level width (omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_line_width: Option<f64>,
 }
 
 use super::text_metrics::TextMetrics;
@@ -690,6 +697,7 @@ fn place_color_entry(
         shape_name: entry.shape_name.clone(),
         color_hex: None,
         dash_pattern: entry.dash_pattern.clone(),
+        symbol_line_width: None,
     }
 }
 
@@ -1344,9 +1352,14 @@ pub struct StrokeDashLegendEntry {
 /// Input for one auxiliary legend block (size, shape, or stroke-dash) stacked
 /// below the color legend. Built in `prepare.rs`; consumed by
 /// [`layout_aux_legends`].
+///
+/// A `Size` block's `symbol` is the swatch its entries draw: `Circle` (a dot
+/// of the entry's radius) or `Line` (a line swatch whose stroke width is the
+/// entry's dot diameter), chosen by the producer from the marks consuming
+/// the size scale.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuxLegendInput {
-    Size { title: Option<String>, entries: Vec<SizeLegendEntry> },
+    Size { title: Option<String>, entries: Vec<SizeLegendEntry>, symbol: SymbolKind },
     Shape { title: Option<String>, entries: Vec<ShapeLegendEntry> },
     StrokeDash { title: Option<String>, entries: Vec<StrokeDashLegendEntry> },
 }
@@ -1360,6 +1373,16 @@ fn aux_title(input: &AuxLegendInput) -> Option<&str> {
     }
 }
 
+/// The `(width, height)` a size-legend swatch occupies: a circle spans its
+/// diameter both ways; a line swatch spans the fixed symbol width and its
+/// stroke width, the same diameter.
+fn size_swatch_extent(symbol: SymbolKind, radius: f64) -> (f64, f64) {
+    match symbol {
+        SymbolKind::Line => (SYMBOL_WIDTH, 2.0 * radius),
+        SymbolKind::Circle | SymbolKind::Square => (2.0 * radius, 2.0 * radius),
+    }
+}
+
 /// Estimate the (width, height) of one auxiliary legend block.
 fn estimate_aux_block_size(
     input: &AuxLegendInput,
@@ -1369,8 +1392,11 @@ fn estimate_aux_block_size(
 ) -> LegendSize {
     let line_h = metrics.line_height(label_font_size);
     let (labels, max_symbol_w): (Vec<&str>, f64) = match input {
-        AuxLegendInput::Size { entries, .. } => {
-            let w = entries.iter().map(|e| 2.0 * e.radius).fold(SYMBOL_WIDTH, f64::max);
+        AuxLegendInput::Size { entries, symbol, .. } => {
+            let w = entries
+                .iter()
+                .map(|e| size_swatch_extent(*symbol, e.radius).0)
+                .fold(SYMBOL_WIDTH, f64::max);
             (entries.iter().map(|e| e.label.as_str()).collect(), w)
         }
         AuxLegendInput::Shape { entries, .. } => (
@@ -1389,9 +1415,9 @@ fn estimate_aux_block_size(
     let n = labels.len() as f64;
     // Per-row pitch must clear the tallest symbol in a size legend.
     let row_h = match input {
-        AuxLegendInput::Size { entries, .. } => entries
+        AuxLegendInput::Size { entries, symbol, .. } => entries
             .iter()
-            .map(|e| 2.0 * e.radius)
+            .map(|e| size_swatch_extent(*symbol, e.radius).1)
             .fold(line_h, f64::max),
         AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => line_h,
     };
@@ -1586,11 +1612,13 @@ fn layout_aux_block(
         0.0
     };
 
-    // The largest symbol radius (size legend) sets the symbol column width so
-    // labels clear the biggest circle.
+    // The widest swatch (size legend) sets the symbol column width so labels
+    // clear the biggest circle.
     let max_radius = match input {
-        AuxLegendInput::Size { entries, .. } =>
-            entries.iter().map(|e| e.radius).fold(SYMBOL_WIDTH / 2.0, f64::max),
+        AuxLegendInput::Size { entries, symbol, .. } => entries
+            .iter()
+            .map(|e| size_swatch_extent(*symbol, e.radius).0 / 2.0)
+            .fold(SYMBOL_WIDTH / 2.0, f64::max),
         AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => SYMBOL_WIDTH / 2.0,
     };
     let symbol_col_x = block_rect.x + LEGEND_OUTER_PAD + max_radius;
@@ -1600,9 +1628,10 @@ fn layout_aux_block(
     let mut row_top = block_rect.y + LEGEND_OUTER_PAD + title_offset;
 
     match input {
-        AuxLegendInput::Size { entries: ses, .. } => {
+        AuxLegendInput::Size { entries: ses, symbol, .. } => {
+            let line_swatch = *symbol == SymbolKind::Line;
             for e in ses {
-                let row_h = (2.0 * e.radius).max(line_h);
+                let row_h = size_swatch_extent(*symbol, e.radius).1.max(line_h);
                 let cy = row_top + row_h / 2.0;
                 entries.push(LegendEntryLayout {
                     label: e.label.clone(),
@@ -1610,11 +1639,12 @@ fn layout_aux_block(
                     label_anchor_y: cy + label_font_size * 0.35,
                     symbol_anchor_x: symbol_col_x,
                     symbol_anchor_y: cy,
-                    symbol_kind: SymbolKind::Circle,
-                    symbol_radius: Some(e.radius),
+                    symbol_kind: if line_swatch { SymbolKind::Line } else { SymbolKind::Circle },
+                    symbol_radius: (!line_swatch).then_some(e.radius),
                     shape_name: None,
                     color_hex: e.color_hex.clone(),
                     dash_pattern: None,
+                    symbol_line_width: line_swatch.then_some(2.0 * e.radius),
                 });
                 row_top += row_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1633,6 +1663,7 @@ fn layout_aux_block(
                     shape_name: Some(e.shape_name.clone()),
                     color_hex: None,
                     dash_pattern: None,
+                    symbol_line_width: None,
                 });
                 row_top += line_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1655,6 +1686,7 @@ fn layout_aux_block(
                     // matching how `MarkStyle::stroke_dash: None` paints no
                     // dasharray.
                     dash_pattern: if e.dash.is_empty() { None } else { Some(e.dash.clone()) },
+                    symbol_line_width: None,
                 });
                 row_top += line_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1694,6 +1726,7 @@ mod tests {
                 shape_name: None,
                 color_hex: None,
                 dash_pattern: None,
+                symbol_line_width: None,
             }],
             title: None,
             colorbar: None,
@@ -2474,6 +2507,10 @@ mod tests {
     // ── Multivariate B1: auxiliary (size / shape) legend layout ──────────
 
     fn size_input(n: usize) -> AuxLegendInput {
+        size_input_drawn_as(n, SymbolKind::Circle)
+    }
+
+    fn size_input_drawn_as(n: usize, symbol: SymbolKind) -> AuxLegendInput {
         AuxLegendInput::Size {
             title: Some("pop".into()),
             entries: (0..n)
@@ -2483,6 +2520,7 @@ mod tests {
                     color_hex: None,
                 })
                 .collect(),
+            symbol,
         }
     }
 
@@ -2540,6 +2578,43 @@ mod tests {
         for e in &blocks[0].entries {
             assert!(e.symbol_radius.is_some(), "size entry must carry a radius");
         }
+    }
+
+    /// A size block drawn by line consumers lays each entry out as a line
+    /// swatch whose stroke width is the entry's dot diameter, on the same
+    /// rows the dot block uses (the swatch is as tall as the dot is wide);
+    /// its symbol column is the fixed swatch length, not the widest dot, so
+    /// labels sit closer once a dot outgrows it. The dot block keeps its
+    /// circles and serializes no line width.
+    #[test]
+    fn aux_size_block_drawn_by_lines_lays_out_dot_diameter_line_swatches() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let m = mock(8.0);
+        let lay = |symbol: SymbolKind| {
+            let (blocks, _) = layout_aux_legends(
+                &[size_input_drawn_as(4, symbol)], None, LegendOrient::Right, inner, inner, 11.0, None, 13.0, &m, 13.0,
+            );
+            blocks.into_iter().next().expect("one size block")
+        };
+        let dots = lay(SymbolKind::Circle);
+        let lines = lay(SymbolKind::Line);
+        assert_eq!(lines.entries.len(), 4);
+        for (dot, line) in dots.entries.iter().zip(&lines.entries) {
+            let r = dot.symbol_radius.expect("a dot entry carries its radius");
+            assert_eq!(line.symbol_kind, SymbolKind::Line);
+            assert_eq!(line.symbol_line_width, Some(2.0 * r));
+            assert_eq!(line.symbol_radius, None, "a line swatch draws no dot");
+            assert_eq!(line.symbol_anchor_y, dot.symbol_anchor_y, "rows keep the dot block's pitch");
+            assert_eq!(dot.symbol_kind, SymbolKind::Circle);
+            assert_eq!(dot.symbol_line_width, None);
+        }
+        // Radii run 3..15: the widest dot (30 px) outgrows the 12 px swatch.
+        let label_inset = |l: &LegendLayout| l.entries[0].label_anchor_x - l.rect.x;
+        assert!(label_inset(&lines) < label_inset(&dots));
+        assert!(lines.rect.w < dots.rect.w, "the estimate tracks the narrower swatch column");
+        assert!(lines.rect.h == dots.rect.h);
+        let json = serde_json::to_string(&dots).expect("serializes");
+        assert!(!json.contains("symbol_line_width"), "{json}");
     }
 
     /// Cycle-2 S3: an aux block RESERVES at the effective label font size, so

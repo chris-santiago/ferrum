@@ -34,7 +34,6 @@ an explicit failure, not a silent skip.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import polars as pl
@@ -42,11 +41,10 @@ import pytest
 
 import ferrum as fm
 from ferrum.composition import Resolve
-from tests._snapshots import assert_svg_eq, legend_texts as _legend_texts, regen_and_verify
+from tests._snapshots import check_or_update_svg_golden, legend_texts as _legend_texts
 
 
 GOLDENS_DIR = Path(__file__).parent / "goldens" / "composite_shared_legend"
-UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -55,29 +53,7 @@ UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
 
 
 def _check_or_update(name: str, svg: str) -> None:
-    """Compare ``svg`` to the on-disk golden ``name``.
-
-    With ``FERRUM_UPDATE_GOLDENS=1`` the golden is (re)written via
-    ``regen_and_verify``, which also rasterizes an inspection PNG under
-    ``tests/snapshots/`` and prints both paths. Otherwise asserts
-    byte-for-byte equality. A missing golden is an explicit test failure
-    rather than a silent skip.
-    """
-    path = GOLDENS_DIR / name
-    if UPDATE:
-        regen_and_verify(path, svg)
-        return
-    if not path.exists():
-        pytest.fail(
-            f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to generate it"
-        )
-    expected = path.read_text()
-    assert_svg_eq(
-        svg,
-        expected,
-        name=name,
-        regen_hint="rerun with FERRUM_UPDATE_GOLDENS=1 to refresh",
-    )
+    check_or_update_svg_golden(GOLDENS_DIR, name, svg)
 
 
 # ---------------------------------------------------------------------------

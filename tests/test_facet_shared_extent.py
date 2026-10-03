@@ -35,7 +35,6 @@ NOTE on bin edges vs. extent:
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -43,13 +42,14 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._snapshots import check_or_update_svg_golden
 
 # ---------------------------------------------------------------------------
 # Shared test fixtures
 # ---------------------------------------------------------------------------
 
 GOLDENS_DIR = Path(__file__).parent / "goldens" / "facet_shared_extent"
-UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
+_REGEN_HINT = "FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py"
 
 
 @pytest.fixture
@@ -424,23 +424,7 @@ class TestFacetSharedExtentGoldens:
     """
 
     def _check_or_update(self, name: str, svg: str) -> None:
-        GOLDENS_DIR.mkdir(parents=True, exist_ok=True)
-        golden = GOLDENS_DIR / name
-        if UPDATE:
-            golden.write_text(svg)
-            return
-        if not golden.exists():
-            pytest.fail(
-                f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to regenerate"
-            )
-        from tests._snapshots import assert_svg_eq
-
-        assert_svg_eq(
-            svg,
-            golden.read_text(),
-            name=name,
-            regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
-        )
+        check_or_update_svg_golden(GOLDENS_DIR, name, svg, regen_hint=_REGEN_HINT)
 
     def test_golden_histogram_facet_single_group(self, df_nonoverlapping: pl.DataFrame) -> None:
         svg = (
@@ -707,23 +691,7 @@ class TestRawFieldSharedFacetGolden:
     """Golden for a faceted RAW scatter on the shared domain (orchestrator-blessed)."""
 
     def _check_or_update(self, name: str, svg: str) -> None:
-        RAW_GOLDENS_DIR.mkdir(parents=True, exist_ok=True)
-        golden = RAW_GOLDENS_DIR / name
-        if UPDATE:
-            golden.write_text(svg)
-            return
-        if not golden.exists():
-            pytest.fail(
-                f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to regenerate"
-            )
-        from tests._snapshots import assert_svg_eq
-
-        assert_svg_eq(
-            svg,
-            golden.read_text(),
-            name=name,
-            regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
-        )
+        check_or_update_svg_golden(RAW_GOLDENS_DIR, name, svg, regen_hint=_REGEN_HINT)
 
     def test_golden_raw_scatter_shared_facet(self, raw_disjoint_df: pl.DataFrame) -> None:
         svg = (
@@ -883,23 +851,7 @@ class TestT3AuxSharedFacetGolden:
     """Golden for a faceted continuous-color scatter on the global domain."""
 
     def _check_or_update(self, name: str, svg: str) -> None:
-        AUX_GOLDENS_DIR.mkdir(parents=True, exist_ok=True)
-        golden = AUX_GOLDENS_DIR / name
-        if UPDATE:
-            golden.write_text(svg)
-            return
-        if not golden.exists():
-            pytest.fail(
-                f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to regenerate"
-            )
-        from tests._snapshots import assert_svg_eq
-
-        assert_svg_eq(
-            svg,
-            golden.read_text(),
-            name=name,
-            regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
-        )
+        check_or_update_svg_golden(AUX_GOLDENS_DIR, name, svg, regen_hint=_REGEN_HINT)
 
     def test_golden_faceted_continuous_color_shared(self, aux_disjoint_df: pl.DataFrame) -> None:
         svg = (

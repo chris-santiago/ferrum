@@ -7,6 +7,7 @@ what a golden actually renders as.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 import sys
@@ -220,6 +221,38 @@ def regen_and_verify(
         print(f"inspect    {png_rel}", file=sys.stdout)
 
     return png_path
+
+
+def check_or_update_svg_golden(
+    golden_dir: Path,
+    name: str,
+    svg: str,
+    *,
+    regen_hint: str = "rerun with FERRUM_UPDATE_GOLDENS=1 to refresh",
+) -> None:
+    """Compare ``svg`` against the on-disk golden ``golden_dir / name``.
+
+    The shared compare-or-regenerate step behind every
+    ``tests/test_*golden*.py`` module: with ``FERRUM_UPDATE_GOLDENS=1`` set,
+    the golden is (re)written through :func:`regen_and_verify`, which also
+    rasterizes an inspection PNG and prints both paths, so a regen can never
+    silently skip the visual check CLAUDE.md's golden-blessing rule
+    requires. Otherwise asserts byte-for-byte equality via
+    :func:`assert_svg_eq`; a missing golden is an explicit test failure, not
+    a silent skip.
+
+    Imports ``pytest`` lazily so this module (and ``scripts/snapshot-goldens.py``,
+    which imports it) stays usable without pytest installed.
+    """
+    import pytest
+
+    path = golden_dir / name
+    if os.environ.get("FERRUM_UPDATE_GOLDENS") == "1":
+        regen_and_verify(path, svg)
+        return
+    if not path.exists():
+        pytest.fail(f"golden {name!r} does not exist; {regen_hint}")
+    assert_svg_eq(svg, path.read_text(), name=name, regen_hint=regen_hint)
 
 
 def find_goldens(*roots: str | Path) -> list[Path]:

@@ -80,7 +80,7 @@ use crate::layout::legend::{
 use crate::layout::text_metrics::TextMetrics;
 use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendLayout, LegendOrient,
-    LegendOverrides, Rect as LayoutRect, ThemeInputs, Viewport,
+    LegendOverrides, Rect as LayoutRect, SymbolKind, ThemeInputs, Viewport,
 };
 use crate::spec::chart::ChartSpec;
 
@@ -350,6 +350,9 @@ pub(crate) fn render_composite_scene(
     // Read before the imposition pre-pass prunes the map: a group whose rect
     // could not be shared is still one layered chart, its members still layers.
     let layer_of = overlay_layer_indices(&overlay_groups);
+    // Before the imposition pre-pass measures each member's natural region:
+    // a member's size legend swatch kind sets its legend gutter.
+    plan_size_dot_siblings(leaves, &layer_of, &prepared, &mut contexts);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
 
     // Declared extent alignment (#182 follow-up). A jointplot's marginals and a
@@ -650,6 +653,7 @@ struct MergeCtx<'a> {
 /// (design §6 seam contract). Built by [`capture_leaf_bundle`] for every leaf
 /// the compositor suppresses; the band assembler picks the first non-empty one
 /// in a resolving node's subtree (design §8.4 capture rule).
+#[derive(Clone)]
 struct LeafLegendBundle {
     entries: Vec<LegendEntry>,
     colorbar: Option<ColorbarInput>,
@@ -664,6 +668,25 @@ struct LeafLegendBundle {
 }
 
 impl LeafLegendBundle {
+    /// The swatch this leaf's size block draws, `None` without one.
+    fn size_symbol(&self) -> Option<SymbolKind> {
+        self.aux.iter().find_map(|a| match a {
+            AuxLegendInput::Size { symbol, .. } => Some(*symbol),
+            AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => None,
+        })
+    }
+
+    /// This bundle with its size block drawing `symbol` swatches.
+    fn with_size_symbol(&self, symbol: SymbolKind) -> LeafLegendBundle {
+        let mut bundle = self.clone();
+        for a in &mut bundle.aux {
+            if let AuxLegendInput::Size { symbol: s, .. } = a {
+                *s = symbol;
+            }
+        }
+        bundle
+    }
+
     /// A bundle is empty when the leaf produced no drawable legend content — a
     /// leaf whose legend the user disabled (`legend=None`) yields this (prepare-
     /// stage suppression), so it is skipped for figure-legend capture (§8.4).
@@ -1022,6 +1045,35 @@ fn plan_line_ribbon_color_group_walk(
                 plan_line_ribbon_color_group_walk(c, prepared, leaf_cursor, contexts);
             }
         }
+    }
+}
+
+/// Mark every leaf of an all-leaf `Overlay` group whose size field a sibling
+/// member draws with a mark other than a line with
+/// [`LeafScaleContext::size_scale_has_non_line_sibling`] `= true`, so the
+/// leaf's size legend keeps circle swatches: each member draws its own size
+/// legend for the group's one size field, and the group draws that field as
+/// dots. Groups are read off `layer_of` (each member's position in its group,
+/// unpruned); a member's size consumers are [`prepare::size_drawing_marks`]
+/// over `prepared[j].layers`, the rule the size legend's swatch reads.
+fn plan_size_dot_siblings(
+    leaves: &[CompositeLeafInput<'_>],
+    layer_of: &[Option<usize>],
+    prepared: &[prepare::PreparedInputs],
+    contexts: &mut [LeafScaleContext],
+) {
+    use crate::spec::mark::Mark;
+    for (i, position) in layer_of.iter().enumerate() {
+        let (Some(k), Some(size)) = (position, leaves[i].spec.encoding.size.as_ref()) else {
+            continue;
+        };
+        let start = i - k;
+        let members = (start..layer_of.len()).take_while(|&j| layer_of[j] == Some(j - start));
+        contexts[i].size_scale_has_non_line_sibling = members.filter(|&j| j != i).any(|j| {
+            prepare::size_drawing_marks(&prepared[j].layers, &size.field)
+                .iter()
+                .any(|m| *m != Mark::Line)
+        });
     }
 }
 
@@ -1476,13 +1528,17 @@ fn descend_channel(
 /// `leaf_range`. Captures the first participating leaf's non-empty bundle in
 /// pre-order (design §8.4); if every participating leaf is user-disabled (all
 /// bundles empty) no band is emitted, matching design §4.
+///
+/// The band speaks for every participating leaf, so its size block draws line
+/// swatches only when each participant's own size block does: one
+/// participant drawing the size field as dots keeps the band's circles.
 fn apply_legend_band(
     scene: &mut SceneGraph,
     merge_ctx: &MergeCtx<'_>,
     leaf_range: std::ops::Range<usize>,
     flags: BandFlags,
 ) {
-    let captured = leaf_range.into_iter().find_map(|i| {
+    let mut participants = leaf_range.filter_map(|i| {
         let ctx = &merge_ctx.contexts[i];
         let participates =
             (flags.color && ctx.color.is_some()) || (flags.size && ctx.size.is_some());
@@ -1494,8 +1550,13 @@ fn apply_legend_band(
             _ => None,
         }
     });
-    let Some(bundle) = captured else { return };
-    draw_legend_band(scene, bundle, flags);
+    let Some(bundle) = participants.next() else { return };
+    let draws_dots = |b: &LeafLegendBundle| b.size_symbol() == Some(SymbolKind::Circle);
+    if bundle.size_symbol() == Some(SymbolKind::Line) && participants.any(draws_dots) {
+        draw_legend_band(scene, &bundle.with_size_symbol(SymbolKind::Circle), flags);
+    } else {
+        draw_legend_band(scene, bundle, flags);
+    }
 }
 
 /// Lay out the band's legend content (color block + size aux) in a sandbox,

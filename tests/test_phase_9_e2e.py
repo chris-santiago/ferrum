@@ -10,7 +10,6 @@ the default behavior is byte-identical comparison.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +17,10 @@ import polars as pl
 import pytest
 
 import ferrum as fe
+from tests._snapshots import check_or_update_svg_golden
 
 
 GOLDENS_DIR = Path(__file__).parent / "test_phase_9_e2e" / "goldens"
-UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -97,37 +96,7 @@ def df_joint():
 
 
 def _check_or_update(name: str, svg: str) -> None:
-    """Compare ``svg`` to the on-disk golden ``name``.
-
-    With ``FERRUM_UPDATE_GOLDENS=1`` the on-disk golden is (re)written.
-    Otherwise the function asserts byte-for-byte equality against the
-    committed file. A missing golden is treated as an explicit test
-    failure rather than a silent skip — goldens must be regenerated
-    deliberately.
-    """
-    path = GOLDENS_DIR / name
-    if UPDATE:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(svg)
-        return
-    if not path.exists():
-        pytest.fail(
-            f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to generate it"
-        )
-    expected = path.read_text()
-    # NOTE: do not use `assert svg == expected` — pytest's assertion
-    # rewriter spends minutes building a unified diff between the two
-    # ~500 KB SVG strings on a mismatch. The helper raises AssertionError
-    # directly with a compact message. See
-    # docs/superpowers/followups/2026-05-11-phase-9-render-perf.md.
-    from tests._snapshots import assert_svg_eq
-
-    assert_svg_eq(
-        svg,
-        expected,
-        name=name,
-        regen_hint="rerun with FERRUM_UPDATE_GOLDENS=1 to refresh",
-    )
+    check_or_update_svg_golden(GOLDENS_DIR, name, svg)
 
 
 # ---------------------------------------------------------------------------

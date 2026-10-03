@@ -60,6 +60,13 @@ impl Mark {
         }
         for_each_mark!(arm)
     }
+
+    /// Whether this mark draws an encoded `size` channel: a point's area, a
+    /// line's dot-diameter width, a text's font size. Every other mark
+    /// carries an inherited `size` binding without drawing it.
+    pub(crate) fn draws_size_channel(self) -> bool {
+        matches!(self, Mark::Point | Mark::Line | Mark::Text)
+    }
 }
 
 impl fmt::Display for Mark {

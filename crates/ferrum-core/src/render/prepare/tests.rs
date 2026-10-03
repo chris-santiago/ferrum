@@ -2350,7 +2350,7 @@ fn size_encoding_produces_graduated_size_legend() {
         1,
         "expected exactly one (size) aux legend"
     );
-    let AuxLegendInput::Size { entries, title } = &p.aux_legends[0] else {
+    let AuxLegendInput::Size { entries, title, .. } = &p.aux_legends[0] else {
         panic!("expected a Size aux legend, got {:?}", p.aux_legends[0]);
     };
     assert_eq!(title.as_deref(), Some("pop"));

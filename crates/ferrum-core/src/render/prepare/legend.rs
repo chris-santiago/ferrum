@@ -19,7 +19,7 @@ use arrow::record_batch::RecordBatch;
 use ferrum_scene::ChannelName;
 use pyo3::prelude::*;
 
-use super::super::scale_resolve::ResolvedScales;
+use super::super::scale_resolve::{LeafScaleContext, ResolvedScales};
 use super::LegendPreparedOverrides;
 
 /// The full color-legend output produced from the resolved scales + spec.
@@ -143,10 +143,15 @@ fn resolve_conditional_color_domain(spec: &ChartSpec, transformed: &RecordBatch)
 /// resolved color scale, which `provisional_scales` alone cannot (spec §4.0,
 /// 2026-08-28: line/ribbon's inert-continuous-color suppression, see
 /// [`inert_numeric_color_on_line_or_ribbon_only`]). Under the composite path
-/// `layers` only ever sees THIS leaf's own marks; `composite_color_has_non_line_ribbon_sibling`
-/// is the composite seam's verdict on whether a sibling leaf ELSEWHERE in the
-/// same Overlay group renders the shared scale (spec-review 2026-08-28
-/// finding — `render::composite_render::plan_line_ribbon_color_group_exemptions`).
+/// `layers` only ever sees THIS leaf's own marks; `leaf_scales` carries the
+/// composite seam's verdicts on what sibling leaves ELSEWHERE in the same
+/// Overlay group draw:
+/// [`LeafScaleContext::color_scale_has_non_line_ribbon_sibling`] (a sibling
+/// renders the shared color scale,
+/// `render::composite_render::plan_line_ribbon_color_group_exemptions`) and
+/// [`LeafScaleContext::size_scale_has_non_line_sibling`] (a sibling draws the
+/// size field as dots, so the size legend keeps circle swatches). `None` for
+/// every standalone (flat/facet) render.
 /// `warnings` is the panel's live warnings sink (mirrors `build_axes`'s
 /// `&mut scale_warnings` at the same call site).
 pub(crate) fn build_color_legend(
@@ -154,7 +159,7 @@ pub(crate) fn build_color_legend(
     transformed: &RecordBatch,
     provisional_scales: &ResolvedScales,
     layers: &[super::LayerPrepared],
-    composite_color_has_non_line_ribbon_sibling: bool,
+    leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> ColorLegendBundle {
     use super::super::scale_resolve::ColorScale;
@@ -411,7 +416,7 @@ pub(crate) fn build_color_legend(
     let inert_consumer_marks = inert_numeric_color_on_line_or_ribbon_only(
         provisional_scales,
         layers,
-        composite_color_has_non_line_ribbon_sibling,
+        leaf_scales.is_some_and(|c| c.color_scale_has_non_line_ribbon_sibling),
     );
 
     // Multivariate B1: build size/shape/dash auxiliary legends from the
@@ -428,6 +433,11 @@ pub(crate) fn build_color_legend(
             inert_on_line_or_ribbon: inert_consumer_marks.is_some(),
             enumerates_field: !legend_entries.is_empty(),
         },
+        size_legend_symbol(
+            spec,
+            layers,
+            leaf_scales.is_some_and(|c| c.size_scale_has_non_line_sibling),
+        ),
     );
     fold_identity_into_color_entries(&mut legend_entries, &folded, warnings);
 
@@ -984,11 +994,14 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 /// promise spec §4.0 suppresses the colorbar for. Swatches fall back to the
 /// neutral/default color, i.e. a plain size legend, byte-identical to the
 /// no-color-merge case.
+///
+/// `size_symbol` is the swatch the size block draws ([`size_legend_symbol`]).
 fn build_aux_legends(
     spec: &ChartSpec,
     transformed: &RecordBatch,
     scales: &ResolvedScales,
     state: ColorLegendState,
+    size_symbol: SymbolKind,
 ) -> AuxLegends {
     use crate::render::format::format_value_with_spec;
     use crate::scale::ticks::nice_ticks;
@@ -1074,6 +1087,7 @@ fn build_aux_legends(
                     out.push(AuxLegendInput::Size {
                         title: aux_legend_title(size_enc),
                         entries,
+                        symbol: size_symbol,
                     });
                 }
             }
@@ -1259,15 +1273,64 @@ fn inert_numeric_color_on_line_or_ribbon_only(
     // already returned `None`), so this is unreachable as `None` in
     // practice but handled defensively rather than indexed/unwrapped.
     let resolved_field = layers.first().and_then(|l| l.encoding.color.as_ref()).map(|e| e.field.as_str())?;
-    let consumers: Vec<Mark> = layers
-        .iter()
-        .filter(|l| l.encoding.color.as_ref().map(|e| e.field.as_str()) == Some(resolved_field))
-        .map(|l| l.mark)
-        .collect();
+    let consumers = channel_consumer_marks(layers, resolved_field, |e| e.color.as_ref());
     if !consumers.is_empty() && consumers.iter().all(|m| matches!(m, Mark::Line | Mark::Ribbon)) {
         Some(consumers)
     } else {
         None
+    }
+}
+
+/// The mark of every layer whose (post-inheritance) encoding binds `field`
+/// on the channel `channel` reads — the layers consuming the scale built
+/// from that field, inherited bindings included, in layer order.
+fn channel_consumer_marks(
+    layers: &[super::LayerPrepared],
+    field: &str,
+    channel: fn(&crate::spec::encoding::Encoding) -> Option<&crate::spec::encoding::EncodingSpec>,
+) -> Vec<crate::spec::mark::Mark> {
+    layers
+        .iter()
+        .filter(|l| channel(&l.encoding).map(|e| e.field.as_str()) == Some(field))
+        .map(|l| l.mark)
+        .collect()
+}
+
+/// The marks that draw the size channel bound to `field`: every layer whose
+/// (post-inheritance) size encoding binds `field`, kept only when its mark
+/// draws an encoded size. A layer that only inherits the field onto a mark
+/// that never draws size (a rule beside a line) is no consumer. In layer
+/// order.
+pub(in crate::render) fn size_drawing_marks(
+    layers: &[super::LayerPrepared],
+    field: &str,
+) -> Vec<crate::spec::mark::Mark> {
+    let mut marks = channel_consumer_marks(layers, field, |e| e.size.as_ref());
+    marks.retain(|m| m.draws_size_channel());
+    marks
+}
+
+/// The swatch a size legend draws. A line draws its size as a dot-diameter
+/// width, so when every layer drawing the size field is a line, the legend
+/// draws line swatches at that width; any other consumer draws the size as
+/// a dot or a font size, and the legend keeps circles. Consumers are
+/// [`size_drawing_marks`]. `sibling_draws_dots` is the
+/// compositor's verdict that a sibling leaf of the same overlay group draws
+/// the field as dots, which this leaf's own `layers` cannot see.
+fn size_legend_symbol(
+    spec: &ChartSpec,
+    layers: &[super::LayerPrepared],
+    sibling_draws_dots: bool,
+) -> SymbolKind {
+    use crate::spec::mark::Mark;
+    let Some(size_enc) = spec.encoding.size.as_ref() else {
+        return SymbolKind::Circle;
+    };
+    let consumers = size_drawing_marks(layers, &size_enc.field);
+    if !sibling_draws_dots && !consumers.is_empty() && consumers.iter().all(|m| *m == Mark::Line) {
+        SymbolKind::Line
+    } else {
+        SymbolKind::Circle
     }
 }
 
@@ -1594,7 +1657,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
 
         assert!(bundle.legend_entries.is_empty(), "buckets render as a colorbar");
         let cb = bundle.colorbar.expect("discretizing color must build a colorbar");
@@ -1626,7 +1689,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("continuous color must build a colorbar");
         assert_eq!(cb.stops.len(), 11);
         assert_eq!(cb.tick_labels.len(), 5);
@@ -1655,7 +1718,7 @@ mod tests {
         let mut warnings = Vec::new();
         let scales_default = scales_with_color(scale());
         let default_bundle =
-            build_color_legend(&spec, &empty_batch(), &scales_default, &layers, false, &mut warnings);
+            build_color_legend(&spec, &empty_batch(), &scales_default, &layers, None, &mut warnings);
         let default_labels = default_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
@@ -1666,7 +1729,7 @@ mod tests {
         ));
         let scales_typed = scales_with_color(scale());
         let typed_bundle =
-            build_color_legend(&spec, &empty_batch(), &scales_typed, &layers, false, &mut warnings);
+            build_color_legend(&spec, &empty_batch(), &scales_typed, &layers, None, &mut warnings);
         let typed_labels = typed_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         assert_eq!(
@@ -1720,7 +1783,7 @@ mod tests {
         );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &temporal, &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &temporal, &scales, &layers, None, &mut warnings);
         let labels = bundle.colorbar.expect("must build a colorbar").tick_labels;
         assert!(
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
@@ -1767,7 +1830,7 @@ mod tests {
         let config = ChartConfig::default();
         let labels = |spec: &ChartSpec, batch: &RecordBatch| {
             let layers = vec![LayerPrepared::from_chart_only(spec)];
-            build_color_legend(spec, batch, &scales, &layers, false, &mut Vec::new())
+            build_color_legend(spec, batch, &scales, &layers, None, &mut Vec::new())
                 .colorbar
                 .expect("must build a colorbar")
                 .tick_labels
@@ -1882,7 +1945,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render continuous color; colorbar must be suppressed");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "exactly one warning must fire");
@@ -1909,7 +1972,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Ribbon, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "ribbon cannot render continuous color; colorbar must be suppressed");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -1938,7 +2001,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render a discretizing color scale either");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -1970,7 +2033,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("a point layer sharing the scale genuinely renders it; colorbar must stay");
         assert_eq!(cb.stops.len(), 11);
         assert!(warnings.is_empty(), "a mixed line+point chart sharing the scale must not warn spuriously");
@@ -1988,7 +2051,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert_eq!(bundle.legend_entries.len(), 3, "categorical color on line stays byte-identical (NF-A3)");
         assert!(bundle.colorbar.is_none());
         assert!(warnings.is_empty(), "categorical color must never trigger the inert-scale suppression");
@@ -2017,7 +2080,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "legend=None never built a colorbar in the first place");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "the inert channel must still warn even with no legend to suppress");
@@ -2063,9 +2126,11 @@ mod tests {
             field: "v".into(),
             ..Default::default()
         });
-        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut line = layer_with_mark_and_color(Mark::Line, Some("v"));
+        line.encoding.size = spec.encoding.size.clone();
+        let layers = vec![line];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         // Sanity: the merge premise actually held (colorbar nulled by the
         // merge, not the inert-scale check testing nothing).
         assert!(bundle.colorbar.is_none());
@@ -2085,8 +2150,8 @@ mod tests {
         // semantics are a separate follow-up), but every swatch must fall
         // back to the neutral default — none may carry a graduated color
         // sampled from the scale the warning just judged inert.
-        let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
-            AuxLegendInput::Size { entries, .. } => Some(entries),
+        let (size_entries, symbol) = bundle.aux_legends.iter().find_map(|a| match a {
+            AuxLegendInput::Size { entries, symbol, .. } => Some((entries, *symbol)),
             _ => None,
         }).expect("the size legend must still render, unaffected by the color channel's own suppression");
         assert!(!size_entries.is_empty(), "the size legend must have swatches to check");
@@ -2094,6 +2159,103 @@ mod tests {
             size_entries.iter().all(|e| e.color_hex.is_none()),
             "every swatch must be the neutral default, not a graduated color from the inert scale: {size_entries:?}"
         );
+        assert_eq!(symbol, SymbolKind::Line, "the line is the size legend's only consumer, so it draws line swatches");
+    }
+
+    // ── Size legend swatch: lines iff every size consumer is a line ──────
+
+    /// A spec and scales sizing by `v`, with no color.
+    fn size_only_fixture() -> (ResolvedScales, ChartSpec) {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use crate::render::scale_resolve::{ScaleKind, SizeScale};
+        use crate::scale::linear::LinearScale;
+        let mut scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 1.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        scales.color = None;
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![10.0, 400.0], false, false)),
+        });
+        let mut spec = empty_spec();
+        spec.encoding.size = Some(crate::spec::encoding::EncodingSpec { field: "v".into(), ..Default::default() });
+        (scales, spec)
+    }
+
+    /// The size block a set of consumer marks builds, given whether a
+    /// composite sibling draws the field as dots.
+    fn size_block_for(marks: &[Mark], sibling_draws_dots: bool) -> (SymbolKind, Vec<f64>) {
+        let (scales, spec) = size_only_fixture();
+        let layers: Vec<LayerPrepared> = marks
+            .iter()
+            .map(|&m| {
+                let mut l = layer_with_mark_and_color(m, None);
+                l.encoding.size = spec.encoding.size.clone();
+                l
+            })
+            .collect();
+        let ctx = LeafScaleContext { size_scale_has_non_line_sibling: sibling_draws_dots, ..Default::default() };
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, Some(&ctx), &mut Vec::new());
+        bundle
+            .aux_legends
+            .iter()
+            .find_map(|a| match a {
+                AuxLegendInput::Size { entries, symbol, .. } => {
+                    Some((*symbol, entries.iter().map(|e| e.radius).collect()))
+                }
+                _ => None,
+            })
+            .expect("a size legend renders")
+    }
+
+    /// Every non-empty set of size consumers drawn from {line, point}, alone
+    /// or beside a composite sibling drawing dots: the block draws line
+    /// swatches exactly when every consumer is a line and no sibling draws
+    /// dots, and the entries' radii never depend on the swatch.
+    #[test]
+    fn size_legend_symbol_matrix_over_consumers_and_composite_siblings() {
+        let kinds = [Mark::Line, Mark::Point];
+        let consumer_sets: Vec<Vec<Mark>> = (1..1u32 << kinds.len())
+            .map(|bits| kinds.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, m)| *m).collect())
+            .collect();
+        let (_, reference_radii) = size_block_for(&[Mark::Point], false);
+        for marks in &consumer_sets {
+            for sibling_draws_dots in [false, true] {
+                let (symbol, radii) = size_block_for(marks, sibling_draws_dots);
+                let lines_only = marks.iter().all(|m| *m == Mark::Line) && !sibling_draws_dots;
+                let want = if lines_only { SymbolKind::Line } else { SymbolKind::Circle };
+                assert_eq!(symbol, want, "consumers {marks:?}, sibling draws dots: {sibling_draws_dots}");
+                assert_eq!(radii, reference_radii, "the swatch never changes an entry's radius");
+            }
+        }
+        // Vacuity control: the two single-consumer cells disagree.
+        assert_ne!(size_block_for(&[Mark::Line], false).0, size_block_for(&[Mark::Point], false).0);
+    }
+
+    /// A layer that does not draw the size field is not a consumer: a point
+    /// beside the sized line without the field, or a rule inheriting it, draws
+    /// no size, so the line decides alone. A text drawing it as a font size
+    /// is a consumer and keeps the circles.
+    #[test]
+    fn a_layer_that_does_not_draw_the_size_field_does_not_consume_it() {
+        let (scales, spec) = size_only_fixture();
+        let sized = |mark: Mark| {
+            let mut l = layer_with_mark_and_color(mark, None);
+            l.encoding.size = spec.encoding.size.clone();
+            l
+        };
+        let symbol_beside_line = |other: LayerPrepared| {
+            let layers = [sized(Mark::Line), other];
+            let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut Vec::new());
+            match &bundle.aux_legends[0] {
+                AuxLegendInput::Size { symbol, .. } => *symbol,
+                other => panic!("expected a size block, got {other:?}"),
+            }
+        };
+        assert_eq!(symbol_beside_line(layer_with_mark_and_color(Mark::Point, None)), SymbolKind::Line);
+        assert_eq!(symbol_beside_line(sized(Mark::Rule)), SymbolKind::Line);
+        assert_eq!(symbol_beside_line(sized(Mark::Text)), SymbolKind::Circle);
     }
 
     /// The same same-field color+size merge on `mark_point` (a mark that
@@ -2125,7 +2287,7 @@ mod tests {
         });
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "the merge still folds the colorbar into the size legend");
         assert!(warnings.is_empty(), "point genuinely renders continuous color; nothing is inert here");
         let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
@@ -2184,7 +2346,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no Size legend was emitted; the colorbar is the chart's only color legend and must survive");
         assert!(
             !bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })),
@@ -2203,7 +2365,7 @@ mod tests {
         scales.size = None; // the channel is bound in `spec` but never resolved
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no resolved size scale means no Size block; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2230,7 +2392,7 @@ mod tests {
         });
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "an empty-entries Size legend is not emitted; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2257,7 +2419,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("g")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line's inert v channel must still lose its colorbar");
         assert_eq!(warnings.len(), 1, "point's unrelated field g must not exempt line's v: {warnings:?}");
         match &warnings[0] {
@@ -2288,7 +2450,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "point genuinely renders the shared v mapping; colorbar must stay");
         assert!(warnings.is_empty(), "same-field point sibling must still exempt line");
     }
@@ -2338,7 +2500,7 @@ mod tests {
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
-            false,
+            None,
             &mut warnings,
         );
         assert_eq!(bundle.legend_title.as_deref(), Some("g"));
@@ -2352,7 +2514,7 @@ mod tests {
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
-            false,
+            None,
             &mut warnings,
         );
         assert_eq!(bundle.legend_title.as_deref(), Some("Group"));
@@ -2367,7 +2529,7 @@ mod tests {
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
-            false,
+            None,
             &mut warnings,
         );
         assert_eq!(bundle.legend_title, None);
@@ -2399,7 +2561,7 @@ mod tests {
                 palette: std::borrow::Cow::Owned(vec![]),
             }),
             &layers,
-            false,
+            None,
             &mut warnings,
         );
         // `legend_title` resolves the channel title, not the `Legend(title=)`

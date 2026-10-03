@@ -2791,6 +2791,7 @@ mod tests {
                 radius: 4.0,
                 color_hex: None,
             }],
+            symbol: SymbolKind::Circle,
         };
         let shape_entry = AuxLegendInput::Shape {
             title: Some("region".into()),

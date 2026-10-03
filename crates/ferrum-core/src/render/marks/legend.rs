@@ -294,8 +294,13 @@ pub fn build_legend(
                     // to `Line`, which is what makes the dash visible at all (a
                     // `Circle` carrying a dash draws byte-identically to one
                     // without). Every other `Line`-kind entry carries `None` and
-                    // draws solid, byte-identical to pre-T12.
-                    let line_w = symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width);
+                    // draws solid, byte-identical to pre-T12. A size entry's own
+                    // `symbol_line_width` (the dot diameter its lines draw)
+                    // outranks both widths.
+                    let line_w = entry
+                        .symbol_line_width
+                        .or(symbol_stroke_w)
+                        .unwrap_or(theme.sizes.line_stroke_width);
                     let half_len = 6.0 * swatch_scale;
                     nodes.push(SceneNode::Line {
                         x1: sx - half_len,
@@ -475,6 +480,7 @@ mod tests {
                     shape_name: None,
                     color_hex: None,
                     dash_pattern: None,
+                    symbol_line_width: None,
                 },
                 LegendEntryLayout {
                     label: "b".into(),
@@ -487,6 +493,7 @@ mod tests {
                     shape_name: None,
                     color_hex: None,
                     dash_pattern: None,
+                    symbol_line_width: None,
                 },
             ],
             title: None,
@@ -520,6 +527,7 @@ mod tests {
             shape_name: None,
             color_hex: None,
             dash_pattern: None,
+            symbol_line_width: None,
         };
         let legend = LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
@@ -548,6 +556,62 @@ mod tests {
         assert_eq!(labels, vec!["20", "60", "100"], "numeric size labels present");
     }
 
+    /// A size block laid out for line consumers draws one line swatch per
+    /// entry at the entry's dot diameter, outranking a legend-level
+    /// `symbol_stroke_width`; the same block laid out for dots draws circles
+    /// of the entry's radius. Driven through `layout_aux_legends`, the path
+    /// the renderer is fed by.
+    #[test]
+    fn size_line_swatch_strokes_at_the_entry_dot_diameter() {
+        use crate::layout::legend::layout_aux_legends;
+        use crate::layout::{AuxLegendInput, HeuristicMetrics, SizeLegendEntry};
+        let radii = [2.0, 5.0, 9.0];
+        let block = |symbol: SymbolKind| AuxLegendInput::Size {
+            title: None,
+            entries: radii
+                .iter()
+                .map(|&radius| SizeLegendEntry { label: format!("{radius}"), radius, color_hex: None })
+                .collect(),
+            symbol,
+        };
+        let inner = Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 };
+        let metrics = HeuristicMetrics::default();
+        let theme = ThemeInputs::default();
+        let render = |symbol: SymbolKind| {
+            let (mut blocks, _) = layout_aux_legends(
+                &[block(symbol)],
+                None,
+                LegendOrient::Right,
+                inner,
+                inner,
+                11.0,
+                None,
+                12.0,
+                &metrics,
+                0.0,
+            );
+            let mut legend = blocks.remove(0);
+            legend.symbol_stroke_width = Some(1.0);
+            build_legend(&legend, None, &theme)
+        };
+
+        let line_nodes = render(SymbolKind::Line);
+        let widths: Vec<f64> = line_nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Line { style, .. } = n { Some(style.width) } else { None })
+            .collect();
+        assert_eq!(widths, radii.map(|r| 2.0 * r).to_vec(), "each swatch strokes at 2 * radius");
+        assert!(!line_nodes.iter().any(|n| matches!(n, SceneNode::Circle { .. })));
+
+        let circle_nodes = render(SymbolKind::Circle);
+        let drawn: Vec<f64> = circle_nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Circle { r, .. } = n { Some(*r) } else { None })
+            .collect();
+        assert_eq!(drawn, radii.to_vec(), "a dot block keeps its graduated circles");
+        assert!(!circle_nodes.iter().any(|n| matches!(n, SceneNode::Line { .. })));
+    }
+
     /// A shape legend draws the category's point glyph (here a diamond → a
     /// `Path` node) plus a label, honoring an explicit `color_hex`.
     #[test]
@@ -567,6 +631,7 @@ mod tests {
                 shape_name: Some("diamond".into()),
                 color_hex: None,
                 dash_pattern: None,
+                symbol_line_width: None,
             }],
             title: None,
             colorbar: None,
@@ -614,6 +679,7 @@ mod tests {
             shape_name: None,
             color_hex: Some("#1f77b4".into()),
             dash_pattern: None,
+            symbol_line_width: None,
         };
         LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },

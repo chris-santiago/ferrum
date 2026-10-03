@@ -36,8 +36,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import operator
 import re
 import tempfile
+from functools import reduce
+from itertools import combinations
+from typing import Any
 
 import polars as pl
 import pytest
@@ -1190,3 +1194,171 @@ def test_a_sized_line_cut_by_a_break_tapers_with_interpolated_widths_at_each_cut
                 )
     # The cut widths are neither endpoint's: the taper runs through the cut.
     assert source[1] < exit_w < source[2] and source[2] < entry_w < source[3]
+
+
+# ---------------------------------------------------------------------------
+# Legend swatches: a size legend draws line swatches exactly when every layer
+# binding the size field is a line, across composite leaves for a legend
+# they share, and circles otherwise. A line swatch's stroke width is the
+# entry's dot diameter, `2 * r` of the circle the same entry draws on a
+# point-only chart. The population is every non-empty set of size consumers
+# drawn from {line, point}, on every route that combines them: one flat
+# chart (`+`), the static overlay composite (`fm.layer(...).to_svg()`, one
+# legend per member leaf), a figure-level legend band shared across
+# `hconcat` leaves, and the interactive scene.
+# ---------------------------------------------------------------------------
+
+_SWATCH_MARKS = ("line", "point")
+_CONSUMER_SETS = [
+    combo for n in range(1, len(_SWATCH_MARKS) + 1) for combo in combinations(_SWATCH_MARKS, n)
+]
+_SHARED_SIZE = fm.Resolve(scale={"size": "shared"}, legend={"size": "shared"})
+
+
+def _consumer(mark: str) -> fm.Chart:
+    return getattr(fm.Chart(_DF), f"mark_{mark}")().encode(x="x", y="y", size="v")
+
+
+def _combine(route: str, marks: tuple[str, ...]) -> Any:
+    charts = [_consumer(m) for m in marks]
+    if route in ("plus", "interactive"):
+        return reduce(operator.add, charts)
+    if route == "layer":
+        return fm.layer(*charts)
+    return fm.hconcat(*charts, resolve=_SHARED_SIZE)
+
+
+_MARK_COLOR = "#2563eb"
+
+
+def _strip_clip_groups(svg: str) -> str:
+    """Remove every `<g clip-path=...>...</g>` block, honoring nested `<g>`s.
+
+    A clip group can itself contain nested `<g>` elements (e.g. per-mark
+    grouping inside a clipped panel). A non-greedy `<g clip-path=...>.*?</g>`
+    regex stops at the *first* `</g>` it finds, which is the nested group's
+    close tag, not the clip group's own -- leaking the clip group's
+    remaining marks into whatever this function is meant to exclude them
+    from. This scans forward counting open/close `<g>` tags to find each
+    clip group's true matching close instead.
+    """
+    out = []
+    i = 0
+    while True:
+        m = re.search(r'<g\s+clip-path="[^"]*">', svg[i:])
+        if not m:
+            out.append(svg[i:])
+            break
+        start = i + m.start()
+        out.append(svg[i:start])
+        depth = 0
+        end = len(svg)
+        for tm in re.finditer(r"<g\b[^>]*>|</g>", svg[start:]):
+            if tm.group().startswith("</g"):
+                depth -= 1
+                if depth == 0:
+                    end = start + tm.end()
+                    break
+            else:
+                depth += 1
+        i = end
+    return "".join(out)
+
+
+def _svg_legend_swatches(svg: str) -> list[tuple[str, float]]:
+    """`(kind, size)` per legend swatch of a static SVG, in document order.
+
+    Marks render inside clip groups and axis chrome in gray, so what stays
+    outside every clip group in the mark color is the legend: a circle swatch
+    reports its radius, a line swatch its stroke width.
+    """
+    body = re.sub(r"<defs>.*?</defs>", "", svg, flags=re.S)
+    body = _strip_clip_groups(body)
+    swatches = []
+    for el in re.findall(r"<(?:circle|line)\b[^>]*>", body):
+        if el.startswith("<circle"):
+            swatches.append(("circle", float(re.search(r' r="([^"]+)"', el).group(1))))
+        elif f'stroke="{_MARK_COLOR}"' in el:
+            swatches.append(("line", float(re.search(r' stroke-width="([^"]+)"', el).group(1))))
+    return swatches
+
+
+def test_strip_clip_groups_handles_nested_g() -> None:
+    """A mark circle nested inside a clip group's own `<g>` must not leak out.
+
+    A non-greedy `<g clip-path=...>.*?</g>` regex would stop at the nested
+    `</g>` and leave `mark-circle` (and the clip group's own close tag) in
+    the body; the balanced scanner must strip the whole outer group.
+    """
+    svg = (
+        '<g clip-path="url(#a)"><g class="marks">'
+        '<circle id="mark-circle" r="1"/></g></g>'
+        '<circle id="legend-circle" r="2"/>'
+    )
+    stripped = _strip_clip_groups(svg)
+    assert "mark-circle" not in stripped
+    assert "legend-circle" in stripped
+
+
+def _scene_legend_swatches(chart: Any) -> list[tuple[str, float]]:
+    scene = json.loads(chart.interactive().scene_json)
+    swatches = []
+    for node in scene["legend"]:
+        if node["type"] == "circle":
+            swatches.append(("circle", node["r"]))
+        elif node["type"] == "line":
+            swatches.append(("line", node["style"]["width"]))
+    return swatches
+
+
+def _legend_swatches(route: str, chart: Any) -> list[tuple[str, float]]:
+    if route == "interactive":
+        return _scene_legend_swatches(chart)
+    return _svg_legend_swatches(chart.to_svg())
+
+
+@pytest.mark.parametrize("route", ["plus", "layer", "hconcat_shared", "interactive"])
+@pytest.mark.parametrize("marks", _CONSUMER_SETS, ids="+".join)
+def test_size_legend_swatch_follows_every_size_consumer(route: str, marks: tuple[str, ...]) -> None:
+    radii = [r for _, r in _scene_legend_swatches(_consumer("point"))]
+    swatches = _legend_swatches(route, _combine(route, marks))
+    # Every route draws one shared legend of `len(radii)` entries. The static
+    # overlay composite (`fm.layer`) is a known open defect: it currently
+    # draws one full, overlapping legend per member leaf, stacked at
+    # identical coordinates, so this pins `len(marks) * len(radii)` entries
+    # rather than the deduped count the route should eventually produce.
+    expected = len(marks) * len(radii) if route == "layer" else len(radii)
+    assert len(swatches) == expected, swatches
+    lines_only = set(marks) == {"line"}
+    for i, (kind, size) in enumerate(swatches):
+        r = radii[i % len(radii)]
+        if lines_only:
+            assert kind == "line", swatches
+            assert size == pytest.approx(2 * r, abs=2e-3)
+        else:
+            assert kind == "circle", swatches
+            assert size == pytest.approx(r, abs=2e-3)
+
+
+def test_line_only_legend_differs_from_point_only() -> None:
+    """Vacuity control: the matrix's two single-consumer cells must disagree."""
+    line = _svg_legend_swatches(_consumer("line").to_svg())
+    point = _svg_legend_swatches(_consumer("point").to_svg())
+    assert {k for k, _ in line} == {"line"}
+    assert {k for k, _ in point} == {"circle"}
+    line_sizes = [s for _, s in line]
+    point_sizes = [s for _, s in point]
+    assert line_sizes != point_sizes, "line widths must differ from point radii, not just kinds"
+    assert line_sizes == pytest.approx([2 * r for r in point_sizes], abs=2e-3)
+
+
+@pytest.mark.parametrize("route", ["plus", "layer", "interactive"])
+def test_a_rule_inheriting_the_size_field_keeps_the_line_swatches(route: str) -> None:
+    """A rule beside a sized line carries the promoted size binding but draws
+    no size, so the line is the legend's only consumer."""
+    rule = fm.Chart(_DF).mark_rule().encode(y="y")
+    chart = _consumer("line") + rule if route != "layer" else fm.layer(_consumer("line"), rule)
+    radii = [r for _, r in _scene_legend_swatches(_consumer("point"))]
+    swatches = _legend_swatches(route, chart)
+    assert [k for k, _ in swatches] == ["line"] * len(radii)
+    assert [w for _, w in swatches] == pytest.approx([2 * r for r in radii], abs=2e-3)

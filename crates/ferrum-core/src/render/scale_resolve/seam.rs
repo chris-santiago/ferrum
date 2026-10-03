@@ -128,6 +128,14 @@ pub(crate) struct LeafScaleContext {
     /// derived here. `false` (the default) leaves the check exactly as a
     /// standalone chart's.
     pub(crate) color_scale_has_non_line_ribbon_sibling: bool,
+    /// Layout-stage-only signal: this leaf belongs to an all-leaf `Overlay`
+    /// group in which a sibling leaf draws this leaf's size field with a mark
+    /// other than a line, so the group's size scale is drawn as dots and this
+    /// leaf's size legend keeps circle swatches even when its own layers are
+    /// all lines (`render::prepare::legend::size_legend_symbol`). Set by
+    /// `composite_render::plan_size_dot_siblings`. `false` (the default)
+    /// decides from this leaf's own layers, as a standalone chart does.
+    pub(crate) size_scale_has_non_line_sibling: bool,
 }
 
 impl LeafScaleContext {

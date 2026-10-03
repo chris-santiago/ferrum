@@ -44,6 +44,10 @@ pub(crate) use extent::fix_transform_extents_for_facet;
 // aux-legend channel list instead of mirroring it).
 pub(crate) use legend::aux_legend_channels;
 
+// `pub(in crate::render)` so the compositor's overlay sibling pass reads the
+// same size-consumer rule the size legend's swatch choice is built from.
+pub(in crate::render) use legend::size_drawing_marks;
+
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
 /// `None` row value = wrap mode (single-field facet).
 type FacetPartitionKey = (String, Option<String>);
@@ -1247,20 +1251,13 @@ pub fn prepare_render_inputs(
     // its warnings sink. See `legend::build_color_legend` for the full
     // behavior.
     //
-    // `composite_color_has_non_line_ribbon_sibling` (T5b static-composite
-    // fix, spec §4.0's second bullet): under the composite path, `layers`
-    // above only ever sees THIS leaf's own marks — a sibling leaf elsewhere
-    // in an Overlay group (e.g. `fm.layer(line(color=v), point(color=v))`)
-    // is invisible to it, since each leaf renders through its own standalone
-    // `prepare_render_inputs` call. `leaf_scales` (the composite seam,
-    // `render::composite_render::plan_line_ribbon_color_group_exemptions`)
-    // is the one place that already sees the whole group, so its verdict is
-    // read here and threaded down as the extra bit `build_color_legend`
-    // needs. `false` for every standalone (flat/facet) render, since
-    // `leaf_scales` is `None` there.
-    let composite_color_has_non_line_ribbon_sibling = leaf_scales
-        .map(|c| c.color_scale_has_non_line_ribbon_sibling)
-        .unwrap_or(false);
+    // Under the composite path `layers` above only ever sees THIS leaf's own
+    // marks: a sibling leaf elsewhere in an Overlay group (e.g.
+    // `fm.layer(line(color=v), point(color=v))`) is invisible to it, since
+    // each leaf renders through its own standalone `prepare_render_inputs`
+    // call. `leaf_scales` (the composite seam) is the one place that already
+    // sees the whole group, so its verdicts reach `build_color_legend` with
+    // it. `None` for every standalone (flat/facet) render.
     legend::refuse_format_temporality_mismatch_legend_fields(spec, &transformed, chart_config)?;
     let legend::ColorLegendBundle {
         legend_entries,
@@ -1273,7 +1270,7 @@ pub fn prepare_render_inputs(
         &transformed,
         &provisional_scales,
         &layers,
-        composite_color_has_non_line_ribbon_sibling,
+        leaf_scales,
         &mut scale_warnings,
     );
 
