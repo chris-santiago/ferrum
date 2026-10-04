@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from ferrum._entry import speak_as
+
 from ._base import FerrumVisualizer
 from ferrum.plots.ranking import (
     _parallel_coords_chart_from_dataframe,
@@ -118,7 +120,9 @@ class Rank1DVisualizer(FerrumVisualizer):
         else:
             df = rank1d_compute(X, algorithm=self.algorithm)
         self._metrics["top_feature_score"] = float(df["score"][0])
-        self._chart = _rank1d_chart_from_dataframe(
+        self._chart = speak_as(
+            type(self).__name__,
+            _rank1d_chart_from_dataframe,
             df,
             algorithm=self.algorithm,
             orient=self.orient,
@@ -217,7 +221,9 @@ class Rank2DVisualizer(FerrumVisualizer):
             self._metrics["max_abs_corr"] = float(off_diag["correlation"].abs().max() or 0.0)
         else:
             self._metrics["max_abs_corr"] = 0.0
-        self._chart = _rank2d_chart_from_dataframe(
+        self._chart = speak_as(
+            type(self).__name__,
+            _rank2d_chart_from_dataframe,
             df,
             algorithm=self.algorithm,
             annot=self.annot,
@@ -339,7 +345,9 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
             n_features = len(self.features) if self.features else int(arr.shape[1])
         self._metrics["n_samples"] = float(n_samples)
         self._metrics["n_features"] = float(n_features)
-        self._chart = _parallel_coords_chart_from_dataframe(
+        self._chart = speak_as(
+            type(self).__name__,
+            _parallel_coords_chart_from_dataframe,
             X,
             features=self.features,
             hue=effective_hue,

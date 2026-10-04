@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.encoding import Color, X, Y
+from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _figure_entry,
@@ -41,6 +41,7 @@ from ferrum.plots._helpers import (
     _resolve_source,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
+    _title_legend,
 )
 
 
@@ -734,7 +735,7 @@ def _rank2d_chart_from_dataframe(
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     legend_title = "Covariance" if algorithm == "covariance" else "Correlation"
-    chart = chart.encode(color=Color("correlation", title=legend_title))
+    chart = _title_legend(chart, "color", legend_title)
     chart = chart.properties(title=ferrum.Title(f"Feature Correlation ({algorithm.title()})"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -993,8 +994,9 @@ def _decision_boundary_chart_from_source(
         # (which grid `z` column got computed) already happened above, in
         # `_build_decision_boundary_grid`; the mark itself treats `proba`
         # as informational and warns if it is passed directly.
-        chart = ferrum.Chart(grid_df).mark_decision_boundary()
-        chart = chart.encode(color=Color("z", title=grid_info.z_title))
+        chart = _title_legend(
+            ferrum.Chart(grid_df).mark_decision_boundary(), "color", grid_info.z_title
+        )
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         return _finalize_chart(
             chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -1011,8 +1013,9 @@ def _decision_boundary_chart_from_source(
         )
     # `proba` is not forwarded to mark_decision_boundary here either -- see
     # the pure-boundary path above for why.
-    chart = ferrum.Chart(unified).mark_decision_boundary()
-    chart = chart.encode(color=Color("z", title=grid_info.z_title))
+    chart = _title_legend(
+        ferrum.Chart(unified).mark_decision_boundary(), "color", grid_info.z_title
+    )
     chart = chart.layer(
         _Layer(
             mark="point",

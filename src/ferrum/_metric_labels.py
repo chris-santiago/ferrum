@@ -73,7 +73,7 @@ number under the same label.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, ClassVar, Literal, NamedTuple, Optional
 
 import polars as pl
@@ -434,10 +434,9 @@ def _is_metric_label_layer(layer: Any) -> bool:
     """Whether ``layer`` is an overlay this module emitted.
 
     Recognised by structure -- a ``text`` mark reading
-    :data:`_LABEL_TEXT_COL` -- rather than by a layer name, because the
-    layer reaches ``Chart._layers`` through ``Chart.__add__``'s generic
-    ``_expand_layers`` path, which names nothing. The column is private to
-    this module, so nothing else can produce that shape.
+    :data:`_LABEL_TEXT_COL` -- rather than by its ``<kind>_label`` name,
+    which a caller's own layer could share. The column is private to this
+    module, so nothing else can produce that shape.
     """
     return layer.mark == "text" and _resolve_field(layer.encoding.get("text")) == _LABEL_TEXT_COL
 
@@ -635,7 +634,12 @@ def _apply_metric_label(
         .mark_text(align="right", baseline="hanging", dx=-4, dy=4)
         .encode(x=_LABEL_X_COL, y=_LABEL_Y_COL, text=_LABEL_TEXT_COL)
     )
-    return base_aug + annot_layer
+    labelled = base_aug + annot_layer
+    # Named for the sub-layer a figure's `mark=` override aims at
+    # (`roc_chart(mark={"auc_label": {...}})`).
+    *kept, overlay = labelled._layers
+    labelled._layers = [*kept, replace(overlay, name=f"{kind}_label")]
+    return labelled
 
 
 @dataclass(frozen=True)

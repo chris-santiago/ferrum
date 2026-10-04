@@ -30,23 +30,10 @@ pub enum TaperError {
     Misaligned { points: usize, widths: usize },
     /// A width is non-finite or not `> 0`.
     InvalidWidth { index: usize, value: f64 },
-    /// A tapered path is closed (`closed == true` or a `Close` command): a
-    /// tapered stroke is an open centerline, so a closing segment has no
-    /// width to draw.
+    /// A tapered path is closed ([`PathClosure::Closed`] or a `Close`
+    /// command): a tapered stroke is an open centerline, so a closing segment
+    /// has no width to draw.
     Closed,
-    /// A line's `vertex_rows` entry does not carry exactly one row per vertex.
-    RowsMisaligned { points: usize, rows: usize },
-    /// A batch's `vertex_rows` does not carry exactly one row list per node.
-    RowListsMisaligned { nodes: usize, lists: usize },
-    /// A batch carries `vertex_rows` without the `size_conditionals` they
-    /// answer to.
-    SizeConditionalsUnpaired,
-    /// A batch's `size_conditionals` names conditional `index` of a scene
-    /// that has `conditionals`.
-    SizeConditionalOutOfRange { index: usize, conditionals: usize },
-    /// A batch's `size_conditionals` names conditional `index`, which sets no
-    /// `size`.
-    NotASizeConditional { index: usize },
 }
 
 impl fmt::Display for TaperError {
@@ -61,26 +48,6 @@ impl fmt::Display for TaperError {
                 "tapered stroke width {index} is {value}; every width must be finite and greater than 0"
             ),
             Self::Closed => write!(f, "tapered stroke is a closed path; a tapered stroke must be an open path"),
-            Self::RowsMisaligned { points, rows } => write!(
-                f,
-                "tapered stroke has {rows} vertex rows for {points} vertices; it needs one row per vertex"
-            ),
-            Self::RowListsMisaligned { nodes, lists } => write!(
-                f,
-                "tapered line batch has {lists} vertex row lists for {nodes} lines; it needs one list per line"
-            ),
-            Self::SizeConditionalsUnpaired => write!(
-                f,
-                "tapered line batch carries vertex_rows without the size_conditionals they answer to"
-            ),
-            Self::SizeConditionalOutOfRange { index, conditionals } => write!(
-                f,
-                "mark batch answers to size conditional {index}, but the scene has {conditionals} conditionals"
-            ),
-            Self::NotASizeConditional { index } => write!(
-                f,
-                "mark batch answers to size conditional {index}, but conditional {index} sets no size"
-            ),
         }
     }
 }
@@ -327,17 +294,36 @@ pub fn flatten_tapered_path(commands: &[PathCmd], widths: &[f64]) -> Result<Vec<
     Ok(subpaths)
 }
 
+/// Whether a [`SceneNode::Path`](crate::SceneNode::Path) closes back on its
+/// start, its `closed` field as a named value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathClosure {
+    Open,
+    Closed,
+}
+
+impl From<bool> for PathClosure {
+    /// A `SceneNode::Path`'s `closed` field.
+    fn from(closed: bool) -> Self {
+        if closed {
+            Self::Closed
+        } else {
+            Self::Open
+        }
+    }
+}
+
 /// The on-pieces of a tapered path's stroke: its centerlines flattened by
 /// [`flatten_tapered_path`], each dashed by [`dash_tapered`] (an empty `dash`
-/// draws each centerline whole). Refuses a closed path (`closed == true` or a
-/// `Close` command) and misaligned or non-positive `widths`.
+/// draws each centerline whole). Refuses a closed path ([`PathClosure::Closed`]
+/// or a `Close` command) and misaligned or non-positive `widths`.
 pub fn dash_tapered_path(
     commands: &[PathCmd],
-    closed: bool,
+    closure: PathClosure,
     widths: &[f64],
     dash: &[f64],
 ) -> Result<Vec<TaperPiece>, TaperError> {
-    if closed {
+    if closure == PathClosure::Closed {
         return Err(TaperError::Closed);
     }
     let mut pieces = Vec::new();
@@ -569,7 +555,7 @@ mod tests {
             PathCmd::MoveTo { x: 5.0, y: 5.0 },
             PathCmd::LineTo { x: 9.0, y: 5.0 },
         ];
-        let pieces = dash_tapered_path(&lone_move, false, &[1.0, 2.0, 3.0], &[]).unwrap();
+        let pieces = dash_tapered_path(&lone_move, PathClosure::Open, &[1.0, 2.0, 3.0], &[]).unwrap();
         assert_eq!(pieces, vec![TaperPiece::Run { points: vec![(5.0, 5.0), (9.0, 5.0)], widths: vec![2.0, 3.0] }]);
         // Vacuity control: a zero-length dash on a segment is a dot.
         assert!(matches!(
@@ -667,13 +653,13 @@ mod tests {
             PathCmd::LineTo { x: 10.0, y: 5.0 },
         ];
         let widths = [2.0, 4.0, 6.0, 8.0];
-        let pieces = dash_tapered_path(&commands, false, &widths, &[4.0, 2.0]).expect("open path");
+        let pieces = dash_tapered_path(&commands, PathClosure::Open, &widths, &[4.0, 2.0]).expect("open path");
         assert_eq!(pieces.len(), 4, "{pieces:?}");
         assert_piece(&pieces[0], &[(0.0, 0.0), (4.0, 0.0)], &[2.0, 2.8]);
         assert_piece(&pieces[1], &[(6.0, 0.0), (10.0, 0.0)], &[3.2, 4.0]);
         assert_piece(&pieces[2], &[(0.0, 5.0), (4.0, 5.0)], &[6.0, 6.8]);
         assert_piece(&pieces[3], &[(6.0, 5.0), (10.0, 5.0)], &[7.2, 8.0]);
-        assert_eq!(dash_tapered_path(&commands, true, &widths, &[]), Err(TaperError::Closed));
+        assert_eq!(dash_tapered_path(&commands, PathClosure::Closed, &widths, &[]), Err(TaperError::Closed));
     }
 
     #[test]

@@ -130,7 +130,7 @@ fn permute_rows(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -
 fn permute_columns(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -> PyResult<Columns> {
     let from = spec.from.as_deref().unwrap_or_default();
     let schema = batch.schema();
-    let slots = feature_column_indices(&schema);
+    let slots = feature_column_indices(&schema, "stat_reorder")?;
     if idx_arr.len() != slots.len() {
         return Err(PyValueError::new_err(format!(
             "stat_reorder: from='{from}' produced {} indices but batch has {} numeric columns",
@@ -447,6 +447,25 @@ mod tests {
             let err = apply_with_outputs(&column_spec(from), &batch, Some(&outs)).unwrap_err().to_string();
             assert!(err.contains(needle), "expected {needle:?} in {err}");
         }
+    }
+
+    #[test]
+    fn column_reorder_refuses_a_decimal_column_in_its_own_voice() {
+        pyo3::Python::initialize();
+        use arrow::array::Decimal128Array;
+        let wide = wide_batch();
+        let mut fields: Vec<Field> = wide.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        let mut cols = wide.columns().to_vec();
+        fields.push(Field::new("E", DataType::Decimal128(5, 2), false));
+        cols.push(Arc::new(Decimal128Array::from(vec![1, 2, 3, 4]).with_precision_and_scale(5, 2).unwrap()));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+        let outs = order_outputs(vec![3, 0, 2, 1]);
+        let err = apply_with_outputs(&column_spec(Some("o")), &batch, Some(&outs)).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "ValueError: stat_reorder: column 'E' is a decimal column (Decimal128(5, 2)); a feature column \
+             must be an integer or float column, so cast it to float first"
+        );
     }
 
     #[test]

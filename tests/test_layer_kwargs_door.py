@@ -93,19 +93,37 @@ class TestTheDoorIsGeneral:
             "a bare stroke= is expected to reach every layer, box rects included"
         )
 
-    def test_a_layer_this_call_does_not_emit_is_a_no_op(self, cat_df):
-        """``outliers=False`` draws no outlier layer, and aiming at it is
-        accepted as a no-op -- the same reading ``_apply_mark_overrides``
-        gives a conditionally-absent layer, because both doors are keyed on
-        the mark's full catalog rather than on this call's emitted layers."""
-        aimed = (
+    def test_style_for_a_layer_this_call_does_not_emit_refuses(self, cat_df):
+        """``outliers=False`` draws no outlier layer, so style aimed at it
+        would reach nothing; it refuses, as ``_apply_mark_overrides`` refuses
+        a figure's ``mark=`` style for an undrawn sub-layer. The name is
+        still in the catalog, so the call itself accepts it."""
+        chart = (
             fm.Chart(cat_df)
             .mark_boxplot(layer_kwargs={"outlier": {"fill": AIMED}}, outliers=False)
             .encode(x="g", y="v")
-            .to_svg()
         )
-        bare = fm.Chart(cat_df).mark_boxplot(outliers=False).encode(x="g", y="v").to_svg()
-        assert aimed == bare
+        with pytest.raises(ValueError) as exc_info:
+            chart.to_svg()
+        assert str(exc_info.value) == (
+            "mark_boxplot(layer_kwargs=): this call draws no ['outlier'] sub-layer, so "
+            "nothing would take the style; it draws "
+            "['box', 'lower_cap', 'median', 'upper_cap', 'whisker']"
+        )
+
+    def test_style_a_layer_does_not_honor_refuses(self, cat_df):
+        """Aimed style is held to the aimed layer's own mark: the median is
+        a tick, which has no ``filled``."""
+        chart = (
+            fm.Chart(cat_df)
+            .mark_boxplot(layer_kwargs={"median": {"filled": True}})
+            .encode(x="g", y="v")
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"^mark_boxplot: keyword argument 'filled' is not honored by mark_tick\.",
+        ):
+            chart.to_svg()
 
     def test_an_empty_per_layer_dict_changes_nothing(self, xy_df):
         """``lmplot(line_kws=None)`` forwards ``{}``; that must render
@@ -160,7 +178,7 @@ class TestTheDoorRefusesInTheCallersVoice:
     def test_a_non_dict_is_refused(self, xy_df, bad):
         """Mirrors ``_apply_mark_overrides``' refusal of a non-dict override
         value: same shape of mistake, same exception type."""
-        with pytest.raises(TypeError, match="layer_kwargs"):
+        with pytest.raises(ValueError, match="layer_kwargs"):
             fm.Chart(xy_df).mark_smooth(layer_kwargs=bad)
 
     def test_every_catalogued_name_is_accepted_by_its_own_mark(self):

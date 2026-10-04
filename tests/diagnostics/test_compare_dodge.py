@@ -527,7 +527,8 @@ def test_shap_bar_compare_declares_color_and_dodge():
     # See test_importance_compare_declares_color_and_dodge's comment:
     # desugar_shap_bar's bar_enc["color"] is now Nominal-typed too.
     color_ch = bar.encoding.get("color")
-    assert color_ch == Color("model", type_="nominal")
+    # The figure titles the legend on this binding (`_title_legend`).
+    assert color_ch == Color("model", type_="nominal", title="Model")
     assert color_ch.field == "model"
     assert color_ch.option("type") == "N"
 
@@ -645,7 +646,8 @@ def test_cv_scores_compare_declares_color_and_dodge():
     # See test_importance_compare_declares_color_and_dodge's comment:
     # desugar_boxplot's enc()["color"] is now Nominal-typed too.
     color_ch = box_layer.encoding.get("color")
-    assert color_ch == Color("model", type_="nominal")
+    # The figure titles the legend on this binding (`_title_legend`).
+    assert color_ch == Color("model", type_="nominal", title="Model")
     assert color_ch.field == "model"
     assert color_ch.option("type") == "N"
 

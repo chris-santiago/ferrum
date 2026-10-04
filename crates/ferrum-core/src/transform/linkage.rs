@@ -151,7 +151,7 @@ const LINKAGE_REFS: &str = include_str!("fixtures/linkage_refs.json");
 /// Returns (n_rows, n_features, flat row-major Vec<f64>).
 fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
     let schema = batch.schema();
-    let feature_cols: Vec<Float64Array> = feature_column_indices(&schema)
+    let feature_cols: Vec<Float64Array> = feature_column_indices(&schema, "linkage")?
         .into_iter()
         .map(|i| coerce_to_float64(batch.column(i), "linkage", schema.field(i).name()))
         .collect::<PyResult<_>>()?;
@@ -175,14 +175,45 @@ fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
 /// order: column-axis leaf `k` is the column at position `k` of this list.
 /// `Reorder(axis="columns")` permutes exactly these positions, so a column
 /// linkage's `order` output addresses the same columns on both sides.
-pub(crate) fn feature_column_indices(schema: &Schema) -> Vec<usize> {
-    schema
+///
+/// A feature column is one [`is_numeric_dtype`] accepts. A decimal column is
+/// refused, voiced as `ctx`: it holds numbers, but no transform reads it as
+/// one, so leaving it out of the features would drop data the caller meant to
+/// cluster.
+pub(crate) fn feature_column_indices(schema: &Schema, ctx: &str) -> PyResult<Vec<usize>> {
+    let decimal = schema.fields().iter().find(|f| {
+        matches!(
+            f.data_type(),
+            DataType::Decimal32(..) | DataType::Decimal64(..) | DataType::Decimal128(..) | DataType::Decimal256(..)
+        )
+    });
+    if let Some(field) = decimal {
+        return Err(PyValueError::new_err(format!(
+            "{ctx}: column '{}' is a decimal column ({}); a feature column must be an integer or \
+             float column, so cast it to float first",
+            field.name(),
+            field.data_type()
+        )));
+    }
+    Ok(schema
         .fields()
         .iter()
         .enumerate()
         .filter(|(_, f)| is_numeric_dtype(f.data_type()))
         .map(|(i, _)| i)
-        .collect()
+        .collect())
+}
+
+/// `ferrum._core.numeric_feature_columns(schema, entry)`: the names of the
+/// feature columns [`feature_column_indices`] selects from an Arrow `schema`,
+/// in schema order, so a Python figure function splits its table into id and
+/// feature columns by the rule `Linkage` and `Reorder` apply. Refuses a
+/// decimal column with a `ValueError` voiced as `entry`. Registered in
+/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyo3::pyfunction]
+pub(crate) fn numeric_feature_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyResult<Vec<String>> {
+    let schema = schema.into_inner();
+    Ok(feature_column_indices(&schema, entry)?.into_iter().map(|i| schema.field(i).name().clone()).collect())
 }
 
 /// Transpose a row-major matrix from (n_rows x n_cols) to (n_cols x n_rows).
@@ -844,6 +875,41 @@ mod tests {
             standard_scale: None,
             name: None,
         }
+    }
+
+    /// A decimal column holds numbers no transform reads as one, so the
+    /// feature split refuses it, naming the column and its dtype, instead of
+    /// leaving it out of the clustering; integer and float columns are
+    /// features, a label column is not.
+    #[test]
+    fn a_decimal_feature_column_is_refused_rather_than_left_out() {
+        pyo3::Python::initialize();
+        use arrow::array::{Decimal128Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Decimal128(5, 2), false),
+            Field::new("c", DataType::Int64, false),
+        ]));
+        let decimals = Decimal128Array::from(vec![150, 50, 250]).with_precision_and_scale(5, 2).unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["r0", "r1", "r2"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(decimals),
+                Arc::new(Int64Array::from(vec![3, 1, 2])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            apply(&ward_spec(), &batch).unwrap_err().to_string(),
+            "ValueError: linkage: column 'b' is a decimal column (Decimal128(5, 2)); a feature column \
+             must be an integer or float column, so cast it to float first"
+        );
+        let without_decimal = batch.project(&[0, 1, 3]).unwrap();
+        assert_eq!(feature_column_indices(&without_decimal.schema(), "linkage").unwrap(), vec![1, 2]);
+        assert!(apply(&ward_spec(), &without_decimal).is_ok());
     }
 
     #[test]

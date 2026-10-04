@@ -149,12 +149,12 @@ pub fn tessellate_tapered_path(
     commands: &[PathCmd],
     widths: &[f64],
     style: &FillStroke,
-    closed: bool,
+    closure: PathClosure,
     batch_cap: Option<StrokeCap>,
     batch_join: Option<StrokeJoin>,
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) -> Result<(), TaperError> {
-    let pieces = dash_tapered_path(commands, closed, widths, style.stroke_dash.as_deref().unwrap_or(&[]))?;
+    let pieces = dash_tapered_path(commands, closure, widths, style.stroke_dash.as_deref().unwrap_or(&[]))?;
     let Some(stroke) = &style.stroke else { return Ok(()) };
     let color = color_to_f32(stroke, style.opacity * style.stroke_opacity);
     let mut opts = StrokeOptions::default();
@@ -1464,7 +1464,7 @@ mod tests {
             ..make_fill_stroke_style(1.0, 1.0, 1.0)
         };
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
-        tessellate_tapered_path(&commands, &[2.0, 10.0], &style, false, None, None, &mut buffers)
+        tessellate_tapered_path(&commands, &[2.0, 10.0], &style, PathClosure::Open, None, None, &mut buffers)
             .expect("well-formed widths");
         let at = |x: f32| {
             buffers
@@ -1502,13 +1502,13 @@ mod tests {
         };
         let open = [PathCmd::MoveTo { x: 0.0, y: 0.0 }, PathCmd::LineTo { x: 10.0, y: 0.0 }];
         let with_close = [open[0].clone(), open[1].clone(), PathCmd::Close];
-        for (commands, closed, widths) in [
-            (&open[..], true, vec![1.0, 2.0]),
-            (&with_close[..], false, vec![1.0, 2.0, 2.0]),
+        for (commands, closure, widths) in [
+            (&open[..], PathClosure::Closed, vec![1.0, 2.0]),
+            (&with_close[..], PathClosure::Open, vec![1.0, 2.0, 2.0]),
         ] {
             let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
             assert_eq!(
-                tessellate_tapered_path(commands, &widths, &fill_stroke, closed, None, None, &mut buffers),
+                tessellate_tapered_path(commands, &widths, &fill_stroke, closure, None, None, &mut buffers),
                 Err(TaperError::Closed)
             );
             assert!(buffers.vertices.is_empty(), "a refused path must draw nothing");

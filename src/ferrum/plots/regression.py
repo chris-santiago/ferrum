@@ -57,6 +57,7 @@ from ferrum.plots._helpers import (
     _merge_layers,
     _overlay_metrics_corner,
     _resolve_source,
+    _style_kws,
 )
 
 if TYPE_CHECKING:
@@ -514,9 +515,7 @@ def _log_scaled_x(value: Any, field: str) -> Any:
             "for one x scale. Keep your scale= and drop logx=True, or pass x as a "
             "column name and let logx set the log scale."
         )
-    kwargs = dict(value._kwargs)
-    kwargs["scale"] = {"type": "log"}
-    return type(value)(value.field, **kwargs)
+    return value._with_options(scale={"type": "log"})
 
 
 def _fit_chart_from_named_transform(
@@ -1227,7 +1226,7 @@ def lmplot(
     scatter_layer = None
     if scatter:
         s = Chart(data)
-        skw = dict(scatter_kws) if scatter_kws else {}
+        skw = _style_kws("scatter_kws", "point", scatter_kws)
         if x_jitter is not None:
             s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)), **skw)
         else:
@@ -1242,7 +1241,7 @@ def lmplot(
     # whenever those layers were not materialized yet -- the `scatter=False`
     # branch, whose chart still carries a pending stat mark until render
     # (#199).
-    lkw = dict(line_kws) if line_kws else {}
+    lkw = _style_kws("line_kws", "line", line_kws)
 
     fit = _build_fit(
         method,

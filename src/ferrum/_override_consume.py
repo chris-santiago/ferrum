@@ -33,6 +33,7 @@ from ferrum._core import (  # type: ignore[attr-defined]
 )
 from ferrum._override_apply import OverridePayload
 from ferrum.exceptions import FerrumOverrideError
+from ferrum.marks.base import resolve_layer_style
 
 
 def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
@@ -152,14 +153,16 @@ def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -
 
 
 def apply_mark_style(
-    mark_style: dict[str, Any], payload: OverridePayload, *, is_multi_mark: bool
+    mark_style: dict[str, Any], payload: OverridePayload, *, mark: Any
 ) -> dict[str, Any]:
     """Return *mark_style* merged with ``payload.mark_style`` (override wins).
 
     Mark-style overrides apply to the chart's single base/primary mark.  A chart
     with multiple marks (a layered chart) has no single primary mark, so a
     ``mark_*`` override is ambiguous and raises :class:`FerrumOverrideError`
-    (spec §11 Q4).  *mark_style* is not mutated; a new dict is returned.
+    (spec §11 Q4).  A leaf the chart's own mark does not honor (``mark_shape``
+    on a line) raises it too, as ``mark_<mark>(...)`` would refuse the kwarg.
+    *mark_style* is not mutated; a new dict is returned.
 
     Parameters
     ----------
@@ -167,19 +170,23 @@ def apply_mark_style(
         The base mark's style dict assembled in ``Chart.to_spec``.
     payload:
         The resolved override payload.
-    is_multi_mark:
-        ``True`` when the chart has more than one mark (layered).  When this holds
-        and the payload carries any mark-style override, raise.
+    mark:
+        The chart's one mark, or ``None`` for a layered chart, which has
+        none and so refuses any mark-style override.
     """
     if not payload.mark_style:
         return mark_style
-    if is_multi_mark:
+    if mark is None:
         leaves = ", ".join(sorted(payload.mark_style))
         raise FerrumOverrideError(
             f"mark_* override ({leaves}) is ambiguous on a multi-mark chart: "
             "a layered chart has no single primary mark to apply it to. "
             "Set the style on the specific layer's mark_*() call instead."
         )
+    try:
+        resolve_layer_style("Chart.override", mark, payload.mark_style)
+    except ValueError as exc:
+        raise FerrumOverrideError(str(exc)) from None
     return {**mark_style, **payload.mark_style}
 
 

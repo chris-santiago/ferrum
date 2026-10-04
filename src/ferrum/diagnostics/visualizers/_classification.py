@@ -24,6 +24,8 @@ from ferrum.plots.classification import (
     _pr_chart_from_source,
     _roc_chart_from_source,
 )
+from ferrum._entry import speak_as
+
 from ._base import FerrumVisualizer
 
 
@@ -1093,7 +1095,9 @@ class ClassBalanceVisualizer(FerrumVisualizer):
         self._metrics["n_classes"] = float(len(counts))
         self._metrics["imbalance_ratio"] = float(max_n) / float(max(min_n, 1))
 
-        self._chart = _class_balance_chart_from_dataframe(
+        self._chart = speak_as(
+            type(self).__name__,
+            _class_balance_chart_from_dataframe,
             self._y,
             mark=self.mark,
             encode=self.encode,

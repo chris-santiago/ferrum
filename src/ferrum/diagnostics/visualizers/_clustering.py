@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from ferrum._entry import speak_as
+
 from ._base import FerrumVisualizer
 
 
@@ -203,7 +205,9 @@ class ElbowVisualizer(FerrumVisualizer):
             scores["score"].arg_min() if self.metric == "distortion" else scores["score"].arg_max()
         )
         self._metrics["best_k"] = float(scores["k"][idx])
-        self._chart = _elbow_chart_from_source(
+        self._chart = speak_as(
+            type(self).__name__,
+            _elbow_chart_from_source,
             scores,
             mark=self.mark,
             encode=self.encode,

@@ -401,3 +401,27 @@ class _PendingMark:
     #: this mark emits names it (``_Layer.entry``), and so does every warning
     #: its desugar reports (``MarkDesugarResult.degraded``).
     entry: str | None = None
+    #: ``(channel, title)`` pairs a figure titled this mark's legends with
+    #: (``ferrum.plots._helpers._title_legend``), applied to the bindings
+    #: the desugar emits, whichever columns it chose (:func:`titled_encoding`).
+    legend_titles: tuple = ()
+
+
+def titled_encoding(encoding: dict, legend_titles: tuple) -> dict:
+    """Return *encoding* with each ``(channel, title)`` in *legend_titles* titling its binding.
+
+    Only a binding to a column takes the title: a channel the encoding does
+    not bind stays unbound, and a constant stays a constant. *encoding* is
+    not mutated.
+    """
+    from ferrum.encoding import _channel_class_for
+    from ferrum.encoding.base import ChannelBase
+
+    titled = dict(encoding)
+    for channel, title in legend_titles:
+        binding = titled.get(channel)
+        if isinstance(binding, ChannelBase) and isinstance(binding.field, str):
+            titled[channel] = binding._with_options(title=title)
+        elif isinstance(binding, str):
+            titled[channel] = _channel_class_for(channel)(binding, title=title)
+    return titled

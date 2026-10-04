@@ -188,10 +188,8 @@ pub fn resolve_conditionals_with_packed(
     // batches at the offsets the loader recorded on their own draw commands.
     for span in batch_instance_spans(layout) {
         for (index, cond) in conditionals.iter().enumerate() {
-            // A `size` conditional reaches only the batches whose layer
-            // declared it, when the batch names its own.
-            let out_of_scope = cond.sets_size()
-                && span.batch.size_conditionals.as_ref().is_some_and(|own| !own.contains(&index));
+            // A `size` conditional reaches only the batches that answer to it.
+            let out_of_scope = cond.sets_size() && !span.batch.answers_to_size_conditional(index);
             if out_of_scope {
                 continue;
             }
@@ -417,8 +415,8 @@ fn mark_selected(
 /// `panels` (BAKED, [`crate::scene_load::bake_panels`]) with every line that
 /// carries `vertex_rows` redrawn under the active selections: each width
 /// vertex takes the dot diameter ([`ferrum_scene::dot_diameter`]) of the area
-/// its own row's branch of each `size` conditional the batch names in
-/// `size_conditionals` (its own layer's) picks, a later conditional
+/// its own row's branch of each `size` conditional the batch answers to
+/// ([`ferrum_scene::MarkBatch::answers_to_size_conditional`]) picks, a later conditional
 /// outranking an earlier one as [`resolve_conditionals_with_packed`] layers
 /// them, baked by the panel's layout scale as every stroke width is
 /// ([`crate::scene_load::baked_stroke_width`]). A vertex a break cut between
@@ -448,16 +446,13 @@ pub(crate) fn conditional_line_panels(
         let ls = panel.layout_scale;
         for batch in &mut panel.marks {
             let Some(rows) = batch.vertex_rows.as_ref() else { continue };
-            // Only the conditionals this line's own layer declared, in scene
+            // Only the `size` conditionals this line answers to, in scene
             // order, each with a non-empty selection.
-            let active: Vec<(&ConditionalEncoding, &SelectionState)> = batch
-                .size_conditionals
+            let active: Vec<(&ConditionalEncoding, &SelectionState)> = conditionals
                 .iter()
-                .flatten()
-                .filter_map(|&i| {
-                    let cond = conditionals.get(i)?;
-                    Some((cond, selections.get(&cond.selection_name)?))
-                })
+                .enumerate()
+                .filter(|&(i, cond)| cond.sets_size() && batch.answers_to_size_conditional(i))
+                .filter_map(|(_, cond)| Some((cond, selections.get(&cond.selection_name)?)))
                 .filter(|(_, sel)| !matches!(sel, SelectionState::Empty))
                 .collect();
             let widths: Vec<Option<Vec<f64>>> = rows
@@ -561,8 +556,7 @@ pub(crate) fn redraw_conditional_lines(
         return Ok(None);
     };
     let extent = [0.0, 0.0, loaded_data.width, loaded_data.height];
-    let (mesh, mesh_panels) = crate::scene_load::mark_mesh(&lines, extent)
-        .map_err(|e| wasm_bindgen::JsValue::from(crate::error::WasmRenderError::TaperedStroke(e)))?;
+    let (mesh, mesh_panels) = crate::scene_load::mark_mesh(&lines, extent).map_err(wasm_bindgen::JsValue::from)?;
     loaded_buffers.update_mark_mesh(gpu, &mesh, mesh_panels);
     Ok(Some(lines))
 }
@@ -4207,23 +4201,23 @@ mod tests {
     }
 
     /// A loaded scene whose rows do not carry one row per vertex, or one list
-    /// per line, is refused when it loads, in the voice of a misaligned
-    /// `widths`, and never drawn at a guessed width; a scene with no such
-    /// line needs no redraw.
+    /// per line, is refused when it loads as a malformed batch, and never
+    /// drawn at a guessed width; a scene with no such line needs no redraw.
     #[test]
     fn misaligned_vertex_rows_refuse_at_load() {
-        use ferrum_scene::TaperError;
+        use crate::error::WasmRenderError;
+        use ferrum_scene::BatchShapeError;
         let short = conditional_line_scene(zigzag(), vec![0, 1, 2]);
         let err = load_scene(&short).err();
-        assert_eq!(err, Some(TaperError::RowsMisaligned { points: 4, rows: 3 }));
+        assert_eq!(err, Some(WasmRenderError::MalformedBatch(BatchShapeError::RowsMisaligned { points: 4, rows: 3 })));
         assert_eq!(
-            crate::error::WasmRenderError::from(err.unwrap()).to_string(),
-            "mark_line: the tapered line cannot be drawn: tapered stroke has 3 vertex rows for 4 vertices; it \
+            err.unwrap().to_string(),
+            "the scene's mark batch cannot be drawn: tapered stroke has 3 vertex rows for 4 vertices; it \
              needs one row per vertex"
         );
         let mut two_lists = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
         two_lists.panels[0].marks[0].vertex_rows.as_mut().unwrap().push(vec![]);
-        assert_eq!(load_scene(&two_lists).err(), Some(TaperError::RowListsMisaligned { nodes: 1, lists: 2 }));
+        assert_eq!(load_scene(&two_lists).err(), Some(WasmRenderError::MalformedBatch(BatchShapeError::RowListsMisaligned { nodes: 1, lists: 2 })));
         assert!(load_scene(&conditional_line_scene(zigzag(), vec![0, 1, 2, 3])).is_ok(), "aligned rows load");
 
         let plain = line_scene(zigzag());
@@ -4365,10 +4359,11 @@ mod tests {
     /// or one that sets no `size`.
     #[test]
     fn unpaired_or_out_of_range_size_conditionals_refuse_at_load() {
-        use ferrum_scene::TaperError;
+        use crate::error::WasmRenderError;
+        use ferrum_scene::BatchShapeError;
         let mut unpaired = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
         unpaired.panels[0].marks[0].size_conditionals = None;
-        assert_eq!(load_scene(&unpaired).err(), Some(TaperError::SizeConditionalsUnpaired));
+        assert_eq!(load_scene(&unpaired).err(), Some(WasmRenderError::MalformedBatch(BatchShapeError::SizeConditionalsUnpaired)));
         let mut not_size = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
         not_size.interaction.conditionals.push(ConditionalEncoding {
             selection_name: "s".to_string(),
@@ -4377,7 +4372,7 @@ mod tests {
             if_not: EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } },
         });
         not_size.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
-        assert_eq!(load_scene(&not_size).err(), Some(TaperError::NotASizeConditional { index: 1 }));
+        assert_eq!(load_scene(&not_size).err(), Some(WasmRenderError::MalformedBatch(BatchShapeError::NotASizeConditional { index: 1 })));
         // A scope alone, on a batch with no rows, loads.
         let mut scoped = line_scene(zigzag());
         scoped.panels[0].marks[0].size_conditionals = Some(vec![]);
@@ -4386,7 +4381,7 @@ mod tests {
         out_of_range.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
         assert_eq!(
             load_scene(&out_of_range).err(),
-            Some(TaperError::SizeConditionalOutOfRange { index: 1, conditionals: 1 })
+            Some(WasmRenderError::MalformedBatch(BatchShapeError::SizeConditionalOutOfRange { index: 1, conditionals: 1 }))
         );
     }
 }

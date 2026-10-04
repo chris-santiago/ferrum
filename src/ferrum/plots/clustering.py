@@ -30,7 +30,7 @@ from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.diagnostics.sources._clustering import _ELBOW_METRICS
-from ferrum.encoding import Color, Size, X, Y
+from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _compose_compare,
@@ -40,6 +40,7 @@ from ferrum.plots._helpers import (
     _reject_compare,
     _resolve_first_param,
     _resolve_source,
+    _title_legend,
 )
 
 
@@ -71,7 +72,7 @@ def _silhouette_chart_from_source(
     import ferrum
 
     df = source.silhouette(k=k)
-    chart = ferrum.Chart(df).mark_silhouette().encode(color=Color("cluster", title="Cluster"))
+    chart = _title_legend(ferrum.Chart(df).mark_silhouette(), "color", "Cluster")
     if subtitle is not None:
         chart = chart.properties(
             title=ferrum.Title("Silhouette Plot", subtitle=subtitle),
@@ -224,10 +225,9 @@ def _intercluster_distance_chart_from_source(
                     "domain": [y_lo - y_pad, y_hi + y_pad],
                 },
             ),
-            color=Color("cluster", title="Cluster"),
-            size=Size("size", title="Cluster size"),
         )
     )
+    chart = _title_legend(_title_legend(chart, "color", "Cluster"), "size", "Cluster size")
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme

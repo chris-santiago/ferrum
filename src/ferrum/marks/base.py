@@ -6,14 +6,17 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ferrum._core import (
     check_mark_size,
     interpolate_accepted_values,
     mark_integer_kwargs,
+    mark_kwargs_fields,
     mark_numeric_kwargs,
 )
+from ferrum._entry import EntryRefusal
 from ferrum._layer import _MARKS_DRAWING_CONSTANT_SIZE
 from ferrum._validate import (
     as_finite_real,
@@ -42,7 +45,7 @@ from ferrum._validate import (
 _STROKE_PRIMARY_MARKS: frozenset[str] = frozenset(["line", "rule", "segment", "trail", "function"])
 
 # Aliases map user-friendly names to their canonical renderer-level keys.
-# ``color`` is handled separately in ``MarkBase.__init__`` because the
+# ``color`` is handled separately in ``_canonical_mark_kwarg`` because the
 # canonical target depends on whether the mark is stroke-primary or not.
 # All other aliases are mark-type-independent.
 _MARK_KWARG_ALIASES: dict[str, str] = {
@@ -302,8 +305,12 @@ def _honored_set_for(mark_name: str) -> frozenset[str]:
     return MARK_HONORED_KWARGS.get(mark_name, _COMPOSITE_FALLBACK_KWARGS)
 
 
-def _mark_kwarg_error(mark_name: str, key: str) -> str:
+def _mark_kwarg_error(mark_name: str, key: str, *, entry: str | None = None) -> str:
     """Build the refusal message for one kwarg *key* not honored by *mark_name*.
+
+    Voiced as *entry*, the public call that received the kwarg, which is
+    ``mark_<mark_name>`` unless another door (a figure function, a
+    visualizer) wrote it into the mark.
 
     Two phrasings, both naming the honored set (decision: "naming the mark
     and its honored set"):
@@ -318,9 +325,12 @@ def _mark_kwarg_error(mark_name: str, key: str) -> str:
       per-mark distinction.
     """
     honored = sorted(_honored_set_for(mark_name))
+    voice = entry or f"mark_{mark_name}"
     if key not in _VALID_MARK_KWARGS:
-        return f"mark_{mark_name}: unknown keyword argument {key!r}. Honored: {honored}"
-    return f"mark_{mark_name}: keyword argument {key!r} is not honored by mark_{mark_name}. Honored: {honored}"
+        return f"{voice}: unknown keyword argument {key!r}. Honored: {honored}"
+    return (
+        f"{voice}: keyword argument {key!r} is not honored by mark_{mark_name}. Honored: {honored}"
+    )
 
 
 def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) -> None:
@@ -336,9 +346,11 @@ def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) 
     desugar has run, which is the first point the emitted marks are known.
     """
     if not drawn_marks:
-        # Nothing emitted, so nothing draws it: the same refusal Rust gives a
-        # mark that never draws a constant size.
-        raise ValueError(f"{entry}(size=...) has no effect on {entry}; received {size}.")
+        # The desugar emitted no mark at all, so no mark's size rule applies.
+        raise ValueError(
+            f"{entry}(size=...): {entry} draws no marks for this call, so size= has "
+            f"nothing to size; received {size!r}."
+        )
     drawing = [mark for mark in drawn_marks if mark in _MARKS_DRAWING_CONSTANT_SIZE]
     check_mark_size(entry, (drawing or drawn_marks)[0], size)
 
@@ -387,7 +399,7 @@ def _mark_kwargs_error_plural(mark_name: str, keys: list[str]) -> str:
 _VALID_MARK_KWARGS: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
 
 
-def _validate_literal_color(mark_name: str, key: str, value: str) -> None:
+def _validate_literal_color(entry: str, key: str, value: str) -> None:
     """Raise ``ValueError`` if *value* is not a color ``ferrum.color.to_hex`` accepts.
 
     A thin, label-composing wrapper over
@@ -417,7 +429,156 @@ def _validate_literal_color(mark_name: str, key: str, value: str) -> None:
     """
     from ferrum.color import to_hex
 
-    validate_color_value(f"mark_{mark_name}: {key}", value, to_hex)
+    validate_color_value(f"{entry}: {key}", value, to_hex)
+
+
+def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
+    """The style field *key* names on *mark_name*, its aliases resolved.
+
+    ``color`` is mark-type-aware: stroke-primary marks (line, rule, segment,
+    trail) map it to ``stroke``, every other mark to ``fill``. The other
+    aliases (``alpha``, ``linetype``) are mark-independent; a canonical key
+    maps to itself.
+    """
+    if key == "color":
+        return "stroke" if mark_name in _STROKE_PRIMARY_MARKS else "fill"
+    return _MARK_KWARG_ALIASES.get(key, key)
+
+
+def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return *kwargs* as *mark_name* honors them: aliases resolved, values checked.
+
+    The one honored-kwarg rule for a mark's style, whichever door wrote it:
+    ``mark_<name>(...)`` (through :class:`MarkBase`), ``fm.Layer(mark_kwargs=)``,
+    a figure function's ``mark=`` dict or ``*_kws`` and a composite's
+    ``layer_kwargs=``. Every refusal is a ``ValueError`` voiced as *entry*,
+    the public call that received the kwarg: a kwarg *mark_name* does not
+    honor (:func:`mark_honors`), a constant ``size`` that breaks the size
+    rule (:func:`check_constant_size`), an unknown point ``shape``, an
+    ``interpolate`` outside Rust's vocabulary, a non-numeric value for a
+    numeric field, or a literal ``fill``/``stroke`` that is not a color.
+    """
+    resolved: dict[str, Any] = {}
+    for k, v in kwargs.items():
+        canonical = _canonical_mark_kwarg(mark_name, k)
+        # A constant `size=` on a primitive meets the one size rule,
+        # which names the mark's own width/font kwarg where one exists,
+        # ahead of the generic not-honored door below.
+        if canonical == "size" and mark_name in MARK_HONORED_KWARGS:
+            resolved[canonical] = check_constant_size(entry, mark_name, v)
+            continue
+        # A kwarg the mark does not honor is refused as such before its
+        # value is judged.
+        if not mark_honors(mark_name, canonical):
+            raise ValueError(_mark_kwarg_error(mark_name, canonical, entry=entry))
+        if canonical == "stroke_dash":
+            # Named forms ("dashed", "dotted", ...), the comma-split
+            # form, and list/tuple passthrough are all resolved by the
+            # one shared helper -- reached identically whether the user
+            # wrote the canonical ``stroke_dash=`` kwarg or either alias,
+            # so a named string works either way.
+            v = _normalize_stroke_dash(v, context=f"{entry}: {k}")
+        elif canonical in _INTEGER_MARK_KWARGS:
+            v = coerce_non_negative_int(f"{entry}({k}=...)", v)
+        elif canonical in _REAL_MARK_KWARGS:
+            v = coerce_finite_real(f"{entry}({k}=...)", v)
+        resolved[canonical] = v
+    # Validate shape= value for point marks. The constant shape is a fixed
+    # string that must name one of the glyphs supported by the Rust renderer;
+    # an unknown name would silently default to circle at render time.
+    shape_val = resolved.get("shape")
+    if shape_val is not None and isinstance(shape_val, str):
+        validate_choice(entry, "shape", shape_val, _VALID_POINT_SHAPES)
+    # interpolate= is refused at declaration, like every door that takes it.
+    validate_optional_vocabulary(
+        entry,
+        "interpolate",
+        resolved.get("interpolate"),
+        interpolate_accepted_values(),
+    )
+    # Validate literal fill/stroke color strings at construction time via
+    # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
+    # colors fail immediately rather than silently at render time. The
+    # ``color=`` alias is already folded into ``fill``/``stroke`` above,
+    # so checking those two canonical keys covers all three user-facing
+    # spellings. Paint sentinels (see ``_is_paint_sentinel``) are
+    # short-circuited ahead of the parser — ``"theme:label"``,
+    # ``"none"`` and ``"transparent"`` all raise in to_hex by design and
+    # are not colors. The stored value stays the user's
+    # original string; to_hex is consulted only for validation.
+    for paint_key in ("fill", "stroke"):
+        paint_val = resolved.get(paint_key)
+        if isinstance(paint_val, str) and not _is_paint_sentinel(paint_val):
+            _validate_literal_color(entry, paint_key, paint_val)
+    return resolved
+
+
+#: Every ``mark_style`` wire key Rust reads, for a layer mark Python keeps no
+#: per-mark honored set for (``ribbon``, ``polygon``, ...).
+_WIRE_MARK_KWARGS: frozenset[str] = frozenset(mark_kwargs_fields())
+
+
+def resolve_layer_style(entry: str, mark: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a caller's style *kwargs* for one layer drawing *mark*, as *mark* honors them.
+
+    A primitive mark meets :func:`resolve_mark_kwargs`. Any other mark name
+    has no Python honored set, so a key Rust reads for no mark at all
+    refuses, and the rest pass through for Rust to judge. A *mark* that is
+    not a name (a ``MarkSpec``) is returned unchanged. Refusals are voiced as
+    *entry*.
+    """
+    if not isinstance(mark, str):
+        return dict(kwargs)
+    if mark in MARK_HONORED_KWARGS:
+        return resolve_mark_kwargs(entry, mark, kwargs)
+    unknown = sorted(k for k in kwargs if k not in _WIRE_MARK_KWARGS)
+    if unknown:
+        raise ValueError(
+            f"{entry}: keyword argument(s) {unknown!r} are not mark style fields. "
+            f"Fields: {sorted(_WIRE_MARK_KWARGS)}"
+        )
+    return dict(kwargs)
+
+
+def layer_honors(mark: Any, key: str) -> bool:
+    """Whether a layer drawing *mark* honors the style kwarg *key* (aliases resolved).
+
+    The membership half of :func:`resolve_layer_style`, for a door that
+    spreads one style dict over layers of different marks.
+    """
+    if not isinstance(mark, str):
+        return True
+    if mark in MARK_HONORED_KWARGS:
+        return mark_honors(mark, _canonical_mark_kwarg(mark, key))
+    return key in _WIRE_MARK_KWARGS
+
+
+def resolve_figure_style(
+    mark: Any, kwargs: Mapping[str, Any], *, provisional: str | None = None
+) -> dict[str, Any]:
+    """:func:`resolve_layer_style` for a style dict a door received while a chart builds.
+
+    The door (a figure's ``mark=`` override, ``lmplot(line_kws=)``, a
+    composite's ``layer_kwargs=``) may run while a figure function or
+    visualizer builds, before its public entry is known, so a refusal is an
+    :class:`ferrum._entry.EntryRefusal` that the figure re-voices as itself.
+    Raised outside any figure, it speaks as *provisional* (default
+    ``mark_<mark>``).
+    """
+    provisional = provisional or f"mark_{mark}"
+    try:
+        return resolve_layer_style(provisional, mark, kwargs)
+    except ValueError as err:
+        first = str(err)
+
+    def message_for(entry: str) -> str:
+        try:
+            resolve_layer_style(entry, mark, kwargs)
+        except ValueError as err:
+            return str(err)
+        return first
+
+    raise EntryRefusal(message_for, provisional) from None
 
 
 class MarkBase:
@@ -459,70 +620,7 @@ class MarkBase:
 
     def __init__(self, mark_name: str, **kwargs: Any) -> None:
         self.mark_name = mark_name
-        # Resolve aliases before validation so canonical keys always pass
-        # and friendly aliases (color, alpha, linetype) are transparently
-        # remapped.  Canonical keys (fill, opacity, stroke_dash) still work
-        # unchanged — the alias dict only covers the friendly names.
-        #
-        # ``color`` is mark-type-aware: stroke-primary marks (line, rule,
-        # segment, trail) map it to ``stroke``; all other marks map to ``fill``.
-        color_target = "stroke" if mark_name in _STROKE_PRIMARY_MARKS else "fill"
-        resolved: dict[str, Any] = {}
-        for k, v in kwargs.items():
-            if k == "color":
-                canonical = color_target
-            else:
-                canonical = _MARK_KWARG_ALIASES.get(k, k)
-            # A constant `size=` on a primitive meets the one size rule,
-            # which names the mark's own width/font kwarg where one exists,
-            # ahead of the generic not-honored door below.
-            if canonical == "size" and mark_name in MARK_HONORED_KWARGS:
-                resolved[canonical] = check_constant_size(f"mark_{mark_name}", mark_name, v)
-                continue
-            # A kwarg the mark does not honor is refused as such before its
-            # value is judged.
-            if not mark_honors(mark_name, canonical):
-                raise ValueError(_mark_kwarg_error(mark_name, canonical))
-            if canonical == "stroke_dash":
-                # Named forms ("dashed", "dotted", ...), the comma-split
-                # form, and list/tuple passthrough are all resolved by the
-                # one shared helper -- reached identically whether the user
-                # wrote the canonical ``stroke_dash=`` kwarg or either alias,
-                # so a named string works either way.
-                v = _normalize_stroke_dash(v, context=f"mark_{mark_name}: {k}")
-            elif canonical in _INTEGER_MARK_KWARGS:
-                v = coerce_non_negative_int(f"mark_{mark_name}({k}=...)", v)
-            elif canonical in _REAL_MARK_KWARGS:
-                v = coerce_finite_real(f"mark_{mark_name}({k}=...)", v)
-            resolved[canonical] = v
-        # Validate shape= value for point marks. The constant shape is a fixed
-        # string that must name one of the glyphs supported by the Rust renderer;
-        # an unknown name would silently default to circle at render time.
-        shape_val = resolved.get("shape")
-        if shape_val is not None and isinstance(shape_val, str):
-            validate_choice(f"mark_{mark_name}", "shape", shape_val, _VALID_POINT_SHAPES)
-        # interpolate= is refused at declaration, like every door that takes it.
-        validate_optional_vocabulary(
-            f"mark_{mark_name}",
-            "interpolate",
-            resolved.get("interpolate"),
-            interpolate_accepted_values(),
-        )
-        # Validate literal fill/stroke color strings at construction time via
-        # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
-        # colors fail immediately rather than silently at render time. The
-        # ``color=`` alias is already folded into ``fill``/``stroke`` above,
-        # so checking those two canonical keys covers all three user-facing
-        # spellings. Paint sentinels (see ``_is_paint_sentinel``) are
-        # short-circuited ahead of the parser — ``"theme:label"``,
-        # ``"none"`` and ``"transparent"`` all raise in to_hex by design and
-        # are not colors. The stored value stays the user's
-        # original string; to_hex is consulted only for validation.
-        for paint_key in ("fill", "stroke"):
-            paint_val = resolved.get(paint_key)
-            if isinstance(paint_val, str) and not _is_paint_sentinel(paint_val):
-                _validate_literal_color(mark_name, paint_key, paint_val)
-        self._kwargs = resolved
+        self._kwargs = resolve_mark_kwargs(f"mark_{mark_name}", mark_name, kwargs)
 
     @property
     def kwargs(self) -> dict[str, Any]:

@@ -833,11 +833,6 @@ DISPOSITIONED: dict[tuple[str, str, str], str] = {
         "The figure-level half of the same confusion-matrix frame as "
         "desugar_class_prediction_error above."
     ),
-    ("src/ferrum/plots/classification.py", "_confusion_chart_from_source", "value"): (
-        "Titles the colour binding over ModelSource.confusion_matrix()'s own "
-        "`value` column, the same Python-built frame as "
-        "desugar_class_prediction_error above."
-    ),
     (
         "src/ferrum/plots/classification.py",
         "_discrimination_threshold_chart_from_source",

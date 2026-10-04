@@ -876,7 +876,6 @@ def desugar_hex(
     stroke: Optional[str] = None,
     stroke_width: float = 0,
     _color: Any = None,
-    _entry: str | None = None,
 ) -> MarkDesugarResult:
     """Hexagonal-bin mark desugar.
 
@@ -929,13 +928,10 @@ def desugar_hex(
         ``stroke_width`` mark kwarg.
     _color : str or ChannelBase or None, default None
         The chart-level color when it names the aggregated column or Hex's
-        output column (injected at resolution, never a user kwarg). Its channel properties style the
-        cell color binding; the default title is the aggregated column, or
-        ``"Count"``.
-    _entry : str or None, default None
-        The public entry the caller invoked (injected at resolution, never a
-        user kwarg), named in the cmap/scheme conflict refusal below instead
-        of hard-coding ``"mark_hex"``.
+        output column (injected at resolution, never a user kwarg). Its
+        channel properties style the cell color binding; the default title is
+        the aggregated column, or ``"Count"``. Its scheme arrives already
+        folded into *cmap* by the resolution step.
 
     Returns
     -------
@@ -960,19 +956,6 @@ def desugar_hex(
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
     require_aggregate_field("hex", "mark_hex", aggregate, field)
     from ferrum.encoding import Color, X, Y
-    from ferrum.encoding.base import ChannelBase
-
-    # The polygon cells sample their own `cmap`, so a scheme on the caller's
-    # color reaches them through it and the legend agrees with the cells.
-    scheme = _color.option("scheme") if isinstance(_color, ChannelBase) else None
-    if scheme is not None:
-        if cmap is not None and cmap != scheme:
-            entry = _entry or "mark_hex"
-            raise ValueError(
-                f"{entry}: cmap={cmap!r} and color=fm.Color(..., scheme={scheme!r}) both "
-                "set the cell colormap; pass only one."
-            )
-        cmap = scheme
 
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
@@ -1058,11 +1041,10 @@ def desugar_swarm(
     Input: DataFrame with categorical column (``x_field`` when vertical, or
     ``y_field`` when horizontal) and numeric value column (the other).
 
-    ``Swarm`` (named ``"swarm"``) validates its columns and emits the
-    original columns plus ``swarm_y`` (Float64, the value; null on a row
-    that is never placed -- a null or NaN value, or a null category). A row
-    whose ``dodge`` value is null belongs to no sub-band and is dropped
-    entirely before this output is emitted, not nulled in place. Placement
+    ``Swarm`` (named ``"swarm"``) validates its columns and emits the input
+    columns unchanged. A row whose ``dodge`` value is null belongs to no
+    sub-band and is dropped entirely; a row with a null or NaN value, or a
+    null category, is kept and never placed. Placement
     does not happen in the transform: the renderer packs whichever rows the
     layer draws against the panel's resolved value-axis scale and adds the
     cross-axis pixel offset then, the same seam ``Jitter`` computes its own

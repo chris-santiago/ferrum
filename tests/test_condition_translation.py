@@ -734,11 +734,10 @@ def test_chained_layer_merge_names_the_two_colliding_declarations(df):
     assert msg == (
         "chart + chart: the left chart's conditional on selection 'b' and "
         "the right chart's conditional on selection 'c' both declare a "
-        "conditional on the 'color' wire channel -- after the marks merge "
-        "onto one panel, every conditional on the merged wire applies to "
-        "every layer's marks, so there is no per-layer scope to keep the "
-        "two apart; a channel can carry only one conditional. Drop one of "
-        "the two declarations, or move one to a different channel."
+        "conditional on the 'color' wire channel -- the merged chart holds "
+        "one conditional per wire channel, whichever layers each would "
+        "reach; a channel can carry only one conditional. Drop one of the "
+        "two declarations, or move one to a different channel."
     )
 
 
@@ -754,11 +753,10 @@ def test_layer_merge_collision_under_one_shared_selection_names_each_side_once(d
     assert str(excinfo.value) == (
         "chart + chart: the left chart's conditional on selection 's' and "
         "the right chart's conditional on selection 's' both declare a "
-        "conditional on the 'color' wire channel -- after the marks merge "
-        "onto one panel, every conditional on the merged wire applies to "
-        "every layer's marks, so there is no per-layer scope to keep the "
-        "two apart; a channel can carry only one conditional. Drop one of "
-        "the two declarations, or move one to a different channel."
+        "conditional on the 'color' wire channel -- the merged chart holds "
+        "one conditional per wire channel, whichever layers each would "
+        "reach; a channel can carry only one conditional. Drop one of the "
+        "two declarations, or move one to a different channel."
     )
 
 

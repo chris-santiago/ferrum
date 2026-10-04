@@ -192,13 +192,21 @@ def desugar_intercluster_distance(
 
     Data contract: ``cluster`` (Utf8), ``x`` (Float64), ``y`` (Float64),
     ``size`` (Int64). When ``label_clusters=True`` a text layer overlays
-    the cluster id at each point. ``min_size`` and ``max_size`` set the
-    point-area range (in pixel² units, before sqrt → radius); the
-    defaults ``min_size=60.0`` / ``max_size=600.0`` produce ~8–24 px radii,
-    well above the theme default ``[3, 30]`` that collapses to a 1–3 px
-    speck on typical KMeans cluster counts.
+    the cluster id above each point, offset by a `dy` big enough to clear
+    even the largest possible bubble (``sqrt(max_size / pi)``) plus a
+    small gap -- the same constant-pixel-offset idiom other diagnostics
+    use for a point's label (e.g. ``desugar_cluster_diagnostics``'s elbow
+    annotation), rather than centering on the bubble where a size-scaled
+    point and dark theme text can overlap and clip each other.
+    ``min_size`` and ``max_size`` set the point-area range (in pixel²
+    units, before sqrt → radius); the defaults ``min_size=60.0`` /
+    ``max_size=600.0`` produce ~4–14 px radii, well above the theme
+    default ``[3, 30]`` that collapses to a 1–3 px speck on typical
+    KMeans cluster counts.
     """
     del x_field, y_field
+    import math
+
     from ferrum.encoding import Size
 
     user_kw = _validate("intercluster_distance", mark_kwargs)
@@ -214,11 +222,19 @@ def desugar_intercluster_distance(
         point_enc["color"] = color_field
     layers: list = [_Layer(name="point", mark="point", encoding=point_enc)]
     if label_clusters:
+        # `max_size` is an area in px², so sqrt(max_size / pi) is the
+        # largest radius any bubble can render at. No row's own radius
+        # exceeds it, so a single constant `dy` clears every bubble's
+        # top edge -- no per-row style channel exists to vary `dy` by
+        # each row's own (smaller) radius.
+        label_gap = 6.0
+        label_dy = -(math.sqrt(max_size / math.pi) + label_gap)
         layers.append(
             _Layer(
                 name="label",
                 mark="text",
                 encoding={"x": "x", "y": "y", "text": "cluster"},
+                mark_kwargs={"dy": label_dy},
             )
         )
     return MarkDesugarResult(layers=_apply(layers, user_kw))

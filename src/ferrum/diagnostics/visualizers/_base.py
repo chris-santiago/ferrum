@@ -35,13 +35,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from ferrum._entry import speak_as
+
 
 class FerrumVisualizer:
     """Base class for sklearn-protocol model-diagnostic visualizers.
 
     Concrete visualizers either override ``_materialize`` +
     ``_build_chart`` (the standard model-backed flow) or override
-    ``fit`` directly (no-model / multi-fit / label-only flow).
+    ``fit`` directly (no-model / multi-fit / label-only flow). Either way
+    the chart is built through :func:`ferrum._entry.speak_as` with the
+    class name, so a malformed ``mark=`` refuses at ``fit``, the first point
+    the chart's layers exist, and every warning and refusal about the chart
+    names the class.
 
     Parameters
     ----------
@@ -125,7 +131,7 @@ class FerrumVisualizer:
         """
         self._source = self._build_source(X, y)
         self._materialize()
-        self._chart = self._build_chart()
+        self._chart = speak_as(type(self).__name__, self._build_chart)
         self._fitted = True
         return self
 
@@ -216,11 +222,7 @@ class FerrumVisualizer:
             raise RuntimeError(
                 f"{type(self).__name__} must be fit before .show(); call .fit(X, y) first."
             )
-        from ferrum._entry import stamp_entry
-
-        # The visualizer is the public call its caller made, so every warning
-        # and refusal about the chart it built names the class.
-        return stamp_entry(self._chart, type(self).__name__)
+        return self._chart
 
     def __repr__(self) -> str:
         """Return a concise string representation of the visualizer state.

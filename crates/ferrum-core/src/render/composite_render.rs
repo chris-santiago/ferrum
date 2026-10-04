@@ -252,13 +252,14 @@ fn is_figure_level_dedupable(warning: &RenderWarning) -> bool {
 
 /// Whether `warning` reports a config surface missing from a leaf, and `a` and
 /// `b` carry the same override for that surface: a leaf rendered under `b`
-/// that did not warn applied it, so the override took effect on the figure.
+/// that did not warn applied it (the warning is the override's only
+/// not-applied outcome), so the override took effect on the figure.
 fn same_config_surface(warning: &RenderWarning, a: &ChartConfig, b: &ChartConfig) -> bool {
-    match warning {
-        RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2" => {
-            a.axis_y2.is_some() && a.axis_y2 == b.axis_y2
-        }
-        _ => false,
+    let RenderWarning::ConfigSurfaceNotPresent { section } = warning else {
+        return false;
+    };
+    match section {
+        crate::render::ConfigSurface::AxisY2 => a.axis_y2.is_some() && a.axis_y2 == b.axis_y2,
     }
 }
 
@@ -314,7 +315,7 @@ pub(crate) fn render_composite_scene(
         .zip(&prepared)
         .map(|(leaf, prep)| LeafResolveInput {
             spec: leaf.spec,
-            encoding: &prep.layers[0].encoding,
+            encoding: prep.rendering_encoding(),
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
         })
@@ -342,7 +343,7 @@ pub(crate) fn render_composite_scene(
     // legend's content. A composite with all-independent legend resolution
     // produces an empty plan — no suppression, no band — so its output is
     // byte-identical to today (design §7 byte-stability invariant).
-    let merges: Vec<bool> = prepared.iter().map(|p| leaf_merges_color_size(&p.layers[0].encoding)).collect();
+    let merges: Vec<bool> = prepared.iter().map(|p| leaf_merges_color_size(p.rendering_encoding())).collect();
     let band_plan = plan_legend_bands(tree, &merges, &mut contexts);
 
     // Overlay shared-rect planning (GH #89A): for a `layout: Overlay`
@@ -595,7 +596,7 @@ fn capture_leaf_bundle(
         aux: po.prep.aux_legends.clone(),
         color_scale,
         theme: po.applied.effective_theme.clone(),
-        merged_color_size: leaf_merges_color_size(&po.prep.layers[0].encoding),
+        merged_color_size: leaf_merges_color_size(po.prep.rendering_encoding()),
     })
 }
 
@@ -1103,7 +1104,7 @@ fn plan_size_dot_siblings(
 ) {
     use crate::spec::mark::Mark;
     for (i, position) in layer_of.iter().enumerate() {
-        let (Some(k), Some(size)) = (position, prepared[i].layers[0].encoding.size.as_ref()) else {
+        let (Some(k), Some(size)) = (position, prepared[i].rendering_encoding().size.as_ref()) else {
             continue;
         };
         let start = i - k;
@@ -2338,6 +2339,9 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
     let mut zoom = true;
     let mut pan = true;
     let mut toolbar = true;
+    // Per child: its merged panel range and the merged indices of its own
+    // `size` conditionals.
+    let mut sized_scopes: Vec<(std::ops::Range<usize>, Vec<usize>)> = Vec::new();
 
     for (i, (child, t)) in children.into_iter().zip(plan.placements).enumerate() {
         let mut scene = child.scene;
@@ -2359,6 +2363,15 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         // This child's conditionals are appended after every earlier
         // child's, so each line's indices into them shift by as many.
         let conditional_base = merged.interaction.conditionals.len();
+        let own_sized: Vec<usize> = scene
+            .interaction
+            .conditionals
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.sets_size())
+            .map(|(i, _)| i + conditional_base)
+            .collect();
+        let panel_start = merged.panels.len();
         for mut panel in scene.panels.drain(..) {
             place_panel(&mut panel, &t);
             for index in panel.marks.iter_mut().flat_map(|b| b.size_conditionals.iter_mut().flatten()) {
@@ -2366,6 +2379,7 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
             }
             merged.panels.push(panel);
         }
+        sized_scopes.push((panel_start..merged.panels.len(), own_sized));
 
         offset_nodes(&mut scene.title, t.tx, t.ty);
         offset_nodes(&mut scene.legend, t.tx, t.ty);
@@ -2411,6 +2425,7 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         toolbar = toolbar && ci.toolbar;
     }
 
+    scope_size_conditionals_to_own_child(&mut merged, sized_scopes);
     merged.interaction.zoom_enabled = zoom;
     merged.interaction.pan_enabled = pan;
     merged.interaction.toolbar = toolbar;
@@ -2418,6 +2433,25 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         scene: merged,
         width: plan.width,
         height: plan.height,
+    }
+}
+
+/// Give every batch that answers to every `size` conditional
+/// ([`ferrum_scene::MarkBatch::size_conditionals`] `None`) the explicit list
+/// of its own child's, whenever the merged scene holds a `size` conditional
+/// that child did not declare. A child's `None` meant every conditional of
+/// that child's scene; in the merged scene it would also reach a sibling
+/// child's, so a conditional declared in one panel would resize the marks of
+/// another. A child holding every merged `size` conditional keeps `None`.
+fn scope_size_conditionals_to_own_child(merged: &mut SceneGraph, scopes: Vec<(std::ops::Range<usize>, Vec<usize>)>) {
+    let merged_sized = merged.interaction.conditionals.iter().filter(|c| c.sets_size()).count();
+    for (panels, own) in scopes {
+        if own.len() == merged_sized {
+            continue;
+        }
+        for batch in merged.panels[panels].iter_mut().flat_map(|p| &mut p.marks) {
+            batch.size_conditionals.get_or_insert_with(|| own.clone());
+        }
     }
 }
 
@@ -3448,6 +3482,46 @@ mod tests {
                 .map(|&i| scene.interaction.conditionals[i].selection_name.as_str())
                 .collect();
             assert_eq!(named, vec!["t"], "line leaf first: {line_first}");
+        }
+    }
+
+    /// A leaf batch with no `size` conditionals of its own answers to none of
+    /// a sibling leaf's in the merged scene, at any nesting depth; a leaf
+    /// holding every merged `size` conditional keeps `None`, and a composite
+    /// with no `size` conditional writes none.
+    #[test]
+    fn a_leaf_batch_answers_only_to_its_own_leafs_size_conditionals_in_the_merged_scene() {
+        let size = |name: &str| -> crate::spec::chart::ChartConditional {
+            ferrum_scene::ConditionalEncoding {
+                selection_name: name.into(),
+                channel: ferrum_scene::ChannelName::Size,
+                if_selected: ferrum_scene::EncodingValue::Size { value: 100.0 },
+                if_not: ferrum_scene::EncodingValue::Size { value: 4.0 },
+            }
+            .into()
+        };
+        let sized = |name: &str| ChartSpec { conditionals: vec![size(name)], ..scatter_spec() };
+        let scopes = |tree: &CompositeNode, specs: [ChartSpec; 2]| {
+            let holds = specs.map(|spec| LeafHold { spec, ..hold() });
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let (scene, _) = render_composite_scene(tree, &leaves, &ThemeInputs::default()).unwrap();
+            let named = |p: &ferrum_scene::Panel| -> Option<Vec<String>> {
+                p.marks[0]
+                    .size_conditionals
+                    .as_ref()
+                    .map(|own| own.iter().map(|&i| scene.interaction.conditionals[i].selection_name.clone()).collect())
+            };
+            scene.panels.iter().map(named).collect::<Vec<_>>()
+        };
+        let flat = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        let nested = composite(
+            CompositeLayout::Vconcat,
+            vec![composite(CompositeLayout::Hconcat, vec![leaf_node(0)]), leaf_node(1)],
+        );
+        for tree in [&flat, &nested] {
+            assert_eq!(scopes(tree, [scatter_spec(), sized("other")]), vec![Some(vec![]), None]);
+            assert_eq!(scopes(tree, [sized("p"), sized("q")]), vec![Some(vec!["p".into()]), Some(vec!["q".into()])]);
+            assert_eq!(scopes(tree, [scatter_spec(), scatter_spec()]), vec![None, None]);
         }
     }
 
@@ -4820,7 +4894,7 @@ mod tests {
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         let surface_warnings: Vec<_> = warnings
             .iter()
-            .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2"))
+            .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section: crate::render::ConfigSurface::AxisY2 }))
             .collect();
         assert_eq!(
             surface_warnings.len(),
@@ -4855,7 +4929,7 @@ mod tests {
             let (_scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
             warnings
                 .into_iter()
-                .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2"))
+                .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section: crate::render::ConfigSurface::AxisY2 }))
                 .count()
         };
         assert_eq!(render(axis_y2_cfg.clone(), axis_y2_cfg.clone()), 0, "applied on the dual-axis leaf");

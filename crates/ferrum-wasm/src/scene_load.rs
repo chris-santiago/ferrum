@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use ferrum_scene::*;
 use lyon::tessellation::VertexBuffers;
 
+use crate::error::WasmRenderError;
 use crate::tessellate::{self, MeshVertex};
 
 /// Convert a single sRGB channel value (0.0..1.0) to linear light.
@@ -1054,12 +1055,12 @@ pub fn bake_panels(scene: &SceneGraph) -> Vec<Panel> {
 /// `widths` the shared taper validation rejects rather than drawing it, and a
 /// line whose `size_conditionals` do not pair with its `vertex_rows` or name
 /// a conditional the scene lacks.
-pub fn load_scene(scene: &SceneGraph) -> Result<SceneData, TaperError> {
+pub fn load_scene(scene: &SceneGraph) -> Result<SceneData, WasmRenderError> {
     load_scene_with_packed(scene, &[])
 }
 
 /// [`load_scene`] with the packed binary instance sidecar.
-pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<SceneData, TaperError> {
+pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<SceneData, WasmRenderError> {
     for batch in scene.panels.iter().flat_map(|p| &p.marks) {
         ferrum_scene::validate_size_conditionals(batch, &scene.interaction.conditionals)?;
     }
@@ -1218,7 +1219,7 @@ fn collect_panel_marks(
     ls: &ferrum_scene::LayoutScale,
     batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
     scene_full_extent: [f32; 4],
-) -> Result<(), TaperError> {
+) -> Result<(), WasmRenderError> {
     let effective_plot_area = if ls.is_identity() {
         panel.plot_area
     } else {
@@ -1327,7 +1328,7 @@ fn collect_panel_marks(
 pub(crate) fn mark_mesh(
     panels: &[Panel],
     scene_full_extent: [f32; 4],
-) -> Result<(VertexBuffers<MeshVertex, u32>, Vec<MarkMeshPanel>), TaperError> {
+) -> Result<(VertexBuffers<MeshVertex, u32>, Vec<MarkMeshPanel>), WasmRenderError> {
     let mut collector = SceneCollector::new();
     let identity = ferrum_scene::LayoutScale::identity();
     for (panel_idx, panel) in panels.iter().enumerate() {
@@ -1808,7 +1809,7 @@ fn collect_nodes(
                 widths: Some(widths),
             } => {
                 tessellate::tessellate_tapered_path(
-                    commands, widths, style, *closed, batch_cap, batch_join, mesh,
+                    commands, widths, style, PathClosure::from(*closed), batch_cap, batch_join, mesh,
                 )?;
             }
             SceneNode::Polyline { points, style, widths } => {
@@ -3529,7 +3530,7 @@ mod tests {
             widths: Some(vec![2.0, 6.0]),
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Line, vec![misaligned.clone()]);
-        assert_eq!(load_scene(&scene).err(), Some(TaperError::Misaligned { points: 3, widths: 2 }));
+        assert_eq!(load_scene(&scene).err(), Some(WasmRenderError::TaperedStroke(TaperError::Misaligned { points: 3, widths: 2 })));
 
         let mut scene = make_scene_with_nodes(MarkBatchKind::Line, vec![]);
         scene.panels[0].annotations = vec![SceneNode::Group {
@@ -3550,7 +3551,7 @@ mod tests {
                 widths: Some(vec![1.0, -1.0]),
             }],
         }];
-        assert_eq!(load_scene(&scene).err(), Some(TaperError::InvalidWidth { index: 1, value: -1.0 }));
+        assert_eq!(load_scene(&scene).err(), Some(WasmRenderError::TaperedStroke(TaperError::InvalidWidth { index: 1, value: -1.0 })));
 
         // Control: the same polyline with aligned widths loads.
         let SceneNode::Polyline { points, style, .. } = misaligned else { unreachable!() };

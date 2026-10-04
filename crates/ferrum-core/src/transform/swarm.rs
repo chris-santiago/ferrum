@@ -1,7 +1,7 @@
 //! Swarm: greedy beeswarm placement.
 //!
 //! Placement runs in two stages. This transform validates the columns and
-//! emits the layer's output schema; the dot offsets are decided at render time
+//! passes the rows through; the dot offsets are decided at render time
 //! by [`place_offsets`], which packs each category in PIXEL space through the
 //! resolved panel scale (called from `render::position::apply_swarm`, the seam
 //! where `Jitter` computes its band-pixel offsets). Only there are the plot
@@ -11,10 +11,9 @@
 //! with no size of its own takes the dot diameter `point_size`
 //! ([`SwarmSpec::dot_area`]), so the drawn dots match their placement.
 //!
-//! Output schema: input schema PLUS an appended `swarm_y: Float64`, the
-//! original `value`, null on a row that is never placed (null or NaN value,
-//! null category). The cross-axis offset is a pixel quantity of the rendered
-//! panel with no data-unit form before layout, so the transform emits none:
+//! Output schema: the input schema, unchanged. The cross-axis offset is a
+//! pixel quantity of the rendered panel with no data-unit form before layout,
+//! so the transform emits none:
 //! render time adds the `__pos_x_offset__` (vertical orient) or
 //! `__pos_y_offset__` (horizontal orient) column of placed pixel offsets,
 //! which `render/position.rs` adds to the category band centre. Placement
@@ -35,14 +34,13 @@
 //! `spacing` px apart. Dodge groups sit side by side, their centres `d` px
 //! apart.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Array, RecordBatch, StringArray};
+use arrow::datatypes::DataType;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 use crate::transform::numeric_util::coerce_to_float64;
@@ -136,32 +134,8 @@ pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBat
         .map_err(|_| PyValueError::new_err(format!(
             "stat_swarm: column '{}' not found", spec.value
         )))?;
-    let val_arr = coerce_to_float64(batch.column(val_idx), "stat_swarm", &spec.value)?;
-
-    let n = batch.num_rows();
-    let cat_col = batch.column(cat_idx);
-    let swarm_y: Float64Array = (0..n)
-        .map(|i| {
-            let has_category =
-                !matches!(groupby_key_at(cat_col.as_ref(), &cat_dt, i), Some(KeyValue::Null) | None);
-            let v = (!val_arr.is_null(i)).then(|| val_arr.value(i)).filter(|v| !v.is_nan());
-            v.filter(|_| has_category)
-        })
-        .collect();
-
-    let mut out_cols: Vec<ArrayRef> = batch.columns().to_vec();
-    out_cols.push(Arc::new(swarm_y));
-
-    let mut new_fields: Vec<Field> = schema
-        .fields()
-        .iter()
-        .map(|f| (**f).clone())
-        .collect();
-    new_fields.push(Field::new("swarm_y", DataType::Float64, true));
-    let out_schema = Arc::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
-
-    RecordBatch::try_new(out_schema, out_cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_swarm: {e}")))
+    coerce_to_float64(batch.column(val_idx), "stat_swarm", &spec.value)?;
+    Ok(batch.clone())
 }
 
 /// Validate the dodge column and drop the rows it leaves in no sub-band.
@@ -308,7 +282,7 @@ use crate::transform::core::TransformSpec;
 /// ``point_size / 2`` do not overlap. Points are placed symmetrically
 /// around the category centre, or on one side only when ``side`` is set.
 ///
-/// Output: the original columns plus ``swarm_y`` (the value). The dots are
+/// Output: the input columns, unchanged. The dots are
 /// placed when the chart renders, in pixels through the resolved panel scale,
 /// so neighbouring centres sit ``point_size + spacing`` px apart. A point layer drawing this output with
 /// no size of its own (no ``size=`` and no ``size`` encoding) draws each dot
@@ -603,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_transform_emits_the_value_and_drops_null_dodge_rows() {
+    fn swarm_transform_passes_its_input_through_and_drops_null_dodge_rows() {
         pyo3::Python::initialize();
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, true),
@@ -622,12 +596,7 @@ mod tests {
         let s = SwarmSpec { dodge: Some("grp".into()), ..spec(5.0, 1.0, SwarmSide::Both) };
         let out = apply(&s, &b).unwrap();
         assert_eq!(out.num_rows(), 3, "the null-dodge row is dropped");
-        let col = |name: &str| {
-            out.column_by_name(name).unwrap().as_any().downcast_ref::<Float64Array>().unwrap().clone()
-        };
-        assert_eq!(col("swarm_y").iter().collect::<Vec<_>>(), vec![Some(1.0), None, None]);
-        let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
-        assert_eq!(names, vec!["cat", "v", "grp", "swarm_y"], "no null swarm_x and no placeholder offset");
+        assert_eq!(out, b.slice(0, 3), "every other row passes through unchanged");
     }
 
     #[test]
@@ -637,7 +606,7 @@ mod tests {
         for orient in [SwarmOrient::Vertical, SwarmOrient::Horizontal] {
             let s = SwarmSpec { orient, ..spec(5.0, 1.0, SwarmSide::Both) };
             let out = apply(&s, &b).unwrap();
-            assert_eq!(out.num_columns(), b.num_columns() + 1, "{orient:?}");
+            assert_eq!(out.schema(), b.schema(), "{orient:?}");
             assert!(out.schema().index_of("__pos_y_offset__").is_err());
             assert!(out.schema().index_of("__pos_x_offset__").is_err());
         }

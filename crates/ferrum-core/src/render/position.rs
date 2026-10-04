@@ -1072,13 +1072,13 @@ fn jitter_axis_values(
 
 /// Place a swarm layer's dots through the resolved panel scale.
 ///
-/// The `Swarm` transform only emits the value column; the packing needs the
+/// The `Swarm` transform only validates its columns; the packing needs the
 /// rendered value axis (plot rect, end insets, facet-shared or explicit domain,
 /// scale kind), which exists only here, beside the band-pixel offsets `Jitter`
 /// computes in [`apply_jitter`]. The placed offsets land in the column of the
 /// axis that carries the category band: the value axis is `y` for a vertical
-/// swarm, `x` for a horizontal one, exchanged when the layer's coord flips its
-/// channels.
+/// swarm, `x` for a horizontal one, exchanged when `layer_coord`, the layer's
+/// coord, flips its channels.
 ///
 /// The packing places whichever rows the layer draws. When a later transform
 /// dropped the category, value or dodge column it reads, the dots are left
@@ -1090,11 +1090,12 @@ pub(crate) fn apply_swarm(
     batch: &RecordBatch,
     swarm: &crate::transform::swarm::SwarmSpec,
     scales: &ResolvedScales,
-    coord_flipped: bool,
+    layer_coord: Option<&crate::spec::coord::CoordKind>,
     entry: &str,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     use crate::transform::swarm::{place_offsets, SwarmOrient};
+    let coord_flipped = crate::spec::coord::flips_positional_channels(layer_coord);
     let failed = |reason: String| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Swarm",
         reason: crate::render::PositionAdjustReason::Message(reason),
@@ -1126,11 +1127,11 @@ pub(crate) fn apply_swarm(
     if let ScaleKind::Ordinal(category_scale) = cross_scale {
         let reach = offsets.iter().fold(0.0_f64, |a, o| a.max(o.abs())) + swarm.point_size / 2.0;
         let half_slot = category_scale.step() / 2.0;
-        let overflowing = !warnings.iter().any(|w| {
+        let not_yet_warned = !warnings.iter().any(|w| {
             matches!(w, RenderWarning::SwarmOverflowsBand { entry: e, category, value, .. }
                 if e == entry && *category == swarm.category && *value == swarm.value)
         });
-        if reach > half_slot && overflowing {
+        if reach > half_slot && not_yet_warned {
             warnings.push(RenderWarning::SwarmOverflowsBand {
                 entry: entry.to_string(),
                 category: swarm.category.clone(),
@@ -1661,9 +1662,10 @@ mod tests {
             dodge: None,
             name: None,
         };
-        // coord_flipped=true on a Vertical swarm puts the value on x and the
+        // A CoordFlip on a Vertical swarm puts the value on x and the
         // packed offsets into `__pos_y_offset__` — the stale column's name.
-        let out = apply_swarm(&b, &swarm, &dummy_scales(), true, "mark_swarm", &mut Vec::new())
+        let flip = crate::spec::coord::CoordKind::Flip;
+        let out = apply_swarm(&b, &swarm, &dummy_scales(), Some(&flip), "mark_swarm", &mut Vec::new())
             .unwrap()
             .unwrap();
         let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();

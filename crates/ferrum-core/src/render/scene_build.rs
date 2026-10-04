@@ -823,7 +823,7 @@ fn resolve_panel_scales(
 
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
     //
-    // #113: `prep.layers[0].encoding` is POST-flip (`LayerPrepared::flip_coords`
+    // #113: `prep.rendering_encoding()` is POST-flip (`LayerPrepared::flip_coords`
     // already ran), but `spec.encoding` is still the authored PRE-flip
     // encoding. Flip the base into the same (post-flip) coordinate space
     // BEFORE overlaying — matching the convention `numeric_domain_union`
@@ -854,7 +854,7 @@ fn resolve_panel_scales(
     if prep.coord_flipped {
         merged_encoding.flip_positional();
     }
-    merged_encoding.overlay_from(&prep.layers[0].encoding);
+    merged_encoding.overlay_from(prep.rendering_encoding());
     let mut rendering_spec_for_panel = ChartSpec {
         encoding: merged_encoding,
         ..spec.clone()
@@ -1775,8 +1775,11 @@ fn build_panel_mark_batches(
         // `RenderError::InLayer`: its index on a layered chart (an unlayered
         // chart's one layer is the chart itself), and the public entry that
         // produced it, the layer's own, else the chart's, else the mark's.
-        // The positional gates below name their layer in their own text and
-        // stay unwrapped.
+        // The two positional gates below stay outside it: theirs are the
+        // shared-panel refusals, raised in the same words by scale resolution
+        // and by the composite route's (`fm.layer`), neither of which runs
+        // inside a layer's draw, so each names its layer as `layer {i}: `
+        // and `+` and `fm.layer` refuse alike.
         let entry = spec
             .layers
             .as_ref()
@@ -1836,7 +1839,7 @@ fn build_panel_mark_batches(
             .transform_swarms
             .get(layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY));
         let swarm_placed: Option<RecordBatch> = match swarm {
-            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_flipped, &entry, warnings).map_err(name_layer)?,
+            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_coord.as_ref(), &entry, warnings).map_err(name_layer)?,
             None => None,
         };
         let layer_batch: &RecordBatch = swarm_placed.as_ref().unwrap_or(layer_batch);
@@ -2284,7 +2287,7 @@ fn build_title(
 }
 
 /// Resolve the color scale a legend draws against, from a leaf's prepared
-/// inputs (`prep.layers[0].encoding` is the rendering encoding; the color scale
+/// inputs (`prep.rendering_encoding()`, the encoding its scales are built from; the color scale
 /// is re-resolved over the leaf's final batch, then any chart-level
 /// `configure_color` override applied). Returns `None` when the leaf encodes no
 /// color. Shared by [`build_legend_decorations`] (per-panel legend draw) and the
@@ -2298,7 +2301,7 @@ pub(crate) fn resolve_legend_color_scale(
     chart_config: &super::chart_config::ChartConfig,
 ) -> Result<Option<scale_resolve::ColorScale>, RenderError> {
     let mut rendering_spec_for_legend = ChartSpec {
-        encoding: prep.layers[0].encoding.clone(),
+        encoding: prep.rendering_encoding().clone(),
         ..spec.clone()
     };
     scale_resolve::resolve_param_domains(&mut rendering_spec_for_legend);
@@ -3764,7 +3767,7 @@ fn validate_layer_positional_columns(
 /// per-layer coord can produce (a layer that declares none inherits the chart's,
 /// so the two agree by construction). Layer 0 is exempt for a stronger reason:
 /// the panel's axes are resolved from its own post-flip encoding
-/// (`prepare`'s `rendering_encoding = layers[0].encoding`), so its columns suit
+/// (`prepare::rendering_encoding_of`), so its columns suit
 /// them by construction and the question is already answered.
 ///
 /// **The servability question is the crate's existing pair, not a new dtype

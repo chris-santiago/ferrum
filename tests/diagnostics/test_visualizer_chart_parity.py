@@ -807,8 +807,11 @@ def _record_builder_call(
     target = _call_target(case)
     calls: list[dict[str, Any]] = []
 
-    def recorder(*_args: Any, **received: Any) -> None:
+    def recorder(*_args: Any, **received: Any) -> Any:
         calls.append(received)
+        # A chart, as the builder it stands in for returns: `fit` builds
+        # through `speak_as`, which stamps whatever comes back.
+        return ferrum.Chart()
 
     for module_name in {target.__module__, case.visualizer.__module__}:
         module = sys.modules[module_name]

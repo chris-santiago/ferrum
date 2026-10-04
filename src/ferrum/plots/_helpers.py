@@ -10,10 +10,11 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
-from ferrum._entry import stamp_entry
+from ferrum._entry import EntryRefusal, speak_as
 from ferrum._overrides import _apply_overrides
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks.base import resolve_figure_style
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -185,6 +186,37 @@ def _field_name(value: Any) -> str | None:
     if value is None:
         return None
     return value.field if hasattr(value, "field") else str(value)
+
+
+def _title_legend(chart: "Chart", channel: str, title: str) -> "Chart":
+    """Title *chart*'s *channel* legend *title*, on the bindings its marks chose.
+
+    The one way a figure titles a legend. A composite mark binds *channel*
+    on its own layers to a column it chose (``mark_confusion``'s cell
+    value, ``mark_roc``'s class); every layer binding *channel* to a column
+    takes *title*, so the figure names the legend without naming the column
+    and without a chart-level binding its other layers (a reference line)
+    would inherit. A layer that binds no *channel* is left alone. A flat
+    chart titles its own binding. A pending composite mark carries the
+    title to its resolution (``_PendingMark.legend_titles``), so the figure
+    does not resolve it early.
+    """
+    from dataclasses import replace
+
+    from ferrum._layer import titled_encoding
+
+    title_pair = ((channel, title),)
+    new = chart._clone()
+    pending = new._pending_stat_mark
+    if pending is not None:
+        new._pending_stat_mark = replace(pending, legend_titles=pending.legend_titles + title_pair)
+    elif new._layers:
+        new._layers = [
+            replace(ly, encoding=titled_encoding(ly.encoding, title_pair)) for ly in new._layers
+        ]
+    else:
+        new._encoding = titled_encoding(new._encoding, title_pair)
+    return new
 
 
 class _ColorArgument(NamedTuple):
@@ -518,21 +550,40 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
+def _style_kws(param: str, mark: str, kws: Any) -> dict:
+    """Return a figure's ``<param>=`` style dict (``line_kws``) for the layer drawing *mark*.
+
+    Held to *mark*'s honored kwargs with aliases resolved
+    (:func:`ferrum.marks.base.resolve_figure_style`); ``None`` is no style. A
+    refusal is voiced by the figure that received the dict.
+    """
+    if kws is None:
+        return {}
+    if not isinstance(kws, dict):
+        kind = type(kws).__name__
+        raise EntryRefusal(
+            lambda entry: f"{entry}({param}=...) must be a dict of mark kwargs; got {kind}", ""
+        )
+    return resolve_figure_style(mark, kws)
+
+
 def _figure_entry(fn: _F) -> _F:
     """Make the figure function *fn* the public entry its chart speaks as.
 
     Every warning and refusal about a layer the figure draws (a line's
     ``size`` and ``stroke_width`` both set, a size the mark cannot draw, a
     degraded composite) names the public call the user made, not the
-    ``mark_*`` method or primitive the figure used to draw it. Applies to
-    every leaf of a composite result. Every public function of a
+    ``mark_*`` method or primitive the figure used to draw it, and so does
+    every refusal a door inside the figure raises while it builds (a
+    ``mark=`` override, a ``line_kws=`` dict). Applies to every leaf of a
+    composite result. Every public function of a
     ``ferrum.plots`` module carries it; ``tests/test_public_entry_voice.py``
     derives that population from the modules themselves.
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return stamp_entry(fn(*args, **kwargs), fn.__name__)
+        return speak_as(fn.__name__, fn, *args, **kwargs)
 
     return wrapper  # type: ignore[return-value]
 
@@ -583,6 +634,10 @@ def _compose_compare(
     for name, model_source in source.items():
         try:
             child = builder(model_source, **builder_kwargs)
+        except EntryRefusal:
+            # A malformed figure argument refuses alike for every model, in
+            # the figure's own voice.
+            raise
         except ValueError as exc:
             raise ValueError(f"compare={{{name!r}: ...}}: {exc}") from exc
         child = child.properties(title=name)

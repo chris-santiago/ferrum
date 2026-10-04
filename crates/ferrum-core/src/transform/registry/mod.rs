@@ -55,12 +55,12 @@
 //!   grouped here under "no *stable* default name to declare", which is false — `DataStackSpec.as_` is a single top-level
 //!   `(String, String)` with a real serde default, `("y0", "y1")`
 //!   (`data_stack.rs`). The accurate reason it stays `[]` is different: its
-//!   additive pair, unlike `Swarm`/`Violin` below, is a directly
+//!   additive pair, unlike `Violin` below, is a directly
 //!   caller-settable parameter layered on top of the transform's ENTIRE
 //!   arbitrary input schema (every input column passes through unchanged),
 //!   and declaring it correctly would need the same non-empty per-call
 //!   passthrough allowlist that `swarm_outputs_match_actual_schema`
-//!   (`tests.rs`) proves for `Swarm` — a fixture this table doesn't have for
+//!   (`tests.rs`) uses for `Swarm` — a fixture this table doesn't have for
 //!   `DataStack` today. This is "not yet proven", not "structurally
 //!   undeclarable"; left open rather than reopening the accepted `[]`
 //!   decision;
@@ -84,13 +84,14 @@
 //!   whichever columns the caller selects to melt/fold, so even under the
 //!   default name the dtype is never statically knowable.
 //!
-//! `Swarm` and `Violin` are both pass-through-plus-additive (input schema is
-//! unknown/arbitrary) but their *additive* columns are name-stable under
-//! default construction (`swarm_y` for `Swarm`; `group_id`/`violin_x`/`violin_y`/
-//! `__pos_x_offset__` for `Violin`), so both declare those additive columns
-//! rather than `[]` — the "no closed schema" carve-out above applies only
-//! when even the additive names are caller-controlled, not whenever *some*
-//! part of the schema (the pass-through part) is unknown.
+//! `Violin` is pass-through-plus-additive (input schema is unknown/arbitrary)
+//! but its *additive* columns are name-stable under default construction
+//! (`group_id`/`violin_x`/`violin_y`/`__pos_x_offset__`), so it declares those
+//! additive columns rather than `[]` — the "no closed schema" carve-out above
+//! applies only when even the additive names are caller-controlled, not
+//! whenever *some* part of the schema (the pass-through part) is unknown.
+//! `Swarm` is pass-through only (its placement is added at render), so it
+//! declares `[]`.
 //!
 //! **`secondary_outputs` convention.** `outputs` covers a kind's *primary*
 //! batch (spec §4.6's wording). Three kinds also publish additional NAMED
@@ -547,13 +548,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "x", "y", "bin_size", "aggregate", "field", "name", "extent_x", "extent_y",
             ],
         },
-        // The one additive column, in either orient. See the module doc's
-        // `Swarm`/`Violin` note: unlike
-        // `DataWindow`/`DataStack`/`JoinAggregate`, these additive names are
-        // NOT caller-controlled, so they're declarable even though the
-        // pass-through part of the schema (the input's own columns) isn't.
+        // Pass-through only: the input's own columns, no additive column.
         "swarm" => TransformRegistryEntry {
-            outputs: vec![("swarm_y", DataType::Float64)],
+            outputs: vec![],
             secondary_outputs: vec![],
             params: vec![
                 "category", "value", "point_size", "spacing", "side", "orient", "dodge", "name",

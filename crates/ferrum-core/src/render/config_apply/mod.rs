@@ -234,7 +234,7 @@ fn fill_axis_slots_specific_before_shared(
     if let Some(ref axis_y2_cfg) = chart_config.axis_y2 {
         if axes.secondary_y.is_empty() {
             warnings.push(RenderWarning::ConfigSurfaceNotPresent {
-                section: "axis_y2".to_string(),
+                section: crate::render::ConfigSurface::AxisY2,
             });
         } else {
             for secondary in axes.secondary_y.iter_mut() {

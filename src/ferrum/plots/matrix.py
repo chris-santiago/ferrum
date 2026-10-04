@@ -37,7 +37,7 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
-from ferrum._core import secondary_key
+from ferrum._core import numeric_feature_columns, secondary_key
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import coerce_finite_real, validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -241,13 +241,7 @@ def pairplot(
         # No vars specified — auto-detect numeric columns from data.
         from ferrum._coerce import to_arrow_table
 
-        tbl = to_arrow_table(data)
-        numeric_cols = []
-        for name in tbl.column_names:
-            t = tbl[name].type
-            ts = str(t).lower()
-            if any(s in ts for s in ("int", "float", "double", "decimal")):
-                numeric_cols.append(name)
+        numeric_cols = numeric_feature_columns(to_arrow_table(data).schema, "pairplot")
         rows = numeric_cols
         cols = numeric_cols
 
@@ -542,16 +536,12 @@ def heatmap(
     center = coerce_finite_real("heatmap(center=...)", center)
 
     tbl = to_arrow_table(data)
-    # Identify id column (first non-numeric) and value columns (numeric).
-    id_col: str | None = None
-    value_cols: list[str] = []
-    for name in tbl.column_names:
-        t = str(tbl[name].type).lower()
-        is_numeric = any(s in t for s in ("int", "float", "double", "decimal"))
-        if is_numeric:
-            value_cols.append(name)
-        elif id_col is None:
-            id_col = name
+    # The value columns are the feature columns Rust's `Linkage` and
+    # `Reorder(axis="columns")` read (a decimal column refuses here); the id
+    # column is the first column that is not one.
+    value_cols = numeric_feature_columns(tbl.schema, "heatmap")
+    features = frozenset(value_cols)
+    id_col = next((name for name in tbl.column_names if name not in features), None)
     if not value_cols:
         raise ValueError("heatmap: no numeric columns found in data")
 
@@ -1045,16 +1035,12 @@ def clustermap(
     from ferrum._coerce import to_arrow_table
 
     tbl = to_arrow_table(data)
-    # Identify id column + numeric columns (same approach as heatmap).
-    id_col: str | None = None
-    value_cols: list[str] = []
-    for name in tbl.column_names:
-        t = str(tbl[name].type).lower()
-        is_numeric = any(s in t for s in ("int", "float", "double", "decimal"))
-        if is_numeric:
-            value_cols.append(name)
-        elif id_col is None:
-            id_col = name
+    # The value columns are the feature columns Rust's `Linkage` and
+    # `Reorder(axis="columns")` read (a decimal column refuses here); the id
+    # column is the first column that is not one.
+    value_cols = numeric_feature_columns(tbl.schema, "clustermap")
+    features = frozenset(value_cols)
+    id_col = next((name for name in tbl.column_names if name not in features), None)
     if not value_cols:
         raise ValueError("clustermap: no numeric columns found in data")
 
@@ -1535,7 +1521,10 @@ def _jointplot_build(
         if ylim is not None:
             hist_enc["y"] = _Y(_bin2d_cols["y_lo"], scale={"domain": list(ylim)})
         center = (
-            Chart(data).transform(Bin2D(x=x, y=y, **bin2d_kwargs)).mark_rect().encode(**hist_enc)
+            Chart(data)
+            .transform(Bin2D(x=x, y=y, **bin2d_kwargs))
+            .mark_rect(**jk)
+            .encode(**hist_enc)
         )
     elif kind == "hex":
         # Hex aggregates each hexagonal bin to a single value (Hex has no

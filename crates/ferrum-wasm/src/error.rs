@@ -2,7 +2,7 @@
 
 use wasm_bindgen::JsValue;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum WasmRenderError {
     GpuInit(String),
     ContextLost,
@@ -11,6 +11,8 @@ pub enum WasmRenderError {
     ShaderCompilation(String),
     /// A tapered stroke whose `widths` the shared taper validation refuses.
     TaperedStroke(ferrum_scene::TaperError),
+    /// A mark batch whose sidecars the shared batch-shape validation refuses.
+    MalformedBatch(ferrum_scene::BatchShapeError),
 }
 
 impl std::fmt::Display for WasmRenderError {
@@ -22,6 +24,7 @@ impl std::fmt::Display for WasmRenderError {
             Self::TextureUpload(msg) => write!(f, "texture upload failed: {msg}"),
             Self::ShaderCompilation(msg) => write!(f, "shader compilation failed: {msg}"),
             Self::TaperedStroke(e) => write!(f, "mark_line: the tapered line cannot be drawn: {e}"),
+            Self::MalformedBatch(e) => write!(f, "the scene's mark batch cannot be drawn: {e}"),
         }
     }
 }
@@ -29,6 +32,12 @@ impl std::fmt::Display for WasmRenderError {
 impl From<ferrum_scene::TaperError> for WasmRenderError {
     fn from(e: ferrum_scene::TaperError) -> Self {
         Self::TaperedStroke(e)
+    }
+}
+
+impl From<ferrum_scene::BatchShapeError> for WasmRenderError {
+    fn from(e: ferrum_scene::BatchShapeError) -> Self {
+        Self::MalformedBatch(e)
     }
 }
 

@@ -173,7 +173,7 @@ class TestConditionalSubLayers:
 
     def test_unknown_layer_raises(self, clf_data):
         model, X, y = clf_data
-        with pytest.raises(ValueError, match="Unknown sub-layer"):
+        with pytest.raises(ValueError, match="unknown sub-layer 'nonexistent'"):
             fm.calibration_chart(model, X, y, mark={"nonexistent": False})
 
     def test_error_lists_valid_names(self, clf_data):
@@ -404,12 +404,18 @@ class TestEndToEnd:
 class TestErrorPaths:
     def test_bad_mark_type_raises(self, clf_data):
         model, X, y = clf_data
-        with pytest.raises(TypeError, match="must be a dict"):
+        with pytest.raises(ValueError) as exc_info:
             fm.calibration_chart(model, X, y, mark={"line": 42})
+        assert str(exc_info.value) == (
+            "calibration_chart(mark={'line': ...}) must be a dict of mark kwargs, or "
+            "False to drop the sub-layer; got int"
+        )
 
     def test_unknown_sublayer_raises_valueerror(self, clf_data):
         model, X, y = clf_data
-        with pytest.raises(ValueError, match="Unknown sub-layer"):
+        with pytest.raises(
+            ValueError, match=r"^calibration_chart\(mark=\.\.\.\): unknown sub-layer"
+        ):
             fm.calibration_chart(model, X, y, mark={"imaginary": False})
 
 
@@ -556,16 +562,30 @@ class TestSvgRoundTrip:
 
 class TestEdgeCases:
     def test_suppress_all_layers(self, clf_data):
+        """Dropping every sub-layer leaves nothing to draw, so it refuses, as
+        an all-empty composition does."""
+        model, X, y = clf_data
+        with pytest.raises(ValueError) as exc_info:
+            fm.calibration_chart(
+                model,
+                X,
+                y,
+                mark={"line": False, "reference": False, "point": False, "brier_label": False},
+            )
+        assert str(exc_info.value) == (
+            "calibration_chart(mark=...) drops every sub-layer this call draws "
+            "(['brier_label', 'line', 'point', 'reference']), so the chart would draw "
+            "nothing; keep at least one"
+        )
+
+    def test_suppress_all_but_one_layer_renders(self, clf_data):
+        """Control: keeping one sub-layer renders it alone."""
         model, X, y = clf_data
         chart = fm.calibration_chart(
-            model,
-            X,
-            y,
-            mark={"line": False, "reference": False, "point": False},
+            model, X, y, mark={"line": False, "reference": False, "point": False}
         )
-        assert chart.layer_names == []
-        svg = chart.to_svg()
-        assert "<svg" in svg
+        assert chart.layer_names == ["brier_label"]
+        assert "<svg" in chart.to_svg()
 
     def test_empty_dict_overrides_are_noop(self, clf_data):
         model, X, y = clf_data

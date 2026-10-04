@@ -444,6 +444,49 @@ def test_mark_intercluster_distance_rejects_unknown_kwarg():
         (ferrum.Chart(icd).mark_intercluster_distance(strokr="red").to_svg())
 
 
+def test_intercluster_distance_labels_clear_their_own_bubble():
+    """Each cluster-id label must sit above its own bubble, not on top of it.
+
+    Regression: labels used to inherit the size scale and render centered
+    on the bubble (black text on top of the fill, overlapping the dot).
+    Each label's rendered y must clear its own circle's top edge
+    (``cy - r``) by a visible margin.
+    """
+    import re
+
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    chart = ferrum.intercluster_distance_chart(
+        model,
+        df,
+        k=3,
+        method="mds",
+        random_state=0,
+    )
+    svg = chart.to_svg()
+    circle_re = re.compile(r'<circle cx="([^"]+)" cy="([^"]+)" r="([^"]+)"')
+    text_re = re.compile(r'<text x="([^"]+)" y="([^"]+)"[^>]*>([^<]*)</text>')
+    # The point layer's 3 bubbles render first, in data-row order, before
+    # any legend swatch circle -- the first 3 <circle> elements are the
+    # cluster bubbles themselves.
+    bubbles = [m.groups() for m in circle_re.finditer(svg)][:3]
+    assert len(bubbles) == 3
+    texts = list(text_re.finditer(svg))
+    for cx_s, cy_s, r_s in bubbles:
+        cy, r = float(cy_s), float(r_s)
+        # The label's x is unchanged from the bubble's cx (same x encoding,
+        # no dx) -- an exact string match pairs each label with its bubble
+        # without guessing at render order.
+        label = next((m for m in texts if m.group(1) == cx_s), None)
+        assert label is not None, f"no label text found at cluster bubble x={cx_s}"
+        label_y = float(label.group(2))
+        top_edge = cy - r
+        assert label_y < top_edge - 1.0, (
+            f"label y={label_y} does not clear bubble top edge {top_edge} "
+            f"(cy={cy}, r={r}) -- label overlaps or sits inside its own dot"
+        )
+
+
 # --- Task 32: decision_boundary --------------------------------------
 
 

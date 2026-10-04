@@ -555,12 +555,7 @@ class _RenderMixin:
         label_maps = _collect_label_maps(chart)
         raw_data = _apply_label_maps(chart._data, label_maps) if label_maps else chart._data
         data = normalize_for_rust(to_arrow_table(raw_data))
-        from ferrum import config as _config
-
-        viewport = (
-            chart._width or float(_config.get("width")),
-            chart._height or float(_config.get("height")),
-        )
+        viewport = chart._native_size()
         from ferrum.themes._defaults import get_default_theme
 
         effective_theme = chart._theme or get_default_theme()

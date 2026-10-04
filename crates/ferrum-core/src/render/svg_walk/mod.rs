@@ -1,6 +1,6 @@
 use ferrum_scene::{
     dash_tapered, dash_tapered_path, Color as FsColor, FillStroke as FsFillStroke, ImageData, PathCmd,
-    SceneGraph, SceneNode, StrokeCap, StrokeJoin, StrokeStyle as FsStroke, TaperError,
+    PathClosure, SceneGraph, SceneNode, StrokeCap, StrokeJoin, StrokeStyle as FsStroke, TaperError,
     TextStyle as FsText,
 };
 
@@ -357,7 +357,7 @@ fn emit_node_in(svg: &mut SvgBuffer, node: &SceneNode, ends: BatchEnds) -> Resul
             widths: Some(widths),
         } => {
             let dash = style.stroke_dash.as_deref().unwrap_or(&[]);
-            let pieces = dash_tapered_path(commands, *closed, widths, dash)?;
+            let pieces = dash_tapered_path(commands, PathClosure::from(*closed), widths, dash)?;
             let (anchor_x, anchor_y) = path_anchor(commands);
             let paint = outline_paint(style.stroke, style.stroke_opacity, style.angle, anchor_x, anchor_y);
             svg.tapered_stroke(&pieces, stroke_ends(None, None, ends), &paint);

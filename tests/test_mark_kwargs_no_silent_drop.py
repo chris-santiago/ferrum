@@ -9,7 +9,7 @@ ONE of:
 
 2. **Calls ``validate_user_mark_kwargs(...)``** in its body — explicitly
    validates user-supplied kwargs against the renderer-level allowlist
-   and raises ``TypeError`` on unknown keys. Used by the four 10e
+   and raises ``ValueError`` on unknown keys. Used by the four 10e
    desugars that *also* forward known visual kwargs into their layers.
 
 If a future contributor adds a new ``desugar_<name>(*, **kwargs)`` that

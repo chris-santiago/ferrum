@@ -8,15 +8,19 @@ assembled chart just before ``.theme()`` is applied.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
+
+from ferrum._entry import EntryRefusal
+from ferrum.marks.base import layer_honors, resolve_figure_style
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
 # Full catalog of possible sub-layer names for each composite mark type.
-# Keyed by the ``kind`` string passed to ``_set_composite_mark``.
-# Validation checks this registry so conditionally-absent layers
-# (e.g. boxplot outlier when outliers=False) are accepted as no-ops.
+# Keyed by the ``kind`` string passed to ``_set_composite_mark``. A name in
+# the catalog that this call did not draw (boxplot's outlier under
+# outliers=False) may be suppressed, since it is already absent, but style
+# aimed at it refuses: nothing would draw it.
 LAYER_NAME_CATALOG: dict[str, frozenset[str]] = {}
 
 # Figure-level chrome keys that ``_CompositeBase.properties`` intercepts and
@@ -40,13 +44,16 @@ def _apply_overrides(
     encode: dict[str, Any] | None = None,
     properties: dict[str, Any] | None = None,
     layers: list | None = None,
-    _skip_unknown_mark_keys: bool = False,
+    _landed: set[str] | None = None,
 ) -> Any:
     """Merge user overrides into *chart* and return the modified copy.
 
     Application order: mark → encode → properties → layers.
     For compound views (VConcatChart, HConcatChart, etc.), fans out to
-    each child chart via ``_rebuild_with_charts``.
+    each child chart via ``_rebuild_with_charts``: each ``mark=`` key
+    applies to every child that draws the sub-layer it names, and a key no
+    child takes refuses. *_landed* collects, across that fan-out, the keys
+    some child took.
     """
     from ferrum.chart import Chart
     from ferrum.composition import LayerChart, _CompositeBase
@@ -76,6 +83,8 @@ def _apply_overrides(
                 k: v for k, v in properties.items() if k not in _FIGURE_CHROME_KEYS
             } or None
 
+        landed: set[str] = set() if _landed is None else _landed
+
         def _apply(c: Any) -> Any:
             return _apply_overrides(
                 c,
@@ -83,7 +92,7 @@ def _apply_overrides(
                 encode=encode,
                 properties=child_properties,
                 layers=layers,
-                _skip_unknown_mark_keys=True,
+                _landed=landed,
             )
 
         rebuild = getattr(chart, "_rebuild_with_charts", None)
@@ -105,10 +114,12 @@ def _apply_overrides(
 
         if figure_chrome:
             chart = chart.properties(**figure_chrome)
+        if mark is not None and _landed is None:
+            _refuse_unlanded(mark, landed)
         return chart
 
     if mark is not None:
-        chart = _apply_mark_overrides(chart, mark, _skip_unknown=_skip_unknown_mark_keys)
+        chart = _apply_mark_overrides(chart, mark, _landed=_landed)
     if encode is not None:
         chart = chart.encode(**encode)
     if properties is not None:
@@ -120,63 +131,142 @@ def _apply_overrides(
 
 def _apply_mark_overrides(
     chart: "Chart",
-    overrides: dict[str, Any],
+    overrides: Any,
     *,
-    _skip_unknown: bool = False,
+    _landed: set[str] | None = None,
 ) -> "Chart":
+    """Apply a figure's ``mark=`` dict to *chart*.
+
+    A chart with named sub-layers takes ``{name: {kwarg: value}}`` (style
+    for that sub-layer, held to its mark's honored kwargs) or
+    ``{name: False}`` (drop it). Any other chart takes the dict as style for
+    its mark, or, layered, each key on every layer whose mark honors it.
+    Refusals are :class:`EntryRefusal`, voiced by the figure. Inside a
+    compound fan-out (*_landed* given) a child takes only what applies to
+    it and records the keys it took; the caller refuses the rest.
+    """
+    if not isinstance(overrides, dict):
+        kind = type(overrides).__name__
+        raise EntryRefusal(
+            lambda entry: (
+                f"{entry}(mark=...) must be a dict, of mark kwargs or of sub-layer "
+                f"names to their mark kwargs; got {kind}"
+            ),
+            "",
+        )
     resolved = chart._resolve_pending()
     names = resolved.layer_names
 
-    # No named layers: if _skip_unknown, leave it untouched (this child panel
-    # has no composite layers at all). Otherwise a flat chart takes the
-    # overrides as its own mark kwargs and an unnamed layered chart takes them
-    # on every layer, since a layered chart's style is its own per layer
-    # (spec §4.8).
     if not names:
-        if _skip_unknown:
-            return resolved
-        new = resolved._clone()
-        if new._layers:
-            new._layers = [
-                replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **overrides})
-                for ly in new._layers
-            ]
-            return new
-        existing_kwargs = dict(new._mark_kwargs) if new._mark_kwargs else {}
-        existing_kwargs.update(overrides)
-        new._mark_kwargs = existing_kwargs
-        return new
+        return _apply_unnamed_style(resolved, overrides, _landed)
 
-    # Composite chart: validate keys against full catalog.
     valid = _valid_layer_names(resolved)
-    for key in overrides:
+    drawn = set(names)
+    for key, val in overrides.items():
         if key not in valid:
-            if _skip_unknown:
+            if _landed is not None:
                 continue
-            raise ValueError(
-                f"Unknown sub-layer {key!r}; valid names for this chart: {sorted(valid)}"
-            )
+            raise EntryRefusal(_unknown_sub_layer_message(key, valid), "")
+        if val is not False and val is not None and not isinstance(val, dict):
+            raise EntryRefusal(_non_dict_override_message(key, type(val).__name__), "")
+        # Dropping a layer that is already absent, or styling it with nothing,
+        # leaves the chart as asked.
+        if key in drawn or not val:
+            if _landed is not None:
+                _landed.add(key)
+            continue
+        if _landed is None:
+            raise EntryRefusal(_undrawn_sub_layer_message(key, drawn), "")
 
     new = resolved._clone()
     new_layers: list = []
     for ly in new._layers or []:
-        if ly.name is None or ly.name not in overrides:
+        val = overrides.get(ly.name) if ly.name is not None else None
+        if ly.name not in overrides:
             new_layers.append(ly)
+        elif val is False or val is None:
             continue
-        val = overrides[ly.name]
-        if val is False or val is None:
-            continue
-        if isinstance(val, dict):
-            merged = dict(ly.mark_kwargs or {})
-            merged.update(val)
-            new_layers.append(replace(ly, mark_kwargs=merged))
         else:
-            raise TypeError(
-                f"mark override for {ly.name!r} must be a dict of mark "
-                f"kwargs or False to suppress; got {type(val).__name__}"
-            )
+            styled = {**(ly.mark_kwargs or {}), **resolve_figure_style(ly.mark, val)}
+            new_layers.append(replace(ly, mark_kwargs=styled))
+    if not new_layers:
+        raise EntryRefusal(
+            lambda entry: (
+                f"{entry}(mark=...) drops every sub-layer this call draws "
+                f"({sorted(drawn)}), so the chart would draw nothing; keep at least one"
+            ),
+            "",
+        )
     new._layers = new_layers
     return new
+
+
+def _apply_unnamed_style(
+    chart: "Chart", overrides: dict[str, Any], landed: set[str] | None
+) -> "Chart":
+    """A ``mark=`` style dict on a chart with no named sub-layers.
+
+    A flat chart takes it as its mark's style. A layered chart's style is
+    its own per layer (spec §4.8), so each key reaches every layer whose
+    mark honors it, the way a composite's catch-all ``size`` reaches only
+    the layers that draw it. A key no layer honors refuses, unless this
+    chart is one child of a compound fan-out (*landed* given), where it
+    records the keys it took and leaves the rest to its siblings.
+    """
+    new = chart._clone()
+    marks = [ly.mark for ly in new._layers] if new._layers else [new._mark]
+    parts = [{k: v for k, v in overrides.items() if layer_honors(m, k)} for m in marks]
+    taken = set().union(*parts)
+    if landed is not None:
+        landed |= taken
+    else:
+        untaken = {k: v for k, v in overrides.items() if k not in taken}
+        if untaken:
+            resolve_figure_style(marks[0], untaken)
+    styles = [resolve_figure_style(m, part) for m, part in zip(marks, parts)]
+    if new._layers:
+        new._layers = [
+            replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **style})
+            for ly, style in zip(new._layers, styles)
+        ]
+    elif styles[0]:
+        new._mark_kwargs = {**(new._mark_kwargs or {}), **styles[0]}
+    return new
+
+
+def _unknown_sub_layer_message(key: str, valid: set[str]) -> Callable[[str], str]:
+    return lambda entry: (
+        f"{entry}(mark=...): unknown sub-layer {key!r}; this chart's sub-layers are {sorted(valid)}"
+    )
+
+
+def _non_dict_override_message(key: str, kind: str) -> Callable[[str], str]:
+    return lambda entry: (
+        f"{entry}(mark={{{key!r}: ...}}) must be a dict of mark kwargs, or False to "
+        f"drop the sub-layer; got {kind}"
+    )
+
+
+def _undrawn_sub_layer_message(key: str, drawn: set[str]) -> Callable[[str], str]:
+    return lambda entry: (
+        f"{entry}(mark={{{key!r}: ...}}): this call draws no {key!r} sub-layer, so "
+        f"nothing would take the style; it draws {sorted(drawn)}"
+    )
+
+
+def _refuse_unlanded(overrides: Any, landed: set[str]) -> None:
+    """Refuse the ``mark=`` keys no child of a compound figure took."""
+    if not isinstance(overrides, dict):
+        return
+    unlanded = sorted(k for k in overrides if k not in landed)
+    if unlanded:
+        raise EntryRefusal(
+            lambda entry: (
+                f"{entry}(mark=...): no panel of this chart draws a sub-layer named, or "
+                f"a mark that honors, {unlanded!r}, so nothing would take them"
+            ),
+            "",
+        )
 
 
 def _valid_layer_names(chart: "Chart") -> set[str]:

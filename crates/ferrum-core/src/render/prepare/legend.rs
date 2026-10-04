@@ -14,7 +14,8 @@ use crate::layout::{
 use crate::layout::axis::resolve_axis_title;
 use crate::render::chart_config::LegendStyleSpec;
 use crate::render::format::Temporality;
-use crate::spec::chart::ChartSpec;
+use crate::spec::chart::{ChartConditional, ChartSpec};
+use crate::spec::encoding::{Encoding, EncodingSpec};
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::ChannelName;
 use pyo3::prelude::*;
@@ -22,7 +23,40 @@ use pyo3::prelude::*;
 use super::super::scale_resolve::{LeafScaleContext, ResolvedScales};
 use super::LegendPreparedOverrides;
 
-/// The full color-legend output produced from the resolved scales + spec.
+/// What the legends read off a chart. Each legend channel is bound as its
+/// scale was built, from the rendering encoding
+/// ([`super::rendering_encoding_of`]): a chart-level binding is inherited into
+/// it and a layer's own binding replaces it, so the legend's title and
+/// `Legend(...)` style come from the binding that draws. `x`/`y` stay as
+/// authored: they feed only the color legend's `Legend(...)` cascade, which
+/// must not swap under `CoordFlip`.
+pub(crate) struct LegendBindings<'a> {
+    color: Option<&'a EncodingSpec>,
+    size: Option<&'a EncodingSpec>,
+    shape: Option<&'a EncodingSpec>,
+    stroke_dash: Option<&'a EncodingSpec>,
+    x: Option<&'a EncodingSpec>,
+    y: Option<&'a EncodingSpec>,
+    conditionals: &'a [ChartConditional],
+}
+
+impl<'a> LegendBindings<'a> {
+    /// The legend channels of `rendering`, the authored `x`/`y` and the
+    /// conditionals of `spec`.
+    pub(crate) fn new(spec: &'a ChartSpec, rendering: &'a Encoding) -> Self {
+        Self {
+            color: rendering.color.as_ref(),
+            size: rendering.size.as_ref(),
+            shape: rendering.shape.as_ref(),
+            stroke_dash: rendering.stroke_dash.as_ref(),
+            x: spec.encoding.x.as_ref(),
+            y: spec.encoding.y.as_ref(),
+            conditionals: &spec.conditionals,
+        }
+    }
+}
+
+/// The full color-legend output produced from the resolved scales + bindings.
 /// Unpacked straight into `PreparedInputs` by the orchestrator.
 pub(crate) struct ColorLegendBundle {
     pub legend_entries: Vec<LegendEntry>,
@@ -46,11 +80,11 @@ pub(crate) struct ColorLegendBundle {
 /// Precedence within the per-channel level is color > x > y; the whole level
 /// still beats chart-level `configure_legend` and the theme, per the batch's
 /// one cascade discipline.
-fn per_channel_legend_specs(spec: &ChartSpec) -> Vec<&LegendStyleSpec> {
+fn per_channel_legend_specs<'a>(bindings: &LegendBindings<'a>) -> Vec<&'a LegendStyleSpec> {
     [
-        spec.encoding.color.as_ref(),
-        spec.encoding.x.as_ref(),
-        spec.encoding.y.as_ref(),
+        bindings.color,
+        bindings.x,
+        bindings.y,
     ]
     .into_iter()
     .flatten()
@@ -69,7 +103,7 @@ fn pick<'a, T>(
     specs.iter().find_map(|s| field(s))
 }
 
-/// Walk `spec.conditionals` for the given `channel` and collect the field names
+/// Walk `bindings.conditionals` for the given `channel` and collect the field names
 /// referenced by either branch (`if_selected` / `if_not`) as
 /// `EncodingValue::Field { name }`. Dedup preserving first-appearance order.
 /// Returns an empty `Vec` when no field-driven conditional exists for `channel`.
@@ -78,14 +112,14 @@ fn pick<'a, T>(
 /// now this for `ChannelName::Color` followed by `distinct_values_in_order` over
 /// each field's values (see the `None` arm of [`build_color_legend`]).
 pub(crate) fn resolve_conditional_field_names(
-    spec: &ChartSpec,
+    bindings: &LegendBindings<'_>,
     channel: ChannelName,
 ) -> Vec<String> {
     use ferrum_scene::EncodingValue;
     let mut seen = std::collections::HashSet::<String>::new();
     let mut out = Vec::<String>::new();
 
-    for cond in spec.conditionals.iter().map(|c| &c.encoding) {
+    for cond in bindings.conditionals.iter().map(|c| &c.encoding) {
         if cond.channel != channel {
             continue;
         }
@@ -112,10 +146,10 @@ pub(crate) fn resolve_conditional_field_names(
 /// no base color encoding) so that `when(Color(field))` conditionals still
 /// produce a categorical legend whose entries the WASM `bind="legend"` toggle
 /// can use.
-fn resolve_conditional_color_domain(spec: &ChartSpec, transformed: &RecordBatch) -> Vec<String> {
+fn resolve_conditional_color_domain(bindings: &LegendBindings<'_>, transformed: &RecordBatch) -> Vec<String> {
     let mut seen = std::collections::HashSet::<String>::new();
     let mut out = Vec::<String>::new();
-    for name in resolve_conditional_field_names(spec, ChannelName::Color) {
+    for name in resolve_conditional_field_names(bindings, ChannelName::Color) {
         // Ignore errors (field not present in batch) — just skip.
         if let Ok(values) = super::super::arrow_cast::distinct_values_in_order(transformed, &name) {
             for v in values {
@@ -128,7 +162,7 @@ fn resolve_conditional_color_domain(spec: &ChartSpec, transformed: &RecordBatch)
     out
 }
 
-/// Build the full color legend / colorbar bundle from the resolved scales + spec.
+/// Build the full color legend / colorbar bundle from the resolved scales + bindings.
 ///
 /// Mirrors the orchestrator's former inline legend block exactly: categorical
 /// color → discrete entries; continuous color → colorbar gradient + ticks;
@@ -155,7 +189,7 @@ fn resolve_conditional_color_domain(spec: &ChartSpec, transformed: &RecordBatch)
 /// `warnings` is the panel's live warnings sink (mirrors `build_axes`'s
 /// `&mut scale_warnings` at the same call site).
 pub(crate) fn build_color_legend(
-    spec: &ChartSpec,
+    bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
     provisional_scales: &ResolvedScales,
     layers: &[super::LayerPrepared],
@@ -184,7 +218,7 @@ pub(crate) fn build_color_legend(
     // None)` does. `orient="none"` is the second spelling of the same intent,
     // and both resolve field-by-field with the same first-`Some` rule the
     // `pick`s below use (see `LegendStyleSpec::suppressed_by`).
-    let legend_specs = per_channel_legend_specs(spec);
+    let legend_specs = per_channel_legend_specs(bindings);
     let legend_disabled = LegendStyleSpec::suppressed_by(&legend_specs);
     // Colorbar label overrides, shared by the continuous (gradient) and the
     // discretizing (k-swatch) arms: an explicit `tickLabels` list replaces the
@@ -200,10 +234,7 @@ pub(crate) fn build_color_legend(
     // The color field's temporality decides whether an undeclared `%`-bearing
     // spec is a date pattern, as the axis's scale does (`#147` T23): the one
     // answer `refuse_format_temporality_mismatch_legend_fields` checked.
-    let color_temporality = spec
-        .encoding
-        .color
-        .as_ref()
+    let color_temporality = bindings.color
         .and_then(|enc| super::field_temporality(enc, transformed))
         .unwrap_or(Temporality::NonTemporal);
     // The two gates below (`format_spec.is_some() || format_type ==
@@ -331,7 +362,7 @@ pub(crate) fn build_color_legend(
                 // field's distinct values so `bind="legend"` has categories to
                 // toggle.  Gated on `provisional_scales.color == None` so base-
                 // color charts remain byte-identical.
-                let cond_domain = resolve_conditional_color_domain(spec, transformed);
+                let cond_domain = resolve_conditional_color_domain(bindings, transformed);
                 if cond_domain.is_empty() {
                     (Vec::new(), None)
                 } else {
@@ -426,7 +457,7 @@ pub(crate) fn build_color_legend(
     // folding means the color entries take the folded channel's identity, not
     // that the identity is dropped.
     let AuxLegends { blocks: aux_legends, folded } = build_aux_legends(
-        spec,
+        bindings,
         transformed,
         provisional_scales,
         ColorLegendState {
@@ -434,7 +465,7 @@ pub(crate) fn build_color_legend(
             enumerates_field: !legend_entries.is_empty(),
         },
         size_legend_symbol(
-            spec,
+            bindings,
             layers,
             leaf_scales.is_some_and(|c| c.size_scale_has_non_line_sibling),
         ),
@@ -456,13 +487,13 @@ pub(crate) fn build_color_legend(
     // reported. Resolved after `build_aux_legends` because only that call
     // knows which channels were actually folded.
     let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
-        let color_title = match spec.encoding.color.as_ref() {
+        let color_title = match bindings.color {
             Some(c) => resolve_axis_title(c.title.as_deref(), Some(c.field.clone())),
             None => {
                 // Conditional-color case: find the first Color conditional with a
                 // Field branch and use its field name as the title.
                 use ferrum_scene::EncodingValue;
-                spec.conditionals.iter().map(|c| &c.encoding).find_map(|cond| {
+                bindings.conditionals.iter().map(|c| &c.encoding).find_map(|cond| {
                     if cond.channel != ChannelName::Color {
                         return None;
                     }
@@ -475,10 +506,7 @@ pub(crate) fn build_color_legend(
                 })
             }
         };
-        let color_said = spec
-            .encoding
-            .color
-            .as_ref()
+        let color_said = bindings.color
             .map_or(ColorTitle::Unstated, color_title_state);
         resolve_shared_legend_title(color_said, color_title, &folded.titles, warnings)
     } else {
@@ -513,7 +541,7 @@ pub(crate) fn build_color_legend(
     // for the inert-line/ribbon case, per the cycle-2 adjudicated ruling:
     // the merge, not the inert check, is the one redirecting the legend.
     let colorbar = {
-        let merged_color_size = same_field_numeric_size_color_merge(spec, provisional_scales)
+        let merged_color_size = same_field_numeric_size_color_merge(bindings, provisional_scales)
             && aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. }));
         if merged_color_size {
             None
@@ -624,7 +652,7 @@ pub(crate) fn build_color_legend(
 /// the color field, and naming `'x'` would pin the "not temporal" verdict on
 /// a field that was never checked.
 pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
-    spec: &ChartSpec,
+    bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
     chart_config: &crate::render::chart_config::ChartConfig,
 ) -> Result<(), crate::render::RenderError> {
@@ -632,8 +660,8 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
     if crate::render::config_apply::chart_config_legend_disabled(chart_config) {
         return Ok(());
     }
-    let legend_specs = per_channel_legend_specs(spec);
-    if let Some(color_enc) = spec.encoding.color.as_ref() {
+    let legend_specs = per_channel_legend_specs(bindings);
+    if let Some(color_enc) = bindings.color {
         if !LegendStyleSpec::suppressed_by(&legend_specs) {
             super::refuse_format_temporality_mismatch_field(
                 color_enc,
@@ -645,7 +673,7 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
             )?;
         }
     }
-    for (channel, enc) in aux_legend_channel_pairs(spec) {
+    for (channel, enc) in aux_legend_channel_pairs(bindings) {
         let Some(enc) = enc else { continue };
         if legend_channel_disabled(Some(enc)) {
             continue;
@@ -669,23 +697,21 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
 /// read (#123), so Python reads the set instead of mirroring it.
 const AUX_LEGEND_CHANNEL_NAMES: [&str; 3] = ["size", "shape", "stroke_dash"];
 
-/// The aux legend channels paired with their spec encoding, in block order:
+/// The aux legend channels paired with their binding, in block order:
 /// the one list [`build_aux_legends`] destructures and
 /// [`refuse_format_temporality_mismatch_legend_fields`] walks. The guarantee
 /// runs one way: a fourth entry here fails to compile at the destructure until
 /// the builder handles it, but an aux block the builder reads straight from
-/// `spec.encoding` (bypassing this list) would compile without meeting the
+/// the [`LegendBindings`] (bypassing this list) would compile without meeting the
 /// `#147` rule, so a new aux legend channel belongs in this list. Channel
 /// names come from [`AUX_LEGEND_CHANNEL_NAMES`], the same array the
 /// Python-visible [`aux_legend_channels`] pyfunction reads, so the two
 /// cannot drift apart on names or order.
-fn aux_legend_channel_pairs(
-    spec: &ChartSpec,
-) -> [(&'static str, Option<&crate::spec::encoding::EncodingSpec>); 3] {
+fn aux_legend_channel_pairs<'a>(bindings: &LegendBindings<'a>) -> [(&'static str, Option<&'a EncodingSpec>); 3] {
     [
-        (AUX_LEGEND_CHANNEL_NAMES[0], spec.encoding.size.as_ref()),
-        (AUX_LEGEND_CHANNEL_NAMES[1], spec.encoding.shape.as_ref()),
-        (AUX_LEGEND_CHANNEL_NAMES[2], spec.encoding.stroke_dash.as_ref()),
+        (AUX_LEGEND_CHANNEL_NAMES[0], bindings.size),
+        (AUX_LEGEND_CHANNEL_NAMES[1], bindings.shape),
+        (AUX_LEGEND_CHANNEL_NAMES[2], bindings.stroke_dash),
     ]
 }
 
@@ -744,7 +770,7 @@ fn explicit_channel_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<S
 ///
 /// Keyed by LABEL, never by position: the color domain and the shape/dash
 /// domain are both built by `sorted_categorical_domain` over the same field
-/// but with that channel's OWN `sort=` spec, so `stroke_dash=StrokeDash('g',
+/// but with that channel's OWN `sort=` bindings, so `stroke_dash=StrokeDash('g',
 /// sort='descending')` beside `color='g'` yields two correct domains in
 /// opposite orders. Pairing them by index would transpose every pattern
 /// silently.
@@ -948,15 +974,12 @@ fn resolve_shared_legend_title(
 /// site). Independent of whether the color scale later turns out inert on
 /// line/ribbon — that only gates the SWATCH color, not whether a merge
 /// condition holds at all (spec-review 2026-08-28, cycle-3 finding).
-fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales) -> bool {
+fn same_field_numeric_size_color_merge(bindings: &LegendBindings<'_>, scales: &ResolvedScales) -> bool {
     use super::super::scale_resolve::{ColorInput, ColorScale};
-    let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
+    let color_field = bindings.color.map(|c| c.field.as_str());
     let color_is_numeric =
         scales.color.as_ref().map(ColorScale::input) == Some(ColorInput::Numeric);
-    let same_field_as_color = spec
-        .encoding
-        .size
-        .as_ref()
+    let same_field_as_color = bindings.size
         .is_some_and(|size_enc| color_field == Some(size_enc.field.as_str()));
     same_field_as_color && color_is_numeric
 }
@@ -998,7 +1021,7 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
 /// `size_symbol` is the swatch the size block draws ([`size_legend_symbol`]),
 /// `None` when no layer draws size and so no size block is emitted.
 fn build_aux_legends(
-    spec: &ChartSpec,
+    bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
     scales: &ResolvedScales,
     state: ColorLegendState,
@@ -1009,7 +1032,7 @@ fn build_aux_legends(
 
     use super::super::scale_resolve::{ColorInput, ColorScale};
 
-    let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
+    let color_field = bindings.color.map(|c| c.field.as_str());
     // Numeric color (continuous or discretizing): the size legend can sample it
     // per value via `lookup_f64`, so a shared field merges into one block.
     // Categorical color enumerates the field instead, so the aux legend is
@@ -1021,11 +1044,11 @@ fn build_aux_legends(
     // `same_field_as_color` still needs to stand alone below for the
     // categorical-suppression branch, which asks a different question
     // (same field but NOT numeric).
-    let numeric_merge = same_field_numeric_size_color_merge(spec, scales);
+    let numeric_merge = same_field_numeric_size_color_merge(bindings, scales);
 
     let mut out = Vec::new();
     let mut folded = FoldedChannels::default();
-    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channel_pairs(spec);
+    let [(_, size_enc), (_, shape_enc), (_, dash_enc)] = aux_legend_channel_pairs(bindings);
 
     // ── Size legend ──────────────────────────────────────────────────────
     if let (Some(size_scale), Some(size_enc), Some(size_symbol)) = (&scales.size, size_enc, size_symbol) {
@@ -1223,9 +1246,9 @@ fn categorical_aux_fate(
 /// composite path this way; cycle-4 finding 2 extends it here so the flat
 /// path — which also serves `LayerChart.interactive()` — agrees). The
 /// resolved field is `layers[0]`'s own color field: `prepare_render_inputs`
-/// feeds `layers[0].encoding` into scale resolution
-/// (`rendering_encoding = layers[0].encoding.clone()`), so that is
-/// definitionally the field `scales.color` was resolved from.
+/// feeds the rendering encoding ([`super::rendering_encoding_of`]) into scale
+/// resolution, so that is definitionally the field `scales.color` was
+/// resolved from.
 /// `LayerPrepared::from_chart_and_layer` clones each layer's own encoding,
 /// so per-layer color fields genuinely differ in a merged multi-layer spec
 /// (`fm.layer(line(color='v:Q'), point(color='g:N'))`) — without field-keying,
@@ -1323,12 +1346,12 @@ pub(in crate::render) fn size_drawing_marks(
 /// compositor's verdict that a sibling leaf of the same overlay group draws
 /// the field as dots, which this leaf's own `layers` cannot see.
 fn size_legend_symbol(
-    spec: &ChartSpec,
+    bindings: &LegendBindings<'_>,
     layers: &[super::LayerPrepared],
     sibling_draws_dots: bool,
 ) -> Option<SymbolKind> {
     use crate::spec::mark::Mark;
-    let size_enc = spec.encoding.size.as_ref()?;
+    let size_enc = bindings.size?;
     let consumers = size_drawing_marks(layers, &size_enc.field);
     if consumers.is_empty() {
         None
@@ -1378,6 +1401,11 @@ mod tests {
     use ferrum_scene::{ConditionalEncoding, EncodingValue};
 
     /// Minimal point spec with no encodings, ready to receive conditionals.
+    /// The bindings of a chart whose rendering encoding is its own.
+    fn bindings(spec: &ChartSpec) -> LegendBindings<'_> {
+        LegendBindings::new(spec, &spec.encoding)
+    }
+
     fn empty_spec() -> ChartSpec {
         ChartSpec {
             mark: Mark::Point,
@@ -1407,7 +1435,7 @@ mod tests {
         let mut spec = empty_spec();
         spec.conditionals = vec![color_field_cond("cat").into()];
         assert_eq!(
-            resolve_conditional_field_names(&spec, ChannelName::Color),
+            resolve_conditional_field_names(&bindings(&spec), ChannelName::Color),
             vec!["cat".to_string()]
         );
     }
@@ -1420,7 +1448,7 @@ mod tests {
         c2.if_not = EncodingValue::Field { name: "cat".into() };
         spec.conditionals = vec![color_field_cond("cat").into(), c2.into(), color_field_cond("other").into()];
         assert_eq!(
-            resolve_conditional_field_names(&spec, ChannelName::Color),
+            resolve_conditional_field_names(&bindings(&spec), ChannelName::Color),
             vec!["cat".to_string(), "other".to_string()]
         );
     }
@@ -1505,7 +1533,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        let specs = per_channel_legend_specs(&spec);
+        let specs = per_channel_legend_specs(&bindings(&spec));
         assert_eq!(specs.len(), 3);
         // Color's orient wins over x's; x's columns wins over y's; y still
         // supplies the field neither of the others named.
@@ -1527,7 +1555,7 @@ mod tests {
             "y",
             LegendStyleSpec { orient: Some("bottom".into()), ..Default::default() },
         ));
-        let specs = per_channel_legend_specs(&spec);
+        let specs = per_channel_legend_specs(&bindings(&spec));
         assert_eq!(specs.len(), 1);
         assert_eq!(pick(&specs, |l| l.orient.as_deref()), Some("bottom"));
     }
@@ -1542,7 +1570,7 @@ mod tests {
             "x",
             LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
         ));
-        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&bindings(&spec))));
     }
 
     /// The cycle-1 S3: suppression is read at the SAME precedence as every
@@ -1561,7 +1589,7 @@ mod tests {
             "y",
             LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
         ));
-        let specs = per_channel_legend_specs(&spec);
+        let specs = per_channel_legend_specs(&bindings(&spec));
         assert!(
             !LegendStyleSpec::suppressed_by(&specs),
             "color's explicit placement outranks y's suppression",
@@ -1571,7 +1599,7 @@ mod tests {
             "c",
             LegendStyleSpec { title: Some("t".into()), ..Default::default() },
         ));
-        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&bindings(&spec))));
     }
 
     /// `disabled` and `orient` cascade INDEPENDENTLY, field by field — the
@@ -1589,7 +1617,7 @@ mod tests {
             "y",
             LegendStyleSpec { disabled: Some(true), ..Default::default() },
         ));
-        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&bindings(&spec))));
     }
 
     /// The single-channel askers (aux blocks, chart-level) are the
@@ -1649,7 +1677,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
 
         assert!(bundle.legend_entries.is_empty(), "buckets render as a colorbar");
         let cb = bundle.colorbar.expect("discretizing color must build a colorbar");
@@ -1681,7 +1709,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("continuous color must build a colorbar");
         assert_eq!(cb.stops.len(), 11);
         assert_eq!(cb.tick_labels.len(), 5);
@@ -1710,7 +1738,7 @@ mod tests {
         let mut warnings = Vec::new();
         let scales_default = scales_with_color(scale());
         let default_bundle =
-            build_color_legend(&spec, &empty_batch(), &scales_default, &layers, None, &mut warnings);
+            build_color_legend(&bindings(&spec), &empty_batch(), &scales_default, &layers, None, &mut warnings);
         let default_labels = default_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
@@ -1721,7 +1749,7 @@ mod tests {
         ));
         let scales_typed = scales_with_color(scale());
         let typed_bundle =
-            build_color_legend(&spec, &empty_batch(), &scales_typed, &layers, None, &mut warnings);
+            build_color_legend(&bindings(&spec), &empty_batch(), &scales_typed, &layers, None, &mut warnings);
         let typed_labels = typed_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         assert_eq!(
@@ -1768,14 +1796,14 @@ mod tests {
         );
         let numeric = batch_of(DataType::Float64, Arc::new(Float64Array::from(vec![lo as f64, hi as f64])));
         let config = ChartConfig::default();
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&spec, &temporal, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &temporal, &config), Ok(()));
         assert!(
-            refuse_format_temporality_mismatch_legend_fields(&spec, &numeric, &config).is_err(),
+            refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &numeric, &config).is_err(),
             "negative control: the same spec over a numeric column is refused"
         );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &temporal, &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &temporal, &scales, &layers, None, &mut warnings);
         let labels = bundle.colorbar.expect("must build a colorbar").tick_labels;
         assert!(
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
@@ -1822,19 +1850,19 @@ mod tests {
         let config = ChartConfig::default();
         let labels = |spec: &ChartSpec, batch: &RecordBatch| {
             let layers = vec![LayerPrepared::from_chart_only(spec)];
-            build_color_legend(spec, batch, &scales, &layers, None, &mut Vec::new())
+            build_color_legend(&bindings(spec), batch, &scales, &layers, None, &mut Vec::new())
                 .colorbar
                 .expect("must build a colorbar")
                 .tick_labels
         };
 
         let year = spec_with("%Y");
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&year, &temporal, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&year), &temporal, &config), Ok(()));
         assert_eq!(labels(&year, &temporal), ["2001", "2002", "2003", "2004", "2005"]);
 
         let number = spec_with(".2f");
         assert_eq!(
-            refuse_format_temporality_mismatch_legend_fields(&number, &temporal, &config),
+            refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &temporal, &config),
             Err(crate::render::RenderError::NumberFormatOnTemporalScale {
                 channel: "color",
                 surface: crate::render::FormatSurface::Legend,
@@ -1842,7 +1870,7 @@ mod tests {
                 coord_flipped: false,
             })
         );
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&number, &numeric, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &numeric, &config), Ok(()));
         // The fixture's scale domain is the epoch-ms span; over a numeric
         // field those are just numbers, formatted as the d3 spec says.
         assert_eq!(labels(&number, &numeric)[0], "978307200000.00");
@@ -1885,7 +1913,7 @@ mod tests {
                     ..Default::default()
                 };
                 let err = refuse_format_temporality_mismatch_legend_fields(
-                    &spec_with(channel, pair.clone()),
+                    &bindings(&spec_with(channel, pair.clone())),
                     &batch,
                     &config,
                 )
@@ -1898,7 +1926,7 @@ mod tests {
                 ] {
                     assert_eq!(
                         refuse_format_temporality_mismatch_legend_fields(
-                            &spec_with(channel, disabled),
+                            &bindings(&spec_with(channel, disabled)),
                             &batch,
                             &config,
                         ),
@@ -1913,7 +1941,7 @@ mod tests {
                     ..Default::default()
                 };
                 assert_eq!(
-                    refuse_format_temporality_mismatch_legend_fields(&spec_with(channel, pair), &batch, &chart_off),
+                    refuse_format_temporality_mismatch_legend_fields(&bindings(&spec_with(channel, pair)), &batch, &chart_off),
                     Ok(()),
                     "{channel}: a chart-level disabled legend is exempt"
                 );
@@ -1937,7 +1965,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render continuous color; colorbar must be suppressed");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "exactly one warning must fire");
@@ -1964,7 +1992,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Ribbon, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "ribbon cannot render continuous color; colorbar must be suppressed");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -1993,7 +2021,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render a discretizing color scale either");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -2025,7 +2053,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("a point layer sharing the scale genuinely renders it; colorbar must stay");
         assert_eq!(cb.stops.len(), 11);
         assert!(warnings.is_empty(), "a mixed line+point chart sharing the scale must not warn spuriously");
@@ -2043,7 +2071,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert_eq!(bundle.legend_entries.len(), 3, "categorical color on line stays byte-identical (NF-A3)");
         assert!(bundle.colorbar.is_none());
         assert!(warnings.is_empty(), "categorical color must never trigger the inert-scale suppression");
@@ -2072,7 +2100,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "legend=None never built a colorbar in the first place");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "the inert channel must still warn even with no legend to suppress");
@@ -2122,7 +2150,7 @@ mod tests {
         line.encoding.size = spec.encoding.size.clone();
         let layers = vec![line];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         // Sanity: the merge premise actually held (colorbar nulled by the
         // merge, not the inert-scale check testing nothing).
         assert!(bundle.colorbar.is_none());
@@ -2195,7 +2223,7 @@ mod tests {
     fn size_block_of(layers: &[LayerPrepared], sibling_draws_dots: bool) -> Option<(SymbolKind, Vec<f64>)> {
         let (scales, spec) = size_only_fixture();
         let ctx = LeafScaleContext { size_scale_has_non_line_sibling: sibling_draws_dots, ..Default::default() };
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, layers, Some(&ctx), &mut Vec::new());
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, layers, Some(&ctx), &mut Vec::new());
         let mut blocks = bundle.aux_legends.iter().filter_map(|a| match a {
             AuxLegendInput::Size { entries, symbol, .. } => Some((*symbol, entries.iter().map(|e| e.radius).collect())),
             _ => None,
@@ -2298,7 +2326,7 @@ mod tests {
         };
         let symbol_beside_line = |other: LayerPrepared| {
             let layers = [sized(Mark::Line), other];
-            let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut Vec::new());
+            let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut Vec::new());
             match &bundle.aux_legends[0] {
                 AuxLegendInput::Size { symbol, .. } => *symbol,
                 other => panic!("expected a size block, got {other:?}"),
@@ -2340,7 +2368,7 @@ mod tests {
         point.encoding.size = spec.encoding.size.clone();
         let layers = vec![point];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "the merge still folds the colorbar into the size legend");
         assert!(warnings.is_empty(), "point genuinely renders continuous color; nothing is inert here");
         let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
@@ -2399,7 +2427,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no Size legend was emitted; the colorbar is the chart's only color legend and must survive");
         assert!(
             !bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })),
@@ -2418,7 +2446,7 @@ mod tests {
         scales.size = None; // the channel is bound in `spec` but never resolved
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no resolved size scale means no Size block; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2445,7 +2473,7 @@ mod tests {
         });
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "an empty-entries Size legend is not emitted; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2472,7 +2500,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("g")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line's inert v channel must still lose its colorbar");
         assert_eq!(warnings.len(), 1, "point's unrelated field g must not exempt line's v: {warnings:?}");
         match &warnings[0] {
@@ -2503,7 +2531,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "point genuinely renders the shared v mapping; colorbar must stay");
         assert!(warnings.is_empty(), "same-field point sibling must still exempt line");
     }
@@ -2516,11 +2544,11 @@ mod tests {
         spec.conditionals = vec![color_field_cond("cat").into(), size_cond.into()];
         // Color channel sees only "cat"; Size channel sees only "sz".
         assert_eq!(
-            resolve_conditional_field_names(&spec, ChannelName::Color),
+            resolve_conditional_field_names(&bindings(&spec), ChannelName::Color),
             vec!["cat".to_string()]
         );
         assert_eq!(
-            resolve_conditional_field_names(&spec, ChannelName::Size),
+            resolve_conditional_field_names(&bindings(&spec), ChannelName::Size),
             vec!["sz".to_string()]
         );
     }
@@ -2549,7 +2577,7 @@ mod tests {
         let spec = spec_with_color_field("g");
         let mut warnings = Vec::new();
         let bundle = build_color_legend(
-            &spec,
+            &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
@@ -2563,7 +2591,7 @@ mod tests {
         spec.encoding.color.as_mut().unwrap().title = Some("Group".into());
         let mut warnings = Vec::new();
         let bundle = build_color_legend(
-            &spec,
+            &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
@@ -2578,7 +2606,7 @@ mod tests {
         spec.encoding.color.as_mut().unwrap().title = Some(String::new());
         let mut warnings = Vec::new();
         let bundle = build_color_legend(
-            &spec,
+            &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
             &layers(&spec),
@@ -2607,7 +2635,7 @@ mod tests {
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
         let bundle = build_color_legend(
-            &spec,
+            &bindings(&spec),
             &empty_batch(),
             &scales_with_color(ColorScale::Categorical {
                 domain: vec!["a".into(), "b".into()],
@@ -2846,7 +2874,7 @@ mod tests {
     fn aux_legend_channels_pyfunction_matches_aux_legend_channel_pairs_names() {
         let spec = empty_spec();
         let pair_names: Vec<String> =
-            aux_legend_channel_pairs(&spec).iter().map(|(name, _)| name.to_string()).collect();
+            aux_legend_channel_pairs(&bindings(&spec)).iter().map(|(name, _)| name.to_string()).collect();
         assert_eq!(aux_legend_channels(), pair_names);
         assert_eq!(aux_legend_channels(), vec!["size", "shape", "stroke_dash"]);
     }

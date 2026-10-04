@@ -49,12 +49,14 @@ from ferrum._layer import (
     MarkDesugarResult,
     apply_catch_all_style,
     catch_all_over,
+    titled_encoding,
 )
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
 from ferrum._warn import user_stacklevel
-from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws
+from ferrum._entry import EntryRefusal
+from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws, resolve_figure_style
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -274,12 +276,12 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
     the fluent-path twin of the figure-level ``mark={"line": {...}}``
     override, and it is validated against the same vocabulary:
     ``_overrides.LAYER_NAME_CATALOG[kind]``, the registry every composite
-    mark already populates with the sub-layers it can draw. Keyed on that
-    rather than on the layers this particular call happens to emit, so a
-    conditionally-absent layer (a ``ribbon`` under ``ci=None``, a
-    ``boxplot`` ``outlier`` under ``outliers=False``) is accepted as a no-op
-    exactly as ``_apply_mark_overrides`` accepts it -- one vocabulary, two
-    doors, not two vocabularies.
+    mark already populates with the sub-layers it can draw. This check runs
+    at the call, before the desugar, so it judges names only; once the
+    desugar has run, the dispatcher holds each aimed dict to its layer's
+    mark and refuses one aimed at a catalogued layer this call did not
+    draw (a ``ribbon`` under ``ci=None``), as ``_apply_mark_overrides``
+    does -- one vocabulary, two doors, not two vocabularies.
 
     An unknown name is REFUSED rather than silently ignored, in the voice of
     the entry the caller invoked (*where*, defaulting to ``mark_<kind>``):
@@ -293,16 +295,15 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
     Raises
     ------
     ValueError
-        If a key is not a sub-layer *kind* can draw.
-    TypeError
-        If *layer_kwargs*, or any of its values, is not a dict -- mirroring
+        If a key is not a sub-layer *kind* can draw, or *layer_kwargs*, or
+        any of its values, is not a dict -- mirroring
         ``_apply_mark_overrides``' refusal of a non-dict override value.
     """
     if layer_kwargs is None:
         return {}
     entry = where or f"mark_{kind}"
     if not isinstance(layer_kwargs, dict):
-        raise TypeError(
+        raise ValueError(
             f"{entry}(layer_kwargs=) must be a dict mapping a sub-layer name to that "
             f"layer's mark kwargs, e.g. layer_kwargs={{'line': {{'stroke': 'red'}}}}; "
             f"got {type(layer_kwargs).__name__}."
@@ -324,7 +325,7 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
                 f"instead, e.g. {entry}(opacity=0.5)."
             )
         if not isinstance(style, dict):
-            raise TypeError(
+            raise ValueError(
                 f"{entry}(layer_kwargs={{{name!r}: ...}}) must be a dict of mark "
                 f"kwargs for that layer; got {type(style).__name__}."
             )
@@ -333,8 +334,12 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
     return aimed
 
 
-def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict) -> _Layer:
+def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
     """Apply the caller's per-layer style to *layer*, recording the keys as theirs.
+
+    The style is held to the layer's own mark (:func:`resolve_figure_style`,
+    voiced as *entry*, or as the figure that resolved this mark while it
+    built).
 
     Recorded on ``caller_style_keys`` (not just merged into ``mark_kwargs``)
     because the chart-level catch-all is spread over the same layers moments
@@ -346,6 +351,7 @@ def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict) -> _Layer:
     aimed = layer_kwargs.get(layer.name) if layer.name is not None else None
     if not aimed:
         return layer
+    aimed = resolve_figure_style(layer.mark, aimed, provisional=entry)
     return replace(
         layer,
         mark_kwargs={**(layer.mark_kwargs or {}), **aimed},
@@ -353,8 +359,21 @@ def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict) -> _Layer:
     )
 
 
+def _refuse_undrawn_layer_kwargs(layer_kwargs: dict, drawn: set, entry: str) -> None:
+    """Refuse per-layer style aimed at a catalogued layer this call did not draw."""
+    undrawn = sorted(name for name in layer_kwargs if name not in drawn)
+    if undrawn:
+        raise EntryRefusal(
+            lambda voice: (
+                f"{voice}(layer_kwargs=): this call draws no {undrawn!r} sub-layer, so "
+                f"nothing would take the style; it draws {sorted(drawn)}"
+            ),
+            entry,
+        )
+
+
 def _aim_single_mark_kwargs(
-    result: MarkDesugarResult, layer_kwargs: dict
+    result: MarkDesugarResult, layer_kwargs: dict, entry: str
 ) -> tuple[dict | None, frozenset]:
     """The single-mark half of :func:`_aim_layer_kwargs`.
 
@@ -368,6 +387,7 @@ def _aim_single_mark_kwargs(
     aimed = layer_kwargs.get(result.layer_name) if result.layer_name is not None else None
     if not aimed:
         return result.mark_kwargs, result.caller_style_keys
+    aimed = resolve_figure_style(result.mark, aimed, provisional=entry)
     return (
         {**(result.mark_kwargs or {}), **aimed},
         result.caller_style_keys | frozenset(aimed),
@@ -492,9 +512,7 @@ def _merge_positional_channel_scale(layer_value: Any, chart_scale: Any, axis: st
 
     layer_scale = layer_value.option("scale")
     if layer_scale is None:
-        new_kwargs = dict(layer_value._kwargs)
-        new_kwargs["scale"] = chart_scale
-        return type(layer_value)(layer_value.field, **new_kwargs)
+        return layer_value._with_options(scale=chart_scale)
 
     if _scale_domain(layer_scale) is not None:
         return None  # mark-computed domain wins
@@ -504,9 +522,7 @@ def _merge_positional_channel_scale(layer_value: Any, chart_scale: Any, axis: st
         return None  # nothing to merge
 
     merged_scale = {**_scale_to_dict(layer_scale), "domain": chart_domain}
-    new_kwargs = dict(layer_value._kwargs)
-    new_kwargs["scale"] = merged_scale
-    return type(layer_value)(layer_value.field, **new_kwargs)
+    return layer_value._with_options(scale=merged_scale)
 
 
 def _propagate_positional_scale(chart_encoding: dict, layer_encoding: dict) -> dict:
@@ -888,8 +904,10 @@ def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
     The cells are always colored by Hex's per-cell aggregate. A color naming
     the column an aggregate reads supplies ``field`` when none was given. That
     color, or one naming Hex's output column itself, styles the cell color
-    binding with its channel properties (title, scheme, legend). Any other
-    color would be drawn nowhere, so it is refused.
+    binding with its channel properties (title, scheme, legend), its scheme
+    becoming the cells' ``cmap`` (refused beside a different ``cmap=``). Any
+    other color would be drawn nowhere, so it is refused. Every refusal is
+    voiced as the public entry the caller invoked.
     """
     from ferrum._registry import aggregate_needs_field, registry_output_columns
 
@@ -910,11 +928,20 @@ def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
             f"aggregate={aggregate!r}{of_field}. Bind color= to the aggregated column, "
             "or drop it."
         )
-    ctx.transform_kwargs = {
-        **kwargs,
-        "_color": ctx.chart._encoding["color"],
-        "_entry": ctx.chart._pending_stat_mark.entry,
-    }
+    # The polygon cells sample their own `cmap`, so a scheme on the caller's
+    # color reaches them through it and the legend agrees with the cells.
+    color = ctx.chart._encoding["color"]
+    scheme = color.option("scheme") if isinstance(color, ChannelBase) else None
+    if scheme is not None:
+        cmap = kwargs.get("cmap")
+        if cmap is not None and cmap != scheme:
+            entry = ctx.chart._pending_stat_mark.entry or "mark_hex"
+            raise ValueError(
+                f"{entry}: cmap={cmap!r} and color=fm.Color(..., scheme={scheme!r}) both "
+                "set the cell colormap; pass only one."
+            )
+        kwargs = {**kwargs, "cmap": scheme}
+    ctx.transform_kwargs = {**kwargs, "_color": color}
 
 
 def _resolve_or_refuse_disc_flag(
@@ -1233,9 +1260,12 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         # not a key the layer records in `caller_style_keys` -- which is what
         # `_aim_layer_kwargs` just recorded for the keys aimed here.  The
         # prior primitive layer is left untouched.
+        _refuse_undrawn_layer_kwargs(
+            layer_kwargs, {lyr.name for lyr in result.layers if lyr.name is not None}, entry
+        )
         emitted = [
             replace(
-                apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs), style_dict),
+                apply_catch_all_style(_aim_layer_kwargs(lyr, layer_kwargs, entry), style_dict),
                 entry=entry,
             )
             for lyr in result.layers
@@ -1244,6 +1274,11 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         # prerequisite): reattach any chart-level explicit x/y scale the
         # desugar's fresh per-layer encodings would otherwise drop.
         emitted = [_propagate_layer_scale(chart._encoding, lyr) for lyr in emitted]
+        titles = chart._pending_stat_mark.legend_titles
+        if titles:
+            emitted = [
+                replace(lyr, encoding=titled_encoding(lyr.encoding, titles)) for lyr in emitted
+            ]
         new._layers = _prior_layers + emitted
         new._mark = None  # signals layered mode in to_spec
         return new
@@ -1256,7 +1291,10 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # declares WHICH catalogued layer its one mark is can be styled through
     # the same `layer_kwargs=` door, and the keys aimed there are recorded as
     # the caller's so the chart-level catch-all below cannot override them.
-    single_mark_kwargs, single_caller_keys = _aim_single_mark_kwargs(result, layer_kwargs)
+    _refuse_undrawn_layer_kwargs(
+        layer_kwargs, {result.layer_name} if result.layer_name is not None else set(), entry
+    )
+    single_mark_kwargs, single_caller_keys = _aim_single_mark_kwargs(result, layer_kwargs, entry)
     if _prior_layers:
         if result.data is not None:
             # No shipped desugar produces this combination today (the only
@@ -1278,6 +1316,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         if remap:
             _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding)
         smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
+        smooth_enc = titled_encoding(smooth_enc, chart._pending_stat_mark.legend_titles)
         # Style applies to the composite's emitted smooth layer only; the prior
         # scatter layer keeps its own mark_kwargs. Which side wins on a shared
         # key is `catch_all_over`'s call, from the caller-named keys.
@@ -1322,4 +1361,5 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     if remap:
         _apply_remap(new._encoding, remap, orig_encoding=chart._encoding)
     new._encoding = _propagate_positional_scale(chart._encoding, new._encoding)
+    new._encoding = titled_encoding(new._encoding, chart._pending_stat_mark.legend_titles)
     return new

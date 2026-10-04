@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ferrum import Chart, ConcatChart
 
 from ferrum.diagnostics.source import ComparedModelSource
-from ferrum.encoding import Color, X, Y
+from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _compose_compare,
@@ -30,6 +30,7 @@ from ferrum.plots._helpers import (
     _order_compare_rows,
     _require,
     _resolve_source,
+    _title_legend,
 )
 
 
@@ -253,7 +254,7 @@ def _cv_scores_chart_compare_from_source(
         color_field="model",
         position=Dodge(by="model"),
     )
-    chart = chart.encode(y=Y("score", title="Score"), color=Color("model", title="Model"))
+    chart = _title_legend(chart.encode(y=Y("score", title="Score")), "color", "Model")
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme

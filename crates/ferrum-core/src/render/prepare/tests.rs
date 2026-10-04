@@ -2825,6 +2825,39 @@ fn layer_own_transforms_refused_naming_the_layer() {
     );
 }
 
+/// A hand-built spec whose `layers` list is empty refuses as a typed error
+/// rather than reading a layer 0 that does not exist; one layer prepares.
+#[test]
+fn an_empty_layers_list_refuses() {
+    pyo3::Python::initialize();
+    use crate::spec::layer::Layer;
+    let prepare = |spec: &ChartSpec| {
+        prepare_render_inputs(
+            spec,
+            &price_weight_batch(),
+            &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport {
+                width: 600.0,
+                height: 400.0,
+            },
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+    };
+    let mut spec = spec_with_one_bin(None);
+    spec.layers = Some(vec![]);
+    let err = prepare(&spec).err().expect("an empty layers list must refuse");
+    assert!(matches!(err, RenderError::LayeredChartNoLayers), "wrong variant: {err:?}");
+    assert_eq!(
+        err.to_string(),
+        "ChartSpec.layers is an empty list: a layered chart draws its layers, and this one \
+         has none. Add at least one layer, or leave layers unset to draw the chart's own mark."
+    );
+
+    spec.layers = Some(vec![Layer { mark: Mark::Point, encoding: Encoding::default(), ..Default::default() }]);
+    assert!(prepare(&spec).is_ok(), "one layer must prepare");
+}
+
 // ── `#176`(11) + N3: malformed sort refuses at render ─────────────────────
 //
 // Python's construction-time gate (`EncodingSpec.__new__`,

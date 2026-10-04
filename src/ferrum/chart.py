@@ -33,7 +33,7 @@ from ferrum._spec_build import SpecBuildMixin
 from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _validate_sort_object
-from ferrum.marks.base import MARK_HONORED_KWARGS, MarkBase, check_constant_size
+from ferrum.marks.base import MarkBase
 from ferrum.position import _STACKABLE_MARKS
 
 # Re-exported from this module so existing ``from ferrum.chart import ...``
@@ -509,19 +509,10 @@ def _append_conditional(
     ``Chart.__add__``'s layer merge enforces the identical rule via its own
     inline check rather than calling this function (it has no single
     *source_key*/*claimed_here* to resolve -- it is merging two already-built
-    conditional lists, not appending one new declaration), but the answer
-    must be the same: **2026-09-11, batch-H close cycle 4 correction.** An
-    earlier version of this docstring exempted the merge on the premise
-    that "each layer's conditional belongs to that layer's marks" -- reading
-    the WASM runtime (``crates/ferrum-wasm/src/conditional.rs``'s
-    ``resolve_conditionals_with_packed``) disproves that: every conditional
-    in the wire's flat ``conditionals`` list is applied to every mark batch
-    in every panel, with no per-layer scope at all. So `a + b`, where each
-    side carries its own conditional on the same wire channel, used to build
-    a spec with two conditionals stamped the same ``channel`` and no defined
-    winner -- the exact undefined-runtime-behaviour shape this rule exists
-    to refuse, reached through the one entry point that used to skip the
-    check.
+    conditional lists, not appending one new declaration), and the answer is
+    the same: the merged chart holds one conditional per wire channel,
+    whichever layers each reaches, so two on one channel have no defined
+    winner and refuse.
     """
     wire = conditional_wire_channel(source_key)
     alias_detail = (
@@ -1156,30 +1147,36 @@ class Chart(
         new._composite_kind = name
         return new
 
+    def _native_size(self) -> tuple[float, float]:
+        """Return the ``(width, height)`` this chart renders at on its own.
+
+        Its declared size, or else the ``ferrum.config`` default the renderer
+        falls back to; read at call time, so a ``config.set`` in force applies.
+        """
+        from ferrum import config
+
+        return (
+            self._width or float(config.get("width")),
+            self._height or float(config.get("height")),
+        )
+
     def _with_entry(self, entry: str) -> "Chart":
         # A clone whose every layer -- the ones it already has, the ones its
         # pending composite mark emits at resolution, or its one unlayered
         # mark -- names *entry*, the public figure function or visualizer
         # that built it, so a warning or refusal about any of them speaks as
-        # that call (`_Layer.entry`; the chart-level `_entry` reaches the
-        # wire only for a flat chart, see `to_spec`). Every constant size
-        # already on a primitive mark meets the one size rule here, in that
-        # voice, whichever door inside the figure wrote it (a `mark=`
-        # override, a `layers=` entry, the figure's own styling); a pending
-        # composite's is held to it by the dispatcher at resolution.
+        # that call (`_Layer.entry`; the chart-level `_entry` is the flat
+        # chart's, see `to_spec`). Every door inside the figure that writes a
+        # caller's style already refused it in this voice
+        # (`resolve_figure_style`); Rust holds every layer's size to the one
+        # size rule at render, wrapped in the layer's entry.
         new = self._clone()
-        new._entry = entry
         if new._layers:
             new._layers = [replace(layer, entry=entry) for layer in new._layers]
-            drawn = [(layer.mark, layer.mark_kwargs) for layer in new._layers]
-        else:
-            drawn = [(new._mark, new._mark_kwargs)]
-        for mark, mark_kwargs in drawn:
-            size = (mark_kwargs or {}).get("size")
-            if size is not None and mark in MARK_HONORED_KWARGS:
-                check_constant_size(entry, mark, size)
         if new._pending_stat_mark is not None:
             new._pending_stat_mark = replace(new._pending_stat_mark, entry=entry)
+        if not new._layers and new._pending_stat_mark is None:
+            new._entry = entry
         return new
 
     def mark_point(self, **kwargs) -> "Chart":
@@ -2523,16 +2520,15 @@ class Chart(
                     _check_param_collision(s.name, is_selection=True, context="layer merge")
                 _append_unique_by_name(new._selections, s)
         if rhs._conditionals:
-            # One-conditional-per-wire-channel, enforced across the merge
-            # too (2026-09-11, batch-H close cycle 4): the wire's
-            # `conditionals` list is flat, and the interactive runtime applies
-            # every conditional to every point and rect batch in every panel
-            # (only a line reads its `layers` scope -- see
-            # `_append_conditional`'s docstring), so two conditionals
-            # colliding on one channel is exactly as undefined here as it
-            # is within one `encode()` call. Checked against `new._conditionals`
-            # as it accumulates, so a third+ chart in a chained
-            # `a + b + c` merge collides against everything merged so far.
+            # One conditional per wire channel, enforced across the merge
+            # too: the merged chart's `conditionals` list holds at most one
+            # per channel, whichever layers each would reach (a `size`
+            # conditional reaches the layers that declare it, a color or
+            # opacity conditional every layer), so two colliding on one
+            # channel is exactly as undefined here as within one `encode()`
+            # call. Checked against `new._conditionals` as it accumulates,
+            # so a third+ chart in a chained `a + b + c` merge collides
+            # against everything merged so far.
             for cond in rhs._conditionals:
                 wire = _channel_claimed_by(cond)
                 earlier = _conditional_on_wire(new, wire) if wire is not None else None
@@ -2544,10 +2540,8 @@ class Chart(
                             first=_conditional_declaration_label(earlier, whose="the left chart's"),
                             second=_conditional_declaration_label(cond, whose="the right chart's"),
                             detail=(
-                                " -- after the marks merge onto one panel, every "
-                                "conditional on the merged wire applies to every "
-                                "layer's marks, so there is no per-layer scope to "
-                                "keep the two apart"
+                                " -- the merged chart holds one conditional per wire "
+                                "channel, whichever layers each would reach"
                             ),
                         )
                     )
@@ -3416,7 +3410,9 @@ class Chart(
         if _override_payload is not None and _override_payload.mark_style:
             from ferrum._override_consume import apply_mark_style
 
-            mk = apply_mark_style(mk, _override_payload, is_multi_mark=resolved._layers is not None)
+            mk = apply_mark_style(
+                mk, _override_payload, mark=None if resolved._layers is not None else resolved._mark
+            )
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:

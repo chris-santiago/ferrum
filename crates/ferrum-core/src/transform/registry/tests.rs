@@ -159,7 +159,6 @@ const KINDS_WITH_SCHEMA_FIXTURE: &[&str] = &[
     "linkage",
     "raster",
     "hex",
-    "swarm",
     "letter_value",
     "logistic",
     "glm",
@@ -668,13 +667,10 @@ fn density_data_outputs_match_actual_schema() {
     );
 }
 
-/// `swarm`'s declared outputs (fixed round-2 cycle-1: was `outputs: []`,
-/// inconsistent with `violin`'s declared `__pos_x_offset__` for the identical
-/// column) are additive to an ARBITRARY input schema — unlike every other
-/// fixture above, the real output also carries the fixture's own `cat`/`v`
-/// input columns unchanged, so this is the one call site that needs a
-/// non-empty `passthrough` allowlist for `assert_schema_matches`'s equality
-/// check to hold.
+/// `swarm` declares no outputs: its output is its ARBITRARY input schema
+/// unchanged (placement is added at render), so the fixture's own `cat`/`v`
+/// input columns are the whole `passthrough` allowlist, and an additive column
+/// the transform grew without declaring it fails the equality check.
 #[test]
 fn swarm_outputs_match_actual_schema() {
     pyo3::Python::initialize();

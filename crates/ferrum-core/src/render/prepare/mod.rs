@@ -606,7 +606,21 @@ pub struct LegendPreparedOverrides {
     pub title_padding: Option<f64>,
 }
 
+/// The rendering encoding: layer 0's resolved (post-`CoordFlip`) encoding,
+/// which every scale, axis and legend of the chart is built from. A
+/// chart-level binding is inherited into it and a layer's own binding replaces
+/// it, so layer 0 decides. `build_layers` never returns an empty `Vec`: it
+/// refuses an empty `layers` list ([`RenderError::LayeredChartNoLayers`]).
+pub(crate) fn rendering_encoding_of(layers: &[LayerPrepared]) -> &crate::spec::encoding::Encoding {
+    &layers[0].encoding
+}
+
 impl PreparedInputs {
+    /// [`rendering_encoding_of`] this chart's layers.
+    pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
+        rendering_encoding_of(&self.layers)
+    }
+
     /// The final transform-pipeline output — i.e. `transform_outputs[FINAL_OUTPUT_KEY]`.
     /// Used by the render orchestrator for facet filtering, the colorbar legend
     /// scale rebuild, and any other consumer that needs the chart-level tail.
@@ -1179,7 +1193,7 @@ pub fn prepare_render_inputs(
     // Clone spec and substitute the rendering encoding so resolve_scales works
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
-    let rendering_encoding = layers[0].encoding.clone();
+    let rendering_encoding = rendering_encoding_of(&layers);
     let rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
@@ -1240,7 +1254,7 @@ pub fn prepare_render_inputs(
     apply_axis_domain_configs(
         &mut provisional_scales.x,
         &mut provisional_scales.y,
-        &rendering_encoding,
+        rendering_encoding,
         chart_config,
         &mut scale_warnings,
     )?;
@@ -1253,7 +1267,7 @@ pub fn prepare_render_inputs(
         secondary_y_tick_counts,
     } = build_axes(
         spec,
-        &rendering_encoding,
+        rendering_encoding,
         &provisional_scales,
         theme,
         &layers,
@@ -1316,36 +1330,10 @@ pub fn prepare_render_inputs(
     // sees the whole group, so its verdicts reach `build_color_legend` with
     // it. `None` for every standalone (flat/facet) render.
     //
-    // Every legend channel's scale is built from the first layer's resolved
-    // encoding (a chart-level binding is inherited into it, a layer's own
-    // binding replaces it), so each legend reads its binding, and with it the
-    // title and the `Legend(...)` style, from there too. `x`/`y` stay
-    // authored: they only feed the color legend's `Legend(...)` cascade,
-    // which must not swap under `CoordFlip`.
-    // `legend_spec` clones the whole `ChartSpec` to override 4 encoding
-    // channels; the legend builders below only ever read `.encoding.{color,
-    // x, y, size, shape, stroke_dash}` and `.conditionals` off it, never
-    // `.layers`/`.transforms`/the rest, so a borrowed `Encoding` + a
-    // `conditionals` slice would be cheaper. Kept as a full clone anyway:
-    // trimming it means either (a) hand-reconstructing a `ChartSpec` with
-    // placeholder values for every unread field — an unenforced invariant
-    // that silently goes stale the day a future edit reads one of those
-    // fields here — or (b) re-signing every function in `legend.rs` (and its
-    // ~30 test call sites) to take `&Encoding` instead of `&ChartSpec`. Both
-    // are bigger than this one render-time clone warrants; (b) is the right
-    // move if this legend-building subsystem grows further.
-    let rendered = &layers[0].encoding;
-    let legend_spec = ChartSpec {
-        encoding: crate::spec::encoding::Encoding {
-            color: rendered.color.clone(),
-            size: rendered.size.clone(),
-            shape: rendered.shape.clone(),
-            stroke_dash: rendered.stroke_dash.clone(),
-            ..spec.encoding.clone()
-        },
-        ..spec.clone()
-    };
-    legend::refuse_format_temporality_mismatch_legend_fields(&legend_spec, &transformed, chart_config)?;
+    // Every legend reads its binding off the rendering encoding its scale was
+    // built from (`LegendBindings`).
+    let legend_bindings = legend::LegendBindings::new(spec, rendering_encoding);
+    legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, chart_config)?;
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
@@ -1353,7 +1341,7 @@ pub fn prepare_render_inputs(
         legend_overrides,
         aux_legends,
     } = legend::build_color_legend(
-        &legend_spec,
+        &legend_bindings,
         &transformed,
         &provisional_scales,
         &layers,
@@ -1609,10 +1597,15 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
 /// the channel the user wrote at chart level).
 ///
 /// A layered spec that also sets a chart-level `mark_style` is refused
-/// ([`RenderError::LayeredChartMarkStyle`]): no layer reads it. So is a
+/// ([`RenderError::LayeredChartMarkStyle`]): no layer reads it. So is an
+/// empty `layers` list ([`RenderError::LayeredChartNoLayers`]): nothing would
+/// draw, and the rendering encoding is layer 0's. So is a
 /// layer with its own non-empty `transforms`
 /// ([`RenderError::LayerTransformsUnsupported`]): no layer runs them.
 fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
+    if spec.layers.as_ref().is_some_and(Vec::is_empty) {
+        return Err(RenderError::LayeredChartNoLayers);
+    }
     let layer_count = spec.layers.as_ref().map_or(1, Vec::len);
     for (index, cond) in spec.conditionals.iter().enumerate() {
         if let Some(&layer) = cond.layers.iter().flatten().find(|&&l| l >= layer_count) {

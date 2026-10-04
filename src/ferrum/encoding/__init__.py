@@ -43,7 +43,6 @@ from ferrum.encoding.text import (
 )
 from ferrum.encoding.facet import Facet, FacetRow, FacetCol
 from ferrum.encoding._aliases import apply_channel_aliases
-from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS
 
 __all__ = [
     "X",

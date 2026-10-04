@@ -266,19 +266,27 @@ class TestOverrideMarkPrefix:
         with pytest.raises(FerrumOverrideError):
             chart.to_svg()
 
-    def test_documented_gap_override_is_not_yet_per_mark(self):
-        """Tracked gap (see _override_apply.py's module docstring): the
-        override registry validates against the UNION of every mark's
-        honored kwargs, not the chart's own mark, since resolve() has no
-        per-chart context. A bar chart can still .override(mark_shape=...)
-        even though mark_bar() itself would refuse shape=. This test pins
-        the gap so a future tightening is a deliberate, visible change."""
+    def test_override_is_held_to_the_charts_own_mark(self):
+        """The override registry resolves ``mark_shape`` against every
+        mark's union, but where the style is applied the chart's own mark
+        is known, and a leaf it does not honor refuses as ``mark_bar(shape=)``
+        would, instead of reaching a wire field the bar never reads."""
+        from ferrum.exceptions import FerrumOverrideError
+
         df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
         chart = fm.Chart(df).mark_bar().encode(x="cat", y="val").override(mark_shape="diamond")
-        # Resolves (does not raise FerrumOverrideError); Rust silently
-        # ignores the field for a bar mark, matching this gap's tracked
-        # description.
-        chart.to_svg()
+        with pytest.raises(FerrumOverrideError) as exc_info:
+            chart.to_svg()
+        assert str(exc_info.value).startswith(
+            "Chart.override: keyword argument 'shape' is not honored by mark_bar. Honored: "
+        )
+        assert isinstance(exc_info.value, ValueError)
+
+    def test_override_of_a_leaf_the_mark_honors_still_applies(self):
+        """Control: the same leaf on a point chart draws a diamond."""
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
+        base = fm.Chart(df).mark_point().encode(x="x", y="y")
+        assert base.override(mark_shape="diamond").to_svg() != base.to_svg()
 
 
 # ---------------------------------------------------------------------------

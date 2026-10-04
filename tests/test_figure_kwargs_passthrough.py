@@ -204,7 +204,9 @@ class TestPairplotPassthrough:
     def test_mark_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"])
         overridden = fm.pairplot(df, vars=["x", "y"], mark={"opacity": 0.2})
-        assert overridden.to_svg() is not None
+        # A compound view fans a style dict out to every panel whose mark
+        # honors it.
+        _renders_differently(default, overridden)
 
     def test_encode_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"], hue="cat")
@@ -256,9 +258,9 @@ class TestJointplotPassthrough:
     def test_mark_override(self, df):
         default = fm.jointplot(df, x="x", y="y")
         overridden = fm.jointplot(df, x="x", y="y", mark={"opacity": 0.2})
-        # jointplot is a compound view; mark override fans out to children.
-        # Verify no crash and valid SVG.
-        assert "<svg" in overridden.to_svg()
+        # A compound view fans a style dict out to every panel whose mark
+        # honors it.
+        _renders_differently(default, overridden)
 
     def test_encode_override(self, df):
         default = fm.jointplot(df, x="x", y="y")

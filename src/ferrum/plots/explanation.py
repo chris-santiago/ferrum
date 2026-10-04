@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
-from ferrum.encoding import Color, X, Y
+from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
 from ferrum.plots._helpers import (
     _compose_compare,
@@ -42,6 +42,7 @@ from ferrum.plots._helpers import (
     _should_facet_by_class,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
+    _title_legend,
 )
 
 
@@ -259,10 +260,11 @@ def _importance_chart_compare_from_source(
         orient="vertical",
         error_bars=error_bars,
         top_k=None,
-        color_field=Color("model", title="Model"),
+        color_field="model",
         position=Dodge(by="model"),
         x_scale_domain=(domain_lo, domain_hi),
     )
+    chart = _title_legend(chart, "color", "Model")
     chart = chart.properties(
         title=ferrum.Title("Feature importance", subtitle=subtitle),
     )
@@ -573,9 +575,9 @@ def _shap_bar_chart_compare_from_source(
             position=Dodge(by="model"),
             x_scale_domain=domain,
         )
-        .encode(color=Color("model", title="Model"))
         .coord(CoordFlip())
     )
+    chart = _title_legend(chart, "color", "Model")
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
@@ -667,7 +669,7 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    chart = chart.encode(color=Color("shap_sign", title="SHAP sign"))
+    chart = _title_legend(chart, "color", "SHAP sign")
     is_faceted = _should_facet_by_class(plot_df, per_class=per_class)
     if is_faceted:
         chart = chart.facet(col="class_label")
@@ -826,9 +828,12 @@ def _pdp_chart_from_source(
         .encode(
             x=X("feature_value", title="Feature value"),
             y=Y("pd_value", title="Partial dependence"),
-            **({"color": Color("class_label", title="Class")} if color_field else {}),
         )
-        .facet(col="feature")
+    )
+    if color_field:
+        chart = _title_legend(chart, "color", "Class")
+    chart = (
+        chart.facet(col="feature")
         # Each feature panel is a DIFFERENT variable with its own x-units, so the
         # x-axis must resolve per-panel. The facet default is shared (which is
         # correct when every panel shows the same axis variable); PDP is the one

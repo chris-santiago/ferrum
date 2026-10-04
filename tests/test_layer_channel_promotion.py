@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
 import polars as pl
 import pytest

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 
-class FerrumOverrideError(Exception):
+class FerrumOverrideError(ValueError):
     """Raised when a [override][ferrum.Chart.override] path cannot be resolved.
+
+    A ``ValueError``, like every other refusal of malformed input.
 
     ``Chart.override(**kwargs)`` is a flat snake_case escape hatch onto the
     chart's presentation spec.  Because the Rust spec deserializers silently

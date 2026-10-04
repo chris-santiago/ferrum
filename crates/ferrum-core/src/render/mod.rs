@@ -630,6 +630,11 @@ pub enum RenderError {
     /// `layer.mark_style > theme`), so the chart-level value could only be
     /// ignored; it refuses instead. `layers` is the layer count.
     LayeredChartMarkStyle { layers: usize },
+    /// A layered `ChartSpec` whose `layers` list is empty: a chart is drawn
+    /// from its layers, and every scale, axis and legend from layer 0's
+    /// encoding, so a chart with none has nothing to draw. Python's chart
+    /// API never builds one; this refuses a hand-built spec that carries one.
+    LayeredChartNoLayers,
     /// A layer carries its own non-empty `transforms` (`layers[layer]`, the
     /// first such layer; `count` is its transform count). A layer never runs
     /// transforms of its own: it reads the chart's pipeline output, or a
@@ -981,6 +986,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::StrokeDashRangeUnsupported { .. }
         // A layer count, no channel token.
         | RenderError::LayeredChartMarkStyle { .. }
+        | RenderError::LayeredChartNoLayers
         // A layer index and a transform count, no channel token.
         | RenderError::LayerTransformsUnsupported { .. }
         // Two indices and a layer count, no channel token.
@@ -1224,6 +1230,11 @@ impl std::fmt::Display for RenderError {
                  effect: a layered chart is styled per layer. Move the style onto each layer's \
                  own mark_style."
             ),
+            Self::LayeredChartNoLayers => write!(
+                f,
+                "ChartSpec.layers is an empty list: a layered chart draws its layers, and this one \
+                 has none. Add at least one layer, or leave layers unset to draw the chart's own mark."
+            ),
             Self::ConditionalLayerOutOfRange { index, layer, layers } => write!(
                 f,
                 "conditionals[{index}].layers names layer {layer}, but the chart has {layers} \
@@ -1463,6 +1474,25 @@ pub enum ExcludedLayerPlacement {
     OwnScale,
 }
 
+/// A chart-level config section that addresses a surface only some charts
+/// have ([`RenderWarning::ConfigSurfaceNotPresent`]). Serialized as the config
+/// key the user set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSurface {
+    /// `configure_axis_y2` / `axis_y2=`: the secondary y axis.
+    AxisY2,
+}
+
+impl ConfigSurface {
+    /// The config key the user set.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::AxisY2 => "axis_y2",
+        }
+    }
+}
+
 /// Warnings emitted during render. Geometric edge cases or wrapped layout warnings.
 ///
 /// Note (2026-05-09): spec §11 (line ~556) used `#[serde(tag = "kind", ...)]` but
@@ -1640,18 +1670,12 @@ pub enum RenderWarning {
         scale_kind: String,
         fallback: OpacityScaleFallback,
     },
-    /// A chart-level config section named a surface the chart does not have.
-    /// The sole producer today is `axis_y2` (D2/F-L07-06, spec §4.1): a chart
-    /// with no `independent_y` layer has no secondary y-axis input
-    /// (`AxesInput.secondary_y` is empty) for the override to fill, so it is
-    /// dropped with this warning rather than silently discarded. `section`
-    /// names the config key the user set (currently always `"axis_y2"`, but
-    /// the variant is not axis_y2-specific by name in case a future config
-    /// surface reaches the same "named but absent" shape). `String`, not
-    /// `&'static str`, so `#[derive(Deserialize)]` round-trips through owned
-    /// input (a `&'static str` field forces `Deserialize<'de>` to require
-    /// `'de: 'static`, breaking `serde_json::from_str` on a local `String`).
-    ConfigSurfaceNotPresent { section: String },
+    /// A chart-level config section named a surface the chart does not have:
+    /// `axis_y2` (D2/F-L07-06, spec §4.1) on a chart with no `independent_y`
+    /// layer has no secondary y-axis input (`AxesInput.secondary_y` is empty)
+    /// for the override to fill, so it is dropped with this warning rather
+    /// than silently discarded. `section` names the config key the user set.
+    ConfigSurfaceNotPresent { section: ConfigSurface },
     /// A per-channel `Legend(values=[...])` on a CATEGORICAL legend named
     /// entries the legend does not have (D6/F-L04-05, spec §4.4). `values`
     /// filters and orders the entries; a name matching none of them cannot be
@@ -2030,8 +2054,9 @@ impl std::fmt::Display for RenderWarning {
             },
             RenderWarning::ConfigSurfaceNotPresent { section } => write!(
                 f,
-                "chart config names '{section}' but the chart has no matching surface; \
-                 the override was not applied"
+                "chart config names '{}' but the chart has no matching surface; \
+                 the override was not applied",
+                section.key()
             ),
             RenderWarning::LegendValuesUnknown { values } => write!(
                 f,
@@ -2240,7 +2265,7 @@ mod tests {
                 scale_kind: "log".into(),
                 fallback: OpacityScaleFallback::LiteralAlpha,
             },
-            RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() },
+            RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 },
             RenderWarning::LegendValuesUnknown { values: vec!["zzz".into()] },
             RenderWarning::LegendTitleConflict {
                 kept: Some("species".into()),
@@ -2298,6 +2323,18 @@ mod tests {
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, w);
         }
+    }
+
+    /// The config surface a `ConfigSurfaceNotPresent` names crosses the wire,
+    /// and is printed, as the config key the user set.
+    #[test]
+    fn config_surface_is_its_config_key_on_the_wire() {
+        let w = RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 };
+        assert_eq!(serde_json::to_string(&w).unwrap(), r#"{"type":"config_surface_not_present","section":"axis_y2"}"#);
+        assert_eq!(
+            w.to_string(),
+            "chart config names 'axis_y2' but the chart has no matching surface; the override was not applied"
+        );
     }
 
     #[test]
@@ -2386,7 +2423,7 @@ mod tests {
         );
 
         // D2/F-L07-06 (this task): `axis_y2` names a surface the chart lacks.
-        let no_surface = RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() };
+        let no_surface = RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 };
         let no_surface_text = format!("{no_surface}");
         assert!(no_surface_text.contains("axis_y2"), "{no_surface_text}");
         assert!(no_surface_text.contains("no matching surface"), "{no_surface_text}");
@@ -5575,7 +5612,7 @@ mod orchestration_tests {
             result
                 .warnings
                 .iter()
-                .any(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2")),
+                .any(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section: ConfigSurface::AxisY2 })),
             "expected a ConfigSurfaceNotPresent{{section: \"axis_y2\"}} warning, got: {:?}",
             result.warnings
         );

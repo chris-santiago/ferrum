@@ -117,7 +117,7 @@ def nominal_color_channel(
     field-name string -- object-ness alone was never the caller stating a
     type, and infers a Continuous scale from runtime dtype the same way a
     bare string would -- so it is rebuilt with ``type_="nominal"`` too
-    (``field._kwargs.get("type") is None`` is the complete untyped predicate:
+    (``field.option("type") is None`` is the complete untyped predicate:
     ``ChannelBase.__init__`` normalizes both the ``type_=`` kwarg and the
     ``"col:N"`` shorthand into that one key, so this test covers every
     untyped spelling). ``None`` passes through as ``None``.
@@ -179,17 +179,12 @@ def nominal_color_channel(
     if field is None:
         return None
     if not isinstance(field, str):
-        kwargs = dict(field._kwargs)
-        needs_rebuild = False
-        if kwargs.get("type") is None:
-            kwargs["type"] = "nominal"
-            needs_rebuild = True
+        options: dict = {}
+        if field.option("type") is None:
+            options["type"] = "nominal"
         if sort is not None:
-            kwargs["sort"] = list(sort)
-            needs_rebuild = True
-        if not needs_rebuild:
-            return field
-        return type(field)(field.field, **kwargs)
+            options["sort"] = list(sort)
+        return field._with_options(**options) if options else field
     from ferrum.encoding import Color
 
     kwargs: dict = {"type_": "nominal"}

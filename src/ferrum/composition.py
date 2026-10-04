@@ -877,9 +877,7 @@ def inject_scale(chart, channel: str, scale_dict: dict):
 
     def _set_on(value):
         if isinstance(value, ChannelBase):
-            new_kwargs = dict(value._kwargs)
-            new_kwargs["scale"] = scale_dict
-            return type(value)(value.field, **new_kwargs)
+            return value._with_options(scale=scale_dict)
         cls = _channel_class_for(channel)
         if cls is None:
             return value
@@ -3543,8 +3541,6 @@ class ClusterMapChart(_CompositeBase):
         computation degenerates to identity scale (pure translation) for every
         cell — matching the pre-cutover ``to_svg`` behavior exactly.
         """
-        from ferrum import config as _config
-
         heatmap = self._inject_parent_config(self.heatmap)
         d = self.dendrogram_ratio
         h = 1.0 - d
@@ -3553,8 +3549,7 @@ class ClusterMapChart(_CompositeBase):
         # uses. Any other fallback leaves the heatmap cell ratio-scaled, and a
         # ratio cell's non-panel nodes (its colorbar) are translated but not
         # scaled, so the colorbar would overrun the canvas edge.
-        hm_w = heatmap._width or float(_config.get("width"))
-        hm_h = heatmap._height or float(_config.get("height"))
+        hm_w, hm_h = heatmap._native_size()
         dendro_w = hm_w * d / h
         dendro_h = hm_h * d / h
         # Dendrograms have no meaningful axes (only the tree structure

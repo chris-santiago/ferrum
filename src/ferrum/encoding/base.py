@@ -742,6 +742,10 @@ class ChannelBase:
             )
         return out
 
+    def _with_options(self, **options: Any) -> "ChannelBase":
+        """Return a copy of this channel, same class and field, with *options* set over its own."""
+        return type(self)(self.field, **{**self._kwargs, **options})
+
     def option(self, name: str, default: Any = None) -> Any:
         """Return the value of encoding option *name*, or *default* if unset.
 
