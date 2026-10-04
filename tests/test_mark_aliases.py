@@ -119,13 +119,13 @@ def test_canonical_still_works_combined():
 
 
 def test_unknown_kwarg_still_errors():
-    with pytest.raises(TypeError, match="banana"):
+    with pytest.raises(ValueError, match="banana"):
         MarkBase("point", banana=True)
 
 
 def test_unknown_kwarg_after_alias_resolution():
     """Aliases that don't resolve to a valid key should raise, not silently pass."""
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         MarkBase("point", colouur="red")  # typo, not in alias map
 
 
@@ -201,5 +201,5 @@ def test_mark_circle_alias_kwargs():
 
 def test_mark_circle_unknown_kwarg_errors():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    with pytest.raises(TypeError, match="banana"):
+    with pytest.raises(ValueError, match="banana"):
         fm.Chart(df).mark_circle(banana=True).encode(x="x", y="y").to_svg()

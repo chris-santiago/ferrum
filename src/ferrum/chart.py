@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
-from ferrum._layer import _EntryVoice, _Layer, _PendingMark
+from ferrum._layer import _Layer, _PendingMark
 from ferrum._layer_transforms import (
     _NamedTransform,
     _resolve_layer_aggregates,
@@ -33,7 +33,7 @@ from ferrum._spec_build import SpecBuildMixin
 from ferrum._spec_view import _SpecView
 from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _validate_sort_object
-from ferrum.marks.base import MarkBase
+from ferrum.marks.base import MARK_HONORED_KWARGS, MarkBase, check_constant_size
 from ferrum.position import _STACKABLE_MARKS
 
 # Re-exported from this module so existing ``from ferrum.chart import ...``
@@ -355,7 +355,6 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     )
     existing_layers, top_xforms = _expand_layers(new)
     new._transforms = top_xforms
-    new._entry = None
     new._layers = existing_layers + [secondary_layer]
     return new
 
@@ -1108,6 +1107,8 @@ class Chart(
         new._mark = name
         new._mark_kwargs = m.to_mark_kwargs_dict()
         new._position = position
+        # The mark this call sets speaks as this call, not as whatever entry
+        # built the mark it replaces.
         new._entry = None
         # S4: orient="horizontal" → coord flip (consumed Python-side).
         if m.orient_coord_flip():
@@ -1139,7 +1140,7 @@ class Chart(
             validate_position_eligibility(name, position)
         new = self._clone()
         new._mark = placeholder
-        new._entry = None
+        new._entry = None  # the mark this call sets speaks as this call
         if data_transform is not None and new._data is not None:
             # Coerce through the canonical to-polars entry point before
             # applying the row-filter closure, so `data_transform` runs for
@@ -1155,30 +1156,30 @@ class Chart(
         new._composite_kind = name
         return new
 
-    def _with_warning_voice(self, door: str, recourse: str = "") -> "Chart":
-        # A clone whose pending composite mark voices its resolution-time
-        # warnings as *door* (the public entry that called the mark_* method
-        # on the caller's behalf), appending *recourse*. Private chart state:
-        # never serialized, never in the repr, never a mark kwarg.
-        if self._pending_stat_mark is None:
-            raise RuntimeError("_with_warning_voice needs a pending composite mark to voice")
-        new = self._clone()
-        new._pending_stat_mark = replace(self._pending_stat_mark, voice=_EntryVoice(door, recourse))
-        return new
-
     def _with_entry(self, entry: str) -> "Chart":
         # A clone whose every layer -- the ones it already has, the ones its
         # pending composite mark emits at resolution, or its one unlayered
-        # mark -- names *entry*, the public figure function that built it, so
-        # a render refusal about any of them speaks as that call
-        # (`_Layer.entry`, or the chart-level `_entry` on a flat chart).
+        # mark -- names *entry*, the public figure function or visualizer
+        # that built it, so a warning or refusal about any of them speaks as
+        # that call (`_Layer.entry`; the chart-level `_entry` reaches the
+        # wire only for a flat chart, see `to_spec`). Every constant size
+        # already on a primitive mark meets the one size rule here, in that
+        # voice, whichever door inside the figure wrote it (a `mark=`
+        # override, a `layers=` entry, the figure's own styling); a pending
+        # composite's is held to it by the dispatcher at resolution.
         new = self._clone()
-        if new._layers is not None:
+        new._entry = entry
+        if new._layers:
             new._layers = [replace(layer, entry=entry) for layer in new._layers]
+            drawn = [(layer.mark, layer.mark_kwargs) for layer in new._layers]
+        else:
+            drawn = [(new._mark, new._mark_kwargs)]
+        for mark, mark_kwargs in drawn:
+            size = (mark_kwargs or {}).get("size")
+            if size is not None and mark in MARK_HONORED_KWARGS:
+                check_constant_size(entry, mark, size)
         if new._pending_stat_mark is not None:
             new._pending_stat_mark = replace(new._pending_stat_mark, entry=entry)
-        if new._layers is None and new._pending_stat_mark is None:
-            new._entry = entry
         return new
 
     def mark_point(self, **kwargs) -> "Chart":
@@ -2113,7 +2114,6 @@ class Chart(
         resolved = self._resolve_pending()
         new = resolved._clone()
         existing, _ = _expand_layers(new)
-        new._entry = None
         converted = []
         # The public `Layer` encodings, the only bindings this call promotes.
         authored: list[dict] = []
@@ -2315,8 +2315,6 @@ class Chart(
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-        # Each operand's public entry now rides on the layers it contributes.
-        new._entry = None
         lhs_layers, lhs_top_xforms = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
         # Each operand's conditionals belong to the layers that operand
@@ -2347,7 +2345,7 @@ class Chart(
                 carrier = _CarrierLayer(
                     mark="point",
                     encoding=dict(lhs._encoding),
-                    mark_kwargs={"opacity": 0, "size": 0},
+                    mark_kwargs={"opacity": 0},
                 )
                 new._layers = [carrier]
                 # Rebuild from the two primitive expansions ONLY -- do not
@@ -2365,7 +2363,6 @@ class Chart(
                 ) + _annotations_from_primitive(rhs._annotation_primitive)
             else:
                 new = rhs._clone()
-                new._entry = None
                 new._layers = rhs_layers
                 new._annotations = new._annotations + _annotations_from_primitive(
                     lhs._annotation_primitive
@@ -3464,7 +3461,11 @@ class Chart(
             kw["axis_y"] = resolved._axis_y
         if resolved._description:
             kw["chart_description"] = resolved._description
-        if resolved._entry is not None:
+        # The chart-level entry names a flat chart's one mark. A layered
+        # chart's entries ride on its layers (`_expand_layers` moved the
+        # flat chart's onto the layer it built), so a chart-level one there
+        # would only be a stale fallback for layers another operand brought.
+        if resolved._entry is not None and not resolved._layers:
             kw["entry"] = resolved._entry
 
         # --- Reactive-parameter (D6) params section ---

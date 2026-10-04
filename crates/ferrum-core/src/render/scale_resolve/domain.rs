@@ -1528,17 +1528,11 @@ mod tests {
         Layer {
             mark,
             encoding: Default::default(),
-            transforms: Vec::new(),
             mark_style: zero.map(|z| crate::spec::mark_style::MarkKwargsSpec {
                 zero: Some(z),
                 ..Default::default()
             }),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         }
     }
 

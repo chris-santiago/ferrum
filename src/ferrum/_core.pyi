@@ -668,7 +668,7 @@ class Swarm:
         category: str,
         value: str,
         *,
-        point_size: float = 5.0,
+        point_size: float = 4.0,
         spacing: float = 1.0,
         side: str = "both",
         orient: str = "vertical",
@@ -695,6 +695,7 @@ class Reorder:
         *,
         drop_index: bool = True,
         from_: Optional[str] = None,
+        axis: str = "rows",
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -956,6 +957,12 @@ def theme_color_keys() -> list[str]: ...
 # list instead of hand-mirroring it as a Python literal.
 def aux_legend_channels() -> list[str]: ...
 
+# The channels Rust builds a chart-wide auxiliary (non-positional) scale for,
+# in its ``AuxiliaryScales`` order, each read from the chart-level encoding
+# only. ``ferrum.encoding._auxiliary_scale_channels`` reads it so a layer
+# merge promotes exactly the bindings Rust scales.
+def auxiliary_scale_channels() -> list[str]: ...
+
 # Every ``MarkKwargsSpec`` wire key (the ``mark_style`` dict's keys), in
 # declaration order, read from the struct's derived serde field list.
 def mark_kwargs_fields() -> list[str]: ...
@@ -969,6 +976,16 @@ def mark_numeric_kwargs() -> list[str]: ...
 # this list: route these through a non-negative-integer contract, not the
 # real-number one every other numeric field gets.
 def mark_integer_kwargs() -> list[str]: ...
+
+# The marks that draw a constant ``size=``, from Rust's one per-mark size
+# table (``Mark::size_drawing``). Every other mark refuses a constant size.
+def marks_drawing_constant_size() -> list[str]: ...
+
+# Run the render-time constant-size rule early: raise ``ValueError`` with the
+# render refusal's exact text, voiced as ``entry``, when ``mark`` never draws a
+# constant size or ``size`` is not a finite number above zero. ``mark`` must be
+# a primitive mark name; any other name raises ``ValueError``.
+def check_mark_size(entry: str, mark: str, size: float) -> None: ...
 
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it

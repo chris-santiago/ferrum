@@ -312,9 +312,11 @@ def test_importance_compare_declares_color_and_dodge():
     # `desugar_importance`'s bar_enc["color"] through Color(..., type_="nominal")
     # instead of a bare string, so an Int64 "model" id column can't infer a
     # continuous scale -- assert both the field name and the Nominal typing,
-    # not just field-name equality with a bare string.
+    # not just field-name equality with a bare string. The figure titles the
+    # binding "Model" through that same channel, so the legend never shows the
+    # internal column name.
     color_ch = bar.encoding.get("color")
-    assert color_ch == Color("model", type_="nominal")
+    assert color_ch == Color("model", type_="nominal", title="Model")
     assert color_ch.field == "model"
     assert color_ch.option("type") == "N"
 

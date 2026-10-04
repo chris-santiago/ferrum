@@ -232,8 +232,9 @@ def check_or_update_svg_golden(
 ) -> None:
     """Compare ``svg`` against the on-disk golden ``golden_dir / name``.
 
-    The shared compare-or-regenerate step behind every
-    ``tests/test_*golden*.py`` module: with ``FERRUM_UPDATE_GOLDENS=1`` set,
+    The shared compare-or-regenerate step the golden modules call (grep for
+    callers; not every golden module routes through it): with
+    ``FERRUM_UPDATE_GOLDENS=1`` set,
     the golden is (re)written through :func:`regen_and_verify`, which also
     rasterizes an inspection PNG and prints both paths, so a regen can never
     silently skip the visual check CLAUDE.md's golden-blessing rule

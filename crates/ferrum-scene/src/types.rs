@@ -306,12 +306,16 @@ pub struct MarkBatch {
     /// else, omitted on the wire, so every other batch is byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertex_rows: Option<Vec<Vec<VertexRow>>>,
-    /// The `size` conditionals a line's [`Self::vertex_rows`] answer to, as
-    /// indices into the scene's `interaction.conditionals`: exactly the ones
-    /// the line's own layer declared. Present exactly when `vertex_rows` is
-    /// ([`crate::validate_size_conditionals`]). The runtime folds only these,
-    /// so a sibling layer's or another composite leaf's `size` conditional
-    /// never restyles the line. Omitted on the wire everywhere else.
+    /// The `size` conditionals this batch's marks answer to, as indices into
+    /// the scene's `interaction.conditionals`: exactly the ones the batch's
+    /// own layer declared. Present on every line carrying
+    /// [`Self::vertex_rows`], and on any other batch whose layer declared
+    /// fewer than all of its chart's `size` conditionals
+    /// ([`crate::validate_size_conditionals`]). The runtime applies a `size`
+    /// conditional only to the batches that name it, so a sibling layer's
+    /// conditional never resizes this layer's marks. `None` answers to every
+    /// `size` conditional, as every batch did before scoping, and is omitted
+    /// on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_conditionals: Option<Vec<usize>>,
 }

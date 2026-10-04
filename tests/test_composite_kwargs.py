@@ -93,7 +93,7 @@ class TestDesugarErrorbar:
     def test_rejects_unknown_kwarg(self, errorbar_df):
         from ferrum.marks.composite import desugar_errorbar
 
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             desugar_errorbar("group", "val", banana=True)
 
     def test_default_stroke_without_override(self, errorbar_df):
@@ -114,11 +114,11 @@ class TestDesugarErrorbar:
         assert resolved is not None
 
     def test_via_chart_api_rejects_unknown_kwarg(self, errorbar_df):
-        """End-to-end: mark_errorbar(banana=True) must raise TypeError at resolve time."""
+        """End-to-end: mark_errorbar(banana=True) must raise ValueError at resolve time."""
         import ferrum as fm
 
         chart = fm.Chart(errorbar_df).mark_errorbar(banana=True).encode(x="group", y="val")
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             chart._resolve_pending()
 
 
@@ -154,7 +154,7 @@ class TestDesugarBoxplot:
     def test_rejects_unknown_kwarg(self, boxplot_df):
         from ferrum.marks.composite import desugar_boxplot
 
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             desugar_boxplot("species", "val", banana=True)
 
     def test_default_whisker_stroke_without_override(self, boxplot_df):
@@ -176,7 +176,7 @@ class TestDesugarBoxplot:
         import ferrum as fm
 
         chart = fm.Chart(boxplot_df).mark_boxplot(banana=True).encode(x="species", y="val")
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             chart._resolve_pending()
 
 
@@ -208,7 +208,7 @@ class TestDesugarErrorband:
     def test_rejects_unknown_kwarg(self, continuous_df):
         from ferrum.marks.composite import desugar_errorband
 
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             desugar_errorband("x", "y", banana=True)
 
     def test_default_opacity_without_override(self, continuous_df):
@@ -230,7 +230,7 @@ class TestDesugarErrorband:
         import ferrum as fm
 
         chart = fm.Chart(continuous_df).mark_errorband(banana=True).encode(x="x", y="y")
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             chart._resolve_pending()
 
 
@@ -264,7 +264,7 @@ class TestDesugarRibbon:
     def test_rejects_unknown_kwarg(self, ribbon_df):
         from ferrum.marks.composite import desugar_ribbon
 
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             desugar_ribbon("x", "y_lo", y2_field="y_hi", banana=True)
 
     def test_via_chart_api_accepts_fill(self, ribbon_df):
@@ -278,7 +278,7 @@ class TestDesugarRibbon:
         import ferrum as fm
 
         chart = fm.Chart(ribbon_df).mark_ribbon(banana=True).encode(x="x", y="y_lo", y2="y_hi")
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             chart._resolve_pending()
 
 
@@ -314,7 +314,7 @@ class TestDesugarBoxen:
     def test_rejects_unknown_kwarg(self, boxplot_df):
         from ferrum.marks.composite import desugar_boxen
 
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             desugar_boxen("species", "val", banana=True)
 
     def test_via_chart_api_accepts_opacity(self, boxplot_df):
@@ -328,5 +328,5 @@ class TestDesugarBoxen:
         import ferrum as fm
 
         chart = fm.Chart(boxplot_df).mark_boxen(banana=True).encode(x="species", y="val")
-        with pytest.raises(TypeError, match="banana"):
+        with pytest.raises(ValueError, match="banana"):
             chart._resolve_pending()

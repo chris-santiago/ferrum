@@ -288,7 +288,7 @@ class ConditionalSpec:
             if self.channel is not None
             else _infer_conditional_channel(self.if_selected, self.if_not)
         )
-        spec = {
+        return {
             "selection_name": self.selection_name,
             "channel": channel,
             "if_selected": _resolve_encoding_value(
@@ -296,7 +296,6 @@ class ConditionalSpec:
             ),
             "if_not": _resolve_encoding_value(self.if_not, channel=channel, params=params),
         }
-        return spec
 
 
 def selection_point(

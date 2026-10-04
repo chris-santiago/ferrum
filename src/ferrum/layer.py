@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ferrum.marks.base import MARK_HONORED_KWARGS, check_constant_size
+
 _LAYER_TRANSFORMS_REFUSAL = (
     "Layer(transforms=[...]): a layer does not run its own transforms. Give the layer "
     "its own chart with .transform(...) and compose it with +, which routes the "
@@ -46,7 +48,10 @@ class Layer:
         ``+``, which routes the transform to that layer alone.
     mark_kwargs : dict, optional
         Extra keyword arguments forwarded to the mark renderer (e.g.
-        ``{"dx": 5, "opacity": 0.7}``).
+        ``{"dx": 5, "opacity": 0.7}``). A constant ``size`` on a primitive
+        ``mark`` meets the same rule as ``mark_<mark>(size=...)``: it raises
+        ``ValueError`` here, voiced as ``mark_<mark>``, when the mark never
+        draws a constant size or the value is not a finite number above zero.
 
     Examples
     --------
@@ -69,7 +74,10 @@ class Layer:
         self.name = name
         self.encoding = encoding or {}
         self.transforms = []
-        self.mark_kwargs = mark_kwargs or {}
+        self.mark_kwargs = dict(mark_kwargs or {})
+        size = self.mark_kwargs.get("size")
+        if size is not None and isinstance(mark, str) and mark in MARK_HONORED_KWARGS:
+            self.mark_kwargs["size"] = check_constant_size(f"mark_{mark}", mark, size)
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""

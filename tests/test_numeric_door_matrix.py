@@ -407,7 +407,7 @@ def test_accepted_heatmap_bound_renders_the_bytes_it_did_before_the_predicate() 
     assert digest == PINNED_HEATMAP_VMIN_SHA256
 
 
-PINNED_HEATMAP_VMIN_SHA256 = "fc16742a97c0770bfb5bcbce6100824825cf31c896247dde3de4f6a163428d87"
+PINNED_HEATMAP_VMIN_SHA256 = "748f6d0c0dbb64bbff55fe9dc87aebe66cc008d121d8d294078e014f439ed46a"
 
 
 # --- integer-door ceiling -----------------------------------------------------
@@ -537,7 +537,7 @@ def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> Non
     assert any(honoring.values())
     for name, marks in honoring.items():
         if not marks:
-            with pytest.raises(TypeError, match=f"unknown keyword argument '{name}'"):
+            with pytest.raises(ValueError, match=f"unknown keyword argument '{name}'"):
                 MarkBase("point", **{name: 2})
             continue
         mark = marks[0]
@@ -561,9 +561,9 @@ def test_an_unhonored_kwarg_is_refused_as_unhonored_before_its_value_is_judged()
     """A kwarg the mark does not honor is refused as not honored whatever its
     value, not as a malformed value the mark would never use."""
     assert "limit" not in MARK_HONORED_KWARGS["point"]
-    with pytest.raises(TypeError) as by_value:
+    with pytest.raises(ValueError) as by_value:
         MarkBase("point", limit="x")
-    with pytest.raises(TypeError) as by_name:
+    with pytest.raises(ValueError) as by_name:
         MarkBase("point", limit=2)
     assert str(by_value.value) == str(by_name.value)
     assert str(by_value.value) == _mark_kwarg_error("point", "limit")

@@ -1315,7 +1315,37 @@ pub fn prepare_render_inputs(
     // call. `leaf_scales` (the composite seam) is the one place that already
     // sees the whole group, so its verdicts reach `build_color_legend` with
     // it. `None` for every standalone (flat/facet) render.
-    legend::refuse_format_temporality_mismatch_legend_fields(spec, &transformed, chart_config)?;
+    //
+    // Every legend channel's scale is built from the first layer's resolved
+    // encoding (a chart-level binding is inherited into it, a layer's own
+    // binding replaces it), so each legend reads its binding, and with it the
+    // title and the `Legend(...)` style, from there too. `x`/`y` stay
+    // authored: they only feed the color legend's `Legend(...)` cascade,
+    // which must not swap under `CoordFlip`.
+    // `legend_spec` clones the whole `ChartSpec` to override 4 encoding
+    // channels; the legend builders below only ever read `.encoding.{color,
+    // x, y, size, shape, stroke_dash}` and `.conditionals` off it, never
+    // `.layers`/`.transforms`/the rest, so a borrowed `Encoding` + a
+    // `conditionals` slice would be cheaper. Kept as a full clone anyway:
+    // trimming it means either (a) hand-reconstructing a `ChartSpec` with
+    // placeholder values for every unread field — an unenforced invariant
+    // that silently goes stale the day a future edit reads one of those
+    // fields here — or (b) re-signing every function in `legend.rs` (and its
+    // ~30 test call sites) to take `&Encoding` instead of `&ChartSpec`. Both
+    // are bigger than this one render-time clone warrants; (b) is the right
+    // move if this legend-building subsystem grows further.
+    let rendered = &layers[0].encoding;
+    let legend_spec = ChartSpec {
+        encoding: crate::spec::encoding::Encoding {
+            color: rendered.color.clone(),
+            size: rendered.size.clone(),
+            shape: rendered.shape.clone(),
+            stroke_dash: rendered.stroke_dash.clone(),
+            ..spec.encoding.clone()
+        },
+        ..spec.clone()
+    };
+    legend::refuse_format_temporality_mismatch_legend_fields(&legend_spec, &transformed, chart_config)?;
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
@@ -1323,7 +1353,7 @@ pub fn prepare_render_inputs(
         legend_overrides,
         aux_legends,
     } = legend::build_color_legend(
-        spec,
+        &legend_spec,
         &transformed,
         &provisional_scales,
         &layers,

@@ -94,9 +94,9 @@ def test_pr_chart_iso_lines_leave_curve_baseline_and_legend_unchanged():
     assert baseline_lines[0].get("stroke") == "#aaaaaa"
 
     # Legend: the class-keyed color scale still produces a legend titled
-    # "class" -- the iso-line layer no longer participates in that scale
+    # "Class" -- the iso-line layer no longer participates in that scale
     # at all, so the legend content is unaffected by the fix.
-    assert ">class<" in svg
+    assert ">Class<" in svg
 
 
 def test_pr_chart_iso_lines_and_ap_annotation_compose():

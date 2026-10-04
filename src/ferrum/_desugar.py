@@ -39,6 +39,7 @@ import ``Chart`` at module level (that would create an import cycle).
 from __future__ import annotations
 
 import inspect
+import warnings
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Union
 
@@ -52,6 +53,7 @@ from ferrum._layer import (
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
+from ferrum._warn import user_stacklevel
 from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws
 from ferrum.marks.statistical import _build_prior_layer
 
@@ -831,15 +833,6 @@ def _prep_cat_axis_types(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "y_type": ctx.y_type}
 
 
-def _prep_entry_voice(ctx: _ResolveContext) -> None:
-    """Thread the pending mark's entry voice (see :class:`_EntryVoice`) into
-    the desugar as ``_voice``, when an entry other than the ``mark_*`` method
-    set one."""
-    voice = ctx.chart._pending_stat_mark.voice
-    if voice is not None:
-        ctx.transform_kwargs = {**ctx.transform_kwargs, "_voice": voice}
-
-
 def _prep_color_field(ctx: _ResolveContext) -> None:
     """Thread the color (hue) field into the desugar so each (x, hue) group gets
     its own split summary, and every emitted layer carries a consistent color
@@ -890,15 +883,38 @@ def _prep_groupby_from_color(ctx: _ResolveContext) -> None:
 
 
 def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
-    """hex: infer aggregate field from color encoding when not explicit."""
-    if not (
-        ctx.transform_kwargs.get("aggregate", "count") != "count"
-        and ctx.transform_kwargs.get("field") is None
-    ):
-        return
+    """hex: a chart-level color names the aggregated column, or is refused.
+
+    The cells are always colored by Hex's per-cell aggregate. A color naming
+    the column an aggregate reads supplies ``field`` when none was given. That
+    color, or one naming Hex's output column itself, styles the cell color
+    binding with its channel properties (title, scheme, legend). Any other
+    color would be drawn nowhere, so it is refused.
+    """
+    from ferrum._registry import aggregate_needs_field, registry_output_columns
+
     color_field = ctx._color_field()
-    if color_field:
-        ctx.transform_kwargs = {**ctx.transform_kwargs, "field": color_field}
+    if not color_field:
+        return
+    kwargs = ctx.transform_kwargs
+    aggregate = kwargs.get("aggregate", "count")
+    reads_column = aggregate_needs_field("hex", aggregate)
+    if reads_column and kwargs.get("field") is None:
+        kwargs = {**kwargs, "field": color_field}
+    names_aggregate = reads_column and color_field == kwargs.get("field")
+    if not names_aggregate and color_field != registry_output_columns("hex", ["value"])["value"]:
+        of_field = f" of field={kwargs.get('field')!r}" if reads_column else ""
+        entry = ctx.chart._pending_stat_mark.entry or "mark_hex"
+        raise ValueError(
+            f"{entry}: color={color_field!r} is drawn nowhere; the cells are colored by "
+            f"aggregate={aggregate!r}{of_field}. Bind color= to the aggregated column, "
+            "or drop it."
+        )
+    ctx.transform_kwargs = {
+        **kwargs,
+        "_color": ctx.chart._encoding["color"],
+        "_entry": ctx.chart._pending_stat_mark.entry,
+    }
 
 
 def _resolve_or_refuse_disc_flag(
@@ -1046,9 +1062,7 @@ _PENDING_PREP: dict[str, _KindPrep] = {
     ),
     "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
     "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
-    "violin": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field, _prep_entry_voice)
-    ),
+    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types, _prep_color_field)),
     "swarm": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_cat_axis_types)),
     "errorband": _KindPrep(pre=(_prep_cat_axis_types, _prep_color_field)),
     "density": _KindPrep(pre=(_prep_groupby_from_color,)),
@@ -1168,15 +1182,18 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
 
     result = desugar_fn(x_field, y_field, **transform_kwargs)
     # Every layer this desugar emits (or, when it lowers to one unlayered
-    # mark, the chart itself) names the public entry the caller invoked, so
-    # a render refusal about it speaks as that call -- including the size=
-    # refusal just below, so a figure function forwarding size= to a
-    # composite that draws neither point nor line refuses in its own voice.
+    # mark, the chart itself) names the public entry the caller invoked, and
+    # so does every warning and refusal raised about it here: what the
+    # desugar degraded, and the size= rule, so a figure function forwarding
+    # size= to a composite that draws neither point nor line refuses in its
+    # own voice.
     entry = chart._pending_stat_mark.entry or f"mark_{kind}"
+    for note in result.degraded:
+        warnings.warn(f"{entry}: {note}", stacklevel=user_stacklevel())
     if "size" in style_dict:
         refuse_size_no_layer_draws(
             entry,
-            style_kwargs["size"],
+            style_dict["size"],
             [lyr.mark for lyr in result.layers] if result.layers is not None else [result.mark],
         )
     new = chart._clone()

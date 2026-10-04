@@ -690,14 +690,21 @@ class TestClustermap:
     def test_heatmap_center_has_linkage_transforms(self, cluster_data):
         cm = fe.clustermap(cluster_data)
         d = json.loads(cm.heatmap.to_spec().to_json())
-        # row_link + col_link + 1 reorder (rows, consuming row_link_order via
-        # the Phase-9-finalize Reorder.from='<named_output>' mechanism) + unpivot.
-        # Column ordering is handled by the column-dendrogram layer separately;
-        # the heatmap's visible row ordering matches the row-linkage cluster order.
-        types = [t.get("type") for t in d.get("transforms", [])]
-        assert types.count("linkage") == 2
-        assert types.count("reorder") == 1
-        assert "unpivot" in types
+        # Both linkages, then a row Reorder and a column Reorder, each reading
+        # its linkage's `order` output, then an Unpivot with no `value_vars`
+        # so its blocks follow the permuted column order.
+        transforms = d.get("transforms", [])
+        assert [t.get("type") for t in transforms] == [
+            "linkage",
+            "linkage",
+            "reorder",
+            "reorder",
+            "unpivot",
+        ]
+        row_reorder, col_reorder, unpivot = transforms[2:]
+        assert (row_reorder["from"], row_reorder.get("axis", "rows")) == ("row_link_order", "rows")
+        assert (col_reorder["from"], col_reorder["axis"]) == ("col_link_order", "columns")
+        assert "value_vars" not in unpivot
 
     def test_dendrograms_present(self, cluster_data):
         cm = fe.clustermap(cluster_data)

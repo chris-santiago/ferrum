@@ -552,7 +552,6 @@ mod tests {
     use crate::render::draw::resolve_mark_style;
     use crate::render::scale_resolve::ColorScale;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -561,7 +560,6 @@ mod tests {
 
     fn color_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: enc_field("x"),
@@ -569,11 +567,7 @@ mod tests {
                 color: enc_field("c"),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         }
     }
 

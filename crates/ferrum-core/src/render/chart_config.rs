@@ -484,7 +484,7 @@ pub struct AxisStyleSpec {
 /// the wire chokepoint's manual gate — not this attribute — owns the pinned
 /// refusal text; this is the reflection source `AXIS_CONFIG_EXTRA_KEYS`'
 /// doc explains it can't mine from.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AxisConfigSpec {
     #[serde(flatten)]

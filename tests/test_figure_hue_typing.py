@@ -165,7 +165,7 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
     # message to point at.
     expected_warnings = (
         [
-            "catplot(kind='violin'): inner marks are drawn at each "
+            "catplot: inner marks are drawn at each "
             "category's center and are not dodged per hue group; use "
             'Chart.mark_violin(inner="none") to drop the inner mark'
         ]
@@ -176,7 +176,7 @@ def test_catplot_hue_answers_identically_for_every_kind(kind: str) -> None:
 
 
 _CATPLOT_VIOLIN_HUE_WARNING = (
-    "catplot(kind='violin'): inner marks are drawn at each category's "
+    "catplot: inner marks are drawn at each category's "
     "center and are not dodged per hue group; use "
     'Chart.mark_violin(inner="none") to drop the inner mark'
 )

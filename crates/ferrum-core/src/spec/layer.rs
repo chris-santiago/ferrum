@@ -60,14 +60,36 @@ pub struct Layer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coord: Option<crate::spec::coord::CoordKind>,
     /// The public entry the caller invoked that produced this layer (e.g.
-    /// `"mark_smooth"` for the fit line it desugars into). A refusal raised
-    /// while drawing the layer names this entry in place of the mark's own
-    /// primitive (`mark_line`), so a caller who never wrote `mark_line` reads
-    /// the entry they did write. `None` (every primitive layer, and every spec
-    /// written before the field existed) names the mark's own primitive; the
-    /// field is omitted from the wire then.
+    /// `"mark_smooth"` for the fit line it desugars into). Every refusal
+    /// raised while building the layer (`RenderError::InLayer`), and a
+    /// layer-voiced warning (`RenderWarning::SwarmOverflowsBand`), names this
+    /// entry in place of the mark's own primitive (`mark_line`), so a caller
+    /// who never wrote `mark_line` reads the entry they did write. `None`
+    /// falls back to [`crate::spec::chart::ChartSpec::entry`], then to
+    /// `mark_{mark}`; the field is omitted from the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+}
+
+/// A point layer with every optional field empty, the base test literals
+/// spread with `..Default::default()`. Test-only, as `ChartSpec`'s is.
+#[cfg(test)]
+impl Default for Layer {
+    fn default() -> Self {
+        Self {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+            coord: None,
+            entry: None,
+        }
+    }
 }
 
 impl Layer {
@@ -107,11 +129,7 @@ mod tests {
         let layer = Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-        position: None, blend: None, name: None, independent_y: false, coord: None,
-        entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -128,14 +146,7 @@ mod tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -148,17 +159,11 @@ mod tests {
         let layer = Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
             mark_style: Some(MarkKwargsSpec {
                 size: Some(50.0),
                 ..Default::default()
             }),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -170,11 +175,8 @@ mod tests {
         let layer = Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
             data_source: Some("box".into()),
-            position: None, blend: None, name: None, independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -191,14 +193,8 @@ mod tests {
         let layer = Layer {
             mark: Mark::Bar,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
             position: Some(PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(json.contains(r#""position""#));
@@ -211,11 +207,7 @@ mod tests {
         let layer = Layer {
             mark: Mark::Bar,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None, blend: None, name: None, independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(!json.contains("position"), "position=None must be omitted: {json}");
@@ -226,11 +218,7 @@ mod tests {
         let layer = Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-        position: None, blend: None, name: None, independent_y: false, coord: None,
-        entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -253,14 +241,8 @@ mod tests {
         let layer = Layer {
             mark: Mark::Line,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: true, coord: None,
-            entry: None,
+            independent_y: true,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -276,14 +258,7 @@ mod tests {
         let layer = Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -301,15 +276,7 @@ mod tests {
         Layer {
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         }
     }
 

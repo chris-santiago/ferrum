@@ -12,7 +12,7 @@ def test_markbase_accepts_valid_kwargs():
 
 
 def test_markbase_rejects_unknown_kwargs():
-    with pytest.raises(TypeError, match="unknown keyword"):
+    with pytest.raises(ValueError, match="unknown keyword"):
         MarkBase("point", squiggly=True)
 
 
@@ -34,7 +34,7 @@ def test_markbase_rejects_transform_only_kwargs_directly():
     API. Constructing ``MarkBase`` directly with them now refuses (#243)
     instead of silently accepting and then dropping them from
     ``to_mark_kwargs_dict()``'s output."""
-    with pytest.raises(TypeError, match="method"):
+    with pytest.raises(ValueError, match="method"):
         MarkBase("smooth", size=100, method="loess", bandwidth=0.5)
 
 

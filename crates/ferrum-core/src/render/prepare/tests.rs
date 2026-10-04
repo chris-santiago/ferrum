@@ -13,7 +13,6 @@
 use super::*;
 use crate::layout::{AuxLegendInput, SymbolKind};
 use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN};
-use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::{Encoding, EncodingSpec};
 use crate::spec::mark::Mark;
 use arrow::array::{Float64Array, StringArray};
@@ -40,7 +39,6 @@ fn a_flip_moves_value_axis_into_post_flip_space_with_the_channels() {
     // The spec `desugar_density(orientation="horizontal")` emits: the
     // density on `x`, the observation on `y`, and the declaration saying so.
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Area,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -53,23 +51,11 @@ fn a_flip_moves_value_axis_into_post_flip_space_with_the_channels() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
         mark_style: Some(MarkKwargsSpec {
             value_axis: Some(StackValueAxis::X),
             ..Default::default()
         }),
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     // `build_layers` reads the flip off each layer's own effective coord
@@ -1260,7 +1246,6 @@ fn batch3() -> RecordBatch {
 
 fn spec_color_facet() -> ChartSpec {
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -1280,7 +1265,6 @@ fn spec_color_facet() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(crate::layout::FacetSpec {
             field: "species".into(),
             row: None,
@@ -1292,18 +1276,7 @@ fn spec_color_facet() -> ChartSpec {
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -1518,7 +1491,6 @@ fn batch_pop() -> RecordBatch {
 
 fn base_spec() -> ChartSpec {
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -1533,20 +1505,7 @@ fn base_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -2579,20 +2538,7 @@ fn single_layer_spec() -> ChartSpec {
             color: None,
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -2647,28 +2593,13 @@ fn prepare_multi_layer_produces_multiple_layer_prepared() {
                 }),
                 ..Default::default()
             },
-            transforms: vec![],
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         },
         Layer {
             mark: Mark::Line,
             encoding: Encoding::default(), // inherits from chart-level
             transforms: vec![],
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         },
     ]);
     let batch = price_weight_batch();
@@ -2850,14 +2781,7 @@ fn layer_own_transforms_refused_naming_the_layer() {
         mark: Mark::Point,
         encoding: Encoding::default(),
         transforms,
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
     let prepare = |spec: &ChartSpec| {
         prepare_render_inputs(
@@ -2960,15 +2884,7 @@ fn refuse_malformed_sort_specs_layer_channel_names_the_layer() {
             y: Some(EncodingSpec { field: "weight".into(), sort: y_sort, ..Default::default() }),
             ..Default::default()
         },
-        transforms: vec![],
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
     let mut spec = single_layer_spec();
     spec.layers = Some(vec![layer(None), layer(Some(serde_json::json!({"field": 1})))]);
@@ -3097,7 +3013,6 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(crate::layout::FacetSpec {
             field: "col_cat".into(),
             row: Some("row_cat".into()),
@@ -3129,17 +3044,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             coord: None,
             entry: None,
         }]),
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     assert!(
         prepare_with(&spec, &facet_grid_batch()).is_ok(),
@@ -3309,15 +3214,8 @@ fn unknown_data_source_raises_clear_error() {
     spec.layers = Some(vec![Layer {
         mark: Mark::Point,
         encoding: Encoding::default(),
-        transforms: vec![],
-        mark_style: None,
         data_source: Some("missing".into()),
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     }]);
     let batch = price_weight_batch();
     let err = prepare_render_inputs(
@@ -5326,15 +5224,7 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5346,19 +5236,11 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
         independent_y: true,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Line,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5367,20 +5249,8 @@ fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
         layers: Some(vec![primary, secondary]),
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let schema = Arc::new(Schema::new(vec![
@@ -5454,15 +5324,7 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5477,19 +5339,11 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
         independent_y: true,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Line,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5498,20 +5352,9 @@ fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
         layers: Some(vec![primary, secondary]),
         coord: Some(CoordKind::Flip),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let schema = Arc::new(Schema::new(vec![
@@ -5582,15 +5425,7 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
     let secondary = Layer {
         mark: Mark::Line,
@@ -5598,19 +5433,11 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
             y: Some(enc_with_axis("y1", serde_json::json!({ "orient": "top" }))),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
         independent_y: true,
-        coord: None,
-        entry: None,
+        ..Default::default()
     };
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Line,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5619,20 +5446,8 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
         layers: Some(vec![primary, secondary]),
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let schema = Arc::new(Schema::new(vec![
@@ -5674,7 +5489,6 @@ fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
 #[test]
 fn prepare_render_inputs_no_independent_y_layer_leaves_secondary_y_empty() {
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5687,20 +5501,7 @@ fn prepare_render_inputs_no_independent_y_layer_leaves_secondary_y_empty() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let schema = Arc::new(Schema::new(vec![
         Field::new("x", DataType::Float64, false),
@@ -5766,7 +5567,6 @@ fn sort_shorthand_batch() -> RecordBatch {
 /// byte-identical either way.
 fn sorted_bar_spec(sort: serde_json::Value, flipped: bool) -> ChartSpec {
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5780,20 +5580,8 @@ fn sorted_bar_spec(sort: serde_json::Value, flipped: bool) -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: flipped.then_some(crate::spec::coord::CoordKind::Flip),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -6023,27 +5811,13 @@ fn utf8view_and_large_utf8_raw_input_render_byte_identical_svg_to_utf8() {
 
     fn bar_spec_over(field: &str) -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: field.into(), ..Default::default() }),
                 y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -6267,4 +6041,120 @@ fn a_non_numeric_secondary_y_column_beside_a_caller_y_scale_renders() {
         .expect("a secondary-y string column is not judged against the primary axis");
     assert_eq!(prep.axes.secondary_y.len(), 1);
     assert_eq!(prep.axes.secondary_y[0].tick_labels, vec!["lo", "mid", "hi"]);
+}
+
+// ── Legend title from the binding that built the color scale ─────────────
+
+/// A two-layer chart over `batch3` whose only `color` binding is
+/// `layer0_color` on layer 0 (`chart_color` at chart level), the shape a
+/// composite mark's own layer-level hue produces.
+fn layered_color_spec(chart_color: Option<EncodingSpec>, layer0_color: Option<EncodingSpec>) -> ChartSpec {
+    let xy = Encoding {
+        x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+        y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let layer = |mark, color| crate::spec::layer::Layer {
+        mark,
+        encoding: Encoding { color, ..Default::default() },
+        ..Default::default()
+    };
+    ChartSpec {
+        mark: Mark::Line,
+        encoding: Encoding { color: chart_color, ..xy },
+        layers: Some(vec![layer(Mark::Line, layer0_color), layer(Mark::Point, None)]),
+        ..Default::default()
+    }
+}
+
+/// The legend is titled, and styled, from the color binding its scale was
+/// built from: the first layer's resolved encoding, whether that binding is
+/// the layer's own or inherited from the chart. A layer-level `color` with a
+/// `title=`, and one with a `Legend(title=)`, title the legend exactly as the
+/// same bindings at chart level do; a chart with no color binding anywhere
+/// is the control and stays untitled.
+#[test]
+fn a_layer_level_color_binding_titles_its_legend_like_a_chart_level_one() {
+    use crate::render::chart_config::LegendStyleSpec;
+    let species = EncodingSpec { field: "species".into(), ..Default::default() };
+    let titled = EncodingSpec { title: Some("Kind".into()), ..species.clone() };
+    let legend_titled = EncodingSpec {
+        legend: Some(Box::new(LegendStyleSpec { title: Some("Group".into()), ..Default::default() })),
+        ..species.clone()
+    };
+    let batch = batch3();
+    for (binding, title, override_title) in
+        [(&species, "species", None), (&titled, "Kind", None), (&legend_titled, "species", Some("Group"))]
+    {
+        let chart_level = prep(&layered_color_spec(Some(binding.clone()), None), &batch);
+        let layer_level = prep(&layered_color_spec(None, Some(binding.clone())), &batch);
+        for p in [&chart_level, &layer_level] {
+            assert_eq!(p.legend_entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+            assert_eq!(p.legend_title.as_deref(), Some(title));
+            assert_eq!(p.legend_overrides.title.as_deref(), override_title);
+        }
+    }
+    let uncolored = prep(&layered_color_spec(None, None), &batch);
+    assert!(uncolored.legend_entries.is_empty());
+    assert_eq!(uncolored.legend_title, None);
+}
+
+/// The aux legend channels, each bound at chart level or on the first layer
+/// only, over a two-layer chart whose first layer draws the channel (a line
+/// for `stroke_dash`, a point otherwise).
+fn layered_aux_spec(channel: &str, chart: Option<EncodingSpec>, layer0: Option<EncodingSpec>) -> ChartSpec {
+    let bind = |enc: Option<EncodingSpec>, base: Encoding| match channel {
+        "size" => Encoding { size: enc, ..base },
+        "shape" => Encoding { shape: enc, ..base },
+        "stroke_dash" => Encoding { stroke_dash: enc, ..base },
+        other => panic!("not an aux legend channel: {other}"),
+    };
+    let xy = Encoding {
+        x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+        y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let first = if channel == "stroke_dash" { Mark::Line } else { Mark::Point };
+    let layer = |mark, encoding| crate::spec::layer::Layer { mark, encoding, ..Default::default() };
+    ChartSpec {
+        mark: first,
+        encoding: bind(chart, xy),
+        layers: Some(vec![layer(first, bind(layer0, Encoding::default())), layer(Mark::Point, Encoding::default())]),
+        ..Default::default()
+    }
+}
+
+/// Each aux legend (size, shape, stroke_dash) is built, titled and styled
+/// from the binding its scale was built from: the first layer's resolved
+/// encoding. For every channel, a plain binding, one with `title=` and one
+/// with `Legend(title=)` give the same aux block on the first layer as at
+/// chart level, titled field, `Kind` and `Group` respectively. A chart with
+/// the channel bound nowhere is the control and draws no aux block.
+#[test]
+fn a_layer_level_aux_binding_draws_its_legend_like_a_chart_level_one() {
+    use crate::render::chart_config::LegendStyleSpec;
+    let batch = batch3();
+    for (channel, field) in [("size", "x"), ("shape", "species"), ("stroke_dash", "species")] {
+        let plain = EncodingSpec { field: field.into(), ..Default::default() };
+        let titled = EncodingSpec { title: Some("Kind".into()), ..plain.clone() };
+        let legend_titled = EncodingSpec {
+            legend: Some(Box::new(LegendStyleSpec { title: Some("Group".into()), ..Default::default() })),
+            ..plain.clone()
+        };
+        for (binding, title) in [(&plain, field), (&titled, "Kind"), (&legend_titled, "Group")] {
+            let chart_level = prep(&layered_aux_spec(channel, Some(binding.clone()), None), &batch).aux_legends;
+            let layer_level = prep(&layered_aux_spec(channel, None, Some(binding.clone())), &batch).aux_legends;
+            assert_eq!(chart_level.len(), 1, "{channel}: {chart_level:?}");
+            let got = match &chart_level[0] {
+                AuxLegendInput::Size { title, .. } if channel == "size" => title,
+                AuxLegendInput::Shape { title, .. } if channel == "shape" => title,
+                AuxLegendInput::StrokeDash { title, .. } if channel == "stroke_dash" => title,
+                other => panic!("{channel}: wrong block {other:?}"),
+            };
+            assert_eq!(got.as_deref(), Some(title), "{channel}");
+            assert_eq!(layer_level, chart_level, "{channel} {title}");
+        }
+        let unbound = prep(&layered_aux_spec(channel, None, None), &batch);
+        assert!(unbound.aux_legends.is_empty(), "{channel}: {:?}", unbound.aux_legends);
+    }
 }

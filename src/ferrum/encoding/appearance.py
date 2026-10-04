@@ -100,12 +100,19 @@ class Size(ChannelBase):
     width in static output; in the interactive view each vertex redraws at
     the dot-diameter width of its row's active branch. Every branch must be
     positive on such a line, and a conditional size plus ``stroke_width``
-    raises ``ValueError`` as any other size does. A conditional encoded on
-    the chart as a whole (a layered chart, or a composite such as
-    ``mark_line(point=True)``) applies to every layer, lines included, as a
-    field size does; one encoded on a single layer's own chart or ``Layer``
-    applies to that layer only, so a line beside it is neither restyled nor
-    checked.
+    raises ``ValueError`` as any other size does.
+
+    A field ``size`` and a conditional ``size`` reach different layers under
+    ``chart + chart``, so read them as two rules. A field ``size`` builds the
+    chart's one size scale and reaches every layer that draws size, whichever
+    operand declared it: ``point.encode(size="v") + line`` tapers the line
+    too. A conditional ``size`` reaches only the layers of the chart it was
+    declared on: ``point.encode(size=cond) + line`` restyles the points and
+    leaves the line alone, and a point beside a line that declared one is not
+    resized by it. A conditional declared on a layered chart as a whole, on a
+    composite such as ``mark_line(point=True)``, or on the host of
+    ``Chart.layer()`` reaches every layer of that chart, lines included; one
+    declared on a ``Layer``'s own encoding reaches that layer only.
 
     When ``size`` and ``color`` are both mapped to the same field, ferrum merges
     them into a single combined legend block.

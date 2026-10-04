@@ -131,21 +131,17 @@ def _channel_class_map() -> dict:
 
 @functools.cache
 def _auxiliary_scale_channels() -> tuple[str, ...]:
-    """Return the channels Rust builds an auxiliary (non-positional) scale for.
+    """Return the channels Rust builds a chart-wide auxiliary (non-positional) scale for.
 
-    A channel qualifies when it renders as its own ``EncodingSpec``
-    (``_RENDERER_HONORED_CHANNELS``), its class honors ``scale=``, and it
-    draws no axis. Order follows ``_RENDERER_HONORED_CHANNELS``, so
-    ``color`` comes first. Rust reads every one of these scales from the
-    chart-level encoding only, which is why ``Chart + Chart`` promotes a
-    layer-level binding of each (``composition._promote_layer_channels``).
+    Read from Rust's ``ferrum._core.auxiliary_scale_channels()``, the list
+    the scale resolver's ``AuxiliaryScales`` is pinned to, so ``color``
+    comes first. Rust builds each of these scales from the chart-level
+    encoding only, which is why ``Chart + Chart`` promotes a layer-level
+    binding of each (``composition._promote_layer_channels``).
     """
-    classes = _channel_class_map()
-    return tuple(
-        name
-        for name in _RENDERER_HONORED_CHANNELS
-        if "scale" in classes[name]._honored_kwargs and "axis" not in classes[name]._honored_kwargs
-    )
+    from ferrum._core import auxiliary_scale_channels
+
+    return tuple(auxiliary_scale_channels())
 
 
 def _channel_class_for(name: str):

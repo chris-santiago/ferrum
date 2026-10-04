@@ -824,6 +824,10 @@ class TestAnUntypedSpecOnATemporalFieldGetsOneAnswer:
         epoch-millisecond count (``959817600000.00``).
         """
         message = f'the number format "{resolved}" on the {NUMBER_REFUSED_ON[surface]}'
+        # A refusal about one layer's mark is voiced by the public call that
+        # drew it; chart-level surfaces (axes, legends) speak for themselves.
+        if surface == "text":
+            message = "mark_text: " + message
         assert _refusal(TEMPORAL_SURFACES[surface](field, fmt, None)) == message + _DATE_HINT
 
     @pytest.mark.parametrize("surface", sorted(TEMPORAL_SURFACES))

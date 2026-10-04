@@ -61,7 +61,7 @@ fn vertex_width(field: &str, sample: Option<(f64, f64)>, fallback: f64) -> Resul
         Some((value, area)) => NonPositiveLineWidth::Scaled { field, value, area },
         None => NonPositiveLineWidth::Fallback { field, width },
     };
-    Err(RenderError::LineWidthNotPositive { layer: None, entry: None, source: Box::new(source) })
+    Err(RenderError::LineWidthNotPositive { source: Box::new(source) })
 }
 
 /// Every `size` conditional this line's layer declared (the per-layer spec
@@ -85,7 +85,7 @@ fn refuse_non_positive_branch(cond: &ferrum_scene::ConditionalEncoding) -> Resul
         if !(width.is_finite() && width > 0.0) {
             let selection = cond.selection_name.clone();
             let source = NonPositiveLineWidth::Conditional { selection, area };
-            return Err(RenderError::LineWidthNotPositive { layer: None, entry: None, source: Box::new(source) });
+            return Err(RenderError::LineWidthNotPositive { source: Box::new(source) });
         }
     }
     Ok(())
@@ -106,8 +106,6 @@ fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), Re
     let stroke_width = binding(encoding.stroke_width.as_ref(), ctx.mark_style.line.stroke_width);
     match (size, stroke_width) {
         (Some(size), Some(stroke_width)) => Err(RenderError::LineWidthConflict {
-            layer: None,
-            entry: None,
             sources: Box::new(LineWidthSources { size, stroke_width }),
         }),
         _ => Ok(()),
@@ -405,7 +403,6 @@ mod tests {
     use crate::render::draw::resolve_mark_style;
     use crate::render::scale_resolve::resolve_scales;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use crate::spec::mark_style::MarkKwargsSpec;
@@ -416,22 +413,14 @@ mod tests {
 
     fn line_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(), mark: Mark::Line,
+            mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -901,17 +890,14 @@ mod tests {
             group_col,
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Line,
+            mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         (batch, spec)
     }
@@ -1627,7 +1613,7 @@ mod tests {
             let overrides = MarkKwargsSpec { size, stroke_width, ..Default::default() };
             let err = build_width_case(&sized_spec(size_field, sw_field), &width_batch(ASCENDING.to_vec()), &overrides)
                 .expect_err("size and stroke_width together must refuse");
-            assert!(matches!(err, RenderError::LineWidthConflict { layer: None, .. }), "{err:?}");
+            assert!(matches!(err, RenderError::LineWidthConflict { .. }), "{err:?}");
             assert_eq!(err.to_string(), conflict_text(s_text, w_text));
         }
         // Vacuity control: each binding alone draws.
@@ -1645,15 +1631,8 @@ mod tests {
         crate::spec::layer::Layer {
             mark,
             encoding,
-            transforms: Vec::new(),
             mark_style,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         }
     }
 
@@ -1941,7 +1920,7 @@ mod tests {
         spec.encoding.size.as_mut().unwrap().scale = Some(scale("[0,36]"));
         let err = build_width_case(&spec, &width_batch(ASCENDING.to_vec()), &MarkKwargsSpec::default())
             .expect_err("a zero-area vertex must refuse");
-        assert!(matches!(err, RenderError::LineWidthNotPositive { layer: None, .. }), "{err:?}");
+        assert!(matches!(err, RenderError::LineWidthNotPositive { .. }), "{err:?}");
         assert_eq!(
             err.to_string(),
             "mark_line: size 'v' value 1 maps to area 0 on the size scale, which gives no positive \
@@ -1968,7 +1947,7 @@ mod tests {
         let with_null = vec![Some(1.0), None, Some(3.0), Some(4.0)];
         let err = build_width_case_themed(&spec, &width_batch(with_null), &MarkKwargsSpec::default(), theme.clone())
             .expect_err("a zero fallback width must refuse");
-        assert!(matches!(err, RenderError::LineWidthNotPositive { layer: None, .. }), "{err:?}");
+        assert!(matches!(err, RenderError::LineWidthNotPositive { .. }), "{err:?}");
         assert_eq!(
             err.to_string(),
             "mark_line: size 'v' has a row with no usable size (null, non-finite or off the scale), \
@@ -1987,48 +1966,56 @@ mod tests {
     }
 
     /// A hand-built wire spec reaches render without Python's constructor
-    /// check: a non-positive or non-finite constant `size=` on a line
-    /// refuses there and never reaches `dot_diameter`, and a negative or
-    /// non-finite one on a point refuses before it becomes a NaN radius. On a
-    /// layered chart both refusals, and a zero-area vertex, name their layer.
+    /// check, so render runs the one size rule on every layer: a constant
+    /// `size=` must be finite and `> 0` on a mark that draws one, and is
+    /// refused on a mark that never does, naming that mark's own sizing kwarg
+    /// where it has one. The refusal names the entry the layer records, and
+    /// its layer on a layered chart.
     #[test]
-    fn wire_door_refuses_out_of_range_constant_size_and_names_the_layer() {
+    fn wire_door_refuses_a_constant_size_the_mark_cannot_draw_and_names_the_layer() {
         let sized = |mark, value| {
             let mut spec = line_spec();
             spec.mark = mark;
             spec.mark_style = Some(MarkKwargsSpec { size: Some(value), ..Default::default() });
             spec
         };
-        for (value, text) in [(-4.0, "-4"), (0.0, "0"), (f64::NAN, "NaN")] {
-            let err = render_static(&sized(Mark::Line, value)).err().unwrap_or_else(|| panic!("size={value} must refuse"));
-            assert!(matches!(err, RenderError::MarkSizeOutOfRange { mark: Mark::Line, .. }), "{err:?}");
-            assert_eq!(err.to_string(), format!("mark_line(size=...) must be a positive number; received {text}"));
+        for mark in [Mark::Line, Mark::Point] {
+            for (value, text) in [(-4.0, "-4"), (0.0, "0"), (f64::NAN, "NaN"), (f64::INFINITY, "inf")] {
+                let spec = sized(mark, value);
+                let want = format!("mark_{mark}(size=...) must be a positive number; received {text}");
+                let err = render_static(&spec).err().unwrap_or_else(|| panic!("{mark} size={value} must refuse"));
+                assert!(matches!(err.root(), RenderError::MarkSizeOutOfRange { mark: m, .. } if *m == mark), "{err:?}");
+                assert_eq!(err.to_string(), want);
+                assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(want));
+            }
         }
-        // A point's radius is `sqrt(size / PI)`: a negative or non-finite
-        // area has none and refuses on both output kinds. Zero stays an
-        // invisible dot.
-        for (value, text) in [(-4.0, "-4"), (f64::NAN, "NaN"), (f64::INFINITY, "inf")] {
-            let spec = sized(Mark::Point, value);
-            let expected = format!("mark_point(size=...) must be a non-negative number; received {text}");
-            let err = render_static(&spec).err().unwrap_or_else(|| panic!("point size={value} must refuse"));
-            assert!(matches!(err, RenderError::MarkSizeOutOfRange { mark: Mark::Point, .. }), "{err:?}");
-            assert_eq!(err.to_string(), expected);
-            let err = render_interactive(&spec).err().unwrap_or_else(|| panic!("point size={value} must refuse"));
-            assert_eq!(err.to_string(), expected);
+        for (mark, tail) in [(Mark::Bar, ""), (Mark::Area, ""), (Mark::Rule, " Set stroke_width= instead.")] {
+            let spec = sized(mark, 5.0);
+            let want = format!("mark_{mark}(size=...) has no effect on mark_{mark}; received 5.{tail}");
+            let err = render_static(&spec).err().unwrap_or_else(|| panic!("{mark} size=5 must refuse"));
+            assert!(matches!(err.root(), RenderError::MarkSizeNotDrawn { mark: m, .. } if *m == mark), "{err:?}");
+            assert_eq!(err.to_string(), want);
+            assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(want));
         }
-        // Vacuity controls: a positive constant draws on both marks, and a
-        // point keeps its zero-area dot.
-        for (mark, value) in [(Mark::Line, 10.0), (Mark::Point, 10.0), (Mark::Point, 0.0)] {
-            assert!(render_static(&sized(mark, value)).is_ok(), "{mark:?} size={value}");
-            assert!(render_interactive(&sized(mark, value)).is_ok(), "{mark:?} size={value}");
+        // The chart's entry names the public call in place of the mark.
+        let stamped = ChartSpec { entry: Some("relplot".into()), ..sized(Mark::Point, 0.0) };
+        assert_eq!(
+            render_static(&stamped).err().map(|e| e.to_string()),
+            Some("relplot(size=...) must be a positive number; received 0".to_string())
+        );
+        // Vacuity controls: a positive constant draws on both marks that draw one.
+        for mark in [Mark::Line, Mark::Point] {
+            assert!(render_static(&sized(mark, 10.0)).is_ok(), "{mark:?}");
+            assert!(render_interactive(&sized(mark, 10.0)).is_ok(), "{mark:?}");
         }
 
-        // On a layered chart an out-of-range constant names its layer.
+        // On a layered chart a refused constant names its layer.
         let xy = line_spec().encoding;
         let bad = |mark, value| test_layer(mark, xy.clone(), Some(MarkKwargsSpec { size: Some(value), ..Default::default() }));
         for (mark, value, text) in [
             (Mark::Line, 0.0, "mark_line(size=...) must be a positive number; received 0"),
-            (Mark::Point, -4.0, "mark_point(size=...) must be a non-negative number; received -4"),
+            (Mark::Point, 0.0, "mark_point(size=...) must be a positive number; received 0"),
+            (Mark::Area, 5.0, "mark_area(size=...) has no effect on mark_area; received 5."),
         ] {
             let partner = test_layer(Mark::Point, xy.clone(), None);
             for (layers, li) in [(vec![bad(mark, value), partner.clone()], 0), (vec![partner, bad(mark, value)], 1)] {
@@ -2038,6 +2025,16 @@ mod tests {
                 assert_eq!(render_interactive(&spec).err().map(|e| e.to_string()), Some(want));
             }
         }
+
+        // Naming is a property of where the refusal arose, not of its kind: an
+        // unparseable color on a layer reads as that layer's entry too.
+        let mut bad_fill = test_layer(Mark::Point, xy.clone(), Some(MarkKwargsSpec { fill: Some("notacolor".into()), ..Default::default() }));
+        bad_fill.entry = Some("relplot".into());
+        let spec = added(vec![test_layer(Mark::Point, xy.clone(), None), bad_fill]);
+        let err = render_static(&spec).err().expect("an unparseable fill must refuse");
+        assert!(matches!(err, RenderError::InLayer { layer: Some(1), .. }), "{err:?}");
+        assert!(matches!(err.root(), RenderError::InvalidColor(_)), "{err:?}");
+        assert!(err.to_string().starts_with("layer 1: relplot: "), "{err}");
 
         // The size field is chart-level (the one size scale), inherited by
         // both layers; the line is layer 1.
@@ -2209,6 +2206,25 @@ mod tests {
             let want = "layer 1: mark_line: size=fm.when(...) on selection 's' has a branch of size 0, which gives no \
                         positive line width. Every width along a line must be positive; give every branch a size above 0.";
             assert_eq!(render_static(&refused).err().map(|e| e.to_string()).as_deref(), Some(want), "{layers:?}");
+        }
+    }
+
+    /// Every batch names the `size` conditionals its layer declared when its
+    /// layer declared fewer than all of them, so the line's own conditional
+    /// is out of the point layer's scope and the runtime never resizes the
+    /// dots by it. A chart-wide conditional leaves the point batch unscoped,
+    /// so its scene is unchanged.
+    #[test]
+    fn a_point_batch_names_the_size_conditionals_its_layer_declared() {
+        let point_batch = |scene: &ferrum_scene::SceneGraph| scene.panels[0].marks[0].size_conditionals.clone();
+        let line_scoped = render_interactive(&with_scoped_size_conditional(point_then_line(), 100.0, 20.0, Some(vec![1]))).unwrap();
+        assert_eq!(point_batch(&line_scoped), Some(vec![]), "the line's conditional is outside the point's scope");
+        assert_eq!(line_batch(&line_scoped).size_conditionals, Some(vec![0]));
+        // Vacuity control: a layer that declared every size conditional (here
+        // the only one) is unscoped, so its scene is unchanged.
+        for layers in [None, Some(vec![0, 1]), Some(vec![0])] {
+            let scene = render_interactive(&with_scoped_size_conditional(point_then_line(), 100.0, 20.0, layers.clone())).unwrap();
+            assert_eq!(point_batch(&scene), None, "{layers:?}");
         }
     }
 

@@ -5,7 +5,6 @@ Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
 """
 
 from __future__ import annotations
-import warnings
 from typing import Any, Optional
 
 from ferrum import (
@@ -19,7 +18,7 @@ from ferrum import (
     Violin,
 )
 from ferrum._core import secondary_key, transform_registry
-from ferrum._layer import MarkDesugarResult, _EntryVoice, _Layer
+from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import (
     registry_output_columns,
@@ -27,7 +26,6 @@ from ferrum._registry import (
     require_aggregate_field,
 )
 from ferrum._validate import validate_choice
-from ferrum._warn import user_stacklevel
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
     resolve_color_groupby,
@@ -70,7 +68,8 @@ def desugar_contour(
     Layers emitted (no groupby)
     ---------------------------
     1. ``polygon`` — ``x="contour_x"``, ``y="contour_y"``,
-       ``color="level_value"``, ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
+       ``color=Color("level_value", title="Density")``,
+       ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
 
     Layers emitted (with groupby)
     -----------------------------
@@ -144,7 +143,7 @@ def desugar_contour(
             name="contour",
         ),
     ]
-    from ferrum.encoding import X, Y
+    from ferrum.encoding import Color, X, Y
 
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of any of these columns raises here instead of
@@ -194,7 +193,7 @@ def desugar_contour(
                 encoding={
                     "x": X(_contour_cols["contour_x"], title=x_field),
                     "y": Y(_contour_cols["contour_y"], title=y_field),
-                    "color": _contour_cols["level_value"],
+                    "color": Color(_contour_cols["level_value"], title="Density"),
                 },
                 mark_kwargs=mk,
                 data_source="contour",
@@ -282,7 +281,6 @@ def desugar_violin(
     color_sort: Any = None,
     shared_extent: bool = False,
     horizontal: bool = False,
-    _voice: _EntryVoice | None = None,
 ) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
@@ -369,11 +367,6 @@ def desugar_violin(
         emits ``__pos_y_offset__`` (scaled by panel height) instead of
         ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
         expands along the category band on the ``y`` axis.
-    _voice : _EntryVoice or None, default None
-        The public entry the hue-inner warning below names, injected at
-        resolution from the pending mark (never a user kwarg). ``None`` names
-        ``mark_violin(inner=...)``; ``catplot``, which exposes no ``inner=``
-        of its own, sets its own entry and a working recourse.
 
     Returns
     -------
@@ -479,20 +472,18 @@ def desugar_violin(
     )
     if inner == "none":
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
+    # WARN DEGRADED: every inner variant draws at the category's own
+    # position, undodged per hue -- see _VIOLIN_QUARTILE_BAND_SIZE's comment
+    # above. Reported once per resolution of the pending mark (each to_json()
+    # and each render resolves it exactly once); not without a hue split,
+    # where the inner mark IS drawn at its (single) own position. The
+    # recourse names `Chart.mark_violin` because a caller that reached this
+    # through a figure function (catplot) has no `inner=` of its own.
+    degraded: tuple = ()
     if split_hue:
-        # WARN DEGRADED: every inner variant draws at the category's own
-        # position, undodged per hue -- see _VIOLIN_QUARTILE_BAND_SIZE's
-        # comment above. Warns once per resolution of the pending mark (each
-        # to_json() and each render resolves it exactly once); does not warn
-        # without a hue split, where the inner mark IS drawn at its (single)
-        # own position. The voice names the public entry that was actually
-        # called, since a caller with no `inner=` of its own (catplot)
-        # cannot act on a message naming a kwarg it does not expose.
-        voice = _voice or _EntryVoice("mark_violin(inner=...)")
-        warnings.warn(
-            f"{voice.door}: inner marks are drawn at each category's center and "
-            f"are not dodged per hue group{voice.recourse}",
-            stacklevel=user_stacklevel(),
+        degraded = (
+            "inner marks are drawn at each category's center and are not dodged "
+            'per hue group; use Chart.mark_violin(inner="none") to drop the inner mark',
         )
     if inner == "point":
         # Raw points on the original data (not the violin batch).
@@ -514,6 +505,7 @@ def desugar_violin(
                 violin_layer,
                 _Layer(name="point", mark="point", encoding=point_encoding),
             ],
+            degraded=degraded,
         )
     if inner == "quartile":
         transforms.append(BoxStats(field=val_field, groupby=groupby, name="quart"))
@@ -555,7 +547,7 @@ def desugar_violin(
                     data_source="quart",
                 )
             )
-        return MarkDesugarResult(transforms=transforms, layers=layers)
+        return MarkDesugarResult(transforms=transforms, layers=layers, degraded=degraded)
     # inner == "box": delegate to desugar_boxplot with the swapped axes so the
     # inner box also respects the horizontal orientation.
     from ferrum.marks.composite import desugar_boxplot
@@ -577,6 +569,7 @@ def desugar_violin(
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
         layers=[violin_layer, *box_result.layers],
+        degraded=degraded,
     )
 
 
@@ -882,6 +875,8 @@ def desugar_hex(
     cmap: str | None = None,
     stroke: Optional[str] = None,
     stroke_width: float = 0,
+    _color: Any = None,
+    _entry: str | None = None,
 ) -> MarkDesugarResult:
     """Hexagonal-bin mark desugar.
 
@@ -932,6 +927,15 @@ def desugar_hex(
         Border width for hex cells in pixels.  Only produces a visible border
         when non-zero.  Passed directly to the polygon layer's
         ``stroke_width`` mark kwarg.
+    _color : str or ChannelBase or None, default None
+        The chart-level color when it names the aggregated column or Hex's
+        output column (injected at resolution, never a user kwarg). Its channel properties style the
+        cell color binding; the default title is the aggregated column, or
+        ``"Count"``.
+    _entry : str or None, default None
+        The public entry the caller invoked (injected at resolution, never a
+        user kwarg), named in the cmap/scheme conflict refusal below instead
+        of hard-coding ``"mark_hex"``.
 
     Returns
     -------
@@ -955,7 +959,20 @@ def desugar_hex(
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
     require_aggregate_field("hex", "mark_hex", aggregate, field)
-    from ferrum.encoding import X, Y
+    from ferrum.encoding import Color, X, Y
+    from ferrum.encoding.base import ChannelBase
+
+    # The polygon cells sample their own `cmap`, so a scheme on the caller's
+    # color reaches them through it and the legend agrees with the cells.
+    scheme = _color.option("scheme") if isinstance(_color, ChannelBase) else None
+    if scheme is not None:
+        if cmap is not None and cmap != scheme:
+            entry = _entry or "mark_hex"
+            raise ValueError(
+                f"{entry}: cmap={cmap!r} and color=fm.Color(..., scheme={scheme!r}) both "
+                "set the cell colormap; pass only one."
+            )
+        cmap = scheme
 
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
@@ -979,13 +996,31 @@ def desugar_hex(
             encoding={
                 "x": X(_hex_cols["hex_x"], title=x_field),
                 "y": Y(_hex_cols["hex_y"], title=y_field),
-                "color": _hex_cols["value"],
+                "color": Color(_hex_cols["value"], **_hex_color_kwargs(aggregate, field, _color)),
             },
             mark_kwargs=mk,
             data_source="hex",
         )
     ]
     return MarkDesugarResult(transforms=transforms, layers=layers)
+
+
+def _hex_color_kwargs(aggregate: str, field: str | None, color: Any) -> dict:
+    """``Color`` kwargs for the hex cells' binding, titled for the reader.
+
+    The title is the aggregated column, or ``"Count"`` for an aggregate that
+    reads none. *color* is the caller's chart-level color naming the
+    aggregated column or the output column; its properties carry over onto
+    the binding and its own title wins.
+    """
+    from ferrum._registry import aggregate_needs_field
+    from ferrum.encoding.base import ChannelBase
+
+    reads_column = aggregate_needs_field("hex", aggregate)
+    kwargs: dict = {"title": field if reads_column else "Count"}
+    if isinstance(color, ChannelBase):
+        kwargs.update(color._kwargs)
+    return kwargs
 
 
 register_layer_names(
@@ -1024,23 +1059,20 @@ def desugar_swarm(
     ``y_field`` when horizontal) and numeric value column (the other).
 
     ``Swarm`` (named ``"swarm"``) validates its columns and emits the
-    original columns plus:
-    ``[swarm_x (Float64, always null), swarm_y (Float64, the value; null on
-    a row that is never placed -- a null or NaN value, or a null category),
-    __pos_x_offset__ (Float64, a ``0.0`` placeholder)]`` for vertical, or
-    ``__pos_y_offset__`` for horizontal. A row whose ``dodge`` value is null
-    belongs to no sub-band and is dropped entirely before this output is
-    emitted, not nulled in place. Placement does not happen in the
-    transform: the cross-axis offset column is a placeholder until the
-    renderer replaces it with the packed pixel offset against the panel's
-    resolved value-axis scale, the same seam ``Jitter`` already computes its
-    own pixel offsets at.
+    original columns plus ``swarm_y`` (Float64, the value; null on a row
+    that is never placed -- a null or NaN value, or a null category). A row
+    whose ``dodge`` value is null belongs to no sub-band and is dropped
+    entirely before this output is emitted, not nulled in place. Placement
+    does not happen in the transform: the renderer packs whichever rows the
+    layer draws against the panel's resolved value-axis scale and adds the
+    cross-axis pixel offset then, the same seam ``Jitter`` computes its own
+    pixel offsets at. A swarm whose packed dots reach past half its category
+    slot warns that they spill into the neighbouring categories.
 
-    For ``orient="vertical"``, the renderer uses the original ``cat``/``val``
-    columns for axis labeling, and ``__pos_x_offset__`` shifts each point
-    within the category band.  For ``orient="horizontal"``, the layer encodes
-    the original ``val``/``cat`` fields and the renderer applies
-    ``__pos_y_offset__`` to spread points along the y axis.
+    For ``orient="vertical"`` the renderer uses the original ``cat``/``val``
+    columns for axis labeling and shifts each point along x within its
+    category band; for ``orient="horizontal"`` the layer encodes the
+    original ``val``/``cat`` fields and the renderer spreads points along y.
 
     Layers emitted
     --------------

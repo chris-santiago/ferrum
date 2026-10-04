@@ -2479,7 +2479,6 @@ mod pipeline_order_tests {
     // The bare two-axis `AxesInput` the sibling mod's per-axis tests use.
     use super::chart_config_application_tests::blank_axes;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
@@ -2541,7 +2540,6 @@ mod pipeline_order_tests {
             }),
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -2562,20 +2560,7 @@ mod pipeline_order_tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         (spec, batch)
     }

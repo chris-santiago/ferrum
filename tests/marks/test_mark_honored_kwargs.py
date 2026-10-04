@@ -54,7 +54,7 @@ _MARK_STYLE_RS = (
 class TestBarArrowRefusal:
     def test_mark_bar_arrow_raises_naming_mark_and_honored_set(self):
         df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
-        with pytest.raises(TypeError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             fm.Chart(df).mark_bar(arrow=True).encode(x="cat", y="val")
         message = str(exc_info.value)
         assert "mark_bar" in message
@@ -82,7 +82,7 @@ class TestBarArrowRefusal:
 class TestBandSizeSettlesFinding154:
     def test_mark_bar_band_size_raises(self):
         df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
-        with pytest.raises(TypeError, match="band_size"):
+        with pytest.raises(ValueError, match="band_size"):
             fm.Chart(df).mark_bar(band_size=0.9).encode(x="cat", y="val")
 
     def test_mark_tick_band_size_still_works(self):
@@ -109,10 +109,10 @@ _SIZE_REFUSING_PRIMITIVES = sorted(
 )
 
 #: Literal expected refusal text for every refusing primitive, pointer and
-#: no-pointer forms alike -- hand-written, not derived from
-#: ``_inert_size_error``, so a dropped/swapped/mis-pointed
-#: ``_SIZE_REFUSAL_POINTER`` entry or a drifted message template fails this
-#: test instead of passing vacuously against its own production oracle.
+#: no-pointer forms alike -- hand-written, not derived from the Rust size
+#: rule (``ferrum._core.check_mark_size``), so a dropped/swapped/mis-pointed
+#: recourse or a drifted message template fails this test instead of
+#: passing vacuously against its own production oracle.
 _SIZE_REFUSAL_MESSAGES: dict[str, str] = {
     "arc": "mark_arc(size=...) has no effect on mark_arc; received 20.",
     "area": "mark_area(size=...) has no effect on mark_area; received 20.",
@@ -168,15 +168,18 @@ class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
             "mark_density(size=...) has no effect on mark_density; received 0."
         )
 
-    def test_composite_mark_size_reaches_the_point_it_emits_unchecked(self):
-        """A composite that emits a point keeps its catch-all ``size=`` on
-        that point, with the composite's own meaning: ``0`` is not a
-        point/line magnitude here and is not positivity-checked."""
+    def test_composite_mark_size_meets_the_rule_of_the_mark_that_draws_it(self):
+        """A composite that emits a point holds its catch-all ``size=`` to the
+        point's own rule, voiced as the composite, and spreads it onto the
+        point alone: the rule it also emits never draws a size."""
         df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        resolved = fm.Chart(df).mark_qq(size=0).encode(x="v:Q")._resolve_pending()
+        with pytest.raises(ValueError) as exc_info:
+            fm.Chart(df).mark_qq(size=0).encode(x="v:Q").to_json()
+        assert str(exc_info.value) == "mark_qq(size=...) must be a positive number; received 0"
+        resolved = fm.Chart(df).mark_qq(size=30).encode(x="v:Q")._resolve_pending()
         assert [(ly.mark, (ly.mark_kwargs or {}).get("size")) for ly in resolved._layers] == [
-            ("point", 0),
-            ("rule", 0),
+            ("point", 30),
+            ("rule", None),
         ]
 
 
@@ -235,7 +238,7 @@ class TestValidateUserMarkKwargs:
         assert validate_user_mark_kwargs("boxplot", {"opacity": 0.5}) == {"opacity": 0.5}
 
     def test_not_honored_kwarg_raises_naming_mark_and_honored_set(self):
-        with pytest.raises(TypeError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             validate_user_mark_kwargs("boxplot", {"shape": "diamond"})
         message = str(exc_info.value)
         assert "mark_boxplot" in message
@@ -342,7 +345,7 @@ class TestDriftPinAgainstRustSectionHeaders:
         rust_map = _parse_rust_field_mark_map()
         for field, marks in rust_map.items():
             for mark in marks:
-                assert field in _PRIMITIVE_MARK_EXTRAS[mark], (
+                assert field in MARK_HONORED_KWARGS[mark], (
                     f"mark_style.rs documents {field!r} as owned by mark_{mark}, "
                     f"but MARK_HONORED_KWARGS[{mark!r}] does not include "
                     f"{field!r}. Update ferrum.marks.base._PRIMITIVE_MARK_EXTRAS."

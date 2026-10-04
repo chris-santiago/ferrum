@@ -486,12 +486,13 @@ ROWS: list[Row] = [
     ),
     Row(
         "Reorder",
-        dict(by="ro_by", drop_index=False, from_="ro_from", name="ro_nm"),
+        dict(by="ro_by", drop_index=False, from_="ro_from", axis="columns", name="ro_nm"),
         dict(
             by="by='ro_by'",
             drop_index="drop_index=false",
             # The parameter's spelling, as AggregateOp's `fn_=` (ruling §8).
             from_='from_=Some("ro_from")',
+            axis="axis='columns'",
             name='name=Some("ro_nm")',
         ),
     ),

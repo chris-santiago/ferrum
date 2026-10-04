@@ -53,7 +53,7 @@ def test_shap_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _fake_bar(source, **kwargs):
         calls.append("bar")
-        return "BAR_CHART"
+        return ferrum.Chart(None).mark_point()
 
     # Avoid the real SHAP computation: stub the source resolver and the sibling.
     monkeypatch.setattr(expl, "_resolve_source", lambda *a, **k: object())
@@ -63,7 +63,8 @@ def test_shap_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
         result = ferrum.shap_chart(object(), kind="bar")
 
     assert calls == ["bar"]
-    assert result == "BAR_CHART"
+    # The forwarded chart speaks as the dispatcher the caller invoked.
+    assert result._entry == "shap_chart"
 
 
 def test_rank_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,7 +75,7 @@ def test_rank_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _fake_rank1d(*args, **kwargs):
         calls.append("1d")
-        return "RANK1D_CHART"
+        return ferrum.Chart(None).mark_point()
 
     monkeypatch.setattr(ranking, "rank1d_chart", _fake_rank1d)
 
@@ -82,7 +83,7 @@ def test_rank_chart_warns_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
         result = ferrum.rank_chart(object(), rank="1d")
 
     assert calls == ["1d"]
-    assert result == "RANK1D_CHART"
+    assert result._entry == "rank_chart"
 
 
 @pytest.mark.parametrize(

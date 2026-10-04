@@ -138,10 +138,10 @@ class TestMarkDensityStyle:
         # Stack position is set (confirms transform routing)
         assert resolved._position is not None
 
-    def test_typo_raises_type_error(self, density_df):
-        """An unknown kwarg raises TypeError at resolve time."""
+    def test_typo_raises_value_error(self, density_df):
+        """An unknown kwarg raises ValueError at resolve time."""
         chart = fm.Chart(density_df).mark_density(notakwarg=1).encode(x="value:Q")
-        with pytest.raises(TypeError, match="notakwarg"):
+        with pytest.raises(ValueError, match="notakwarg"):
             chart._resolve_pending()
 
     def test_byte_identity_no_style(self, density_df):
@@ -201,9 +201,9 @@ class TestMarkHistogramStyle:
         )
         assert "bin_count" not in resolved._mark_kwargs
 
-    def test_typo_raises_type_error(self, density_df):
+    def test_typo_raises_value_error(self, density_df):
         chart = fm.Chart(density_df).mark_histogram(notakwarg=1).encode(x="value:Q")
-        with pytest.raises(TypeError, match="notakwarg"):
+        with pytest.raises(ValueError, match="notakwarg"):
             chart._resolve_pending()
 
     def test_byte_identity_no_style(self, density_df):
@@ -258,9 +258,9 @@ class TestMarkHexStyle:
         assert "stroke_width" not in style_kwargs
         assert "opacity" in style_kwargs
 
-    def test_typo_raises_type_error(self, hex_df):
+    def test_typo_raises_value_error(self, hex_df):
         chart = fm.Chart(hex_df).mark_hex(notakwarg=1).encode(x="x", y="y")
-        with pytest.raises(TypeError, match="notakwarg"):
+        with pytest.raises(ValueError, match="notakwarg"):
             chart._resolve_pending()
 
     def test_byte_identity_no_style(self, hex_df):

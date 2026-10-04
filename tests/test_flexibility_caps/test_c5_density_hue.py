@@ -125,12 +125,16 @@ class TestDesugaredContourGroupby:
         assert color_ch.option("type") == "N"
 
     def test_no_groupby_fill_layer_colors_by_level_value(self):
-        """Without groupby, polygon layer colors by level_value (byte-stable)."""
+        """Without groupby, polygon layer colors by level_value, its legend
+        titled "Density" rather than the internal column name."""
+        from ferrum.encoding import Color
+
         result = desugar_contour("x", "y", groupby=None, fill=True)
         layers = result.layers
         enc = layers[0].encoding
-        assert enc.get("color") == "level_value", (
-            f"No-groupby contour must color by 'level_value'; got {enc.get('color')!r}"
+        assert enc.get("color") == Color("level_value", title="Density"), (
+            f"No-groupby contour must color by 'level_value' titled 'Density'; "
+            f"got {enc.get('color')!r}"
         )
 
     def test_groupby_uses_segment_mark_not_polygon(self):

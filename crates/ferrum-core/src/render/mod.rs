@@ -649,41 +649,46 @@ pub enum RenderError {
     /// honest way to draw one and ignore the other: REFUSE MALFORMED.
     ///
     /// Decided once, in the line mark build, so every door (a Python chart, a
-    /// figure function, a hand-built wire spec) reaches it. `layer` is `None`
-    /// on an unlayered chart; the per-layer draw loop names the layer index
-    /// on a layered one, which `Display` prefixes as `layer {i}: `. `entry`
-    /// is the public entry that produced the layer ([`crate::spec::layer::Layer::entry`],
-    /// e.g. `mark_smooth`), which the text names in place of `mark_line`;
-    /// `None` names `mark_line`.
+    /// figure function, a hand-built wire spec) reaches it. The per-layer draw
+    /// loop wraps it in [`Self::InLayer`], which names the public entry in
+    /// place of `mark_line`.
     LineWidthConflict {
-        layer: Option<usize>,
-        entry: Option<String>,
         /// Boxed, for `clippy::result_large_err` and nothing else, the same
         /// reason [`Self::LayerAxisColumnUnplaceable`]'s `detail` is boxed.
         sources: Box<LineWidthSources>,
     },
-    /// A constant `size=` (a dot area) that the mark cannot draw: on a line,
-    /// zero, negative or not finite, since the line's width is the diameter
-    /// of a dot of that area; on a point, negative or not finite, since the
-    /// radius is `sqrt(size / PI)` (zero is a legal invisible dot). REFUSE
-    /// MALFORMED. Python's mark constructors refuse the same values; this
-    /// refuses a hand-built spec that carries one. `layer` is filled the way
-    /// [`Self::LineWidthConflict`]'s is.
-    MarkSizeOutOfRange { layer: Option<usize>, entry: Option<String>, mark: crate::spec::mark::Mark, value: f64 },
+    /// A constant `size=` (a dot area) that is zero, negative or not finite on
+    /// a mark that draws one ([`crate::spec::mark::Mark::draws_constant_size`]):
+    /// a point's radius `sqrt(size / PI)` and a line's width (the diameter of
+    /// a dot of that area) exist only for a positive area. REFUSE MALFORMED,
+    /// through [`draw::check_constant_size`], the one size rule.
+    MarkSizeOutOfRange { mark: crate::spec::mark::Mark, value: f64 },
+    /// A constant `size=` on a mark that never draws one
+    /// ([`crate::spec::mark::Mark::draws_constant_size`]): accepted, it would
+    /// render exactly as without it. REFUSE MALFORMED, through
+    /// [`draw::check_constant_size`]; the text names the mark's own sizing
+    /// kwarg where it has one ([`crate::spec::mark::Mark::size_knob`]).
+    MarkSizeNotDrawn { mark: crate::spec::mark::Mark, value: f64 },
     /// A drawn vertex of a sized line would take a width that is not finite
     /// and `> 0`, the scene's `widths` contract: its size value maps to a
     /// non-positive area on the size scale, or a row with no usable size
     /// falls back to a non-positive default width. Neither has a width to
     /// draw, and substituting another would misreport the data, so the line
-    /// refuses. `layer` and `entry` are filled the way
-    /// [`Self::LineWidthConflict`]'s are.
+    /// refuses.
     LineWidthNotPositive {
-        layer: Option<usize>,
-        entry: Option<String>,
         /// Boxed for `clippy::result_large_err`, as `LineWidthConflict`'s
         /// `sources` is.
         source: Box<NonPositiveLineWidth>,
     },
+    /// A refusal raised while building one layer's marks, with the layer it
+    /// came from: `layer` is its index on a layered chart (`None` on an
+    /// unlayered one, whose one layer is the chart), and `entry` the public
+    /// call that produced it ([`crate::spec::layer::Layer::entry`], else
+    /// [`crate::spec::chart::ChartSpec::entry`], else `mark_{mark}`). Applied
+    /// to every refusal of the per-layer draw loop's style and build steps, so
+    /// naming is a property of where the refusal arose, not of its variant.
+    /// `Display` prefixes `layer {i}: ` and voices `source` as `entry`.
+    InLayer { layer: Option<usize>, entry: String, source: Box<RenderError> },
     /// A stroke node's `widths` breaks the scene contract the static SVG
     /// outline needs: misaligned with its vertices, a width that is not
     /// finite and `> 0`, or a closed path. The line mark never writes such a
@@ -911,6 +916,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         RenderError::NumberFormatOnTemporalScale { channel, surface, format, .. } => {
             RenderError::NumberFormatOnTemporalScale { channel, surface, format, coord_flipped }
         }
+        // A layer context corrects the refusal it carries.
+        RenderError::InLayer { layer, entry, source } => {
+            RenderError::InLayer { layer, entry, source: Box::new(with_coord_flipped(*source, coord_flipped)) }
+        }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
         // here, not a silent no-op. `EncodingTypeMismatch`,
@@ -976,10 +985,11 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayerTransformsUnsupported { .. }
         // Two indices and a layer count, no channel token.
         | RenderError::ConditionalLayerOutOfRange { .. }
-        // A layer index and two width bindings, no channel token.
+        // Two width bindings, no channel token.
         | RenderError::LineWidthConflict { .. }
         // A mark and a number; a field name and a width.
         | RenderError::MarkSizeOutOfRange { .. }
+        | RenderError::MarkSizeNotDrawn { .. }
         | RenderError::LineWidthNotPositive { .. }
         // A scene-contract fault, no channel token.
         | RenderError::TaperedStrokeMalformed { .. }
@@ -1088,16 +1098,7 @@ impl std::fmt::Display for RenderError {
                 write!(f, "scene construction failed: {msg}"),
             Self::HtmlBundleAssembly(msg) =>
                 write!(f, "HTML bundle assembly failed: {msg}"),
-            Self::UnsupportedChannelCombination { mark, channel, hint, hint_alt_channel, coord_flipped } => {
-                let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                let hint: std::borrow::Cow<str> = match hint_alt_channel {
-                    Some(alt) => std::borrow::Cow::Owned(
-                        hint.replacen("{alt}", prepare::user_facing_channel(alt, *coord_flipped), 1),
-                    ),
-                    None => std::borrow::Cow::Borrowed(*hint),
-                };
-                write!(f, "{mark}: channel '{channel}' is not supported; {hint}")
-            }
+            Self::UnsupportedChannelCombination { mark, .. } => self.fmt_as(mark, f),
             Self::InvalidAxisOrient { channel, orient, coord_flipped } => {
                 // `allowed`/`physical` reflect the RESOLVED axis (`channel`,
                 // pre-un-flip): top/bottom validity is a GEOMETRIC property of
@@ -1136,8 +1137,7 @@ impl std::fmt::Display for RenderError {
             }
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
-            Self::MarkRequiresCoord { mark, required } =>
-                write!(f, "{mark} requires a {required} coord"),
+            Self::MarkRequiresCoord { mark, .. } => self.fmt_as(mark, f),
             // One frame, two reasons (see `LayerCoordUnplaceableReason`): the
             // prefix, the "cannot be placed on one of them" spine and the closing
             // instruction are shared verbatim, so a caller cannot tell which of
@@ -1303,59 +1303,18 @@ impl std::fmt::Display for RenderError {
                 None => write!(f, "could not normalize string columns to Utf8: {reason}"),
                 Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
             },
-            Self::LineWidthConflict { layer, entry, sources } => {
-                if let Some(layer) = layer {
-                    write!(f, "layer {layer}: ")?;
-                }
-                let entry = entry.as_deref().unwrap_or("mark_line");
-                let LineWidthSources { size, stroke_width } = &**sources;
-                write!(
-                    f,
-                    "{entry}: size and stroke_width both set the line's width (size={size}, \
-                     stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width \
-                     that can taper along the line; stroke_width= sets a width in pixels."
-                )
+            Self::LineWidthConflict { .. } | Self::LineWidthNotPositive { .. } => self.fmt_as("mark_line", f),
+            Self::MarkSizeOutOfRange { mark, .. } | Self::MarkSizeNotDrawn { mark, .. } => {
+                self.fmt_as(&format!("mark_{}", mark.as_str()), f)
             }
-            Self::MarkSizeOutOfRange { layer, entry, mark, value } => {
+            Self::InLayer { layer, entry, source } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
                 }
-                let bound = if matches!(mark, crate::spec::mark::Mark::Line) { "positive" } else { "non-negative" };
-                match entry {
-                    Some(entry) => write!(f, "{entry}")?,
-                    None => write!(f, "mark_{}", mark.as_str())?,
-                }
-                write!(f, "(size=...) must be a {bound} number; received {value}")
-            }
-            Self::LineWidthNotPositive { layer, entry, source } => {
-                if let Some(layer) = layer {
-                    write!(f, "layer {layer}: ")?;
-                }
-                let entry = entry.as_deref().unwrap_or("mark_line");
-                match &**source {
-                    NonPositiveLineWidth::Scaled { field, value, area } => write!(
-                        f,
-                        "{entry}: size '{field}' value {value} maps to area {area} on the size \
-                         scale, which gives no positive line width. Every width along a line must \
-                         be positive; give the size scale a range above 0."
-                    ),
-                    NonPositiveLineWidth::Fallback { field, width } => write!(
-                        f,
-                        "{entry}: size '{field}' has a row with no usable size (null, \
-                         non-finite or off the scale), which takes the line's default width \
-                         {width}. Every width along a line must be positive; set a positive \
-                         Theme(line_stroke_width=)."
-                    ),
-                    NonPositiveLineWidth::Conditional { selection, area } => write!(
-                        f,
-                        "{entry}: size=fm.when(...) on selection '{selection}' has a branch of \
-                         size {area}, which gives no positive line width. Every width along a line \
-                         must be positive; give every branch a size above 0."
-                    ),
-                }
+                source.fmt_as(entry, f)
             }
             Self::TaperedStrokeMalformed { source } => {
-                write!(f, "mark_line: the tapered line cannot be drawn: {source}")
+                write!(f, "the scene's tapered stroke cannot be drawn: {source}")
             }
         }
     }
@@ -1370,38 +1329,93 @@ impl From<ferrum_scene::TaperError> for RenderError {
 }
 
 impl RenderError {
-    /// Name the layer a per-layer refusal came from, for the refusals whose
-    /// text carries a `layer {i}: ` prefix only on a layered chart. Every
-    /// other error passes through unchanged.
+    /// Write this refusal voiced as `entry`, the public call the caller
+    /// invoked. A refusal whose sentence is built around the call names it in
+    /// place (`{entry}(size=...) ...`, `{entry}: size and stroke_width ...`);
+    /// every other one is prefixed `{entry}: `.
+    fn fmt_as(&self, entry: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LineWidthConflict { sources } => {
+                let LineWidthSources { size, stroke_width } = &**sources;
+                write!(
+                    f,
+                    "{entry}: size and stroke_width both set the line's width (size={size}, \
+                     stroke_width={stroke_width}); bind only one. size= sets a dot-diameter width \
+                     that can taper along the line; stroke_width= sets a width in pixels."
+                )
+            }
+            Self::MarkSizeOutOfRange { value, .. } => {
+                write!(f, "{entry}(size=...) must be a positive number; received {value}")
+            }
+            Self::MarkSizeNotDrawn { mark, value } => {
+                write!(f, "{entry}(size=...) has no effect on {entry}; received {value}.")?;
+                match mark.size_knob() {
+                    Some(knob) => write!(f, " Set {knob}= instead."),
+                    None => Ok(()),
+                }
+            }
+            Self::LineWidthNotPositive { source } => match &**source {
+                NonPositiveLineWidth::Scaled { field, value, area } => write!(
+                    f,
+                    "{entry}: size '{field}' value {value} maps to area {area} on the size \
+                     scale, which gives no positive line width. Every width along a line must \
+                     be positive; give the size scale a range above 0."
+                ),
+                NonPositiveLineWidth::Fallback { field, width } => write!(
+                    f,
+                    "{entry}: size '{field}' has a row with no usable size (null, \
+                     non-finite or off the scale), which takes the line's default width \
+                     {width}. Every width along a line must be positive; set a positive \
+                     Theme(line_stroke_width=)."
+                ),
+                NonPositiveLineWidth::Conditional { selection, area } => write!(
+                    f,
+                    "{entry}: size=fm.when(...) on selection '{selection}' has a branch of \
+                     size {area}, which gives no positive line width. Every width along a line \
+                     must be positive; give every branch a size above 0."
+                ),
+            },
+            Self::MarkRequiresCoord { required, .. } => write!(f, "{entry} requires a {required} coord"),
+            Self::UnsupportedChannelCombination { channel, hint, hint_alt_channel, coord_flipped, .. } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let hint: std::borrow::Cow<str> = match hint_alt_channel {
+                    Some(alt) => std::borrow::Cow::Owned(
+                        hint.replacen("{alt}", prepare::user_facing_channel(alt, *coord_flipped), 1),
+                    ),
+                    None => std::borrow::Cow::Borrowed(*hint),
+                };
+                write!(f, "{entry}: channel '{channel}' is not supported; {hint}")
+            }
+            other => write!(f, "{entry}: {other}"),
+        }
+    }
+
+    /// Wrap a refusal raised while building one layer in [`Self::InLayer`],
+    /// naming its `layer` index (on a layered chart) and its public `entry`.
+    /// A refusal already wrapped keeps its context.
+    pub(crate) fn in_layer_context(self, layer: Option<usize>, entry: &str) -> Self {
+        match self {
+            wrapped @ Self::InLayer { .. } => wrapped,
+            source => Self::InLayer { layer, entry: entry.to_owned(), source: Box::new(source) },
+        }
+    }
+
+    /// Name layer `index` on a refusal [`Self::in_layer_context`] wrapped
+    /// without one: a composite overlay renders each member as an unlayered
+    /// chart and knows the member's layer index only outside it. Every other
+    /// error passes through unchanged.
     pub(crate) fn in_layer(self, index: usize) -> Self {
         match self {
-            Self::LineWidthConflict { layer: None, entry, sources } => {
-                Self::LineWidthConflict { layer: Some(index), entry, sources }
-            }
-            Self::LineWidthNotPositive { layer: None, entry, source } => {
-                Self::LineWidthNotPositive { layer: Some(index), entry, source }
-            }
-            Self::MarkSizeOutOfRange { layer: None, entry, mark, value } => {
-                Self::MarkSizeOutOfRange { layer: Some(index), entry, mark, value }
-            }
+            Self::InLayer { layer: None, entry, source } => Self::InLayer { layer: Some(index), entry, source },
             other => other,
         }
     }
 
-    /// Name the public entry a per-layer refusal's layer came from
-    /// ([`crate::spec::layer::Layer::entry`]), for the same refusals
-    /// [`Self::in_layer`] names a layer on. Every other error passes through
-    /// unchanged.
-    pub(crate) fn with_entry(self, name: &str) -> Self {
-        let entry = Some(name.to_owned());
+    /// The refusal inside any [`Self::InLayer`] context.
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> &Self {
         match self {
-            Self::LineWidthConflict { layer, entry: None, sources } => Self::LineWidthConflict { layer, entry, sources },
-            Self::LineWidthNotPositive { layer, entry: None, source } => {
-                Self::LineWidthNotPositive { layer, entry, source }
-            }
-            Self::MarkSizeOutOfRange { layer, entry: None, mark, value } => {
-                Self::MarkSizeOutOfRange { layer, entry, mark, value }
-            }
+            Self::InLayer { source, .. } => source.root(),
             other => other,
         }
     }
@@ -1852,6 +1866,13 @@ pub enum RenderWarning {
     /// `resolve_continuous_scheme`). `count` is the number of stops that
     /// survived parsing.
     GradientTooFewStops { count: usize },
+    /// A swarm's packed dots reach `reach_px` from their category's centre,
+    /// past `half_slot_px`, half the distance between neighbouring
+    /// categories: they spill into the next category (or past the plot
+    /// edge). The dots are drawn where they were packed, keeping their
+    /// spacing; WARN DEGRADED. `entry` is the public call that built the
+    /// layer. Raised once per swarm, not per facet panel.
+    SwarmOverflowsBand { entry: String, category: String, value: String, reach_px: f64, half_slot_px: f64 },
     /// A layer of a layered chart was left out of the axis another layer's
     /// scale establishes on one channel, so its marks draw somewhere other
     /// than that axis: `placement` says where. `layer` is the excluded
@@ -2096,6 +2117,13 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "the gradient's {count} stop(s) cannot form a gradient (at least 2 are \
                  required); the theme's default scheme was used instead"
+            ),
+            RenderWarning::SwarmOverflowsBand { entry, category, value, reach_px, half_slot_px } => write!(
+                f,
+                "{entry}: Swarm(category='{category}', value='{value}') packs its dots up to {reach_px:.1} px \
+                 from their category's centre, past the {half_slot_px:.1} px half-slot each category has, so \
+                 they spill into the neighbouring categories; reduce the dot size or spacing, or give the \
+                 chart more room along the category axis"
             ),
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {
                 let draws = match placement {
@@ -2895,7 +2923,6 @@ pub(crate) fn filter_batch_by_facet(
 #[cfg(test)]
 mod orchestration_tests {
     use super::*;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
@@ -2905,7 +2932,6 @@ mod orchestration_tests {
 
     fn scatter_3() -> (ChartSpec, RecordBatch) {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2913,18 +2939,7 @@ mod orchestration_tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -3019,7 +3034,6 @@ mod orchestration_tests {
     /// A bar chart of [`four_categories`] whose x scale is `band`.
     fn band_bar_spec(band: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -3031,20 +3045,7 @@ mod orchestration_tests {
                 y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -3801,7 +3802,6 @@ mod orchestration_tests {
     #[test]
     fn render_svg_log_axis_configure_axis_nice_true_renders_instead_of_refusing() {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -3826,18 +3826,7 @@ mod orchestration_tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -3970,7 +3959,6 @@ mod orchestration_tests {
 
     fn line_spec_with_stroke_dash(color_field: Option<&str>) -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -3979,10 +3967,7 @@ mod orchestration_tests {
                 stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -4133,7 +4118,6 @@ mod orchestration_tests {
     #[test]
     fn render_svg_categorical_stroke_dash_on_ribbon_draws_distinct_paths_and_legend() {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Ribbon,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4142,18 +4126,7 @@ mod orchestration_tests {
                 stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4214,7 +4187,6 @@ mod orchestration_tests {
     fn render_svg_ribbon_cleared_stroke_emits_no_stroke_attribute() {
         use crate::spec::mark_style::MarkKwargsSpec;
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Ribbon,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4222,18 +4194,8 @@ mod orchestration_tests {
                 y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
             mark_style: Some(MarkKwargsSpec { stroke: Some("none".into()), ..Default::default() }),
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4273,29 +4235,18 @@ mod orchestration_tests {
     fn point_fill_opacity_spec(fill: Option<&str>, opacity: Option<f64>) -> (ChartSpec, RecordBatch) {
         use crate::spec::mark_style::MarkKwargsSpec;
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
             mark_style: Some(MarkKwargsSpec {
                 fill: fill.map(String::from),
                 opacity,
                 ..Default::default()
             }),
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4441,21 +4392,10 @@ mod orchestration_tests {
             encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
         }
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark,
             encoding,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
             mark_style: Some(style),
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4862,7 +4802,6 @@ mod orchestration_tests {
         )
         .unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4870,7 +4809,6 @@ mod orchestration_tests {
                 color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
@@ -4882,16 +4820,7 @@ mod orchestration_tests {
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec,
@@ -4942,14 +4871,12 @@ mod orchestration_tests {
         )
         .unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "cat".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "panel".into(),
                 row: None,
@@ -4964,18 +4891,7 @@ mod orchestration_tests {
                     y: crate::layout::ResolveMode::Shared,
                 },
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         (spec, batch)
     }
@@ -5132,7 +5048,6 @@ mod orchestration_tests {
         )
         .unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -5149,7 +5064,6 @@ mod orchestration_tests {
                 color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
@@ -5164,18 +5078,7 @@ mod orchestration_tests {
                     y: crate::layout::facet::ResolveMode::Shared,
                 },
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let err = render_svg(
             &spec,
@@ -5222,7 +5125,6 @@ mod orchestration_tests {
         )
         .unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -5230,7 +5132,6 @@ mod orchestration_tests {
                 color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
@@ -5242,16 +5143,7 @@ mod orchestration_tests {
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec,
@@ -5379,7 +5271,6 @@ mod orchestration_tests {
             })
         });
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -5387,18 +5278,7 @@ mod orchestration_tests {
                 color: Some(EncodingSpec { field: "species".into(), type_: None, legend, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         (spec, batch)
     }
@@ -5562,14 +5442,7 @@ mod orchestration_tests {
                 y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         let secondary = Layer {
             mark: Mark::Line,
@@ -5577,36 +5450,17 @@ mod orchestration_tests {
                 y: Some(EncodingSpec { field: "y1".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: true, coord: None,
-            entry: None,
+            independent_y: true,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![primary, secondary]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -5808,7 +5662,6 @@ mod orchestration_tests {
 #[cfg(test)]
 mod png_tests {
     use super::*;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::Float64Array;
@@ -5818,23 +5671,14 @@ mod png_tests {
     #[test]
     fn render_png_produces_png_magic_bytes() {
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -5856,23 +5700,14 @@ mod png_tests {
     #[test]
     fn render_png_determinism_two_calls_byte_identical() {
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -5897,7 +5732,6 @@ mod golden_tests {
     //! See spec §9.4 for refresh discipline.
 
     use super::*;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
@@ -5939,23 +5773,14 @@ mod golden_tests {
     #[test]
     fn scatter_minimal_golden() {
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -5995,23 +5820,14 @@ mod golden_tests {
             Arc::new(StringArray::from(vec!["a","b","c","a","b","c"])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -6034,23 +5850,14 @@ mod golden_tests {
             Arc::new(Float64Array::from(vec![3.0, 1.0, 4.0, 1.5])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Bar,
+            mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
                 y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -6072,23 +5879,14 @@ mod golden_tests {
             Arc::new(Float64Array::from(vec![10.0, 50.0, 30.0, 80.0, 60.0])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Line,
+            mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -6110,23 +5908,14 @@ mod golden_tests {
             Arc::new(Float64Array::from(vec![10.0, 50.0, 30.0, 80.0, 60.0])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Area,
+            mark: Mark::Area,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -6150,14 +5939,13 @@ mod golden_tests {
             Arc::new(StringArray::from(vec!["setosa","setosa","setosa","versicolor","versicolor","versicolor","virginica","virginica","virginica"])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
@@ -6169,16 +5957,7 @@ mod golden_tests {
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

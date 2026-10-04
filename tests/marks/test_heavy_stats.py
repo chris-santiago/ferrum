@@ -520,8 +520,9 @@ def test_violin_quartile_ticks_render_per_hue_stroke_color():
 
 
 _VIOLIN_HUE_INNER_WARNING = (
-    "mark_violin(inner=...): inner marks are drawn at each category's center "
-    "and are not dodged per hue group"
+    "mark_violin: inner marks are drawn at each category's center "
+    'and are not dodged per hue group; use Chart.mark_violin(inner="none") to drop '
+    "the inner mark"
 )
 
 
@@ -578,7 +579,7 @@ def test_violin_warning_voice_is_not_a_mark_kwarg(kwarg):
 
     def refusal(name: str) -> str:
         chart = fe.Chart(_violin_hue_df()).mark_violin(**{name: "spoof"})
-        with pytest.raises(TypeError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             chart.encode(x="g", y="v", color="h").to_json()
         return str(exc_info.value)
 

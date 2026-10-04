@@ -664,10 +664,10 @@ def test_rank2d_chart_title_default_algorithm_is_pearson():
 # ---------------------------------------------------------------------------
 
 
-def test_mark_alpha_selection_ci_style_raises_type_error():
+def test_mark_alpha_selection_ci_style_raises_value_error():
     df = pl.DataFrame({"alpha": [0.1, 1.0], "mean_score": [0.8, 0.75]})
     chart = ferrum.Chart(df).mark_alpha_selection(ci_style="band")
-    with pytest.raises(TypeError, match="ci_style"):
+    with pytest.raises(ValueError, match="ci_style"):
         chart._resolve_pending()
 
 
@@ -676,17 +676,17 @@ def test_mark_alpha_selection_ci_style_raises_type_error():
 # ---------------------------------------------------------------------------
 
 
-def test_mark_calibration_n_bins_raises_type_error():
+def test_mark_calibration_n_bins_raises_value_error():
     df = pl.DataFrame({"mean_predicted": [0.1, 0.5, 0.9], "fraction_positive": [0.05, 0.5, 0.95]})
     chart = ferrum.Chart(df).mark_calibration(n_bins=5)
-    with pytest.raises(TypeError, match="n_bins"):
+    with pytest.raises(ValueError, match="n_bins"):
         chart._resolve_pending()
 
 
-def test_mark_calibration_strategy_raises_type_error():
+def test_mark_calibration_strategy_raises_value_error():
     df = pl.DataFrame({"mean_predicted": [0.1, 0.5, 0.9], "fraction_positive": [0.05, 0.5, 0.95]})
     chart = ferrum.Chart(df).mark_calibration(strategy="quantile")
-    with pytest.raises(TypeError, match="strategy"):
+    with pytest.raises(ValueError, match="strategy"):
         chart._resolve_pending()
 
 
@@ -705,19 +705,19 @@ def _pca_scree_df() -> pl.DataFrame:
     )
 
 
-def test_mark_pca_scree_n_components_raises_type_error():
+def test_mark_pca_scree_n_components_raises_value_error():
     chart = ferrum.Chart(_pca_scree_df()).mark_pca_scree(n_components=2)
-    with pytest.raises(TypeError, match="n_components"):
+    with pytest.raises(ValueError, match="n_components"):
         chart._resolve_pending()
 
 
-def test_mark_pca_scree_with_threshold_n_components_raises_type_error():
+def test_mark_pca_scree_with_threshold_n_components_raises_value_error():
     """The threshold-line branch (a different desugar function) rejects
     ``n_components`` the same way as the plain branch above -- the P9 fix
     resolved the drop/raise asymmetry between the two desugars to one
     consistent (raising) behavior."""
     chart = ferrum.Chart(_pca_scree_df()).mark_pca_scree(threshold_line=0.9, n_components=2)
-    with pytest.raises(TypeError, match="n_components"):
+    with pytest.raises(ValueError, match="n_components"):
         chart._resolve_pending()
 
 

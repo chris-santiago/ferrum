@@ -610,7 +610,6 @@ fn emit_text_negative_opacity_clamps_to_zero_alpha() {
 // ── Tapered strokes: a node with `widths` paints one filled outline ──
 
 use crate::spec::chart::ChartSpec;
-use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::{Encoding, EncodingSpec};
 use crate::spec::mark::Mark;
 use crate::spec::mark_style::MarkKwargsSpec;
@@ -926,7 +925,7 @@ fn a_malformed_tapered_node_refuses_with_a_typed_error() {
     let err = walk_svg(&line_scene(vec![polyline(&line, Some(&[1.0, 2.0]), None)], None, None), false).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "mark_line: the tapered line cannot be drawn: tapered stroke has 2 widths for 3 vertices; \
+        "the scene's tapered stroke cannot be drawn: tapered stroke has 2 widths for 3 vertices; \
          it needs one width per vertex"
     );
 }
@@ -1050,7 +1049,6 @@ fn sized_batch() -> arrow::record_batch::RecordBatch {
 fn line_chart(size: bool, grouped: bool, kwargs: MarkKwargsSpec) -> ChartSpec {
     let field = |f: &str| Some(EncodingSpec { field: f.into(), ..Default::default() });
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Line,
         encoding: Encoding {
             x: field("x"),
@@ -1058,16 +1056,8 @@ fn line_chart(size: bool, grouped: bool, kwargs: MarkKwargsSpec) -> ChartSpec {
             size: if size { field("v") } else { None },
             color: if grouped { field("g") } else { None },
             ..Default::default()
-        },
-        transforms: Vec::new(), facet: None, layers: None,
-        coord: None, mark_style: Some(kwargs),
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        }, mark_style: Some(kwargs),
+        ..Default::default()
     }
 }
 

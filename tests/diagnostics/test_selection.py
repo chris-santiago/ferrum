@@ -407,7 +407,7 @@ def test_mark_kwargs_unknown_kwarg_raises():
     model, X, y = _ridge_xy()
     bad = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
     bad = bad._clone().mark_learning_curve(not_a_real_kwarg=42)
-    with pytest.raises(TypeError, match="not_a_real_kwarg"):
+    with pytest.raises(ValueError, match="not_a_real_kwarg"):
         bad.to_svg()
 
 

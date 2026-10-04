@@ -1,3 +1,4 @@
+pub mod batch_shape;
 pub mod dash;
 pub mod error;
 pub mod parameter;
@@ -5,6 +6,7 @@ pub mod selection;
 pub mod taper;
 pub mod types;
 
+pub use batch_shape::*;
 pub use dash::*;
 pub use error::*;
 pub use parameter::*;

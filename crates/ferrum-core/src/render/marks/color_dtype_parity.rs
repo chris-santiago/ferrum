@@ -59,7 +59,6 @@ use crate::layout::{PanelLayout, Rect, ThemeInputs};
 use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
 use crate::render::scale_resolve::resolve_scales;
 use crate::spec::chart::ChartSpec;
-use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::{DataType as SpecType, Encoding, EncodingSpec};
 use crate::spec::mark::Mark;
 
@@ -159,23 +158,9 @@ fn encoding_for(mark: &Mark, color_col: &str) -> Encoding {
 
 fn spec_for(mark: Mark, color_col: &str) -> ChartSpec {
     ChartSpec {
-        data: DataRef::default(),
         encoding: encoding_for(&mark, color_col),
         mark,
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 

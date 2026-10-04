@@ -2513,7 +2513,6 @@ mod tests {
     use crate::layout::facet::FacetGroup;
     use crate::layout::text_metrics::{fixed_width, MockMetrics};
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -2564,7 +2563,6 @@ mod tests {
 
     fn minimal_chart_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -2580,20 +2578,7 @@ mod tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 

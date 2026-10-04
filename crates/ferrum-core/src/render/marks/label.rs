@@ -250,7 +250,6 @@ mod tests {
     use crate::render::draw::{resolve_mark_style, MarkStyle};
     use crate::render::scale_resolve::resolve_scales;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::Float64Array;
@@ -260,27 +259,13 @@ mod tests {
     /// Build a minimal two-point label spec + batch wired to x/y columns.
     fn two_point_spec_and_batch() -> (ChartSpec, arrow::record_batch::RecordBatch) {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Label,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -351,7 +336,6 @@ mod tests {
     fn spec_and_batch_with_tooltip() -> (ChartSpec, arrow::record_batch::RecordBatch) {
         use crate::spec::encoding::EncodingSpec;
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Label,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -359,20 +343,7 @@ mod tests {
                 tooltip: Some(EncodingSpec { field: "tip".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         use arrow::array::StringArray;
         let schema = Arc::new(Schema::new(vec![

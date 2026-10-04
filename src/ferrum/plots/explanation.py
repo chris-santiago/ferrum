@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
-from ferrum.encoding import X, Y
+from ferrum.encoding import Color, X, Y
 from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
 from ferrum.plots._helpers import (
     _compose_compare,
@@ -259,7 +259,7 @@ def _importance_chart_compare_from_source(
         orient="vertical",
         error_bars=error_bars,
         top_k=None,
-        color_field="model",
+        color_field=Color("model", title="Model"),
         position=Dodge(by="model"),
         x_scale_domain=(domain_lo, domain_hi),
     )
@@ -573,6 +573,7 @@ def _shap_bar_chart_compare_from_source(
             position=Dodge(by="model"),
             x_scale_domain=domain,
         )
+        .encode(color=Color("model", title="Model"))
         .coord(CoordFlip())
     )
     return _finalize_chart(
@@ -666,6 +667,7 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
+    chart = chart.encode(color=Color("shap_sign", title="SHAP sign"))
     is_faceted = _should_facet_by_class(plot_df, per_class=per_class)
     if is_faceted:
         chart = chart.facet(col="class_label")
@@ -824,6 +826,7 @@ def _pdp_chart_from_source(
         .encode(
             x=X("feature_value", title="Feature value"),
             y=Y("pd_value", title="Partial dependence"),
+            **({"color": Color("class_label", title="Class")} if color_field else {}),
         )
         .facet(col="feature")
         # Each feature panel is a DIFFERENT variable with its own x-units, so the
@@ -846,6 +849,7 @@ def _pdp_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def importance_chart(
     model: Any,
     X: Any = None,
@@ -963,6 +967,7 @@ def importance_chart(
     return _importance_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def shap_beeswarm_chart(
     model: Any,
     X: Any = None,
@@ -1074,6 +1079,7 @@ def shap_beeswarm_chart(
     return _shap_beeswarm_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def shap_bar_chart(
     model: Any,
     X: Any = None,
@@ -1189,6 +1195,7 @@ def shap_bar_chart(
     return _shap_bar_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def shap_waterfall_chart(
     model: Any,
     X: Any = None,
@@ -1301,6 +1308,7 @@ def shap_waterfall_chart(
     return _shap_waterfall_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def shap_chart(
     model: Any,
     X: Any = None,

@@ -183,7 +183,13 @@ fn stroke_tapered(
     color: [f32; 4],
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) {
-    let widest = pieces.iter().flat_map(|p| &p.widths).fold(0.0_f64, |a, &w| a.max(w));
+    let widest = pieces
+        .iter()
+        .flat_map(|p| match p {
+            TaperPiece::Run { widths, .. } => widths.as_slice(),
+            TaperPiece::Dot { width, .. } => std::slice::from_ref(width),
+        })
+        .fold(0.0_f64, |a, &w| a.max(w));
     let mut builder = LyonPath::builder_with_attributes(1);
     // Square dots, each a butt-capped run one width long along its heading,
     // which is the square a square cap draws turned to the line; lyon's own
@@ -191,30 +197,31 @@ fn stroke_tapered(
     let mut squares = LyonPath::builder_with_attributes(1);
     let mut any_square = false;
     for piece in pieces {
-        if let ([(x, y)], [w]) = (piece.points.as_slice(), piece.widths.as_slice()) {
-            // A zero-length on-dash (see `TaperPiece`): a round cap's disk is
-            // lyon's cap on a zero-length subpath; a butt cap draws nothing.
-            let w32 = [*w as f32];
-            match opts.start_cap {
-                LineCap::Round => {
-                    builder.begin(point(*x as f32, *y as f32), &w32);
-                    builder.line_to(point(*x as f32, *y as f32), &w32);
-                    builder.end(false);
+        let (points, widths) = match piece {
+            TaperPiece::Dot { point: (x, y), width: w, heading: (hx, hy) } => {
+                // A round cap's disk is lyon's cap on a zero-length subpath;
+                // a butt cap draws nothing.
+                let w32 = [*w as f32];
+                match opts.start_cap {
+                    LineCap::Round => {
+                        builder.begin(point(*x as f32, *y as f32), &w32);
+                        builder.line_to(point(*x as f32, *y as f32), &w32);
+                        builder.end(false);
+                    }
+                    LineCap::Square => {
+                        let r = w / 2.0;
+                        squares.begin(point((x - hx * r) as f32, (y - hy * r) as f32), &w32);
+                        squares.line_to(point((x + hx * r) as f32, (y + hy * r) as f32), &w32);
+                        squares.end(false);
+                        any_square = true;
+                    }
+                    LineCap::Butt => {}
                 }
-                LineCap::Square => {
-                    let (hx, hy) = piece.heading.unwrap_or((1.0, 0.0));
-                    let r = w / 2.0;
-                    squares.begin(point((x - hx * r) as f32, (y - hy * r) as f32), &w32);
-                    squares.line_to(point((x + hx * r) as f32, (y + hy * r) as f32), &w32);
-                    squares.end(false);
-                    any_square = true;
-                }
-                LineCap::Butt => {}
+                continue;
             }
-            continue;
-        }
-        let piece = bracket_turns(piece);
-        let mut vertices = piece.points.iter().zip(&piece.widths);
+            TaperPiece::Run { points, widths } => bracket_turns(points, widths),
+        };
+        let mut vertices = points.iter().zip(&widths);
         let Some((&(x, y), &w)) = vertices.next() else { continue };
         builder.begin(point(x as f32, y as f32), &[w as f32]);
         for (&(x, y), &w) in vertices {
@@ -236,7 +243,7 @@ fn stroke_tapered(
 /// left unbracketed: their miter normal is within 0.01% of unit length.
 const COS_STRAIGHT: f64 = 0.9998;
 
-/// `piece` with a vertex added on each segment either side of every turn,
+/// The run `points`/`widths` with a vertex added on each segment either side of every turn,
 /// where that segment's inner offset line meets the other's.
 ///
 /// Lyon joins a turn's inner side at one vertex whose normal is the miter
@@ -250,15 +257,14 @@ const COS_STRAIGHT: f64 = 0.9998;
 /// the join itself. A bracket sits `w/2 * tan(turn/2)` from the turn (the
 /// inner lines' meeting point, `w` the widest of the three vertices) or
 /// halfway along a shorter segment; its width is the taper's at that point.
-fn bracket_turns(piece: &TaperPiece) -> TaperPiece {
-    let (points, widths) = (&piece.points, &piece.widths);
+fn bracket_turns(points: &[(f64, f64)], widths: &[f64]) -> (Vec<(f64, f64)>, Vec<f64>) {
     let (Some(&first), Some(&first_width)) = (points.first(), widths.first()) else {
-        return piece.clone();
+        return (points.to_vec(), widths.to_vec());
     };
     if points.len() != widths.len() {
-        return piece.clone();
+        return (points.to_vec(), widths.to_vec());
     }
-    let mut out = TaperPiece::run(vec![first], vec![first_width]);
+    let mut out = Centerline { points: vec![first], widths: vec![first_width] };
     for i in 1..points.len() {
         let p = points[i];
         let Some(&next) = points.get(i + 1) else {
@@ -287,7 +293,7 @@ fn bracket_turns(piece: &TaperPiece) -> TaperPiece {
             width_at(widths, i, d2 / l2).unwrap_or(widths[i]),
         ]);
     }
-    out
+    (out.points, out.widths)
 }
 
 pub fn tessellate_polygon(

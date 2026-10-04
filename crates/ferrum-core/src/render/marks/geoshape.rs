@@ -256,7 +256,6 @@ mod tests {
     use crate::scale::linear::LinearScale;
     use crate::spec::chart::ChartSpec;
     use crate::spec::coord::{CoordKind, GeoProjection};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::Encoding;
     use crate::spec::mark::Mark;
     use arrow::array::StringArray;
@@ -268,23 +267,10 @@ mod tests {
     /// coord-guard tests below (Task 6), which need every non-Geo variant.
     fn geo_spec_with_coord(coord: Option<CoordKind>) -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Geoshape,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -515,26 +501,13 @@ mod tests {
     fn geo_spec_with_tooltip() -> ChartSpec {
         use crate::spec::encoding::{Encoding, EncodingSpec};
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Geoshape,
             encoding: Encoding {
                 tooltip: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -542,26 +515,13 @@ mod tests {
     fn geo_spec_with_href() -> ChartSpec {
         use crate::spec::encoding::{Encoding, EncodingSpec};
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Geoshape,
             encoding: Encoding {
                 href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 

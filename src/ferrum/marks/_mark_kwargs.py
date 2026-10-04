@@ -13,7 +13,7 @@ Two helpers enforce the Phase 9+ no-defer principle on this surface:
 - ``validate_user_mark_kwargs(mark_name, kwargs)`` checks every key
   against *mark_name*'s own honored-kwarg vocabulary
   (``ferrum.marks.base.mark_honors`` / ``MARK_HONORED_KWARGS``, #243) and
-  raises ``TypeError`` on any key *mark_name* does not honor, mirroring
+  raises ``ValueError`` on any key *mark_name* does not honor, mirroring
   ``MarkBase`` / ``_set_mark`` validation for primitive marks.
 - ``apply_user_mark_kwargs(layers, kwargs)`` merges validated kwargs
   into every layer's ``mark_kwargs`` dict for layered-mode desugars
@@ -41,7 +41,7 @@ from __future__ import annotations
 
 
 def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
-    """Validate user-supplied ``mark_kwargs``; raise ``TypeError`` on keys *mark_name* doesn't honor.
+    """Validate user-supplied ``mark_kwargs``; raise ``ValueError`` on keys *mark_name* doesn't honor.
 
     Returns the dict unchanged so callers can write
     ``user_kw = validate_user_mark_kwargs("foo", mark_kwargs)`` in one
@@ -67,7 +67,7 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
 
     Raises
     ------
-    TypeError
+    ValueError
         If any key is not honored by *mark_name* (see
         ``ferrum.marks.base.MARK_HONORED_KWARGS``).
 
@@ -78,7 +78,7 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
     >>> validate_user_mark_kwargs("boxplot", {"typo": 1})  # doctest: +ELLIPSIS
     Traceback (most recent call last):
         ...
-    TypeError: mark_boxplot: unknown keyword argument(s) ['typo']. ...
+    ValueError: mark_boxplot: unknown keyword argument(s) ['typo']. ...
     """
     if not kwargs:
         return {}
@@ -87,7 +87,7 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
 
     unknown = [k for k in kwargs if not mark_honors(mark_name, k)]
     if unknown:
-        raise TypeError(_mark_kwargs_error_plural(mark_name, unknown))
+        raise ValueError(_mark_kwargs_error_plural(mark_name, unknown))
     return dict(kwargs)
 
 

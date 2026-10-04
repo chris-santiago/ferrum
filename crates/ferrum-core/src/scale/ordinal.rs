@@ -354,6 +354,12 @@ impl OrdinalScale {
         self.data.geometry().bandwidth()
     }
 
+    /// The pixel distance between consecutive category positions: the slot
+    /// each category has to itself. Non-negative.
+    pub(crate) fn step(&self) -> f64 {
+        self.data.geometry().step().abs()
+    }
+
     /// [`bandwidth`](Self::bandwidth) as it would resolve over a range of
     /// `extent` pixels rather than over this scale's own range — same domain
     /// size, same d3 model, different extent.

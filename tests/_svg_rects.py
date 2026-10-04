@@ -231,3 +231,78 @@ def panel_extents(svg: str) -> dict[str, tuple[float, float, float, float]]:
         else:
             stack.append((tx, ty, sx, sy))
     return out
+
+
+_FIGURE_TOKEN_RE = re.compile(
+    r"<g(?P<gattrs>[^>]*)>|(?P<close></g>)|"
+    r"<(?P<tag>line|rect)(?P<attrs>[^>]*?)/>|"
+    r"<text(?P<tattrs>[^>]*)>(?P<content>[^<]*)</text>"
+)
+_CLIP_REF_RE = re.compile(r'clip-path="url\(#(?P<cid>ferrum-clip-\d+)\)"')
+
+
+def figure_elements(svg: str) -> list[dict]:
+    """Return every `<line>`, `<rect>` and `<text>` with FIGURE-space coordinates.
+
+    Walks the same enclosing `translate(...) scale(...)` groups `panel_extents`
+    composes, and applies them to each element's own coordinates, so a mark in
+    a ratio-fitted cell is compared with marks in other cells in one frame.
+    Each entry carries `tag`, `panel` (the clip id of the plot-area group it is
+    drawn in, or `None` outside any plot area), `fill`, and its coordinates:
+    `x1, y1, x2, y2` for a line, `x, y, w, h` for a rect, and `x, y, text` for
+    a text. The same three-decimal rounding caveat as `panel_extents` applies.
+    """
+    stack: list[tuple[float, float, float, float, str | None]] = [(0.0, 0.0, 1.0, 1.0, None)]
+    out: list[dict] = []
+    for m in _FIGURE_TOKEN_RE.finditer(svg):
+        tx, ty, sx, sy, panel = stack[-1]
+        if m.group("close"):
+            if len(stack) > 1:
+                stack.pop()
+        elif m.group("gattrs") is not None:
+            attrs = m.group("gattrs")
+            t = _PANEL_TRANSFORM_RE.search(attrs)
+            if t:
+                ntx, nty = float(t.group("tx") or 0.0), float(t.group("ty") or 0.0)
+                nsx, nsy = float(t.group("sx") or 1.0), float(t.group("sy") or 1.0)
+                tx, ty, sx, sy = tx + sx * ntx, ty + sy * nty, sx * nsx, sy * nsy
+            clip = _CLIP_REF_RE.search(attrs)
+            stack.append((tx, ty, sx, sy, clip.group("cid") if clip else panel))
+        elif m.group("tag") == "line":
+            a = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group("attrs")))
+            out.append(
+                {
+                    "tag": "line",
+                    "panel": panel,
+                    "x1": tx + sx * float(a["x1"]),
+                    "y1": ty + sy * float(a["y1"]),
+                    "x2": tx + sx * float(a["x2"]),
+                    "y2": ty + sy * float(a["y2"]),
+                }
+            )
+        elif m.group("tag") == "rect":
+            a = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group("attrs")))
+            out.append(
+                {
+                    "tag": "rect",
+                    "panel": panel,
+                    "fill": a.get("fill"),
+                    "x": tx + sx * float(a.get("x", 0.0)),
+                    "y": ty + sy * float(a.get("y", 0.0)),
+                    "w": sx * float(a["width"]),
+                    "h": sy * float(a["height"]),
+                }
+            )
+        else:
+            a = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group("tattrs")))
+            out.append(
+                {
+                    "tag": "text",
+                    "panel": panel,
+                    "fill": a.get("fill"),
+                    "x": tx + sx * float(a["x"]),
+                    "y": ty + sy * float(a["y"]),
+                    "text": m.group("content"),
+                }
+            )
+    return out

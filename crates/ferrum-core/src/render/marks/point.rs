@@ -518,14 +518,12 @@ mod tests {
     use crate::render::draw::resolve_mark_style;
     use crate::render::scale_resolve::resolve_scales;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::SceneNode;
 
     fn three_row_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -533,18 +531,7 @@ mod tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -626,7 +613,6 @@ mod tests {
 
     fn spec_with_size() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -634,18 +620,7 @@ mod tests {
                 size: Some(EncodingSpec { field: "sz".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -692,7 +667,6 @@ mod tests {
 
     fn spec_with_shape() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -700,18 +674,7 @@ mod tests {
                 shape: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -796,7 +759,6 @@ mod tests {
 
     fn spec_with_opacity() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -804,18 +766,7 @@ mod tests {
                 opacity: Some(EncodingSpec { field: "op".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -871,7 +822,6 @@ mod tests {
 
     fn spec_with_stroke_channels() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -882,18 +832,7 @@ mod tests {
                 angle: Some(EncodingSpec { field: "ang".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1223,17 +1162,18 @@ mod tests {
         }
     }
 
-    /// point_size = 0 is a valid (if invisible) configuration: the formula
-    /// must yield radius 0, not NaN or a panic.
+    /// A theme `point_size` of 0 is a valid (if invisible) configuration:
+    /// the formula must yield radius 0, not NaN or a panic. (A constant
+    /// `size=0` is refused by the size rule instead.)
     #[test]
     fn default_radius_zero_point_size_yields_zero_radius() {
         let spec = three_row_spec();
         let batch = three_row_batch();
-        let theme = ThemeInputs::default();
+        let mut theme = ThemeInputs::default();
+        theme.sizes.point_size = 0.0;
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let overrides = crate::spec::mark_style::MarkKwargsSpec { size: Some(0.0), ..Default::default() };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1405,7 +1345,6 @@ mod tests {
             Arc::new(StringArray::from(vec!["solid", "dashed", "dotted"])),
         ]).unwrap();
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1413,10 +1352,7 @@ mod tests {
                 stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1529,7 +1465,6 @@ mod tests {
             Arc::new(Float64Array::from(vec![Some(1.0), None, Some(2.0)])),
         ]).unwrap();
         let mut spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1537,10 +1472,7 @@ mod tests {
                 stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
             filled: Some(false),
@@ -1584,13 +1516,12 @@ mod tests {
         use crate::render::draw::resolve_mark_style;
         use crate::render::scale_resolve::resolve_scales;
         use crate::spec::chart::ChartSpec;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as EncDataType, Encoding, EncodingSpec};
         use crate::spec::mark::Mark;
         use arrow::array::Float64Array;
 
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Point,
+            mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
                     field: "year".into(),
@@ -1604,13 +1535,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("year", DataType::Int64, false),
@@ -1661,7 +1586,6 @@ mod tests {
 
     fn cross_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1669,21 +1593,11 @@ mod tests {
                 tooltip: Some(EncodingSpec { field: "lbl".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
             mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
                 shape: Some("cross".into()),
                 ..Default::default()
             }),
-            position: None,
-            title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1777,23 +1691,15 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 tooltip: Some(EncodingSpec { field: "lbl".into(), type_: None, ..Default::default() }),
                 ..Default::default()
-            },
-            transforms: Vec::new(),
-            facet: None, layers: None, coord: None,
-            mark_style: None, // default shape = Circle
-            position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            }, // default shape = Circle
+            position: None,
+            ..Default::default()
         };
 
         let theme = ThemeInputs::default();
@@ -1841,7 +1747,6 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1849,15 +1754,7 @@ mod tests {
                 href: Some(EncodingSpec { field: "url".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None, layers: None, coord: None,
-            mark_style: None,
-            position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let theme = ThemeInputs::default();

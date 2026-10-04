@@ -7,9 +7,8 @@ drew the line untapered and the dots at the default radius, while
 ``sized_line + point`` tapered the line and sized the dots: the result
 depended on layer order.
 
-The channel population is derived from the encoding vocabulary
-(:func:`ferrum.encoding._auxiliary_scale_channels`) and pinned against the
-Rust ``AuxiliaryScales`` struct, so a new auxiliary channel joins this matrix
+The channel population is Rust's auxiliary-scale channel list, read through
+:func:`ferrum.encoding._auxiliary_scale_channels`, so a new auxiliary channel joins this matrix
 without a hand edit.
 """
 
@@ -40,16 +39,6 @@ _DF = pl.DataFrame(
 )
 
 _CHANNELS = _auxiliary_scale_channels()
-
-_AUX_SCALES_RS = (
-    Path(__file__).resolve().parent.parent
-    / "crates"
-    / "ferrum-core"
-    / "src"
-    / "render"
-    / "scale_resolve"
-    / "mod.rs"
-)
 
 
 def _fields(channel: str) -> tuple[str, str]:
@@ -186,20 +175,16 @@ def _compose(route: str, channel: str, order: str, bound_mark: str = "point"):
 
 
 def test_derived_channels_are_exactly_rusts_auxiliary_scales() -> None:
-    """The promotion set equals the fields of Rust's ``AuxiliaryScales``, in either direction.
+    """The promotion set is Rust's auxiliary-scale set, read from Rust in its order.
 
     Every auxiliary scale Rust builds reads the chart-level encoding only, so
-    a channel missing from the derived set would stay layer-order dependent,
-    and an extra one would promote a channel no scale reads.
+    a channel missing from the set would stay layer-order dependent, and an
+    extra one would promote a channel no scale reads. Rust pins the list to
+    its ``AuxiliaryScales`` slots; this pins that Python asks Rust.
     """
-    src = _AUX_SCALES_RS.read_text()
-    body = re.search(r"struct AuxiliaryScales \{(.*?)\n\}", src, re.DOTALL)
-    assert body, "could not locate struct AuxiliaryScales -- has it moved?"
-    rust_fields = re.findall(r"^\s*(\w+):", body.group(1), re.MULTILINE)
-    assert len(rust_fields) >= 7, f"suspicious AuxiliaryScales parse: {rust_fields}"
-    assert set(_CHANNELS) == set(rust_fields)
-    assert len(_CHANNELS) == len(set(_CHANNELS))
-    assert _CHANNELS[0] == "color"
+    from ferrum._core import auxiliary_scale_channels
+
+    assert _CHANNELS == tuple(auxiliary_scale_channels())
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +333,7 @@ def test_a_layer_zero_constant_does_not_block_promotion(channel: str) -> None:
 
 @pytest.mark.parametrize("channel", [c for c in _CHANNELS if c not in _CONSTANT_KWARG])
 def test_a_channel_without_a_constant_cell_has_no_mark_kwarg(channel: str) -> None:
-    with pytest.raises(TypeError, match=f"mark_point: unknown keyword argument '{channel}'"):
+    with pytest.raises(ValueError, match=f"mark_point: unknown keyword argument '{channel}'"):
         fm.Chart(_DF).mark_point(**{channel: 0.5})
 
 

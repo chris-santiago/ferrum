@@ -633,5 +633,5 @@ def test_validator_helper_is_importable():
     assert callable(apply_user_mark_kwargs)
     # Round-trip: empty dict passes through; unknown raises.
     assert validate_user_mark_kwargs("foo", {}) == {}
-    with pytest.raises(TypeError, match="not_a_real_kwarg"):
+    with pytest.raises(ValueError, match="not_a_real_kwarg"):
         validate_user_mark_kwargs("foo", {"not_a_real_kwarg": 1})

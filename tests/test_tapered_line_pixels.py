@@ -1000,3 +1000,106 @@ def test_a_click_selecting_a_line_row_draws_that_vertex_at_the_selected_width(
         f"vertex unselected draws {unselected * _DPR:.2f} and every vertex selected "
         f"{selected * _DPR:.2f} (committed bundle: {_BUNDLE_PATH})"
     )
+
+
+# ── A zero-length dash on a tapered line ─────────────────────────────────────
+
+_DOT_PERIOD = 60.0  # scene px between on-positions
+_DOT_INK = (255, 0, 0)
+
+
+def _zero_dash_line(cap: str) -> Any:
+    """A level tapered line whose dash is all gap: ``stroke_dash=[0, d]``."""
+    df = pl.DataFrame(
+        {"x": [float(i) for i in range(11)], "y": [1.0] * 11, "v": [float(i) for i in range(11)]}
+    )
+    return (
+        fm.Chart(df)
+        .mark_line(stroke_dash=[0.0, _DOT_PERIOD], stroke_cap=cap, color="#ff0000")
+        .encode(
+            x="x",
+            y=fm.Y("y", scale=fm.LinearScale(domain=[0.0, 2.0])),
+            size=fm.Size("v", scale=WIDE, legend=None),
+        )
+        .configure_grid(x=False, y=False)
+    )
+
+
+def _row_runs(img: Image, row: int, x0: float, x1: float) -> list[tuple[float, float]]:
+    """The red ink runs along device row *row* within ``[x0, x1)``, as
+    ``(left, right)`` device px."""
+    page_bg = img.color((255, 255, 255))
+    ink = img.color(_DOT_INK)
+    runs: list[tuple[float, float]] = []
+    x, end = math.ceil(x0), math.floor(x1)
+    while x < end:
+        if not _is_ink(img.rgb(x, row), page_bg, ink):
+            x += 1
+            continue
+        left = x
+        while x < end and _is_ink(img.rgb(x, row), page_bg, ink):
+            x += 1
+        runs.append((float(left), float(x)))
+    return runs
+
+
+def _dots(browser: Any, tmp_path: Path, cap: str) -> tuple[list, list, float]:
+    """The dots along the line's centerline: the capture's at-rest runs and
+    the static render's runs, both mapped into scene px, and the scene's dash
+    period."""
+    chart = _zero_dash_line(cap)
+    svg = chart.to_svg()
+    area = _plot_areas(svg)[0]
+    centre_y = area.y + area.h / 2
+    html = tmp_path / f"zero_dash_{cap}.html"
+    chart.interactive().save(str(html))
+    page, rect = _load_on_whole_pixels(browser, html)
+    try:
+        svg_w, _ = pc.parse_svg_size(svg)
+        img = Image.from_png(pc.screenshot(page), linear=True)
+    finally:
+        page.close()
+    screen = Screen(rect, svg_w, Affine())
+    x0, x1, _, _ = screen.window(area)
+    per_device = screen.css_per_scene * _DPR
+    captured = [
+        ((a - rect.x * _DPR) / per_device, (b - rect.x * _DPR) / per_device)
+        for a, b in _row_runs(img, round(screen.point(0.0, centre_y)[1]), x0, x1)
+    ]
+    raster = _rasterize(svg)
+    static = [
+        (a / _DPR, b / _DPR)
+        for a, b in _row_runs(
+            raster, round(centre_y * _DPR), area.x * _DPR, (area.x + area.w) * _DPR
+        )
+    ]
+    return captured, static, _DOT_PERIOD
+
+
+def test_a_zero_length_dash_with_a_round_cap_draws_a_dot_at_each_on_position(
+    browser: Any, tmp_path: Path
+) -> None:
+    """A round cap turns each zero-length on-dash of a tapered line into a disk
+    of the vertex's width there, where the static render draws the same dot;
+    a butt cap draws nothing, on both."""
+    captured, static, period = _dots(browser, tmp_path, "round")
+    # The plot edges clip the first and last dots; the interior ones are whole.
+    assert len(static) >= 7, f"the static render drew no row of dots: {static}"
+    assert len(captured) == len(static), f"capture dots {captured} vs static {static}"
+    widths = []
+    for (ca, cb), (sa, sb) in zip(captured[1:-1], static[1:-1]):
+        assert abs((ca + cb) / 2 - (sa + sb) / 2) <= 1.0, (
+            f"a dot centred at {(ca + cb) / 2:.2f} scene px, the static one at {(sa + sb) / 2:.2f}"
+        )
+        assert abs((cb - ca) - (sb - sa)) <= 1.0, (
+            f"a dot {cb - ca:.2f} scene px across, the static one {sb - sa:.2f}"
+        )
+        widths.append(cb - ca)
+    # The taper reaches the dots: each is wider than the one before it.
+    assert widths == sorted(widths) and widths[-1] - widths[0] > 4.0, widths
+    centres = [(a + b) / 2 for a, b in captured[1:-1]]
+    for a, b in zip(centres, centres[1:]):
+        assert abs((b - a) - period) <= 1.0, f"dots sit {b - a:.2f} scene px apart, not {period}"
+
+    butt_captured, butt_static, _ = _dots(browser, tmp_path, "butt")
+    assert butt_captured == [] and butt_static == [], (butt_captured, butt_static)

@@ -1571,6 +1571,22 @@ fn build_auxiliary_scales(
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }
 
+/// The channels [`build_auxiliary_scales`] builds a scale for, in
+/// [`AuxiliaryScales`] field order. Each scale is built once per chart from
+/// the chart's rendering encoding (the chart-level encoding as its first
+/// layer resolves it), never from a later layer's own binding.
+const AUXILIARY_SCALE_CHANNELS: [&str; 7] =
+    ["color", "size", "shape", "opacity", "fill_opacity", "stroke_opacity", "stroke_dash"];
+
+/// `ferrum._core.auxiliary_scale_channels()`: [`AUXILIARY_SCALE_CHANNELS`],
+/// published so Python reads the set of channels Rust scales at chart level
+/// instead of deriving it from its own channel metadata. Registered in
+/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyo3::pyfunction]
+pub(crate) fn auxiliary_scale_channels() -> Vec<String> {
+    AUXILIARY_SCALE_CHANNELS.iter().map(|s| s.to_string()).collect()
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Build a dummy unit `LinearScale` that maps `[0, 1]` domain onto the given

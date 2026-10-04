@@ -25,11 +25,9 @@ fn make_batch_q_q_n() -> RecordBatch {
 }
 
 fn make_spec_with_color() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -37,18 +35,7 @@ fn make_spec_with_color() -> ChartSpec {
             color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -94,7 +81,6 @@ fn unknown_x_column_errors() {
 
 #[test]
 fn color_overflow_emits_warning() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -116,7 +102,6 @@ fn color_overflow_emits_warning() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -124,18 +109,7 @@ fn color_overflow_emits_warning() {
             color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -169,11 +143,9 @@ fn make_batch_q_q_n_n_q() -> RecordBatch {
 }
 
 fn make_spec_with_size() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -181,27 +153,14 @@ fn make_spec_with_size() -> ChartSpec {
             size: Some(EncodingSpec { field: "size_val".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     }
 }
 
 fn make_spec_with_shape() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -209,27 +168,14 @@ fn make_spec_with_shape() -> ChartSpec {
             shape: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     }
 }
 
 fn make_spec_with_opacity() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -237,18 +183,7 @@ fn make_spec_with_opacity() -> ChartSpec {
             opacity: Some(EncodingSpec { field: "opacity_val".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -305,11 +240,9 @@ fn shape_scale_picks_from_8_shape_palette_in_order() {
 
 /// Helper: build a spec with shape encoding and an optional sort value.
 fn make_spec_with_shape_sort(sort_json: Option<serde_json::Value>) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -322,20 +255,7 @@ fn make_spec_with_shape_sort(sort_json: Option<serde_json::Value>) -> ChartSpec 
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -549,11 +469,9 @@ fn shape_sort_missing_field_emits_warning_not_panic() {
 
 /// Helper: build a spec with a shape encoding carrying an explicit `scale=`.
 fn make_spec_with_shape_scale(scale: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -561,30 +479,15 @@ fn make_spec_with_shape_scale(scale: Option<crate::spec::encoding::ScaleSpec>) -
             shape: Some(EncodingSpec { field: "species".into(), type_: None, scale, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
 /// Helper: build a spec with a stroke_dash encoding carrying an explicit `scale=`.
 fn make_spec_with_stroke_dash_scale(scale: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -597,20 +500,7 @@ fn make_spec_with_stroke_dash_scale(scale: Option<crate::spec::encoding::ScaleSp
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -967,7 +857,6 @@ fn stroke_dash_range_unsupported_display_text_handles_empty_entries() {
 
 #[test]
 fn y2_field_extends_y_domain_when_set() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -985,7 +874,6 @@ fn y2_field_extends_y_domain_when_set() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Ribbon,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "t".into(), type_: None, ..Default::default() }),
@@ -993,18 +881,7 @@ fn y2_field_extends_y_domain_when_set() {
             y2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -1022,7 +899,6 @@ fn y2_field_extends_y_domain_when_set() {
 
 #[test]
 fn x2_field_extends_x_domain_when_set() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1040,7 +916,6 @@ fn x2_field_extends_x_domain_when_set() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Ribbon,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "xa".into(), type_: None, ..Default::default() }),
@@ -1048,18 +923,7 @@ fn x2_field_extends_x_domain_when_set() {
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -1076,7 +940,6 @@ fn x2_field_extends_x_domain_when_set() {
 
 #[test]
 fn resolved_scales_include_x2_y2_field_names_when_set() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1096,7 +959,6 @@ fn resolved_scales_include_x2_y2_field_names_when_set() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Ribbon,
         encoding: Encoding {
             x:  Some(EncodingSpec { field: "a".into(),  type_: None, ..Default::default() }),
@@ -1105,18 +967,7 @@ fn resolved_scales_include_x2_y2_field_names_when_set() {
             y2: Some(EncodingSpec { field: "b2".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -1127,7 +978,6 @@ fn resolved_scales_include_x2_y2_field_names_when_set() {
 
 #[test]
 fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1143,25 +993,13 @@ fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-    position: None,
-    title: None,
-    axis_x: None, axis_y: None,
-    selections: Vec::new(), conditionals: Vec::new(),
-    chart_description: None,
-    entry: None,
-    params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -1194,7 +1032,6 @@ fn opacity_scale_defaults_to_0_1_to_1_0() {
 
 #[test]
 fn single_value_domain_expands_to_symmetric_band() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1210,25 +1047,13 @@ fn single_value_domain_expands_to_symmetric_band() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1239,7 +1064,6 @@ fn single_value_domain_expands_to_symmetric_band() {
 
 #[test]
 fn single_value_zero_domain_expands_to_minus_one_plus_one() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1255,25 +1079,13 @@ fn single_value_zero_domain_expands_to_minus_one_plus_one() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1287,7 +1099,6 @@ fn single_value_zero_domain_expands_to_minus_one_plus_one() {
 
 #[test]
 fn child_scale_type_override_wins_over_parent_auto_detection() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1303,7 +1114,6 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -1323,18 +1133,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1343,7 +1142,6 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
 
 #[test]
 fn all_null_column_resolves_to_default_domain() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::Float64Array;
@@ -1367,25 +1165,13 @@ fn all_null_column_resolves_to_default_domain() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -1398,7 +1184,6 @@ fn all_null_column_resolves_to_default_domain() {
 
 #[test]
 fn empty_color_domain_produces_no_color_scale() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1416,7 +1201,6 @@ fn empty_color_domain_produces_no_color_scale() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1424,18 +1208,7 @@ fn empty_color_domain_produces_no_color_scale() {
             color: Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -1454,7 +1227,6 @@ fn empty_color_domain_produces_no_color_scale() {
 
 #[test]
 fn pow_scale_exponent_2_compresses_low_values() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1470,7 +1242,6 @@ fn pow_scale_exponent_2_compresses_low_values() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -1493,18 +1264,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1526,7 +1286,6 @@ fn pow_scale_exponent_2_compresses_low_values() {
 
 #[test]
 fn sqrt_scale_expands_low_values() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
     let schema = Arc::new(Schema::new(vec![
@@ -1542,7 +1301,6 @@ fn sqrt_scale_expands_low_values() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -1564,18 +1322,7 @@ fn sqrt_scale_expands_low_values() {
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1679,7 +1426,6 @@ fn value_fractions_on_normal_domain_are_finite_and_aligned() {
 /// to the categorical palette.
 #[test]
 fn d1_ordinal_color_explicit_string_range_resolves_per_domain() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
 
@@ -1713,7 +1459,6 @@ fn d1_ordinal_color_explicit_string_range_resolves_per_domain() {
     let scale_spec: ScaleSpec = serde_json::from_value(scale_json).unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1726,20 +1471,7 @@ fn d1_ordinal_color_explicit_string_range_resolves_per_domain() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -1814,7 +1546,6 @@ fn d1_ordinal_color_without_explicit_range_uses_default_palette() {
 /// work, since `parse_color` supports named colors.
 #[test]
 fn d1_ordinal_color_named_css_colors_in_range() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
 
@@ -1841,7 +1572,6 @@ fn d1_ordinal_color_named_css_colors_in_range() {
     let scale_spec: ScaleSpec = serde_json::from_value(scale_json).unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -1854,20 +1584,7 @@ fn d1_ordinal_color_named_css_colors_in_range() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -1907,7 +1624,6 @@ fn d1_ordinal_color_named_css_colors_in_range() {
 /// gray, while "A" would have gotten accent — the wrong assignment.
 #[test]
 fn d1_declared_domain_overrides_data_appearance_order() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
 
@@ -1940,7 +1656,6 @@ fn d1_declared_domain_overrides_data_appearance_order() {
     let scale_spec: ScaleSpec = serde_json::from_value(scale_json).unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "cat".into(), type_: None, ..Default::default() }),
@@ -1953,20 +1668,7 @@ fn d1_declared_domain_overrides_data_appearance_order() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -2030,7 +1732,6 @@ fn d1_declared_domain_overrides_data_appearance_order() {
 /// user asked for.
 #[test]
 fn d1_invalid_color_in_range_refuses() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
 
@@ -2058,7 +1759,6 @@ fn d1_invalid_color_in_range_refuses() {
     let scale_spec: ScaleSpec = serde_json::from_value(scale_json).unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2071,20 +1771,7 @@ fn d1_invalid_color_in_range_refuses() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -2107,7 +1794,6 @@ fn d1_invalid_color_in_range_refuses() {
 /// produce byte-identical SVGs.
 #[test]
 fn d4_linear_scale_scheme_honored_in_continuous_color() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{
         ContinuousScaleCommon, Encoding, EncodingSpec, ScaleSpec,
     };
@@ -2131,11 +1817,9 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
     .unwrap();
 
     fn make_spec_with_scheme(scheme: &str) -> ChartSpec {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{ContinuousScaleCommon, Encoding, EncodingSpec, ScaleSpec};
         use crate::spec::mark::Mark;
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Rect,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2161,20 +1845,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -2220,7 +1891,6 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
 /// This tests the original path (pre-heatmap) remains intact.
 #[test]
 fn d4_encoding_level_scheme_still_works_for_continuous_color() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -2239,7 +1909,6 @@ fn d4_encoding_level_scheme_still_works_for_continuous_color() {
     )
     .unwrap();
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2253,20 +1922,7 @@ fn d4_encoding_level_scheme_still_works_for_continuous_color() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -2335,11 +1991,9 @@ fn make_bar_batch_for_sort() -> RecordBatch {
 }
 
 fn make_bar_spec_with_sort(sort: serde_json::Value) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -2351,20 +2005,7 @@ fn make_bar_spec_with_sort(sort: serde_json::Value) -> ChartSpec {
             y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -2511,7 +2152,6 @@ fn d5_sort_field_object_count_orders_by_row_count() {
 /// validates that both sides now agree and the scale resolves successfully.
 #[test]
 fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -2530,7 +2170,6 @@ fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
     .unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -2541,20 +2180,7 @@ fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
             y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -2586,7 +2212,6 @@ fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
 /// produce decimal-formatted domain strings that match what the drawer emits.
 #[test]
 fn f1_float64_ordinal_fractional_values_resolve() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -2604,7 +2229,6 @@ fn f1_float64_ordinal_fractional_values_resolve() {
     .unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -2615,20 +2239,7 @@ fn f1_float64_ordinal_fractional_values_resolve() {
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -2694,7 +2305,6 @@ fn f5_default_categorical_palette_is_byte_stable() {
 /// no-range spec is unaffected (still resolves the default palette).
 #[test]
 fn f5_parse_failure_refuses_and_default_is_unaffected() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
 
@@ -2715,7 +2325,6 @@ fn f5_parse_failure_refuses_and_default_is_unaffected() {
 
     // Spec with a bad range that will trigger the parse-failure arm.
     let bad_range_spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2732,20 +2341,7 @@ fn f5_parse_failure_refuses_and_default_is_unaffected() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
 
     let theme = ThemeInputs::default();
@@ -2855,7 +2451,6 @@ fn normalize_continuous_degenerate_domain_returns_half() {
 /// Shared path: merged batch → single y-domain [0, 200] for all panels.
 #[test]
 fn d2d_independent_resolve_yields_per_panel_domains() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use std::collections::HashMap;
@@ -2894,25 +2489,13 @@ fn d2d_independent_resolve_yields_per_panel_domains() {
     .unwrap();
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let empty_outputs: HashMap<String, RecordBatch> = HashMap::new();
@@ -2990,18 +2573,15 @@ fn faceted_xy_spec(
     y_resolve: crate::layout::facet::ResolveMode,
 ) -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3013,18 +2593,7 @@ fn faceted_xy_spec(
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: y_resolve },
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -3202,7 +2771,6 @@ fn t4_independent_facet_numeric_x_keeps_per_panel_domain() {
 /// set (shared band layout) so band widths/positions match the shared axis.
 #[test]
 fn t4_shared_facet_categorical_x_unions_global_categories() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
@@ -3229,14 +2797,12 @@ fn t4_shared_facet_categorical_x_unions_global_categories() {
     let outputs = final_outputs(global);
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3248,18 +2814,7 @@ fn t4_shared_facet_categorical_x_unions_global_categories() {
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Shared, y: ResolveMode::Shared },
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let pr = (0.0, 100.0);
@@ -3287,7 +2842,6 @@ fn t4_shared_facet_categorical_x_unions_global_categories() {
 /// (only {a,c}) must NOT see category 'b' — per-panel category set preserved.
 #[test]
 fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
@@ -3312,14 +2866,12 @@ fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
     let outputs = final_outputs(global);
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3331,18 +2883,7 @@ fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let pr = (0.0, 100.0);
@@ -3412,11 +2953,9 @@ fn faceted_nominal_sort_spec(
     x_resolve: crate::layout::facet::ResolveMode,
 ) -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Bar,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -3432,7 +2971,6 @@ fn faceted_nominal_sort_spec(
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3444,18 +2982,7 @@ fn faceted_nominal_sort_spec(
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: crate::layout::facet::ResolveMode::Shared },
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -3602,11 +3129,9 @@ fn t4_independent_facet_categorical_data_aware_sort_uses_per_panel_batch() {
 /// Build a faceted point spec on x/y with a size encoding.
 fn faceted_size_spec() -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -3618,7 +3143,6 @@ fn faceted_size_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3630,29 +3154,16 @@ fn faceted_size_spec() -> ChartSpec {
             spacing: None,
             resolve: FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
 /// Build a faceted point spec on x/y with a continuous (Float64) color encoding.
 fn faceted_continuous_color_spec() -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -3664,7 +3175,6 @@ fn faceted_continuous_color_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3676,29 +3186,16 @@ fn faceted_continuous_color_spec() -> ChartSpec {
             spacing: None,
             resolve: FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
 /// Build a faceted point spec on x/y with an opacity encoding.
 fn faceted_opacity_spec() -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -3710,7 +3207,6 @@ fn faceted_opacity_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -3722,18 +3218,7 @@ fn faceted_opacity_spec() -> ChartSpec {
             spacing: None,
             resolve: FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -4036,11 +3521,9 @@ fn t3_non_faceted_size_color_opacity_byte_identical() {
     let outputs = final_outputs(global);
 
     // Use non-faceted specs (no facet field).
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4061,21 +3544,9 @@ fn t3_non_faceted_size_color_opacity_byte_identical() {
                 ..Default::default()
             }),
             ..Default::default()
-        },
-        transforms: Vec::new(),
-        facet: None,  // non-faceted
+        },  // non-faceted
         layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let pr = (0.0, 100.0);
@@ -4138,11 +3609,9 @@ fn t3_cat_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, k_vals: Vec<&str>) -> Record
 /// Build a faceted point spec on x/y with a nominal (Utf8) color encoding.
 fn faceted_categorical_color_spec() -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4154,7 +3623,6 @@ fn faceted_categorical_color_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -4166,18 +3634,7 @@ fn faceted_categorical_color_spec() -> ChartSpec {
             spacing: None,
             resolve: FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -4278,31 +3735,16 @@ fn t3_categorical_color_faceted_uses_global_first_appearance_order() {
 
 /// Minimal non-faceted x/y point spec for the byte-identity guard.
 fn make_spec_with_color_xy_only() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -4339,11 +3781,9 @@ fn t3_shape_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, grp_vals: Vec<&str>) -> Re
 /// Build a faceted point spec on x/y with a nominal shape encoding.
 fn faceted_shape_spec() -> ChartSpec {
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4355,7 +3795,6 @@ fn faceted_shape_spec() -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
@@ -4367,18 +3806,7 @@ fn faceted_shape_spec() -> ChartSpec {
             spacing: None,
             resolve: FacetResolve::default(),
         }),
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -4470,7 +3898,6 @@ fn t3_shape_faceted_uses_global_first_appearance_order() {
 /// affect a non-faceted chart's shape domain.
 #[test]
 fn t3_shape_non_faceted_byte_identical() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
@@ -4487,7 +3914,6 @@ fn t3_shape_non_faceted_byte_identical() {
 
     // Non-faceted spec: no facet field.
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -4498,21 +3924,9 @@ fn t3_shape_non_faceted_byte_identical() {
                 ..Default::default()
             }),
             ..Default::default()
-        },
-        transforms: Vec::new(),
-        facet: None, // non-faceted
+        }, // non-faceted
         layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let pr = (0.0, 100.0);
@@ -4649,31 +4063,16 @@ fn ordinal_scalekind_yields_empty_minor_fractions_via_early_return() {
 
 /// x/y quantitative spec over `make_batch_q_q_n` (x ∈ [1,6], y ∈ [10,60]).
 fn qq_spec() -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
             y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -4981,13 +4380,11 @@ fn positional_diverging_scale_uses_full_lo_hi_extent_not_lo_mid() {
 #[test]
 fn arc_theta_only_resolves_via_dummy_radius_scale() {
     use crate::spec::coord::CoordKind;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::{PolarDirection, PolarThetaChannel};
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Arc,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -4998,9 +4395,6 @@ fn arc_theta_only_resolves_via_dummy_radius_scale() {
             y: None,
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: Some(CoordKind::Polar {
             theta: PolarThetaChannel::X,
             start_angle: 0.0,
@@ -5009,16 +4403,7 @@ fn arc_theta_only_resolves_via_dummy_radius_scale() {
             outer_radius: None,
             pad_angle: 0.0,
         }),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let batch = make_batch_q_q_n();
     let theme = ThemeInputs::default();
@@ -5059,14 +4444,12 @@ fn arc_theta_only_resolves_via_dummy_radius_scale() {
 #[test]
 fn arc_missing_theta_still_errors() {
     use crate::spec::coord::CoordKind;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::{PolarDirection, PolarThetaChannel};
 
     // theta="x", but only "y" (radius) is bound — the theta channel itself is missing.
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Arc,
         encoding: Encoding {
             x: None,
@@ -5077,9 +4460,6 @@ fn arc_missing_theta_still_errors() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: Some(CoordKind::Polar {
             theta: PolarThetaChannel::X,
             start_angle: 0.0,
@@ -5088,16 +4468,7 @@ fn arc_missing_theta_still_errors() {
             outer_radius: None,
             pad_angle: 0.0,
         }),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let batch = make_batch_q_q_n();
     let theme = ThemeInputs::default();
@@ -5119,12 +4490,10 @@ use crate::spec::coord::CoordKind;
 /// literal per test would be near-verbatim duplication of the fixture used
 /// throughout this file (operating principle 11).
 fn arc_spec_with_coord(coord: Option<CoordKind>) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Arc,
         encoding: Encoding {
             x: Some(EncodingSpec {
@@ -5135,20 +4504,8 @@ fn arc_spec_with_coord(coord: Option<CoordKind>) -> ChartSpec {
             y: None,
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -5258,32 +4615,17 @@ fn arc_both_x_and_y_bound_under_non_polar_coord_refuses() {
 /// name the resolved channel `'y'` (byte-identical to today).
 #[test]
 fn missing_y_encoding_names_y_when_not_flipped() {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
             y: None,
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let batch = make_batch_q_q_n();
     let theme = ThemeInputs::default();
@@ -5304,12 +4646,10 @@ fn missing_y_encoding_names_y_when_not_flipped() {
 #[test]
 fn missing_encoding_names_users_channel_under_flip() {
     use crate::spec::coord::CoordKind;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding: Encoding {
             // Post-flip: this is what was the user's OWN y encoding.
@@ -5319,20 +4659,8 @@ fn missing_encoding_names_users_channel_under_flip() {
             y: None,
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: Some(CoordKind::Flip),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let batch = make_batch_q_q_n();
     let theme = ThemeInputs::default();
@@ -5362,13 +4690,11 @@ fn missing_encoding_names_users_channel_under_flip() {
 #[test]
 fn arc_theta_y_only_resolves_via_dummy_radius_scale() {
     use crate::spec::coord::CoordKind;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::{PolarDirection, PolarThetaChannel};
 
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Arc,
         encoding: Encoding {
             x: None,
@@ -5379,9 +4705,6 @@ fn arc_theta_y_only_resolves_via_dummy_radius_scale() {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: Some(CoordKind::Polar {
             theta: PolarThetaChannel::Y,
             start_angle: 0.0,
@@ -5390,16 +4713,7 @@ fn arc_theta_y_only_resolves_via_dummy_radius_scale() {
             outer_radius: None,
             pad_angle: 0.0,
         }),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let batch = make_batch_q_q_n();
     let theme = ThemeInputs::default();
@@ -5561,12 +4875,10 @@ fn yslot_plan_assigns_slots_in_layer_order() {
 /// A rect chart whose `color` channel is the numeric column `v`, carrying the
 /// given scale spec JSON. Used by the discretizing-color tests below.
 fn spec_with_color_scale_json(scale_json: serde_json::Value) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
     let scale: ScaleSpec = serde_json::from_value(scale_json).unwrap();
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Rect,
         encoding: Encoding {
             x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -5579,20 +4891,7 @@ fn spec_with_color_scale_json(scale_json: serde_json::Value) -> ChartSpec {
             }),
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -6578,7 +5877,6 @@ fn appearance_batch() -> RecordBatch {
 /// prove the builders honor a shape the wire may never carry; this proves they
 /// honor the one it does. Mirrors `spec_with_color_scale_json` above.
 fn appearance_spec(channels: serde_json::Value) -> ChartSpec {
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     let mut encoding: Encoding =
@@ -6586,23 +5884,9 @@ fn appearance_spec(channels: serde_json::Value) -> ChartSpec {
     encoding.x = Some(EncodingSpec { field: "x".into(), ..Default::default() });
     encoding.y = Some(EncodingSpec { field: "y".into(), ..Default::default() });
     ChartSpec {
-        data: DataRef::default(),
         mark: Mark::Point,
         encoding,
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -7552,14 +6836,7 @@ fn layer_with(mark: crate::spec::mark::Mark, encoding: crate::spec::encoding::En
     Layer {
         mark,
         encoding,
-        transforms: Vec::new(),
-        mark_style: None,
-        data_source: None,
-        position: None,
-        blend: None,
-        name: None,
-        independent_y: false, coord: None,
-        entry: None,
+        ..Default::default()
     }
 }
 
@@ -8140,4 +7417,35 @@ fn a_channel_bound_nowhere_still_raises_the_channel_level_error() {
         RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
         other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
     }
+}
+
+/// [`AUXILIARY_SCALE_CHANNELS`] names exactly the scales
+/// [`build_auxiliary_scales`] builds, in field order: binding each name alone,
+/// through the same wire key Python writes, builds that slot and no other.
+/// The exhaustive destructure stops compiling when a slot is added without a
+/// name.
+#[test]
+fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
+    let batch = make_batch_q_q_n();
+    for (i, name) in AUXILIARY_SCALE_CHANNELS.iter().enumerate() {
+        let field = if matches!(*name, "shape" | "stroke_dash") { "species" } else { "x" };
+        let encoding: crate::spec::encoding::Encoding =
+            serde_json::from_value(serde_json::json!({ *name: { "field": field } })).unwrap();
+        let spec = ChartSpec { encoding, ..Default::default() };
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash } =
+            build_auxiliary_scales(&spec, &batch, &HashMap::new(), &ThemeInputs::default(), None, &mut Vec::new())
+                .unwrap();
+        let built = [
+            color.is_some(),
+            size.is_some(),
+            shape.is_some(),
+            opacity.is_some(),
+            fill_opacity.is_some(),
+            stroke_opacity.is_some(),
+            stroke_dash.is_some(),
+        ];
+        let expected: Vec<bool> = (0..built.len()).map(|j| j == i).collect();
+        assert_eq!(built.to_vec(), expected, "{name}");
+    }
+    assert_eq!(auxiliary_scale_channels(), AUXILIARY_SCALE_CHANNELS.map(String::from));
 }

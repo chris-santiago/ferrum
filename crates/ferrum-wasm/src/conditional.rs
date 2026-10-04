@@ -187,7 +187,14 @@ pub fn resolve_conditionals_with_packed(
     // packed batches sit at their absolute sidecar `instance_start`, non-packed
     // batches at the offsets the loader recorded on their own draw commands.
     for span in batch_instance_spans(layout) {
-        for cond in conditionals {
+        for (index, cond) in conditionals.iter().enumerate() {
+            // A `size` conditional reaches only the batches whose layer
+            // declared it, when the batch names its own.
+            let out_of_scope = cond.sets_size()
+                && span.batch.size_conditionals.as_ref().is_some_and(|own| !own.contains(&index));
+            if out_of_scope {
+                continue;
+            }
             let Some(sel) = selections.get(&cond.selection_name) else {
                 continue;
             };
@@ -780,12 +787,18 @@ mod tests {
     /// assumption the fix removed. Running `load_scene` instead means the
     /// offsets under test are the ones production assigns.
     fn loader_draw_commands(panels: &[Panel]) -> Vec<DrawCommand> {
+        // The draw commands do not depend on conditional scopes, which index
+        // conditionals this scene does not carry.
+        let mut panels = panels.to_vec();
+        for batch in panels.iter_mut().flat_map(|p| &mut p.marks) {
+            batch.size_conditionals = None;
+        }
         let scene = ferrum_scene::SceneGraph {
             width: 500.0,
             height: 500.0,
             background: None,
             title: vec![],
-            panels: panels.to_vec(),
+            panels,
             legend: vec![],
             decorations: vec![],
             selections: vec![],
@@ -4281,7 +4294,55 @@ mod tests {
         assert_eq!(node_widths(&lines), Some(vec![off, on, off, off]), "its own conditional still restyles it");
     }
 
-    /// A non-size conditional after the line's `size` conditional does not
+    /// A `size` conditional reaches a point batch that names its own
+    /// `size_conditionals` only when it is named there; a batch that names
+    /// none answers to every one. A line layer's conditional therefore never
+    /// resizes a sibling point layer's dots.
+    #[test]
+    fn a_size_conditional_resizes_only_the_point_batches_in_its_scope() {
+        use ferrum_scene::{FillStroke, MarkBatchKind};
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let mut scene = line_scene(zigzag());
+        scene.panels[0].marks[0] = MarkBatch {
+            kind: MarkBatchKind::Point,
+            nodes: vec![SceneNode::Circle { cx: 100.0, cy: 100.0, r: 2.0, style }],
+            data_indices: Some(vec![0]),
+            ..MarkBatch::default()
+        };
+        scene.interaction.conditionals = vec![size_conditional()];
+        let radius = |scope: Option<Vec<usize>>| {
+            let mut scene = scene.clone();
+            scene.panels[0].marks[0].size_conditionals = scope;
+            let data = load_scene(&scene).unwrap();
+            let base = data.circle_instances[0].radius;
+            let out = resolve_conditionals(
+                &scene.panels,
+                &scene.interaction.conditionals,
+                &point_selection(&[0]),
+                &data.circle_instances,
+                &data.rect_instances,
+            );
+            (base, out.circle_instances[0].radius)
+        };
+        let (base, out_of_scope) = radius(Some(vec![]));
+        assert_eq!(out_of_scope, base, "a conditional outside the batch's scope leaves the dot as loaded");
+        let selected = (100.0_f64 / std::f64::consts::PI).sqrt() as f32;
+        assert!((radius(Some(vec![0])).1 - selected).abs() < 1e-4, "a named conditional resizes the dot");
+        // Vacuity control: an unscoped batch answers to every conditional.
+        assert!((radius(None).1 - selected).abs() < 1e-4);
+        assert_ne!(base, selected);
+    }
+
+    /// A non-size conditional beside the line's `size` conditional does not
     /// unset the size branch each vertex picked.
     #[test]
     fn a_later_non_size_conditional_keeps_each_vertex_on_its_size_branch() {
@@ -4293,24 +4354,34 @@ mod tests {
             if_selected: color(255),
             if_not: color(0),
         });
-        scene.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
         let lines =
             conditional_line_panels(&scene.panels, &scene.interaction.conditionals, &point_selection(&[1])).unwrap();
         let (on, off) = (ferrum_scene::dot_diameter(100.0), ferrum_scene::dot_diameter(20.0));
         assert_eq!(node_widths(&lines), Some(vec![off, on, off, off]));
     }
 
-    /// The loader refuses a line whose `size_conditionals` do not pair with
-    /// its `vertex_rows` or name a conditional the scene lacks.
+    /// The loader refuses a line whose `vertex_rows` come without
+    /// `size_conditionals`, and a batch naming a conditional the scene lacks
+    /// or one that sets no `size`.
     #[test]
     fn unpaired_or_out_of_range_size_conditionals_refuse_at_load() {
         use ferrum_scene::TaperError;
         let mut unpaired = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
         unpaired.panels[0].marks[0].size_conditionals = None;
         assert_eq!(load_scene(&unpaired).err(), Some(TaperError::SizeConditionalsUnpaired));
-        let mut stray = line_scene(zigzag());
-        stray.panels[0].marks[0].size_conditionals = Some(vec![]);
-        assert_eq!(load_scene(&stray).err(), Some(TaperError::SizeConditionalsUnpaired));
+        let mut not_size = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
+        not_size.interaction.conditionals.push(ConditionalEncoding {
+            selection_name: "s".to_string(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Color { value: Color { r: 255, g: 0, b: 0, a: 255 } },
+            if_not: EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } },
+        });
+        not_size.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
+        assert_eq!(load_scene(&not_size).err(), Some(TaperError::NotASizeConditional { index: 1 }));
+        // A scope alone, on a batch with no rows, loads.
+        let mut scoped = line_scene(zigzag());
+        scoped.panels[0].marks[0].size_conditionals = Some(vec![]);
+        assert!(load_scene(&scoped).is_ok());
         let mut out_of_range = conditional_line_scene(zigzag(), vec![0, 1, 2, 3]);
         out_of_range.panels[0].marks[0].size_conditionals = Some(vec![0, 1]);
         assert_eq!(

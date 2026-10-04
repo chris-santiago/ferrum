@@ -169,7 +169,7 @@ def test_mark_silhouette_rejects_unknown_kwarg():
     df_data = load_dataset("clustering")
     source = ferrum.ModelSource(model, df_data)
     sil = source.silhouette()
-    with pytest.raises(TypeError, match="unknown keyword"):
+    with pytest.raises(ValueError, match="unknown keyword"):
         ferrum.Chart(sil).mark_silhouette(strokr="red").to_svg()
 
 
@@ -178,7 +178,7 @@ def test_mark_pca_scree_rejects_unknown_kwarg():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(model, df)
     pca = source.pca_variance()
-    with pytest.raises(TypeError, match="unknown keyword"):
+    with pytest.raises(ValueError, match="unknown keyword"):
         ferrum.Chart(pca).mark_pca_scree(strokr="red").to_svg()
 
 
@@ -440,7 +440,7 @@ def test_mark_intercluster_distance_rejects_unknown_kwarg():
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df, random_state=0)
     icd = source.intercluster_distance(k=3)
-    with pytest.raises(TypeError, match="unknown keyword"):
+    with pytest.raises(ValueError, match="unknown keyword"):
         (ferrum.Chart(icd).mark_intercluster_distance(strokr="red").to_svg())
 
 
@@ -568,7 +568,7 @@ def test_mark_decision_boundary_rejects_unknown_kwarg():
             "z": [0.0, 1.0],
         }
     )
-    with pytest.raises(TypeError, match="unknown keyword"):
+    with pytest.raises(ValueError, match="unknown keyword"):
         ferrum.Chart(grid).mark_decision_boundary(strokr="red").to_svg()
 
 

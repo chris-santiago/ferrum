@@ -1771,6 +1771,21 @@ fn build_panel_mark_batches(
         // contract independent of that fact.
         let own_batch: &RecordBatch = layer_batch;
 
+        // Every refusal raised building this layer is wrapped in
+        // `RenderError::InLayer`: its index on a layered chart (an unlayered
+        // chart's one layer is the chart itself), and the public entry that
+        // produced it, the layer's own, else the chart's, else the mark's.
+        // The positional gates below name their layer in their own text and
+        // stay unwrapped.
+        let entry = spec
+            .layers
+            .as_ref()
+            .and_then(|layers| layers.get(li))
+            .and_then(|l| l.entry.clone())
+            .or_else(|| spec.entry.clone())
+            .unwrap_or_else(|| format!("mark_{}", layer.mark.as_str()));
+        let name_layer = |e: RenderError| e.in_layer_context(spec.layers.is_some().then_some(li), &entry);
+
         // This layer's coordinate system (`#172`(1)), already resolved against
         // the chart's by `prepare`, and whether it exchanges the positional
         // channels. Both are read three times below — by the position
@@ -1821,7 +1836,7 @@ fn build_panel_mark_batches(
             .transform_swarms
             .get(layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY));
         let swarm_placed: Option<RecordBatch> = match swarm {
-            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_flipped, warnings)?,
+            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_flipped, &entry, warnings).map_err(name_layer)?,
             None => None,
         };
         let layer_batch: &RecordBatch = swarm_placed.as_ref().unwrap_or(layer_batch);
@@ -1837,7 +1852,8 @@ fn build_panel_mark_batches(
             &layer.encoding,
             layer_flipped,
             warnings,
-        )?;
+        )
+        .map_err(name_layer)?;
         let layer_batch: &RecordBatch = &adjusted_owned;
 
         // Synthetic ChartSpec for this layer. The `encoding` here is a
@@ -1852,22 +1868,6 @@ fn build_panel_mark_batches(
         // Refuses with `RenderError::InvalidColor` on an unparseable
         // `fill=`/`stroke=` (batch-A Task 8) — the same build-seam refusal
         // discipline as `validate_mark_encoding` below.
-        // A per-layer refusal names its layer only on a layered chart (an
-        // unlayered chart's one layer is the chart itself), and names the
-        // public entry that produced the layer when the layer records one.
-        let entry = spec
-            .layers
-            .as_ref()
-            .and_then(|layers| layers.get(li))
-            .and_then(|l| l.entry.as_deref())
-            .or(spec.entry.as_deref());
-        let name_layer = |e: RenderError| {
-            let e = match entry {
-                Some(entry) => e.with_entry(entry),
-                None => e,
-            };
-            if spec.layers.is_some() { e.in_layer(li) } else { e }
-        };
         let mut mark_style =
             draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark).map_err(name_layer)?;
         // A swarm-fed point layer that sizes its dots neither by a constant
@@ -1955,7 +1955,7 @@ fn build_panel_mark_batches(
             own_batch,
             scales,
         )?;
-        validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped)?;
+        validate_mark_encoding(&layer.mark, &layer_spec.encoding, layer_flipped).map_err(name_layer)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx).map_err(name_layer)?;
         // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
         // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
@@ -2058,22 +2058,30 @@ fn build_panel_mark_batches(
             // batch before this field existed. `mark_function(clip=False)`
             // (T11, Python) is the only producer that sets `false`.
             clip: mark_style.misc.clip.unwrap_or(true),
-            // The `size` conditionals this line's own layer declared (the
-            // ones `line.rs` recorded `vertex_rows` for), as indices into
-            // the scene's `interaction.conditionals`.
-            size_conditionals: result.vertex_rows.as_ref().map(|_| {
-                spec.conditionals
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| c.declared_by(li) && c.encoding.sets_size())
-                    .map(|(i, _)| i)
-                    .collect()
-            }),
+            size_conditionals: layer_size_conditionals(spec, li, result.vertex_rows.is_some()),
             vertex_rows: result.vertex_rows,
         });
     }
 
     Ok(mark_batches)
+}
+
+/// The `size` conditionals layer `li` declared, as indices into the scene's
+/// `interaction.conditionals` (the same index space: `spec.conditionals` maps
+/// into it one for one), for [`MarkBatch::size_conditionals`]. A line that
+/// recorded `vertex_rows` always names them; any other batch names them only
+/// when the layer declared fewer than all of the chart's `size` conditionals,
+/// so a chart whose size conditionals all reach every layer writes none.
+fn layer_size_conditionals(spec: &ChartSpec, li: usize, has_vertex_rows: bool) -> Option<Vec<usize>> {
+    let sized: Vec<(usize, bool)> = spec
+        .conditionals
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.encoding.sets_size())
+        .map(|(i, c)| (i, c.declared_by(li)))
+        .collect();
+    let scoped = sized.iter().any(|&(_, declared)| !declared);
+    (has_vertex_rows || scoped).then(|| sized.iter().filter(|&&(_, declared)| declared).map(|&(i, _)| i).collect())
 }
 
 /// Collect param→scene bindings (D6, 5e-2a) from the original spec.
@@ -4031,20 +4039,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         spec.params = params;
         spec
@@ -4449,14 +4444,12 @@ mod tests {
     /// share one pixel range and fail this assertion.)
     #[test]
     fn resolve_panel_scales_differs_per_panel_pixel_range() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -4469,20 +4462,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -4585,7 +4565,6 @@ mod tests {
     /// on `y1`, and a batch carrying `x`/`y0`/`y1`. `layer1_independent` sets the
     /// flag on the appended layer. Returns `(spec, batch)`.
     fn two_layer_dual_y_spec(layer1_independent: bool) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use arrow::array::Float64Array;
@@ -4601,21 +4580,12 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let mut layer1 = y_enc("y1");
         layer1.independent_y = layer1_independent;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -4624,20 +4594,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![y_enc("y0"), layer1]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -4665,7 +4623,6 @@ mod tests {
     /// the prepare axis inputs, the per-panel slots, and the axis-group tags in
     /// lock-step for more than a single secondary axis.
     fn three_layer_two_independent_spec() -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use arrow::array::Float64Array;
@@ -4681,19 +4638,11 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
             independent_y: independent,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -4702,24 +4651,12 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![
                 y_layer("y0", false),
                 y_layer("y1", true),
                 y_layer("y2", true),
             ]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -4951,7 +4888,6 @@ mod tests {
         text_own_color_field: Option<&str>,
         chart_color_field: Option<&str>,
     ) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -4986,15 +4922,8 @@ mod tests {
                 }),
                 ..xy_encoding()
             },
-            transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let text_layer = Layer {
             mark: Mark::Text,
@@ -5005,19 +4934,11 @@ mod tests {
                 }),
                 ..xy_encoding()
             },
-            transforms: Vec::new(),
             mark_style: fill_style(text_fill),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 color: chart_color_field.map(|f| EncodingSpec {
@@ -5026,20 +4947,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![bar_layer, text_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -5205,7 +5114,6 @@ mod tests {
     /// class so `build_color_detail_groups` has real multi-point groups to
     /// fan out over if the leak is present.
     fn roc_reference_line_layered_spec(n_classes: usize) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -5230,15 +5138,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("line".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let reference_layer = Layer {
             mark: Mark::Line,
@@ -5253,22 +5154,15 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             mark_style: Some(MarkKwargsSpec {
                 stroke: Some("#AAAAAA".into()),
                 stroke_dash: Some(vec![4.0, 4.0]),
                 ..Default::default()
             }),
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("reference".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -5287,20 +5181,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![curve_layer, reference_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let rows_per_class = 4;
@@ -5519,7 +5401,6 @@ mod tests {
     /// declares its own `color=` (see `bar_text_layered_spec`'s doc comment).
     #[test]
     fn layered_text_as_layer_zero_with_colored_sibling_still_renders_legend() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use arrow::array::{Float64Array, StringArray};
@@ -5541,14 +5422,7 @@ mod tests {
             mark: Mark::Text,
             encoding: xy_encoding(), // layer 0; NO own color
             transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let bar_layer = Layer {
             mark: Mark::Bar,
@@ -5559,18 +5433,9 @@ mod tests {
                 }),
                 ..xy_encoding()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 // Chart-level color, mirroring Python's `+` copy-up of the
@@ -5581,20 +5446,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![text_layer, bar_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -5630,7 +5483,6 @@ mod tests {
     fn text_over_bar_position_spec(
         position: crate::spec::position::PositionAdjust,
     ) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use arrow::array::{Float64Array, StringArray};
@@ -5658,31 +5510,17 @@ mod tests {
                 }),
                 ..xy_ordinal_encoding()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
             position: Some(position.clone()),
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let text_layer = Layer {
             mark: Mark::Text,
             encoding: xy_ordinal_encoding(), // no own color
             transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
             position: Some(position),
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 color: Some(EncodingSpec {
@@ -5691,20 +5529,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![bar_layer, text_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
@@ -5901,7 +5727,6 @@ mod tests {
         bar_fill: Option<&str>,
         point_fill: Option<&str>,
     ) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -5929,47 +5754,20 @@ mod tests {
         let bar_layer = Layer {
             mark: Mark::Bar,
             encoding: xy_encoding(),
-            transforms: Vec::new(),
             mark_style: fill_style(bar_fill),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: xy_encoding(),
-            transforms: Vec::new(),
             mark_style: fill_style(point_fill),
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![bar_layer, point_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -6056,7 +5854,6 @@ mod tests {
     /// must not change anything about a flat chart's own paint.
     #[test]
     fn flat_point_chart_fill_unaffected_by_hoisted_paint_scope_extension() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::mark_style::MarkKwargsSpec;
         use arrow::array::Float64Array;
@@ -6064,7 +5861,6 @@ mod tests {
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -6077,23 +5873,11 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
             mark_style: Some(MarkKwargsSpec {
                 fill: Some("#ff00ff".into()),
                 ..Default::default()
             }),
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -6138,7 +5922,6 @@ mod tests {
     /// the layer count, rather than rendering with the style silently dropped.
     #[test]
     fn layered_chart_level_mark_style_is_refused() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -6160,37 +5943,18 @@ mod tests {
         let point_layer = |name: &str| Layer {
             mark: Mark::Point,
             encoding: xy_encoding(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some(name.into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![point_layer("a"), point_layer("b")]),
-            coord: None,
             mark_style: Some(MarkKwargsSpec {
                 size: Some(100.0),
                 ..Default::default()
             }),
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -6287,14 +6051,12 @@ mod tests {
     /// of the identical spec/batch.
     #[test]
     fn unlayered_chart_tooltip_scene_json_byte_identical() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -6311,20 +6073,7 @@ mod tests {
                 }]),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -6365,7 +6114,6 @@ mod tests {
     /// reaches the packed wire format via the real producer↔consumer seam.
     #[test]
     fn keyed_point_chart_above_pack_threshold_carries_has_keys_sidecar() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -6377,7 +6125,6 @@ mod tests {
         let keys: Vec<String> = (0..n).map(|i| format!("row-{i}")).collect();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -6393,21 +6140,9 @@ mod tests {
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None, // default shape = Circle, required for packing eligibility
+            }, // default shape = Circle, required for packing eligibility
             position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -6520,7 +6255,6 @@ mod tests {
         key_field_name: &str,
         key_col: arrow::array::ArrayRef,
     ) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
@@ -6530,7 +6264,6 @@ mod tests {
         let ys: Vec<f64> = (0..n).map(|i| (i as f64) * 2.0).collect();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -6547,20 +6280,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -7982,10 +7702,8 @@ mod tests {
     /// regression tests below.
     fn area_spec_with_y2(coord_flipped: bool) -> ChartSpec {
         use crate::spec::coord::CoordKind;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Area,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -8002,24 +7720,12 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: if coord_flipped {
                 Some(CoordKind::Flip)
             } else {
                 None
             },
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -8118,10 +7824,8 @@ mod tests {
     /// `Mark::Bar` (`x2.is_some() && y2.is_some()`).
     fn bar_spec_with_x2_y2(coord_flipped: bool) -> ChartSpec {
         use crate::spec::coord::CoordKind;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -8142,24 +7846,12 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: if coord_flipped {
                 Some(CoordKind::Flip)
             } else {
                 None
             },
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -8324,7 +8016,6 @@ mod tests {
     /// against the live `chart.to_dict()` of `ferrum.shap_chart(..., kind=
     /// "beeswarm")` before being written down here.
     fn beeswarm_shaped_zero_line_spec() -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -8346,15 +8037,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("point".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let reference_layer = Layer {
             mark: Mark::Rule,
@@ -8365,22 +8049,15 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             mark_style: Some(MarkKwargsSpec {
                 stroke: Some("#AAAAAA".into()),
                 stroke_dash: Some(vec![4.0, 4.0]),
                 ..Default::default()
             }),
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("reference".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -8394,20 +8071,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![point_layer, reference_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let features = ["f0", "f0", "f1", "f1"];
@@ -8582,7 +8247,6 @@ mod tests {
     /// layer at merge time — exactly the ambiguity the own-span-axis
     /// normalization must resolve.
     fn layered_rug_tick_spec(band_size: f64) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -8603,15 +8267,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("scatter".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let tick_layer = Layer {
             mark: Mark::Tick,
@@ -8622,21 +8279,14 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             mark_style: Some(MarkKwargsSpec {
                 band_size: Some(band_size),
                 ..Default::default()
             }),
-            data_source: None,
-            position: None,
-            blend: None,
             name: Some("rug".into()),
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -8649,20 +8299,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![point_layer, tick_layer]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -9061,7 +8699,6 @@ mod tests {
     /// inherits (non-positional inheritance) a color channel its own batch does
     /// not carry — the #106 shape the gate must leave alone.
     fn layer_gate_binned_spec() -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
         use crate::transform::bin::BinSpec;
@@ -9083,15 +8720,7 @@ mod tests {
                 y: field("y0"),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let layer1 = Layer {
             mark: Mark::Point,
@@ -9100,19 +8729,11 @@ mod tests {
                 y: field("density"),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
             data_source: Some("binned".into()),
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: field("x"),
@@ -9131,19 +8752,8 @@ mod tests {
                 agg: None,
                 name: Some("binned".into()),
             })],
-            facet: None,
             layers: Some(vec![layer0, layer1]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -9381,7 +8991,6 @@ mod tests {
     /// twice, and an N-panel facet emitted it N+1 times. `optional_facet`
     /// controls whether `grp` (2 distinct values) drives a 2-panel facet.
     fn color_scheme_typo_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::Encoding;
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -9399,7 +9008,6 @@ mod tests {
             resolve: crate::layout::facet::FacetResolve::default(),
         });
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -9417,20 +9025,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -9505,7 +9101,6 @@ mod tests {
     /// constructor (mirrors `scale_resolve::tests::sequential_stops_raw_dict_edges`'s
     /// construction).
     fn gradient_too_few_stops_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, ScaleSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -9523,7 +9118,6 @@ mod tests {
             resolve: crate::layout::facet::FacetResolve::default(),
         });
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -9546,20 +9140,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -9633,7 +9215,6 @@ mod tests {
     #[test]
     fn group_cardinality_degenerate_still_fans_out_once_per_facet_panel() {
         pyo3::Python::initialize();
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::Encoding;
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -9658,7 +9239,6 @@ mod tests {
         }
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -9671,7 +9251,6 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "grp".into(),
                 row: None,
@@ -9683,18 +9262,7 @@ mod tests {
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, false),
@@ -10142,14 +9710,12 @@ mod tests {
     /// data is read, so this fixture only needs to be well-formed enough to
     /// clear `prepare_render_inputs`/`compute_layout` ahead of `build_scene`.
     fn minimal_point_spec() -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -10162,20 +9728,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -10340,15 +9893,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
             coord,
-            entry: None,
+            ..Default::default()
         };
         spec.layers = Some(vec![layer(None), layer(coord)]);
         (spec, batch)
@@ -10429,7 +9975,6 @@ mod tests {
     fn two_layer_ordinal_spec_with_flipped_secondary(
         utf8_categories: bool,
     ) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SpecType, Encoding, EncodingSpec};
         use arrow::array::{Float64Array, Int64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -10456,37 +10001,17 @@ mod tests {
         let layer = |coord| crate::spec::layer::Layer {
             mark: Mark::Point,
             encoding: encoding(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
             coord,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: encoding(),
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![
                 layer(None),
                 layer(Some(crate::spec::coord::CoordKind::Flip)),
             ]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let (cat_field, cat_col): (Field, arrow::array::ArrayRef) = if utf8_categories {
             (
@@ -11202,14 +10727,12 @@ mod tests {
     /// one, which a column facet cannot exercise (T11 cycle-4 quality
     /// review, finding 5).
     fn faceted_bar_spec(high_values: &[f64], ncols: u32) -> (ChartSpec, RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -11223,7 +10746,6 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
             facet: Some(crate::layout::facet::FacetSpec {
                 field: "g".to_string(),
                 row: None,
@@ -11235,18 +10757,7 @@ mod tests {
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
             }),
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         const GROUP_LETTERS: &[char] = &['p', 'q', 'r', 's', 't', 'u'];
@@ -12085,7 +11596,6 @@ mod tests {
     /// reverse-maps into the gap — so the caller need not re-derive it.
     fn remapped_point_nodes(shape: &str, y: f64) -> (Vec<SceneNode>, Option<f64>) {
         use crate::render::draw::resolve_mark_style;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{
             ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec,
         };
@@ -12110,7 +11620,6 @@ mod tests {
             system_injected: false,
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -12131,19 +11640,7 @@ mod tests {
                 size: Some(400.0),
                 ..Default::default()
             }),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", ArrowType::Float64, false),
@@ -12295,7 +11792,6 @@ mod tests {
     /// file-copy revert against the pre-#230-3 `remap_glyph_node`.
     fn remapped_text_node(y: f64, dx: f64, dy: f64) -> (SceneNode, Option<f64>, f64) {
         use crate::render::draw::resolve_mark_style;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{
             ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec,
         };
@@ -12320,7 +11816,6 @@ mod tests {
             system_injected: false,
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -12341,19 +11836,7 @@ mod tests {
                 dy: Some(dy),
                 ..Default::default()
             }),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", ArrowType::Float64, false),
@@ -12589,14 +12072,12 @@ mod tests {
     /// same as an unbroken chart would produce for this spec).
     #[test]
     fn mark_label_on_a_utf8_x_column_under_a_break_does_not_panic() {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Label,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -12609,20 +12090,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -13647,7 +13115,6 @@ mod coord_flip_y2_merge_tests {
     use super::*;
 
     use crate::spec::coord::CoordKind as SpecCoordKind;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::Float64Array;
@@ -13668,7 +13135,6 @@ mod coord_flip_y2_merge_tests {
     /// `idx` alone.
     fn flipped_ranged_bar_spec_and_batch() -> (ChartSpec, RecordBatch) {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -13685,20 +13151,8 @@ mod coord_flip_y2_merge_tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoordKind::Flip),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -13841,7 +13295,6 @@ mod coord_flip_y2_merge_tests {
     #[test]
     fn coord_flip_chart_level_x2_marks_share_axis_scale() {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -13858,20 +13311,8 @@ mod coord_flip_y2_merge_tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoordKind::Flip),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("lo", DataType::Float64, false),

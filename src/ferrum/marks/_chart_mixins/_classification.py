@@ -23,6 +23,7 @@ from ferrum.marks._desugar_helpers import (
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
+    from ferrum.encoding.base import ChannelBase
 
 #: mark_discrimination_threshold's own ``n_thresholds`` default -- named so
 #: the "did the caller actually override this informational parameter"
@@ -40,7 +41,7 @@ class ClassificationMarksMixin:
         average: str | None = None,
         reference_line: bool = True,
         annotate_auc: bool = False,
-        color_field: str | None = "class",
+        color_field: "str | ChannelBase | None" = "class",
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -67,8 +68,10 @@ class ClassificationMarksMixin:
             figure function defaults to ``True`` and owns the overlay via
             the shared ``_metric_labels`` helper; the divergent defaults
             are intentional.)
-        color_field : str or None, optional
-            Column name to drive per-class colour.  Default is ``"class"``.
+        color_field : str or ChannelBase or None, optional
+            Column name to drive per-class colour, or a channel naming one
+            (``fm.Color("class", title="Class")``) whose title and legend
+            style the curve colour binding.  Default is ``"class"``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -93,7 +96,7 @@ class ClassificationMarksMixin:
             if annotate_auc and "_auc_label" not in df.columns:
                 df = _inject_curve_annotation(
                     df,
-                    group_field=color_field,
+                    group_field=getattr(color_field, "field", color_field),
                     kind="auc",
                     prefix="_auc",
                     x_col="fpr",
@@ -123,7 +126,7 @@ class ClassificationMarksMixin:
         average: str | None = None,
         annotate_ap: bool = False,
         iso_lines: bool = False,
-        color_field: str | None = "class",
+        color_field: "str | ChannelBase | None" = "class",
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -147,8 +150,10 @@ class ClassificationMarksMixin:
         iso_lines : bool, optional
             Whether to draw iso-F1 reference lines in the background.
             Default is ``False``.
-        color_field : str or None, optional
-            Column name to drive per-class colour.  Default is ``"class"``.
+        color_field : str or ChannelBase or None, optional
+            Column name to drive per-class colour, or a channel naming one
+            (``fm.Color("class", title="Class")``) whose title and legend
+            style the curve colour binding.  Default is ``"class"``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -173,7 +178,7 @@ class ClassificationMarksMixin:
             if annotate_ap and "_ap_label" not in df.columns:
                 df = _inject_curve_annotation(
                     df,
-                    group_field=color_field,
+                    group_field=getattr(color_field, "field", color_field),
                     kind="ap",
                     prefix="_ap",
                     x_col="recall",

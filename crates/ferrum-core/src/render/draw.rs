@@ -516,6 +516,34 @@ fn is_paint_clear_sentinel(value: &str) -> bool {
     trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("transparent")
 }
 
+/// The size rule for a constant `size=` (a dot area, px²) on `mark`: the mark
+/// must draw a constant size ([`Mark::draws_constant_size`]), and the area must
+/// be finite and `> 0`, since a point's radius `sqrt(size / PI)` and a line's
+/// width (the diameter of a dot of that area) exist only for a positive area.
+/// Every layer's style resolves through here at render, whichever door built
+/// its kwargs; [`check_mark_size`] runs the same rule at construction.
+pub(crate) fn check_constant_size(mark: Mark, size: f64) -> Result<(), RenderError> {
+    if !mark.draws_constant_size() {
+        return Err(RenderError::MarkSizeNotDrawn { mark, value: size });
+    }
+    if !(size.is_finite() && size > 0.0) {
+        return Err(RenderError::MarkSizeOutOfRange { mark, value: size });
+    }
+    Ok(())
+}
+
+/// Refuse a constant `size=` that `mark` cannot draw, with the text the
+/// renderer refuses it with when `entry` names the public call that built the
+/// layer: [`check_constant_size`]'s rule, run where Python builds mark kwargs.
+#[pyfunction]
+pub fn check_mark_size(entry: &str, mark: &str, size: f64) -> PyResult<()> {
+    let mark: Mark = mark.parse().map_err(|e: crate::spec::mark::ParseMarkError| {
+        pyo3::exceptions::PyValueError::new_err(e.to_string())
+    })?;
+    check_constant_size(mark, size)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.in_layer_context(None, entry).to_string()))
+}
+
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
 ///
 /// When `overrides` is `None`, the result is identical to the Phase 7 path
@@ -587,17 +615,7 @@ pub fn resolve_mark_style(
     let Some(o) = overrides else { return Ok(style) };
 
     if let Some(size) = o.size {
-        // A line's width is the diameter of a dot of area `size`, which a
-        // non-positive area does not have; a point's radius is
-        // `sqrt(size / PI)`, which a negative area does not have.
-        let drawable = match mark {
-            Mark::Line => size.is_finite() && size > 0.0,
-            Mark::Point => size.is_finite() && size >= 0.0,
-            _ => true,
-        };
-        if !drawable {
-            return Err(RenderError::MarkSizeOutOfRange { layer: None, entry: None, mark: *mark, value: size });
-        }
+        check_constant_size(*mark, size)?;
         style.point.point_size = size;
     }
     if let Some(opacity) = o.opacity { style.paint.opacity = opacity; }
@@ -1588,6 +1606,40 @@ mod tests {
         assert_eq!(style.point.point_size, theme.sizes.point_size);
     }
 
+    /// The one size rule over every mark: a mark that draws a constant
+    /// `size=` takes any finite positive area and refuses the rest; every
+    /// other mark refuses any value. `draws_size_channel` agrees: a mark that
+    /// draws a constant size draws an encoded one too.
+    #[test]
+    fn every_mark_resolves_a_constant_size_by_the_one_size_rule() {
+        macro_rules! every_mark {
+            ($($V:ident => $name:ident,)*) => { vec![$(Mark::$V),*] };
+        }
+        let theme = ThemeInputs::default();
+        let resolve = |mark: Mark, size: f64| {
+            resolve_mark_style(Some(&MarkKwargsSpec { size: Some(size), ..Default::default() }), &theme, &mark)
+        };
+        let mut drawing = Vec::new();
+        for mark in crate::for_each_mark!(every_mark) {
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                let err = resolve(mark, bad).expect_err("a non-positive or non-finite size refuses");
+                let expected_draws = matches!(err, RenderError::MarkSizeOutOfRange { .. });
+                assert_eq!(expected_draws, mark.draws_constant_size(), "{mark:?} {bad}: {err:?}");
+            }
+            match resolve(mark, 30.0) {
+                Ok(style) => {
+                    assert_eq!(style.point.point_size, 30.0, "{mark:?}");
+                    assert!(mark.draws_size_channel(), "{mark:?}");
+                    drawing.push(mark);
+                }
+                Err(err) => assert!(matches!(err, RenderError::MarkSizeNotDrawn { mark: m, .. } if m == mark), "{err:?}"),
+            }
+        }
+        // Vacuity control: the rule separates the marks.
+        assert_eq!(drawing, vec![Mark::Point, Mark::Line]);
+        assert_eq!(crate::spec::mark::marks_drawing_constant_size(), vec!["point", "line"]);
+    }
+
     #[test]
     fn resolve_mark_style_overrides_point_size() {
         let theme = ThemeInputs::default();
@@ -1871,14 +1923,12 @@ mod tests {
         use crate::layout::{PanelLayout, Rect};
         use crate::render::scale_resolve::resolve_scales;
         use crate::spec::chart::ChartSpec;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -1892,20 +1942,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -2078,7 +2115,6 @@ mod tests {
         use crate::render::chart_config::ChartConfig;
         use crate::render::config::RenderConfig;
         use crate::spec::chart::ChartSpec;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
         use arrow::array::{Float64Array, StringArray};
         use arrow::datatypes::{DataType as ArrowType, Field, Schema};
@@ -2088,7 +2124,6 @@ mod tests {
             Some(EncodingSpec { field: name.into(), type_: Some(t), ..Default::default() })
         };
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Rect,
             encoding: Encoding {
                 x: field("xc", SpecDataType::Nominal),
@@ -2097,19 +2132,7 @@ mod tests {
                 ..Default::default()
             },
             mark_style: Some(MarkKwargsSpec { fill: Some("none".into()), ..Default::default() }),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("xc", ArrowType::Utf8, false),
@@ -2237,14 +2260,12 @@ mod tests {
         use crate::layout::{PanelLayout, Rect};
         use crate::render::scale_resolve::resolve_scales;
         use crate::spec::chart::ChartSpec;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -2257,9 +2278,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -2303,14 +2322,12 @@ mod tests {
         use crate::layout::{PanelLayout, Rect};
         use crate::render::scale_resolve::resolve_scales;
         use crate::spec::chart::ChartSpec;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -2330,9 +2347,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
 
         let schema = Arc::new(Schema::new(vec![

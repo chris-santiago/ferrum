@@ -86,8 +86,7 @@
 //!
 //! `Swarm` and `Violin` are both pass-through-plus-additive (input schema is
 //! unknown/arbitrary) but their *additive* columns are name-stable under
-//! default construction (`swarm_x`/`swarm_y`/`__pos_x_offset__` for `Swarm`'s
-//! default `orient="vertical"`; `group_id`/`violin_x`/`violin_y`/
+//! default construction (`swarm_y` for `Swarm`; `group_id`/`violin_x`/`violin_y`/
 //! `__pos_x_offset__` for `Violin`), so both declare those additive columns
 //! rather than `[]` — the "no closed schema" carve-out above applies only
 //! when even the additive names are caller-controlled, not whenever *some*
@@ -548,19 +547,13 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "x", "y", "bin_size", "aggregate", "field", "name", "extent_x", "extent_y",
             ],
         },
-        // Additive columns under default construction (`orient="vertical"`).
-        // `orient="horizontal"` emits `__pos_y_offset__` instead of
-        // `__pos_x_offset__` — same "under default construction" carve-out as
-        // `contour`. See the module doc's `Swarm`/`Violin` note: unlike
+        // The one additive column, in either orient. See the module doc's
+        // `Swarm`/`Violin` note: unlike
         // `DataWindow`/`DataStack`/`JoinAggregate`, these additive names are
         // NOT caller-controlled, so they're declarable even though the
         // pass-through part of the schema (the input's own columns) isn't.
         "swarm" => TransformRegistryEntry {
-            outputs: vec![
-                ("swarm_x", DataType::Float64),
-                ("swarm_y", DataType::Float64),
-                ("__pos_x_offset__", DataType::Float64),
-            ],
+            outputs: vec![("swarm_y", DataType::Float64)],
             secondary_outputs: vec![],
             params: vec![
                 "category", "value", "point_size", "spacing", "side", "orient", "dodge", "name",
@@ -576,7 +569,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "reorder" => TransformRegistryEntry {
             outputs: vec![],
             secondary_outputs: vec![],
-            params: vec!["by", "drop_index", "from", "name"],
+            params: vec!["by", "drop_index", "from", "axis", "name"],
             ..Default::default()
         },
         "reference_line" => TransformRegistryEntry {

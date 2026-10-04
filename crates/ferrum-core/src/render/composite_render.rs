@@ -250,6 +250,18 @@ fn is_figure_level_dedupable(warning: &RenderWarning) -> bool {
     )
 }
 
+/// Whether `warning` reports a config surface missing from a leaf, and `a` and
+/// `b` carry the same override for that surface: a leaf rendered under `b`
+/// that did not warn applied it, so the override took effect on the figure.
+fn same_config_surface(warning: &RenderWarning, a: &ChartConfig, b: &ChartConfig) -> bool {
+    match warning {
+        RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2" => {
+            a.axis_y2.is_some() && a.axis_y2 == b.axis_y2
+        }
+        _ => false,
+    }
+}
+
 /// Render a validated composite tree into one [`SceneGraph`], plus every
 /// leaf's [`RenderWarning`]s aggregated in leaf pre-order.
 ///
@@ -330,7 +342,8 @@ pub(crate) fn render_composite_scene(
     // legend's content. A composite with all-independent legend resolution
     // produces an empty plan — no suppression, no band — so its output is
     // byte-identical to today (design §7 byte-stability invariant).
-    let band_plan = plan_legend_bands(tree, &mut contexts);
+    let merges: Vec<bool> = prepared.iter().map(|p| leaf_merges_color_size(&p.layers[0].encoding)).collect();
+    let band_plan = plan_legend_bands(tree, &merges, &mut contexts);
 
     // Overlay shared-rect planning (GH #89A): for a `layout: Overlay`
     // composite node whose DIRECT children are ALL leaves (LayerChart's actual
@@ -352,7 +365,7 @@ pub(crate) fn render_composite_scene(
     let layer_of = overlay_layer_indices(&overlay_groups);
     // Before the imposition pre-pass measures each member's natural region:
     // a member's size legend swatch kind sets its legend gutter.
-    plan_size_dot_siblings(leaves, &layer_of, &prepared, &mut contexts);
+    plan_size_dot_siblings(&layer_of, &prepared, &mut contexts);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
 
     // Declared extent alignment (#182 follow-up). A jointplot's marginals and a
@@ -391,6 +404,7 @@ pub(crate) fn render_composite_scene(
     // legend bundle so the compositor can build the figure legend from it.
     let mut leaf_scenes: Vec<SceneGraph> = Vec::with_capacity(n);
     let mut bundles: Vec<Option<LeafLegendBundle>> = Vec::with_capacity(n);
+    let mut leaf_warning_lists: Vec<Vec<RenderWarning>> = Vec::with_capacity(n);
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = (!ctx.is_empty()).then_some(ctx);
@@ -412,16 +426,24 @@ pub(crate) fn render_composite_scene(
         uniquify_scene_raw_clips(&mut scene, i);
         leaf_scenes.push(scene);
         bundles.push(bundle);
-        // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
-        // produce), matching `render_svg`'s single-scene warning contract.
-        // Figure-level config-key warnings dedupe by `PartialEq` here (#140);
-        // per-leaf data-condition warnings fan out untouched — see
-        // `is_figure_level_dedupable`'s doc for which is which.
+        leaf_warning_lists.push(leaf_warnings);
+    }
+    // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
+    // produce), matching `render_svg`'s single-scene warning contract.
+    // Figure-level config-key warnings dedupe by `PartialEq` here (#140), and
+    // one a leaf raised for a config surface it lacks is dropped when another
+    // leaf given the same override has that surface and applied it; per-leaf
+    // data-condition warnings fan out untouched — see
+    // `is_figure_level_dedupable`'s doc for which is which.
+    for (i, leaf_warnings) in leaf_warning_lists.iter().enumerate() {
         for w in leaf_warnings {
-            if is_figure_level_dedupable(&w) && warnings.contains(&w) {
+            let applied_elsewhere = (0..n).any(|j| {
+                j != i && !leaf_warning_lists[j].contains(w) && same_config_surface(w, leaves[i].chart_config, leaves[j].chart_config)
+            });
+            if applied_elsewhere || (is_figure_level_dedupable(w) && warnings.contains(w)) {
                 continue;
             }
-            warnings.push(w);
+            warnings.push(w.clone());
         }
     }
 
@@ -573,7 +595,7 @@ fn capture_leaf_bundle(
         aux: po.prep.aux_legends.clone(),
         color_scale,
         theme: po.applied.effective_theme.clone(),
-        merged_color_size: leaf_merges_color_size(leaf.spec),
+        merged_color_size: leaf_merges_color_size(&po.prep.layers[0].encoding),
     })
 }
 
@@ -581,10 +603,11 @@ fn capture_leaf_bundle(
 /// field — `prepare_render_inputs` then folds size into the color legend (the
 /// aux `Size` block carries the color, and the redundant colorbar is dropped),
 /// so suppressing one channel must suppress the other (design §6 seam contract,
-/// handoff item 3). Derived from the spec so it is known before pass 2 (the
-/// suppression flags must be set before the leaf renders).
-fn leaf_merges_color_size(spec: &ChartSpec) -> bool {
-    match (spec.encoding.color.as_ref(), spec.encoding.size.as_ref()) {
+/// handoff item 3). Read off the leaf's rendering encoding (its first layer's
+/// resolved one), the binding its legends are built from, so it is known
+/// before pass 2 (the suppression flags must be set before the leaf renders).
+fn leaf_merges_color_size(encoding: &crate::spec::encoding::Encoding) -> bool {
+    match (encoding.color.as_ref(), encoding.size.as_ref()) {
         (Some(c), Some(s)) => c.field == s.field,
         _ => false,
     }
@@ -743,8 +766,13 @@ struct ChannelWalk {
 /// rendering (design §4). A leaf is suppressed only when it *participated* in
 /// the shared domain (its context carries the channel), so a leaf with an
 /// explicit per-chart `scale=`, or under an explicitly-independent nested node
-/// (excluded from the union), keeps its own panel legend.
-fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) -> LegendBandPlan {
+/// (excluded from the union), keeps its own panel legend. `merges[i]` is leaf
+/// `i`'s [`leaf_merges_color_size`] verdict, in pre-order.
+fn plan_legend_bands(
+    tree: &CompositeNode,
+    merges: &[bool],
+    contexts: &mut [LeafScaleContext],
+) -> LegendBandPlan {
     let mut plan = LegendBandPlan {
         band_nodes: HashMap::new(),
     };
@@ -763,6 +791,14 @@ fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) ->
         root,
         &mut plan,
     );
+    // Same-field color+size merge: the size legend is folded into the color
+    // block, so suppressing the color legend suppresses both (design §6,
+    // handoff 3).
+    for (context, &merged) in contexts.iter_mut().zip(merges) {
+        if merged && context.suppress_color_legend {
+            context.suppress_size_legend = true;
+        }
+    }
     plan
 }
 
@@ -781,17 +817,11 @@ fn plan_legend_walk(
     plan: &mut LegendBandPlan,
 ) {
     match node {
-        CompositeNode::Leaf { spec, .. } => {
+        CompositeNode::Leaf { .. } => {
             let i = *leaf_cursor;
             *leaf_cursor += 1;
-            let merges = leaf_merges_color_size(spec);
             if color.band_active && contexts[i].color.is_some() {
                 contexts[i].suppress_color_legend = true;
-                // Same-field color+size merge: the size legend is folded into the
-                // color block, so suppress both together (design §6, handoff 3).
-                if merges {
-                    contexts[i].suppress_size_legend = true;
-                }
             }
             if size.band_active && contexts[i].size.is_some() {
                 contexts[i].suppress_size_legend = true;
@@ -1067,14 +1097,13 @@ fn plan_line_ribbon_color_group_walk(
 /// unpruned); a member's size consumers are [`prepare::size_drawing_marks`]
 /// over `prepared[j].layers`, the rule the size legend's swatch reads.
 fn plan_size_dot_siblings(
-    leaves: &[CompositeLeafInput<'_>],
     layer_of: &[Option<usize>],
     prepared: &[prepare::PreparedInputs],
     contexts: &mut [LeafScaleContext],
 ) {
     use crate::spec::mark::Mark;
     for (i, position) in layer_of.iter().enumerate() {
-        let (Some(k), Some(size)) = (position, leaves[i].spec.encoding.size.as_ref()) else {
+        let (Some(k), Some(size)) = (position, prepared[i].layers[0].encoding.size.as_ref()) else {
             continue;
         };
         let start = i - k;
@@ -2818,7 +2847,6 @@ mod tests {
     use crate::layout::SymbolKind;
     use crate::render::config::RenderConfig;
     use crate::spec::composite::{CompositeResolve, ExtentAlignment};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::DataType as EncDataType;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
@@ -2830,7 +2858,6 @@ mod tests {
 
     fn scatter_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -2843,20 +2870,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 
@@ -2951,18 +2965,10 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
             independent_y,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -2971,20 +2977,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
             layers: Some(vec![y_layer("y0", false), y_layer("y1", true)]),
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 
@@ -4626,7 +4620,7 @@ mod tests {
 
         // Real band-attach set from the production legend planner.
         let mut contexts = vec![LeafScaleContext::default(); 5];
-        let plan = plan_legend_bands(&tree, &mut contexts);
+        let plan = plan_legend_bands(&tree, &[false; 5], &mut contexts);
         let mut band_nodes: Vec<usize> = plan
             .band_nodes
             .iter()
@@ -4836,6 +4830,39 @@ mod tests {
         );
     }
 
+    /// An `axis_y2` override given to every leaf of an hconcat whose one leaf
+    /// has a secondary axis is applied there, so the figure raises no
+    /// "no matching surface" warning for the leaf without one. Given only to
+    /// the leaf without a secondary axis, it applies nowhere and warns.
+    #[test]
+    fn hconcat_axis_y2_applied_on_one_leaf_does_not_warn_for_the_other() {
+        use crate::render::chart_config::{AxisConfigSpec, AxisStyleSpec};
+        let axis_y2_cfg = ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style: AxisStyleSpec { tick_count: Some(3), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let render = |dual_cfg: ChartConfig, plain_cfg: ChartConfig| {
+            let dual = LeafHold { chart_config: dual_cfg, ..dual_axis_hold() };
+            let plain = LeafHold { chart_config: plain_cfg, ..hold() };
+            let tree = composite(
+                CompositeLayout::Hconcat,
+                vec![dual_leaf_node(0), leaf_node_with(plain.spec.clone(), 1)],
+            );
+            let leaves = [leaf_input(&dual, 300.0, 200.0), leaf_input(&plain, 300.0, 200.0)];
+            let (_scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            warnings
+                .into_iter()
+                .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2"))
+                .count()
+        };
+        assert_eq!(render(axis_y2_cfg.clone(), axis_y2_cfg.clone()), 0, "applied on the dual-axis leaf");
+        // Vacuity control: the override on the plain leaf alone applies nowhere.
+        assert_eq!(render(ChartConfig::default(), axis_y2_cfg), 1);
+    }
+
     /// #230-4 rider (quality-review cycle-3 finding 3): `BreakAxisMergeConflict`
     /// is a pure function of the leaf's own declared `BreakAxis` specs — no
     /// data or scale dependence, exactly `is_figure_level_dedupable`'s
@@ -4938,14 +4965,7 @@ mod tests {
                 y2: Some(EncodingSpec { field: "y2".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         }]);
         spec
     }
@@ -5603,7 +5623,8 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                CompositeRenderError::LeafRender { source: RenderError::LineWidthConflict { .. }, .. }
+                CompositeRenderError::LeafRender { source, .. }
+                    if matches!(source.root(), RenderError::LineWidthConflict { .. })
             ),
             "{err:?}"
         );
@@ -5701,7 +5722,7 @@ mod tests {
         let message = |tree: &CompositeNode, specs| {
             render_leaves(tree, specs).map(|_| ()).expect_err("a negative point size must refuse").to_string()
         };
-        let text = "mark_point(size=...) must be a non-negative number; received -4";
+        let text = "mark_point(size=...) must be a positive number; received -4";
         assert_eq!(
             message(&overlay_tree(ok(), bad()), vec![ok(), bad()]),
             format!("failed to render composite leaf leaf #1: layer 1: {text}")
@@ -7909,6 +7930,164 @@ mod tests {
         assert_eq!(overlay([point(), yielding()]), circles);
         // Vacuity control: a drawing line member adds a block of its own.
         assert_eq!(overlay([drawing_line(), point()]).len(), 2 * circles.len());
+    }
+
+    /// Every text node of a scene's legend, in order.
+    fn legend_texts(scene: &SceneGraph) -> Vec<String> {
+        fn walk(nodes: &[SceneNode], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Text { content, .. } => out.push(content.clone()),
+                    SceneNode::Group { children, .. } => walk(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&scene.legend, &mut out);
+        out
+    }
+
+    /// An aux legend channel bound at chart level or on a leaf's first layer
+    /// only draws the same legend on every composite route: each member of
+    /// an overlay draws its own (size, shape and stroke_dash), and a
+    /// size-shared hconcat bands one size legend. Each cell asserts the
+    /// channel's `title=` reaches the legend; an unbound leaf is the control
+    /// and draws neither the title nor a swatch.
+    #[test]
+    fn a_layer_level_aux_binding_draws_its_legend_on_every_composite_route() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("s", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![2.0, 5.0, 9.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "b", "a"])),
+            ],
+        )
+        .unwrap();
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Placement {
+            Chart,
+            Layer0,
+            Nowhere,
+        }
+        let leaf_spec = |channel: &str, placement: Placement| {
+            let field = if channel == "size" { "s" } else { "g" };
+            let binding = || Some(EncodingSpec { field: field.into(), title: Some("Kind".into()), ..Default::default() });
+            let bind = |on: bool, base: Encoding| {
+                let enc = if on { binding() } else { None };
+                match channel {
+                    "size" => Encoding { size: enc, ..base },
+                    "shape" => Encoding { shape: enc, ..base },
+                    _ => Encoding { stroke_dash: enc, ..base },
+                }
+            };
+            let mark = if channel == "stroke_dash" { Mark::Line } else { Mark::Point };
+            let mut s = scatter_spec();
+            s.mark = mark;
+            s.encoding = bind(placement == Placement::Chart, s.encoding);
+            s.layers = Some(vec![crate::spec::layer::Layer {
+                mark,
+                encoding: bind(placement == Placement::Layer0, Encoding::default()),
+                ..Default::default()
+            }]);
+            s
+        };
+        let render = |specs: [ChartSpec; 2], layout: CompositeLayout| {
+            let holds = specs.map(|s| color_hold_with(s, batch.clone(), ThemeInputs::default()));
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
+            let mut tree = composite(layout, vec![leaf(0), leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                resolve.size = Some(RM::Shared);
+            }
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            (legend_texts(&scene), crate::render::legend_swatches(&scene))
+        };
+        let routes: [(&str, CompositeLayout, &[&str]); 2] = [
+            ("overlay", CompositeLayout::Overlay, &["size", "shape", "stroke_dash"]),
+            ("shared band", CompositeLayout::Hconcat, &["size"]),
+        ];
+        for (route, layout, channels) in routes {
+            for &channel in channels {
+                let cell = |p: Placement| render([leaf_spec(channel, p), leaf_spec(channel, p)], layout);
+                let (chart_texts, chart_swatches) = cell(Placement::Chart);
+                let (layer_texts, layer_swatches) = cell(Placement::Layer0);
+                let (none_texts, none_swatches) = cell(Placement::Nowhere);
+                let titles = chart_texts.iter().filter(|t| *t == "Kind").count();
+                assert!(titles >= 1, "{route} {channel}: {chart_texts:?}");
+                if layout == CompositeLayout::Hconcat {
+                    assert_eq!(titles, 1, "the band draws one size legend: {chart_texts:?}");
+                }
+                assert!(chart_swatches.len() > none_swatches.len(), "{route} {channel}: {chart_swatches:?}");
+                assert!(!none_texts.iter().any(|t| t == "Kind"), "{route} {channel}: {none_texts:?}");
+                assert_eq!(layer_texts, chart_texts, "{route} {channel}");
+                assert_eq!(layer_swatches, chart_swatches, "{route} {channel}");
+            }
+        }
+    }
+
+    /// The compositor's own legend planning reads a leaf's first-layer
+    /// bindings too. A color and a size on one field on the first layer fold
+    /// into one legend that a color-shared hconcat bands once, as at chart
+    /// level. A line member of an overlay whose point sibling draws the same
+    /// layer-level size keeps circle swatches, as at chart level. Each cell
+    /// asserts its chart-level render differs from the plain one, so the
+    /// comparison is not vacuous.
+    #[test]
+    fn composite_legend_planning_reads_a_leafs_first_layer_bindings() {
+        let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
+        let s = || Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        let leaf_spec = |mark: Mark, color: bool, layer_level: bool| {
+            let mut spec = scatter_spec();
+            spec.mark = mark;
+            let bound = Encoding { size: s(), color: if color { s() } else { None }, ..Default::default() };
+            let layer_enc = if layer_level { bound.clone() } else { Encoding::default() };
+            if !layer_level {
+                spec.encoding = Encoding { x: spec.encoding.x.clone(), y: spec.encoding.y.clone(), ..bound };
+            }
+            spec.layers = Some(vec![crate::spec::layer::Layer { mark, encoding: layer_enc, ..Default::default() }]);
+            spec
+        };
+        let render = |specs: [ChartSpec; 2], layout: CompositeLayout, shared_color: bool| {
+            let holds = specs.map(|s| color_hold_with(s, batch.clone(), ThemeInputs::default()));
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
+            let mut tree = composite(layout, vec![leaf(0), leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                if shared_color {
+                    resolve.color = Some(RM::Shared);
+                }
+            }
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            (legend_texts(&scene), crate::render::legend_swatches(&scene))
+        };
+        let merged_band = |layer_level: bool| {
+            let leaf = || leaf_spec(Mark::Point, true, layer_level);
+            render([leaf(), leaf()], CompositeLayout::Hconcat, true)
+        };
+        let unshared = {
+            let leaf = || leaf_spec(Mark::Point, true, false);
+            render([leaf(), leaf()], CompositeLayout::Hconcat, false)
+        };
+        assert_ne!(merged_band(false), unshared);
+        assert_eq!(merged_band(true), merged_band(false));
+        let mixed_overlay = |layer_level: bool| {
+            render(
+                [leaf_spec(Mark::Line, false, layer_level), leaf_spec(Mark::Point, false, layer_level)],
+                CompositeLayout::Overlay,
+                false,
+            )
+        };
+        let (_, chart_swatches) = mixed_overlay(false);
+        assert!(!chart_swatches.is_empty() && chart_swatches.iter().all(|(k, _)| *k == "circle"), "{chart_swatches:?}");
+        assert_eq!(mixed_overlay(true), mixed_overlay(false));
     }
 
     /// A point spec with color AND size mapped to the SAME numeric field `s` —

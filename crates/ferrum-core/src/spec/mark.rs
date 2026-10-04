@@ -61,12 +61,66 @@ impl Mark {
         for_each_mark!(arm)
     }
 
+    /// How this mark draws `size`: the one table every question about which
+    /// marks draw `size` reads, at render and (through
+    /// [`marks_drawing_constant_size`]) at construction.
+    pub(crate) fn size_drawing(self) -> SizeDrawing {
+        match self {
+            Mark::Point | Mark::Line => SizeDrawing::ConstantOrEncoded,
+            Mark::Text => SizeDrawing::EncodedOnly,
+            Mark::Bar | Mark::Area | Mark::Rule | Mark::Tick | Mark::Rect | Mark::Polygon | Mark::Image
+            | Mark::Ribbon | Mark::Segment | Mark::Arc | Mark::Label | Mark::Geoshape => SizeDrawing::Never,
+        }
+    }
+
     /// Whether this mark draws an encoded `size` channel: a point's area, a
     /// line's dot-diameter width, a text's font size. Every other mark
     /// carries an inherited `size` binding without drawing it.
     pub(crate) fn draws_size_channel(self) -> bool {
-        matches!(self, Mark::Point | Mark::Line | Mark::Text)
+        self.size_drawing() != SizeDrawing::Never
     }
+
+    /// Whether this mark draws a constant `size=`.
+    pub(crate) fn draws_constant_size(self) -> bool {
+        self.size_drawing() == SizeDrawing::ConstantOrEncoded
+    }
+
+    /// The mark's own kwarg that sets how big or thick it draws, named when a
+    /// constant `size=` it never draws is refused.
+    pub(crate) fn size_knob(self) -> Option<&'static str> {
+        match self {
+            Mark::Rule | Mark::Segment => Some("stroke_width"),
+            Mark::Text | Mark::Label => Some("font_size"),
+            Mark::Tick | Mark::Rect => Some("band_size"),
+            _ => None,
+        }
+    }
+}
+
+/// What a mark draws for `size` ([`Mark::size_drawing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SizeDrawing {
+    /// A constant `size=` or an encoded `size` channel: a point's area, a
+    /// line's dot-diameter width.
+    ConstantOrEncoded,
+    /// An encoded `size` channel only: a text's font size. A constant
+    /// `size=` is never read; `font_size=` sizes the mark.
+    EncodedOnly,
+    /// Nothing: the mark carries an inherited `size` binding without drawing it.
+    Never,
+}
+
+/// The primitive marks that draw a constant `size=`, in [`for_each_mark!`]
+/// order: Python's mark constructors read this rather than keeping a list of
+/// their own.
+#[pyo3::pyfunction]
+pub fn marks_drawing_constant_size() -> Vec<&'static str> {
+    macro_rules! names {
+        ($($V:ident => $name:ident,)*) => {
+            [$( Mark::$V, )*]
+        };
+    }
+    for_each_mark!(names).into_iter().filter(|m| m.draws_constant_size()).map(|m| m.as_str()).collect()
 }
 
 impl fmt::Display for Mark {

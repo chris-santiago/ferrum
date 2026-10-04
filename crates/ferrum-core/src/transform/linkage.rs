@@ -98,6 +98,19 @@ pub(crate) enum LinkageAxis {
     Columns,
 }
 
+/// The `axis=` vocabulary of `Linkage` and of the `Reorder` that applies a
+/// linkage's leaf order: both name the same two axes of the wide matrix.
+impl Vocabulary for LinkageAxis {
+    const ALL: &'static [Self] = &[Self::Rows, Self::Columns];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Rows => &["rows"],
+            Self::Columns => &["columns"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ZScoreAxis {
@@ -138,12 +151,10 @@ const LINKAGE_REFS: &str = include_str!("fixtures/linkage_refs.json");
 /// Returns (n_rows, n_features, flat row-major Vec<f64>).
 fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
     let schema = batch.schema();
-    let mut feature_cols: Vec<Float64Array> = Vec::new();
-    for (i, field) in schema.fields().iter().enumerate() {
-        if is_numeric_dtype(field.data_type()) {
-            feature_cols.push(coerce_to_float64(batch.column(i), "linkage", field.name())?);
-        }
-    }
+    let feature_cols: Vec<Float64Array> = feature_column_indices(&schema)
+        .into_iter()
+        .map(|i| coerce_to_float64(batch.column(i), "linkage", schema.field(i).name()))
+        .collect::<PyResult<_>>()?;
     if feature_cols.is_empty() {
         return Err(PyValueError::new_err(
             "linkage: input must have at least one numeric column",
@@ -158,6 +169,20 @@ fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
         }
     }
     Ok((n_rows, n_cols, mat))
+}
+
+/// Schema positions of the feature columns `Linkage` clusters, in schema
+/// order: column-axis leaf `k` is the column at position `k` of this list.
+/// `Reorder(axis="columns")` permutes exactly these positions, so a column
+/// linkage's `order` output addresses the same columns on both sides.
+pub(crate) fn feature_column_indices(schema: &Schema) -> Vec<usize> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| is_numeric_dtype(f.data_type()))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Transpose a row-major matrix from (n_rows x n_cols) to (n_cols x n_rows).
@@ -720,15 +745,8 @@ impl PyLinkage {
                 )))
             }
         };
-        let axis = match axis {
-            "rows" => LinkageAxis::Rows,
-            "columns" => LinkageAxis::Columns,
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "Linkage: unknown axis '{axis}'; expected rows|columns"
-                )))
-            }
-        };
+        let axis = LinkageAxis::parse_or_refuse("axis", axis)
+            .map_err(|e| PyValueError::new_err(format!("Linkage: {e}")))?;
         let z_score = match z_score {
             None => None,
             Some("rows") => Some(ZScoreAxis::Rows),

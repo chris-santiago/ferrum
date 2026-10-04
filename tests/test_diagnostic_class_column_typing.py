@@ -86,7 +86,7 @@ monkeypatch that reverts ``nominal_color_channel`` to a bare-string
 passthrough. The **figure** path (``roc_chart``/``pr_chart``, which layers
 an additional chart-level ``.encode(x=, y=)`` after the mark call) is
 explicitly NOT byte-identical: it now renders a legend TITLE
-(``<text ...>class</text>``) that the pre-fix bare-string binding did not
+(``<text ...>Class</text>``) that the pre-fix bare-string binding did not
 produce. This is a sanctioned, deliberate behavior change -- a legend
 having its title is correct; the title's prior absence was an artifact of
 the untyped bare-string binding, not an intentional design choice -- not a

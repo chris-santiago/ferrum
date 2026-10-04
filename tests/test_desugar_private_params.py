@@ -75,9 +75,10 @@ _PREP_STEPS = {step for prep in _PENDING_PREP.values() for step in prep.pre}
 def test_every_private_desugar_parameter_is_injected_by_a_prep_step() -> None:
     functions = _desugar_functions()
     injected = _injected_names(_PREP_STEPS)
-    # The population is not empty and contains the known private parameter.
-    assert "_voice" in _private_params(functions["ferrum.marks.heavy_stat.desugar_violin"])
-    assert "_voice" in injected
+    # The population is every desugar the dispatcher can reach; today none
+    # declares a private parameter, and the control below shows one would
+    # be caught.
+    assert functions
     assert _uninjected(functions, injected) == {}
 
 

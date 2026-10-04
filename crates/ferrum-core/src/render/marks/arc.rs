@@ -802,7 +802,6 @@ mod tests {
     use crate::scale::linear::LinearScale;
     use crate::spec::chart::ChartSpec;
     use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
@@ -812,7 +811,6 @@ mod tests {
 
     fn polar_spec(with_opacity: bool) -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -823,9 +821,6 @@ mod tests {
                 },
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -834,16 +829,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1024,7 +1010,6 @@ mod tests {
     fn annular_spec() -> ChartSpec {
         // theta=x (t0), theta2=x2 (t1), radius=y (r0), radius2=y2 (r1).
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "t0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -1033,9 +1018,6 @@ mod tests {
                 y2: Some(EncodingSpec { field: "r1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1044,16 +1026,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1160,16 +1133,12 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1178,16 +1147,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1288,7 +1248,6 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 // theta is nominal x; radius is quantitative y.
@@ -1298,9 +1257,6 @@ mod tests {
                 tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1309,16 +1265,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1381,16 +1328,12 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
                 y: Some(EncodingSpec { field: "r".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1399,16 +1342,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1473,7 +1407,6 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x:  Some(EncodingSpec { field: "t0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -1483,9 +1416,6 @@ mod tests {
                 href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1494,16 +1424,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1562,7 +1483,6 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "t0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -1571,9 +1491,6 @@ mod tests {
                 y2: Some(EncodingSpec { field: "r1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1582,16 +1499,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1644,16 +1552,12 @@ mod tests {
         ]).unwrap();
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1662,16 +1566,7 @@ mod tests {
                 pad_angle: 0.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = ThemeInputs::default();
         let panel = make_panel();
@@ -1806,15 +1701,11 @@ mod tests {
     #[test]
     fn build_skips_row_whose_pad_angle_exceeds_its_sweep() {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Arc,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(SpecCoord::Polar {
                 theta: PolarThetaChannel::X,
                 start_angle: 0.0,
@@ -1825,16 +1716,7 @@ mod tests {
                 pad_angle: 1.0,
                 direction: PolarDirection::Clockwise,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, false)]));
         let batch = arrow::record_batch::RecordBatch::try_new(

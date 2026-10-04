@@ -48,7 +48,6 @@ use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
 use crate::render::position::apply_position;
 use crate::render::scale_resolve::resolve_scales;
 use crate::spec::chart::ChartSpec;
-use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::{DataType as SpecType, Encoding, EncodingSpec, ScaleSpec};
 use crate::spec::mark::Mark;
 use crate::spec::position::PositionAdjust;
@@ -160,23 +159,10 @@ fn render_nodes(
     plot: Rect,
 ) -> Vec<SceneNode> {
     let spec = ChartSpec {
-        data: DataRef::default(),
         mark,
         encoding,
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
-        coord: None,
-        mark_style: None,
         position: position.clone(),
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     };
     let theme = ThemeInputs::default();
     let panel = PanelLayout {

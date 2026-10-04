@@ -1234,7 +1234,15 @@ class StatisticalMarksMixin:
             default ``"count"``.
         field : str or None, optional
             Column to aggregate; required for every aggregate in
-            ``transform_registry("hex")["methods_needing_field"]``.
+            ``transform_registry("hex")["methods_needing_field"]``. An
+            ``.encode(color=...)`` naming a column supplies it when omitted.
+            The cells are always coloured by the per-cell aggregate, titled
+            with the aggregated column, or ``"Count"``. A chart-level
+            ``color=`` must name the aggregated column (or Hex's ``value``
+            output column); its title, scheme and legend then style the cell
+            colours, its scheme acting as ``cmap=``. Any other ``color=``, or
+            a scheme alongside a different ``cmap=``, is refused with
+            ``ValueError``.
         scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.
@@ -1311,7 +1319,10 @@ class StatisticalMarksMixin:
         ----------
         size : float, optional
             Point diameter in pixels: both the drawn dot's diameter and
-            the placement diameter.  Default is ``4``.  Placement is
+            the placement diameter.  Default is ``4``.  This is a diameter,
+            unlike ``mark_point(size=)``, which is an area in square
+            pixels; ``fm.Swarm(point_size=)`` is the same diameter, with
+            the same default of ``4`` for a hand-built swarm.  Placement is
             computed at render time against the panel's resolved
             value-axis scale, so the rendered centre-to-centre distance
             between adjacent placed dots is exactly ``size + spacing`` px
@@ -1411,8 +1422,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the line layer (e.g. ``stroke``,
-            ``stroke_width``).
+            Mark-style overrides for the line (e.g. ``stroke``,
+            ``stroke_width``, ``opacity``, or ``size`` for a dot-diameter
+            width), validated like any composite mark's style kwargs.
 
         Returns
         -------
@@ -1423,7 +1435,8 @@ class StatisticalMarksMixin:
         ------
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
-            inferred.
+            inferred, when a style kwarg is not one the line honors, or when
+            ``size`` is not a finite number above zero.
 
         Examples
         --------
@@ -1437,7 +1450,12 @@ class StatisticalMarksMixin:
             from ferrum.position import validate_position_eligibility
 
             validate_position_eligibility("function", position)
+        from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws
         from ferrum.marks.heavy_stat import desugar_function
+
+        style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
+        if "size" in style:
+            refuse_size_no_layer_draws("mark_function", style["size"], ["line"])
 
         # Infer parent x data for domain resolution.
         # For multi-layer charts, try the first layer's data; for single-chart,
@@ -1483,7 +1501,6 @@ class StatisticalMarksMixin:
             domain=domain,
             n=n,
             clip=clip,
-            **mark_kwargs,
         )
         mark = result.mark
         transforms = result.transforms
@@ -1493,7 +1510,7 @@ class StatisticalMarksMixin:
         # {"clip": False} when clip=False, else None -- see its docstring);
         # this mixin just applies whatever the desugar decided, the same way
         # every other composite mark's style dict is applied to its layers.
-        line_mark_kwargs = result.mark_kwargs
+        line_mark_kwargs = {**style, **(result.mark_kwargs or {})}
         if self._layers is not None and self._layers:
             # Multi-layer: build a fresh single-chart with the function data and
             # compose via + so it becomes a proper layer alongside existing layers.

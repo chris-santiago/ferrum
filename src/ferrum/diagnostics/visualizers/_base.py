@@ -216,7 +216,11 @@ class FerrumVisualizer:
             raise RuntimeError(
                 f"{type(self).__name__} must be fit before .show(); call .fit(X, y) first."
             )
-        return self._chart
+        from ferrum._entry import stamp_entry
+
+        # The visualizer is the public call its caller made, so every warning
+        # and refusal about the chart it built names the class.
+        return stamp_entry(self._chart, type(self).__name__)
 
     def __repr__(self) -> str:
         """Return a concise string representation of the visualizer state.

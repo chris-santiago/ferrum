@@ -334,7 +334,6 @@ mod tests {
     use crate::render::draw::resolve_mark_style;
     use crate::render::scale_resolve::resolve_scales;
     use crate::spec::chart::ChartSpec;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::Float64Array;
@@ -344,23 +343,14 @@ mod tests {
     #[test]
     fn text_emits_one_text_element_per_row() {
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
- coord: None,
- mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -386,7 +376,6 @@ mod tests {
         use crate::spec::encoding::DataType as SDT;
         use arrow::array::StringArray;
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "px".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
@@ -394,13 +383,7 @@ mod tests {
                 text: Some(EncodingSpec { field: "label".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("px", DataType::Utf8, false),
@@ -446,7 +429,6 @@ mod tests {
         use crate::spec::encoding::DataType as SDT;
         use arrow::array::{StringArray, TimestampMillisecondArray};
         let spec_with = |format: &str| ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "px".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
@@ -454,13 +436,7 @@ mod tests {
                 text: Some(EncodingSpec { field: "d".into(), format: Some(format.into()), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("px", DataType::Utf8, false),
@@ -510,27 +486,13 @@ mod tests {
     #[test]
     fn text_build_still_produces_text_kind() {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -591,17 +553,13 @@ mod tests {
         use arrow::array::Float64Array as F64Arr;
 
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -652,17 +610,13 @@ mod tests {
     #[test]
     fn text_no_offset_columns_zero_effect() {
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -720,7 +674,7 @@ mod tests {
         use arrow::array::StringArray;
 
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -728,11 +682,7 @@ mod tests {
                 tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x",   DataType::Float64, false),
@@ -779,7 +729,7 @@ mod tests {
         use arrow::array::StringArray;
 
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -787,11 +737,7 @@ mod tests {
                 href: Some(EncodingSpec { field: "url".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x",   DataType::Float64, false),
@@ -829,7 +775,7 @@ mod tests {
         use arrow::array::StringArray;
 
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -837,11 +783,7 @@ mod tests {
                 tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x",   DataType::Float64, false),
@@ -878,7 +820,6 @@ mod tests {
     fn limit_test_spec() -> ChartSpec {
         use crate::spec::encoding::DataType as SDT;
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
@@ -886,13 +827,7 @@ mod tests {
                 text: Some(EncodingSpec { field: "label".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -962,7 +897,7 @@ mod tests {
 
         let overrides = fill_override.map(|hex| MarkKwargsSpec { fill: Some(hex.into()), ..Default::default() });
         let spec = ChartSpec {
-            data: DataRef::default(), mark: Mark::Text,
+            mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
@@ -972,12 +907,8 @@ mod tests {
                     None
                 },
                 ..Default::default()
-            },
-            transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: overrides.clone(), position: None, title: None,
-            axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(),
-            chart_description: None, entry: None, params: Vec::new(),
+            }, mark_style: overrides.clone(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -1070,7 +1001,6 @@ mod tests {
 
         let build_for = |x_field: Field, x_col: arrow::array::ArrayRef| -> Vec<String> {
             let spec = ChartSpec {
-                data: DataRef::default(),
                 mark: Mark::Text,
                 encoding: Encoding {
                     x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Nominal), ..Default::default() }),
@@ -1078,10 +1008,7 @@ mod tests {
                     text: Some(EncodingSpec { field: "lbl".into(), ..Default::default() }),
                     ..Default::default()
                 },
-                transforms: Vec::new(), facet: None, layers: None, coord: None,
-                mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
-                selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None,
-                params: Vec::new(),
+                ..Default::default()
             };
             let schema = Arc::new(Schema::new(vec![
                 x_field,
@@ -1144,7 +1071,6 @@ mod tests {
         use arrow::array::StringArray;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Ordinal), ..Default::default() }),
@@ -1152,10 +1078,7 @@ mod tests {
                 text: Some(EncodingSpec { field: "nope".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None,
-            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Utf8, false),
@@ -1202,7 +1125,6 @@ mod tests {
         use crate::spec::encoding::DataType as SpecType;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Text,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Quantitative), ..Default::default() }),
@@ -1210,10 +1132,7 @@ mod tests {
                 color: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecType::Nominal), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None,
-            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         // The layer's own batch — no `cat` column, mirroring `qq_line`.
         let schema = Arc::new(Schema::new(vec![

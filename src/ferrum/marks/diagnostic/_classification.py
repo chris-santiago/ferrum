@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
@@ -12,6 +12,9 @@ from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
 )
+
+if TYPE_CHECKING:
+    from ferrum.encoding.base import ChannelBase
 
 # --- 10b: classification curves --------------------------------------
 
@@ -23,7 +26,7 @@ def desugar_roc(
     average: str | None = None,
     reference_line: bool = True,
     annotate_auc: bool = False,
-    color_field: str | None = "class",
+    color_field: "str | ChannelBase | None" = "class",
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """ROC curve mark.
@@ -98,7 +101,7 @@ def desugar_pr(
     average: str | None = None,
     annotate_ap: bool = False,
     iso_lines: bool = False,
-    color_field: str | None = "class",
+    color_field: "str | ChannelBase | None" = "class",
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Precision-recall curve mark.

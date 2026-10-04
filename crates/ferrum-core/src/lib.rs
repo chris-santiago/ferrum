@@ -92,6 +92,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // (`render/prepare/legend.rs::AUX_LEGEND_CHANNEL_NAMES`), published so
     // `ferrum.encoding.base` reads the list instead of hand-mirroring it.
     m.add_function(wrap_pyfunction!(render::prepare::aux_legend_channels, m)?)?;
+    // The channels Rust builds a chart-wide auxiliary scale for
+    // (`render/scale_resolve/mod.rs::AUXILIARY_SCALE_CHANNELS`), published so
+    // a layer merge promotes exactly the bindings Rust scales.
+    m.add_function(wrap_pyfunction!(render::scale_resolve::auxiliary_scale_channels, m)?)?;
     // #176: the `interpolate=` vocabulary
     // (`render/marks/curve.rs::Interpolate::ALL`), published so `marks/base.py`
     // gates it at declaration instead of the renderer refusing it.
@@ -110,6 +114,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The `usize` subset of the numeric fields, routed through a
     // non-negative-integer contract instead of the real-number one.
     m.add_function(wrap_pyfunction!(spec::mark_style::mark_integer_kwargs, m)?)?;
+    // The size rule (`spec/mark.rs::Mark::size_drawing`, `render/draw.rs::check_constant_size`),
+    // published so every Python door that builds mark kwargs refuses with the
+    // renderer's own rule and text.
+    m.add_function(wrap_pyfunction!(spec::mark::marks_drawing_constant_size, m)?)?;
+    m.add_function(wrap_pyfunction!(render::draw::check_mark_size, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

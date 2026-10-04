@@ -11,16 +11,15 @@
 //! with no size of its own takes the dot diameter `point_size`
 //! ([`SwarmSpec::dot_area`]), so the drawn dots match their placement.
 //!
-//! Output schema: input schema PLUS appended `swarm_x: Float64`,
-//! `swarm_y: Float64`, and `__pos_x_offset__: Float64` (vertical orient) or
-//! `__pos_y_offset__: Float64` (horizontal orient).
-//! - `swarm_x` is always null: the cross-axis offset is a pixel quantity of the
-//!   rendered panel and has no data-unit form before layout.
-//! - `swarm_y` is the original `value`, null on a row that is never placed
-//!   (null or NaN value, null category).
-//! - The position-offset column is `0.0` on every row here; render time fills
-//!   it with the placed pixel offsets, and `render/position.rs` adds them to
-//!   the category band centre.
+//! Output schema: input schema PLUS an appended `swarm_y: Float64`, the
+//! original `value`, null on a row that is never placed (null or NaN value,
+//! null category). The cross-axis offset is a pixel quantity of the rendered
+//! panel with no data-unit form before layout, so the transform emits none:
+//! render time adds the `__pos_x_offset__` (vertical orient) or
+//! `__pos_y_offset__` (horizontal orient) column of placed pixel offsets,
+//! which `render/position.rs` adds to the category band centre. Placement
+//! packs whichever rows the layer draws, so rows a later transform filtered
+//! or aggregated are packed as they are.
 //!
 //! With `dodge`, rows whose dodge value is null are dropped (they belong to no
 //! sub-band).
@@ -49,7 +48,7 @@ use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, Ke
 use crate::transform::numeric_util::coerce_to_float64;
 
 fn default_point_size() -> f64 {
-    5.0
+    4.0
 }
 fn default_spacing() -> f64 {
     1.0
@@ -106,13 +105,6 @@ impl SwarmSpec {
         std::f64::consts::PI * (self.point_size / 2.0).powi(2)
     }
 
-    /// The position-offset column this orientation's cross axis reads.
-    pub(crate) fn offset_column(&self) -> &'static str {
-        match self.orient {
-            SwarmOrient::Vertical => "__pos_x_offset__",
-            SwarmOrient::Horizontal => "__pos_y_offset__",
-        }
-    }
 }
 
 pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -158,19 +150,15 @@ pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBat
         .collect();
 
     let mut out_cols: Vec<ArrayRef> = batch.columns().to_vec();
-    out_cols.push(Arc::new(Float64Array::from(vec![None::<f64>; n])));
     out_cols.push(Arc::new(swarm_y));
-    out_cols.push(Arc::new(Float64Array::from(vec![0.0; n])));
 
     let mut new_fields: Vec<Field> = schema
         .fields()
         .iter()
         .map(|f| (**f).clone())
         .collect();
-    new_fields.push(Field::new("swarm_x", DataType::Float64, true));
     new_fields.push(Field::new("swarm_y", DataType::Float64, true));
-    new_fields.push(Field::new(spec.offset_column(), DataType::Float64, false));
-    let out_schema = Arc::new(Schema::new(new_fields));
+    let out_schema = Arc::new(Schema::new(new_fields).with_metadata(schema.metadata().clone()));
 
     RecordBatch::try_new(out_schema, out_cols)
         .map_err(|e| PyValueError::new_err(format!("stat_swarm: {e}")))
@@ -320,11 +308,9 @@ use crate::transform::core::TransformSpec;
 /// ``point_size / 2`` do not overlap. Points are placed symmetrically
 /// around the category centre, or on one side only when ``side`` is set.
 ///
-/// Output: the original columns plus ``swarm_x`` (always null), ``swarm_y``
-/// (the value) and ``__pos_x_offset__`` (``__pos_y_offset__`` when
-/// horizontal). The offsets are placed when the chart renders, in pixels
-/// through the resolved panel scale, so neighbouring centres sit
-/// ``point_size + spacing`` px apart. A point layer drawing this output with
+/// Output: the original columns plus ``swarm_y`` (the value). The dots are
+/// placed when the chart renders, in pixels through the resolved panel scale,
+/// so neighbouring centres sit ``point_size + spacing`` px apart. A point layer drawing this output with
 /// no size of its own (no ``size=`` and no ``size`` encoding) draws each dot
 /// ``point_size`` px across, so dot edges sit ``spacing`` px apart.
 ///
@@ -334,7 +320,7 @@ use crate::transform::core::TransformSpec;
 ///     Categorical column that defines the swarm axis position.
 /// value : str
 ///     Numeric column whose values are spread along the value axis.
-/// point_size : float, default 5.0
+/// point_size : float, default 4.0
 ///     Diameter of each point in pixels. Must be > 0.
 /// spacing : float, default 1.0
 ///     Minimum gap between point edges, in pixels. Must be ≥ 0.
@@ -357,7 +343,7 @@ impl PySwarm {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         category, value, *,
-        point_size = 5.0,
+        point_size = 4.0,
         spacing = 1.0,
         side = "both",
         orient = "vertical",
@@ -499,6 +485,22 @@ mod tests {
         best
     }
 
+    /// The wire default and the constructor default are one value, the one
+    /// `mark_swarm` draws its dots at, so a `Swarm` transform feeding
+    /// `mark_point` and `mark_swarm` place and draw the same dots.
+    #[test]
+    fn swarm_point_size_defaults_to_four_on_the_wire_and_in_the_constructor() {
+        let wire: SwarmSpec = serde_json::from_value(serde_json::json!({"category": "c", "value": "v"})).unwrap();
+        assert_eq!(wire.point_size, 4.0);
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let built = py.get_type::<PySwarm>().call1(("c", "v")).unwrap();
+            let built = built.extract::<PySwarm>().unwrap();
+            let TransformSpec::Swarm(s) = built.0 else { panic!("Swarm builds a Swarm spec") };
+            assert_eq!(s.point_size, 4.0);
+        });
+    }
+
     #[test]
     fn swarm_side_both_alternates_around_zero() {
         pyo3::Python::initialize();
@@ -601,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_transform_emits_placeholder_columns_and_drops_null_dodge_rows() {
+    fn swarm_transform_emits_the_value_and_drops_null_dodge_rows() {
         pyo3::Python::initialize();
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, true),
@@ -623,20 +625,22 @@ mod tests {
         let col = |name: &str| {
             out.column_by_name(name).unwrap().as_any().downcast_ref::<Float64Array>().unwrap().clone()
         };
-        assert_eq!(col("swarm_x").null_count(), 3);
         assert_eq!(col("swarm_y").iter().collect::<Vec<_>>(), vec![Some(1.0), None, None]);
-        assert_eq!(col("__pos_x_offset__").values().to_vec(), vec![0.0; 3]);
+        let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
+        assert_eq!(names, vec!["cat", "v", "grp", "swarm_y"], "no null swarm_x and no placeholder offset");
     }
 
     #[test]
-    fn swarm_horizontal_emits_pos_y_offset() {
+    fn swarm_emits_no_offset_column_in_either_orient() {
         pyo3::Python::initialize();
         let b = make_batch(vec!["A"; 5], vec![1.0; 5]);
-        let s = SwarmSpec { orient: SwarmOrient::Horizontal, ..spec(5.0, 1.0, SwarmSide::Both) };
-        let out = apply(&s, &b).unwrap();
-        assert_eq!(out.num_columns(), 5);
-        assert!(out.schema().index_of("__pos_y_offset__").is_ok());
-        assert!(out.schema().index_of("__pos_x_offset__").is_err());
+        for orient in [SwarmOrient::Vertical, SwarmOrient::Horizontal] {
+            let s = SwarmSpec { orient, ..spec(5.0, 1.0, SwarmSide::Both) };
+            let out = apply(&s, &b).unwrap();
+            assert_eq!(out.num_columns(), b.num_columns() + 1, "{orient:?}");
+            assert!(out.schema().index_of("__pos_y_offset__").is_err());
+            assert!(out.schema().index_of("__pos_x_offset__").is_err());
+        }
     }
 
     // ---- Rendered placement: the contract holds on the drawn SVG ----
@@ -872,40 +876,90 @@ mod tests {
         }
     }
 
-    /// A later transform that drops the swarm's placeholder column leaves rows
-    /// that are no longer the swarm's: they are not placed, and one warning
-    /// per chart (not per facet panel) names the dropped column.
+    /// A swarm wider than its category's slot spills into the neighbouring
+    /// category: the dots stay where they were packed and one typed warning,
+    /// voiced as the layer's entry, says how far they reach past the
+    /// half-slot. A swarm that fits raises none.
     #[test]
-    fn swarm_whose_placeholder_a_later_transform_dropped_warns() {
+    fn a_swarm_wider_than_its_category_slot_warns_once() {
         use serde_json::json;
         pyo3::Python::initialize();
-        let mut chart = swarm_chart(8.0, 1.0, false,
-                                    json!({"facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 3}}}), None);
-        chart["transforms"][0].as_object_mut().unwrap().remove("name");
-        chart["layers"][0].as_object_mut().unwrap().remove("data_source");
-        chart["transforms"].as_array_mut().unwrap().push(json!({
-            "type": "aggregate", "groupby": ["g"],
-            "ops": [{"field": "v", "fn": "mean", "as": "v"}],
-        }));
-        let out = render_output(chart, &spread_batch());
-        let swarm_warnings: Vec<String> = out
-            .warnings
-            .iter()
-            .filter(|w| matches!(w, crate::render::RenderWarning::PositionAdjustSkipped { adjustment, .. }
-                                 if adjustment == "swarm"))
-            .map(|w| w.to_string())
-            .collect();
-        assert_eq!(swarm_warnings, vec![
-            "swarm could not be applied (column '__pos_x_offset__' that Swarm(category='g', value='v') \
+        let batch = |per: usize| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+            ]));
+            let g: Vec<&str> = (0..2 * per).map(|i| if i < per { "a" } else { "b" }).collect();
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(g)), Arc::new(Float64Array::from(vec![5.0; 2 * per]))])
+                .unwrap()
+        };
+        let overflowing = |out: &crate::render::RenderOutput<String>| -> Vec<crate::render::RenderWarning> {
+            out.warnings
+                .iter()
+                .filter(|w| matches!(w, crate::render::RenderWarning::SwarmOverflowsBand { .. }))
+                .cloned()
+                .collect()
+        };
+        let mut chart = swarm_chart(10.0, 1.0, false, json!({}), None);
+        chart["layers"][0]["entry"] = json!("mark_swarm");
+        let out = render_output(chart.clone(), &batch(40));
+        let warned = overflowing(&out);
+        assert_eq!(warned.len(), 1, "{:?}", out.warnings);
+        let crate::render::RenderWarning::SwarmOverflowsBand { entry, reach_px, half_slot_px, .. } = &warned[0] else {
+            unreachable!()
+        };
+        assert_eq!(entry, "mark_swarm");
+        // 40 dots on one value pack 20 to a side, 11 px apart: the outermost
+        // centre sits 20 * 11 or 19 * 11 px out, plus a 5 px radius.
+        assert!((*reach_px - (20.0 * 11.0 + 5.0)).abs() < 1e-9, "{reach_px}");
+        assert!(reach_px > half_slot_px);
+        assert!(warned[0].to_string().starts_with("mark_swarm: Swarm(category='g', value='v') packs its dots up to 225.0 px"),
+                "{}", warned[0]);
+        // Vacuity control: four dots a category fit their slot.
+        assert_eq!(overflowing(&render_output(chart, &batch(4))), vec![]);
+    }
+
+    /// Placement packs whichever rows the layer draws: an aggregate after the
+    /// swarm that keeps the category and value columns has its rows placed
+    /// with no warning, while one that drops the value column leaves the dots
+    /// unplaced and one warning per chart (not per facet panel) names it.
+    #[test]
+    fn a_later_transform_keeping_the_columns_is_placed_and_one_dropping_them_warns() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let aggregated = |as_: &str| {
+            let mut chart = swarm_chart(8.0, 1.0, false,
+                                        json!({"facet": {"field": "f", "mode": {"kind": "wrap", "ncols": 3}}}), None);
+            chart["transforms"][0].as_object_mut().unwrap().remove("name");
+            chart["layers"][0].as_object_mut().unwrap().remove("data_source");
+            chart["layers"][0]["encoding"]["y"]["field"] = json!(as_);
+            chart["transforms"].as_array_mut().unwrap().push(json!({
+                "type": "aggregate", "groupby": ["g", "f"],
+                "ops": [{"field": "v", "fn": "mean", "as": as_}],
+            }));
+            render_output(chart, &spread_batch())
+        };
+        let swarm_warnings = |out: &crate::render::RenderOutput<String>| -> Vec<String> {
+            out.warnings
+                .iter()
+                .filter(|w| matches!(w, crate::render::RenderWarning::PositionAdjustSkipped { adjustment, .. }
+                                     if adjustment == "swarm"))
+                .map(|w| w.to_string())
+                .collect()
+        };
+        let kept = aggregated("v");
+        assert_eq!(swarm_warnings(&kept), Vec::<String>::new());
+        assert_eq!(circle_centres(&kept.bytes).len(), 3, "one placed dot per facet panel");
+        assert_eq!(swarm_warnings(&aggregated("m")), vec![
+            "swarm could not be applied (column 'v' that Swarm(category='g', value='v') \
              places its dots by is not in the layer's data; a later transform dropped it); \
              marks were not offset".to_string(),
         ]);
     }
 
     /// A flipped layer whose chain holds an earlier Swarm of the opposite
-    /// orientation still packs the dots the layer actually draws: the
-    /// earlier Swarm's placeholder column (its own cross-axis slot) must not
-    /// leak into the later Swarm's cross column and shadow the real offsets.
+    /// orientation still packs the dots the layer actually draws by the
+    /// later Swarm.
     #[test]
     fn rendered_swarm_stays_packed_under_an_earlier_opposite_orient_swarm_on_a_flipped_layer() {
         use serde_json::json;

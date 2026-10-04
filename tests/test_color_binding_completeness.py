@@ -238,23 +238,6 @@ ALLOWED: dict[tuple[str, str], str] = {
     "which is the point-mark carve-out (sole color consumer; its sibling layer "
     "is an unencoded text label).",
     (
-        "src/ferrum/marks/heavy_stat.py",
-        "_contour_cols['level_value']",
-    ): "Filled-contour isoband density level — a continuous quantity ramped by "
-    "the sequential colormap, which is the intended reading. Expression changed "
-    "from the literal 'level_value' to a registry_output_columns lookup (batch-D "
-    "T12 round 3, spec §4.6 / M6a) -- same field, same continuous reading, now "
-    "validated against transform_registry('contour') instead of hardcoded.",
-    (
-        "src/ferrum/marks/heavy_stat.py",
-        "_hex_cols['value']",
-    ): "desugar_hex's aggregate cell value — the measured quantity the hexbin "
-    "exists to show, continuous regardless of which aggregate= was requested. "
-    "Expression changed from the literal 'value' to a registry_output_columns "
-    "lookup (batch-D T12 round 2, spec §4.6 / M6a) -- same field, same "
-    "continuous reading, now validated against transform_registry('hex') "
-    "instead of hardcoded.",
-    (
         "src/ferrum/plots/matrix.py",
         "'value'",
     ): "Heatmap cell value (figure-function side of the same binding).",

@@ -1380,23 +1380,9 @@ mod tests {
     /// Minimal point spec with no encodings, ready to receive conditionals.
     fn empty_spec() -> ChartSpec {
         ChartSpec {
-            data: Default::default(),
             mark: Mark::Point,
             encoding: Default::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 

@@ -2174,7 +2174,6 @@ mod tests {
     #[test]
     fn coord_cartesian_x_domain_override_wins_over_encoding_reverse() {
         use crate::spec::coord::CoordKind;
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
         use crate::spec::mark::Mark;
 
@@ -2196,7 +2195,6 @@ mod tests {
             .unwrap()
         };
         let spec = crate::spec::chart::ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec {
@@ -2213,25 +2211,13 @@ mod tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(CoordKind::Cartesian {
                 x_domain: Some((5.0, 20.0)),
                 y_domain: None,
                 expand: true,
                 clip: true,
             }),
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let theme = crate::layout::ThemeInputs::default();
         let (scales, _) =
@@ -2251,26 +2237,11 @@ mod tests {
     /// is only reachable from the auto path) — so any well-formed `ChartSpec`
     /// satisfies the parameter for these entry-point tests.
     fn minimal_point_chart_spec() -> crate::spec::chart::ChartSpec {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::mark::Mark;
         crate::spec::chart::ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Default::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -2354,14 +2325,7 @@ mod tests {
         crate::spec::layer::Layer {
             mark,
             encoding,
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         }
     }
 

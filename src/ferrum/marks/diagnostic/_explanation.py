@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
@@ -12,6 +12,9 @@ from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
 )
+
+if TYPE_CHECKING:
+    from ferrum.encoding.base import ChannelBase
 
 _ORIENT_CHOICES = ("horizontal", "vertical")
 
@@ -25,7 +28,7 @@ def desugar_importance(
     orient: str = "horizontal",
     error_bars: bool = True,
     top_k: int | None = None,
-    color_field: str | None = None,
+    color_field: "str | ChannelBase | None" = None,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:

@@ -372,7 +372,7 @@ chart
 
 ![Chart sizing](img/recipes_13.png)
 
-The default size is 600 x 400. Use [`.properties()`][ferrum.Chart.properties] when you need a wider plot for time series, a square plot for scatter matrices, or a compact sparkline.
+The default size is 640 x 480. Use [`.properties()`][ferrum.Chart.properties] when you need a wider plot for time series, a square plot for scatter matrices, or a compact sparkline.
 
 ## Custom category order
 

@@ -238,7 +238,11 @@ impl SvgBuffer {
     pub fn tapered_stroke(&mut self, pieces: &[TaperPiece], ends: (StrokeCap, StrokeJoin), style: &FillStroke) {
         let mut d = String::new();
         for piece in pieces {
-            for ring in outline_rings(&piece.points, &piece.widths, piece.heading, ends) {
+            let rings = match piece {
+                TaperPiece::Run { points, widths } => outline_rings(points, widths, ends),
+                TaperPiece::Dot { point, width, heading } => dot_rings(*point, width / 2.0, *heading, ends.0),
+            };
+            for ring in rings {
                 push_ring(&mut d, &ring);
             }
         }
@@ -455,18 +459,11 @@ type Point = (f64, f64);
 /// Straight segments a half circle of a round cap or join is drawn with.
 const ROUND_SEGMENTS: f64 = 16.0;
 
-/// The rings whose union is one tapered centerline's stroke (see
+/// The rings whose union is one tapered run's stroke (see
 /// [`SvgBuffer::tapered_stroke`]). A run of coincident vertices keeps the
-/// first one's width; a single vertex is a zero-length stroke, which SVG
-/// draws as a dot under a round cap and a square under a square one, the
-/// square turned to `heading` (a zero-length on-dash's direction along the
-/// line) or axis-aligned without one.
-fn outline_rings(
-    points: &[Point],
-    widths: &[f64],
-    heading: Option<Point>,
-    (cap, join): (StrokeCap, StrokeJoin),
-) -> Vec<Vec<Point>> {
+/// first one's width; a run whose vertices all coincide is a zero-length
+/// stroke, which SVG draws as an axis-aligned dot ([`dot_rings`]).
+fn outline_rings(points: &[Point], widths: &[f64], (cap, join): (StrokeCap, StrokeJoin)) -> Vec<Vec<Point>> {
     let mut vertices: Vec<(Point, f64)> = Vec::with_capacity(points.len());
     for (&p, &w) in points.iter().zip(widths) {
         if vertices.last().is_none_or(|(q, _)| *q != p) {
@@ -478,12 +475,7 @@ fn outline_rings(
         return rings;
     };
     if vertices.len() == 1 {
-        // Two caps back to back along the heading: a disk, or a square `w`
-        // wide.
-        let (hx, hy) = heading.unwrap_or((1.0, 0.0));
-        rings.extend(cap_ring(first, first_r, (hx, hy), cap));
-        rings.extend(cap_ring(first, first_r, (-hx, -hy), cap));
-        return rings;
+        return dot_rings(first, first_r, (1.0, 0.0), cap);
     }
     let dirs: Vec<Point> = vertices.windows(2).map(|s| unit(s[0].0, s[1].0)).collect();
     for (s, &d) in vertices.windows(2).zip(&dirs) {
@@ -498,6 +490,16 @@ fn outline_rings(
     let (d_first, d_last) = (dirs[0], dirs[dirs.len() - 1]);
     rings.extend(cap_ring(first, first_r, (-d_first.0, -d_first.1), cap));
     rings.extend(cap_ring(last, last_r, d_last, cap));
+    rings
+}
+
+/// A zero-length stroke of half-width `r` at `at`: two caps back to back
+/// along `heading`, a disk under a round cap, a square `2r` wide turned to
+/// `heading` under a square one, and nothing under a butt cap.
+fn dot_rings(at: Point, r: f64, (hx, hy): Point, cap: StrokeCap) -> Vec<Vec<Point>> {
+    let mut rings = Vec::new();
+    rings.extend(cap_ring(at, r, (hx, hy), cap));
+    rings.extend(cap_ring(at, r, (-hx, -hy), cap));
     rings
 }
 

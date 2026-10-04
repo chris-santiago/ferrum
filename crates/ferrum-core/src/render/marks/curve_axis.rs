@@ -51,7 +51,6 @@ use crate::render::draw::{resolve_mark_style, DrawCtx};
 use crate::render::scale_resolve::resolve_scales;
 use crate::spec::chart::ChartSpec;
 use crate::spec::coord::CoordKind;
-use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::{DataType as SpecType, Encoding, EncodingSpec};
 use crate::spec::mark::Mark;
 use crate::spec::mark_style::MarkKwargsSpec;
@@ -131,7 +130,6 @@ fn matrix_spec(mark: Mark, shape: Shape) -> ChartSpec {
         })
     };
     ChartSpec {
-        data: DataRef::default(),
         mark,
         encoding: Encoding {
             x: quantitative("x"),
@@ -140,20 +138,8 @@ fn matrix_spec(mark: Mark, shape: Shape) -> ChartSpec {
             x2: if shape.x2 { quantitative("hi") } else { None },
             ..Default::default()
         },
-        transforms: Vec::new(),
-        facet: None,
-        layers: None,
         coord: shape.flip.then_some(CoordKind::Flip),
-        mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None,
-        axis_y: None,
-        selections: Vec::new(),
-        conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+        ..Default::default()
     }
 }
 

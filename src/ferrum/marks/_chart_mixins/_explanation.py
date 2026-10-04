@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
+    from ferrum.encoding.base import ChannelBase
 
 
 class ExplanationMarksMixin:
@@ -22,7 +23,7 @@ class ExplanationMarksMixin:
         orient: str = "horizontal",
         error_bars: bool = True,
         top_k: int | None = None,
-        color_field: str | None = None,
+        color_field: "str | ChannelBase | None" = None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -50,8 +51,11 @@ class ExplanationMarksMixin:
             directly this parameter is forwarded to the desugar function but
             the desugar layer treats it as informational -- actual filtering
             must be done on the DataFrame before passing it to ``Chart``.
-        color_field : str or None, optional
-            Column name to drive per-feature colour.
+        color_field : str or ChannelBase or None, optional
+            Column name to drive per-bar colour, or a channel naming one
+            (``fm.Color("model", title="Model")``) whose title and legend
+            style the bar colour binding. It colours the bars only, never
+            the error bars.
         position : Position, optional
             Position adjustment.
         **mark_kwargs

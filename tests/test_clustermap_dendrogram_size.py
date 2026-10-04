@@ -161,11 +161,15 @@ def test_short_heatmap_default_ratio_renders_column_dendrogram(df_small):
     assert col_y_span > _MIN_EXTENT_PX, "column dendrogram must get usable tree-depth height"
 
 
-@pytest.mark.parametrize("ratio", [0.074, 0.05])
+@pytest.mark.parametrize("ratio", [0.062, 0.05])
 def test_sub_floor_ratio_still_raises_padding_exceeds_viewport(df_small, ratio):
     """A ratio too small for ANYTHING to render (not just the dendrogram) is
     a genuine hard failure and must keep raising -- this fix only removes a
     phantom reservation, it does not lower the real floor.
+
+    The floor: the column dendrogram is ``480 * d / (1 - d)`` px tall on the
+    default 640x480 heatmap, below the 32 px of top + bottom padding for
+    ``d < 1/16``; 0.062 sits just under it.
     """
     with pytest.raises(ValueError, match=r"padding top=16 exceeds viewport dimension"):
         fm.clustermap(df_small, dendrogram_ratio=ratio).to_svg()

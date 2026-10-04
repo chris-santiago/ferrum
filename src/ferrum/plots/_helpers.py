@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
+from ferrum._entry import stamp_entry
 from ferrum._overrides import _apply_overrides
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -517,28 +518,21 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-def _stamp_entry(chart: Any, entry: str) -> Any:
-    """Return *chart* with every leaf chart's layers naming *entry*."""
-    from ferrum.chart import Chart
-
-    if isinstance(chart, Chart):
-        return chart._with_entry(entry)
-    return chart._rebuild_with_charts(lambda child: _stamp_entry(child, entry))
-
-
 def _figure_entry(fn: _F) -> _F:
-    """Make the figure function *fn* the public entry its drawn layers name.
+    """Make the figure function *fn* the public entry its chart speaks as.
 
-    A render refusal about a layer (a line's ``size`` and ``stroke_width``
-    both set, a size that is not a positive number) names the public call
-    the user made, so the layers a figure function draws speak as that
-    function, not as the ``mark_*`` method or primitive it used to draw
-    them. Applies to every leaf of a composite result.
+    Every warning and refusal about a layer the figure draws (a line's
+    ``size`` and ``stroke_width`` both set, a size the mark cannot draw, a
+    degraded composite) names the public call the user made, not the
+    ``mark_*`` method or primitive the figure used to draw it. Applies to
+    every leaf of a composite result. Every public function of a
+    ``ferrum.plots`` module carries it; ``tests/test_public_entry_voice.py``
+    derives that population from the modules themselves.
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _stamp_entry(fn(*args, **kwargs), fn.__name__)
+        return stamp_entry(fn(*args, **kwargs), fn.__name__)
 
     return wrapper  # type: ignore[return-value]
 

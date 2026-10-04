@@ -1967,7 +1967,6 @@ mod chart_config_gate_tests {
     /// mirrors `orchestration_tests::scatter_3` (`render/mod.rs`), a private
     /// helper of that sibling test module and not reachable from here.
     fn minimal_line_chart() -> (ChartSpec, arrow::record_batch::RecordBatch) {
-        use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::mark::Mark;
         use arrow::array::Float64Array;
@@ -1975,27 +1974,13 @@ mod chart_config_gate_tests {
         use std::sync::Arc;
 
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
                 y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -2342,30 +2327,15 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
 mod composite_leaf_bounds_tests {
     use super::*;
     use crate::spec::composite::CompositeNode;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::Encoding;
     use crate::spec::mark::Mark;
 
     /// A single-leaf composite tree whose leaf selects payload index `data`.
     fn dummy_leaf(data: usize) -> CompositeNode {
         let spec = ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         };
         CompositeNode::Leaf { spec: Box::new(spec), data, label: None }
     }
@@ -2462,30 +2432,15 @@ mod composite_leaf_bounds_tests {
 #[cfg(test)]
 mod composite_leaf_binding_tests {
     use super::*;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::Encoding;
     use crate::spec::mark::Mark;
     use pyo3::types::{PyDict, PyList};
 
     fn dummy_chart_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 
@@ -2683,7 +2638,6 @@ mod composite_leaf_binding_tests {
 mod composite_warning_tests {
     use super::*;
     use crate::spec::composite::CompositeNode;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
@@ -2696,7 +2650,6 @@ mod composite_warning_tests {
     /// the composite wrapping.
     fn color_overflow_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2704,20 +2657,7 @@ mod composite_warning_tests {
                 color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 

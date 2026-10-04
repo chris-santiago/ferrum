@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.diagnostics.source import ComparedModelSource
-from ferrum.encoding import X, Y
+from ferrum.encoding import Color, X, Y
 from ferrum.marks._desugar_helpers import _normalize_names, nominal_color_channel
 from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
@@ -42,6 +42,15 @@ from ferrum.plots._helpers import (
 
 # Register the calibration layer-name catalog entry.
 register_layer_names("calibration", frozenset({"line", "reference", "point"}))
+
+
+def _color_field_and_title(df: pl.DataFrame) -> tuple[str | None, str]:
+    """ROC/PR's color field plus its legend title: ``"Model"`` for the
+    compare-source path (a ``model`` column), else ``"Class"``.
+    """
+    color_field = _color_field_for(df, "class")
+    color_title = "Model" if color_field == "model" else "Class"
+    return color_field, color_title
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +180,7 @@ def _roc_chart_from_source(
     from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.roc_curve(average=None if per_class else average, diagnostic="roc_chart")
-    color_field = _color_field_for(df, "class")
+    color_field, color_title = _color_field_and_title(df)
 
     # Single annotation surface: the figure builder owns the AUC overlay
     # (via _apply_metric_label_explicit below, formatted by _metric_labels'
@@ -179,10 +188,16 @@ def _roc_chart_from_source(
     # mark from emitting a second, redundant text layer. The figure default
     # (annotate_auc=True) and the mark default (annotate_auc=False) diverge
     # by design: a raw mark does not auto-annotate; a figure function does.
+    #
+    # color_field is passed as a titled Color(...) rather than applied via a
+    # chart-level encode(color=...): mark_roc's reference-line layer declares
+    # no color of its own, so a chart-level color would be inherited by that
+    # layer too and paint the diagonal per class/model instead of leaving it
+    # a single grey dashed line.
     chart = ferrum.Chart(df).mark_roc(
         average=None if per_class else average,
         annotate_auc=False,
-        color_field=color_field,
+        color_field=Color(color_field, title=color_title),
     )
     chart = chart.encode(
         x=X("fpr", title="False Positive Rate"),
@@ -263,18 +278,22 @@ def _pr_chart_from_source(
                     ),
                 )
 
-    color_field = _color_field_for(df, "class")
+    color_field, color_title = _color_field_and_title(df)
     # Single annotation surface (see _roc_chart_from_source): the figure
     # builder owns the AP overlay via _apply_metric_label_explicit below;
     # mark_pr(annotate_ap=False) suppresses the mark's own text layer. The
     # figure default (annotate_ap=True) diverges from the mark default
     # (annotate_ap=False) by design.
+    #
+    # color_field is passed titled (see _roc_chart_from_source's matching
+    # comment): mark_pr's own layers are the only consumers, so a chart-level
+    # color encode is never needed here and would risk the same leakage.
     chart = (
         ferrum.Chart(df)
         .mark_pr(
             annotate_ap=False,
             iso_lines=iso_lines,
-            color_field=color_field,
+            color_field=Color(color_field, title=color_title),
         )
         .encode(
             x=X("recall", title="Recall", scale={"type": "linear", "domain": [0.0, 1.05]}),
@@ -531,6 +550,7 @@ def _confusion_chart_from_source(
     chart = chart.encode(
         x=X("predicted", title="Predicted label"),
         y=Y("actual", title="True label"),
+        color=Color("value", title="Count" if normalize is None else "Proportion"),
     )
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
     return _finalize_chart(
@@ -575,6 +595,7 @@ def _class_prediction_error_chart_from_source(
     chart = chart.encode(
         x=X("actual", title="Actual class"),
         y=Y("value", title="Number of predictions"),
+        color=Color("predicted", title="Predicted class"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
     return _finalize_chart(
@@ -735,6 +756,7 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.encode(
         x=X("threshold", title="Discrimination threshold"),
         y=Y("value", title="Score"),
+        color=Color("metric", title="Metric"),
     )
     chart = chart.properties(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
@@ -1461,6 +1483,7 @@ def lift_chart(
     )
 
 
+@_figure_entry
 def confusion_matrix_chart(
     model: Any = None,
     X: Any = None,
@@ -1551,6 +1574,7 @@ def confusion_matrix_chart(
     )
 
 
+@_figure_entry
 def class_prediction_error_chart(
     model: Any = None,
     X: Any = None,
@@ -1784,6 +1808,7 @@ def discrimination_threshold_chart(
     )
 
 
+@_figure_entry
 def classification_report_chart(
     model: Any = None,
     X: Any = None,
@@ -1862,6 +1887,7 @@ def classification_report_chart(
     )
 
 
+@_figure_entry
 def class_balance_chart(
     y: Any,
     *,

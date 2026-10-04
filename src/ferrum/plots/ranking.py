@@ -20,16 +20,18 @@ _build_decision_boundary_grid, _build_decision_boundary_unified.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import polars as pl
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from ferrum import Chart
 
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.encoding import X, Y
+from ferrum.encoding import Color, X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _figure_entry,
@@ -47,6 +49,7 @@ from ferrum.plots._helpers import (
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def rank_chart(
     data_or_source: Any = _UNSET,
     X: Any = None,
@@ -197,6 +200,7 @@ def rank_chart(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def rank1d_chart(
     data_or_source: Any = _UNSET,
     X: Any = None,
@@ -336,6 +340,7 @@ def rank1d_chart(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def rank2d_chart(
     data_or_source: Any = _UNSET,
     X: Any = None,
@@ -528,6 +533,7 @@ def parallel_coordinates_chart(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def decision_boundary_chart(
     model: Any,
     X: Any,
@@ -727,6 +733,8 @@ def _rank2d_chart_from_dataframe(
             .alias("correlation_fmt"),
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
+    legend_title = "Covariance" if algorithm == "covariance" else "Correlation"
+    chart = chart.encode(color=Color("correlation", title=legend_title))
     chart = chart.properties(title=ferrum.Title(f"Feature Correlation ({algorithm.title()})"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -969,11 +977,11 @@ def _decision_boundary_chart_from_source(
         # Pure-boundary path: no overlay, no padding columns, no row mixing.
         grid_df = pl.DataFrame(
             {
-                "x": [v - grid_info["dx"] / 2 for v in grid_info["flat_x"]],
-                "x2": [v + grid_info["dx"] / 2 for v in grid_info["flat_x"]],
-                "y": [v - grid_info["dy"] / 2 for v in grid_info["flat_y"]],
-                "y2": [v + grid_info["dy"] / 2 for v in grid_info["flat_y"]],
-                "z": [float(v) for v in grid_info["z"]],
+                "x": [v - grid_info.dx / 2 for v in grid_info.flat_x],
+                "x2": [v + grid_info.dx / 2 for v in grid_info.flat_x],
+                "y": [v - grid_info.dy / 2 for v in grid_info.flat_y],
+                "y2": [v + grid_info.dy / 2 for v in grid_info.flat_y],
+                "z": [float(v) for v in grid_info.z],
             }
         )
         # Non-proba: cast class indices to String for categorical color scale.
@@ -986,6 +994,7 @@ def _decision_boundary_chart_from_source(
         # `_build_decision_boundary_grid`; the mark itself treats `proba`
         # as informational and warns if it is passed directly.
         chart = ferrum.Chart(grid_df).mark_decision_boundary()
+        chart = chart.encode(color=Color("z", title=grid_info.z_title))
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         return _finalize_chart(
             chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -1003,6 +1012,7 @@ def _decision_boundary_chart_from_source(
     # `proba` is not forwarded to mark_decision_boundary here either -- see
     # the pure-boundary path above for why.
     chart = ferrum.Chart(unified).mark_decision_boundary()
+    chart = chart.encode(color=Color("z", title=grid_info.z_title))
     chart = chart.layer(
         _Layer(
             mark="point",
@@ -1031,16 +1041,28 @@ def _resolve_decision_boundary_features(
     return feat_idx  # type: ignore[return-value]
 
 
+class _DecisionBoundaryGrid(NamedTuple):
+    """Prediction grid + cell bounds for a 2-feature decision-boundary chart."""
+
+    flat_x: list[float]
+    flat_y: list[float]
+    dx: float
+    dy: float
+    z: np.ndarray
+    z_title: str
+    x_col: np.ndarray
+    y_col: np.ndarray
+
+
 def _build_decision_boundary_grid(
     source: Any,
     feat_idx: tuple[int, int],
     grid_resolution: int,
     *,
     proba: bool,
-) -> dict:
+) -> _DecisionBoundaryGrid:
     """Compute the prediction grid + cell bounds for a 2-feature
-    decision-boundary chart. Returns a dict with ``flat_x``, ``flat_y``,
-    ``dx``, ``dy``, ``z``, and the two feature vectors ``x_col``, ``y_col``.
+    decision-boundary chart.
     """
     import numpy as np
 
@@ -1068,20 +1090,23 @@ def _build_decision_boundary_grid(
     grid[:, feat_idx[1]] = yy.ravel()
     if proba and "predict_proba" in source.capabilities:
         z = source.model.predict_proba(grid)[:, 1].astype(np.float64)
+        z_title = "Predicted probability"
     else:
         z = np.asarray(source.model.predict(grid)).astype(np.float64)
-    return {
-        "flat_x": [float(v) for v in xx.ravel()],
-        "flat_y": [float(v) for v in yy.ravel()],
-        "dx": dx,
-        "dy": dy,
-        "z": z,
-        "x_col": x_col,
-        "y_col": y_col,
-    }
+        z_title = "Class"
+    return _DecisionBoundaryGrid(
+        flat_x=[float(v) for v in xx.ravel()],
+        flat_y=[float(v) for v in yy.ravel()],
+        dx=dx,
+        dy=dy,
+        z=z,
+        z_title=z_title,
+        x_col=x_col,
+        y_col=y_col,
+    )
 
 
-def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
+def _build_decision_boundary_unified(source: Any, g: _DecisionBoundaryGrid) -> pl.DataFrame:
     """Build the layered grid+scatter DataFrame for the overlay path.
 
     Maps ``y`` labels to the same numeric domain as ``z``. For
@@ -1112,9 +1137,9 @@ def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
         dtype=np.float64,
     )
 
-    flat_x, flat_y = g["flat_x"], g["flat_y"]
-    dx, dy, z = g["dx"], g["dy"], g["z"]
-    x_col, y_col = g["x_col"], g["y_col"]
+    flat_x, flat_y = g.flat_x, g.flat_y
+    dx, dy, z = g.dx, g.dy, g.z
+    x_col, y_col = g.x_col, g.y_col
     n_grid = len(flat_x)
     n_scatter = len(x_col)
     nulls_grid = [None] * n_grid

@@ -83,9 +83,14 @@ COMPOSITE_MARK_CONFIGS = {
         "base_encoding": {"x": "val:Q"},
         "channels": ["color"],
     },
+    # hex: the cells are always colored by Hex's per-cell aggregate, so a
+    # chart-level color is either the aggregated column (it then supplies
+    # `field` and styles the cell binding) or refused as drawn nowhere --
+    # `color="cat:N"` over the default count aggregate is the refused case.
+    # Both are pinned in tests/marks/test_hex_color.py.
     "mark_hex": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color"],
+        "channels": [],
     },
     "mark_swarm": {
         "base_encoding": {"x": "cat:N", "y": "val:Q"},

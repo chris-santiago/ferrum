@@ -1060,9 +1060,8 @@ pub fn load_scene(scene: &SceneGraph) -> Result<SceneData, TaperError> {
 
 /// [`load_scene`] with the packed binary instance sidecar.
 pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<SceneData, TaperError> {
-    let conditionals = scene.interaction.conditionals.len();
     for batch in scene.panels.iter().flat_map(|p| &p.marks) {
-        ferrum_scene::validate_size_conditionals(batch, conditionals)?;
+        ferrum_scene::validate_size_conditionals(batch, &scene.interaction.conditionals)?;
     }
     let mut collector = SceneCollector::new();
     let mut batch_meta = HashMap::new();

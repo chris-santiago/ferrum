@@ -32,6 +32,8 @@ once per chart even when the chart is faceted.
 
 from __future__ import annotations
 
+import warnings
+
 import itertools
 import math
 import re
@@ -422,32 +424,64 @@ def test_rendered_centres_sit_size_plus_spacing_apart(layout, size, spacing):
     )
 
 
-def test_swarm_then_aggregate_warns_exactly_once_even_when_faceted():
-    """`#161`: an ``Aggregate``-style transform after ``Swarm``
-    collapses rows, dropping the placeholder offset column the renderer
-    needs to place dots. That is a degradation (the swarm layout is lost,
-    not an error), so it warns instead of silently leaving dots stacked at
-    the placeholder ``0.0`` offset. The warning is deduped per chart, not
-    per facet panel, so a 3-panel facet must still emit exactly one.
-    """
+def _swarm_then_mean(as_name: str) -> list[str]:
+    """Warnings from a 3-panel facet of ``Swarm`` followed by a mean aggregate
+    writing its result to *as_name*."""
     values = _spread_values()
     n = len(values)
     third = n // 3
     panels = (["p1"] * third) + (["p2"] * third) + (["p3"] * (n - 2 * third))
     df = pl.DataFrame({"group": ["A"] * n, "value": values, "panel": panels})
-
-    with pytest.warns(UserWarning) as caught:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         fm.Chart(df).transform(
             fm.Swarm(category="group", value="value", point_size=8.0, spacing=0.0),
             fm.transform_aggregate(
-                {"field": "value", "fn": "mean", "as": "value"}, groupby=["group"]
+                {"field": "value", "fn": "mean", "as": as_name}, groupby=["group"]
             ),
-        ).mark_point().encode(x="group:N", y="value").facet(col="panel").to_svg()
+        ).mark_point().encode(x="group:N", y=as_name).facet(col="panel").to_svg()
+    return [str(w.message) for w in caught]
 
-    assert len(caught) == 1, [str(w.message) for w in caught]
-    assert str(caught[0].message) == (
-        "swarm could not be applied (column '__pos_x_offset__' that "
+
+def test_swarm_then_an_aggregate_keeping_its_columns_is_placed_without_a_warning():
+    """`#161`: placement packs whichever rows the layer draws, so an aggregate
+    after ``Swarm`` that keeps the category and value columns is placed, and
+    nothing was dropped to warn about."""
+    assert _swarm_then_mean("value") == []
+
+
+def test_swarm_then_an_aggregate_dropping_its_value_warns_exactly_once_when_faceted():
+    """An aggregate that drops the value column ``Swarm`` places by is a
+    degradation (the layout is lost, not an error): it warns, naming the
+    column, once per chart rather than once per facet panel."""
+    assert _swarm_then_mean("mean_v") == [
+        "swarm could not be applied (column 'value' that "
         "Swarm(category='group', value='value') places its dots by is not "
         "in the layer's data; a later transform dropped it); marks were "
         "not offset"
-    )
+    ]
+
+
+def test_hand_built_swarm_defaults_draw_exactly_like_mark_swarm():
+    """``fm.Swarm``'s default ``point_size`` is ``mark_swarm``'s default
+    ``size=4`` (user ruling 2026-10-04), so a hand-built
+    ``transform(fm.Swarm(...)).mark_point()`` places and draws every dot
+    exactly where ``mark_swarm()`` does. Control: an explicit
+    ``point_size=5`` (the former default) moves the dots, so the comparison
+    can tell the two defaults apart."""
+    values = _spread_values()
+    df = pl.DataFrame({"group": ["A"] * len(values), "value": values})
+
+    def hand_built(**swarm_kwargs) -> list[tuple[float, float, float]]:
+        chart = (
+            fm.Chart(df)
+            .transform(fm.Swarm(category="group", value="value", **swarm_kwargs))
+            .mark_point()
+            .encode(x="group:N", y="value")
+        )
+        return sorted(_circles(chart.to_svg()))
+
+    composite = sorted(_circles(fm.Chart(df).mark_swarm().encode(x="group:N", y="value").to_svg()))
+    assert {r for _, _, r in composite} == {2.0}
+    assert hand_built() == composite
+    assert hand_built(point_size=5.0) != composite

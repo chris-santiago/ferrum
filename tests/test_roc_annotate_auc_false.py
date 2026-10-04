@@ -34,3 +34,35 @@ def test_roc_annotate_auc_true_emits_exactly_one_auc_per_curve():
     auc_texts = [t for t in text_runs(chart.to_svg()) if "AUC" in t]
     assert len(auc_texts) == n_curves
     assert all(t.startswith("AUC = ") for t in auc_texts)
+
+
+def test_the_class_legend_is_titled_whether_or_not_the_curves_are_annotated():
+    """The legend is titled ``Class`` with and without the metric overlay.
+
+    The per-class hue is a layer-level binding of the ROC/PR composite, and
+    the overlay adds no color of its own, so the title comes from that
+    binding alone: turning the annotation off must not untitle the legend.
+    """
+    model, X, y = _iris_model()
+    for build, flag in ((fm.roc_chart, "annotate_auc"), (fm.pr_chart, "annotate_ap")):
+        for annotate in (False, True):
+            runs = text_runs(build(model, X, y, **{flag: annotate}).to_svg())
+            assert runs.count("Class") == 1, (build.__name__, annotate, runs)
+
+
+def test_the_layer_level_class_legend_is_titled_on_every_composition_route():
+    """The flat chart, an overlay leaf and a shared figure-legend band all title it ``Class``."""
+    model, X, y = _iris_model()
+
+    def roc():
+        return fm.roc_chart(model, X, y, annotate_auc=False)
+
+    other = fm.Chart({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0]}).mark_point().encode(x="fpr", y="tpr")
+    shared = fm.Resolve(scale={"color": "shared"}, legend={"color": "shared"})
+    routes = {
+        "flat": roc(),
+        "overlay": fm.LayerChart(roc(), other),
+        "band": fm.hconcat(roc(), roc(), resolve=shared),
+    }
+    for route, chart in routes.items():
+        assert text_runs(chart.to_svg()).count("Class") == 1, route

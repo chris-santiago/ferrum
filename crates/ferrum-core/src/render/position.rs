@@ -1072,23 +1072,26 @@ fn jitter_axis_values(
 
 /// Place a swarm layer's dots through the resolved panel scale.
 ///
-/// The `Swarm` transform only emits the columns; the packing needs the
+/// The `Swarm` transform only emits the value column; the packing needs the
 /// rendered value axis (plot rect, end insets, facet-shared or explicit domain,
 /// scale kind), which exists only here, beside the band-pixel offsets `Jitter`
-/// computes in [`apply_jitter`]. The placed offsets replace the transform's
-/// placeholder offset column and land in the column of the axis that carries
-/// the category band: the value axis is `y` for a vertical swarm, `x` for a
-/// horizontal one, exchanged when the layer's coord flips its channels.
+/// computes in [`apply_jitter`]. The placed offsets land in the column of the
+/// axis that carries the category band: the value axis is `y` for a vertical
+/// swarm, `x` for a horizontal one, exchanged when the layer's coord flips its
+/// channels.
 ///
-/// The placeholder column is the witness that the batch's rows are still the
-/// swarm's rows. When a later transform dropped it (or the category, value or
-/// dodge column the packing reads), the dots are left unplaced and a
-/// `PositionAdjustSkipped` warning names the missing column: `Ok(None)`.
+/// The packing places whichever rows the layer draws. When a later transform
+/// dropped the category, value or dodge column it reads, the dots are left
+/// unplaced and a `PositionAdjustSkipped` warning names the column: `Ok(None)`. Dots that reach past half the category slot on a category axis
+/// spill into the neighbouring categories (or past the plot edge); they are
+/// drawn where they were packed, and `SwarmOverflowsBand`, voiced as `entry`,
+/// says so.
 pub(crate) fn apply_swarm(
     batch: &RecordBatch,
     swarm: &crate::transform::swarm::SwarmSpec,
     scales: &ResolvedScales,
     coord_flipped: bool,
+    entry: &str,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     use crate::transform::swarm::{place_offsets, SwarmOrient};
@@ -1097,47 +1100,57 @@ pub(crate) fn apply_swarm(
         reason: crate::render::PositionAdjustReason::Message(reason),
         coord_flipped,
     };
-    let placeholder = swarm.offset_column();
-    let read = [Some(placeholder), Some(swarm.category.as_str()), Some(swarm.value.as_str()), swarm.dodge.as_deref()];
+    let named = format!("Swarm(category='{}', value='{}')", swarm.category, swarm.value);
+    let read = [Some(swarm.category.as_str()), Some(swarm.value.as_str()), swarm.dodge.as_deref()];
     if let Some(missing) = read.into_iter().flatten().find(|c| batch.column_by_name(c).is_none()) {
-        let warning = RenderWarning::PositionAdjustSkipped {
-            adjustment: "swarm".into(),
-            reason: format!(
-                "column '{missing}' that Swarm(category='{}', value='{}') places its dots by \
-                 is not in the layer's data; a later transform dropped it",
-                swarm.category, swarm.value
-            ),
-        };
+        let reason = format!(
+            "column '{missing}' that {named} places its dots by is not in the layer's data; a later transform dropped it"
+        );
+        let warning = RenderWarning::PositionAdjustSkipped { adjustment: "swarm".into(), reason };
         if !warnings.contains(&warning) {
             warnings.push(warning);
         }
         return Ok(None);
     }
     let value_on_y = matches!(swarm.orient, SwarmOrient::Vertical) != coord_flipped;
-    let (value_scale, cross_column) = if value_on_y {
-        (&scales.y, "__pos_x_offset__")
+    let (value_scale, cross_scale, cross_column) = if value_on_y {
+        (&scales.y, &scales.x, "__pos_x_offset__")
     } else {
-        (&scales.x, "__pos_y_offset__")
+        (&scales.x, &scales.y, "__pos_y_offset__")
     };
     let values = crate::render::arrow_cast::col_as_f64(batch, &swarm.value)
         .map_err(|e| failed(e.to_string()))?;
     let offsets = place_offsets(swarm, batch, &values, |v| value_scale.to_pixel_f64(v))
         .map_err(failed)?;
 
+    if let ScaleKind::Ordinal(category_scale) = cross_scale {
+        let reach = offsets.iter().fold(0.0_f64, |a, o| a.max(o.abs())) + swarm.point_size / 2.0;
+        let half_slot = category_scale.step() / 2.0;
+        let overflowing = !warnings.iter().any(|w| {
+            matches!(w, RenderWarning::SwarmOverflowsBand { entry: e, category, value, .. }
+                if e == entry && *category == swarm.category && *value == swarm.value)
+        });
+        if reach > half_slot && overflowing {
+            warnings.push(RenderWarning::SwarmOverflowsBand {
+                entry: entry.to_string(),
+                category: swarm.category.clone(),
+                value: swarm.value.clone(),
+                reach_px: reach,
+                half_slot_px: half_slot,
+            });
+        }
+    }
+
     let schema = batch.schema();
+    // Replaces a column of the cross name already in the batch (an earlier
+    // opposite-orient Swarm's placement on a chain under a flipped layer, or
+    // a position column of that name), so `column_by_name` reads the offsets
+    // pushed below.
     let (mut fields, mut cols): (Vec<Field>, Vec<ArrayRef>) = schema
         .fields()
         .iter()
         .zip(batch.columns())
-        // Drops both the placeholder this swarm itself emitted AND the cross
-        // column it is about to push. On an unflipped layer those are the
-        // same name, already covered by `!= placeholder`; on a flipped layer
-        // they differ, and a chain whose lineage holds an earlier
-        // opposite-orient Swarm can leave the cross column's name already in
-        // the batch (that Swarm's own, stale, placeholder). Without this,
-        // pushing the real offsets below would leave two fields of that name
-        // and `column_by_name` would keep reading the stale one.
-        .filter(|(f, _)| f.name() != placeholder && f.name() != cross_column)
+        .filter(|(f, _)| f.name() != cross_column)
         .map(|(f, c)| (f.as_ref().clone(), c.clone()))
         .unzip();
     fields.push(Field::new(cross_column, DataType::Float64, false));
@@ -1620,15 +1633,13 @@ mod tests {
     /// `0.0`) must be dropped, not merely shadowed by the real offsets
     /// pushed after it.
     #[test]
-    fn apply_swarm_drops_a_stale_cross_column_left_by_an_earlier_opposite_orient_swarm() {
+    fn apply_swarm_replaces_a_stale_cross_column() {
         use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
             Field::new("v", DataType::Float64, false),
-            // This swarm's own placeholder, about to be dropped.
-            Field::new("__pos_x_offset__", DataType::Float64, false),
-            // Stale: the earlier, opposite-orient Swarm's own placeholder,
-            // which is THIS swarm's cross column once the layer is flipped.
+            // Stale: a column of THIS swarm's cross name once the layer is
+            // flipped.
             Field::new("__pos_y_offset__", DataType::Float64, false),
         ]));
         let b = RecordBatch::try_new(
@@ -1636,7 +1647,6 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(vec!["A"; 5])),
                 Arc::new(Float64Array::from(vec![1.0; 5])),
-                Arc::new(Float64Array::from(vec![0.0; 5])),
                 Arc::new(Float64Array::from(vec![99.0; 5])),
             ],
         )
@@ -1653,7 +1663,7 @@ mod tests {
         };
         // coord_flipped=true on a Vertical swarm puts the value on x and the
         // packed offsets into `__pos_y_offset__` — the stale column's name.
-        let out = apply_swarm(&b, &swarm, &dummy_scales(), true, &mut Vec::new())
+        let out = apply_swarm(&b, &swarm, &dummy_scales(), true, "mark_swarm", &mut Vec::new())
             .unwrap()
             .unwrap();
         let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
@@ -2333,7 +2343,6 @@ mod tests {
         .unwrap();
 
         let spec = ChartSpec {
-            data: Default::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
@@ -2341,25 +2350,13 @@ mod tests {
                 color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
             position: Some(PositionAdjust::Stack {
                 by: Some("g".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
                 value_axis: None,
             }),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let result = axis_batch_for_y(&spec, "y", &batch);
@@ -2423,7 +2420,6 @@ mod tests {
         .unwrap();
 
         let spec = ChartSpec {
-            data: Default::default(),
             mark: Mark::Bar,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
@@ -2431,25 +2427,13 @@ mod tests {
                 color: Some(EncodingSpec { field: "grp".into(), type_: None, ..Default::default() }),
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
             position: Some(PositionAdjust::Stack {
                 by: Some("grp".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
                 value_axis: Some(StackValueAxis::X),
             }),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let theme = ThemeInputs::default();
@@ -2474,28 +2458,15 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let spec = crate::spec::chart::ChartSpec {
-            data: Default::default(),
             mark: crate::spec::mark::Mark::Bar,
             encoding: enc,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
             position: Some(PositionAdjust::Stack {
                 by: Some("g".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
                 value_axis: None,
             }),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let x_result = axis_batch_for_x(&spec, "x", &b);
@@ -2549,28 +2520,16 @@ mod tests {
 
         let enc = enc_xy("val", "cat", Some("grp"));
         let spec = crate::spec::chart::ChartSpec {
-            data: Default::default(),
             mark: crate::spec::mark::Mark::Bar,
             encoding: enc,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(crate::spec::coord::CoordKind::Flip),
-            mark_style: None,
             position: Some(PositionAdjust::Stack {
                 by: Some("grp".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
                 value_axis: None,
             }),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let x_result = axis_batch_for_x(&spec, "val", &batch);
@@ -2627,28 +2586,16 @@ mod tests {
 
         let enc = enc_xy("val", "cat", Some("grp"));
         let spec = crate::spec::chart::ChartSpec {
-            data: Default::default(),
             mark: crate::spec::mark::Mark::Bar,
             encoding: enc,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
             coord: Some(crate::spec::coord::CoordKind::Flip),
-            mark_style: None,
             position: Some(PositionAdjust::Stack {
                 by: Some("grp".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
                 value_axis: None,
             }),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
 
         let y_result = axis_batch_for_y(&spec, "cat", &batch);
@@ -5546,23 +5493,10 @@ mod tests {
         let adjusted = apply_position(batch, Some(&pos), scales, &enc, false, &mut Vec::new()).unwrap();
 
         let spec = ChartSpec {
-            data: Default::default(),
             mark: Mark::Bar,
             encoding: enc,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
             position: Some(pos),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            entry: None,
-            params: Vec::new(),
+            ..Default::default()
         };
         let panel = PanelLayout {
             plot_area: panel_area,

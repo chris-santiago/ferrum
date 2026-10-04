@@ -107,10 +107,11 @@ pub struct ChartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_description: Option<String>,
     /// The public entry the caller invoked that produced this chart (e.g.
-    /// `"mark_smooth"` for the single line it lowers to). A refusal raised
-    /// while drawing a layer names this entry in place of the mark's own
-    /// primitive; a layer's own [`Layer::entry`] outranks it. `None` names
-    /// the primitive, and the field is omitted from the wire then.
+    /// `"mark_smooth"` for the single line it lowers to). Every refusal and
+    /// layer-voiced warning raised while building a layer names this entry in
+    /// place of the mark's own primitive; a layer's own [`Layer::entry`]
+    /// outranks it. `None` names `mark_{mark}`, and the field is omitted from
+    /// the wire then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
 }
@@ -147,6 +148,34 @@ impl From<ferrum_scene::ConditionalEncoding> for ChartConditional {
     /// A conditional declared by the whole chart.
     fn from(encoding: ferrum_scene::ConditionalEncoding) -> Self {
         Self { encoding, layers: None }
+    }
+}
+
+/// A point chart with every optional field empty: the base test literals
+/// spread with `..Default::default()`, so a new optional field costs them
+/// nothing. Test-only: a real spec always names its mark.
+#[cfg(test)]
+impl Default for ChartSpec {
+    fn default() -> Self {
+        Self {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+            entry: None,
+        }
     }
 }
 
@@ -625,7 +654,6 @@ mod tests {
 
     fn minimal_scatter() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
@@ -637,18 +665,7 @@ mod tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -771,18 +788,7 @@ mod tests {
                 color: None,
                 ..Default::default()
             },
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -805,18 +811,7 @@ mod tests {
             data: DataRef::Named { name: "default".into() },
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -843,17 +838,7 @@ mod tests {
                 agg: None,
                 name: None,
             })],
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-        position: None,
-        title: None,
-        axis_x: None, axis_y: None,
-        selections: Vec::new(), conditionals: Vec::new(),
-        chart_description: None,
-        entry: None,
-        params: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -916,8 +901,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None, entry: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false, coord: None, entry: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), ..Default::default() },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), ..Default::default() },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));

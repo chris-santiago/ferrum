@@ -1838,6 +1838,7 @@ def regplot(
     )
 
 
+@_figure_entry
 def residuals_chart(
     model: Any = None,
     X: Any = None,
@@ -2118,6 +2119,7 @@ def prediction_error_chart(
     return _prediction_error_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def cooks_distance_chart(
     model: Any = None,
     X: Any = None,

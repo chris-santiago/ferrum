@@ -30,7 +30,7 @@ from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.diagnostics.sources._clustering import _ELBOW_METRICS
-from ferrum.encoding import X, Y
+from ferrum.encoding import Color, Size, X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _compose_compare,
@@ -71,7 +71,7 @@ def _silhouette_chart_from_source(
     import ferrum
 
     df = source.silhouette(k=k)
-    chart = ferrum.Chart(df).mark_silhouette()
+    chart = ferrum.Chart(df).mark_silhouette().encode(color=Color("cluster", title="Cluster"))
     if subtitle is not None:
         chart = chart.properties(
             title=ferrum.Title("Silhouette Plot", subtitle=subtitle),
@@ -224,6 +224,8 @@ def _intercluster_distance_chart_from_source(
                     "domain": [y_lo - y_pad, y_hi + y_pad],
                 },
             ),
+            color=Color("cluster", title="Cluster"),
+            size=Size("size", title="Cluster size"),
         )
     )
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
@@ -805,6 +807,7 @@ def cluster_diagnostics(
     )
 
 
+@_figure_entry
 def intercluster_distance_chart(
     model: Any,
     X: Any = None,  # noqa: N803 — matches ferrum-spec.md parameter name
@@ -912,6 +915,7 @@ def intercluster_distance_chart(
     return _intercluster_distance_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def silhouette_chart(
     model: Any,
     X: Any = None,
@@ -1001,6 +1005,7 @@ def silhouette_chart(
     return _silhouette_chart_from_source(source, **builder_kwargs)
 
 
+@_figure_entry
 def manifold_chart(
     model: Any,
     X: Any = None,

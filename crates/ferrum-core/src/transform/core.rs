@@ -736,7 +736,8 @@ mod tests {
     fn test_transform_spec_reorder_round_trip() {
         use crate::transform::reorder::ReorderSpec;
         let original = TransformSpec::Reorder(ReorderSpec {
-            by: "new_idx".into(), drop_index: true, from: None, name: None,
+            by: "new_idx".into(), drop_index: true, from: None,
+            axis: crate::transform::linkage::LinkageAxis::Rows, name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"reorder""#));

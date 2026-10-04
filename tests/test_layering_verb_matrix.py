@@ -8,12 +8,13 @@ refusal, and the tapered width, including the refusal that names the
 public entry. Each verb places two members, given as plain descriptions,
 in both orders.
 
-The one rule that decides a conditional's reach: a conditional declared on
-a chart reaches the layers that chart's own field encodings reach. An
-operand of ``chart + chart`` (and so every ``fm.layer``/``LayerChart``
-member) keeps it on its own layers. A host of ``Chart.layer()`` shares it
-with every layer it is given, the way its field ``size`` is inherited, and
-a ``Layer``'s own encoding keeps it on that layer.
+Field and conditional ``size`` follow two different reach rules, and the
+cells pin both. A field ``size`` is promoted to the merged chart, so under
+``chart + chart`` it reaches the other operand's line as well. A
+conditional ``size`` stays with the chart it was declared on: an operand of
+``chart + chart`` (and so every ``fm.layer``/``LayerChart`` member) keeps
+it on its own layers, a host of ``Chart.layer()`` shares it with every
+layer it is given, and a ``Layer``'s own encoding keeps it on that layer.
 """
 
 from __future__ import annotations

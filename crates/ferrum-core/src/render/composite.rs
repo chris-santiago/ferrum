@@ -1096,7 +1096,6 @@ fn numeric_extent_domain(col: &dyn arrow::array::Array) -> SharedDomain {
 mod tests {
     use super::*;
     use crate::spec::composite::CompositeResolve;
-    use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::EncodingSpec;
     use crate::spec::layer::Layer;
     use crate::spec::mark::Mark;
@@ -1115,23 +1114,9 @@ mod tests {
 
     fn base_spec() -> ChartSpec {
         ChartSpec {
-            data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding::default(),
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: None,
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            params: Vec::new(),
-            chart_description: None,
-            entry: None,
+            ..Default::default()
         }
     }
 
@@ -2212,14 +2197,8 @@ mod tests {
         let layer = Layer {
             mark: Mark::Rect,
             encoding: layer_enc,
-            transforms: Vec::new(),
-            mark_style: None,
             data_source: Some("box".into()),
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false, coord: None,
-            entry: None,
+            ..Default::default()
         };
         ChartSpec {
             encoding: chart_enc,
@@ -2263,28 +2242,12 @@ mod tests {
         let point_layer = Layer {
             mark: Mark::Point,
             encoding: point_layer_enc,
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let line_layer = Layer {
             mark: Mark::Line,
             encoding: line_layer_enc,
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let spec = ChartSpec {
             encoding: chart_enc,
@@ -2970,15 +2933,7 @@ mod tests {
             .map(|(i, m)| Layer {
                 mark: Mark::Point,
                 encoding: encoding_of(i, m),
-                transforms: Vec::new(),
-                mark_style: None,
-                data_source: None,
-                position: None,
-                blend: None,
-                name: None,
-                independent_y: false,
-                coord: None,
-                entry: None,
+                ..Default::default()
             })
             .collect();
         let flat_spec = ChartSpec { encoding: layers[0].encoding.clone(), layers: Some(layers), ..base_spec() };
@@ -3217,15 +3172,8 @@ mod tests {
         let layer = |spec: &ChartSpec| Layer {
             mark: Mark::Point,
             encoding: spec.encoding.clone(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
             coord: spec.coord.clone(),
-            entry: None,
+            ..Default::default()
         };
         let flat = ChartSpec { layers: Some(vec![layer(&plain), layer(&flipped)]), ..plain.clone() };
         let prep = prepare(&flat).expect("+ resolves");
@@ -3277,15 +3225,8 @@ mod tests {
         let layer = |spec: &ChartSpec, coord| Layer {
             mark: Mark::Point,
             encoding: spec.encoding.clone(),
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
             coord,
-            entry: None,
+            ..Default::default()
         };
         let flat_spec =
             ChartSpec { layers: Some(vec![layer(&lead, None), layer(&member, member_layer_coord)]), ..lead.clone() };
@@ -3702,15 +3643,7 @@ mod tests {
         let layer = |mark: Mark, encoding: Encoding| Layer {
             mark,
             encoding,
-            transforms: Vec::new(),
-            mark_style: None,
-            data_source: None,
-            position: None,
-            blend: None,
-            name: None,
-            independent_y: false,
-            coord: None,
-            entry: None,
+            ..Default::default()
         };
         let scaled = Encoding {
             x: Some(enc("i")),

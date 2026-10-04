@@ -15,6 +15,9 @@ _ensure_id_column — materialises a synthetic row-identity column when
 the input has no non-numeric id column (used by ``heatmap`` and
 ``clustermap``).
 
+_matrix_titles — the default column-axis, row-axis, and colorbar titles
+shared by ``heatmap`` and ``clustermap``.
+
 _heatmap_finite_values — flattens ``heatmap``'s numeric value columns to a
 finite-valued (NaN- and inf-dropped) array; shared by ``robust=`` percentile
 clipping and the one-sided ``vmin=``/``vmax=`` data-extent fill.
@@ -86,6 +89,20 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
     pdf = to_polars(data)
     pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
     return pdf, to_arrow_table(pdf), "_row_id"
+
+
+def _matrix_titles(id_col: str, value_cols: list[str]) -> tuple[str, str, str]:
+    """Return the ``(column axis, row axis, colorbar)`` titles of a matrix chart.
+
+    Shared by ``heatmap`` and ``clustermap``. The unpivoted ``column`` field is
+    titled "Column"; the row axis takes the user's id column name, or "Row"
+    when the id is the synthetic ``_row_id``. The colorbar is titled with the
+    value column when there is exactly one, and "Value" when several numeric
+    columns are unpivoted into one colour binding.
+    """
+    row_title = "Row" if id_col == "_row_id" else id_col
+    value_title = value_cols[0] if len(value_cols) == 1 else "Value"
+    return "Column", row_title, value_title
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +403,7 @@ def _pairplot_build(
 # ---------------------------------------------------------------------------
 
 
+@_figure_entry
 def heatmap(
     data: Any,
     *,
@@ -484,6 +502,8 @@ def heatmap(
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
+        The chart is titled ``"Heatmap"`` by default; a ``"title"`` key
+        replaces it, and ``"title": ""`` suppresses it.
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
@@ -799,8 +819,12 @@ def _heatmap_build(
         rect_kwargs["stroke"] = linecolor
         rect_kwargs["stroke_width"] = linewidths
 
-    enc: dict = {"x": "column", "y": id_col, "color": "value"}
-    if "color" in encode_kwargs:
+    from ferrum.encoding import Color, X, Y
+
+    x_title, y_title, value_title = _matrix_titles(id_col, value_cols)
+    enc: dict = {"x": X("column", title=x_title), "y": Y(id_col, title=y_title), "color": "value"}
+    color_overridden = "color" in encode_kwargs
+    if color_overridden:
         enc["color"] = encode_kwargs.pop("color")
     enc.update(encode_kwargs)
 
@@ -809,8 +833,6 @@ def _heatmap_build(
     # out-of-domain warning are all owned by _heatmap_resolve_color_domain;
     # this block only assembles the wire kwargs from its result.
     if vmin is not None or vmax is not None or center is not None or cmap is not None:
-        from ferrum.encoding import Color
-
         vmin, vmax = _heatmap_resolve_color_domain(tbl, value_cols, vmin, vmax, center)
 
         # center= selects a Diverging scale (midpoint = center, scheme =
@@ -824,7 +846,13 @@ def _heatmap_build(
         if center is not None:
             scale_kwargs["domainMid"] = center
         if len(scale_kwargs) > 1:  # > just "type"
-            enc["color"] = Color(enc["color"], scale=scale_kwargs)
+            color_kwargs: dict = {"scale": scale_kwargs}
+            if not color_overridden:
+                color_kwargs["title"] = value_title
+            enc["color"] = Color(enc["color"], **color_kwargs)
+
+    if not color_overridden and isinstance(enc["color"], str):
+        enc["color"] = Color(enc["color"], title=value_title)
 
     if melted_data is not None:
         # Data already melted and filtered — no Unpivot transform needed.
@@ -859,6 +887,9 @@ def _heatmap_build(
             )
         chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
 
+    from ferrum.title import Title
+
+    chart = chart.properties(title=Title("Heatmap"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
@@ -913,6 +944,7 @@ def _normalize_standardize_arg(value: Any, *, param: str) -> str | None:
     )
 
 
+@_figure_entry
 def clustermap(
     data: Any,
     *,
@@ -982,6 +1014,8 @@ def clustermap(
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
+        The chart is titled ``"Clustermap"`` by default; a ``"title"`` key
+        replaces it, and ``"title": ""`` suppresses it.
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
@@ -1038,6 +1072,7 @@ def clustermap(
 
     return _clustermap_build(
         data,
+        tbl=tbl,
         id_col=id_col,
         value_cols=value_cols,
         method=method,
@@ -1060,6 +1095,7 @@ def clustermap(
 def _clustermap_build(
     data: Any,
     *,
+    tbl: Any,
     id_col: str,
     value_cols: list[str],
     method: str,
@@ -1081,14 +1117,20 @@ def _clustermap_build(
 
     The public ``clustermap`` resolves the id/value columns and normalises the
     ``z_score``/``standard_scale`` axis arguments; this builder owns the linkage
-    transforms, center heatmap, and dendrogram panels.
+    transforms, center heatmap, and dendrogram panels. ``tbl`` is the Arrow view
+    of ``data``.
     """
     from ferrum import (
         ClusterMapChart,
+        LinearScale,
         Linkage,
         Reorder,
         Unpivot,
     )
+
+    def _leaf_scale(n: int, *, reverse: bool = False) -> LinearScale:
+        """Return the heatmap band scale's continuous image over ``n`` cells."""
+        return LinearScale(domain=[-0.5, n - 0.5], reverse=reverse)
 
     # Linkage transforms (rows + columns) with explicit names so we can route
     # their `segments` named outputs to the dendrogram layers. `linkage`
@@ -1125,44 +1167,48 @@ def _clustermap_build(
     _segment_cols = registry_secondary_columns("linkage", _segments_key, ["x", "y", "x2", "y2"])
     _order_cols = registry_secondary_columns("linkage", _order_key, ["original_idx"])
 
-    # Center heatmap: reorder rows + columns then unpivot.
+    # Center heatmap: reorder rows and columns of the wide batch, then unpivot.
+    # Each `Reorder` reads its permutation from a linkage's `order` output via
+    # `from_=`: the row one permutes the batch's rows by `row_link_order`, the
+    # column one permutes its numeric value columns by `col_link_order`.
+    # `drop_index=False` keeps the data columns intact (the index column lives
+    # in the `from_=` batch only). `value_vars=None` makes Unpivot emit its
+    # blocks in the permuted batch order; an explicit list would fix the block
+    # order and undo the column permutation. The heatmap's band domains follow
+    # first-appearance order, so both axes show the clustered order.
     unpivot = Unpivot(
         id_vars=[id_col],
-        value_vars=value_cols,
+        value_vars=None,
         var_name="column",
         value_name="value",
     )
-    # Reorder reads its index column from a sibling named output via from=:
-    # row_link publishes `row_link_order` (n rows of permutation indices);
-    # the Reorder transform permutes the chained batch accordingly. The col
-    # Reorder consumes col_link_order. (Phase 9 finalize: Reorder.from=)
-    # Note: Linkage row/col indexing here assumes the column-Reorder runs
-    # AFTER the unpivot — but currently we keep them pre-unpivot, which only
-    # makes sense for the row axis. For column reordering with the wide-format
-    # data, the canonical approach is to reorder columns by passing through
-    # the column linkage order before unpivoting. We do both axes pre-unpivot;
-    # the resulting unpivoted long-form preserves the visually-clustered order.
-    # `drop_index=False` keeps the data columns intact (we're not dropping a
-    # column from the chained batch — the index column lives in `from=` only).
     from ferrum.encoding import Color as _Color, X as _X, Y as _Y
     from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
     _resolved_scheme = resolve_cmap_alias(scheme=scheme, cmap=cmap, where="clustermap")
-    _color_enc = _Color("value", scheme=_resolved_scheme)
-    # Suppress synthetic axis titles (_row_id, column) that bleed through from
-    # the internal unpivot column names — real row-label columns keep their names.
-    _x_enc = _X("column", title="")
-    _y_enc = _Y(id_col, title="" if id_col in ("_row_id", "column") else id_col)
+    # A caller's own `x=`/`y=`/`color=` in encode_kwargs overrides these below.
+    _x_title, _y_title, _value_title = _matrix_titles(id_col, value_cols)
+    _color_enc = _Color("value", scheme=_resolved_scheme, title=_value_title)
+    _x_enc = _X("column", title=_x_title)
+    _y_enc = _Y(id_col, title=_y_title)
     center_enc: dict = {"x": _x_enc, "y": _y_enc, "color": _color_enc}
     center_enc.update(encode_kwargs)
+    # `value_vars=None` melts every non-id column, so the center sees only the
+    # id and the numeric value columns.
     center = (
-        Chart(data)
+        Chart(tbl.select([id_col, *value_cols]))
         .transform(
             row_link,
             col_link,
             Reorder(
                 by=_order_cols["original_idx"],
                 from_=secondary_key(row_link_name, _order_key),
+                drop_index=False,
+            ),
+            Reorder(
+                by=_order_cols["original_idx"],
+                from_=secondary_key(col_link_name, _order_key),
+                axis="columns",
                 drop_index=False,
             ),
             unpivot,
@@ -1191,7 +1237,11 @@ def _clustermap_build(
             # the dendrogram's share of dendrogram_ratio (F-L09-08). Layout now
             # reserves a gutter only for chrome it draws, so the workaround is
             # removed rather than left as a second mechanism for one rule.
-            "x": _segment_cols["x"],
+            #
+            # Linkage places leaf k at x = k. The leaf axis gets the heatmap
+            # band scale's continuous image, [-0.5, n - 0.5] with no padding,
+            # so leaf k lands on the centre of heatmap column k.
+            "x": _X(_segment_cols["x"], scale=_leaf_scale(len(value_cols))),
             "y": _segment_cols["y"],
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
@@ -1213,8 +1263,13 @@ def _clustermap_build(
             # See col_dendro_layer above: the `title=""` phantom-gutter
             # workaround is gone with #182; `axis(show=False)` below is the
             # whole statement.
-            "x": _segment_cols["x"],
-            "y": _segment_cols["y"],
+            #
+            # Same leaf-axis scale as the column dendrogram, reversed: CoordFlip
+            # draws data x upward, and the heatmap's first row is at the top.
+            # The distance axis is reversed too, so the leaves face the heatmap
+            # on the right, as the column tree's face it below.
+            "x": _X(_segment_cols["x"], scale=_leaf_scale(tbl.num_rows, reverse=True)),
+            "y": _Y(_segment_cols["y"], scale=LinearScale(reverse=True)),
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },
@@ -1244,7 +1299,7 @@ def _clustermap_build(
         row_dendrogram=row_dendro,
         col_dendrogram=col_dendro,
         dendrogram_ratio=dendrogram_ratio,
-    )
+    ).properties(title="Clustermap")
     cm = _finalize_chart(
         cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
     )
@@ -1488,7 +1543,7 @@ def _jointplot_build(
         # the aggregation, it just mislabels the count legend with the hue
         # field's name. Drop it here -- the hue legend still comes from the
         # marginals (see the shared-color handling below), and the center
-        # keeps its own (title-less) count-aggregate color scale.
+        # keeps its own count-aggregate color scale, titled "Count".
         hex_enc = {k: v for k, v in enc_center.items() if k != "color"}
         center = Chart(data).mark_hex(**jk).encode(**hex_enc)
     elif kind == "reg":

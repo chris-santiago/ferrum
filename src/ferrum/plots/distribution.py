@@ -1556,6 +1556,7 @@ def _reject_per_row_appearance_channels(kind: str, caller_channels: dict) -> Non
     )
 
 
+@_figure_entry
 def catplot(
     data: Any,
     *,
@@ -2160,14 +2161,6 @@ def _catplot_build(
             chart = chart.mark_violin(position=position)
         else:
             chart = chart.mark_violin()
-        # The hue-inner warning speaks as catplot's own entry: catplot fixes
-        # `inner=` at its own default and never exposes it, so a message
-        # pointing at `mark_violin(inner=...)` would send the caller looking
-        # for a kwarg catplot does not have; the recourse names one that works.
-        chart = chart._with_warning_voice(
-            f"catplot(kind={kind!r})",
-            '; use Chart.mark_violin(inner="none") to drop the inner mark',
-        )
     elif kind == "boxen":
         if position is not None:
             chart = chart.mark_boxen(position=position)

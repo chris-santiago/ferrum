@@ -903,7 +903,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             id_vars: vec![], value_vars: None, var_name: "variable".into(), value_name: "value".into(),
             name: None,
         })),
-        ("reorder", Reorder(ReorderSpec { by: "x".into(), drop_index: false, from: None, name: None })),
+        ("reorder", Reorder(ReorderSpec { by: "x".into(), drop_index: false, from: None, axis: crate::transform::linkage::LinkageAxis::Rows, name: None })),
         ("reference_line", ReferenceLine(ReferenceLineSpec {
             x_field: "x".into(), y_field: "y".into(), x: (0.0, 1.0), y: (0.0, 1.0), name: None,
         })),

@@ -3543,11 +3543,18 @@ class ClusterMapChart(_CompositeBase):
         computation degenerates to identity scale (pure translation) for every
         cell — matching the pre-cutover ``to_svg`` behavior exactly.
         """
+        from ferrum import config as _config
+
         heatmap = self._inject_parent_config(self.heatmap)
         d = self.dendrogram_ratio
         h = 1.0 - d
-        hm_w = heatmap._width or 600.0
-        hm_h = heatmap._height or 400.0
+        # The heatmap's native size is the one its leaf renders at, so an
+        # undeclared size falls back to the same config default the renderer
+        # uses. Any other fallback leaves the heatmap cell ratio-scaled, and a
+        # ratio cell's non-panel nodes (its colorbar) are translated but not
+        # scaled, so the colorbar would overrun the canvas edge.
+        hm_w = heatmap._width or float(_config.get("width"))
+        hm_h = heatmap._height or float(_config.get("height"))
         dendro_w = hm_w * d / h
         dendro_h = hm_h * d / h
         # Dendrograms have no meaningful axes (only the tree structure

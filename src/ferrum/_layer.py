@@ -11,9 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
+from ferrum._core import marks_drawing_constant_size
+
 # Primitive (renderer-native) mark names — those that do not desugar into a
-# composite of other marks.  Single-sourced here (a stdlib-only leaf imported by
-# the desugar pipeline) so chart.py, _desugar.py, and the statistical
+# composite of other marks.  Single-sourced here (a leaf imported by the
+# desugar pipeline) so chart.py, _desugar.py, and the statistical
 # chart-method mixin cannot drift across the T4.1 split seam.
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
@@ -121,6 +123,9 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
     }
 
 
+_MARKS_DRAWING_CONSTANT_SIZE = frozenset(marks_drawing_constant_size())
+
+
 def apply_catch_all_style(layer: _Layer, style_dict: dict) -> _Layer:
     """Merge a catch-all *style_dict* into *layer*'s ``mark_kwargs``.
 
@@ -137,7 +142,14 @@ def apply_catch_all_style(layer: _Layer, style_dict: dict) -> _Layer:
     to be two bodies agreeing by coincidence -- the second was unconditionally
     user-wins and ignored ``caller_style_keys`` entirely, which was invisible
     only because no layer reaching it recorded any.
+
+    A catch-all ``size`` reaches only a layer whose mark draws a constant
+    size (:func:`ferrum._core.marks_drawing_constant_size`): render refuses
+    a constant size on any other mark, and the caller aimed ``size`` at the
+    marks that draw it, not at, say, a smooth's confidence band.
     """
+    if "size" in style_dict and layer.mark not in _MARKS_DRAWING_CONSTANT_SIZE:
+        style_dict = {k: v for k, v in style_dict.items() if k != "size"}
     if not style_dict:
         return layer
     merged = catch_all_over(layer.mark_kwargs, style_dict, layer.caller_style_keys)
@@ -244,6 +256,13 @@ class MarkDesugarResult:
         above); empty means every key is a desugar default. Single-mark mode
         only -- a layered result records the same thing per layer, on
         ``_Layer.caller_style_keys``.
+    degraded : tuple of str
+        Sentences saying what this desugar had to drop or approximate, with
+        no speaker. The desugar does not warn itself: the dispatcher warns
+        each one as ``"{entry}: {note}"``, opened by the public call the
+        caller made (``_PendingMark.entry``), so one note speaks as
+        ``mark_violin`` or as ``catplot`` depending on who called. Both
+        modes.
     layer_name : str or None
         Which catalogued sub-layer of the composite mark this single mark IS
         (``_overrides.LAYER_NAME_CATALOG[kind]``) -- e.g. ``desugar_smooth``'s
@@ -310,6 +329,7 @@ class MarkDesugarResult:
     mark_kwargs: Optional[dict] = None  # style resolved for the emitted mark
     caller_style_keys: frozenset = frozenset()  # which of those keys the caller named
     layer_name: Optional[str] = None  # the catalogued sub-layer this mark is
+    degraded: tuple = ()  # what the desugar dropped, voiced by the dispatcher
 
     def __post_init__(self) -> None:
         """Enforce the layered-XOR-single-mark invariant, plus the
@@ -362,20 +382,6 @@ class MarkDesugarResult:
 
 
 @dataclass(frozen=True)
-class _EntryVoice:
-    """The public entry a composite mark's resolution-time warning names.
-
-    ``door`` opens the message; ``recourse`` is appended verbatim to its end,
-    for an entry that cannot point at a kwarg of its own. Carried on
-    :class:`_PendingMark`, never on the mark's kwargs, so no ``mark_*`` call
-    can set it and it never reaches the wire or a repr.
-    """
-
-    door: str
-    recourse: str = ""
-
-
-@dataclass(frozen=True)
 class _PendingMark:
     """Sentinel stored on ``Chart._pending_stat_mark`` when a composite or
     diagnostic ``mark_*()`` is called before ``.encode()``.
@@ -389,12 +395,9 @@ class _PendingMark:
     kwargs: dict
     desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], MarkDesugarResult]
     prior_mark: str | None = None  # Existing primitive mark to preserve as a layer
-    #: The entry that called the ``mark_*`` method on the caller's behalf
-    #: (e.g. ``catplot``), voiced by the desugar's warnings; ``None`` means
-    #: the ``mark_*`` method itself.
-    voice: _EntryVoice | None = None
-    #: The public entry every layer this mark emits names, when a figure
-    #: function called the ``mark_*`` method on the caller's behalf (e.g.
-    #: ``lmplot``); ``None`` means the ``mark_*`` method itself. See
-    #: ``_Layer.entry``.
+    #: The public entry the caller invoked, when a figure function or
+    #: visualizer called the ``mark_*`` method on the caller's behalf (e.g.
+    #: ``lmplot``); ``None`` means the ``mark_*`` method itself. Every layer
+    #: this mark emits names it (``_Layer.entry``), and so does every warning
+    #: its desugar reports (``MarkDesugarResult.degraded``).
     entry: str | None = None
