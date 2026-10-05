@@ -9,12 +9,10 @@ directly from the in-house compute helpers in ``stats.py``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import polars as pl
-
-from ferrum._entry import speak_as
 
 from ._base import FerrumVisualizer
 from ferrum.plots.ranking import (
@@ -25,13 +23,20 @@ from ferrum.plots.ranking import (
 from .._internal._rank_helpers import rank1d_compute, rank1d_compute_with_y, rank2d_compute
 
 
+class _ParallelSource(NamedTuple):
+    """What a parallel-coordinates chart is drawn from: the samples and the column coloring them."""
+
+    X: Any
+    hue: str | None
+
+
 class Rank1DVisualizer(FerrumVisualizer):
     """Rank features by a univariate statistic and display as a bar chart.
 
     A no-model visualizer (``model=None``) that computes a scalar score
     for each feature column and renders them as a ranked horizontal or
-    vertical bar chart.  ``fit`` is overridden directly — the base-class
-    ``ModelSource`` round-trip is bypassed entirely.
+    vertical bar chart.  Its source is the score frame itself, so no
+    ``ModelSource`` is built.
 
     Records ``top_feature_score`` (the score of the highest-ranked
     feature) in ``_metrics``.
@@ -112,18 +117,20 @@ class Rank1DVisualizer(FerrumVisualizer):
         self.properties = properties
         self.layers = layers
 
-    def fit(self, X: Any, y: Any = None) -> "Rank1DVisualizer":
+    def _build_source(self, X: Any, y: Any) -> pl.DataFrame:
+        """Return the ranked per-feature score frame; only ``algorithm="covariance"`` reads ``y``."""
         if self.algorithm == "covariance":
             if y is None:
                 raise ValueError("Rank1DVisualizer(algorithm='covariance') requires y.")
-            df = rank1d_compute_with_y(X, y, algorithm="covariance")
-        else:
-            df = rank1d_compute(X, algorithm=self.algorithm)
-        self._metrics["top_feature_score"] = float(df["score"][0])
-        self._chart = speak_as(
-            type(self).__name__,
-            _rank1d_chart_from_dataframe,
-            df,
+            return rank1d_compute_with_y(X, y, algorithm="covariance")
+        return rank1d_compute(X, algorithm=self.algorithm)
+
+    def _materialize(self) -> None:
+        self._metrics["top_feature_score"] = float(self._source["score"][0])
+
+    def _build_chart(self) -> Any:
+        return _rank1d_chart_from_dataframe(
+            self._source,
             algorithm=self.algorithm,
             orient=self.orient,
             top_k=self.top_k,
@@ -134,17 +141,14 @@ class Rank1DVisualizer(FerrumVisualizer):
             layers=self.layers,
             theme=self.theme,
         )
-        self._fitted = True
-        return self
 
 
 class Rank2DVisualizer(FerrumVisualizer):
     """Rank feature pairs by pairwise correlation and display as a heatmap.
 
     A no-model visualizer (``model=None``) that computes an N×N
-    correlation matrix and renders it as an annotated heatmap.  ``fit``
-    is overridden directly — the base-class ``ModelSource`` round-trip is
-    bypassed entirely.
+    correlation matrix and renders it as an annotated heatmap.  Its source
+    is the correlation frame itself, so no ``ModelSource`` is built.
 
     The ``"kendall"`` algorithm routes pairwise computation through
     ``ferrum._core.kendall_tau_b`` (Rust) for performance.
@@ -213,18 +217,21 @@ class Rank2DVisualizer(FerrumVisualizer):
         self.properties = properties
         self.layers = layers
 
-    def fit(self, X: Any, y: Any = None) -> "Rank2DVisualizer":
+    def _build_source(self, X: Any, y: Any) -> pl.DataFrame:
+        """Return the pairwise association frame; ``y`` is unused."""
         del y
-        df = rank2d_compute(X, algorithm=self.algorithm)
-        off_diag = df.filter(pl.col("feature_x") != pl.col("feature_y"))
+        return rank2d_compute(X, algorithm=self.algorithm)
+
+    def _materialize(self) -> None:
+        off_diag = self._source.filter(pl.col("feature_x") != pl.col("feature_y"))
         if off_diag.height > 0:
             self._metrics["max_abs_corr"] = float(off_diag["correlation"].abs().max() or 0.0)
         else:
             self._metrics["max_abs_corr"] = 0.0
-        self._chart = speak_as(
-            type(self).__name__,
-            _rank2d_chart_from_dataframe,
-            df,
+
+    def _build_chart(self) -> Any:
+        return _rank2d_chart_from_dataframe(
+            self._source,
             algorithm=self.algorithm,
             annot=self.annot,
             mark=self.mark,
@@ -233,17 +240,14 @@ class Rank2DVisualizer(FerrumVisualizer):
             layers=self.layers,
             theme=self.theme,
         )
-        self._fitted = True
-        return self
 
 
 class ParallelCoordinatesVisualizer(FerrumVisualizer):
     """Visualize multivariate samples as a parallel-coordinates chart.
 
     A no-model visualizer (``model=None``) that draws one polyline per
-    sample across a set of parallel vertical axes (one per feature).
-    ``fit`` is overridden directly — the base-class ``ModelSource``
-    round-trip is bypassed entirely.
+    sample across a set of parallel vertical axes (one per feature).  Its
+    source is the samples themselves, so no ``ModelSource`` is built.
 
     Records ``n_samples`` and ``n_features`` in ``_metrics`` so the
     ``repr`` surfaces the chart's shape.
@@ -318,23 +322,26 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         self.properties = properties
         self.layers = layers
 
-    def fit(self, X: Any, y: Any = None) -> "ParallelCoordinatesVisualizer":
-        # When the caller passes y but didn't set hue, route y as the
-        # color encoding under a reserved column name. Matches the
-        # sklearn convention that y is the supervisory signal — using it
-        # as the visual grouping is the natural default when no explicit
-        # hue column is named.
-        effective_hue = self.hue
+    def _build_source(self, X: Any, y: Any) -> _ParallelSource:
+        """Return ``X`` and the column that colors its lines.
+
+        When the caller passes y but didn't set hue, y is routed as the
+        color encoding under a reserved column name. Matches the sklearn
+        convention that y is the supervisory signal -- using it as the
+        visual grouping is the natural default when no explicit hue column
+        is named.
+        """
         if self.hue is None and y is not None:
-            X = _attach_hue_from_y(X, y)
-            effective_hue = "_hue"
+            return _ParallelSource(_attach_hue_from_y(X, y), "_hue")
+        return _ParallelSource(X, self.hue)
+
+    def _materialize(self) -> None:
         # n_samples / n_features bookkeeping for the repr.
+        X, hue = self._source
         if isinstance(X, pl.DataFrame):
             n_samples = X.height
             n_features = (
-                len(self.features)
-                if self.features
-                else (X.width - (1 if effective_hue in X.columns else 0))
+                len(self.features) if self.features else (X.width - (1 if hue in X.columns else 0))
             )
         elif hasattr(X, "shape"):
             n_samples = int(X.shape[0])
@@ -345,12 +352,12 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
             n_features = len(self.features) if self.features else int(arr.shape[1])
         self._metrics["n_samples"] = float(n_samples)
         self._metrics["n_features"] = float(n_features)
-        self._chart = speak_as(
-            type(self).__name__,
-            _parallel_coords_chart_from_dataframe,
-            X,
+
+    def _build_chart(self) -> Any:
+        return _parallel_coords_chart_from_dataframe(
+            self._source.X,
             features=self.features,
-            hue=effective_hue,
+            hue=self._source.hue,
             rescale=self.rescale,
             alpha=self.alpha,
             mark=self.mark,
@@ -359,8 +366,6 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
             layers=self.layers,
             theme=self.theme,
         )
-        self._fitted = True
-        return self
 
 
 def _attach_hue_from_y(X: Any, y: Any) -> Any:

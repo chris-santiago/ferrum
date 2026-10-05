@@ -1,53 +1,40 @@
 """FerrumVisualizer base — see ferrum-spec.md §3.15.
 
-fit() materializes derived data on a ModelSource and builds the chart.
-show() returns the Chart for rendering.
+fit() materializes derived data and builds the chart; show() returns the
+Chart for rendering.
 
-Two override patterns:
+``fit`` is one template over three hooks, which subclasses override; no
+subclass overrides ``fit`` itself, so every visualizer's chart is built in
+its class's voice:
 
-1. **Model-backed visualizers (the common case)** — override
-   ``_materialize`` and ``_build_chart``; the inherited ``fit``
-   constructs a ``ModelSource`` (via ``_build_source``) and calls both
-   hooks in order.
-2. **No-model / non-standard visualizers** — override ``fit`` directly
-   and skip ``ModelSource`` construction.  ``ClassBalanceVisualizer``,
+1. ``_build_source(X, y)`` returns what the chart is computed from. By
+   default a ``ModelSource`` wrapping ``self.model``. A subclass may build
+   it differently (``ROCVisualizer``, ``PRVisualizer``,
+   ``DiscriminationThresholdVisualizer`` and ``CalibrationVisualizer``
+   route ``compare=`` / ``*models`` to a ``ComparedModelSource``), or, with
+   no model, return the prepared data itself (``ClassBalanceVisualizer``,
    ``Rank1DVisualizer`` / ``Rank2DVisualizer`` /
-   ``ParallelCoordinatesVisualizer``, and ``ElbowVisualizer`` all take
-   this path.
-
-The two hooks default to no-ops on the base class so option-2
-subclasses don't need to provide trivial stubs.  Calling ``show()``
-on a fitted-but-unbuilt visualizer simply returns ``None`` instead
-of raising; that's a programming error in the subclass, not a
-runtime condition to guard against.
-
-A third, narrower hook — ``_build_source`` — lets an option-1 subclass
-customize *how* the ``ModelSource`` is constructed (e.g. routing a
-``compare=`` kwarg through ``_resolve_source`` to build a
-``ComparedModelSource``) without duplicating the rest of ``fit``.
-``ROCVisualizer``, ``PRVisualizer``,
-``DiscriminationThresholdVisualizer``, and ``CalibrationVisualizer``
-(whose ``*models`` overlay resolves here too, since 2026-09-13) use
-this.
+   ``ParallelCoordinatesVisualizer``, ``ElbowVisualizer``).
+2. ``_materialize()`` reads ``self._source`` and writes ``_metrics``.
+3. ``_build_chart()`` returns the chart built from ``self._source``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ferrum._entry import speak_as
+from ferrum._entry import stamp_entry, voiced_as
 
 
 class FerrumVisualizer:
     """Base class for sklearn-protocol model-diagnostic visualizers.
 
-    Concrete visualizers either override ``_materialize`` +
-    ``_build_chart`` (the standard model-backed flow) or override
-    ``fit`` directly (no-model / multi-fit / label-only flow). Either way
-    the chart is built through :func:`ferrum._entry.speak_as` with the
-    class name, so a malformed ``mark=`` refuses at ``fit``, the first point
-    the chart's layers exist, and every warning and refusal about the chart
-    names the class.
+    Concrete visualizers override the ``_build_source``, ``_materialize``
+    and ``_build_chart`` hooks, never ``fit``. ``fit`` runs all three in the
+    class's voice (:func:`ferrum._entry.voiced_as`) and stamps the class
+    name on the chart (:func:`ferrum._entry.stamp_entry`), so a malformed
+    ``mark=`` refuses at ``fit``, the first point the chart's layers exist,
+    and every warning and refusal about the chart names the class.
 
     Parameters
     ----------
@@ -111,10 +98,10 @@ class FerrumVisualizer:
     def fit(self, X: Any, y: Any = None) -> "FerrumVisualizer":
         """Materialize derived data from ``X`` / ``y`` and build the chart.
 
-        Constructs a ``ModelSource`` from the wrapped ``model`` (via
-        ``_build_source``), calls ``_materialize`` to populate
-        ``_metrics``, then ``_build_chart`` to assemble the ferrum
-        ``Chart``. Returns ``self`` for method chaining.
+        Builds the source (``_build_source``), calls ``_materialize`` to
+        populate ``_metrics``, then ``_build_chart`` to assemble the ferrum
+        ``Chart``, all speaking as the class. Returns ``self`` for method
+        chaining.
 
         Parameters
         ----------
@@ -129,20 +116,23 @@ class FerrumVisualizer:
         FerrumVisualizer
             ``self`` — the fitted visualizer instance.
         """
-        self._source = self._build_source(X, y)
-        self._materialize()
-        self._chart = speak_as(type(self).__name__, self._build_chart)
+        entry = type(self).__name__
+        with voiced_as(entry):
+            self._source = self._build_source(X, y)
+            self._materialize()
+            chart = self._build_chart()
+        self._chart = stamp_entry(chart, entry)
         self._fitted = True
         return self
 
     def _build_source(self, X: Any, y: Any) -> Any:
-        """Construct the ``ModelSource`` wrapping ``self.model``.
+        """Return what the chart is computed from, stored as ``self._source``.
 
-        Default implementation for the standard model-backed flow.
-        Subclasses that support additional source-construction options
-        (e.g. a ``compare=`` kwarg that should build a
-        ``ComparedModelSource``) override this hook instead of
-        duplicating the rest of ``fit``.
+        Default implementation for the standard model-backed flow: a
+        ``ModelSource`` wrapping ``self.model``. Subclasses with other
+        source-construction options (e.g. a ``compare=`` kwarg that should
+        build a ``ComparedModelSource``), or with no model at all, override
+        this hook.
         """
         import ferrum
 
@@ -151,23 +141,17 @@ class FerrumVisualizer:
     def _materialize(self) -> None:
         """Compute derived data and populate ``_metrics``.
 
-        Default implementation is a no-op so subclasses that override
-        ``fit`` directly (no-model variants) don't have to provide a
-        trivial stub.  Standard model-backed subclasses override this
-        to read off ``self._source`` and write headline metrics into
-        ``self._metrics``.
+        Default implementation is a no-op, for a visualizer with no
+        headline metric. Subclasses override this to read off
+        ``self._source`` and write headline metrics into ``self._metrics``.
         """
 
     def _build_chart(self) -> Any:
-        """Assemble and return the ferrum ``Chart``.
+        """Assemble and return the ferrum ``Chart`` from ``self._source``.
 
-        Default implementation returns ``None`` so subclasses that
-        override ``fit`` directly (and set ``self._chart`` themselves)
-        don't have to provide a trivial stub.  Standard model-backed
-        subclasses override this to construct the chart from
-        ``self._source``.
+        Every visualizer overrides it.
         """
-        return None
+        raise TypeError(f"{type(self).__name__} defines no _build_chart")
 
     def score(self, X: Any, y: Any) -> float:
         """Delegate to ``self.model.score(X, y)`` when the model supports it.

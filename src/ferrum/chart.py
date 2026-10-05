@@ -1167,9 +1167,10 @@ class Chart(
         # that built it, so a warning or refusal about any of them speaks as
         # that call (`_Layer.entry`; the chart-level `_entry` is the flat
         # chart's, see `to_spec`). Every door inside the figure that writes a
-        # caller's style already refused it in this voice
-        # (`resolve_figure_style`); Rust holds every layer's size to the one
-        # size rule at render, wrapped in the layer's entry.
+        # caller's style already refused it in this voice (`speak_as`), a
+        # pending mark resolved later refuses in it too (`_resolve_pending`),
+        # and Rust holds every layer's size to the one size rule at render,
+        # wrapped in the layer's entry.
         new = self._clone()
         if new._layers:
             new._layers = [replace(layer, entry=entry) for layer in new._layers]

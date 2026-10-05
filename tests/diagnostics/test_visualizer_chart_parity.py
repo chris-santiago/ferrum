@@ -729,12 +729,13 @@ _FORWARDING_EXCEPTIONS: list[ForwardingException] = [
     ),
 ]
 
-#: Params the inherited `FerrumVisualizer.fit` consumes while building the
-#: ModelSource, before the builder runs. Exempt only for a visualizer that
-#: inherits that `fit` and whose called builder has no parameter of that
-#: name, so a builder that does take it (FeatureImportancesVisualizer's
-#: random_state=) must still receive it, and a visualizer with its own `fit`
-#: needs its own `_FORWARDING_EXCEPTIONS` entry saying where the value goes.
+#: Params `FerrumVisualizer.fit` consumes while building the ModelSource,
+#: before the builder runs. Exempt only for a visualizer that builds a
+#: ModelSource (`_builds_model_source`) and whose called builder has no
+#: parameter of that name, so a builder that does take it
+#: (FeatureImportancesVisualizer's random_state=) must still receive it, and
+#: a no-model visualizer needs its own `_FORWARDING_EXCEPTIONS` entry saying
+#: where the value goes.
 _PRE_BUILDER_PARAMS: dict[str, str] = {
     "random_state": "Seeds the ModelSource the inherited fit builds before the "
     "chart; the builder reads the seeded source.",
@@ -752,8 +753,11 @@ def _call_target(case: ParityCase) -> Callable[..., Any]:
 
 
 def _builds_model_source(visualizer: type[FerrumVisualizer]) -> bool:
-    """Whether `visualizer` inherits the base `fit` that builds a ModelSource."""
-    return "fit" not in vars(visualizer)
+    """Whether `visualizer` wraps its model(s) in a ModelSource, rather than
+    computing its source from the data alone (a no-model visualizer takes
+    neither `model` nor `*models`)."""
+    params = inspect.signature(visualizer.__init__).parameters
+    return "model" in params or "models" in params
 
 
 def _placeholder_positional(visualizer: type[FerrumVisualizer]) -> tuple[Any, ...]:
@@ -809,8 +813,8 @@ def _record_builder_call(
 
     def recorder(*_args: Any, **received: Any) -> Any:
         calls.append(received)
-        # A chart, as the builder it stands in for returns: `fit` builds
-        # through `speak_as`, which stamps whatever comes back.
+        # A chart, as the builder it stands in for returns: `fit` stamps
+        # whatever comes back.
         return ferrum.Chart()
 
     for module_name in {target.__module__, case.visualizer.__module__}:
@@ -826,7 +830,7 @@ def _record_builder_call(
         warnings.simplefilter("ignore", DeprecationWarning)
         visualizer = case.visualizer(*positional, **kwargs)
     if not _builds_model_source(case.visualizer):
-        # No-model visualizers build inside their own `fit`.
+        # A no-model visualizer's source is computed from the data in `fit`.
         df = load_dataset("regression")
         visualizer.fit(df.select(["f0", "f1", "f2", "f3", "f4"]))
     else:

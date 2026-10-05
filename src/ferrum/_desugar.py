@@ -55,8 +55,8 @@ from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
 from ferrum._warn import user_stacklevel
-from ferrum._entry import EntryRefusal
-from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws, resolve_figure_style
+from ferrum._entry import EntryRefusal, voiced_as
+from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws, resolve_layer_style
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -294,8 +294,10 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
 
     Raises
     ------
-    ValueError
-        If a key is not a sub-layer *kind* can draw, or *layer_kwargs*, or
+    EntryRefusal
+        A ``ValueError`` voiced as *where*, re-voiceable as the figure
+        function or visualizer that wrote the dict, if a key is not a
+        sub-layer *kind* can draw, or *layer_kwargs*, or
         any of its values, is not a dict -- mirroring
         ``_apply_mark_overrides``' refusal of a non-dict override value.
     """
@@ -303,10 +305,14 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
         return {}
     entry = where or f"mark_{kind}"
     if not isinstance(layer_kwargs, dict):
-        raise ValueError(
-            f"{entry}(layer_kwargs=) must be a dict mapping a sub-layer name to that "
-            f"layer's mark kwargs, e.g. layer_kwargs={{'line': {{'stroke': 'red'}}}}; "
-            f"got {type(layer_kwargs).__name__}."
+        got = type(layer_kwargs).__name__
+        raise EntryRefusal(
+            lambda voice: (
+                f"{voice}(layer_kwargs=) must be a dict mapping a sub-layer name to that "
+                f"layer's mark kwargs, e.g. layer_kwargs={{'line': {{'stroke': 'red'}}}}; "
+                f"got {got}."
+            ),
+            entry,
         )
     from ferrum._overrides import LAYER_NAME_CATALOG
 
@@ -314,32 +320,44 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
     aimed: dict = {}
     for name, style in layer_kwargs.items():
         if name not in valid:
-            drawn = (
-                f"{entry} draws {sorted(valid)}"
-                if valid
-                else f"{entry} draws no named sub-layers, so it has nothing to aim at"
-            )
-            raise ValueError(
-                f"{entry}(layer_kwargs=): unknown sub-layer {name!r}; {drawn}. "
-                "Pass style that should reach every layer as a plain mark kwarg "
-                f"instead, e.g. {entry}(opacity=0.5)."
-            )
+            raise EntryRefusal(_unknown_layer_kwargs_message(name, valid), entry)
         if not isinstance(style, dict):
-            raise ValueError(
-                f"{entry}(layer_kwargs={{{name!r}: ...}}) must be a dict of mark "
-                f"kwargs for that layer; got {type(style).__name__}."
+            got = type(style).__name__
+            raise EntryRefusal(
+                lambda voice: (
+                    f"{voice}(layer_kwargs={{{name!r}: ...}}) must be a dict of mark "
+                    f"kwargs for that layer; got {got}."
+                ),
+                entry,
             )
         if style:
             aimed[name] = dict(style)
     return aimed
 
 
+def _unknown_layer_kwargs_message(name: Any, valid: frozenset[str]) -> Callable[[str], str]:
+    """The refusal text, for any voice, of ``layer_kwargs=`` aimed at *name*, no sub-layer."""
+
+    def message_for(voice: str) -> str:
+        drawn = (
+            f"{voice} draws {sorted(valid)}"
+            if valid
+            else f"{voice} draws no named sub-layers, so it has nothing to aim at"
+        )
+        return (
+            f"{voice}(layer_kwargs=): unknown sub-layer {name!r}; {drawn}. "
+            "Pass style that should reach every layer as a plain mark kwarg "
+            f"instead, e.g. {voice}(opacity=0.5)."
+        )
+
+    return message_for
+
+
 def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
     """Apply the caller's per-layer style to *layer*, recording the keys as theirs.
 
-    The style is held to the layer's own mark (:func:`resolve_figure_style`,
-    voiced as *entry*, or as the figure that resolved this mark while it
-    built).
+    The style is held to the layer's own mark (:func:`resolve_layer_style`,
+    voiced as *entry*).
 
     Recorded on ``caller_style_keys`` (not just merged into ``mark_kwargs``)
     because the chart-level catch-all is spread over the same layers moments
@@ -351,7 +369,7 @@ def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
     aimed = layer_kwargs.get(layer.name) if layer.name is not None else None
     if not aimed:
         return layer
-    aimed = resolve_figure_style(layer.mark, aimed, provisional=entry)
+    aimed = resolve_layer_style(entry, layer.mark, aimed)
     return replace(
         layer,
         mark_kwargs={**(layer.mark_kwargs or {}), **aimed},
@@ -387,7 +405,7 @@ def _aim_single_mark_kwargs(
     aimed = layer_kwargs.get(result.layer_name) if result.layer_name is not None else None
     if not aimed:
         return result.mark_kwargs, result.caller_style_keys
-    aimed = resolve_figure_style(result.mark, aimed, provisional=entry)
+    aimed = resolve_layer_style(entry, result.mark, aimed)
     return (
         {**(result.mark_kwargs or {}), **aimed},
         result.caller_style_keys | frozenset(aimed),
@@ -1116,9 +1134,21 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     When ``result.layers`` is set, the chart enters layered mode; otherwise it
     applies the single-mark ``result.mark``, ``result.remap``, and
     ``result.position``.
+
+    Every style refusal the resolution raises speaks as the public entry
+    the caller invoked: the figure function or visualizer stamped on the
+    pending mark, which may resolve after that call has returned, or
+    ``mark_<kind>`` for a mark method called directly.
     """
     if chart._pending_stat_mark is None:
         return chart
+    entry = chart._pending_stat_mark.entry or f"mark_{chart._pending_stat_mark.kind}"
+    with voiced_as(entry):
+        return _resolve_pending_as(chart, entry)
+
+
+def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
+    """:func:`_resolve_pending_impl`'s resolution of a pending mark, voiced as *entry*."""
     kind = chart._pending_stat_mark.kind
     # Copied because `layer_kwargs` is popped out below and the pending mark
     # belongs to `chart`, which a caller may resolve more than once.
@@ -1129,7 +1159,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # nor a `MarkBase` style key (which would reject it as unknown). Every
     # composite mark routed through this dispatcher gets the same door and
     # the same refusal, keyed on the same `LAYER_NAME_CATALOG` vocabulary.
-    layer_kwargs = validate_layer_kwargs(kind, kwargs.pop("layer_kwargs", None))
+    layer_kwargs = validate_layer_kwargs(kind, kwargs.pop("layer_kwargs", None), where=entry)
     x_enc = chart._encoding.get("x")
     y_enc = chart._encoding.get("y")
     x_field = (
@@ -1214,7 +1244,6 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     # desugar degraded, and the size= rule, so a figure function forwarding
     # size= to a composite that draws neither point nor line refuses in its
     # own voice.
-    entry = chart._pending_stat_mark.entry or f"mark_{kind}"
     for note in result.degraded:
         warnings.warn(f"{entry}: {note}", stacklevel=user_stacklevel())
     if "size" in style_dict:

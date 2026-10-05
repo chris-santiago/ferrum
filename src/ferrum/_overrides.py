@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._entry import EntryRefusal
-from ferrum.marks.base import layer_honors, resolve_figure_style
+from ferrum.marks.base import layer_honors, resolve_layer_style
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -187,7 +187,10 @@ def _apply_mark_overrides(
         elif val is False or val is None:
             continue
         else:
-            styled = {**(ly.mark_kwargs or {}), **resolve_figure_style(ly.mark, val)}
+            styled = {
+                **(ly.mark_kwargs or {}),
+                **resolve_layer_style(f"mark_{ly.mark}", ly.mark, val),
+            }
             new_layers.append(replace(ly, mark_kwargs=styled))
     if not new_layers:
         raise EntryRefusal(
@@ -220,10 +223,8 @@ def _apply_unnamed_style(
     if landed is not None:
         landed |= taken
     else:
-        untaken = {k: v for k, v in overrides.items() if k not in taken}
-        if untaken:
-            resolve_figure_style(marks[0], untaken)
-    styles = [resolve_figure_style(m, part) for m, part in zip(marks, parts)]
+        _refuse_untaken(marks[0], {k: v for k, v in overrides.items() if k not in taken})
+    styles = [resolve_layer_style(f"mark_{m}", m, part) for m, part in zip(marks, parts)]
     if new._layers:
         new._layers = [
             replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **style})
@@ -251,6 +252,29 @@ def _undrawn_sub_layer_message(key: str, drawn: set[str]) -> Callable[[str], str
     return lambda entry: (
         f"{entry}(mark={{{key!r}: ...}}): this call draws no {key!r} sub-layer, so "
         f"nothing would take the style; it draws {sorted(drawn)}"
+    )
+
+
+def _refuse_untaken(mark: Any, untaken: dict[str, Any]) -> None:
+    """Refuse the ``mark=`` style keys no layer of a chart honors.
+
+    For a named *mark*, the chart's first layer's, the refusal is that
+    mark's own for the keys (``relplot: keyword argument 'interpolate' is
+    not honored by mark_point``), so it names the mark and what it honors.
+    Any other mark has no honored set to name, so the refusal names the
+    keys alone. Either way the keys never pass silently.
+    """
+    if not untaken:
+        return
+    if isinstance(mark, str):
+        resolve_layer_style(f"mark_{mark}", mark, untaken)
+    keys = sorted(untaken)
+    raise EntryRefusal(
+        lambda entry: (
+            f"{entry}(mark=...): no layer of this chart draws a mark that honors "
+            f"{keys!r}, so nothing would take them"
+        ),
+        "",
     )
 
 

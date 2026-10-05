@@ -14,7 +14,7 @@ from ferrum._entry import EntryRefusal, speak_as
 from ferrum._overrides import _apply_overrides
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
-from ferrum.marks.base import resolve_figure_style
+from ferrum.marks.base import resolve_layer_style
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -554,7 +554,7 @@ def _style_kws(param: str, mark: str, kws: Any) -> dict:
     """Return a figure's ``<param>=`` style dict (``line_kws``) for the layer drawing *mark*.
 
     Held to *mark*'s honored kwargs with aliases resolved
-    (:func:`ferrum.marks.base.resolve_figure_style`); ``None`` is no style. A
+    (:func:`ferrum.marks.base.resolve_layer_style`); ``None`` is no style. A
     refusal is voiced by the figure that received the dict.
     """
     if kws is None:
@@ -564,7 +564,7 @@ def _style_kws(param: str, mark: str, kws: Any) -> dict:
         raise EntryRefusal(
             lambda entry: f"{entry}({param}=...) must be a dict of mark kwargs; got {kind}", ""
         )
-    return resolve_figure_style(mark, kws)
+    return resolve_layer_style(f"mark_{mark}", mark, kws)
 
 
 def _figure_entry(fn: _F) -> _F:

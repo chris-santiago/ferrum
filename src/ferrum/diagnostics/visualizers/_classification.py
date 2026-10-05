@@ -24,7 +24,6 @@ from ferrum.plots.classification import (
     _pr_chart_from_source,
     _roc_chart_from_source,
 )
-from ferrum._entry import speak_as
 
 from ._base import FerrumVisualizer
 
@@ -1072,38 +1071,34 @@ class ClassBalanceVisualizer(FerrumVisualizer):
         self.encode = encode
         self.properties = properties
         self.layers = layers
-        self._y: pl.Series | None = None
 
-    def fit(self, X: Any, y: Any = None) -> "ClassBalanceVisualizer":
+    def _build_source(self, X: Any, y: Any) -> pl.Series:
+        """Return the class labels, ``y`` or, from ``fit(y)``, ``X``, as a ``pl.Series``."""
         if y is None:
             if X is None:
                 raise TypeError("ClassBalanceVisualizer.fit() needs either fit(X, y) or fit(y).")
             y = X
-
         if isinstance(y, pl.Series):
-            self._y = y
-        else:
-            try:
-                arr = np.asarray(y).ravel()
-            except Exception:
-                arr = list(y)
-            self._y = pl.Series(arr.tolist() if isinstance(arr, np.ndarray) else arr)
+            return y
+        try:
+            arr = np.asarray(y).ravel()
+        except Exception:
+            arr = list(y)
+        return pl.Series(arr.tolist() if isinstance(arr, np.ndarray) else arr)
 
-        counts = Counter(self._y.to_list())
+    def _materialize(self) -> None:
+        counts = Counter(self._source.to_list())
         max_n = max(counts.values()) if counts else 0
         min_n = min(counts.values()) if counts else 1
         self._metrics["n_classes"] = float(len(counts))
         self._metrics["imbalance_ratio"] = float(max_n) / float(max(min_n, 1))
 
-        self._chart = speak_as(
-            type(self).__name__,
-            _class_balance_chart_from_dataframe,
-            self._y,
+    def _build_chart(self) -> Any:
+        return _class_balance_chart_from_dataframe(
+            self._source,
             mark=self.mark,
             encode=self.encode,
             properties=self.properties,
             layers=self.layers,
             theme=self.theme,
         )
-        self._fitted = True
-        return self

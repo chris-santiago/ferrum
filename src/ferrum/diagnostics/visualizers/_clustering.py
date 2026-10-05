@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ferrum._entry import speak_as
 
 from ._base import FerrumVisualizer
 
@@ -112,8 +111,8 @@ class ElbowVisualizer(FerrumVisualizer):
 
     Unlike other ferrum visualizers, ``ElbowVisualizer`` takes a model *class*
     (e.g. ``KMeans``) — not a fitted instance — and constructs and fits one
-    model per k value inside its own ``fit()`` override. The ``ModelSource``
-    round-trip is skipped entirely; per-k models are transient and discarded
+    model per k value when ``fit`` builds its source, the per-k score
+    frame. No ``ModelSource`` is built; per-k models are transient and discarded
     after their score is recorded. Renders a score-vs-k line chart.
 
     Records ``best_k`` — the integer k whose score is optimal for the
@@ -189,34 +188,38 @@ class ElbowVisualizer(FerrumVisualizer):
         self.properties = properties
         self.layers = layers
 
-    def fit(self, X: Any, y: Any = None) -> "ElbowVisualizer":
+    def _build_source(self, X: Any, y: Any) -> Any:
+        """Return the per-``k`` score frame, fitting ``model_class`` at each ``k``; ``y`` is unused."""
         del y
-        from ferrum.plots.clustering import _elbow_chart_from_source, _elbow_scores
+        from ferrum.plots.clustering import _elbow_scores
 
-        scores = _elbow_scores(
+        return _elbow_scores(
             self.model_class,
             X,
             ks=self.ks,
             metric=self.metric,
             random_state=self.random_state,
         )
+
+    def _materialize(self) -> None:
+        scores = self._source
         # distortion is minimized; silhouette and CH are maximized.
         idx = (
             scores["score"].arg_min() if self.metric == "distortion" else scores["score"].arg_max()
         )
         self._metrics["best_k"] = float(scores["k"][idx])
-        self._chart = speak_as(
-            type(self).__name__,
-            _elbow_chart_from_source,
-            scores,
+
+    def _build_chart(self) -> Any:
+        from ferrum.plots.clustering import _elbow_chart_from_source
+
+        return _elbow_chart_from_source(
+            self._source,
             mark=self.mark,
             encode=self.encode,
             properties=self.properties,
             layers=self.layers,
             theme=self.theme,
         )
-        self._fitted = True
-        return self
 
 
 class ManifoldVisualizer(FerrumVisualizer):
@@ -229,8 +232,8 @@ class ManifoldVisualizer(FerrumVisualizer):
     recompute it.
 
     Takes a *fitted* clustering estimator whose ``labels_`` attribute is used
-    to color points. Pass ``model=None`` only if you override ``fit`` in a
-    subclass and supply ``labels_`` by other means.
+    to color points. Pass ``model=None`` only if you override
+    ``_build_source`` in a subclass and supply ``labels_`` by other means.
 
     Records ``n_samples`` — the number of rows in the embedding — as the
     headline metric.

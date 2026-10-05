@@ -67,9 +67,10 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
 
     Raises
     ------
-    ValueError
-        If any key is not honored by *mark_name* (see
-        ``ferrum.marks.base.MARK_HONORED_KWARGS``).
+    EntryRefusal
+        A ``ValueError`` voiced as ``mark_<mark_name>``, or as the figure
+        function or visualizer that wrote the kwargs, if any key is not
+        honored by *mark_name* (see ``ferrum.marks.base.MARK_HONORED_KWARGS``).
 
     Examples
     --------
@@ -78,16 +79,20 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
     >>> validate_user_mark_kwargs("boxplot", {"typo": 1})  # doctest: +ELLIPSIS
     Traceback (most recent call last):
         ...
-    ValueError: mark_boxplot: unknown keyword argument(s) ['typo']. ...
+    ferrum._entry.EntryRefusal: mark_boxplot: unknown keyword argument(s) ['typo']. ...
     """
     if not kwargs:
         return {}
+    from ferrum._entry import EntryRefusal
     from ferrum.marks.base import mark_honors  # type: ignore[attr-defined]
     from ferrum.marks.base import _mark_kwargs_error_plural  # type: ignore[attr-defined]
 
     unknown = [k for k in kwargs if not mark_honors(mark_name, k)]
     if unknown:
-        raise ValueError(_mark_kwargs_error_plural(mark_name, unknown))
+        raise EntryRefusal(
+            lambda entry: _mark_kwargs_error_plural(mark_name, unknown, entry=entry),
+            f"mark_{mark_name}",
+        )
     return dict(kwargs)
 
 

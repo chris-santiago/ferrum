@@ -6,8 +6,9 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+import functools
+from collections.abc import Callable, Mapping
+from typing import Any, TypeVar
 
 from ferrum._core import (
     check_mark_size,
@@ -61,6 +62,42 @@ _LINETYPE_MAP: dict[str, list[float]] = {
     "dashdot": [4.0, 2.0, 1.0, 2.0],
     "longdash": [8.0, 4.0],
 }
+
+
+_Resolver = TypeVar("_Resolver", bound=Callable[..., Any])
+
+
+def _refuses_in_any_voice(resolve: _Resolver) -> _Resolver:
+    """Make every refusal of ``resolve(entry, ...)`` an :class:`EntryRefusal`.
+
+    *resolve* judges a caller's style and raises ``ValueError`` voiced as
+    its first argument, the public call that received the style. The
+    refusal it raises instead carries the same judgment for any voice, so a
+    figure function or visualizer that wrote the style re-voices it as
+    itself (:func:`ferrum._entry.voiced_as`) and a mark method called
+    directly keeps its own. An :class:`EntryRefusal` raised inside
+    *resolve* already has that form and propagates unchanged.
+    """
+
+    @functools.wraps(resolve)
+    def wrapper(entry: str, *args: Any) -> Any:
+        try:
+            return resolve(entry, *args)
+        except EntryRefusal:
+            raise
+        except ValueError as err:
+            first = str(err)
+
+        def message_for(voice: str) -> str:
+            try:
+                resolve(voice, *args)
+            except ValueError as err:
+                return str(err)
+            return first
+
+        raise EntryRefusal(message_for, entry) from None
+
+    return wrapper  # type: ignore[return-value]
 
 
 def _stroke_dash_error(context: str, value: Any) -> str:
@@ -333,6 +370,7 @@ def _mark_kwarg_error(mark_name: str, key: str, *, entry: str | None = None) -> 
     )
 
 
+@_refuses_in_any_voice
 def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) -> None:
     """Hold a composite mark's constant `size=` to the size rule of the marks it emits.
 
@@ -355,6 +393,7 @@ def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) 
     check_mark_size(entry, (drawing or drawn_marks)[0], size)
 
 
+@_refuses_in_any_voice
 def check_constant_size(entry: str, mark: str, size: Any) -> float | None:
     """Return *size* as a number once it meets the one constant-size rule for *mark*.
 
@@ -373,16 +412,15 @@ def check_constant_size(entry: str, mark: str, size: Any) -> float | None:
     return value
 
 
-def _mark_kwargs_error_plural(mark_name: str, keys: list[str]) -> str:
+def _mark_kwargs_error_plural(mark_name: str, keys: list[str], *, entry: str) -> str:
     """Plural counterpart of :func:`_mark_kwarg_error` for a batch of *keys*
     (used by ``validate_user_mark_kwargs``, which reports every offending
-    key from one call rather than failing on the first)."""
+    key from one call rather than failing on the first), voiced as *entry*."""
     honored = sorted(_honored_set_for(mark_name))
     if all(key not in _VALID_MARK_KWARGS for key in keys):
-        return f"mark_{mark_name}: unknown keyword argument(s) {keys!r}. Honored: {honored}"
+        return f"{entry}: unknown keyword argument(s) {keys!r}. Honored: {honored}"
     return (
-        f"mark_{mark_name}: keyword argument(s) {keys!r} not honored by "
-        f"mark_{mark_name}. Honored: {honored}"
+        f"{entry}: keyword argument(s) {keys!r} not honored by mark_{mark_name}. Honored: {honored}"
     )
 
 
@@ -445,18 +483,20 @@ def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
     return _MARK_KWARG_ALIASES.get(key, key)
 
 
+@_refuses_in_any_voice
 def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Return *kwargs* as *mark_name* honors them: aliases resolved, values checked.
 
     The one honored-kwarg rule for a mark's style, whichever door wrote it:
     ``mark_<name>(...)`` (through :class:`MarkBase`), ``fm.Layer(mark_kwargs=)``,
     a figure function's ``mark=`` dict or ``*_kws`` and a composite's
-    ``layer_kwargs=``. Every refusal is a ``ValueError`` voiced as *entry*,
-    the public call that received the kwarg: a kwarg *mark_name* does not
-    honor (:func:`mark_honors`), a constant ``size`` that breaks the size
-    rule (:func:`check_constant_size`), an unknown point ``shape``, an
-    ``interpolate`` outside Rust's vocabulary, a non-numeric value for a
-    numeric field, or a literal ``fill``/``stroke`` that is not a color.
+    ``layer_kwargs=``. Every refusal is an :class:`ferrum._entry.EntryRefusal`
+    voiced as *entry*, the public call that received the kwarg: a kwarg
+    *mark_name* does not honor (:func:`mark_honors`), a constant ``size``
+    that breaks the size rule (:func:`check_constant_size`), an unknown
+    point ``shape``, an ``interpolate`` outside Rust's vocabulary, a
+    non-numeric value for a numeric field, or a literal ``fill``/``stroke``
+    that is not a color.
     """
     resolved: dict[str, Any] = {}
     for k, v in kwargs.items():
@@ -518,14 +558,15 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
 _WIRE_MARK_KWARGS: frozenset[str] = frozenset(mark_kwargs_fields())
 
 
+@_refuses_in_any_voice
 def resolve_layer_style(entry: str, mark: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Return a caller's style *kwargs* for one layer drawing *mark*, as *mark* honors them.
 
     A primitive mark meets :func:`resolve_mark_kwargs`. Any other mark name
     has no Python honored set, so a key Rust reads for no mark at all
     refuses, and the rest pass through for Rust to judge. A *mark* that is
-    not a name (a ``MarkSpec``) is returned unchanged. Refusals are voiced as
-    *entry*.
+    not a name (a ``MarkSpec``) is returned unchanged. Refusals are
+    :class:`ferrum._entry.EntryRefusal`, voiced as *entry*.
     """
     if not isinstance(mark, str):
         return dict(kwargs)
@@ -551,34 +592,6 @@ def layer_honors(mark: Any, key: str) -> bool:
     if mark in MARK_HONORED_KWARGS:
         return mark_honors(mark, _canonical_mark_kwarg(mark, key))
     return key in _WIRE_MARK_KWARGS
-
-
-def resolve_figure_style(
-    mark: Any, kwargs: Mapping[str, Any], *, provisional: str | None = None
-) -> dict[str, Any]:
-    """:func:`resolve_layer_style` for a style dict a door received while a chart builds.
-
-    The door (a figure's ``mark=`` override, ``lmplot(line_kws=)``, a
-    composite's ``layer_kwargs=``) may run while a figure function or
-    visualizer builds, before its public entry is known, so a refusal is an
-    :class:`ferrum._entry.EntryRefusal` that the figure re-voices as itself.
-    Raised outside any figure, it speaks as *provisional* (default
-    ``mark_<mark>``).
-    """
-    provisional = provisional or f"mark_{mark}"
-    try:
-        return resolve_layer_style(provisional, mark, kwargs)
-    except ValueError as err:
-        first = str(err)
-
-    def message_for(entry: str) -> str:
-        try:
-            resolve_layer_style(entry, mark, kwargs)
-        except ValueError as err:
-            return str(err)
-        return first
-
-    raise EntryRefusal(message_for, provisional) from None
 
 
 class MarkBase:

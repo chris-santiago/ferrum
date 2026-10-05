@@ -100,13 +100,21 @@ def test_the_population_check_catches_an_unstamped_function() -> None:
     assert plain_chart.__code__ is not _STAMP_CODE
 
 
-def test_every_visualizer_speaks_through_the_one_show() -> None:
-    """``show()`` is the only public exit of a visualizer's chart and it
-    stamps the class name, so no subclass may replace it."""
+def test_no_visualizer_replaces_the_fit_template() -> None:
+    """``FerrumVisualizer.fit`` builds every visualizer's chart in the class's
+    voice, so no subclass may define its own ``fit`` and skip it."""
     visualizers = _visualizers()
     assert len(visualizers) >= 25
-    overriding = [cls.__name__ for cls in visualizers if "show" in vars(cls)]
+    overriding = [cls.__name__ for cls in visualizers if "fit" in vars(cls)]
     assert overriding == []
+
+
+def test_the_fit_guard_catches_a_class_that_defines_fit() -> None:
+    """Control: the membership test the guard above applies sees a class's
+    own ``fit``. A plain class, so the visualizer population is untouched."""
+    own_fit = type("OwnFit", (), {"fit": lambda self, X, y=None: self})
+    assert "fit" in vars(own_fit)
+    assert "fit" not in vars(fm.ROCVisualizer)
 
 
 # ── The size rule, door by door ─────────────────────────────────────────────
@@ -253,3 +261,168 @@ def test_a_flat_chart_entry_does_not_reach_another_operands_layers() -> None:
     spec = json.loads(hosted.to_spec().to_json())
     assert "entry" not in spec
     assert [layer.get("entry") for layer in spec["layers"]] == ["relplot", None]
+
+
+# ── A visualizer's refusals speak as the class ──────────────────────────────
+
+
+def _visualizer_cases() -> dict[str, Callable[[Any], Any]]:
+    """For each visualizer class name, ``fit(mark)``: build it with *mark* and fit it.
+
+    Fixture recipes only; the population they must cover is derived
+    (:func:`_visualizers`) and checked against them below.
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+    from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
+    from sklearn.tree import DecisionTreeRegressor
+
+    rng = np.random.default_rng(1)
+    X = pl.DataFrame({f"f{i}": rng.normal(size=60) for i in range(3)})
+    xa = X.to_numpy()
+    y_cls = (xa[:, 0] + 0.5 * rng.normal(size=60) > 0).astype(int)
+    y_reg = xa @ np.array([1.0, -2.0, 0.5]) + 0.1 * rng.normal(size=60)
+    clf = LogisticRegression().fit(xa, y_cls)
+    reg = LinearRegression().fit(xa, y_reg)
+    tree = DecisionTreeRegressor(max_depth=3, random_state=0).fit(xa, y_reg)
+    kmeans = KMeans(n_clusters=3, n_init=3, random_state=0).fit(xa)
+    pca = PCA().fit(xa)
+
+    def classified(cls: type, **kw: Any) -> Callable[[Any], Any]:
+        return lambda mark: cls(clf, mark=mark, **kw).fit(xa, y_cls)
+
+    def regressed(cls: type, model: Any = reg, **kw: Any) -> Callable[[Any], Any]:
+        return lambda mark: cls(model, mark=mark, **kw).fit(xa, y_reg)
+
+    def clustered(cls: type, model: Any = kmeans, **kw: Any) -> Callable[[Any], Any]:
+        return lambda mark: cls(model, mark=mark, **kw).fit(xa)
+
+    return {
+        "AlphaSelectionVisualizer": regressed(
+            fm.AlphaSelectionVisualizer, Ridge(), alphas=[0.1, 1.0], cv=3
+        ),
+        "CVScoresVisualizer": regressed(fm.CVScoresVisualizer, cv=3),
+        "CalibrationVisualizer": classified(fm.CalibrationVisualizer),
+        "ClassBalanceVisualizer": lambda mark: fm.ClassBalanceVisualizer(mark=mark).fit(y_cls),
+        "ClassPredictionErrorVisualizer": classified(fm.ClassPredictionErrorVisualizer),
+        "ClassificationReportVisualizer": classified(fm.ClassificationReportVisualizer),
+        "ConfusionMatrixVisualizer": classified(fm.ConfusionMatrixVisualizer),
+        "CooksDistanceVisualizer": regressed(fm.CooksDistanceVisualizer),
+        "DiscriminationThresholdVisualizer": classified(fm.DiscriminationThresholdVisualizer),
+        "ElbowVisualizer": lambda mark: fm.ElbowVisualizer(KMeans, ks=[2, 3], mark=mark).fit(xa),
+        "FeatureImportancesVisualizer": regressed(fm.FeatureImportancesVisualizer, tree),
+        "InterclusterDistanceVisualizer": clustered(fm.InterclusterDistanceVisualizer),
+        "LearningCurveVisualizer": regressed(fm.LearningCurveVisualizer, cv=3),
+        "ManifoldVisualizer": clustered(fm.ManifoldVisualizer, None, method="pca"),
+        "PCAVarianceVisualizer": clustered(fm.PCAVarianceVisualizer, pca),
+        "PRVisualizer": classified(fm.PRVisualizer),
+        "ParallelCoordinatesVisualizer": (
+            lambda mark: fm.ParallelCoordinatesVisualizer(mark=mark).fit(X, y_cls)
+        ),
+        "PredictionErrorVisualizer": regressed(fm.PredictionErrorVisualizer),
+        "ROCVisualizer": classified(fm.ROCVisualizer),
+        "Rank1DVisualizer": lambda mark: fm.Rank1DVisualizer(mark=mark).fit(X),
+        "Rank2DVisualizer": lambda mark: fm.Rank2DVisualizer(mark=mark).fit(X),
+        "ResidualsVisualizer": regressed(fm.ResidualsVisualizer),
+        "SHAPBarVisualizer": regressed(fm.SHAPBarVisualizer, tree, random_state=0),
+        "SHAPBeeswarmVisualizer": regressed(fm.SHAPBeeswarmVisualizer, tree, random_state=0),
+        "SHAPVisualizer": regressed(fm.SHAPVisualizer, tree, kind="bar", random_state=0),
+        "SHAPWaterfallVisualizer": regressed(
+            fm.SHAPWaterfallVisualizer, tree, sample_idx=0, random_state=0
+        ),
+        "SilhouetteVisualizer": clustered(fm.SilhouetteVisualizer),
+        "ValidationCurveVisualizer": regressed(
+            fm.ValidationCurveVisualizer, Ridge(), param="alpha", values=[0.1, 1.0], cv=3
+        ),
+    }
+
+
+_VISUALIZER_CASES = _visualizer_cases()
+
+
+def _quietly(build: Callable[[], Any]) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return build()
+
+
+def test_every_visualizer_has_a_voice_case() -> None:
+    assert sorted(_VISUALIZER_CASES) == [cls.__name__ for cls in _visualizers()]
+
+
+@pytest.mark.parametrize("name", sorted(_VISUALIZER_CASES))
+def test_a_visualizer_refuses_a_malformed_mark_as_its_class(name: str) -> None:
+    fit = _VISUALIZER_CASES[name]
+    with pytest.raises(ValueError) as exc_info:
+        _quietly(lambda: fit(5))
+    assert str(exc_info.value) == (
+        f"{name}(mark=...) must be a dict, of mark kwargs or of sub-layer names to "
+        "their mark kwargs; got int"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_VISUALIZER_CASES))
+def test_a_visualizer_fits_with_no_mark_override(name: str) -> None:
+    """Control: the same recipe fits, so the refusal above is the ``mark=``."""
+    viz = _quietly(lambda: _VISUALIZER_CASES[name](None))
+    assert viz.show() is not None
+
+
+def test_the_override_door_alone_has_no_voice() -> None:
+    """Control: outside a figure or visualizer the ``mark=`` door names no
+    one, so the class name above comes from the ``fit`` template."""
+    from ferrum._overrides import _apply_overrides
+
+    with pytest.raises(ValueError) as exc_info:
+        _apply_overrides(fm.Chart(_DF).mark_point(), mark=5)  # type: ignore[arg-type]
+    assert str(exc_info.value).startswith("(mark=...) must be a dict")
+
+
+# ── jointplot's style dicts speak as jointplot, eager and lazy ──────────────
+
+
+def _jointplot_cells() -> list[Any]:
+    from ferrum.plots.matrix import _VALID_CENTER_KINDS, _VALID_MARGINAL_KINDS
+
+    cells = [
+        pytest.param({"kind": k, "joint_kws": {"bogus_kw": 1}}, id=f"joint_kws-{k}")
+        for k in sorted(_VALID_CENTER_KINDS)
+    ]
+    cells += [
+        pytest.param({"marginal_kind": k, "marginal_kws": {"bogus_kw": 1}}, id=f"marginal_kws-{k}")
+        for k in sorted(_VALID_MARGINAL_KINDS)
+    ]
+    return cells
+
+
+@pytest.mark.parametrize("kwargs", _jointplot_cells())
+def test_a_jointplot_style_dict_refuses_as_jointplot(kwargs: dict) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        fm.jointplot(_DF, x="x", y="y", **kwargs).to_svg()
+    assert str(exc_info.value).startswith("jointplot: unknown keyword argument 'bogus_kw'. ")
+
+
+def test_a_lazily_resolved_jointplot_cell_refuses_as_jointplot_after_the_build() -> None:
+    """The kde center resolves at render, after ``jointplot`` has returned."""
+    chart = fm.jointplot(_DF, x="x", y="y", kind="kde", joint_kws={"bogus_kw": 1})
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    assert str(exc_info.value).startswith("jointplot: unknown keyword argument 'bogus_kw'. ")
+
+
+@pytest.mark.parametrize(
+    ("build", "voice"),
+    [
+        (lambda: fm.Chart(_DF).mark_point(bogus_kw=1), "mark_point"),
+        (
+            lambda: fm.Chart(_DF).mark_density(bogus_kw=1).encode(x="x").to_svg(),
+            "mark_density",
+        ),
+    ],
+    ids=["eager", "lazy"],
+)
+def test_a_mark_method_called_directly_speaks_as_itself(build: Callable, voice: str) -> None:
+    """Control: with no figure around it, a mark method keeps its own voice."""
+    with pytest.raises(ValueError) as exc_info:
+        build()
+    assert str(exc_info.value).startswith(f"{voice}: unknown keyword argument 'bogus_kw'. ")
