@@ -2061,7 +2061,7 @@ fn build_panel_mark_batches(
             // batch before this field existed. `mark_function(clip=False)`
             // (T11, Python) is the only producer that sets `false`.
             clip: mark_style.misc.clip.unwrap_or(true),
-            size_conditionals: layer_size_conditionals(spec, li, result.vertex_rows.is_some()),
+            conditionals: layer_conditionals(spec, li),
             vertex_rows: result.vertex_rows,
         });
     }
@@ -2069,22 +2069,13 @@ fn build_panel_mark_batches(
     Ok(mark_batches)
 }
 
-/// The `size` conditionals layer `li` declared, as indices into the scene's
-/// `interaction.conditionals` (the same index space: `spec.conditionals` maps
-/// into it one for one), for [`MarkBatch::size_conditionals`]. A line that
-/// recorded `vertex_rows` always names them; any other batch names them only
-/// when the layer declared fewer than all of the chart's `size` conditionals,
-/// so a chart whose size conditionals all reach every layer writes none.
-fn layer_size_conditionals(spec: &ChartSpec, li: usize, has_vertex_rows: bool) -> Option<Vec<usize>> {
-    let sized: Vec<(usize, bool)> = spec
-        .conditionals
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.encoding.sets_size())
-        .map(|(i, c)| (i, c.declared_by(li)))
-        .collect();
-    let scoped = sized.iter().any(|&(_, declared)| !declared);
-    (has_vertex_rows || scoped).then(|| sized.iter().filter(|&&(_, declared)| declared).map(|&(i, _)| i).collect())
+/// The conditionals layer `li` declared, of every channel, as indices into
+/// the scene's `interaction.conditionals` (the same index space:
+/// `spec.conditionals` maps into it one for one), for
+/// [`MarkBatch::conditionals`]. A conditional declared by the whole chart
+/// reaches every layer, so a chart without conditionals writes none.
+fn layer_conditionals(spec: &ChartSpec, li: usize) -> Vec<usize> {
+    spec.conditionals.iter().enumerate().filter(|(_, c)| c.declared_by(li)).map(|(i, _)| i).collect()
 }
 
 /// Collect param→scene bindings (D6, 5e-2a) from the original spec.

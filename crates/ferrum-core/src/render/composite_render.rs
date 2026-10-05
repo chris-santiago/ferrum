@@ -2339,10 +2339,6 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
     let mut zoom = true;
     let mut pan = true;
     let mut toolbar = true;
-    // Per child: its merged panel range and the merged indices of its own
-    // `size` conditionals.
-    let mut sized_scopes: Vec<(std::ops::Range<usize>, Vec<usize>)> = Vec::new();
-
     for (i, (child, t)) in children.into_iter().zip(plan.placements).enumerate() {
         let mut scene = child.scene;
 
@@ -2361,25 +2357,15 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         }
 
         // This child's conditionals are appended after every earlier
-        // child's, so each line's indices into them shift by as many.
+        // child's, so each batch's indices into them shift by as many.
         let conditional_base = merged.interaction.conditionals.len();
-        let own_sized: Vec<usize> = scene
-            .interaction
-            .conditionals
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.sets_size())
-            .map(|(i, _)| i + conditional_base)
-            .collect();
-        let panel_start = merged.panels.len();
         for mut panel in scene.panels.drain(..) {
             place_panel(&mut panel, &t);
-            for index in panel.marks.iter_mut().flat_map(|b| b.size_conditionals.iter_mut().flatten()) {
+            for index in panel.marks.iter_mut().flat_map(|b| &mut b.conditionals) {
                 *index += conditional_base;
             }
             merged.panels.push(panel);
         }
-        sized_scopes.push((panel_start..merged.panels.len(), own_sized));
 
         offset_nodes(&mut scene.title, t.tx, t.ty);
         offset_nodes(&mut scene.legend, t.tx, t.ty);
@@ -2425,7 +2411,6 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         toolbar = toolbar && ci.toolbar;
     }
 
-    scope_size_conditionals_to_own_child(&mut merged, sized_scopes);
     merged.interaction.zoom_enabled = zoom;
     merged.interaction.pan_enabled = pan;
     merged.interaction.toolbar = toolbar;
@@ -2433,25 +2418,6 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         scene: merged,
         width: plan.width,
         height: plan.height,
-    }
-}
-
-/// Give every batch that answers to every `size` conditional
-/// ([`ferrum_scene::MarkBatch::size_conditionals`] `None`) the explicit list
-/// of its own child's, whenever the merged scene holds a `size` conditional
-/// that child did not declare. A child's `None` meant every conditional of
-/// that child's scene; in the merged scene it would also reach a sibling
-/// child's, so a conditional declared in one panel would resize the marks of
-/// another. A child holding every merged `size` conditional keeps `None`.
-fn scope_size_conditionals_to_own_child(merged: &mut SceneGraph, scopes: Vec<(std::ops::Range<usize>, Vec<usize>)>) {
-    let merged_sized = merged.interaction.conditionals.iter().filter(|c| c.sets_size()).count();
-    for (panels, own) in scopes {
-        if own.len() == merged_sized {
-            continue;
-        }
-        for batch in merged.panels[panels].iter_mut().flat_map(|p| &mut p.marks) {
-            batch.size_conditionals.get_or_insert_with(|| own.clone());
-        }
     }
 }
 
@@ -3446,7 +3412,7 @@ mod tests {
     }
 
     /// Every leaf's conditionals land in the one merged scene list, so a
-    /// sized line leaf's `size_conditionals` must index its own leaf's
+    /// sized line leaf's `conditionals` must index its own leaf's
     /// conditional there, never a sibling leaf's, in either leaf order and
     /// with the sibling's conditional before or after its own.
     #[test]
@@ -3476,40 +3442,38 @@ mod tests {
                 .find(|b| b.kind == ferrum_scene::MarkBatchKind::Line)
                 .expect("the line leaf draws a line batch");
             let named: Vec<&str> = line_batch
-                .size_conditionals
+                .conditionals
                 .iter()
-                .flatten()
                 .map(|&i| scene.interaction.conditionals[i].selection_name.as_str())
                 .collect();
             assert_eq!(named, vec!["t"], "line leaf first: {line_first}");
         }
     }
 
-    /// A leaf batch with no `size` conditionals of its own answers to none of
-    /// a sibling leaf's in the merged scene, at any nesting depth; a leaf
-    /// holding every merged `size` conditional keeps `None`, and a composite
-    /// with no `size` conditional writes none.
+    /// A leaf batch answers to exactly its own leaf's conditionals, of every
+    /// channel, in the merged scene, at any nesting depth: never to a sibling
+    /// leaf's, and to none when its leaf declared none.
     #[test]
-    fn a_leaf_batch_answers_only_to_its_own_leafs_size_conditionals_in_the_merged_scene() {
-        let size = |name: &str| -> crate::spec::chart::ChartConditional {
-            ferrum_scene::ConditionalEncoding {
-                selection_name: name.into(),
-                channel: ferrum_scene::ChannelName::Size,
-                if_selected: ferrum_scene::EncodingValue::Size { value: 100.0 },
-                if_not: ferrum_scene::EncodingValue::Size { value: 4.0 },
-            }
-            .into()
+    fn a_leaf_batch_answers_only_to_its_own_leafs_conditionals_in_the_merged_scene() {
+        let conditional = |name: &str, channel, if_selected, if_not| -> crate::spec::chart::ChartConditional {
+            ferrum_scene::ConditionalEncoding { selection_name: name.into(), channel, if_selected, if_not }.into()
         };
-        let sized = |name: &str| ChartSpec { conditionals: vec![size(name)], ..scatter_spec() };
+        let size = |v| ferrum_scene::EncodingValue::Size { value: v };
+        let sized = |name: &str| ChartSpec {
+            conditionals: vec![conditional(name, ferrum_scene::ChannelName::Size, size(100.0), size(4.0))],
+            ..scatter_spec()
+        };
+        let grey = ferrum_scene::EncodingValue::Color { value: ferrum_scene::Color { r: 9, g: 9, b: 9, a: 255 } };
+        let colored = |name: &str| ChartSpec {
+            conditionals: vec![conditional(name, ferrum_scene::ChannelName::Color, grey.clone(), grey.clone())],
+            ..scatter_spec()
+        };
         let scopes = |tree: &CompositeNode, specs: [ChartSpec; 2]| {
             let holds = specs.map(|spec| LeafHold { spec, ..hold() });
             let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
             let (scene, _) = render_composite_scene(tree, &leaves, &ThemeInputs::default()).unwrap();
-            let named = |p: &ferrum_scene::Panel| -> Option<Vec<String>> {
-                p.marks[0]
-                    .size_conditionals
-                    .as_ref()
-                    .map(|own| own.iter().map(|&i| scene.interaction.conditionals[i].selection_name.clone()).collect())
+            let named = |p: &ferrum_scene::Panel| -> Vec<String> {
+                p.marks[0].conditionals.iter().map(|&i| scene.interaction.conditionals[i].selection_name.clone()).collect()
             };
             scene.panels.iter().map(named).collect::<Vec<_>>()
         };
@@ -3518,10 +3482,13 @@ mod tests {
             CompositeLayout::Vconcat,
             vec![composite(CompositeLayout::Hconcat, vec![leaf_node(0)]), leaf_node(1)],
         );
+        let none: Vec<String> = vec![];
         for tree in [&flat, &nested] {
-            assert_eq!(scopes(tree, [scatter_spec(), sized("other")]), vec![Some(vec![]), None]);
-            assert_eq!(scopes(tree, [sized("p"), sized("q")]), vec![Some(vec!["p".into()]), Some(vec!["q".into()])]);
-            assert_eq!(scopes(tree, [scatter_spec(), scatter_spec()]), vec![None, None]);
+            assert_eq!(scopes(tree, [scatter_spec(), sized("other")]), vec![none.clone(), vec!["other".into()]]);
+            assert_eq!(scopes(tree, [sized("p"), sized("q")]), vec![vec!["p".to_string()], vec!["q".into()]]);
+            assert_eq!(scopes(tree, [colored("c"), sized("q")]), vec![vec!["c".to_string()], vec!["q".into()]]);
+            assert_eq!(scopes(tree, [colored("c"), scatter_spec()]), vec![vec!["c".to_string()], none.clone()]);
+            assert_eq!(scopes(tree, [scatter_spec(), scatter_spec()]), vec![none.clone(), none.clone()]);
         }
     }
 

@@ -306,19 +306,18 @@ pub struct MarkBatch {
     /// else, omitted on the wire, so every other batch is byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertex_rows: Option<Vec<Vec<VertexRow>>>,
-    /// The `size` conditionals this batch's marks answer to, as indices into
-    /// the scene's `interaction.conditionals`: exactly the ones the batch's
-    /// own layer declared. Present on every line carrying
-    /// [`Self::vertex_rows`], and on any other batch whose layer declared
-    /// fewer than all of its chart's `size` conditionals, or (in a composite)
-    /// whose own chart declared fewer than all of the merged scene's
-    /// ([`crate::validate_size_conditionals`]). The runtime applies a `size`
-    /// conditional only to the batches that name it, so a sibling layer's or
-    /// sibling chart's conditional never resizes this batch's marks. `None`
-    /// answers to every `size` conditional and is omitted on the wire. Read it
-    /// through [`Self::answers_to_size_conditional`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_conditionals: Option<Vec<usize>>,
+    /// The conditionals this batch's marks answer to, of every channel, as
+    /// indices into the scene's `interaction.conditionals`: exactly the ones
+    /// the batch's own layer declared, a conditional declared by the whole
+    /// chart reaching every layer of it. The runtime applies a conditional
+    /// only to the batches that list it, so a sibling layer's or sibling
+    /// composite child's conditional never restyles this batch's marks.
+    /// Empty answers to none and is omitted on the wire, so a scene without
+    /// conditionals is byte-identical. A line carrying [`Self::vertex_rows`]
+    /// lists at least one `size` conditional ([`crate::validate_conditionals`]).
+    /// Read it through [`Self::answers_to`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditionals: Vec<usize>,
 }
 
 /// Where one width vertex of a line lies on its source rows
@@ -360,7 +359,7 @@ impl Default for MarkBatch {
             glyph_anchors: None,
             clip: true,
             vertex_rows: None,
-            size_conditionals: None,
+            conditionals: Vec::new(),
         }
     }
 }
@@ -454,6 +453,14 @@ impl MarkBatchKind {
             Self::Segment => "segment",
             Self::Arc => "arc",
         }
+    }
+}
+
+impl MarkBatch {
+    /// Whether this batch's marks answer to the scene's conditional `index`,
+    /// of any channel: the one reading of [`Self::conditionals`].
+    pub fn answers_to(&self, index: usize) -> bool {
+        self.conditionals.contains(&index)
     }
 }
 

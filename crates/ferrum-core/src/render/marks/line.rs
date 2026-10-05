@@ -66,7 +66,7 @@ fn vertex_width(field: &str, sample: Option<(f64, f64)>, fallback: f64) -> Resul
 
 /// Every `size` conditional this line's layer declared (the per-layer spec
 /// carries only its own layer's conditionals). The interactive runtime folds
-/// all of them (the batch names them in `size_conditionals`), so each one's
+/// all of them (the batch lists them in `conditionals`), so each one's
 /// branches are checked.
 fn size_conditionals(spec: &crate::spec::chart::ChartSpec) -> Vec<&ferrum_scene::ConditionalEncoding> {
     spec.conditionals
@@ -2209,28 +2209,69 @@ mod tests {
         }
     }
 
-    /// Every batch names the `size` conditionals its layer declared when its
-    /// layer declared fewer than all of them, so the line's own conditional
-    /// is out of the point layer's scope and the runtime never resizes the
-    /// dots by it. A chart-wide conditional leaves the point batch unscoped,
-    /// so its scene is unchanged.
+    /// Every batch lists exactly the conditionals its layer declared, so the
+    /// line's own conditional is out of the point layer's list and the
+    /// runtime never resizes the dots by it, while a chart-wide one reaches
+    /// both layers.
     #[test]
-    fn a_point_batch_names_the_size_conditionals_its_layer_declared() {
-        let point_batch = |scene: &ferrum_scene::SceneGraph| scene.panels[0].marks[0].size_conditionals.clone();
-        let line_scoped = render_interactive(&with_scoped_size_conditional(point_then_line(), 100.0, 20.0, Some(vec![1]))).unwrap();
-        assert_eq!(point_batch(&line_scoped), Some(vec![]), "the line's conditional is outside the point's scope");
-        assert_eq!(line_batch(&line_scoped).size_conditionals, Some(vec![0]));
-        // Vacuity control: a layer that declared every size conditional (here
-        // the only one) is unscoped, so its scene is unchanged.
-        for layers in [None, Some(vec![0, 1]), Some(vec![0])] {
+    fn every_batch_lists_the_conditionals_its_layer_declared() {
+        for (layers, point, line) in [
+            (Some(vec![1]), vec![], vec![0]),
+            (Some(vec![0]), vec![0], vec![]),
+            (Some(vec![0, 1]), vec![0], vec![0]),
+            (None, vec![0], vec![0]),
+        ] {
             let scene = render_interactive(&with_scoped_size_conditional(point_then_line(), 100.0, 20.0, layers.clone())).unwrap();
-            assert_eq!(point_batch(&scene), None, "{layers:?}");
+            assert_eq!(scene.panels[0].marks[0].conditionals, point, "point batch, {layers:?}");
+            assert_eq!(line_batch(&scene).conditionals, line, "line batch, {layers:?}");
+        }
+        // Vacuity control: a chart without conditionals lists none.
+        let plain = render_interactive(&point_then_line()).unwrap();
+        assert!(plain.panels[0].marks.iter().all(|b| b.conditionals.is_empty()));
+    }
+
+    /// A host chart's conditional reaches every layer attached to it, through
+    /// `Chart.layer(Layer(...))` (an inheriting line layer) and through
+    /// `chart + SecondaryY(...)` (an independent-y line layer): Python stamps
+    /// it with every layer, `[0, 1]`, on both routes, and both batches list
+    /// it. Control: one declared only on the attached layer, `[1]`, stays on
+    /// the line batch alone. The two specs mirror the wire `to_json()` emits
+    /// for each route, with the base chart a point layer on `x`/`y`.
+    #[test]
+    fn a_host_charts_conditional_reaches_every_attached_layer_on_both_host_routes() {
+        let color = |r| ferrum_scene::EncodingValue::Color { value: ferrum_scene::Color { r, g: 0, b: 0, a: 255 } };
+        let declared = |spec: ChartSpec, layers: Vec<usize>| ChartSpec {
+            conditionals: vec![crate::spec::chart::ChartConditional {
+                encoding: ferrum_scene::ConditionalEncoding {
+                    selection_name: "s".into(),
+                    channel: ferrum_scene::ChannelName::Color,
+                    if_selected: color(255),
+                    if_not: color(136),
+                },
+                layers: Some(layers),
+            }],
+            ..spec
+        };
+        let xy = line_spec().encoding;
+        let attached = added(vec![test_layer(Mark::Point, xy.clone(), None), test_layer(Mark::Line, Encoding::default(), None)]);
+        let secondary_y = Encoding { y: Some(EncodingSpec { field: "w".into(), type_: None, ..Default::default() }), ..xy.clone() };
+        let secondary = added(vec![
+            test_layer(Mark::Point, xy, None),
+            crate::spec::layer::Layer { independent_y: true, ..test_layer(Mark::Line, secondary_y, None) },
+        ]);
+        for (route, base) in [("layer", attached), ("SecondaryY", secondary)] {
+            let host = render_interactive(&declared(base.clone(), vec![0, 1])).unwrap();
+            assert_eq!(host.panels[0].marks[0].conditionals, vec![0], "{route}: the host's own point layer");
+            assert_eq!(line_batch(&host).conditionals, vec![0], "{route}: the attached line layer");
+            let own = render_interactive(&declared(base, vec![1])).unwrap();
+            assert_eq!(own.panels[0].marks[0].conditionals, Vec::<usize>::new(), "{route}: control, the host layer");
+            assert_eq!(line_batch(&own).conditionals, vec![0], "{route}: control, the attached layer");
         }
     }
 
-    /// A line answers to its layer's `size` conditionals and no other: a
-    /// later color conditional beside its size conditional is neither named
-    /// on the batch nor branch-checked as a width, and the line renders.
+    /// A later color conditional beside a line's size conditional is listed on
+    /// the batch like every conditional its layer declared, but is not
+    /// branch-checked as a width, and the line renders.
     #[test]
     fn a_later_non_size_conditional_is_not_one_the_line_answers_to() {
         let mut spec = with_size_conditional(line_spec(), 100.0, 20.0);
@@ -2247,7 +2288,7 @@ mod tests {
         assert!(render_static(&spec).is_ok(), "{:?}", render_static(&spec).err());
         let scene = render_interactive(&spec).unwrap();
         let batch = &scene.panels[0].marks[0];
-        assert_eq!(batch.size_conditionals, Some(vec![0]));
+        assert_eq!(batch.conditionals, vec![0, 1]);
         assert_eq!(all_row_numbers(batch.vertex_rows.clone()), Some(vec![vec![0, 1, 2, 3]]));
         assert_eq!(scene.interaction.conditionals.len(), 2);
     }

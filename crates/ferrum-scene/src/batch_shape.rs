@@ -1,7 +1,7 @@
 //! The shape a [`MarkBatch`]'s per-vertex and per-batch sidecars must have
 //! before anything reads them: [`MarkBatch::vertex_rows`] aligned with the
-//! batch's width vertices, and [`MarkBatch::size_conditionals`] naming only
-//! `size` conditionals of the scene.
+//! batch's width vertices, and [`MarkBatch::conditionals`] naming only
+//! conditionals of the scene.
 
 use std::fmt;
 
@@ -14,15 +14,12 @@ pub enum BatchShapeError {
     RowsMisaligned { points: usize, rows: usize },
     /// A batch's `vertex_rows` does not carry exactly one row list per node.
     RowListsMisaligned { nodes: usize, lists: usize },
-    /// A batch carries `vertex_rows` without the `size_conditionals` they
-    /// answer to.
+    /// A batch carries `vertex_rows` but lists no `size` conditional for
+    /// them to answer to.
     SizeConditionalsUnpaired,
-    /// A batch's `size_conditionals` names conditional `index` of a scene
-    /// that has `conditionals`.
-    SizeConditionalOutOfRange { index: usize, conditionals: usize },
-    /// A batch's `size_conditionals` names conditional `index`, which sets no
-    /// `size`.
-    NotASizeConditional { index: usize },
+    /// A batch's `conditionals` names conditional `index` of a scene that has
+    /// `conditionals`.
+    ConditionalOutOfRange { index: usize, conditionals: usize },
 }
 
 impl fmt::Display for BatchShapeError {
@@ -38,15 +35,11 @@ impl fmt::Display for BatchShapeError {
             ),
             Self::SizeConditionalsUnpaired => write!(
                 f,
-                "tapered line batch carries vertex_rows without the size_conditionals they answer to"
+                "tapered line batch carries vertex_rows but answers to no size conditional"
             ),
-            Self::SizeConditionalOutOfRange { index, conditionals } => write!(
+            Self::ConditionalOutOfRange { index, conditionals } => write!(
                 f,
-                "mark batch answers to size conditional {index}, but the scene has {conditionals} conditionals"
-            ),
-            Self::NotASizeConditional { index } => write!(
-                f,
-                "mark batch answers to size conditional {index}, but conditional {index} sets no size"
+                "mark batch answers to conditional {index}, but the scene has {conditionals} conditionals"
             ),
         }
     }
@@ -71,33 +64,18 @@ pub fn validate_vertex_rows(batch: &MarkBatch) -> Result<(), BatchShapeError> {
     Ok(())
 }
 
-impl MarkBatch {
-    /// Whether this batch's marks answer to the scene's `size` conditional
-    /// `index`: the ones [`MarkBatch::size_conditionals`] names, or every one
-    /// when it is `None`. The one reading of that field for every consumer.
-    pub fn answers_to_size_conditional(&self, index: usize) -> bool {
-        self.size_conditionals.as_ref().is_none_or(|own| own.contains(&index))
+/// Check that every index `batch` lists in [`MarkBatch::conditionals`] names
+/// one of the scene's `conditionals`, and that a batch carrying `vertex_rows`
+/// lists at least one that sets `size` ([`ConditionalEncoding::sets_size`]).
+pub fn validate_conditionals(batch: &MarkBatch, conditionals: &[ConditionalEncoding]) -> Result<(), BatchShapeError> {
+    if let Some(&index) = batch.conditionals.iter().find(|&&index| index >= conditionals.len()) {
+        return Err(BatchShapeError::ConditionalOutOfRange { index, conditionals: conditionals.len() });
     }
-}
-
-/// Check that `batch` carries [`MarkBatch::size_conditionals`] whenever it
-/// carries `vertex_rows`, and that every index names one of the scene's
-/// `conditionals` that sets `size` ([`ConditionalEncoding::sets_size`]).
-pub fn validate_size_conditionals(batch: &MarkBatch, conditionals: &[ConditionalEncoding]) -> Result<(), BatchShapeError> {
-    let Some(indices) = &batch.size_conditionals else {
-        return match batch.vertex_rows {
-            Some(_) => Err(BatchShapeError::SizeConditionalsUnpaired),
-            None => Ok(()),
-        };
-    };
-    for &index in indices {
-        match conditionals.get(index) {
-            None => return Err(BatchShapeError::SizeConditionalOutOfRange { index, conditionals: conditionals.len() }),
-            Some(cond) if !cond.sets_size() => return Err(BatchShapeError::NotASizeConditional { index }),
-            Some(_) => {}
-        }
+    let sized = batch.conditionals.iter().any(|&index| conditionals.get(index).is_some_and(ConditionalEncoding::sets_size));
+    match batch.vertex_rows {
+        Some(_) if !sized => Err(BatchShapeError::SizeConditionalsUnpaired),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -139,7 +117,7 @@ mod tests {
 
 
     #[test]
-    fn size_conditionals_name_only_size_conditionals_and_pair_with_vertex_rows() {
+    fn conditionals_name_scene_conditionals_and_tapered_lines_list_a_size_one() {
         let cond = |if_selected, if_not| ConditionalEncoding {
             selection_name: "s".into(),
             channel: ChannelName::Size,
@@ -150,38 +128,32 @@ mod tests {
         let black = Color { r: 0, g: 0, b: 0, a: 255 };
         let color = cond(EncodingValue::Color { value: black }, EncodingValue::Color { value: black });
         let conditionals = [size, color];
-        let batch = |scope: Option<Vec<usize>>, rows: bool| MarkBatch {
-            size_conditionals: scope,
-            vertex_rows: rows.then(|| vec![]),
+        let batch = |listed: Vec<usize>, rows: bool| MarkBatch {
+            conditionals: listed,
+            vertex_rows: rows.then(std::vec::Vec::new),
             ..MarkBatch::default()
         };
-        // A point batch may carry a scope alone; a line's rows need one.
-        assert_eq!(validate_size_conditionals(&batch(None, false), &conditionals), Ok(()));
-        assert_eq!(validate_size_conditionals(&batch(Some(vec![0]), false), &conditionals), Ok(()));
-        assert_eq!(validate_size_conditionals(&batch(Some(vec![0]), true), &conditionals), Ok(()));
-        assert_eq!(validate_size_conditionals(&batch(Some(vec![]), true), &conditionals), Ok(()));
-        assert_eq!(validate_size_conditionals(&batch(None, true), &conditionals), Err(BatchShapeError::SizeConditionalsUnpaired));
+        // Any batch may list any channel; a line's rows need a size one.
+        assert_eq!(validate_conditionals(&batch(vec![], false), &conditionals), Ok(()));
+        assert_eq!(validate_conditionals(&batch(vec![1], false), &conditionals), Ok(()));
+        assert_eq!(validate_conditionals(&batch(vec![0, 1], true), &conditionals), Ok(()));
+        assert_eq!(validate_conditionals(&batch(vec![], true), &conditionals), Err(BatchShapeError::SizeConditionalsUnpaired));
+        assert_eq!(validate_conditionals(&batch(vec![1], true), &conditionals), Err(BatchShapeError::SizeConditionalsUnpaired));
         assert_eq!(
-            validate_size_conditionals(&batch(Some(vec![1]), false), &conditionals),
-            Err(BatchShapeError::NotASizeConditional { index: 1 })
+            validate_conditionals(&batch(vec![0, 2], false), &conditionals),
+            Err(BatchShapeError::ConditionalOutOfRange { index: 2, conditionals: 2 })
         );
         assert_eq!(
-            validate_size_conditionals(&batch(Some(vec![0, 2]), true), &conditionals),
-            Err(BatchShapeError::SizeConditionalOutOfRange { index: 2, conditionals: 2 })
-        );
-        assert_eq!(
-            BatchShapeError::NotASizeConditional { index: 1 }.to_string(),
-            "mark batch answers to size conditional 1, but conditional 1 sets no size"
+            BatchShapeError::ConditionalOutOfRange { index: 2, conditionals: 2 }.to_string(),
+            "mark batch answers to conditional 2, but the scene has 2 conditionals"
         );
     }
 
     #[test]
-    fn a_batch_answers_to_the_size_conditionals_it_names_or_to_every_one_when_it_names_none() {
-        let batch = |scope: Option<Vec<usize>>| MarkBatch { size_conditionals: scope, ..MarkBatch::default() };
-        assert!(batch(None).answers_to_size_conditional(0));
-        assert!(batch(None).answers_to_size_conditional(3));
-        assert!(batch(Some(vec![1])).answers_to_size_conditional(1));
-        assert!(!batch(Some(vec![1])).answers_to_size_conditional(0));
-        assert!(!batch(Some(vec![])).answers_to_size_conditional(0));
+    fn a_batch_answers_only_to_the_conditionals_it_lists() {
+        let batch = |listed: Vec<usize>| MarkBatch { conditionals: listed, ..MarkBatch::default() };
+        assert!(batch(vec![1]).answers_to(1));
+        assert!(!batch(vec![1]).answers_to(0));
+        assert!(!batch(vec![]).answers_to(0));
     }
 }

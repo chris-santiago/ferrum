@@ -123,12 +123,14 @@ pub struct ChartSpec {
 /// declared the conditional (`chart + chart` keeps each operand's
 /// declaration on that operand's layers). `None` (absent on the wire) is a
 /// declaration by the whole chart, every layer of it, which is every
-/// unlayered chart's and every pre-scope spec's. Only a line reads it: a
-/// `size` conditional restyles a line's width, and has its branches checked,
-/// only when the line's layer declared it. Points and rects apply every
-/// conditional chart-wide. The scene's `interaction.conditionals` carries
-/// the bare [`ferrum_scene::ConditionalEncoding`]: the runtime never reads a
-/// scope.
+/// unlayered chart's and every pre-scope spec's. Every channel reads it: a
+/// layer's scene batches list exactly the conditionals that layer declared
+/// ([`ferrum_scene::MarkBatch::conditionals`]), and the interactive runtime
+/// restyles a batch's marks only by the conditionals it lists, so a
+/// conditional never reaches a sibling layer's marks. A line also has a
+/// `size` conditional's branches checked only when its layer declared it.
+/// The scene's `interaction.conditionals` carries the bare
+/// [`ferrum_scene::ConditionalEncoding`]; the scope lives on the batches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChartConditional {
     #[serde(flatten)]

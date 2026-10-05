@@ -3490,9 +3490,8 @@ class Chart(
             wire_conditionals = []
             for c, scope in zip(conditionals, scopes):
                 wire = c.to_spec_dict(params=param_registry)
-                # The layers this conditional belongs to: a size conditional
-                # restyles a line only when the line's own layer is listed
-                # (points and rects apply every conditional chart-wide).
+                # The layers this conditional belongs to: it restyles only
+                # the marks of the layers listed, on every channel.
                 # Absent on an unlayered chart, meaning its one layer.
                 if scope is not None:
                     wire["layers"] = scope
