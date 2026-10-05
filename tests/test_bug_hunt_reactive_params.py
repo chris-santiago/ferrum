@@ -365,6 +365,216 @@ class TestParamCollection:
         with pytest.raises(ValueError, match="collision"):
             a + b
 
+    def _redefinition_message(self, entry: str, first_decl: str, second_decl: str) -> str:
+        """Build the exact refusal text ``_selection_redefinition_message`` emits.
+
+        Mirrors the production format string verbatim so each collision
+        test asserts the full text, not just an anchored prefix: a broken
+        diff (wrong field, empty list, a spurious entry) would still match
+        a prefix-only regex but not this.
+        """
+        return (
+            f"{entry}: selection 'shared' is declared twice with different definitions: "
+            f"first declares {first_decl}, second declares {second_decl}. "
+            f"One name is one selection on this chart: pass the same Selection object "
+            f"to every call that declares 'shared', or give the second one its own name."
+        )
+
+    def test_add_selection_raises_on_name_collision_with_different_definition(self):
+        """Two different ``Selection`` declarations sharing a name, added to
+        the same chart, must raise rather than silently keep only the first.
+
+        This is the within-one-chart counterpart of the Rust composite
+        renderer's cross-chart ``CompositeRenderError::SelectionRedefined``
+        refusal. The message must lead with ``add_selection()``, the public
+        call the caller actually invoked -- not some other one of the five
+        call sites that share ``_append_unique_by_name`` -- and must name
+        exactly the one field (``nearest``) that differs.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=False)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_selection(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_selection()", "nearest=False", "nearest=True"
+        )
+
+    def test_add_params_raises_on_name_collision_with_different_definition(self):
+        """Same refusal, reached through ``add_params()`` instead of
+        ``add_selection()`` -- ``Selection`` is a ``Parameter`` subtype, so
+        ``add_params()`` also registers it into ``_selections``. The message
+        must lead with ``add_params()``, not the ``add_selection()`` voice.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=False)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_params(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_params()", "nearest=False", "nearest=True"
+        )
+
+    def test_encode_conditional_raises_on_name_collision_with_different_definition(self):
+        """Same refusal, reached through ``encode()``'s conditional
+        auto-register (:func:`_append_conditional`'s ``context="encode()"``
+        call) rather than ``add_selection()``. Two ``encode()`` calls each
+        attach a conditional driven by a differently-defined ``Selection``
+        named ``"shared"``, on different wire channels so the collision is
+        the selection redefinition, not the one-conditional-per-channel rule.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=False)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(
+                x="t",
+                y="a",
+                color=sel_a.when(fm.Color("c")).otherwise(value("#ccc")),
+            )
+        )
+        with pytest.raises(ValueError) as excinfo:
+            chart.encode(size=sel_b.when(fm.Size("a")).otherwise(value(1)))
+        assert str(excinfo.value) == self._redefinition_message(
+            "encode()", "nearest=False", "nearest=True"
+        )
+
+    def test_conditional_raises_on_name_collision_with_different_definition(self):
+        """Same refusal, reached through :meth:`Chart.conditional`'s own
+        auto-register, not ``encode()``'s. The chart already carries
+        ``sel_a`` via ``add_selection()``; ``.conditional(sel_b.when(...))``
+        then collides on the differently-defined ``"shared"`` selection.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=False)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.conditional(sel_b.when(fm.Color("c")).otherwise(value("#ccc")))
+        assert str(excinfo.value) == self._redefinition_message(
+            "Chart.conditional()", "nearest=False", "nearest=True"
+        )
+
+    def test_layer_merge_raises_on_name_collision_with_different_definition(self):
+        """Same refusal, reached through ``Chart.__add__``'s layer merge --
+        two charts each declare a differently-defined ``"shared"`` selection
+        and are layered via ``+``. The message must lead with
+        ``"chart + chart"``, matching the voice
+        :func:`_conditional_collision_message` already uses for the sibling
+        conditional collision in this same merge path. Only ``+``
+        (``Chart.__add__``) reaches this helper -- ``|`` and ``&`` compose
+        through the Rust composite renderer's own ``SelectionRedefined``
+        check, not this one.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=False)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        a = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        b = fm.Chart(df).mark_line().encode(x="t", y="a").add_selection(sel_b)
+        with pytest.raises(ValueError) as excinfo:
+            a + b
+        assert str(excinfo.value) == self._redefinition_message(
+            "chart + chart", "nearest=False", "nearest=True"
+        )
+
+    def test_add_selection_raises_on_kind_collision(self):
+        """A ``"point"`` and an ``"interval"`` selection sharing a name report
+        only the ``type=`` field, exactly as the Rust ``SelectionRedefined``
+        message does when the kinds themselves disagree -- once the kind
+        differs, no other field is comparable, so none is listed.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared")
+        sel_b = fm.selection_interval(name="shared")
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_selection(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_selection()", "type='point'", "type='interval'"
+        )
+
+    def test_add_selection_raises_on_bind_collision(self):
+        """Two same-kind, same-field selections that disagree only on
+        ``bind`` report exactly that field.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", bind="legend")
+        sel_b = fm.selection_point(name="shared")
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_selection(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_selection()", "bind='legend'", "bind=None"
+        )
+
+    def test_add_selection_accepts_equal_but_distinct_redeclaration(self):
+        """Control: re-adding an equal-but-distinct ``Selection`` under the
+        same name to the same chart is accepted as a dedup, not a refusal --
+        equality of definition is what is checked, not object identity, so
+        the ordinary "pass the same selection to more than one call" case
+        keeps working.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=True)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = (
+            fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a).add_selection(sel_b)
+        )
+        names = [s.name for s in chart._selections if s is not None]
+        assert names.count("shared") == 1
+
+    def test_add_selection_accepts_list_and_tuple_fields_as_the_same_wire_declaration(self):
+        """Control: ``fields=['x']`` and ``fields=('x',)`` both serialize to
+        the same JSON array on the wire, so they must dedup rather than
+        refuse.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", fields=["x"])
+        sel_b = fm.selection_point(name="shared", fields=("x",))
+        chart = (
+            fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a).add_selection(sel_b)
+        )
+        names = [s.name for s in chart._selections if s is not None]
+        assert names.count("shared") == 1
+
+    def test_add_selection_redefinition_message_lists_only_the_field_that_differs_on_the_wire(
+        self,
+    ):
+        """A ``fields`` declared as a list on one side and a tuple on the
+        other is identical on the wire and must not appear in the refusal
+        text, even when a real field (``nearest``) also differs. Only
+        ``nearest`` is listed.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", fields=["x"], nearest=False)
+        sel_b = fm.selection_point(name="shared", fields=("x",), nearest=True)
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_selection(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_selection()", "nearest=False", "nearest=True"
+        )
+
+    def test_add_selection_redefinition_message_lists_int_and_bool_as_different(self):
+        """``nearest=1`` and ``nearest=True`` compare equal under Python
+        ``==`` but serialize to different JSON (``1`` vs. ``true``), so the
+        refusal fires and the message names the field rather than coming
+        back empty.
+        """
+        df = _df()
+        sel_a = fm.selection_point(name="shared", nearest=1)
+        sel_b = fm.selection_point(name="shared", nearest=True)
+        chart = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel_a)
+        with pytest.raises(ValueError) as excinfo:
+            chart.add_selection(sel_b)
+        assert str(excinfo.value) == self._redefinition_message(
+            "add_selection()", "nearest=1", "nearest=True"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # transform_filter(param) crossfilter — static contract = all rows kept

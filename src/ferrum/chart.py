@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from ferrum._interactive import InteractiveChart
+    from ferrum.selection import Selection
 
 from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
@@ -377,16 +378,124 @@ def _annotations_from_primitive(primitive: object) -> list:
     return [Annotate(primitive)]
 
 
-def _append_unique_by_name(seq: list, item: object) -> None:
+def _json_equal(first: object, second: object) -> bool:
+    """Return True when *first* and *second* serialize to the same JSON text.
+
+    The one definition of value identity "on the wire": a Python ``list``
+    and a ``tuple`` with the same elements serialize to the same JSON array
+    and count as equal, while a Python ``int`` and ``bool`` that compare
+    equal under ``==`` (``1 == True``) serialize to different JSON
+    (``1`` vs. ``true``) and count as different. Shared by
+    :func:`_selection_wire_equal` (whole-declaration identity) and
+    :func:`_selection_redefinition_message` (per-field diff), so both read
+    the same notion of "differs".
+    """
+    return json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def _selection_wire_equal(first: "Selection", second: "Selection") -> bool:
+    """Return True when *first* and *second* serialize to the same wire shape.
+
+    Compares through :meth:`Selection.to_param_spec_dict` via
+    :func:`_json_equal`, rather than Python ``==`` on the dataclasses. A
+    ``fields=['x']`` declaration and a ``fields=('x',)`` declaration are
+    different Python values (list vs. tuple) but serialize to the same
+    JSON array -- the only distinction the Rust composite renderer's
+    wire-JSON ``SelectionRedefined`` check can see. Comparing the
+    dataclasses directly is stricter than the wire and would refuse input
+    the wire itself would merge.
+    """
+    return _json_equal(first.to_param_spec_dict(), second.to_param_spec_dict())
+
+
+def _append_unique_by_name(seq: list, item: object, *, entry: str) -> None:
     """Append *item* to *seq* if no element with the same ``.name`` is present.
 
     Preserves insertion order (first-seen wins).  Mutates *seq* in place.
     *item* must have a ``.name`` attribute; *seq* may contain ``None`` entries
-    which are skipped during the existence check.
+    which are skipped during the existence check. *entry* names the public
+    call the caller was reached through (``"add_selection()"``,
+    ``"add_params()"``, ``"encode()"``, ``"Chart.layer()"``,
+    ``"Chart.conditional()"``, or ``"chart + chart"``) -- required, not
+    defaulted, so the refusal below cannot silently inherit the wrong voice,
+    the same discipline :func:`_append_conditional`'s *context* parameter
+    already enforces for conditional collisions.
+
+    Every current caller appends a ``Selection``.  A name collision is
+    checked for identity of *definition on the wire* (:func:`_selection_wire_equal`),
+    not identity of name and not Python ``==``: two ``Selection`` objects
+    sharing a name are expected to be the same declaration -- the
+    linked-views case, where one ``Selection`` is handed to
+    ``add_selection()``/``add_params()``/``encode()`` on more than one
+    chart, and the charts later merge via ``+`` (``Chart.__add__``). That
+    case is accepted silently. A colliding ``Selection`` whose wire form
+    actually differs raises ``ValueError`` naming the differing fields --
+    the within-one-chart counterpart of the Rust composite renderer's
+    ``CompositeRenderError::SelectionRedefined``, which refuses the same
+    shape across charts.
     """
-    existing = {el.name for el in seq if el is not None and hasattr(el, "name")}
-    if item.name not in existing:
-        seq.append(item)
+    for existing in seq:
+        if existing is None or not hasattr(existing, "name"):
+            continue
+        if existing.name != item.name:
+            continue
+        if not _selection_wire_equal(existing, item):
+            raise ValueError(_selection_redefinition_message(existing, item, entry=entry))
+        return
+    seq.append(item)
+
+
+def _selection_redefinition_message(first: "Selection", second: "Selection", *, entry: str) -> str:
+    """Format the refusal for two same-named selections with different definitions.
+
+    Leads with *entry*, the public call that raised it, in the same
+    ``"{context}: ..."`` voice :func:`_conditional_collision_message` already
+    uses for the sibling conditional-collision refusal. Lists only the
+    fields that actually differ, in the same "declares ..., declares ..."
+    voice as the Rust composite renderer's ``SelectionRedefined`` message:
+    the full declaration would bury the one or two fields that disagree. A
+    differing ``kind`` (``"point"`` vs. ``"interval"``) is reported as
+    ``type`` alone and nothing else, exactly as the Rust message does when
+    the kinds differ -- once the kind itself disagrees, no other field is
+    comparable.
+
+    The diff comes from the same wire dicts
+    (:meth:`Selection.to_param_spec_dict`) and the same :func:`_json_equal`
+    that :func:`_selection_wire_equal` uses to decide the refusal fires at
+    all.
+    """
+    name = first.name
+    first_wire = first.to_param_spec_dict()
+    second_wire = second.to_param_spec_dict()
+    if first_wire["kind"] != second_wire["kind"]:
+        first_decl = f"type={first_wire['kind']!r}"
+        second_decl = f"type={second_wire['kind']!r}"
+    else:
+        first_select = first_wire["select"]
+        second_select = second_wire["select"]
+        ordered_keys: list[str] = []
+        seen: set[str] = set()
+        for key in (*first_select.keys(), *second_select.keys(), "bind"):
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered_keys.append(key)
+        diffs = []
+        for key in ordered_keys:
+            if key == "bind":
+                v1, v2 = first_wire.get("bind"), second_wire.get("bind")
+            else:
+                v1, v2 = first_select.get(key), second_select.get(key)
+            if not _json_equal(v1, v2):
+                diffs.append((key, v1, v2))
+        first_decl = ", ".join(f"{key}={v1!r}" for key, v1, _ in diffs)
+        second_decl = ", ".join(f"{key}={v2!r}" for key, _, v2 in diffs)
+    return (
+        f"{entry}: selection {name!r} is declared twice with different definitions: "
+        f"first declares {first_decl}, second declares {second_decl}. "
+        f"One name is one selection on this chart: pass the same Selection object "
+        f"to every call that declares {name!r}, or give the second one its own name."
+    )
 
 
 def _wire_channel_of_conditional(spec: "ConditionalSpec") -> str:
@@ -545,7 +654,7 @@ def _append_conditional(
     target._conditionals.append(recorded)
     sel = spec.selection
     if sel is not None:
-        _append_unique_by_name(target._selections, sel)
+        _append_unique_by_name(target._selections, sel, entry=context)
     return recorded
 
 
@@ -2519,7 +2628,7 @@ class Chart(
                     continue
                 if s.name in existing_variable_names:
                     _check_param_collision(s.name, is_selection=True, context="layer merge")
-                _append_unique_by_name(new._selections, s)
+                _append_unique_by_name(new._selections, s, entry="chart + chart")
         if rhs._conditionals:
             # One conditional per wire channel, enforced across the merge
             # too: the merged chart's `conditionals` list holds at most one
@@ -3631,7 +3740,7 @@ class Chart(
                 )
         new = self._clone()
         for sel in selections:
-            _append_unique_by_name(new._selections, sel)
+            _append_unique_by_name(new._selections, sel, entry="add_selection()")
         return new
 
     def add_params(self, *params) -> "Chart":
@@ -3683,7 +3792,7 @@ class Chart(
         # later also passed to add_selection().
         for p in params:
             if isinstance(p, Selection):
-                _append_unique_by_name(new._selections, p)
+                _append_unique_by_name(new._selections, p, entry="add_params()")
         return new
 
     def interactive(self, *, toolbar: bool = True) -> "InteractiveChart":
@@ -3778,7 +3887,7 @@ class Chart(
             # so the explicit path benefits like encode(<channel>=cond) does.
             carried = getattr(spec, "selection", None)
             if carried is not None and carried.name == spec.selection_name:
-                _append_unique_by_name(new._selections, carried)
+                _append_unique_by_name(new._selections, carried, entry="Chart.conditional()")
             else:
                 existing = {s.name for s in new._selections if hasattr(s, "name")}
                 if spec.selection_name not in existing:

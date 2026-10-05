@@ -626,6 +626,26 @@ fn point_in_polygon(px: f64, py: f64, vertices: &[[f64; 2]]) -> bool {
     inside
 }
 
+/// The array positions of every panel whose plot area contains the canvas
+/// point `(x, y)`, through the same per-panel zoom inverse the hit tests
+/// gate on.
+pub fn panels_containing(
+    panels: &[ferrum_scene::Panel],
+    x: f64,
+    y: f64,
+    zoom: &crate::zoom_pan::ZoomPanState,
+) -> Vec<usize> {
+    panels
+        .iter()
+        .enumerate()
+        .filter(|(panel_pos, panel)| {
+            let (px, py) = select_panel_transform(&zoom.transforms, *panel_pos).inverse_apply(x, y);
+            rect_contains(&panel.plot_area, px, py)
+        })
+        .map(|(panel_pos, _)| panel_pos)
+        .collect()
+}
+
 fn rect_contains(r: &ferrum_scene::Rect, x: f64, y: f64) -> bool {
     x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
 }

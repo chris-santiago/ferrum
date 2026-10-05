@@ -765,6 +765,21 @@ mod tests {
         );
     }
 
+    /// A selection's owner panels are stamped by the scene build, never
+    /// declared: a `panels` key on a chart's selection is refused, not
+    /// parsed and overwritten.
+    #[test]
+    fn a_selections_owner_panels_are_refused_on_the_chart_wire() {
+        let selection = r#"{"type":"interval","name":"b","fields":null,"encodings":null,"translate":true,"zoom":true,"mark":null,"resolve":"global""#;
+        let chart = |selection: String| format!(r#"{{"mark":"point","encoding":{{}},"selections":[{selection}]}}"#);
+        let parsed: ChartSpec = serde_json::from_str(&chart(format!("{selection}}}"))).unwrap();
+        assert_eq!(parsed.selections.len(), 1);
+        let err = serde_json::from_str::<ChartSpec>(&chart(format!(r#"{selection},"panels":[0,1]}}"#)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field `panels`"), "{err}");
+    }
+
     #[test]
     fn test_chart_spec_canonical_json_round_trips_under_deny() {
         // Every valid ferrum-produced spec must still deserialize after the

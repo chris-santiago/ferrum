@@ -2273,7 +2273,7 @@ mod tests {
     /// the batch like every conditional its layer declared, but is not
     /// branch-checked as a width, and the line renders.
     #[test]
-    fn a_later_non_size_conditional_is_not_one_the_line_answers_to() {
+    fn a_line_answers_to_a_later_color_conditional_without_width_checking_it() {
         let mut spec = with_size_conditional(line_spec(), 100.0, 20.0);
         let color = |r| ferrum_scene::EncodingValue::Color { value: ferrum_scene::Color { r, g: 0, b: 0, a: 255 } };
         spec.conditionals.push(

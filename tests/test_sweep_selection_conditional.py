@@ -316,7 +316,8 @@ def test_d_cross_panel_shared_selection(df):
 
 
 def test_d_cross_panel_vconcat_shared_selection(df):
-    """Two charts composed with & sharing the same field-based selection."""
+    """Two charts composed with & that declare the same selection merge into one
+    scene selection spec owned by both panels; each child's conditional survives."""
     sel = selection_point(fields=["group"], name="d_v_shared")
     cond = sel.when(fm.Color("group")).otherwise(value("#cccccc"))
     top = _make_chart(df, sel=sel, cond=cond)
@@ -327,7 +328,10 @@ def test_d_cross_panel_vconcat_shared_selection(df):
 
     assert len(scene["panels"]) == 2
     selections = scene.get("selections", [])
-    assert len(selections) == 2, f"expected 2 selections; got {len(selections)}"
+    assert len(selections) == 1, f"expected 1 merged selection; got {len(selections)}"
+    assert selections[0]["panels"] == [0, 1], (
+        f"merged selection must own both panels; got {selections[0].get('panels')}"
+    )
     conditionals = scene["interaction"]["conditionals"]
     assert len(conditionals) == 2, f"expected 2 conditionals; got {len(conditionals)}"
 

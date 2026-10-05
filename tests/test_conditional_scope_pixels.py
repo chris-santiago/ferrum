@@ -877,6 +877,67 @@ def test_vacuity_control_declaring_charts_own_brush_always_registers(
         page.close()
 
 
+# ── Layered brush: every layer of a nested LayerChart is an owner ───────────
+
+
+@pytest.mark.parametrize("layered", [False, True], ids=["plain_chart", "layer_0_of_layerchart"])
+def test_brush_drives_a_layer_0_selection_inside_a_nested_layerchart(
+    layered: bool, browser: Any, tmp_path: Path
+) -> None:
+    """A brush over a LayerChart drives a selection its bottom layer declares.
+
+    ``LayerChart(points, line) | other`` draws one panel per layer on one
+    shared rect, and the brush lands on whichever layer is on top (the
+    line). The LayerChart is the chart that declares the selection, so every
+    one of its layers' panels owns it. ``plain_chart`` is the positive
+    control: the same points, brushed the same way, as a plain chart beside
+    ``other``.
+    """
+    brush = fm.selection_interval(name="layered_brush")
+    cond = brush.when(value(RED)).otherwise(value(ORANGE))
+    points = (
+        fm.Chart(_DF_A)
+        .mark_point(**_style(BASE_A))
+        .encode(x="x", y="y", color=cond)
+        .add_selection(brush)
+    )
+    line = fm.Chart(_DF_A).mark_line().encode(x="x", y="y")
+    other = fm.Chart(_DF_A).mark_point(**_style(BASE_B)).encode(x="x", y="y")
+    combo = (fm.LayerChart(points, line) if layered else points) | other
+    svg = combo.to_svg()
+    svg_w, svg_h = pc.parse_svg_size(svg)
+    circles = pc.parse_circles(svg)
+    assert len(circles) == 10, circles
+    target = circles[2][:2]  # the points layer's own middle point
+
+    html_path = tmp_path / "chart.html"
+    combo.interactive().save(str(html_path))
+    page = browser.new_page(
+        viewport={"width": svg_w, "height": svg_h}, device_scale_factor=pc.DEVICE_SCALE_FACTOR
+    )
+    try:
+        pc.load_interactive(page, html_path)
+        rect = pc.canvas_rect(page)
+        dev = pc.svg_to_device(rect, svg_w, svg_h, target)
+        before = pc.sample_pixels(page, pc.screenshot(page), [dev])[0]
+
+        pad = 40.0
+        tx, ty = target
+        start = pc.svg_to_client(rect, svg_w, svg_h, (tx - pad, ty - pad))
+        end = pc.svg_to_client(rect, svg_w, svg_h, (tx + pad, ty + pad))
+        pc.brush_drag(page, start, end)
+
+        after = pc.sample_pixels(page, pc.screenshot(page), [dev])[0]
+        assert rgb_distance3(before, after) > 10, (
+            f"a brush over the points' own target left their pixel unchanged (before "
+            f"{before}, after {after}, layered={layered}) -- the selection the points "
+            f"declare must take input from every panel of the chart that declares it "
+            f"(committed bundle: {_BUNDLE_PATH})"
+        )
+    finally:
+        page.close()
+
+
 # ── Faceted brush: every facet panel is an owner ────────────────────────────
 
 

@@ -71,7 +71,9 @@
 use std::collections::HashMap;
 
 use arrow::record_batch::RecordBatch;
-use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
+use ferrum_scene::{
+    LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode, SceneSelection, SelectionSpec,
+};
 
 use crate::layout::facet::ResolveMode;
 use crate::layout::legend::{
@@ -166,6 +168,28 @@ pub(crate) enum CompositeRenderError {
     /// `anchor` outside `start`/`middle`/`end`. No warn-fallback: a malformed
     /// root `config` is a typed error naming the tree's root kind.
     RootChromeConfigInvalid { kind: &'static str, message: String },
+    /// Two declarations of one selection name differ. One name is one
+    /// selection on the merged scene, so linked views must declare the same
+    /// definition; `differences` lists every field that differs, by field
+    /// name (only `type` when the kinds differ). `first`/`second` name the
+    /// declaring charts by their position in the composition (see
+    /// [`leaf_positions`]).
+    SelectionRedefined {
+        kind: &'static str,
+        name: String,
+        first: String,
+        second: String,
+        differences: Vec<SelectionFieldDifference>,
+    },
+}
+
+/// One field two same-named selection declarations disagree on, with each
+/// declaration's value as a Python literal.
+#[derive(Debug)]
+pub(crate) struct SelectionFieldDifference {
+    pub(crate) field: String,
+    pub(crate) first: String,
+    pub(crate) second: String,
 }
 
 impl std::fmt::Display for CompositeRenderError {
@@ -198,6 +222,24 @@ impl std::fmt::Display for CompositeRenderError {
             ),
             Self::RootChromeConfigInvalid { kind, message } => {
                 write!(f, "{kind}: invalid root 'config': {message}")
+            }
+            Self::SelectionRedefined { kind, name, first, second, differences } => {
+                let side = |value: fn(&SelectionFieldDifference) -> &str| {
+                    differences
+                        .iter()
+                        .map(|d| format!("{}={}", d.field, value(d)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                write!(
+                    f,
+                    "{kind}: selection '{name}' is declared twice with different definitions: \
+                     {first} declares {}, {second} declares {}. One name \
+                     is one selection across the composition: share one selection between the \
+                     charts, or give each its own name.",
+                    side(|d| &d.first),
+                    side(|d| &d.second),
+                )
             }
         }
     }
@@ -296,6 +338,7 @@ pub(crate) fn render_composite_scene(
             got: leaves.len(),
         });
     }
+    refuse_redefined_selections(tree, leaves)?;
 
     // Pass 1 (resolve) needs each leaf's transformed data + rendering encoding.
     // Prepare every leaf once with no context (context only seeds scale
@@ -872,6 +915,15 @@ fn plan_legend_walk(
 // Overlay shared-rect planning (GH #89A)
 // ---------------------------------------------------------------------------
 
+/// Whether a composite node is an overlay group: an `Overlay` of two or more
+/// children that are all leaves, the shape `LayerChart` lowers to. Its
+/// layers are one chart, drawn as one panel per layer on a shared rect.
+fn is_overlay_group(layout: CompositeLayout, children: &[CompositeNode]) -> bool {
+    layout == CompositeLayout::Overlay
+        && children.len() > 1
+        && children.iter().all(|c| matches!(c, CompositeNode::Leaf { .. }))
+}
+
 /// For every `layout: Overlay` composite node whose DIRECT children are ALL
 /// leaves (LayerChart's actual shape — every layer lowers to one leaf),
 /// `result[i] = Some(group_start)` for each non-primary child leaf index `i`,
@@ -934,12 +986,7 @@ fn plan_overlay_group_walk(
         CompositeNode::Composite {
             layout, children, ..
         } => {
-            if *layout == CompositeLayout::Overlay
-                && children.len() > 1
-                && children
-                    .iter()
-                    .all(|c| matches!(c, CompositeNode::Leaf { .. }))
-            {
+            if is_overlay_group(*layout, children) {
                 let group_start = *leaf_cursor;
                 for j in 1..children.len() {
                     groups[group_start + j] = Some(group_start);
@@ -1037,12 +1084,7 @@ fn plan_line_ribbon_color_group_walk(
         CompositeNode::Composite {
             layout, children, ..
         } => {
-            if *layout == CompositeLayout::Overlay
-                && children.len() > 1
-                && children
-                    .iter()
-                    .all(|c| matches!(c, CompositeNode::Leaf { .. }))
-            {
+            if is_overlay_group(*layout, children) {
                 let group_start = *leaf_cursor;
                 let members = &prepared[group_start..group_start + children.len()];
 
@@ -2016,6 +2058,12 @@ fn build_placed(
                 })
                 .collect();
             let mut merged = merge_children(child_placed, plan, &suppress_chrome);
+            // An overlay group's layers are one chart: a selection any layer
+            // declares is owned by every layer's panel, since a click or brush
+            // lands on whichever layer is on top.
+            if is_overlay_group(*layout, children) {
+                own_selections_by_every_panel(&mut merged.scene);
+            }
             // Figure-legend band (design §5 pass 3): if this composite node
             // resolved a channel as a shared figure legend, grow the merged scene
             // on the oriented edge and draw one legend built from the first
@@ -2356,6 +2404,8 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
             scene.title.clear();
         }
 
+        let child_panels: Vec<usize> = scene.panels.iter().map(|p| p.id).collect();
+
         // This child's conditionals are appended after every earlier
         // child's, so each batch's indices into them shift by as many.
         let conditional_base = merged.interaction.conditionals.len();
@@ -2374,7 +2424,9 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         merged.legend.append(&mut scene.legend);
         merged.decorations.append(&mut scene.decorations);
 
-        merged.selections.append(&mut scene.selections);
+        for selection in scene.selections.drain(..) {
+            merge_selection(&mut merged.selections, selection, &child_panels);
+        }
         if merged.background.is_none() {
             merged.background = scene.background;
         }
@@ -2414,10 +2466,159 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
     merged.interaction.zoom_enabled = zoom;
     merged.interaction.pan_enabled = pan;
     merged.interaction.toolbar = toolbar;
+    if merged.panels.len() <= 1 {
+        own_selections_by_every_panel(&mut merged);
+    }
     Placed {
         scene: merged,
         width: plan.width,
         height: plan.height,
+    }
+}
+
+/// Hand every selection of `scene` to every panel of it, the unstamped
+/// form: the parent merge resolves it to this scene's panels.
+fn own_selections_by_every_panel(scene: &mut SceneGraph) {
+    for selection in &mut scene.selections {
+        selection.panels = None;
+    }
+}
+
+/// Fold one child selection into the merged list. Its owner panels are
+/// explicit from here on: an unstamped selection (`None`, every panel of
+/// its child) owns `child_panels`. A selection a later child declares under
+/// a name already merged is the same selection seen from another chart (the
+/// linked-views pattern; [`refuse_redefined_selections`] has already refused
+/// two definitions under one name), so it adds its owner panels to the first
+/// declaration rather than appending a second spec.
+fn merge_selection(
+    merged: &mut Vec<SceneSelection>,
+    selection: SceneSelection,
+    child_panels: &[usize],
+) {
+    let owners = selection.panels.unwrap_or_else(|| child_panels.to_vec());
+    let i = match merged.iter().position(|s| s.name() == selection.selection.name()) {
+        Some(i) => i,
+        None => {
+            merged.push(SceneSelection { selection: selection.selection, panels: None });
+            merged.len() - 1
+        }
+    };
+    let union = merged[i].panels.get_or_insert_with(Vec::new);
+    for p in owners {
+        if !union.contains(&p) {
+            union.push(p);
+        }
+    }
+}
+
+/// Refuse two declarations of one selection name that differ, anywhere in
+/// the composition: the merge unions same-named selections into one, so a
+/// second definition would otherwise be dropped. Identical declarations (the
+/// linked-views pattern) pass.
+fn refuse_redefined_selections(
+    tree: &CompositeNode,
+    leaves: &[CompositeLeafInput<'_>],
+) -> Result<(), CompositeRenderError> {
+    let mut first: HashMap<&str, (usize, &SelectionSpec)> = HashMap::new();
+    for (leaf, input) in leaves.iter().enumerate() {
+        for selection in &input.spec.selections {
+            let &mut (first_leaf, earlier) = first.entry(selection.name()).or_insert((leaf, selection));
+            if earlier != selection {
+                let positions = leaf_positions(tree);
+                // Clone rather than `mem::take`: a leaf that declares the same
+                // name twice itself has `first_leaf == leaf`, so taking the
+                // same index twice would blank the second side.
+                let position = |i: usize| positions[i].clone();
+                return Err(CompositeRenderError::SelectionRedefined {
+                    kind: tree.kind_name(),
+                    name: selection.name().to_string(),
+                    first: position(first_leaf),
+                    second: position(leaf),
+                    differences: selection_differences(earlier, selection),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Each leaf's position in the composition as its user built it, in leaf
+/// pre-order: the 1-based child index under each enclosing node, innermost
+/// first, e.g. `chart 2 of hconcat` or `layer 1 of overlay in chart 1 of
+/// vconcat`. A leaf that is the whole tree is `the chart`.
+fn leaf_positions(tree: &CompositeNode) -> Vec<String> {
+    fn walk(node: &CompositeNode, path: &mut Vec<String>, out: &mut Vec<String>) {
+        match node {
+            CompositeNode::Leaf { .. } if path.is_empty() => out.push("the chart".to_string()),
+            CompositeNode::Leaf { .. } => {
+                out.push(path.iter().rev().cloned().collect::<Vec<_>>().join(" in "))
+            }
+            CompositeNode::Hole { .. } => {}
+            CompositeNode::Composite { layout, children, .. } => {
+                let unit = if *layout == CompositeLayout::Overlay { "layer" } else { "chart" };
+                for (i, child) in children.iter().enumerate() {
+                    path.push(format!("{unit} {} of {}", i + 1, layout.as_str()));
+                    walk(child, path, out);
+                    path.pop();
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(tree, &mut Vec::new(), &mut out);
+    out
+}
+
+/// A wire JSON value written as the Python literal a user passes for it:
+/// `True`/`False`/`None`, strings single-quoted as `repr` quotes them.
+fn python_literal(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) if s.contains('\'') && !s.contains('"') => format!("\"{s}\""),
+        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::Array(items) => {
+            format!("[{}]", items.iter().map(python_literal).collect::<Vec<_>>().join(", "))
+        }
+        Value::Object(map) => {
+            let entries = map.iter().map(|(k, v)| {
+                format!("{}: {}", python_literal(&Value::String(k.clone())), python_literal(v))
+            });
+            format!("{{{}}}", entries.collect::<Vec<_>>().join(", "))
+        }
+    }
+}
+
+/// The wire fields two selection declarations disagree on, by field name;
+/// only `type` when their kinds differ, since every other field of one kind
+/// is then meaningless to the other. A field one kind lacks reads as
+/// `None`.
+fn selection_differences(a: &SelectionSpec, b: &SelectionSpec) -> Vec<SelectionFieldDifference> {
+    let fields = |s: &SelectionSpec| match serde_json::to_value(s) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    let (a, b) = (fields(a), fields(b));
+    let absent = serde_json::Value::Null;
+    let fields: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let differences = fields
+        .into_iter()
+        .filter_map(|field| {
+            let (first, second) = (a.get(field).unwrap_or(&absent), b.get(field).unwrap_or(&absent));
+            (first != second).then(|| SelectionFieldDifference {
+                field: field.clone(),
+                first: python_literal(first),
+                second: python_literal(second),
+            })
+        });
+    if a.get("type") != b.get("type") {
+        differences.filter(|d| d.field == "type").collect()
+    } else {
+        differences.collect()
     }
 }
 
@@ -2512,6 +2713,9 @@ fn renumber_panels(scene: &mut SceneGraph, base: usize) {
         if let Some(p) = b.panel.as_mut() {
             *p += base;
         }
+    }
+    for p in scene.selections.iter_mut().filter_map(|s| s.panels.as_mut()).flatten() {
+        *p += base;
     }
 }
 
@@ -8395,5 +8599,233 @@ mod tests {
             "a leading hole must not change which leaves get suppressed: legend content must \
              match the hole-free baseline exactly",
         );
+    }
+
+    // -- selection owner panels -------------------------------------------------
+
+    fn point_selection(name: &str) -> SelectionSpec {
+        SelectionSpec::Point {
+            name: name.to_string(),
+            fields: None,
+            encodings: None,
+            nearest: false,
+            toggle: ferrum_scene::EventExpr::ShiftKey,
+            on: ferrum_scene::EventExpr::Click,
+            clear: ferrum_scene::EventExpr::Click,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }
+    }
+
+    fn owned(name: &str, panels: Option<Vec<usize>>) -> SceneSelection {
+        SceneSelection { selection: point_selection(name), panels }
+    }
+
+    fn owners(scene: &SceneGraph) -> Vec<(&str, Option<&[usize]>)> {
+        scene.selections.iter().map(|s| (s.name(), s.panels.as_deref())).collect()
+    }
+
+    /// Each leaf's selection is owned by that leaf's own panel in the merged
+    /// scene, and a selection two leaves declare under one name is one spec
+    /// owned by both (linked views), in either leaf order.
+    #[test]
+    fn a_leafs_selection_is_owned_by_its_own_panels_and_a_shared_name_by_both() {
+        let declaring = |names: &[&str]| ChartSpec {
+            selections: names.iter().map(|n| point_selection(n)).collect(),
+            ..scatter_spec()
+        };
+        let render = |specs| render_hconcat_pair(specs).unwrap();
+
+        let scene = render([declaring(&["a", "shared"]), declaring(&["shared", "b"])]);
+        assert_eq!(
+            owners(&scene),
+            vec![("a", Some(&[0][..])), ("shared", Some(&[0, 1][..])), ("b", Some(&[1][..]))],
+        );
+
+        let scene = render([declaring(&["b"]), declaring(&["a"])]);
+        assert_eq!(owners(&scene), vec![("b", Some(&[0][..])), ("a", Some(&[1][..]))]);
+    }
+
+    fn render_hconcat_pair(specs: [ChartSpec; 2]) -> Result<SceneGraph, CompositeRenderError> {
+        let [a, b] = specs;
+        render_tree(|leaf| composite(CompositeLayout::Hconcat, vec![leaf(0), leaf(1)]), vec![a, b])
+    }
+
+    /// Render the tree `shape` builds, whose `leaf(i)` is a leaf drawing
+    /// `specs[i]`; leaves must be built in pre-order.
+    fn render_tree(
+        shape: impl Fn(&dyn Fn(usize) -> CompositeNode) -> CompositeNode,
+        specs: Vec<ChartSpec>,
+    ) -> Result<SceneGraph, CompositeRenderError> {
+        let tree = shape(&|i| leaf_node_with(specs[i].clone(), i));
+        let holds: Vec<LeafHold> = specs.into_iter().map(|spec| LeafHold { spec, ..hold() }).collect();
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default()).map(|(scene, _)| scene)
+    }
+
+    /// A `LayerChart` nested in a composition is one chart: a selection one
+    /// of its layers declares is owned by every layer's panel, so input on
+    /// the layer drawn on top drives it, while a sibling chart's panel owns
+    /// only its own. At the root, the group is the whole scene and its
+    /// selections stay unstamped.
+    #[test]
+    fn a_selection_declared_by_one_layer_is_owned_by_every_panel_of_its_layer_chart() {
+        let declaring = |names: &[&str]| ChartSpec {
+            selections: names.iter().map(|n| point_selection(n)).collect(),
+            ..scatter_spec()
+        };
+        let specs = || vec![declaring(&["brush"]), scatter_spec(), declaring(&["other"])];
+        let nested = |leaf: &dyn Fn(usize) -> CompositeNode| {
+            composite(
+                CompositeLayout::Hconcat,
+                vec![composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]), leaf(2)],
+            )
+        };
+        let scene = render_tree(nested, specs()).unwrap();
+        assert_eq!(scene.panels.len(), 3);
+        assert_eq!(owners(&scene), vec![("brush", Some(&[0, 1][..])), ("other", Some(&[2][..]))]);
+
+        let reversed = |leaf: &dyn Fn(usize) -> CompositeNode| {
+            composite(
+                CompositeLayout::Hconcat,
+                vec![leaf(0), composite(CompositeLayout::Overlay, vec![leaf(1), leaf(2)])],
+            )
+        };
+        let specs = vec![declaring(&["other"]), scatter_spec(), declaring(&["brush"])];
+        let scene = render_tree(reversed, specs).unwrap();
+        assert_eq!(
+            owners(&scene),
+            vec![("other", Some(&[0][..])), ("brush", Some(&[1, 2][..]))],
+            "a selection the top layer declares is owned by the bottom layer's panel too",
+        );
+
+        let root = |leaf: &dyn Fn(usize) -> CompositeNode| {
+            composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)])
+        };
+        let scene = render_tree(root, vec![declaring(&["brush"]), scatter_spec()]).unwrap();
+        assert_eq!(scene.panels.len(), 2);
+        assert_eq!(owners(&scene), vec![("brush", None)]);
+    }
+
+    /// Two declarations of one selection name that differ are refused,
+    /// naming the selection and each differing field with both values (only
+    /// `type` when the kinds differ).
+    #[test]
+    fn two_definitions_under_one_selection_name_are_refused() {
+        let declaring = |selection: &str| ChartSpec {
+            selections: vec![serde_json::from_str(selection).unwrap()],
+            ..scatter_spec()
+        };
+        let point = |nearest: bool, clear: &str| {
+            format!(
+                r#"{{"type":"point","name":"s","fields":null,"encodings":null,"nearest":{nearest},"toggle":"shift_key","on":"click","clear":"{clear}","resolve":"global"}}"#
+            )
+        };
+        let interval = r#"{"type":"interval","name":"s","fields":null,"encodings":null,"translate":true,"zoom":true,"mark":null,"resolve":"global"}"#;
+        let refusal = |specs: [ChartSpec; 2]| match render_hconcat_pair(specs) {
+            Ok(_) => panic!("two definitions under one selection name must be refused"),
+            Err(err) => err.to_string(),
+        };
+
+        assert_eq!(
+            refusal([declaring(&point(false, "click")), declaring(&point(true, "dblclick"))]),
+            "hconcat: selection 's' is declared twice with different definitions: chart 1 of \
+             hconcat declares clear='click', nearest=False, chart 2 of hconcat declares \
+             clear='dblclick', nearest=True. One name is one selection across the \
+             composition: share one selection between the charts, or give each its own name.",
+        );
+        assert_eq!(
+            refusal([declaring(&point(false, "click")), declaring(interval)]),
+            "hconcat: selection 's' is declared twice with different definitions: chart 1 of \
+             hconcat declares type='point', chart 2 of hconcat declares type='interval'. One \
+             name is one selection across the composition: share one selection between the \
+             charts, or give each its own name.",
+        );
+        let nested = |leaf: &dyn Fn(usize) -> CompositeNode| {
+            composite(
+                CompositeLayout::Vconcat,
+                vec![composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]), leaf(2)],
+            )
+        };
+        let specs = vec![scatter_spec(), declaring(&point(false, "click")), declaring(interval)];
+        let err = render_tree(nested, specs).err().map(|e| e.to_string());
+        assert_eq!(
+            err.as_deref(),
+            Some(
+                "vconcat: selection 's' is declared twice with different definitions: layer 2 \
+                 of overlay in chart 1 of vconcat declares type='point', chart 2 of vconcat \
+                 declares type='interval'. One name is one selection across the composition: \
+                 share one selection between the charts, or give each its own name."
+            ),
+        );
+        let linked = [declaring(&point(false, "click")), declaring(&point(false, "click"))];
+        assert_eq!(render_hconcat_pair(linked).unwrap().selections.len(), 1, "identical declarations merge");
+    }
+
+    /// One leaf declaring the same selection name twice with different
+    /// definitions names BOTH sides, never an empty position: `first_leaf ==
+    /// leaf` here, so a fix that re-reads the same position index twice must
+    /// not blank the second side.
+    #[test]
+    fn one_leaf_declaring_one_name_twice_names_both_sides() {
+        let point = |nearest: bool, clear: &str| {
+            format!(
+                r#"{{"type":"point","name":"s","fields":null,"encodings":null,"nearest":{nearest},"toggle":"shift_key","on":"click","clear":"{clear}","resolve":"global"}}"#
+            )
+        };
+        let spec = ChartSpec {
+            selections: vec![
+                serde_json::from_str(&point(false, "click")).unwrap(),
+                serde_json::from_str(&point(true, "dblclick")).unwrap(),
+            ],
+            ..scatter_spec()
+        };
+        let err = render_tree(|leaf| leaf(0), vec![spec]).err().map(|e| e.to_string());
+        assert_eq!(
+            err.as_deref(),
+            Some(
+                "leaf: selection 's' is declared twice with different definitions: the chart \
+                 declares clear='click', nearest=False, the chart declares clear='dblclick', \
+                 nearest=True. One name is one selection across the composition: share one \
+                 selection between the charts, or give each its own name."
+            ),
+        );
+    }
+
+    fn scene_with_panels(count: usize, selections: Vec<SceneSelection>) -> Placed {
+        let mut placed = placed_stub(100.0, 100.0);
+        placed.scene.panels = (0..count).map(|id| Panel { id, ..stub_panel() }).collect();
+        placed.scene.selections = selections;
+        placed
+    }
+
+    /// A multi-panel child (a faceted leaf) arrives with its owner panels
+    /// already stamped; they shift with its panel ids, and a nested composite
+    /// that ends with one panel hands its parent an unstamped selection that
+    /// the parent resolves to that one panel.
+    #[test]
+    fn owner_panels_shift_with_the_childs_panel_ids_at_any_depth() {
+        let single = scene_with_panels(1, vec![owned("shared", None)]);
+        let mut faceted =
+            scene_with_panels(2, vec![owned("f", Some(vec![0, 1])), owned("shared", Some(vec![0, 1]))]);
+        renumber_panels(&mut faceted.scene, 1);
+        let children = vec![single, faceted];
+        let plan = plan_linear(&children, 10.0, true);
+        let merged = merge_children(children, plan, &[false, false]);
+        assert_eq!(
+            owners(&merged.scene),
+            vec![("shared", Some(&[0, 1, 2][..])), ("f", Some(&[1, 2][..]))],
+        );
+
+        let nested = vec![scene_with_panels(1, vec![owned("n", None)])];
+        let plan = plan_linear(&nested, 10.0, true);
+        let nested = merge_children(nested, plan, &[false]);
+        assert_eq!(owners(&nested.scene), vec![("n", None)], "a one-panel merge stays unstamped");
+
+        let mut sibling = scene_with_panels(1, vec![owned("m", None)]);
+        renumber_panels(&mut sibling.scene, 1);
+        let children = vec![nested, sibling];
+        let plan = plan_linear(&children, 10.0, true);
+        let merged = merge_children(children, plan, &[false, false]);
+        assert_eq!(owners(&merged.scene), vec![("n", Some(&[0][..])), ("m", Some(&[1][..]))]);
     }
 }

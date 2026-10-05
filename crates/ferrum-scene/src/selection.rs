@@ -5,8 +5,13 @@ use crate::types::Color;
 
 // ── 3.7 SelectionSpec ───────────────────────────────────────────────
 
+/// A selection as a chart declares it: the `ChartSpec.selections` wire.
+/// The scene carries each one as a [`SceneSelection`], which adds the owner
+/// panels the scene build stamps. An unknown key, `panels` among them, is
+/// refused rather than dropped: no producer may set what the scene build
+/// owns.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectionSpec {
     Point {
         name: String,
@@ -27,6 +32,54 @@ pub enum SelectionSpec {
         mark: Option<SelectionMarkStyle>,
         resolve: SelectionResolve,
     },
+}
+
+impl SelectionSpec {
+    pub fn name(&self) -> &str {
+        match self {
+            SelectionSpec::Point { name, .. } | SelectionSpec::Interval { name, .. } => name,
+        }
+    }
+}
+
+/// A selection as the scene carries it: the declared [`SelectionSpec`] and
+/// its owner panels, every panel of the chart that declares it, every facet
+/// panel and every layer of a layered chart included. Owners are
+/// [`Panel::id`](crate::Panel)s, never array positions in
+/// `SceneGraph.panels`; input handlers translate the position an event
+/// arrives with before asking [`SceneSelection::takes_input_from`]. The
+/// scene build stamps `panels`; `None` means every panel of the scene, the
+/// form a one-panel scene carries, and is omitted on the wire, so such a
+/// scene's selections serialize exactly as their declarations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneSelection {
+    #[serde(flatten)]
+    pub selection: SelectionSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panels: Option<Vec<usize>>,
+}
+
+impl SceneSelection {
+    pub fn name(&self) -> &str {
+        self.selection.name()
+    }
+
+    /// Whether an input event on `event_panels` (the `Panel.id`s of the
+    /// panels a click or brush landed on) may update this selection: only input on one of its owner
+    /// panels does. A selection with no owner list takes every input, even
+    /// one outside every panel.
+    pub fn takes_input_from(&self, event_panels: &[usize]) -> bool {
+        self.panels
+            .as_ref()
+            .is_none_or(|owners| event_panels.iter().any(|p| owners.contains(p)))
+    }
+}
+
+impl From<SelectionSpec> for SceneSelection {
+    /// A selection owned by every panel of its scene.
+    fn from(selection: SelectionSpec) -> Self {
+        Self { selection, panels: None }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,5 +461,39 @@ mod tests {
             !json.contains("param_bindings"),
             "empty param_bindings must be skipped: {json}"
         );
+    }
+
+    /// Owner panels ride the scene wire only when stamped: an unstamped
+    /// selection serializes exactly as its declaration and reads back
+    /// unstamped, and a stamped one round-trips its list.
+    #[test]
+    fn selection_owner_panels_are_omitted_unless_stamped() {
+        let json = r#"{"type":"interval","name":"b","fields":null,"encodings":null,"translate":true,"zoom":true,"mark":null,"resolve":"global"}"#;
+        let mut scene: SceneSelection = serde_json::from_str(json).unwrap();
+        assert_eq!(scene.panels, None);
+        assert_eq!(serde_json::to_string(&scene).unwrap(), json);
+        assert_eq!(serde_json::to_string(&scene.selection).unwrap(), json);
+
+        scene.panels = Some(vec![1, 2]);
+        let stamped = serde_json::to_string(&scene).unwrap();
+        assert!(stamped.ends_with(r#","panels":[1,2]}"#), "{stamped}");
+        assert_eq!(serde_json::from_str::<SceneSelection>(&stamped).unwrap(), scene);
+    }
+
+    /// Owner panels are the scene build's to stamp: a declared selection
+    /// carrying `panels` is refused, as is any other key the declaration does
+    /// not have, while the same key on the scene wire is read.
+    #[test]
+    fn a_declared_selection_refuses_owner_panels_and_unknown_keys() {
+        let declared = r#"{"type":"point","name":"p","fields":null,"encodings":null,"nearest":false,"toggle":"shift_key","on":"click","clear":"dblclick","resolve":"global""#;
+        assert!(serde_json::from_str::<SelectionSpec>(&format!("{declared}}}")).is_ok());
+        for extra in [r#""panels":[0]"#, r#""bogus":1"#] {
+            let json = format!("{declared},{extra}}}");
+            let err = serde_json::from_str::<SelectionSpec>(&json).unwrap_err().to_string();
+            let key = extra.split('"').nth(1).unwrap();
+            assert!(err.contains(&format!("unknown field `{key}`")), "{json}: {err}");
+        }
+        let scene: SceneSelection = serde_json::from_str(&format!(r#"{declared},"panels":[0]}}"#)).unwrap();
+        assert_eq!(scene.panels, Some(vec![0]));
     }
 }

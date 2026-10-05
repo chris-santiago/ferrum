@@ -848,9 +848,8 @@ def test_p37_1001_marks_nonempty_packed_data():
 
 
 def test_p38_cross_panel_selections_and_conditionals():
-    """Two charts composed with |, both with the same selection_point(fields=["cat"])
-    and conditional, must produce a merged scene with selections and conditionals
-    from both children."""
+    """Two charts composed with | that declare the same selection merge into one
+    scene selection spec owned by both panels; each child's conditional survives."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": ["A", "B", "C"]})
     sel = selection_point(fields=["cat"], name="shared_sel")
     cond = sel.when(fm.Color("cat")).otherwise(value("#cccccc"))
@@ -874,9 +873,12 @@ def test_p38_cross_panel_selections_and_conditionals():
     scene_json, _ = composed._render_interactive()
     scene = json.loads(scene_json)
 
-    # Both children contribute selections
+    # Shared selection merges into one spec owned by both panels
     selections = scene.get("selections", [])
-    assert len(selections) == 2, f"expected 2 selections (one per child); got {len(selections)}"
+    assert len(selections) == 1, f"expected 1 merged selection; got {len(selections)}"
+    assert selections[0]["panels"] == [0, 1], (
+        f"merged selection must own both panels; got {selections[0].get('panels')}"
+    )
 
     # Both children contribute conditionals
     conditionals = scene["interaction"]["conditionals"]

@@ -63,7 +63,7 @@ pub struct WasmRenderer {
     pipelines: RenderPipelines,
     loaded: Option<LoadedScene>,
     transition: Option<ActiveTransition>,
-    selections: Vec<ferrum_scene::SelectionSpec>,
+    selections: Vec<ferrum_scene::SceneSelection>,
     interaction_state: InteractionState,
     zoom: ZoomPanState,
     /// Per-(panel, y-slot) domain-rescale affines (secondary-y-axis, GH #52),
@@ -429,9 +429,9 @@ impl WasmRenderer {
         x1: f32,
         y1: f32,
     ) -> Result<String, JsValue> {
-        if self.loaded.is_none() {
+        let Some(loaded) = self.loaded.as_ref() else {
             return Ok("{}".to_string());
-        }
+        };
 
         // Convert canvas-space brush coordinates to scene-space so
         // contains_point comparisons in conditional resolution use
@@ -450,8 +450,13 @@ impl WasmRenderer {
             .unwrap_or((x1 as f64, y1 as f64));
 
         // Update interval selection state in scene-space.
-        self.interaction_state
-            .handle_drag(&self.selections, panel_id as usize, sx0, sy0, sx1, sy1);
+        self.interaction_state.handle_drag(
+            loaded.hit_panels(),
+            &self.selections,
+            panel_id as usize,
+            (sx0, sy0),
+            (sx1, sy1),
+        );
 
         // D6 crossfilter (BindingRole::Filter): dim marks on a bound target
         // panel that fall outside this brush. Re-projects the source brush
@@ -681,7 +686,7 @@ impl WasmRenderer {
         let field_name = self
             .selections
             .iter()
-            .find_map(|spec| match spec {
+            .find_map(|spec| match &spec.selection {
                 ferrum_scene::SelectionSpec::Point { name, fields, .. }
                     if name == selection_name =>
                 {

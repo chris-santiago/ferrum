@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::selection::{InteractionConfig, SelectionSpec};
+use crate::selection::{InteractionConfig, SceneSelection};
 
 // ── 3.1 Top-level ───────────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ pub struct SceneGraph {
     pub panels: Vec<Panel>,
     pub legend: Vec<SceneNode>,
     pub decorations: Vec<SceneNode>,
-    pub selections: Vec<SelectionSpec>,
+    pub selections: Vec<SceneSelection>,
     pub interaction: InteractionConfig,
     /// Chart-level accessibility description emitted as `<desc>` in the root SVG.
     /// `None` means no `<desc>` element is emitted.

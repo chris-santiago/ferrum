@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ferrum_scene::{FieldValue, SelectionSpec};
+use ferrum_scene::{FieldValue, SceneSelection, SelectionSpec};
 
 use crate::hit_test::{self, HitResult};
 
@@ -50,14 +50,10 @@ pub struct InteractionState {
 }
 
 impl InteractionState {
-    pub fn new(specs: &[SelectionSpec]) -> Self {
+    pub fn new(specs: &[SceneSelection]) -> Self {
         let mut selections = HashMap::new();
         for spec in specs {
-            let name = match spec {
-                SelectionSpec::Point { name, .. } => name,
-                SelectionSpec::Interval { name, .. } => name,
-            };
-            selections.insert(name.clone(), SelectionState::Empty);
+            selections.insert(spec.name().to_string(), SelectionState::Empty);
         }
         InteractionState {
             selections,
@@ -69,7 +65,7 @@ impl InteractionState {
     pub fn handle_click(
         &mut self,
         panels: &[ferrum_scene::Panel],
-        specs: &[SelectionSpec],
+        specs: &[SceneSelection],
         x: f64,
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
@@ -94,7 +90,7 @@ impl InteractionState {
     pub fn handle_click_with_index(
         &mut self,
         panels: &[ferrum_scene::Panel],
-        specs: &[SelectionSpec],
+        specs: &[SceneSelection],
         x: f64,
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
@@ -115,8 +111,15 @@ impl InteractionState {
             },
         );
 
-        for spec in specs {
-            match spec {
+        // The panels this click landed on: the hit mark's own panel, or for a
+        // miss every panel under the click.
+        let event_panels = match &hit {
+            Some(h) => panel_ids_at(panels, [h.panel_id]),
+            None => panel_ids_at(panels, hit_test::panels_containing(panels, x, y, zoom)),
+        };
+
+        for spec in specs.iter().filter(|s| s.takes_input_from(&event_panels)) {
+            match &spec.selection {
                 SelectionSpec::Point {
                     name,
                     toggle,
@@ -180,21 +183,24 @@ impl InteractionState {
         self.hover = hit;
     }
 
+    /// Update every interval selection the brushed panel owns. `panel_pos`
+    /// is the brushed panel's position in `panels`; `start`/`end` are the
+    /// brush's two corners, in either drag direction.
     pub fn handle_drag(
         &mut self,
-        specs: &[SelectionSpec],
-        _panel_id: usize,
-        x0: f64,
-        y0: f64,
-        x1: f64,
-        y1: f64,
+        panels: &[ferrum_scene::Panel],
+        specs: &[SceneSelection],
+        panel_pos: usize,
+        start: (f64, f64),
+        end: (f64, f64),
     ) {
-        for spec in specs {
-            if let SelectionSpec::Interval { name, .. } = spec {
-                let x_lo = x0.min(x1);
-                let x_hi = x0.max(x1);
-                let y_lo = y0.min(y1);
-                let y_hi = y0.max(y1);
+        let event_panels = panel_ids_at(panels, [panel_pos]);
+        for spec in specs.iter().filter(|s| s.takes_input_from(&event_panels)) {
+            if let SelectionSpec::Interval { name, .. } = &spec.selection {
+                let x_lo = start.0.min(end.0);
+                let x_hi = start.0.max(end.0);
+                let y_lo = start.1.min(end.1);
+                let y_hi = start.1.max(end.1);
                 self.selections.insert(
                     name.clone(),
                     SelectionState::Interval {
@@ -478,11 +484,21 @@ fn toggle_points(
     }
 }
 
+/// The `Panel.id`s of the panels at `positions` in `panels`: input events
+/// name panels by array position, selection owner lists by `Panel.id`. A
+/// position past the end names no panel.
+fn panel_ids_at(
+    panels: &[ferrum_scene::Panel],
+    positions: impl IntoIterator<Item = usize>,
+) -> Vec<usize> {
+    positions.into_iter().filter_map(|pos| panels.get(pos).map(|p| p.id)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn point_spec(name: &str) -> SelectionSpec {
+    fn point_spec(name: &str) -> SceneSelection {
         SelectionSpec::Point {
             name: name.to_string(),
             fields: None,
@@ -493,6 +509,7 @@ mod tests {
             clear: ferrum_scene::EventExpr::Mouseout,
             resolve: ferrum_scene::SelectionResolve::Global,
         }
+        .into()
     }
 
     #[test]
@@ -609,7 +626,8 @@ mod tests {
             zoom: true,
             mark: None,
             resolve: ferrum_scene::SelectionResolve::Global,
-        }];
+        }
+        .into()];
         let mut state = InteractionState::new(&specs);
         state.selections.insert(
             "brush".to_string(),
@@ -639,9 +657,10 @@ mod tests {
             zoom: true,
             mark: None,
             resolve: ferrum_scene::SelectionResolve::Global,
-        }];
+        }
+        .into()];
         let mut state = InteractionState::new(&specs);
-        state.handle_drag(&specs, 0, 300.0, 200.0, 100.0, 50.0);
+        state.handle_drag(&[], &specs, 0, (300.0, 200.0), (100.0, 50.0));
         match state.selections.get("b") {
             Some(SelectionState::Interval {
                 x_range: Some((lo, hi)),
@@ -724,7 +743,7 @@ mod tests {
 
     // ── R1–R6: regression tests for interval/brush selection ────────────────
 
-    fn interval_spec(name: &str) -> SelectionSpec {
+    fn interval_spec(name: &str) -> SceneSelection {
         SelectionSpec::Interval {
             name: name.to_string(),
             fields: None,
@@ -734,9 +753,10 @@ mod tests {
             mark: None,
             resolve: ferrum_scene::SelectionResolve::Global,
         }
+        .into()
     }
 
-    fn shift_toggle_point_spec(name: &str) -> SelectionSpec {
+    fn shift_toggle_point_spec(name: &str) -> SceneSelection {
         SelectionSpec::Point {
             name: name.to_string(),
             fields: Some(vec![]),
@@ -747,6 +767,7 @@ mod tests {
             clear: ferrum_scene::EventExpr::Mouseout,
             resolve: ferrum_scene::SelectionResolve::Global,
         }
+        .into()
     }
 
     // R1: handle_drag updates interval selection state.
@@ -754,7 +775,7 @@ mod tests {
     fn r1_handle_drag_updates_interval_selection() {
         let specs = vec![interval_spec("brush")];
         let mut state = InteractionState::new(&specs);
-        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        state.handle_drag(&[], &specs, 0, (10.0, 20.0), (50.0, 60.0));
         match state.selections.get("brush") {
             Some(SelectionState::Interval {
                 x_range: Some((x_lo, x_hi)),
@@ -946,7 +967,7 @@ mod tests {
         let specs = vec![interval_spec("brush")];
         let mut state = InteractionState::new(&specs);
         // Drag from bottom-right to top-left: x0 > x1, y0 > y1.
-        state.handle_drag(&specs, 0, 400.0, 300.0, 100.0, 50.0);
+        state.handle_drag(&[], &specs, 0, (400.0, 300.0), (100.0, 50.0));
         match state.selections.get("brush") {
             Some(SelectionState::Interval {
                 x_range: Some((x_lo, x_hi)),
@@ -1071,7 +1092,7 @@ mod tests {
 
         // Simulate what lib.rs does after inverse_apply: pass scene-space
         // coordinates (100, 50) to (300, 250) to handle_drag.
-        state.handle_drag(&specs, 0, 100.0, 50.0, 300.0, 250.0);
+        state.handle_drag(&[], &specs, 0, (100.0, 50.0), (300.0, 250.0));
 
         // The stored interval must match the scene-space coords.
         match state.selections.get("brush") {
@@ -1341,7 +1362,7 @@ mod tests {
         // where lo == hi. This is a degenerate brush that would select nothing.
         let specs = vec![interval_spec("z")];
         let mut state = InteractionState::new(&specs);
-        state.handle_drag(&specs, 0, 100.0, 200.0, 100.0, 200.0);
+        state.handle_drag(&[], &specs, 0, (100.0, 200.0), (100.0, 200.0));
         match state.selections.get("z") {
             Some(SelectionState::Interval {
                 x_range: Some((lo, hi)),
@@ -1380,7 +1401,7 @@ mod tests {
                 field_values: Vec::new(),
             },
         );
-        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        state.handle_drag(&[], &specs, 0, (10.0, 20.0), (50.0, 60.0));
         // Point selection must be untouched.
         match state.selections.get("pt") {
             Some(SelectionState::Point { indices, .. }) => {
@@ -1447,7 +1468,7 @@ mod tests {
         // This should not panic, and the selection should still be Interval.
         let specs = vec![interval_spec("b")];
         let mut state = InteractionState::new(&specs);
-        state.handle_drag(&specs, 0, 100.0, 100.0, 100.0, 100.0);
+        state.handle_drag(&[], &specs, 0, (100.0, 100.0), (100.0, 100.0));
         match state.selections.get("b") {
             Some(SelectionState::Interval {
                 x_range: Some((lo, hi)),
@@ -1484,7 +1505,7 @@ mod tests {
         // handle_drag should only update interval specs, not point specs.
         let specs = vec![point_spec("p"), interval_spec("b")];
         let mut state = InteractionState::new(&specs);
-        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        state.handle_drag(&[], &specs, 0, (10.0, 20.0), (50.0, 60.0));
         // Point selection must remain Empty
         assert!(
             matches!(state.selections.get("p"), Some(SelectionState::Empty)),
@@ -1644,7 +1665,8 @@ mod tests {
             on: ferrum_scene::EventExpr::Click,
             clear: ferrum_scene::EventExpr::Mouseout,
             resolve: ferrum_scene::SelectionResolve::Global,
-        }];
+        }
+        .into()];
         let mut state = InteractionState::new(&specs);
         let zoom =
             crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
@@ -1817,7 +1839,8 @@ mod tests {
             on: ferrum_scene::EventExpr::Click,
             clear: ferrum_scene::EventExpr::Mouseout,
             resolve: ferrum_scene::SelectionResolve::Global,
-        }];
+        }
+        .into()];
         let mut state = InteractionState::new(&specs);
         let zoom =
             crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
@@ -1967,7 +1990,8 @@ mod tests {
             on: ferrum_scene::EventExpr::Click,
             clear: ferrum_scene::EventExpr::Mouseout,
             resolve: ferrum_scene::SelectionResolve::Global,
-        }];
+        }
+        .into()];
         let mut state = InteractionState::new(&specs);
         let zoom =
             crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
@@ -1992,5 +2016,191 @@ mod tests {
             }
             other => panic!("expected Point selection after click, got {other:?}"),
         }
+    }
+
+    // ── Owner-panel input ─────────────────────────────────────────────────────
+
+    /// Two side-by-side panels, each with one clickable circle: panel 0's
+    /// plot area spans x 0..100 (circle at 50, 50, data index 0), panel 1's
+    /// spans x 200..300 (circle at 250, 50, data index 1).
+    fn two_panels() -> Vec<ferrum_scene::Panel> {
+        use ferrum_scene::{
+            CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+        let style = FillStroke {
+            fill: None,
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let panel = |id: usize, x: f64| {
+            let area = Rect { x, y: 0.0, w: 100.0, h: 100.0 };
+            Panel {
+                id,
+                plot_area: area.clone(),
+                clip: area,
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                    y_domains: Vec::new(),
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![SceneNode::Circle { cx: x + 50.0, cy: 50.0, r: 10.0, style: style.clone() }],
+                    data_indices: Some(vec![id]),
+                    ..MarkBatch::default()
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
+            }
+        };
+        vec![panel(0, 0.0), panel(1, 200.0)]
+    }
+
+    fn owned_point(name: &str, panels: Option<Vec<usize>>) -> SceneSelection {
+        let selection = SelectionSpec::Point {
+            name: name.to_string(),
+            fields: None,
+            encodings: None,
+            nearest: false,
+            toggle: ferrum_scene::EventExpr::ShiftKey,
+            on: ferrum_scene::EventExpr::Click,
+            clear: ferrum_scene::EventExpr::Click,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        };
+        SceneSelection { selection, panels }
+    }
+
+    fn owned_interval(name: &str, panels: Option<Vec<usize>>) -> SceneSelection {
+        let selection = SelectionSpec::Interval {
+            name: name.to_string(),
+            fields: None,
+            encodings: None,
+            translate: false,
+            zoom: false,
+            mark: None,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        };
+        SceneSelection { selection, panels }
+    }
+
+    fn click(state: &mut InteractionState, panels: &[ferrum_scene::Panel], specs: &[SceneSelection], x: f64) {
+        let zoom = crate::zoom_pan::ZoomPanState::new(panels.len(), &ferrum_scene::InteractionConfig::default());
+        state.handle_click(panels, specs, x, 50.0, &zoom, false, &[], &[]);
+    }
+
+    fn point_indices(state: &InteractionState, name: &str) -> Option<Vec<usize>> {
+        match state.selections.get(name) {
+            Some(SelectionState::Point { indices, .. }) => Some(indices.clone()),
+            Some(SelectionState::Empty) => None,
+            other => panic!("{name}: expected a point or empty selection, got {other:?}"),
+        }
+    }
+
+    /// A click on one panel's mark updates only the selection that panel
+    /// owns; the other panel's selection stays as it was until a click lands
+    /// on its own panel.
+    #[test]
+    fn a_click_updates_only_the_selection_its_panel_owns() {
+        let panels = two_panels();
+        let specs = vec![owned_point("a", Some(vec![0])), owned_point("b", Some(vec![1]))];
+        let mut state = InteractionState::new(&specs);
+
+        click(&mut state, &panels, &specs, 250.0);
+        assert_eq!(point_indices(&state, "b"), Some(vec![1]));
+        assert_eq!(point_indices(&state, "a"), None, "a click on panel 1 must leave panel 0's selection empty");
+
+        click(&mut state, &panels, &specs, 50.0);
+        assert_eq!(point_indices(&state, "a"), Some(vec![0]), "a click on panel 0 drives its own selection");
+        assert_eq!(point_indices(&state, "b"), Some(vec![1]), "and leaves panel 1's selection as it was");
+    }
+
+    /// A click that misses every mark clears only the selections owned by the
+    /// panel it landed on; a click outside every panel clears no owned one.
+    #[test]
+    fn a_missed_click_clears_only_the_selection_its_panel_owns() {
+        let panels = two_panels();
+        let specs = vec![owned_point("a", Some(vec![0])), owned_point("b", Some(vec![1]))];
+        let mut state = InteractionState::new(&specs);
+        click(&mut state, &panels, &specs, 50.0);
+        click(&mut state, &panels, &specs, 250.0);
+
+        click(&mut state, &panels, &specs, 150.0);
+        assert_eq!(point_indices(&state, "a"), Some(vec![0]), "a click between the panels clears nothing");
+        assert_eq!(point_indices(&state, "b"), Some(vec![1]));
+
+        click(&mut state, &panels, &specs, 290.0);
+        assert_eq!(point_indices(&state, "b"), None, "a missed click on panel 1 clears its own selection");
+        assert_eq!(point_indices(&state, "a"), Some(vec![0]), "and leaves panel 0's selection selected");
+    }
+
+    /// A selection with no owner list (a one-panel scene's) takes every
+    /// click, as before owner panels existed, including a miss outside every
+    /// panel clearing it.
+    #[test]
+    fn an_unowned_selection_takes_every_click() {
+        let panels = two_panels();
+        let specs = vec![owned_point("s", None)];
+        let mut state = InteractionState::new(&specs);
+        click(&mut state, &panels, &specs, 250.0);
+        assert_eq!(point_indices(&state, "s"), Some(vec![1]));
+        click(&mut state, &panels, &specs, 150.0);
+        assert_eq!(point_indices(&state, "s"), None);
+    }
+
+    /// A brush updates only the interval selections its panel owns, and a
+    /// selection owned by both panels (linked views) takes a brush on either.
+    #[test]
+    fn a_brush_updates_only_the_selections_its_panel_owns() {
+        let specs = vec![
+            owned_interval("a", Some(vec![0])),
+            owned_interval("b", Some(vec![1])),
+            owned_interval("linked", Some(vec![0, 1])),
+        ];
+        let brushed = |state: &InteractionState, name: &str| {
+            matches!(state.selections.get(name), Some(SelectionState::Interval { .. }))
+        };
+        for (panel, own, other) in [(0, "a", "b"), (1, "b", "a")] {
+            let mut state = InteractionState::new(&specs);
+            state.handle_drag(&two_panels(), &specs, panel, (10.0, 10.0), (40.0, 40.0));
+            assert!(brushed(&state, own), "a brush on panel {panel} drives {own}");
+            assert!(!brushed(&state, other), "a brush on panel {panel} must leave {other} empty");
+            assert!(brushed(&state, "linked"), "a brush on panel {panel} drives the linked selection");
+        }
+    }
+
+    /// Owner lists carry `Panel.id`s while clicks and brushes arrive by array
+    /// position; the handlers translate one to the other, so a scene whose
+    /// ids differ from its positions still routes input to its owners.
+    #[test]
+    fn input_is_routed_by_panel_id_not_array_position() {
+        let mut panels = two_panels();
+        panels[0].id = 7;
+        panels[1].id = 3;
+        let specs = vec![owned_point("a", Some(vec![7])), owned_point("b", Some(vec![3]))];
+        let mut state = InteractionState::new(&specs);
+        click(&mut state, &panels, &specs, 250.0);
+        assert_eq!(point_indices(&state, "b"), Some(vec![1]), "a hit on position 1 drives id 3's owner");
+        assert_eq!(point_indices(&state, "a"), None);
+        click(&mut state, &panels, &specs, 290.0);
+        assert_eq!(point_indices(&state, "b"), None, "a miss on position 1 clears id 3's owner");
+
+        let specs = vec![owned_interval("a", Some(vec![7])), owned_interval("b", Some(vec![3]))];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&panels, &specs, 1, (210.0, 10.0), (240.0, 40.0));
+        let brushed = |name: &str| matches!(state.selections.get(name), Some(SelectionState::Interval { .. }));
+        assert!(brushed("b"), "a brush on position 1 drives id 3's owner");
+        assert!(!brushed("a"), "and leaves id 7's owner empty");
     }
 }

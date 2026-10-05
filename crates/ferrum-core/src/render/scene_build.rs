@@ -2,7 +2,7 @@ use crate::spec::coord::to_scene_coord;
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
     BindingRole, BlendMode, CoordKind, InteractionConfig, LayoutScale, MarkBatch, Panel,
-    PanelTickLevels, ParamBinding, SceneGraph, SceneNode, TickLevel,
+    PanelTickLevels, ParamBinding, SceneGraph, SceneNode, SceneSelection, SelectionSpec, TickLevel,
 };
 
 use crate::layout::{AxisLayout, LayoutResult, Rect, ResolveMode, ThemeInputs};
@@ -734,6 +734,7 @@ pub fn build_scene(
         param_bindings,
     };
 
+    let selections = owned_selections(&spec.selections, &panels);
     Ok(SceneGraph {
         width: layout.viewport.w,
         height: layout.viewport.h,
@@ -742,10 +743,23 @@ pub fn build_scene(
         panels,
         legend: legend_nodes,
         decorations: Vec::new(),
-        selections: spec.selections.clone(),
+        selections,
         interaction,
         chart_description: spec.chart_description.clone(),
     })
+}
+
+/// The chart's selections, each stamped with its owner panels: every panel
+/// this chart drew, every facet panel included. A one-panel scene leaves
+/// them unstamped (`None`, every panel of the scene), so its selection specs
+/// serialize as they always have.
+fn owned_selections(selections: &[SelectionSpec], panels: &[Panel]) -> Vec<SceneSelection> {
+    let owners: Option<Vec<usize>> =
+        (panels.len() > 1).then(|| panels.iter().map(|p| p.id).collect());
+    selections
+        .iter()
+        .map(|selection| SceneSelection { selection: selection.clone(), panels: owners.clone() })
+        .collect()
 }
 
 /// The loop-invariant chart-level scale-resolution context: the chart spec,
@@ -3758,7 +3772,7 @@ fn validate_layer_positional_columns(
 /// per-layer coord can produce (a layer that declares none inherits the chart's,
 /// so the two agree by construction). Layer 0 is exempt for a stronger reason:
 /// the panel's axes are resolved from its own post-flip encoding
-/// (`prepare::rendering_encoding_of`), so its columns suit
+/// (`PreparedInputs::rendering_encoding`), so its columns suit
 /// them by construction and the question is already answered.
 ///
 /// **The servability question is the crate's existing pair, not a new dtype
@@ -13084,6 +13098,43 @@ mod tests {
     // spans a gap is dropped; N spanning rects roll up as suppressed; an
     // in-gap ENDPOINT suppresses the whole extent) the new contract retires.
     // See `annotation.rs`'s "Break routing" test section.
+
+    fn interval_selection(name: &str) -> ferrum_scene::SelectionSpec {
+        ferrum_scene::SelectionSpec::Interval {
+            name: name.to_string(),
+            fields: None,
+            encodings: None,
+            translate: false,
+            zoom: false,
+            mark: None,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }
+    }
+
+    /// A faceted chart's selection is owned by every facet panel it drew, so
+    /// a brush on any facet drives it.
+    #[test]
+    fn a_faceted_charts_selection_is_owned_by_every_facet_panel() {
+        let (mut spec, batch) = faceted_bar_spec(&[30.0, 40.0, 50.0], 3);
+        spec.selections = vec![interval_selection("brush")];
+        let scene = build_scene_for(&spec, &batch);
+        assert_eq!(scene.panels.len(), 3, "the fixture must produce three panels");
+        assert_eq!(scene.selections[0].panels, Some(vec![0, 1, 2]));
+    }
+
+    /// A one-panel scene has one possible owner, so its selection carries no
+    /// owner list and serializes exactly as it did before owner panels existed.
+    #[test]
+    fn a_one_panel_charts_selection_carries_no_owner_list() {
+        let (mut spec, batch) = faceted_bar_spec(&[30.0], 1);
+        spec.facet = None;
+        spec.selections = vec![interval_selection("brush")];
+        let scene = build_scene_for(&spec, &batch);
+        assert_eq!(scene.panels.len(), 1);
+        assert_eq!(scene.selections[0].panels, None);
+        let json = serde_json::to_value(&scene.selections[0]).unwrap();
+        assert!(json.get("panels").is_none(), "a one-panel scene omits `panels`: {json}");
+    }
 }
 
 /// RED-proof + regression pin for `#113` — the pre-flip/post-flip encoding
