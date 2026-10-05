@@ -70,9 +70,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // vocabularies, primary output schemas, and wire params per transform
     // kind, one Rust-owned table Python queries instead of hand-mirroring.
     m.add_function(wrap_pyfunction!(transform::registry::transform_registry, m)?)?;
-    // The feature columns `Linkage`/`Reorder` select from a table, so
-    // heatmap/clustermap split id from feature columns by Rust's rule.
-    m.add_function(wrap_pyfunction!(transform::linkage::numeric_feature_columns, m)?)?;
+    // The numeric columns `Linkage`/`Reorder` select from a table, so
+    // heatmap/clustermap split id from numeric columns by Rust's rule.
+    m.add_function(wrap_pyfunction!(transform::numeric_util::numeric_columns, m)?)?;
     // Wave-4 task 9 (#193): the `bins=` vocabulary gate, published so a figure
     // entry (`displot`) can refuse a malformed `bins=` naming ITSELF rather
     // than the private `Bin` transform it builds — without a second copy of the

@@ -25,8 +25,8 @@ use super::LegendPreparedOverrides;
 
 /// What the legends read off a chart. Each legend channel is bound as its
 /// scale was built, from the rendering encoding
-/// ([`super::rendering_encoding_of`]): a chart-level binding is inherited into
-/// it and a layer's own binding replaces it, so the legend's title and
+/// (`PreparedInputs::rendering_encoding()`): a chart-level binding is
+/// inherited into it and a layer's own binding replaces it, so the legend's title and
 /// `Legend(...)` style come from the binding that draws. `x`/`y` stay as
 /// authored: they feed only the color legend's `Legend(...)` cascade, which
 /// must not swap under `CoordFlip`.
@@ -1246,8 +1246,8 @@ fn categorical_aux_fate(
 /// composite path this way; cycle-4 finding 2 extends it here so the flat
 /// path — which also serves `LayerChart.interactive()` — agrees). The
 /// resolved field is `layers[0]`'s own color field: `prepare_render_inputs`
-/// feeds the rendering encoding ([`super::rendering_encoding_of`]) into scale
-/// resolution, so that is definitionally the field `scales.color` was
+/// feeds the rendering encoding (`PreparedInputs::rendering_encoding()`) into
+/// scale resolution, so that is definitionally the field `scales.color` was
 /// resolved from.
 /// `LayerPrepared::from_chart_and_layer` clones each layer's own encoding,
 /// so per-layer color fields genuinely differ in a merged multi-layer spec

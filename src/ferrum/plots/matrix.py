@@ -37,7 +37,7 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
-from ferrum._core import numeric_feature_columns, secondary_key
+from ferrum._core import numeric_columns, secondary_key
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import coerce_finite_real, validate_choice
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -241,7 +241,7 @@ def pairplot(
         # No vars specified — auto-detect numeric columns from data.
         from ferrum._coerce import to_arrow_table
 
-        numeric_cols = numeric_feature_columns(to_arrow_table(data).schema, "pairplot")
+        numeric_cols = numeric_columns(to_arrow_table(data).schema, "pairplot")
         rows = numeric_cols
         cols = numeric_cols
 
@@ -536,10 +536,10 @@ def heatmap(
     center = coerce_finite_real("heatmap(center=...)", center)
 
     tbl = to_arrow_table(data)
-    # The value columns are the feature columns Rust's `Linkage` and
+    # The value columns are the numeric columns Rust's `Linkage` and
     # `Reorder(axis="columns")` read (a decimal column refuses here); the id
     # column is the first column that is not one.
-    value_cols = numeric_feature_columns(tbl.schema, "heatmap")
+    value_cols = numeric_columns(tbl.schema, "heatmap")
     features = frozenset(value_cols)
     id_col = next((name for name in tbl.column_names if name not in features), None)
     if not value_cols:
@@ -1035,10 +1035,10 @@ def clustermap(
     from ferrum._coerce import to_arrow_table
 
     tbl = to_arrow_table(data)
-    # The value columns are the feature columns Rust's `Linkage` and
+    # The value columns are the numeric columns Rust's `Linkage` and
     # `Reorder(axis="columns")` read (a decimal column refuses here); the id
     # column is the first column that is not one.
-    value_cols = numeric_feature_columns(tbl.schema, "clustermap")
+    value_cols = numeric_columns(tbl.schema, "clustermap")
     features = frozenset(value_cols)
     id_col = next((name for name in tbl.column_names if name not in features), None)
     if not value_cols:

@@ -2,8 +2,8 @@
 //!
 //! `by` names an Int64 index column. On the row axis (default),
 //! output.row[i] == input.row[by[i]]. On the column axis, the batch's numeric
-//! feature columns (the ones `Linkage(axis="columns")` clusters, see
-//! [`feature_column_indices`]) are permuted in place: the i-th numeric slot
+//! columns (the ones `Linkage(axis="columns")` clusters, see
+//! [`numeric_column_indices`]) are permuted in place: the i-th numeric slot
 //! receives numeric column by[i], and every other column keeps its position.
 //! When `drop_index=true` (default), the `by` column is omitted from output.
 //!
@@ -20,7 +20,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::linkage::{feature_column_indices, LinkageAxis};
+use crate::transform::linkage::LinkageAxis;
+use crate::transform::numeric_util::numeric_column_indices;
 use crate::transform::vocabulary::Vocabulary;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,7 +131,7 @@ fn permute_rows(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -
 fn permute_columns(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -> PyResult<Columns> {
     let from = spec.from.as_deref().unwrap_or_default();
     let schema = batch.schema();
-    let slots = feature_column_indices(&schema, "stat_reorder")?;
+    let slots = numeric_column_indices(&schema, "stat_reorder")?;
     if idx_arr.len() != slots.len() {
         return Err(PyValueError::new_err(format!(
             "stat_reorder: from='{from}' produced {} indices but batch has {} numeric columns",
@@ -463,7 +464,7 @@ mod tests {
         let err = apply_with_outputs(&column_spec(Some("o")), &batch, Some(&outs)).unwrap_err().to_string();
         assert_eq!(
             err,
-            "ValueError: stat_reorder: column 'E' is a decimal column (Decimal128(5, 2)); a feature column \
+            "ValueError: stat_reorder: column 'E' is a decimal column (Decimal128(5, 2)); a numeric column \
              must be an integer or float column, so cast it to float first"
         );
     }

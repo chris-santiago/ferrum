@@ -987,12 +987,12 @@ def marks_drawing_constant_size() -> list[str]: ...
 # a primitive mark name; any other name raises ``ValueError``.
 def check_mark_size(entry: str, mark: str, size: float) -> None: ...
 
-# The feature columns of ``schema`` (any object exporting
+# The numeric columns of ``schema`` (any object exporting
 # ``__arrow_c_schema__``), in schema order: exactly the integer and float
 # columns ``Linkage`` clusters and ``Reorder(axis="columns")`` permutes. A
 # decimal column raises ``ValueError`` voiced as ``entry``, naming the column
 # and its dtype.
-def numeric_feature_columns(schema: Any, entry: str) -> list[str]: ...
+def numeric_columns(schema: Any, entry: str) -> list[str]: ...
 
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it

@@ -207,7 +207,7 @@ def test_layer_kwargs_for_an_undrawn_layer_refuses() -> None:
         chart.to_svg()
 
 
-# ── decimal feature columns ─────────────────────────────────────────────────
+# ── decimal numeric columns ─────────────────────────────────────────────────
 
 _DEC = pl.DataFrame(
     {"a": [1.0, 2.0, 3.0], "d": [Decimal("1.5"), Decimal("2.5"), Decimal("0.5")], "b": [3, 1, 2]}
@@ -215,11 +215,11 @@ _DEC = pl.DataFrame(
 
 
 @pytest.mark.parametrize("entry", ["heatmap", "clustermap", "pairplot"])
-def test_a_decimal_feature_column_refuses_naming_the_entry(entry: str) -> None:
+def test_a_decimal_column_refuses_naming_the_entry(entry: str) -> None:
     with pytest.raises(ValueError) as exc_info:
         getattr(fm, entry)(_DEC)
     assert str(exc_info.value) == (
-        f"{entry}: column 'd' is a decimal column (Decimal128(38, 1)); a feature column "
+        f"{entry}: column 'd' is a decimal column (Decimal128(38, 1)); a numeric column "
         "must be an integer or float column, so cast it to float first"
     )
 

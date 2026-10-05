@@ -3,7 +3,7 @@
 //! Kept `pub(crate)` — not part of the public API surface.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 
@@ -87,6 +87,56 @@ pub(crate) fn is_numeric_dtype(dt: &DataType) -> bool {
             | DataType::Float16
             | DataType::Float32
     )
+}
+
+/// Schema positions of the numeric columns a wide matrix-shaped table
+/// exposes, in schema order: `Linkage`'s column axis leaf `k` is the column
+/// at position `k` of this list, `Reorder(axis="columns")` permutes exactly
+/// these positions, and `pairplot`/`heatmap`/`clustermap` split their id
+/// column from these same positions via [`numeric_columns`]. The predicate is
+/// crate-wide (every [`is_numeric_dtype`] dtype), not specific to clustering,
+/// which is why it lives beside `is_numeric_dtype` rather than in `linkage`.
+///
+/// A decimal column is refused, voiced as `ctx`: it holds numbers, but no
+/// transform reads it as one, so leaving it out of the numeric columns would
+/// drop data the caller meant to use.
+pub(crate) fn numeric_column_indices(schema: &Schema, ctx: &str) -> PyResult<Vec<usize>> {
+    let decimal = schema.fields().iter().find(|f| {
+        matches!(
+            f.data_type(),
+            DataType::Decimal32(..) | DataType::Decimal64(..) | DataType::Decimal128(..) | DataType::Decimal256(..)
+        )
+    });
+    if let Some(field) = decimal {
+        return Err(PyValueError::new_err(format!(
+            "{ctx}: column '{}' is a decimal column ({}); a numeric column must be an integer or \
+             float column, so cast it to float first",
+            field.name(),
+            field.data_type()
+        )));
+    }
+    Ok(schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| is_numeric_dtype(f.data_type()))
+        .map(|(i, _)| i)
+        .collect())
+}
+
+/// `ferrum._core.numeric_columns(schema, entry)`: the names of the numeric
+/// columns [`numeric_column_indices`] selects from an Arrow `schema`, in
+/// schema order, so a Python figure function splits its table into id and
+/// numeric columns by the one rule `Linkage`, `Reorder`, `pairplot` and
+/// `heatmap` all apply. Refuses a decimal column with a `ValueError` voiced
+/// as `entry`. Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyo3::pyfunction]
+pub(crate) fn numeric_columns(schema: pyo3_arrow::PySchema, entry: &str) -> PyResult<Vec<String>> {
+    let schema = schema.into_inner();
+    Ok(numeric_column_indices(&schema, entry)?
+        .into_iter()
+        .map(|i| schema.field(i).name().clone())
+        .collect())
 }
 
 /// Coerce a paired `(x, y)` column pair into jointly-clean `f64` vectors.
@@ -926,5 +976,29 @@ mod tests {
     fn resolve_shared_extent_shared_computes_global() {
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 9.0, 4.0])));
         assert_eq!(resolve_shared_extent(None, true, &b, "x", &[]), Some((1.0, 9.0)));
+    }
+
+    // ---------- numeric_column_indices ----------
+
+    #[test]
+    fn numeric_column_indices_selects_every_numeric_dtype_skips_label() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Int64, false),
+        ]);
+        assert_eq!(numeric_column_indices(&schema, "pairplot").unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn numeric_column_indices_refuses_a_decimal_column_naming_ctx_and_dtype() {
+        pyo3::Python::initialize();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("d", DataType::Decimal128(5, 2), false),
+        ]);
+        let msg = numeric_column_indices(&schema, "heatmap").unwrap_err().to_string();
+        assert!(msg.contains("heatmap: column 'd' is a decimal column"), "err: {msg}");
+        assert!(msg.contains("a numeric column must be an integer or float column"), "err: {msg}");
     }
 }

@@ -481,6 +481,13 @@ pub struct PreparedInputs {
     pub warnings: Vec<RenderWarning>,
     /// One entry per layer. Single-layer charts have len() == 1.
     pub layers: Vec<LayerPrepared>,
+    /// Layer 0's resolved (post-`CoordFlip`) encoding, which every scale,
+    /// axis and legend of the chart is built from. A chart-level binding is
+    /// inherited into it and a layer's own binding replaces it, so layer 0
+    /// decides. Computed once at construction, from the same `layers` list
+    /// `build_layers` already guarantees is non-empty, so the
+    /// `rendering_encoding()` accessor below never indexes `layers[0]`.
+    rendering_encoding: crate::spec::encoding::Encoding,
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
@@ -606,19 +613,13 @@ pub struct LegendPreparedOverrides {
     pub title_padding: Option<f64>,
 }
 
-/// The rendering encoding: layer 0's resolved (post-`CoordFlip`) encoding,
-/// which every scale, axis and legend of the chart is built from. A
-/// chart-level binding is inherited into it and a layer's own binding replaces
-/// it, so layer 0 decides. `build_layers` never returns an empty `Vec`: it
-/// refuses an empty `layers` list ([`RenderError::LayeredChartNoLayers`]).
-pub(crate) fn rendering_encoding_of(layers: &[LayerPrepared]) -> &crate::spec::encoding::Encoding {
-    &layers[0].encoding
-}
-
 impl PreparedInputs {
-    /// [`rendering_encoding_of`] this chart's layers.
+    /// Layer 0's resolved (post-`CoordFlip`) rendering encoding, computed
+    /// once at construction into this struct's `rendering_encoding` field
+    /// rather than re-derived here, so this accessor never indexes
+    /// `layers[0]`.
     pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
-        rendering_encoding_of(&self.layers)
+        &self.rendering_encoding
     }
 
     /// The final transform-pipeline output — i.e. `transform_outputs[FINAL_OUTPUT_KEY]`.
@@ -1193,7 +1194,14 @@ pub fn prepare_render_inputs(
     // Clone spec and substitute the rendering encoding so resolve_scales works
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
-    let rendering_encoding = rendering_encoding_of(&layers);
+    // `build_layers` above already refuses an empty `layers` list
+    // (`RenderError::LayeredChartNoLayers`), so `.first()` here always
+    // succeeds; the `ok_or` keeps that true by construction instead of by
+    // `layers[0]` indexing.
+    let rendering_encoding = layers
+        .first()
+        .map(|l| &l.encoding)
+        .ok_or(RenderError::LayeredChartNoLayers)?;
     let rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
@@ -1359,6 +1367,7 @@ pub fn prepare_render_inputs(
         legend_title,
         colorbar,
         warnings: scale_warnings,
+        rendering_encoding: rendering_encoding.clone(),
         layers,
         coord_flipped,
         legend_overrides,
