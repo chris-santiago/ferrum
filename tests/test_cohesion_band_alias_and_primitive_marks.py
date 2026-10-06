@@ -10,7 +10,7 @@ edge: ``Axis(min_band=5, min_extent=None)`` silently accepted while
 three surfaces now behave IDENTICALLY for (a) the single-alias path, (b) the
 double-supply path, and (c) the previously-divergent explicit-``None`` edge.
 
-ITEM 2 — ``_PRIMITIVE_MARKS`` was triplicated (chart.py / _desugar.py /
+ITEM 2 — ``_FLAT_MARK_METHODS`` was triplicated (chart.py / _desugar.py /
 marks/_chart_methods_statistical.py).  It is now defined once in ``_layer`` (the
 desugar leaf) and imported everywhere; these tests assert every site sees the
 SAME frozenset object so the dedup cannot silently regress.
@@ -120,27 +120,27 @@ class TestBandAliasCrossSibling:
 
 
 # ---------------------------------------------------------------------------
-# ITEM 2 — single-sourced _PRIMITIVE_MARKS
+# ITEM 2 — single-sourced _FLAT_MARK_METHODS
 # ---------------------------------------------------------------------------
 
 
-class TestPrimitiveMarksSingleSourced:
-    """``_PRIMITIVE_MARKS`` is defined once in ``_layer`` and shared everywhere."""
+class TestFlatMarkMethodsSingleSourced:
+    """``_FLAT_MARK_METHODS`` is defined once in ``_layer`` and shared everywhere."""
 
     def test_all_sites_are_the_same_object(self) -> None:
         """Every consuming module must reference the identical frozenset object."""
         from ferrum import _layer, chart, _desugar
         from ferrum.marks import _chart_methods_statistical
 
-        canonical = _layer._PRIMITIVE_MARKS
-        assert chart._PRIMITIVE_MARKS is canonical
-        assert _desugar._PRIMITIVE_MARKS is canonical
-        assert _chart_methods_statistical._PRIMITIVE_MARKS is canonical
+        canonical = _layer._FLAT_MARK_METHODS
+        assert chart._FLAT_MARK_METHODS is canonical
+        assert _desugar._FLAT_MARK_METHODS is canonical
+        assert _chart_methods_statistical._FLAT_MARK_METHODS is canonical
 
     def test_members_unchanged(self) -> None:
-        """The relocated constant keeps its exact 8 primitive-mark members."""
-        from ferrum._layer import _PRIMITIVE_MARKS
+        """The relocated constant keeps its exact 8 flat-mark-method members."""
+        from ferrum._layer import _FLAT_MARK_METHODS
 
-        assert _PRIMITIVE_MARKS == frozenset(
+        assert _FLAT_MARK_METHODS == frozenset(
             {"point", "line", "bar", "area", "rule", "text", "tick", "rect"}
         )

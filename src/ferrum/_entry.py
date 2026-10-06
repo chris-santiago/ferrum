@@ -20,15 +20,73 @@ class EntryRefusal(ValueError):
     'filled' is not honored by mark_line ...``). A figure that builds
     through another figure re-voices it on the way out, so the outermost
     call names it.
+
+    *entry* must name a call; an empty one refuses. The text for another
+    voice comes from *message_for* alone, a template or a re-call of the one
+    pure validator that refused, never from re-running the door.
     """
 
     def __init__(self, message_for: Callable[[str], str], entry: str) -> None:
+        # A refusal always names a public call: an empty voice would leak a
+        # message that starts with ``(mark=...)``, naming nothing.
+        if not entry:
+            raise ValueError("EntryRefusal needs the public call it speaks as; got an empty entry")
         super().__init__(message_for(entry))
         self.message_for = message_for
+        self.entry = entry
 
     def spoken_as(self, entry: str) -> "EntryRefusal":
-        """The same refusal, voiced as *entry*."""
-        return EntryRefusal(self.message_for, entry)
+        """The same refusal, of the same type, voiced as *entry*."""
+        return type(self)(self.message_for, entry)
+
+    def prefixed(self, prefix: str) -> "EntryRefusal":
+        """The same refusal, of the same type, with *prefix* ahead of its text in every voice."""
+        message_for = self.message_for
+        return type(self)(lambda entry: f"{prefix}{message_for(entry)}", self.entry)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # ``message_for`` is usually a closure, which pickle refuses, and
+        # BaseException's default rebuilds from ``args`` (the text alone),
+        # which ``__init__`` cannot take. Rebuild from the frozen text
+        # instead: the text with a slot wherever the voice goes, so the copy
+        # keeps its type, message and entry, and re-voices like the original.
+        # Subclasses take ``(message_for, entry)``, as ``spoken_as`` relies on.
+        #
+        # A refusal can echo raw, un-escaped user input (a color value, a
+        # kwarg name), so the base slot is not guaranteed absent from this
+        # instance's own text. Lengthen it until it is: `str(self)` is
+        # `self.message_for(self.entry)`, so a slot missing from that text
+        # cannot collide with anything the template later substitutes.
+        state = {k: v for k, v in self.__dict__.items() if k not in ("message_for", "entry")}
+        slot = _VOICE_SLOT
+        own_text = self.message_for(self.entry)
+        while slot in own_text:
+            slot += _VOICE_SLOT
+        return (
+            type(self),
+            (_VoiceTemplate(self.message_for(slot), slot), self.entry),
+            state or None,
+        )
+
+
+# The base marker for where the voice goes in a refusal's frozen text: a
+# private-use character sequence absent from almost every refusal's own
+# text. ``__reduce__`` lengthens it per-instance (and stores the lengthened
+# form on the ``_VoiceTemplate``) whenever this base slot collides with text
+# the refusal echoes from raw user input, so the slot it substitutes on is
+# never also literal text.
+_VOICE_SLOT = "\ue000voice\ue000"
+
+
+class _VoiceTemplate:
+    """A refusal's frozen text for any voice, the picklable form of its ``message_for``."""
+
+    def __init__(self, text: str, slot: str) -> None:
+        self.text = text
+        self.slot = slot
+
+    def __call__(self, entry: str) -> str:
+        return self.text.replace(self.slot, entry)
 
 
 def stamp_entry(chart: Any, entry: str) -> Any:

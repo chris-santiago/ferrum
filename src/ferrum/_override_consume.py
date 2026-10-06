@@ -32,6 +32,7 @@ from ferrum._core import (  # type: ignore[attr-defined]
     validate_scale_dict as _validate_scale_dict,
 )
 from ferrum._override_apply import OverridePayload
+from ferrum._entry import EntryRefusal
 from ferrum.exceptions import FerrumOverrideError
 from ferrum.marks.base import resolve_layer_style
 
@@ -161,8 +162,11 @@ def apply_mark_style(
     with multiple marks (a layered chart) has no single primary mark, so a
     ``mark_*`` override is ambiguous and raises :class:`FerrumOverrideError`
     (spec §11 Q4).  A leaf the chart's own mark does not honor (``mark_shape``
-    on a line) raises it too, as ``mark_<mark>(...)`` would refuse the kwarg.
-    *mark_style* is not mutated; a new dict is returned.
+    on a line) raises it too, as ``mark_<mark>(...)`` would refuse the kwarg,
+    and so does a value of the wrong type. What is merged is the style as
+    :func:`ferrum.marks.base.resolve_layer_style` returns it, so an override
+    reaches the wire in the form every other door stores. *mark_style* is
+    not mutated; a new dict is returned.
 
     Parameters
     ----------
@@ -179,15 +183,17 @@ def apply_mark_style(
     if mark is None:
         leaves = ", ".join(sorted(payload.mark_style))
         raise FerrumOverrideError(
-            f"mark_* override ({leaves}) is ambiguous on a multi-mark chart: "
-            "a layered chart has no single primary mark to apply it to. "
-            "Set the style on the specific layer's mark_*() call instead."
+            lambda entry: (
+                f"{entry}: mark_* override ({leaves}) is ambiguous on a multi-mark chart: "
+                "a layered chart has no single primary mark to apply it to. "
+                "Set the style on the specific layer's mark_*() call instead."
+            )
         )
     try:
-        resolve_layer_style("Chart.override", mark, payload.mark_style)
-    except ValueError as exc:
-        raise FerrumOverrideError(str(exc)) from None
-    return {**mark_style, **payload.mark_style}
+        style = resolve_layer_style("Chart.override", mark, payload.mark_style)
+    except EntryRefusal as err:
+        raise FerrumOverrideError(err.message_for, err.entry) from None
+    return {**mark_style, **style}
 
 
 def apply_coord(coord: Any, payload: OverridePayload) -> Any:
@@ -233,10 +239,13 @@ def apply_coord(coord: Any, payload: OverridePayload) -> Any:
     bad = [leaf for leaf in payload.coord if leaf not in valid_fields]
     if bad:
         leaves = ", ".join(sorted(bad))
+        coord_kind = type(base).__name__
         raise FerrumOverrideError(
-            f"coord_* override ({leaves}) is not a field of "
-            f"{type(base).__name__}. Set a matching coord via .coord(...) first, "
-            "or override a field that coord exposes."
+            lambda entry: (
+                f"{entry}: coord_* override ({leaves}) is not a field of "
+                f"{coord_kind}. Set a matching coord via .coord(...) first, "
+                "or override a field that coord exposes."
+            )
         )
     updated = dataclasses.replace(base, **payload.coord)
     return _serialize_coord(updated)

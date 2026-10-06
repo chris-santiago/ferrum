@@ -198,7 +198,7 @@ mod tests {
         assert!(err.to_string().starts_with("unknown field `blend`, expected one of"), "{err}");
         let blended = serde_json::from_value::<Layer>(serde_json::json!({"mark": "image", "mark_style": {"blend": "additive"}}))
             .unwrap();
-        assert_eq!(blended.mark_style.and_then(|s| s.blend), Some(ferrum_scene::BlendMode::Additive));
+        assert_eq!(blended.mark_style.and_then(|s| s.blend).as_deref(), Some("additive"));
     }
 
     #[test]

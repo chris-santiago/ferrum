@@ -51,7 +51,7 @@ static/interactive, `SecondaryY` static/interactive, and the two
 desugar-prior-layer shapes (`.mark_smooth()`, `.mark_function()`
 multi-layer), each static/interactive. `+`, `LayerChart` and independent-y
 place no constraint on the reader mark, so all 24 fields apply.
-`SecondaryY`'s `mark=` is validated against `ferrum._layer._PRIMITIVE_MARKS`
+`SecondaryY`'s `mark=` is validated against `ferrum._layer._FLAT_MARK_METHODS`
 (`point, line, bar, area, rule, text, tick, rect`), so its field population
 (`SECONDARY_Y_FIELDS`) is the same set intersected with that whitelist --
 derived from the SAME constant `SecondaryY`'s own guard reads, not
@@ -125,7 +125,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import mark_kwargs_fields
-from ferrum._layer import _PRIMITIVE_MARKS, drawn_style_fields
+from ferrum._layer import _FLAT_MARK_METHODS, drawn_style_fields
 from ferrum._scene import _render_scene
 from ferrum.marks.base import honored_kwargs
 
@@ -712,11 +712,11 @@ def test_derived_population_matches_probe_table():
 
 LINE_READER_FIELDS = sorted(f for f, p in PROBES.items() if p.line_reader)
 #: `SecondaryY` validates `mark=` against this fixed primitive whitelist
-#: (`ferrum._layer._PRIMITIVE_MARKS`); a field whose reader is `segment` or
+#: (`ferrum._layer._FLAT_MARK_METHODS`); a field whose reader is `segment` or
 #: `label` cannot go through `SecondaryY` at all, at any output kind -- this
 #: is derived from the same population `SecondaryY`'s own guard reads, not
 #: hand-picked.
-SECONDARY_Y_FIELDS = sorted(f for f, p in PROBES.items() if p.reader_kind in _PRIMITIVE_MARKS)
+SECONDARY_Y_FIELDS = sorted(f for f, p in PROBES.items() if p.reader_kind in _FLAT_MARK_METHODS)
 #: `independent-y` (`LayerChart(resolve={"y": "independent"})`) places no
 #: constraint on the reader mark -- every derived field applies.
 INDEPENDENT_Y_FIELDS = sorted(PROBES)

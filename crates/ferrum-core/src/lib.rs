@@ -117,6 +117,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The `usize` subset of the numeric fields, routed through a
     // non-negative-integer contract instead of the real-number one.
     m.add_function(wrap_pyfunction!(spec::mark_style::mark_integer_kwargs, m)?)?;
+    // C1 (2026-10-06 wave-7-close): the bool and string-shaped subsets, by
+    // the same serde probe, routed through a type gate at declaration.
+    m.add_function(wrap_pyfunction!(spec::mark_style::mark_bool_kwargs, m)?)?;
+    m.add_function(wrap_pyfunction!(spec::mark_style::mark_string_kwargs, m)?)?;
     // The size rule (`spec/mark.rs::Mark::size_drawing`, `render/draw.rs::check_constant_size`),
     // published so every Python door that builds mark kwargs refuses with the
     // renderer's own rule and text.

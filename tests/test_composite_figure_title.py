@@ -549,7 +549,7 @@ def test_layer_factory_dict_title_stored_on_layer_not_inner(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    result = _apply_overrides(layer, properties={"title": "FactoryT"})
+    result = _apply_overrides(layer, entry="figure", properties={"title": "FactoryT"})
 
     # Title stored on the LayerChart.
     assert result._title == "FactoryT"
@@ -565,7 +565,7 @@ def test_layer_factory_dict_title_figure_title_text(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    result = _apply_overrides(layer, properties={"title": "FTT"})
+    result = _apply_overrides(layer, entry="figure", properties={"title": "FTT"})
     assert result._figure_title_text() == "FTT"
 
 
@@ -576,7 +576,7 @@ def test_layer_factory_dict_title_html_document_title(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    result = _apply_overrides(layer, properties={"title": "HTMLDoc"})
+    result = _apply_overrides(layer, entry="figure", properties={"title": "HTMLDoc"})
     html = result.to_html()
     assert "<title>HTMLDoc</title>" in html
 
@@ -588,7 +588,7 @@ def test_layer_factory_dict_title_matches_chained(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    via_dict = _apply_overrides(layer, properties={"title": "Match"})
+    via_dict = _apply_overrides(layer, entry="figure", properties={"title": "Match"})
     via_chain = LayerChart(c, c).properties(title="Match")
 
     assert via_dict._title == via_chain._title == "Match"
@@ -605,7 +605,7 @@ def test_layer_factory_dict_width_still_fans_to_children(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    result = _apply_overrides(layer, properties={"title": "T", "width": 400})
+    result = _apply_overrides(layer, entry="figure", properties={"title": "T", "width": 400})
 
     assert result._title == "T"
     for inner in result._charts:
@@ -625,7 +625,7 @@ def test_layer_factory_dict_subtitle_caption_fan_to_merged(df):
 
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     layer = LayerChart(c, c)
-    result = _apply_overrides(layer, properties={"title": "T", "subtitle": "S"})
+    result = _apply_overrides(layer, entry="figure", properties={"title": "T", "subtitle": "S"})
 
     # Title must be stored on the LayerChart (not leaked to inner charts as a
     # bare title — only subtitle is set on inner charts, not the text portion).
@@ -680,14 +680,16 @@ def test_figure_chrome_keys_parity_composite_vs_layer(df):
 
     # LayerChart: title intercepted on _title.
     layer = LayerChart(c, c)
-    layer_result = _apply_overrides(layer, properties={"title": "T", "width": 300})
+    layer_result = _apply_overrides(layer, entry="figure", properties={"title": "T", "width": 300})
     assert layer_result._title == "T"
     for inner in layer_result._charts:
         assert inner._title is None
 
     # _CompositeBase: title intercepted on _figure_title.
     composite = fm.HConcatChart([c, c])
-    comp_result = _apply_overrides(composite, properties={"title": "T", "width": 300})
+    comp_result = _apply_overrides(
+        composite, entry="figure", properties={"title": "T", "width": 300}
+    )
     assert comp_result._figure_title == "T"
     for child in comp_result.charts:
         assert child._title is None

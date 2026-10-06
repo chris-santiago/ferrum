@@ -155,35 +155,33 @@ class TestMarkSingleMark:
     def test_single_mark_flat_kwargs(self):
         df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-        overridden = _apply_overrides(chart, mark={"opacity": 0.3})
+        overridden = _apply_overrides(chart, entry="figure", mark={"opacity": 0.3})
         assert overridden._mark_kwargs.get("opacity") == 0.3
 
-    def test_markless_chart_is_voiced_as_the_point_it_draws(self):
+    def test_markless_chart_is_held_to_the_point_it_draws(self):
         """A chart with no ``mark_*()`` call yet draws a point on the wire
-        (``ferrum._layer.layer_mark``); a refusal about its style must say
-        ``mark_point``, not ``mark_None``."""
+        (``ferrum._layer.layer_mark``); a refusal about its style is voiced
+        as the figure that passed it, never ``mark_None``."""
         df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         chart = fm.Chart(df)
         with pytest.raises(ValueError) as exc_info:
-            _apply_overrides(chart, mark={"fill": "not-a-color"})
+            _apply_overrides(chart, entry="figure", mark={"fill": "not-a-color"})
         assert str(exc_info.value) == (
-            "mark_point: fill='not-a-color' is not a valid color (invalid color "
+            "figure: fill='not-a-color' is not a valid color (invalid color "
             "'not-a-color': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, "
             "or rgb()/rgba())"
         )
 
-    def test_markless_chart_with_an_unhonored_key_is_also_voiced_as_the_point(self):
+    def test_markless_chart_with_an_unhonored_key_is_also_held_to_the_point(self):
         """A key no mark honors at all, not just an invalid value for an
         honored one, must still route through the point's own rule for a
-        markless chart (``mark_point: keyword argument ... is not honored``)
-        rather than the generic layer-fan-out refusal ("no layer of this
-        chart draws a mark that honors [...]")."""
+        markless chart (``... is not honored by mark_point``)."""
         df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         chart = fm.Chart(df)
         with pytest.raises(ValueError) as exc_info:
-            _apply_overrides(chart, mark={"font_size": 9})
+            _apply_overrides(chart, entry="figure", mark={"font_size": 9})
         assert str(exc_info.value) == (
-            "mark_point: keyword argument 'font_size' is not honored by mark_point. "
+            "figure: keyword argument 'font_size' is not honored by mark_point. "
             "Honored: ['blend', 'fill', 'filled', 'opacity', 'shape', 'size', 'stroke', "
             "'stroke_cap', 'stroke_dash', 'stroke_join', 'stroke_width']"
         )
@@ -198,7 +196,7 @@ class TestConditionalSubLayers:
     def test_suppress_absent_layer_is_noop(self):
         df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "g": ["a", "b"]})
         chart = fm.Chart(df).mark_boxplot(outliers=False).encode(x="g", y="y")
-        overridden = _apply_overrides(chart, mark={"outlier": False})
+        overridden = _apply_overrides(chart, entry="figure", mark={"outlier": False})
         assert "outlier" not in overridden.layer_names
 
     def test_unknown_layer_raises(self, clf_data):
@@ -240,7 +238,7 @@ class TestCvScoresBoxOverride:
 
     def test_box_sublayer_override_applies(self):
         chart = self._cv_scores_box_chart()
-        overridden = _apply_overrides(chart, mark={"box": {"stroke_width": 5}})
+        overridden = _apply_overrides(chart, entry="figure", mark={"box": {"stroke_width": 5}})
         resolved = overridden._resolve_pending()
         box_layer = next(ly for ly in resolved._layers if ly.name == "box")
         assert box_layer.mark_kwargs.get("stroke_width") == 5
@@ -248,11 +246,11 @@ class TestCvScoresBoxOverride:
     def test_box_sublayer_override_does_not_raise(self):
         chart = self._cv_scores_box_chart()
         # Must not raise ValueError("Unknown sub-layer"): "box" is a valid name.
-        _apply_overrides(chart, mark={"box": {"opacity": 0.4}})
+        _apply_overrides(chart, entry="figure", mark={"box": {"opacity": 0.4}})
 
     def test_box_sublayer_suppression_applies(self):
         chart = self._cv_scores_box_chart()
-        overridden = _apply_overrides(chart, mark={"outlier": False})
+        overridden = _apply_overrides(chart, entry="figure", mark={"outlier": False})
         assert "outlier" not in overridden.layer_names
 
     def test_borrowed_box_name_is_in_catalog(self):
@@ -274,7 +272,7 @@ class TestCvScoresBoxOverride:
             }
         )
         chart = fm.Chart(df).mark_cv_scores(kind="bar")
-        overridden = _apply_overrides(chart, mark={"bar": {"opacity": 0.5}})
+        overridden = _apply_overrides(chart, entry="figure", mark={"bar": {"opacity": 0.5}})
         resolved = overridden._resolve_pending()
         assert {ly.name for ly in resolved._layers} == {"bar", "mean"}
         bar_layer = next(ly for ly in resolved._layers if ly.name == "bar")

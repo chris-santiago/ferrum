@@ -152,7 +152,7 @@ def test_child_attribute_error_propagates_through_apply_overrides(df):
     chart = _SentinelChart()
 
     with pytest.raises(AttributeError, match="SENTINEL_child_bug"):
-        _apply_overrides(chart, properties={"width": 200})
+        _apply_overrides(chart, entry="figure", properties={"width": 200})
 
 
 def test_non_rebuildable_chart_falls_back_via_getattr(df):
@@ -175,7 +175,7 @@ def test_non_rebuildable_chart_falls_back_via_getattr(df):
             return clone
 
     chart = _NoRebuildChart()
-    result = _apply_overrides(chart, properties={"width": 300})
+    result = _apply_overrides(chart, entry="figure", properties={"width": 300})
     # Fallback applied properties directly.
     assert result.width == 300
 
@@ -204,5 +204,5 @@ def test_not_implemented_rebuild_falls_back(df):
             return clone
 
     chart = _AbstractishChart()
-    result = _apply_overrides(chart, properties={"width": 400})
+    result = _apply_overrides(chart, entry="figure", properties={"width": 400})
     assert result.width == 400

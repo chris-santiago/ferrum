@@ -241,13 +241,13 @@ def test_layered_detail_with_a_consuming_layer_does_not_warn():
 
 
 def test_mark_override_on_unnamed_layered_chart_styles_every_layer():
-    chart = _apply_overrides(_line() + _line(), mark={"stroke_width": 7})
+    chart = _apply_overrides(_line() + _line(), entry="figure", mark={"stroke_width": 7})
     widths = re.findall(r'<polyline[^>]*stroke-width="([^"]+)"', chart.to_svg())
     assert widths == ["7", "7"]
 
 
 def test_mark_override_on_flat_chart_is_the_charts_own_style():
-    chart = _apply_overrides(_line(), mark={"stroke_width": 7})
+    chart = _apply_overrides(_line(), entry="figure", mark={"stroke_width": 7})
     widths = re.findall(r'<polyline[^>]*stroke-width="([^"]+)"', chart.to_svg())
     assert widths == ["7"]
 

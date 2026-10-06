@@ -622,9 +622,15 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
             if path in _DEPRECATED_PATHS:
                 replacement = _DEPRECATED_PATHS[path]
                 raise FerrumOverrideError(
-                    f"Unknown override path {path!r} (deprecated). Use {replacement} instead."
+                    lambda entry: (
+                        f"{entry}: Unknown override path {path!r} (deprecated). "
+                        f"Use {replacement} instead."
+                    )
                 )
-            raise FerrumOverrideError(f"Unknown override path {path!r}.{_suggestion(path)}")
+            suggestion = _suggestion(path)
+            raise FerrumOverrideError(
+                lambda entry: f"{entry}: Unknown override path {path!r}.{suggestion}"
+            )
 
         # Validate padding-side values (NF-B5/B6/B7): numeric, finite,
         # non-negative. Narrowed to exactly the numeric sides; "padding_auto"

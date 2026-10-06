@@ -99,18 +99,32 @@ pub(crate) struct SwarmSpec {
 }
 
 impl SwarmSpec {
-    /// The pixel step between neighbouring centres: one dot diameter plus the
-    /// edge gap.
-    fn step_px(&self) -> f64 {
-        self.point_size + self.spacing
-    }
-
     /// The area (px²) of a point mark `point_size` px across: the size a
     /// swarm-fed point layer with no size of its own draws its dots at.
     pub(crate) fn dot_area(&self) -> f64 {
         std::f64::consts::PI * (self.point_size / 2.0).powi(2)
     }
 
+}
+
+/// How one declared swarm packs on a chart: the swarm as declared, and the
+/// diameter (px) its dots are packed at, the widest dot any layer it feeds
+/// can draw (`render::position::panel_swarms`). The two are kept apart
+/// because they differ whenever a sized layer draws wider than the swarm's
+/// own `point_size`: placement and overflow read `diameter_px`, while a fed
+/// point layer with no size of its own still draws at `spec.point_size`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SwarmPacking<'a> {
+    pub spec: &'a SwarmSpec,
+    pub diameter_px: f64,
+}
+
+impl SwarmPacking<'_> {
+    /// The pixel step between neighbouring centres: one packing diameter
+    /// plus the edge gap.
+    fn step_px(&self) -> f64 {
+        self.diameter_px + self.spec.spacing
+    }
 }
 
 pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -170,17 +184,19 @@ fn drop_null_dodge_rows(batch: &RecordBatch, dodge_field: &str) -> PyResult<Reco
 /// Rows with no value, no category, or a value the scale cannot place get
 /// offset `0.0`.
 ///
-/// With `dodge`, dodge group `i` of `n` (sorted by name) is centred
-/// `(i - (n - 1) / 2) * (point_size + spacing)` px from the band centre and
+/// Dots pack `packing.diameter_px + spacing` px apart. With `dodge`, dodge
+/// group `i` of `n` (sorted by name) is centred
+/// `(i - (n - 1) / 2) * (diameter_px + spacing)` px from the band centre and
 /// packs outward from there, trying its own side of the band first. All the
 /// groups of one category pack against the same placed dots, so no two dots of
 /// a category overlap whichever group they belong to.
 pub(crate) fn place_offsets(
-    spec: &SwarmSpec,
+    packing: SwarmPacking<'_>,
     batch: &RecordBatch,
     values: &[Option<f64>],
     to_px: impl Fn(f64) -> Option<f64>,
 ) -> Result<Vec<f64>, String> {
+    let spec = packing.spec;
     let n = batch.num_rows();
     let cat_col = batch
         .column_by_name(&spec.category)
@@ -198,7 +214,7 @@ pub(crate) fn place_offsets(
     let dodge_of = |i: usize| dodge.filter(|a| !a.is_null(i)).map(|a| a.value(i));
     let dodge_groups: Vec<&str> = (0..n).filter_map(dodge_of).collect::<BTreeSet<_>>().into_iter().collect();
     let n_groups = dodge_groups.len().max(1) as f64;
-    let step = spec.step_px();
+    let step = packing.step_px();
     let centre_px = |name: Option<&str>| -> f64 {
         name.and_then(|name| dodge_groups.iter().position(|g| *g == name))
             .map_or(0.0, |gi| (gi as f64 - (n_groups - 1.0) / 2.0) * step)
@@ -441,7 +457,8 @@ mod tests {
 
     /// Place with the value axis mapped 1 data unit -> `px_per_unit` px.
     fn place(spec: &SwarmSpec, batch: &RecordBatch, px_per_unit: f64) -> Vec<f64> {
-        place_offsets(spec, batch, &values(batch), |v| Some(v * px_per_unit)).unwrap()
+        let packing = SwarmPacking { spec, diameter_px: spec.point_size };
+        place_offsets(packing, batch, &values(batch), |v| Some(v * px_per_unit)).unwrap()
     }
 
     /// Seeded standard-normal draws (Box-Muller over ChaCha8), scaled.

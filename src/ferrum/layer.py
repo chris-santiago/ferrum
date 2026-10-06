@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from ferrum._layer import layer_mark
 from ferrum.marks.base import resolve_layer_style
 
 _LAYER_TRANSFORMS_REFUSAL = (
@@ -53,10 +52,12 @@ class Layer:
         table says the mark draws: aliases (``color``, ``alpha``) resolve,
         and a field the mark never draws, a constant ``size`` the mark never
         draws or that is not a finite number above zero, or a malformed
-        value raises ``ValueError`` here, voiced as ``mark_<mark>``. So does
-        a kwarg only the mark's own method takes (``orient`` on a bar), and
-        a field only ferrum's own code writes (``detail``, ``clip``,
-        ``value_axis``), each naming the call that sets it.
+        value raises ``ValueError`` here, voiced as ``Layer``, the call that
+        received it (``Layer: keyword argument 'font_size' is not honored by
+        mark_point. Honored: [...]``). So does a kwarg only the mark's own
+        method takes (``orient`` on a bar), and a field only ferrum's own
+        code writes (``detail``, ``clip``, ``value_axis``), each naming the
+        call that sets it.
 
     Examples
     --------
@@ -86,7 +87,7 @@ class Layer:
         self.name = name
         self.encoding = encoding or {}
         self.transforms = []
-        self.mark_kwargs = resolve_layer_style(f"mark_{layer_mark(mark)}", mark, mark_kwargs or {})
+        self.mark_kwargs = resolve_layer_style("Layer", mark, mark_kwargs or {})
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""

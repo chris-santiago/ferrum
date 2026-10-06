@@ -388,7 +388,7 @@ class _RenderMixin:
                 "field": field if needs_field else None,
                 "cmap": cmap,
                 "resolution": "screen",
-                "blend": "alpha",
+                "blend": None,
                 "min_count": None,
                 "log_scale": False,
             },

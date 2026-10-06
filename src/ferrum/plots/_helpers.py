@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
-from ferrum._entry import EntryRefusal, speak_as, voiced_as
+from ferrum._entry import EntryRefusal, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -535,13 +535,21 @@ def _resolve_first_param(
     return alias_value
 
 
-def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=None, theme=None):
+def _finalize_chart(
+    chart, *, entry: str, mark=None, encode=None, properties=None, layers=None, theme=None
+):
     """Apply overrides and optional theme to a chart, then return it.
 
     Encapsulates the identical 3-4 line closing pattern shared by every
     ``_*_from_source`` builder across the ``ferrum.plots.*`` domain modules.
+    *entry* is the figure function the builder builds for; a refusal of the
+    overrides speaks as it, and the public call that actually ran (a figure
+    building through another figure's builder, a visualizer's ``fit``)
+    re-voices it as itself (:func:`ferrum._entry.voiced_as`).
     """
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+    chart = _apply_overrides(
+        chart, entry=entry, mark=mark, encode=encode, properties=properties, layers=layers
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -550,21 +558,22 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-def _style_kws(param: str, mark: str, kws: Any) -> dict:
+def _style_kws(entry: str, param: str, mark: str, kws: Any) -> dict:
     """Return a figure's ``<param>=`` style dict (``line_kws``) for the layer drawing *mark*.
 
     Held to *mark*'s honored kwargs with aliases resolved
     (:func:`ferrum.marks.base.resolve_layer_style`); ``None`` is no style. A
-    refusal is voiced by the figure that received the dict.
+    refusal is an :class:`EntryRefusal` voiced as *entry*, the figure that
+    received the dict.
     """
     if kws is None:
         return {}
     if not isinstance(kws, dict):
         kind = type(kws).__name__
         raise EntryRefusal(
-            lambda entry: f"{entry}({param}=...) must be a dict of mark kwargs; got {kind}", ""
+            lambda voice: f"{voice}({param}=...) must be a dict of mark kwargs; got {kind}", entry
         )
-    return resolve_layer_style(f"mark_{mark}", mark, kws)
+    return resolve_layer_style(entry, mark, kws)
 
 
 def _figure_entry(fn: _F) -> _F:
@@ -587,8 +596,7 @@ def _figure_entry(fn: _F) -> _F:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with voiced_as(fn.__name__):
-            refuse_malformed_mark(kwargs.get("mark"))
+        refuse_malformed_mark(fn.__name__, kwargs.get("mark"))
         return speak_as(fn.__name__, fn, *args, **kwargs)
 
     return wrapper  # type: ignore[return-value]
@@ -638,14 +646,16 @@ def _compose_compare(
 
     children = []
     for name, model_source in source.items():
+        # Every refusal names the model whose panel refused, the same way
+        # whatever raised it; a style refusal keeps its voice, so the
+        # figure re-voices it on the way out.
+        prefix = f"compare={{{name!r}: ...}}: "
         try:
             child = builder(model_source, **builder_kwargs)
-        except EntryRefusal:
-            # A malformed figure argument refuses alike for every model, in
-            # the figure's own voice.
-            raise
+        except EntryRefusal as err:
+            raise err.prefixed(prefix) from None
         except ValueError as exc:
-            raise ValueError(f"compare={{{name!r}: ...}}: {exc}") from exc
+            raise ValueError(f"{prefix}{exc}") from exc
         child = child.properties(title=name)
         children.append(child)
 

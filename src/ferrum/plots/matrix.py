@@ -15,6 +15,9 @@ _ensure_id_column — materialises a synthetic row-identity column when
 the input has no non-numeric id column (used by ``heatmap`` and
 ``clustermap``).
 
+_matrix_columns — splits the input into its numeric value columns and its
+id column (used by ``heatmap`` and ``clustermap``).
+
 _matrix_titles — the default column-axis, row-axis, and colorbar titles
 shared by ``heatmap`` and ``clustermap``.
 
@@ -89,6 +92,23 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
     pdf = to_polars(data)
     pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
     return pdf, to_arrow_table(pdf), "_row_id"
+
+
+def _matrix_columns(tbl: Any, entry: str) -> tuple[list[str], str | None]:
+    """Return a matrix chart's ``(value columns, id column)``, voiced as *entry*.
+
+    Shared by ``heatmap`` and ``clustermap``. The value columns are the
+    numeric columns Rust's ``Linkage`` and ``Reorder(axis="columns")`` read
+    (a decimal column refuses here); the id column is the first column that
+    is not one, or ``None`` when every column is numeric. A table with no
+    numeric column refuses.
+    """
+    value_cols = numeric_columns(tbl.schema, entry)
+    if not value_cols:
+        raise ValueError(f"{entry}: no numeric columns found in data")
+    features = frozenset(value_cols)
+    id_col = next((name for name in tbl.column_names if name not in features), None)
+    return value_cols, id_col
 
 
 def _matrix_titles(id_col: str, value_cols: list[str]) -> tuple[str, str, str]:
@@ -387,7 +407,13 @@ def _pairplot_build(
         resolve=rc_resolve,
     )
     rc = _finalize_chart(
-        rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+        rc,
+        entry="pairplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=None,
     )
     return rc
 
@@ -536,14 +562,7 @@ def heatmap(
     center = coerce_finite_real("heatmap(center=...)", center)
 
     tbl = to_arrow_table(data)
-    # The value columns are the numeric columns Rust's `Linkage` and
-    # `Reorder(axis="columns")` read (a decimal column refuses here); the id
-    # column is the first column that is not one.
-    value_cols = numeric_columns(tbl.schema, "heatmap")
-    features = frozenset(value_cols)
-    id_col = next((name for name in tbl.column_names if name not in features), None)
-    if not value_cols:
-        raise ValueError("heatmap: no numeric columns found in data")
+    value_cols, id_col = _matrix_columns(tbl, "heatmap")
 
     # If no id column found, synthesize a `_row_id` column so downstream
     # transforms have a row identity to unpivot against.
@@ -881,7 +900,13 @@ def _heatmap_build(
 
     chart = chart.properties(title=Title("Heatmap"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="heatmap",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -1035,14 +1060,7 @@ def clustermap(
     from ferrum._coerce import to_arrow_table
 
     tbl = to_arrow_table(data)
-    # The value columns are the numeric columns Rust's `Linkage` and
-    # `Reorder(axis="columns")` read (a decimal column refuses here); the id
-    # column is the first column that is not one.
-    value_cols = numeric_columns(tbl.schema, "clustermap")
-    features = frozenset(value_cols)
-    id_col = next((name for name in tbl.column_names if name not in features), None)
-    if not value_cols:
-        raise ValueError("clustermap: no numeric columns found in data")
+    value_cols, id_col = _matrix_columns(tbl, "clustermap")
 
     # If no id column found, synthesize a `_row_id` column so the unpivot has
     # a row identity to carry through to the heatmap's y encoding. Mirrors
@@ -1287,7 +1305,13 @@ def _clustermap_build(
         dendrogram_ratio=dendrogram_ratio,
     ).properties(title="Clustermap")
     cm = _finalize_chart(
-        cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+        cm,
+        entry="clustermap",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=None,
     )
     return cm
 
@@ -1692,6 +1716,12 @@ def _jointplot_build(
         _resolve=joint_resolve,
     )
     result = _finalize_chart(
-        result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+        result,
+        entry="jointplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=None,
     )
     return result

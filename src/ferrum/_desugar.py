@@ -44,7 +44,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from ferrum._layer import (
-    _PRIMITIVE_MARKS,
+    _FLAT_MARK_METHODS,
     _Layer,
     MarkDesugarResult,
     apply_catch_all_style,
@@ -240,7 +240,7 @@ def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
     signature.  ``x_field``/``y_field`` are passed positionally and
     ``chart_encoding`` is injected separately, so they never appear in
     *user_kwargs*. A ``_``-prefixed parameter is injected by a prep step
-    from private chart state (e.g. ``desugar_violin``'s ``_voice``), never
+    from private chart state (e.g. ``desugar_hex``'s ``_color``), never
     a user kwarg: a user key of that name is a style key, which ``MarkBase``
     refuses as unknown.
 
@@ -1261,7 +1261,7 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
     # that built it (spec §4.8).
     _prior_mark = chart._pending_stat_mark.prior_mark
     _prior_layers: list = []
-    if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
+    if _prior_mark is not None and _prior_mark in _FLAT_MARK_METHODS:
         if chart._layers:
             _prior_layers = list(chart._layers)
         else:

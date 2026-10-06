@@ -977,6 +977,16 @@ def mark_numeric_kwargs() -> list[str]: ...
 # real-number one every other numeric field gets.
 def mark_integer_kwargs() -> list[str]: ...
 
+# The ``bool`` subset of ``mark_kwargs_fields()``, in declaration order,
+# derived from the struct's own ``Deserialize``: a field is boolean exactly
+# when it accepts a bare ``true`` under its key.
+def mark_bool_kwargs() -> list[str]: ...
+
+# The string-shaped subset of ``mark_kwargs_fields()``, in declaration
+# order, derived from the struct's own ``Deserialize``: a field matches
+# exactly when it accepts the bare string ``"x"`` under its key.
+def mark_string_kwargs() -> list[str]: ...
+
 # The marks that draw a constant ``size=``, from Rust's one per-mark size
 # table (``Mark::size_drawing``). Every other mark refuses a constant size.
 def marks_drawing_constant_size() -> list[str]: ...

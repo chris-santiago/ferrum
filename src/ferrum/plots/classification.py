@@ -217,7 +217,13 @@ def _roc_chart_from_source(
         )
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="roc_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -328,7 +334,13 @@ def _pr_chart_from_source(
         )
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="pr_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -417,7 +429,13 @@ def _calibration_chart_from_source(
     )
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="calibration_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -475,7 +493,13 @@ def _gain_chart_from_source(
             y_col="gain",
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="gain_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -523,7 +547,13 @@ def _lift_chart_from_source(
             y_col="lift",
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="lift_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -554,7 +584,13 @@ def _confusion_chart_from_source(
     chart = _title_legend(chart, "color", "Count" if normalize is None else "Proportion")
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="confusion_matrix_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -599,7 +635,13 @@ def _class_prediction_error_chart_from_source(
     chart = _title_legend(chart, "color", "Predicted class")
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="class_prediction_error_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -762,7 +804,13 @@ def _discrimination_threshold_chart_from_source(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="discrimination_threshold_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -887,7 +935,13 @@ def _classification_report_chart(
     )
     chart = chart.properties(title=ferrum.Title("Classification Report"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="classification_report_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -921,7 +975,13 @@ def _class_balance_chart_from_dataframe(
     )
     chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count", color="y")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="class_balance_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

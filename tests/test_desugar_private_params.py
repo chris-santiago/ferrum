@@ -70,15 +70,18 @@ def _uninjected(functions: dict[str, Callable], injected: set[str]) -> dict[str,
 
 
 _PREP_STEPS = {step for prep in _PENDING_PREP.values() for step in prep.pre}
+_HEX = "ferrum.marks.heavy_stat.desugar_hex"
 
 
 def test_every_private_desugar_parameter_is_injected_by_a_prep_step() -> None:
     functions = _desugar_functions()
     injected = _injected_names(_PREP_STEPS)
-    # The population is every desugar the dispatcher can reach; today none
-    # declares a private parameter, and the control below shows one would
-    # be caught.
-    assert functions
+    # The population is every desugar the dispatcher can reach, and it holds
+    # a private parameter: ``desugar_hex``'s ``_color``, which
+    # ``_prep_hex_field_from_color`` supplies. The control below shows an
+    # unsupplied one would be caught.
+    assert _private_params(functions[_HEX]) == {"_color"}
+    assert "_color" in injected
     assert _uninjected(functions, injected) == {}
 
 
@@ -95,8 +98,8 @@ def test_a_private_parameter_no_step_injects_is_caught() -> None:
 
 
 def test_a_user_key_named_like_a_private_parameter_routes_to_style() -> None:
-    """The partition itself: a user ``_voice=`` is a style key, not a transform kwarg."""
-    violin = _desugar_functions()["ferrum.marks.heavy_stat.desugar_violin"]
-    transform, style = _split_style_kwargs(violin, {"_voice": "spoof", "bandwidth": 0.5})
-    assert transform == {"bandwidth": 0.5}
-    assert style == {"_voice": "spoof"}
+    """The partition itself: a user ``_color=`` is a style key, not a transform kwarg."""
+    hex_desugar = _desugar_functions()[_HEX]
+    transform, style = _split_style_kwargs(hex_desugar, {"_color": "spoof", "bin_size": 0.5})
+    assert transform == {"bin_size": 0.5}
+    assert style == {"_color": "spoof"}

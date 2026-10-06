@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
-from ferrum._layer import _PRIMITIVE_MARKS
+from ferrum._layer import _FLAT_MARK_METHODS
 from ferrum._validate import validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import ORIENT_CHOICES
@@ -139,6 +139,13 @@ class StatisticalMarksMixin:
             ``[min, max]`` evaluation range.  Defaults to data extent.
         cumulative : bool, optional
             Produce a CDF instead of a PDF.  Default is ``False``.
+        fill : bool, optional
+            Draw the 1-D density as a filled area (``True``, the default) or
+            as a line (``False``).  A truth value only: a fill color is
+            ``color=``.
+        smooth : bool, optional
+            Smooth the bivariate density grid before contouring (``x`` and
+            ``y`` both encoded).  Default is ``True``.
         n : int, optional
             Number of evaluation points.  Default is ``200``.
         multiple : str, optional
@@ -153,9 +160,10 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
-            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
-            ``alpha``→``opacity``) forwarded to the rendered area/line layer.
+            Constant mark-style overrides (``opacity``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; ``color`` sets the
+            fill color, ``alpha``→``opacity``) forwarded to the rendered
+            area/line layer.  ``fill=`` is the truth value above, not a color.
 
         Returns
         -------
@@ -170,9 +178,18 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_density().encode(x="val")
         Chart(mark='area', encoding=['x'])
         """
+        from ferrum.marks.base import resolve_method_bool
+
         # Normalize orient= → orientation= so the desugar's existing param name
         # is used.  orient= wins over orientation= when both are present.
-        kwargs = _normalize_orient_to_orientation("mark_density", kwargs)
+        kwargs = dict(_normalize_orient_to_orientation("mark_density", kwargs))
+        # The truth-valued arguments the desugar reads to decide what it draws
+        # (an area or a line, a CDF or a PDF, a smoothed bivariate grid) are
+        # held to a truth value at the call, so `fill="red"` is refused rather
+        # than read as True.
+        for arg, default in (("fill", True), ("cumulative", False), ("smooth", True)):
+            if arg in kwargs:
+                kwargs[arg] = resolve_method_bool("mark_density", arg, kwargs[arg], default)
         return self._set_composite_mark(
             "density",
             _resolve_density,
@@ -398,7 +415,7 @@ class StatisticalMarksMixin:
         )
         if layer_kwargs is not None:
             kwargs["layer_kwargs"] = layer_kwargs
-        _pm = self._mark if self._mark in _PRIMITIVE_MARKS else None
+        _pm = self._mark if self._mark in _FLAT_MARK_METHODS else None
         return self._set_composite_mark(
             "smooth",
             _resolve_smooth,
@@ -749,8 +766,10 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_errorband(method="ci", borders=True).encode(x="x", y="y")
         Chart(mark='point', encoding=['x', 'y'])
         """
+        from ferrum.marks.base import resolve_method_bool
         from ferrum.marks.composite import desugar_errorband, _resolve_deprecated_extent
 
+        borders = resolve_method_bool("mark_errorband", "borders", borders, False)
         # Resolve the deprecated extent= alias at the public API level using the
         # shared resolver from composite.py.  Using the _MISSING sentinel for the
         # method default means method="ci" (the canonical default) passed explicitly
@@ -884,9 +903,12 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_contour(thresholds=4, fill=True).encode(x="x", y="y")
         Chart(mark='polygon', encoding=['x', 'y'])
         """
+        from ferrum.marks.base import resolve_method_bool
         from ferrum.marks.heavy_stat import desugar_contour
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
+        smooth = resolve_method_bool("mark_contour", "smooth", smooth, True)
+        fill = resolve_method_bool("mark_contour", "fill", fill, False)
         return self._set_composite_mark(
             "contour",
             desugar_contour,
@@ -1032,7 +1054,11 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_qq(distribution="normal").encode(x="val")
         Chart(mark='point', encoding=['x'])
         """
+        from ferrum.marks.base import resolve_method_bool
         from ferrum.marks.heavy_stat import desugar_qq
+
+        line = resolve_method_bool("mark_qq", "line", line, True)
+        dequantize = resolve_method_bool("mark_qq", "dequantize", dequantize, False)
 
         def _resolve_qq(x_field, y_field, **kw):
             # QQ is single-column: use x_field as the sample field. y_field ignored.
@@ -1060,7 +1086,7 @@ class StatisticalMarksMixin:
         scheme=None,
         cmap=None,
         resolution="screen",
-        blend="alpha",
+        blend=None,
         min_count=None,
         log_scale=False,
         position=None,
@@ -1104,8 +1130,9 @@ class StatisticalMarksMixin:
             for an explicit grid size unaffected by chart dimensions.
         blend : str, optional
             Blend mode of the image layer, one of
-            ``ferrum._core.blend_accepted_values()``; default ``"alpha"``,
-            an alias of ``"normal"``.  ``"additive"`` adds the image's
+            ``ferrum._core.blend_accepted_values()``; ``None`` (default)
+            leaves it unset, which draws as ``"normal"`` (``"alpha"`` is the
+            older name of ``"normal"``).  ``"additive"`` adds the image's
             colors to what is drawn beneath it (static SVG approximates it
             with ``mix-blend-mode:screen``).  Any other value raises
             ``ValueError`` at this call.
@@ -1442,8 +1469,9 @@ class StatisticalMarksMixin:
         ------
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
-            inferred, when a style kwarg is not one the line honors, or when
-            ``size`` is not a finite number above zero.
+            inferred, when ``clip`` is not ``True`` or ``False``, when a style
+            kwarg is not one the line honors, or when ``size`` is not a finite
+            number above zero.
 
         Examples
         --------
@@ -1457,9 +1485,14 @@ class StatisticalMarksMixin:
             from ferrum.position import validate_position_eligibility
 
             validate_position_eligibility("function", position)
-        from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws
+        from ferrum.marks.base import (
+            MarkBase,
+            refuse_style_no_layer_draws,
+            resolve_method_bool,
+        )
         from ferrum.marks.heavy_stat import desugar_function
 
+        clip = resolve_method_bool("mark_function", "clip", clip, True)
         style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
         refuse_style_no_layer_draws("mark_function", style, ["line"])
 

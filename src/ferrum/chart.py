@@ -47,9 +47,7 @@ from ferrum._desugar import (  # noqa: F401  (back-compat re-export)
     _split_style_kwargs,
 )
 
-# Single-sourced in ``_layer`` (the desugar leaf); re-exported here so any
-# existing ``from ferrum.chart import _PRIMITIVE_MARKS`` keeps resolving.
-from ferrum._layer import _PRIMITIVE_MARKS  # noqa: F401  (back-compat re-export)
+from ferrum._layer import _FLAT_MARK_METHODS
 
 
 def _strip_unstackable(d: dict, mark: str | None) -> None:
@@ -291,7 +289,7 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     top-level list so an encoding-implicit aggregate does not double-run
     once the chart carries ``_layers``.
 
-    ``feature.mark`` is validated against ``_PRIMITIVE_MARKS`` before any of
+    ``feature.mark`` is validated against ``_FLAT_MARK_METHODS`` before any of
     that expansion runs (GH #71 defect 4): a composite mark name (e.g.
     ``"boxplot"``) bypasses the ``mark_*()`` desugar pipeline entirely and
     would otherwise build a raw ``_Layer`` that reaches Rust as an unknown
@@ -299,10 +297,10 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     """
     from ferrum.encoding.positional import Y as _Y
 
-    if feature.mark not in _PRIMITIVE_MARKS:
+    if feature.mark not in _FLAT_MARK_METHODS:
         raise ValueError(
             f"SecondaryY: mark={feature.mark!r} is not a primitive mark; must be "
-            f"one of {sorted(_PRIMITIVE_MARKS)}. A composite mark name (e.g. "
+            f"one of {sorted(_FLAT_MARK_METHODS)}. A composite mark name (e.g. "
             "'boxplot', 'violin') cannot be used here -- for a composite overlay "
             "on a secondary axis, use "
             "LayerChart(chart, other_chart, resolve={'y': 'independent'}) instead."
@@ -1588,8 +1586,9 @@ class Chart(
             Text colour override.
         font_size : float, optional
             Font size in points.  Default is ``11``.
-        font_weight : str or int, optional
-            CSS font-weight, e.g. ``"bold"``, ``400``, ``700``.
+        font_weight : str, optional
+            CSS font-weight as a string, e.g. ``"bold"``, ``"400"``, ``"700"``.
+            A number is refused: write ``"700"``, not ``700``.
         align : str, optional
             Horizontal alignment: ``"left"``, ``"center"``, ``"right"``.
         baseline : str, optional
@@ -3464,10 +3463,13 @@ class Chart(
         # A single bar chart's `zero` is consumed here, whichever door wrote it
         # (a figure's `mark=`, a composite's catch-all, `.override(mark_zero=)`),
         # exactly as `mark_bar(zero=)` is: it decides the y zero-anchor below
-        # and never reaches the wire, where only a layered bar reads it.
+        # and never reaches the wire, where only a layered bar reads it. Every
+        # door stored it as a bool, or ``None`` for unset.
         mark_zero = resolved._mark_zero
-        if resolved._mark == "bar" and "zero" in mk:
-            mark_zero = bool(mk.pop("zero"))
+        if resolved._mark == "bar":
+            zero = mk.pop("zero", None)
+            if zero is not None:
+                mark_zero = zero
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}

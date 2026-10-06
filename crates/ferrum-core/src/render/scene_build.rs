@@ -235,6 +235,13 @@ pub fn build_scene(
         theme,
     );
 
+    // Every layer's mark style, resolved once for the chart before any panel
+    // or row is looked at, so a malformed style field (an unknown `blend`,
+    // `stroke_cap`, `stroke_join` or `interpolate`, an unparseable color) is
+    // refused on a layer with no rows, or in a chart whose panels are all
+    // empty, exactly as on one that draws.
+    let layer_styles = resolve_layer_styles(spec, prep, theme)?;
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel {
@@ -463,7 +470,7 @@ pub fn build_scene(
 
         // Per-layer mark batches (MOD-09).
         let mut mark_batches =
-            build_panel_mark_batches(&panel_resolve_ctx, &layer_batches, &chart_swarms, &scales, panel, warnings)?;
+            build_panel_mark_batches(&panel_resolve_ctx, &layer_batches, &layer_styles, &chart_swarms, &scales, panel, warnings)?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -1778,18 +1785,56 @@ fn layer_geometry_encoding(
     encoding
 }
 
+/// The public entry layer `li` of `spec` names in its refusals: the layer's
+/// own, else the chart's, else the mark's.
+fn layer_entry(spec: &ChartSpec, li: usize, mark: crate::spec::mark::Mark) -> String {
+    spec.layers
+        .as_ref()
+        .and_then(|layers| layers.get(li))
+        .and_then(|l| l.entry.clone())
+        .or_else(|| spec.entry.clone())
+        .unwrap_or_else(|| format!("mark_{}", mark.as_str()))
+}
+
+/// Wrap `e` in layer `li`'s voice ([`RenderError::in_layer_context`]): its
+/// index on a layered chart (an unlayered chart's one layer is the chart
+/// itself) and its public [`layer_entry`].
+fn in_layer_voice(e: RenderError, spec: &ChartSpec, li: usize, entry: &str) -> RenderError {
+    e.in_layer_context(spec.layers.is_some().then_some(li), entry)
+}
+
+/// Every layer's resolved mark style, indexed like `prep.layers`, each
+/// refusal in its layer's voice. Read per layer, never per row, so a layer
+/// with no rows refuses a malformed style as one that draws does.
+fn resolve_layer_styles(
+    spec: &ChartSpec,
+    prep: &PreparedInputs,
+    theme: &ThemeInputs,
+) -> Result<Vec<draw::MarkStyle>, RenderError> {
+    prep.layers
+        .iter()
+        .enumerate()
+        .map(|(li, layer)| {
+            draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)
+                .map_err(|e| in_layer_voice(e, spec, li, &layer_entry(spec, li, layer.mark)))
+        })
+        .collect()
+}
+
 /// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
 /// mark-batch loop). Pure extraction — same position adjustment, same synthetic
 /// per-layer ChartSpec, same polar node transform, same alignment guard, same
 /// MarkBatch assembly. Returns the batches in layer order.
 ///
-/// `swarms` is the chart-wide packing [`position::panel_swarms`] computed once
-/// before the panel loop (`build_scene`) — shared by every panel, indexed like
-/// `ctx.prep.layers`.
+/// `layer_styles` are the chart's layer styles [`resolve_layer_styles`]
+/// resolved once before the panel loop, and `swarms` the chart-wide packing
+/// [`position::panel_swarms`] computed there too — both shared by every
+/// panel, indexed like `ctx.prep.layers`.
 fn build_panel_mark_batches(
     ctx: &PanelResolveCtx,
     layer_batches: &[RecordBatch],
-    swarms: &[Option<crate::transform::swarm::SwarmSpec>],
+    layer_styles: &[draw::MarkStyle],
+    swarms: &[Option<crate::transform::swarm::SwarmPacking<'_>>],
     scales: &scale_resolve::ResolvedScales,
     panel: &crate::layout::PanelLayout,
     warnings: &mut Vec<RenderWarning>,
@@ -1836,14 +1881,8 @@ fn build_panel_mark_batches(
         // and by the composite route's (`fm.layer`), neither of which runs
         // inside a layer's draw, so each names its layer as `layer {i}: `
         // and `+` and `fm.layer` refuse alike.
-        let entry = spec
-            .layers
-            .as_ref()
-            .and_then(|layers| layers.get(li))
-            .and_then(|l| l.entry.clone())
-            .or_else(|| spec.entry.clone())
-            .unwrap_or_else(|| format!("mark_{}", layer.mark.as_str()));
-        let name_layer = |e: RenderError| e.in_layer_context(spec.layers.is_some().then_some(li), &entry);
+        let entry = layer_entry(spec, li, layer.mark);
+        let name_layer = |e: RenderError| in_layer_voice(e, spec, li, &entry);
 
         // This layer's coordinate system (`#172`(1)), already resolved against
         // the chart's by `prepare`, and whether it exchanges the positional
@@ -1892,9 +1931,9 @@ fn build_panel_mark_batches(
         // recorded it) gets its dots placed here, through this panel's
         // resolved scales, before any position adjustment, at its swarm's
         // one packing diameter for this panel.
-        let swarm = swarms[li].as_ref();
+        let swarm = swarms[li];
         let swarm_placed: Option<RecordBatch> = match swarm {
-            Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_coord.as_ref(), &entry, warnings).map_err(name_layer)?,
+            Some(packing) => position::apply_swarm(layer_batch, packing, scales, layer_coord.as_ref(), &entry, warnings).map_err(name_layer)?,
             None => None,
         };
         let layer_batch: &RecordBatch = swarm_placed.as_ref().unwrap_or(layer_batch);
@@ -1920,20 +1959,17 @@ fn build_panel_mark_batches(
         // separate resolution in `resolve_legend_color_scale`) reads
         // `layer.encoding` directly and is never touched by what follows.
         //
-        // Resolved before the own-color exemption below because that
+        // Read before the own-color exemption below because that
         // exemption's non-Text branch needs to know whether THIS layer
-        // carries its own literal stroke/fill override.
-        // Refuses with `RenderError::InvalidColor` on an unparseable
-        // `fill=`/`stroke=` (batch-A Task 8) — the same build-seam refusal
-        // discipline as `validate_mark_encoding` below.
-        let mut mark_style =
-            draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark).map_err(name_layer)?;
+        // carries its own literal stroke/fill override. Resolved, and any
+        // malformed field refused, once per chart ([`resolve_layer_styles`]).
+        let mut mark_style = layer_styles[li].clone();
         // A swarm-fed point layer that sizes its dots neither by a constant
-        // nor by a field draws them at the swarm's own `point_size`, not at
-        // the panel's shared packing diameter a sized sibling may widen.
+        // nor by a field draws them at the declared swarm's own `point_size`,
+        // not at the packing diameter a sized sibling may widen.
         if layer.mark == crate::spec::mark::Mark::Point && !position::sizes_own_dots(layer) {
-            if let Some(declared) = prep.transform_swarms.get(position::swarm_key(layer)) {
-                mark_style.point.point_size = declared.dot_area();
+            if let Some(packing) = swarm {
+                mark_style.point.point_size = packing.spec.dot_area();
             }
         }
 
@@ -1979,7 +2015,7 @@ fn build_panel_mark_batches(
         // A conditional style field set without the input it needs drew
         // nothing: warned once per layer, however many panels draw it.
         if let Some(overrides) = layer.mark_style.as_ref() {
-            for (field, needs) in draw::inert_style_fields(overrides, &ctx) {
+            for (field, needs) in draw::inert_style_fields(overrides, &ctx).map_err(name_layer)? {
                 let inert = RenderWarning::MarkStyleInert {
                     layer: spec.layers.is_some().then_some(li),
                     entry: entry.clone(),
@@ -13357,6 +13393,77 @@ mod tests {
         }));
         let scene = build_scene_for(&flat, &xy_span_batch());
         assert_eq!(scene.panels[0].marks[0].blend, BlendMode::Additive);
+    }
+
+    /// A `blend` outside its vocabulary refuses at render in the layer's
+    /// voice, the same way a `stroke_cap` outside its own does, whatever
+    /// produced the spec.
+    #[test]
+    fn an_unknown_blend_refuses_in_the_layer_voice_as_stroke_cap_does() {
+        let layered = |style: serde_json::Value| {
+            spec_from(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "line",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                "layers": [
+                    {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                    {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": style},
+                ],
+            }))
+        };
+        let refusal = |style| try_build_scene_for(&layered(style), &xy_span_batch()).unwrap_err().to_string();
+        assert_eq!(
+            refusal(serde_json::json!({"blend": "multiply"})),
+            "layer 1: mark_line: unknown blend 'multiply'; expected normal|alpha|additive"
+        );
+        assert_eq!(
+            refusal(serde_json::json!({"stroke_cap": "flat"})),
+            "layer 1: mark_line: unknown stroke_cap 'flat'; expected butt|round|square"
+        );
+    }
+
+    /// A vocabulary field outside its vocabulary refuses in the layer's voice
+    /// on a layer whose own `data_source` has no rows, as on one that draws:
+    /// the style is read per layer, not per row. The same layer with an
+    /// in-vocabulary value renders, skipped silently, so the layer really
+    /// is empty and the refusal is the field's alone.
+    #[test]
+    fn an_unknown_vocabulary_field_refuses_on_a_layer_with_no_rows() {
+        pyo3::Python::initialize();
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        let empty_layer = |style: serde_json::Value| {
+            let (mut spec, batch) = layer_gate_binned_spec();
+            spec.transforms = vec![TransformSpec::Filter(FilterSpec {
+                predicate: "datum.x > 1000".into(),
+                name: Some("binned".into()),
+                param: None,
+            })];
+            let layer = &mut spec.layers.as_mut().expect("a layered fixture")[1];
+            layer.mark = Mark::Line;
+            layer.mark_style = Some(serde_json::from_value(style).expect("a mark_style"));
+            try_build_scene_for(&spec, &batch)
+        };
+
+        let scene = empty_layer(serde_json::json!({
+            "blend": "additive", "stroke_cap": "round", "stroke_join": "bevel", "interpolate": "step"
+        }))
+        .expect("an in-vocabulary style on an empty layer renders");
+        assert_eq!(panel_mark_batch_node_counts(&scene).len(), 1, "vacuity: layer 1 has no rows and draws nothing");
+
+        for (style, refusal) in [
+            (serde_json::json!({"blend": "bogus"}), "unknown blend 'bogus'; expected normal|alpha|additive"),
+            (serde_json::json!({"stroke_cap": "flat"}), "unknown stroke_cap 'flat'; expected butt|round|square"),
+            (serde_json::json!({"stroke_join": "mitre"}), "unknown stroke_join 'mitre'"),
+            (serde_json::json!({"interpolate": "smooth"}), "unknown interpolate 'smooth'"),
+        ] {
+            let err = empty_layer(style.clone()).expect_err(&format!("{style}: refused on an empty layer")).to_string();
+            assert!(
+                err.starts_with("layer 1: mark_line: ") && err.contains(refusal),
+                "{style}: {err:?} is not layer 1's refusal containing {refusal:?}"
+            );
+        }
     }
 
     /// One `<g>` element of a rendered SVG: its opening tag, the opening tags

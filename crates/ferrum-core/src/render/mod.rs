@@ -370,6 +370,9 @@ pub enum RenderError {
     /// A `stroke_join=` outside its vocabulary (`miter|round|bevel`), refused
     /// as [`Self::UnknownStrokeCap`] is.
     UnknownStrokeJoin { value: String },
+    /// A `blend=` outside its vocabulary (`normal|alpha|additive`), refused
+    /// as [`Self::UnknownStrokeCap`] is.
+    UnknownBlend { value: String },
     /// A style field the mark never draws ([`crate::spec::mark::Mark::style_fields`]):
     /// accepted, it would render exactly as without it. REFUSE MALFORMED, from
     /// [`draw::resolve_mark_style`] for every producer; the per-layer draw loop
@@ -966,6 +969,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::UnknownInterpolate { .. }
         | RenderError::UnknownStrokeCap { .. }
         | RenderError::UnknownStrokeJoin { .. }
+        | RenderError::UnknownBlend { .. }
         | RenderError::MarkStyleNotDrawn { .. }
         | RenderError::MarkRequiresCoord { .. }
         // Carries a `coord_flipped` field, patched at its own single
@@ -1164,6 +1168,10 @@ impl std::fmt::Display for RenderError {
             Self::UnknownStrokeJoin { value } => {
                 use crate::transform::vocabulary::Vocabulary;
                 f.write_str(&ferrum_scene::StrokeJoin::refusal("stroke_join", value))
+            }
+            Self::UnknownBlend { value } => {
+                use crate::transform::vocabulary::Vocabulary;
+                f.write_str(&ferrum_scene::BlendMode::refusal("blend", value))
             }
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
@@ -1391,7 +1399,7 @@ impl RenderError {
                 )
             }
             Self::MarkSizeNotDrawn { mark, value } => {
-                write!(f, "{entry}(size=...) has no effect on {entry}; received {value}.")?;
+                write!(f, "{entry}(size=...) has no effect on mark_{mark}; received {value}.")?;
                 match mark.size_knob() {
                     Some(knob) => write!(f, " Set {knob}= instead."),
                     None => Ok(()),
@@ -2778,6 +2786,39 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("unknown column"), "msg: {msg}");
         assert!(msg.contains("missing"), "msg: {msg}");
+    }
+
+    /// [`RenderError::MarkSizeNotDrawn`] names the call in the entry
+    /// position and the mark in the mark position. A `mark_*()` door's own
+    /// refusal (no `InLayer` wrap, entry falls back to `mark_{mark}` at
+    /// dispatch) stays byte-identical because entry and mark position then
+    /// name the same mark; `fm.Layer`'s refusal (wrapped in `InLayer` with
+    /// `entry = "Layer"`) must still name the actual mark rather than
+    /// repeating "Layer" — the regression this test pins (entry doubled into
+    /// both slots, dropping the mark name entirely).
+    #[test]
+    fn mark_size_not_drawn_names_the_call_and_the_mark_separately() {
+        use crate::spec::mark::Mark;
+
+        let direct = RenderError::MarkSizeNotDrawn { mark: Mark::Area, value: 5.0 };
+        assert_eq!(
+            format!("{direct}"),
+            "mark_area(size=...) has no effect on mark_area; received 5."
+        );
+
+        let via_layer = RenderError::MarkSizeNotDrawn { mark: Mark::Area, value: 5.0 }
+            .in_layer_context(None, "Layer");
+        assert_eq!(
+            format!("{via_layer}"),
+            "Layer(size=...) has no effect on mark_area; received 5."
+        );
+
+        let via_layer_with_knob = RenderError::MarkSizeNotDrawn { mark: Mark::Text, value: 5.0 }
+            .in_layer_context(None, "Layer");
+        assert_eq!(
+            format!("{via_layer_with_knob}"),
+            "Layer(size=...) has no effect on mark_text; received 5. Set font_size= instead."
+        );
     }
 }
 

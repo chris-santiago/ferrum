@@ -127,8 +127,10 @@ pub struct MarkKwargsSpec {
     /// How this mark's batch composites over what is drawn beneath it
     /// (`MarkBatch::blend`), a per-batch render bit like `clip`. `None`
     /// resolves to `normal`, every batch's blend before this field existed.
-    /// `"alpha"` is accepted as an alias of `normal`; any other value outside
-    /// the vocabulary refuses as the struct is read.
+    /// The vocabulary is `ferrum_scene::BlendMode`'s, `"alpha"` an alias of
+    /// `normal`. An unrecognized value is REFUSED
+    /// (`RenderError::UnknownBlend`) at `render::draw::resolve_mark_style`,
+    /// as `stroke_cap`, `stroke_join` and `interpolate` are.
     ///
     /// The outputs differ where a batch's own marks overlap. The interactive
     /// renderer draws true additive per mark, the mark's color scaled by its
@@ -148,7 +150,7 @@ pub struct MarkKwargsSpec {
     /// linear-light sum of a partial color re-encodes brighter than the sRGB
     /// screen of it, so the same mark reads a different shade on each output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blend: Option<ferrum_scene::BlendMode>,
+    pub blend: Option<String>,
     // ── T5r cycle 2: zero (bar, layered zero-anchor opt-out) ─────────────────
     /// Per-layer mirror of the single-chart `mark_bar(zero=False)` /
     /// `MarkBase.zero_anchor()` concept, consulted by
@@ -270,114 +272,15 @@ pub(crate) fn mark_kwargs_field_names() -> &'static [&'static str] {
 }
 
 impl MarkKwargsSpec {
-    /// The wire keys this spec sets, in declaration order: the keys the
-    /// derived `Serialize` writes (it skips every unset field), recorded by
-    /// [`KeyRecorder`] without serializing any value, so the list cannot
-    /// drift from the struct.
-    pub(crate) fn set_field_names(&self) -> Vec<&'static str> {
-        let mut keys = Vec::new();
-        // `KeyRecorder` refuses only a non-struct shape, which the derived
-        // `Serialize` of this struct never writes. Should that change (a
-        // `#[serde(flatten)]` field switches the derive to a map), every debug
-        // build and test run fails here instead of returning an empty list
-        // that silently switches off the inert-field refusals; a release
-        // build never panics on a user's call.
-        let recorded = self.serialize(KeyRecorder(&mut keys));
-        debug_assert!(recorded.is_ok(), "MarkKwargsSpec no longer serializes as a struct: {recorded:?}");
-        keys
-    }
-}
-
-/// One `Serializer` method per entry that refuses its shape with
-/// [`KEY_RECORDER_REFUSAL`].
-macro_rules! key_recorder_refuses {
-    ($($method:ident($($arg:ty),*) -> $ret:ty;)*) => {
-        $(fn $method(self, $(_: $arg),*) -> Result<$ret, Self::Error> {
-            Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
-        })*
-    };
-}
-
-/// A `Serializer` that takes a struct and records the key of each field it
-/// writes, ignoring the field's value; any other shape is refused.
-struct KeyRecorder<'a>(&'a mut Vec<&'static str>);
-
-const KEY_RECORDER_REFUSAL: &str = "KeyRecorder records a struct's keys only";
-
-impl serde::ser::SerializeStruct for KeyRecorder<'_> {
-    type Ok = ();
-    type Error = serde::de::value::Error;
-
-    fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, _value: &T) -> Result<(), Self::Error> {
-        self.0.push(key);
-        Ok(())
-    }
-
-    fn end(self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl serde::Serializer for KeyRecorder<'_> {
-    type Ok = ();
-    type Error = serde::de::value::Error;
-    type SerializeSeq = serde::ser::Impossible<(), Self::Error>;
-    type SerializeTuple = serde::ser::Impossible<(), Self::Error>;
-    type SerializeTupleStruct = serde::ser::Impossible<(), Self::Error>;
-    type SerializeTupleVariant = serde::ser::Impossible<(), Self::Error>;
-    type SerializeMap = serde::ser::Impossible<(), Self::Error>;
-    type SerializeStruct = Self;
-    type SerializeStructVariant = serde::ser::Impossible<(), Self::Error>;
-
-    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
-
-    // Every other shape is refused; serde offers no forwarding helper on the
-    // serializing side, so the refusals are generated.
-    key_recorder_refuses! {
-        serialize_bool(bool) -> ();
-        serialize_i8(i8) -> ();
-        serialize_i16(i16) -> ();
-        serialize_i32(i32) -> ();
-        serialize_i64(i64) -> ();
-        serialize_u8(u8) -> ();
-        serialize_u16(u16) -> ();
-        serialize_u32(u32) -> ();
-        serialize_u64(u64) -> ();
-        serialize_f32(f32) -> ();
-        serialize_f64(f64) -> ();
-        serialize_char(char) -> ();
-        serialize_str(&str) -> ();
-        serialize_bytes(&[u8]) -> ();
-        serialize_none() -> ();
-        serialize_unit() -> ();
-        serialize_unit_struct(&'static str) -> ();
-        serialize_unit_variant(&'static str, u32, &'static str) -> ();
-        serialize_seq(Option<usize>) -> Self::SerializeSeq;
-        serialize_tuple(usize) -> Self::SerializeTuple;
-        serialize_tuple_struct(&'static str, usize) -> Self::SerializeTupleStruct;
-        serialize_tuple_variant(&'static str, u32, &'static str, usize) -> Self::SerializeTupleVariant;
-        serialize_map(Option<usize>) -> Self::SerializeMap;
-        serialize_struct_variant(&'static str, u32, &'static str, usize) -> Self::SerializeStructVariant;
-    }
-
-    fn serialize_some<T: ?Sized + Serialize>(self, _value: &T) -> Result<(), Self::Error> {
-        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
-    }
-
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, _value: &T) -> Result<(), Self::Error> {
-        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
-    }
-
-    fn serialize_newtype_variant<T: ?Sized + Serialize>(
-        self,
-        _name: &'static str,
-        _variant_index: u32,
-        _variant: &'static str,
-        _value: &T,
-    ) -> Result<(), Self::Error> {
-        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
+    /// The wire keys this spec sets, in declaration order: the keys of its
+    /// serialized form (every unset field is skipped), read in the order of
+    /// [`mark_kwargs_field_names`], so the list cannot drift from the struct.
+    /// A spec that does not serialize to an object refuses rather than
+    /// reading as one that sets nothing.
+    pub(crate) fn set_field_names(&self) -> serde_json::Result<Vec<&'static str>> {
+        let set: serde_json::Map<String, serde_json::Value> =
+            serde_json::to_value(self).and_then(serde_json::from_value)?;
+        Ok(mark_kwargs_field_names().iter().copied().filter(|name| set.contains_key(*name)).collect())
     }
 }
 
@@ -437,6 +340,55 @@ pub(crate) fn mark_integer_kwarg_names() -> Vec<&'static str> {
 #[pyfunction]
 pub(crate) fn mark_integer_kwargs() -> Vec<&'static str> {
     mark_integer_kwarg_names()
+}
+
+/// Every bool (`Option<bool>`) `MarkKwargsSpec` field, in declaration order.
+/// Derived from the struct, not listed, by the same probe `mark_numeric_kwarg_names`
+/// uses: a field is boolean exactly when its derived `Deserialize` accepts a
+/// bare `true` under its key, which every `Option<bool>` field does and every
+/// string, numeric, pattern-list or enum field refuses.
+pub(crate) fn mark_bool_kwarg_names() -> Vec<&'static str> {
+    mark_kwargs_field_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            serde_json::from_value::<MarkKwargsSpec>(serde_json::json!({ *name: true })).is_ok()
+        })
+        .collect()
+}
+
+/// `ferrum._core.mark_bool_kwargs()`: [`mark_bool_kwarg_names`], so Python's
+/// mark-kwarg funnel type-gates exactly the struct's boolean fields instead
+/// of hand-listing them (C1, 2026-10-06 wave-7-close decision). Registered in
+/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn mark_bool_kwargs() -> Vec<&'static str> {
+    mark_bool_kwarg_names()
+}
+
+/// Every string-shaped `MarkKwargsSpec` field, in declaration order. Derived
+/// from the struct, not listed, by the same probe: a field matches exactly
+/// when its derived `Deserialize` accepts the bare string `"x"` under its
+/// key — true for every `Option<String>` field, and also for `value_axis`
+/// (`"x"` is itself one of [`crate::spec::position::StackValueAxis`]'s two
+/// wire tokens) — and false for every numeric, bool or pattern-list field.
+pub(crate) fn mark_string_kwarg_names() -> Vec<&'static str> {
+    mark_kwargs_field_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            serde_json::from_value::<MarkKwargsSpec>(serde_json::json!({ *name: "x" })).is_ok()
+        })
+        .collect()
+}
+
+/// `ferrum._core.mark_string_kwargs()`: [`mark_string_kwarg_names`], so
+/// Python's mark-kwarg funnel type-gates exactly the struct's string-shaped
+/// fields instead of hand-listing them (C1, 2026-10-06 wave-7-close
+/// decision). Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn mark_string_kwargs() -> Vec<&'static str> {
+    mark_string_kwarg_names()
 }
 
 #[cfg(test)]
@@ -534,6 +486,142 @@ mod tests {
             ]
         );
         assert_eq!(real.len() + integer.len(), numeric.len());
+    }
+
+    /// The bool set is exactly the struct's `Option<bool>` fields. The
+    /// exhaustive destructure makes a new field fail to compile here until
+    /// it is classified below, the same discipline the numeric test above
+    /// uses.
+    #[test]
+    fn mark_bool_kwarg_names_are_the_structs_bool_fields() {
+        let super::MarkKwargsSpec {
+            size: _,
+            stroke: _,
+            fill: _,
+            opacity: _,
+            corner_radius: _,
+            stroke_width: _,
+            stroke_dash: _,
+            font_size: _,
+            font_weight: _,
+            align: _,
+            baseline: _,
+            dx: _,
+            dy: _,
+            angle: _,
+            detail: _,
+            cmap: _,
+            interpolate: _,
+            stroke_cap: _,
+            stroke_join: _,
+            filled: _,
+            shape: _,
+            limit: _,
+            band_size: _,
+            line: _,
+            borders: _,
+            leader_line: _,
+            width: _,
+            height: _,
+            clip: _,
+            blend: _,
+            zero: _,
+            arrow: _,
+            arrow_size: _,
+            value_axis: _,
+        } = super::MarkKwargsSpec::default();
+        assert_eq!(
+            super::mark_bool_kwarg_names(),
+            vec!["filled", "line", "borders", "leader_line", "clip", "zero", "arrow"]
+        );
+    }
+
+    /// The string-shaped set is exactly the struct's `Option<String>` fields
+    /// plus `value_axis` (whose enum happens to accept the probe literal
+    /// `"x"` as a real wire token). The exhaustive destructure forces a new
+    /// field to be classified before this compiles.
+    #[test]
+    fn mark_string_kwarg_names_are_the_structs_string_shaped_fields() {
+        let super::MarkKwargsSpec {
+            size: _,
+            stroke: _,
+            fill: _,
+            opacity: _,
+            corner_radius: _,
+            stroke_width: _,
+            stroke_dash: _,
+            font_size: _,
+            font_weight: _,
+            align: _,
+            baseline: _,
+            dx: _,
+            dy: _,
+            angle: _,
+            detail: _,
+            cmap: _,
+            interpolate: _,
+            stroke_cap: _,
+            stroke_join: _,
+            filled: _,
+            shape: _,
+            limit: _,
+            band_size: _,
+            line: _,
+            borders: _,
+            leader_line: _,
+            width: _,
+            height: _,
+            clip: _,
+            blend: _,
+            zero: _,
+            arrow: _,
+            arrow_size: _,
+            value_axis: _,
+        } = super::MarkKwargsSpec::default();
+        assert_eq!(
+            super::mark_string_kwarg_names(),
+            vec![
+                "stroke",
+                "fill",
+                "font_weight",
+                "align",
+                "baseline",
+                "detail",
+                "cmap",
+                "interpolate",
+                "stroke_cap",
+                "stroke_join",
+                "shape",
+                "blend",
+                "value_axis",
+            ]
+        );
+    }
+
+    /// The bool, string-shaped and numeric sets are pairwise disjoint and,
+    /// together with `stroke_dash` (a pattern-list), account for every field
+    /// — so every `MarkKwargsSpec` field is classified by exactly one of
+    /// these three probes, or named here as the reason it is classified by
+    /// none.
+    #[test]
+    fn bool_string_and_numeric_kwarg_sets_partition_every_field_with_named_exceptions() {
+        let names = super::mark_kwargs_field_names();
+        let bools = super::mark_bool_kwarg_names();
+        let strings = super::mark_string_kwarg_names();
+        let numeric = super::mark_numeric_kwarg_names();
+        for name in &bools {
+            assert!(!strings.contains(name) && !numeric.contains(name), "'{name}' must be exclusively bool");
+        }
+        for name in &strings {
+            assert!(!bools.contains(name) && !numeric.contains(name), "'{name}' must be exclusively string-shaped");
+        }
+        let unclassified: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| !bools.contains(n) && !strings.contains(n) && !numeric.contains(n))
+            .collect();
+        assert_eq!(unclassified, vec!["stroke_dash"], "the named exception must stay exactly this one");
+        assert_eq!(bools.len() + strings.len() + numeric.len() + unclassified.len(), names.len());
     }
 
     /// A float or a negative value under `limit`'s key is refused by the
@@ -728,21 +816,19 @@ mod tests {
 
     // ── blend (a per-mark style field) ────────────────────────────────────────
 
-    /// `blend` round-trips as its canonical name, reads `"alpha"` as
-    /// `normal`, refuses a value outside the vocabulary, and is absent when
-    /// unset, so every spec without it serializes as before.
+    /// `blend` carries the producer's spelling through the wire untouched,
+    /// `"alpha"` included, and is absent when unset, so every spec without
+    /// it serializes as before. A value outside the vocabulary reads, to be
+    /// refused at render in the layer's voice
+    /// (`render::draw::resolve_mark_style_refuses_an_unknown_blend`).
     #[test]
-    fn mark_kwargs_blend_round_trips_aliases_alpha_and_refuses_unknown() {
-        use ferrum_scene::BlendMode;
-        let m = MarkKwargsSpec { blend: Some(BlendMode::Additive), ..Default::default() };
-        let json = serde_json::to_string(&m).unwrap();
-        assert_eq!(json, r#"{"blend":"additive"}"#);
-        assert_eq!(serde_json::from_str::<MarkKwargsSpec>(&json).unwrap(), m);
-        let alpha: MarkKwargsSpec = serde_json::from_str(r#"{"blend":"alpha"}"#).unwrap();
-        assert_eq!(alpha.blend, Some(BlendMode::Normal));
-        assert_eq!(serde_json::to_string(&alpha).unwrap(), r#"{"blend":"normal"}"#);
-        let err = serde_json::from_str::<MarkKwargsSpec>(r#"{"blend":"multiply"}"#).unwrap_err().to_string();
-        assert!(err.contains("unknown variant `multiply`"), "{err}");
+    fn mark_kwargs_blend_round_trips_its_spelling_and_defers_refusal_to_render() {
+        for spelling in ["additive", "alpha", "normal", "multiply"] {
+            let json = format!(r#"{{"blend":"{spelling}"}}"#);
+            let m: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(m.blend.as_deref(), Some(spelling));
+            assert_eq!(serde_json::to_string(&m).unwrap(), json);
+        }
         assert!(!serde_json::to_string(&MarkKwargsSpec::default()).unwrap().contains("blend"));
     }
 
@@ -763,8 +849,8 @@ mod tests {
             stroke_dash: Some(Vec::new()),
             ..Default::default()
         };
-        assert_eq!(m.set_field_names(), vec!["fill", "stroke_dash", "arrow"]);
-        assert!(MarkKwargsSpec::default().set_field_names().is_empty());
+        assert_eq!(m.set_field_names().unwrap(), vec!["fill", "stroke_dash", "arrow"]);
+        assert!(MarkKwargsSpec::default().set_field_names().unwrap().is_empty());
     }
 
     // ── Batch H Task 1: arrow / arrow_size (segment) ─────────────────────────

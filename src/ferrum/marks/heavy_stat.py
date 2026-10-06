@@ -698,6 +698,7 @@ def desugar_qq(
             data_source=_QQ_TRANSFORM_NAME,
         )
     ]
+    # *line* is the bool ``Chart.mark_qq`` validated (``resolve_method_bool``).
     if line:
         # The reference line rides QQ's SECONDARY named batch, declared in the
         # registry since 2026-09-06 -- so its four columns check the same way
@@ -746,7 +747,7 @@ def desugar_raster(
     field: Optional[str] = None,
     cmap: str | None = None,
     resolution: Any = "screen",
-    blend: str = "alpha",
+    blend: str | None = None,
     min_count: Optional[int] = None,
     log_scale: bool = False,
 ) -> MarkDesugarResult:
@@ -769,7 +770,7 @@ def desugar_raster(
     --------------
     1. ``image`` — ``x=x_field``, ``y=y_field``,
        ``mark_kwargs={"cmap": cmap, "blend": blend}``, each key only when
-       set (``blend`` only when it is not the default).
+       set.
 
     Parameters
     ----------
@@ -796,12 +797,14 @@ def desugar_raster(
         scales with a pre-layout estimate of the chart's dimensions (not an
         exact match for the rendered plot area — see ``mark_raster``'s
         docstring).
-    blend : str, default "alpha"
+    blend : str or None, default None
         Pixel-level blending mode, one of
-        ``ferrum._core.blend_accepted_values()`` (``"alpha"`` is an alias
-        of ``"normal"``), checked by ``mark_raster``.  ``"additive"`` is
-        written to the image layer's mark style; the SVG output approximates
-        it with ``mix-blend-mode:screen``.
+        ``ferrum._core.blend_accepted_values()``, checked by ``mark_raster``.
+        A set value is written to the image layer's mark style as given; the
+        renderer reads it (``"alpha"`` is its older name of ``"normal"``, and
+        static SVG approximates ``"additive"`` with
+        ``mix-blend-mode:screen``). ``None`` leaves it unset, which draws as
+        ``"normal"``.
     min_count : int or None, default None
         Pixel cells with fewer than ``min_count`` points render as
         transparent.
@@ -847,9 +850,9 @@ def desugar_raster(
     mk: dict = {}
     if cmap is not None:
         mk["cmap"] = cmap
-    # The default blend, and an unset one, write nothing, so a raster that
-    # never asked for a blend serializes exactly as it always has.
-    if blend not in (None, "alpha"):
+    # An unset blend writes nothing, so a raster that never asked for a
+    # blend serializes exactly as it always has.
+    if blend is not None:
         mk["blend"] = blend
     layers = [
         _Layer(
@@ -1240,7 +1243,8 @@ def desugar_function(
     n : int, default 200
         Number of evaluation points.
     clip : bool, default True
-        Whether the rendered line is clipped to the panel's plot area.
+        Whether the rendered line is clipped to the panel's plot area, as a
+        ``bool`` (``Chart.mark_function`` refuses any other value).
         ``False`` sets ``.mark_kwargs = {"clip": False}`` on the returned
         result, which the caller (``Chart.mark_function``) applies to the
         synthesized line layer; the renderer honors it as a per-batch clip
@@ -1295,8 +1299,9 @@ def desugar_function(
     synthetic = pa.Table.from_pydict({"x": xs, "y": ys})
     # clip=False threads onto the synthesized line layer as the
     # MarkKwargsSpec.clip escape (spec §6.3); True is the theme default and
-    # stays unset (mark_kwargs=None) so output is byte-identical.
-    line_mark_kwargs = None if clip else {"clip": False}
+    # stays unset (mark_kwargs=None) so output is byte-identical. *clip* is
+    # the bool ``Chart.mark_function`` validated, never read for truthiness.
+    line_mark_kwargs = {"clip": False} if clip is False else None
     return MarkDesugarResult(
         mark="line", remap={"x": "x", "y": "y"}, data=synthetic, mark_kwargs=line_mark_kwargs
     )

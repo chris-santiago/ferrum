@@ -288,7 +288,7 @@ def test_the_first_layer_binding_a_channel_decides_its_scale(
 # A composite's constant size= refuses where nothing it draws reads it.
 # ---------------------------------------------------------------------------
 
-_DENSITY_REFUSAL = "mark_density(size=...) has no effect on mark_density; received 5."
+_DENSITY_REFUSAL = "mark_density(size=...) has no effect on mark_area; received 5."
 
 
 @dataclass(frozen=True)
@@ -338,7 +338,7 @@ def test_a_composite_size_refusal_names_the_stamped_entry() -> None:
     stamped = fm.Chart(_DF).mark_density(size=5).encode(x="x")._with_entry("kdeplot")
     with pytest.raises(ValueError) as exc:
         stamped.to_svg()
-    assert str(exc.value) == "kdeplot(size=...) has no effect on kdeplot; received 5."
+    assert str(exc.value) == "kdeplot(size=...) has no effect on mark_area; received 5."
 
 
 @pytest.mark.parametrize("route", sorted(_COMPOSITE_ROUTES))

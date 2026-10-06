@@ -169,7 +169,13 @@ def _importance_chart_from_source(
         chart = chart.layer(_importance_value_text_layer(orient, vertical_form=False))
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="importance_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -279,7 +285,13 @@ def _importance_chart_compare_from_source(
         chart = chart.coord(CoordFlip())
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="importance_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -424,7 +436,13 @@ def _shap_beeswarm_chart_from_source(
     if is_faceted:
         chart = chart.facet(col="class_label")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="shap_beeswarm_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -498,7 +516,13 @@ def _shap_bar_chart_from_source(
     if is_faceted:
         chart = chart.facet(col="class_label")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="shap_bar_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -579,7 +603,13 @@ def _shap_bar_chart_compare_from_source(
     )
     chart = _title_legend(chart, "color", "Model")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="shap_bar_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -674,7 +704,13 @@ def _shap_waterfall_chart_from_source(
     if is_faceted:
         chart = chart.facet(col="class_label")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="shap_waterfall_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -845,7 +881,13 @@ def _pdp_chart_from_source(
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="pdp_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

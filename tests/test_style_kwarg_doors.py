@@ -24,13 +24,17 @@ import ferrum as fm
 from ferrum._core import (
     ChartSpec,
     blend_accepted_values,
+    interpolate_accepted_values,
+    mark_bool_kwargs,
     mark_kwargs_fields,
+    mark_string_kwargs,
     mark_style_fields,
     render_svg,
     stroke_cap_accepted_values,
     stroke_join_accepted_values,
     style_table_marks,
 )
+from ferrum._entry import EntryRefusal
 from ferrum.exceptions import FerrumOverrideError
 
 _RNG = np.random.default_rng(0)
@@ -51,7 +55,7 @@ def _layered(style: dict) -> Any:
 
 # door -> (build(style), voice, mark the style lands on, a key that mark draws)
 _DOORS: dict[str, tuple[Callable[[dict], Any], str, str, dict]] = {
-    "Layer": (_layered, "mark_line", "line", {"stroke_width": 6}),
+    "Layer": (_layered, "Layer", "line", {"stroke_width": 6}),
     "relplot mark=": (
         lambda st: fm.relplot(_DF, x="x", y="y", mark=st),
         "relplot",
@@ -383,7 +387,7 @@ _LAYER_CELLS = [(m, f) for m in _MARKS for f in _undrawn_fields(m)]
 def test_a_layer_refuses_a_field_its_mark_never_draws(mark: str, field: str) -> None:
     with pytest.raises(ValueError) as exc_info:
         fm.Layer(mark=mark, mark_kwargs={field: _SAMPLE[field]})
-    assert str(exc_info.value) == _not_honored(f"mark_{mark}", mark, field, _layer_honored(mark))
+    assert str(exc_info.value) == _not_honored("Layer", mark, field, _layer_honored(mark))
 
 
 _OVERRIDE_CELLS = [(m, f) for m in _FLAT_METHOD_MARKS for f in _undrawn_fields(m)]
@@ -488,7 +492,7 @@ def test_an_internal_field_refuses_at_every_door_naming_its_real_door(
     style = {field: _SAMPLE[field]}
     error: type[Exception] = ValueError
     if door == "Layer":
-        voice = f"mark_{target}"
+        voice = "Layer"
         build: Callable[[], Any] = lambda: fm.Layer(mark=target, mark_kwargs=style)  # noqa: E731
     elif door == "method":
         voice = f"mark_{target}"
@@ -512,10 +516,10 @@ def test_an_internal_field_refuses_at_every_door_naming_its_real_door(
 # ── a layer with no mark draws a point, and is held to the point's row ──────
 
 
-def test_a_markless_layer_refuses_an_internal_field_in_the_point_voice() -> None:
+def test_a_markless_layer_refuses_an_internal_field_in_the_layer_voice() -> None:
     with pytest.raises(ValueError) as exc_info:
         fm.Layer(mark_kwargs={"detail": "g"})
-    assert str(exc_info.value) == _internal_refusal("mark_point", "detail")
+    assert str(exc_info.value) == _internal_refusal("Layer", "detail")
 
 
 def test_a_markless_layer_refuses_a_field_the_point_does_not_draw() -> None:
@@ -523,13 +527,11 @@ def test_a_markless_layer_refuses_a_field_the_point_does_not_draw() -> None:
     with pytest.raises(ValueError) as exc_info:
         fm.Layer(mark_kwargs={"font_size": 9})
     assert str(exc_info.value) == (
-        f"mark_point: keyword argument 'font_size' is not honored by mark_point. Honored: {honored}"
+        f"Layer: keyword argument 'font_size' is not honored by mark_point. Honored: {honored}"
     )
     with pytest.raises(ValueError) as exc_info:
         fm.Layer(mark_kwargs={"bogus_kw": 1})
-    assert str(exc_info.value) == (
-        f"mark_point: unknown keyword argument 'bogus_kw'. Honored: {honored}"
-    )
+    assert str(exc_info.value) == f"Layer: unknown keyword argument 'bogus_kw'. Honored: {honored}"
 
 
 def test_a_markless_layer_resolves_aliases_as_a_point() -> None:
@@ -568,7 +570,7 @@ def test_a_method_only_kwarg_refuses_off_its_method(door: str, mark: str, field:
     if door == "Layer":
         with pytest.raises(ValueError) as exc_info:
             fm.Layer(mark=mark, mark_kwargs={field: "horizontal"})
-        voice = f"mark_{mark}"
+        voice = "Layer"
     else:
         chart = (
             getattr(fm.Chart(_CAT), f"mark_{mark}")()
@@ -800,7 +802,7 @@ def test_a_value_outside_a_rust_vocabulary_refuses_on_a_layer(field: str) -> Non
     with pytest.raises(ValueError) as exc_info:
         fm.Layer(mark="line", mark_kwargs={field: "bogus"})
     assert str(exc_info.value) == (
-        f"mark_line: unknown {field} 'bogus'; expected {'|'.join(_VOCABULARIES[field])}"
+        f"Layer: unknown {field} 'bogus'; expected {'|'.join(_VOCABULARIES[field])}"
     )
 
 
@@ -875,6 +877,360 @@ def test_mark_raster_blend_none_is_unset_on_the_wire() -> None:
     (layer,) = json.loads(spec(blend=None))["layers"]
     assert "mark_style" not in layer
     assert spec(blend=None) == spec()
+
+
+def test_mark_raster_writes_the_blend_it_was_given_and_leaves_the_alias_to_rust() -> None:
+    # Python reads no spelling of the vocabulary: `alpha` reaches the wire as
+    # written, and Rust's `BlendMode::parse` draws it as `normal`.
+    def layer(**style: Any) -> dict:
+        chart = fm.Chart(_DF).mark_raster(**style).encode(x="x", y="y")
+        (only,) = json.loads(chart.to_spec().to_json())["layers"]
+        return only
+
+    assert layer(blend="alpha")["mark_style"] == {"blend": "alpha"}
+    assert layer(blend="normal")["mark_style"] == {"blend": "normal"}
+    assert "mark_style" not in layer()
+
+
+# ── a value of the wrong type refuses at every door ─────────────────────────
+#
+# Rust publishes which wire fields are truth-valued and which are strings
+# (`mark_bool_kwargs`, `mark_string_kwargs`). Each door holds a field of that
+# kind to its type before anything reads it, so `"no"` is never taken as
+# True and a non-string `shape`/`fill`/`stroke` never reaches the wire. Each
+# cell styles, at one door, a mark that draws the field; a field only
+# ferrum's own code writes is refused as such whatever its type, and a string
+# field a Rust vocabulary governs refuses a non-string as outside that
+# vocabulary.
+
+#: Every style field a Rust vocabulary governs, with its accepted values.
+_ALL_VOCABULARIES = {**_VOCABULARIES, "interpolate": interpolate_accepted_values()}
+
+
+def _string_refusal(voice: str, field: str) -> str:
+    if field in _ALL_VOCABULARIES:
+        return f"{voice}: unknown {field} '5'; expected {'|'.join(_ALL_VOCABULARIES[field])}"
+    return f"{voice}: {field} must be a string; got 5"
+
+
+#: field kind -> (its fields, a wrong-typed value, the refusal for it)
+_KINDS: dict[str, tuple[tuple[str, ...], Any, Callable[[str, str], str]]] = {
+    "bool": (
+        tuple(mark_bool_kwargs()),
+        "no",
+        lambda voice, field: f"{voice}: {field} must be True or False; got 'no'",
+    ),
+    "string": (tuple(mark_string_kwargs()), 5, _string_refusal),
+}
+
+_TYPE_DOORS = ("method", "Layer", "override", "figure", "composite")
+
+
+def _first_drawing(marks: Any, field: str) -> str | None:
+    return next((m for m in marks if field in _drawn(m)), None)
+
+
+def _figure_drawing(field: str) -> str | None:
+    return next((d for d, (_, _, m) in _FIGURE_DOORS.items() if field in _drawn(m)), None)
+
+
+def _typed_door(door: str, field: str) -> tuple[Callable[[Any], Any], str, type[Exception]] | None:
+    """The build of one *door* styling a mark that draws *field*, with its
+    voice and the refusal's type; ``None`` when no mark that door reaches
+    draws the field. An internal field is no mark's, so it takes the door's
+    first target."""
+    internal = field in _INTERNAL_DOORS
+    if door == "method":
+        mark = _METHOD_MARKS[0] if internal else _first_drawing(_METHOD_MARKS, field)
+        if mark is None:
+            return None
+        return (
+            lambda v: (
+                getattr(fm.Chart(_DF), f"mark_{mark}")(**{field: v}).encode(x="x", y="y").to_spec()
+            ),
+            f"mark_{mark}",
+            ValueError,
+        )
+    if door == "Layer":
+        mark = _MARKS[0] if internal else _first_drawing(_MARKS, field)
+        if mark is None:
+            return None
+        return (
+            lambda v: fm.Layer(mark=mark, mark_kwargs={field: v}),
+            "Layer",
+            ValueError,
+        )
+    if door == "override":
+        mark = _FLAT_METHOD_MARKS[0] if internal else _first_drawing(_FLAT_METHOD_MARKS, field)
+        if mark is None:
+            return None
+        return (
+            lambda v: (
+                getattr(fm.Chart(_DF), f"mark_{mark}")()
+                .encode(x="x", y="y")
+                .override(**{f"mark_{field}": v})
+                .to_spec()
+            ),
+            "Chart.override",
+            FerrumOverrideError,
+        )
+    if door == "figure":
+        name = next(iter(_FIGURE_DOORS)) if internal else _figure_drawing(field)
+        if name is None:
+            return None
+        fig, voice, _ = _FIGURE_DOORS[name]
+        return (lambda v: fig({field: v}).to_spec(), voice, ValueError)
+    build = _COMPOSITES["mark_smooth"]
+    return (lambda v: build({field: v}).to_spec(), "mark_smooth", ValueError)
+
+
+_TYPE_CELLS = [
+    (kind, door, field)
+    for kind, (fields, _, _) in _KINDS.items()
+    for field in fields
+    for door in _TYPE_DOORS
+    if _typed_door(door, field) is not None
+]
+
+
+def test_the_wrong_type_populations_are_read_from_rust_and_reach_every_door() -> None:
+    """Vacuity control: each kind has fields outside the internal set, every
+    door has cells of both kinds, and every field of a kind is refused at the
+    two doors that reach every field."""
+    bools, strings = _KINDS["bool"][0], _KINDS["string"][0]
+    assert not set(bools) & set(strings)
+    assert set(bools) | set(strings) < set(_FIELDS)
+    assert {"zero", "filled", "clip"} <= set(bools)
+    assert {"shape", "fill", "stroke", "value_axis"} <= set(strings)
+    # A vocabulary field is never truth-valued, and some are string fields,
+    # so the matrix reaches `_string_refusal`'s vocabulary branch as well as
+    # its plain one (`shape` above). Which vocabularies are strings is Rust's
+    # to say.
+    assert not set(_ALL_VOCABULARIES) & set(bools)
+    assert set(_ALL_VOCABULARIES) & set(strings)
+    for kind, (fields, _, _) in _KINDS.items():
+        assert set(fields) - set(_INTERNAL_DOORS)
+        for door in _TYPE_DOORS:
+            assert any(c[:2] == (kind, door) for c in _TYPE_CELLS), (kind, door)
+        for door in ("Layer", "composite"):
+            assert {c[2] for c in _TYPE_CELLS if c[:2] == (kind, door)} == set(fields)
+
+
+@pytest.mark.parametrize(("kind", "door", "field"), _TYPE_CELLS)
+def test_a_wrong_typed_value_refuses_at_every_door(kind: str, door: str, field: str) -> None:
+    _, wrong, refusal = _KINDS[kind]
+    build, voice, error = _typed_door(door, field)  # type: ignore[misc]
+    with pytest.raises(error) as exc_info:
+        build(wrong)
+    expected = (
+        _internal_refusal(voice, field) if field in _INTERNAL_DOORS else refusal(voice, field)
+    )
+    assert str(exc_info.value) == expected
+
+
+@pytest.mark.parametrize(("kind", "door", "field"), _TYPE_CELLS)
+def test_a_correctly_typed_value_passes_the_same_door(kind: str, door: str, field: str) -> None:
+    """Control: the cell that refuses a wrong type takes the right one. An
+    internal field is refused whatever its type; a composite's catch-all
+    field that none of its emitted marks draws is refused as untaken."""
+    build, voice, error = _typed_door(door, field)  # type: ignore[misc]
+    if field in _INTERNAL_DOORS:
+        with pytest.raises(error) as exc_info:
+            build(_SAMPLE[field])
+        assert str(exc_info.value) == _internal_refusal(voice, field)
+        return
+    emitted = _emitted_marks(_COMPOSITES["mark_smooth"])
+    if door == "composite" and not any(field in _drawn(m) for m in emitted):
+        with pytest.raises(ValueError) as exc_info:
+            build(_SAMPLE[field])
+        assert str(exc_info.value) == _no_layer_draws("mark_smooth", [field], emitted)
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        build(_SAMPLE[field])
+
+
+def test_a_flat_bar_zero_is_never_read_for_its_truthiness() -> None:
+    """``zero="no"`` used to anchor the bar at zero as if it were True."""
+    for build, voice in (
+        (lambda: fm.Chart(_HIGH).mark_bar(zero="no"), "mark_bar"),
+        (
+            lambda: (
+                fm.Chart(_HIGH).mark_bar().encode(x="g", y="v").override(mark_zero="no").to_spec()
+            ),
+            "Chart.override",
+        ),
+        (lambda: fm.catplot(_CAT, x="g", kind="count", mark={"zero": "no"}), "catplot"),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            build()
+        assert str(exc_info.value) == f"{voice}: zero must be True or False; got 'no'"
+
+
+#: Uneven category counts, so a count bar left unanchored loses its zero.
+_COUNTED = pl.DataFrame({"g": ["a"] * 5 + ["b"] * 7 + ["c"] * 9})
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda zero: fm.Chart(_HIGH).mark_bar(**zero).encode(x="g", y="v"),
+        lambda zero: (
+            fm.Chart(_HIGH)
+            .mark_bar()
+            .encode(x="g", y="v")
+            .override(**{f"mark_{k}": v for k, v in zero.items()})
+        ),
+        lambda zero: fm.catplot(_COUNTED, x="g", kind="count", mark=zero),
+    ],
+    ids=["method", "override", "figure"],
+)
+def test_a_flat_bar_zero_none_is_unset_and_keeps_the_zero_anchor(build: Callable) -> None:
+    """``zero=None`` is the unset value, so the bar stays anchored at zero as
+    by default; it used to be read as ``bool(None)``, unanchored."""
+    anchored = build({}).to_svg()
+    assert build({"zero": None}).to_svg() == anchored
+    assert build({"zero": False}).to_svg() != anchored
+
+
+def test_a_numpy_bool_is_a_bool() -> None:
+    """Control: a numpy truth value is taken as the bool it is, and reaches
+    the wire as one."""
+    unanchored = fm.Chart(_HIGH).mark_bar(zero=False).encode(x="g", y="v").to_svg()
+    assert fm.Chart(_HIGH).mark_bar(zero=np.False_).encode(x="g", y="v").to_svg() == unanchored
+    layer = fm.Layer(mark="point", mark_kwargs={"filled": np.False_})
+    assert layer.mark_kwargs["filled"] is False
+
+
+#: Repeated x values, so an error band has an extent to draw.
+_BANDED = pl.DataFrame({"x": [0.0, 1.0, 2.0] * 4, "y": [float(i % 5) for i in range(12)]})
+
+#: A truth-valued argument a mark method consumes itself:
+#: (method, argument, its default, a chart building that method with it).
+#: A sample with ties, which dequantization spreads apart.
+_TIED = pl.DataFrame({"x": [1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 5.0] * 3})
+
+_METHOD_BOOLS = [
+    pytest.param(
+        "mark_function",
+        "clip",
+        True,
+        lambda v: fm.Chart(None).mark_function(np.sin, domain=[0, 6.28], clip=v),
+        id="mark_function",
+    ),
+    pytest.param(
+        "mark_errorband",
+        "borders",
+        False,
+        lambda v: fm.Chart(_BANDED).mark_errorband(borders=v).encode(x="x", y="y"),
+        id="mark_errorband",
+    ),
+    pytest.param(
+        "mark_qq",
+        "line",
+        True,
+        lambda v: fm.Chart(_DF).mark_qq(line=v).encode(x="x"),
+        id="mark_qq",
+    ),
+    pytest.param(
+        "mark_qq",
+        "dequantize",
+        False,
+        lambda v: fm.Chart(_TIED).mark_qq(dequantize=v).encode(x="x"),
+        id="mark_qq-dequantize",
+    ),
+    pytest.param(
+        "mark_contour",
+        "fill",
+        False,
+        lambda v: fm.Chart(_DF).mark_contour(fill=v).encode(x="x", y="y"),
+        id="mark_contour-fill",
+    ),
+    pytest.param(
+        "mark_contour",
+        "smooth",
+        True,
+        lambda v: fm.Chart(_DF).mark_contour(smooth=v).encode(x="x", y="y"),
+        id="mark_contour-smooth",
+    ),
+    pytest.param(
+        "mark_density",
+        "fill",
+        True,
+        lambda v: fm.Chart(_DF).mark_density(fill=v).encode(x="x"),
+        id="mark_density-fill",
+    ),
+    pytest.param(
+        "mark_density",
+        "cumulative",
+        False,
+        lambda v: fm.Chart(_DF).mark_density(cumulative=v).encode(x="x"),
+        id="mark_density-cumulative",
+    ),
+    pytest.param(
+        "mark_density",
+        "smooth",
+        True,
+        lambda v: fm.Chart(_DF).mark_density(smooth=v).encode(x="x", y="y"),
+        id="mark_density-smooth",
+    ),
+]
+
+
+@pytest.mark.parametrize(("voice", "arg", "default", "build"), _METHOD_BOOLS)
+@pytest.mark.parametrize("wrong", ["no", 0])
+def test_a_method_bool_argument_is_never_read_for_its_truthiness(
+    voice: str, arg: str, default: bool, build: Callable, wrong: Any
+) -> None:
+    """``borders="no"`` and ``mark_contour(fill="no")`` used to draw as if
+    True; ``line="no"``, ``dequantize="no"`` and ``smooth="no"`` failed in
+    the transform with PyO3's text. Each refuses at the door, in its voice."""
+    with pytest.raises(EntryRefusal) as exc_info:
+        build(wrong)
+    assert str(exc_info.value) == f"{voice}: {arg} must be True or False; got {wrong!r}"
+
+
+@pytest.mark.parametrize(("voice", "arg", "default", "build"), _METHOD_BOOLS)
+def test_a_method_bool_argument_takes_a_truth_value_and_none_as_unset(
+    voice: str, arg: str, default: bool, build: Callable
+) -> None:
+    """Control: a builtin or numpy truth value is the bool it is, ``None`` is
+    the default, and the two values draw different charts."""
+    svg = {v: build(v).to_svg() for v in (True, False)}
+    assert svg[True] != svg[False]
+    assert build(None).to_svg() == svg[default]
+    assert build(np.True_).to_svg() == svg[True]
+    assert build(np.False_).to_svg() == svg[False]
+
+
+def test_mark_density_fill_is_a_truth_value_not_a_color() -> None:
+    """``fill="red"`` used to draw an area, read for its truthiness; a fill
+    color is ``color=``, which still reaches the area."""
+    with pytest.raises(EntryRefusal) as exc_info:
+        fm.Chart(_DF).mark_density(fill="red").encode(x="x")
+    assert str(exc_info.value) == "mark_density: fill must be True or False; got 'red'"
+    svg = fm.Chart(_DF).mark_density(color="red").encode(x="x").to_svg()
+    assert 'fill="rgba(255,0,0,' in svg
+
+
+def test_mark_function_clip_false_unclips_the_line() -> None:
+    """Control: a real ``False`` (numpy or builtin) still escapes the clip."""
+
+    def wire(**kw: Any) -> dict:
+        chart = fm.Chart(None).mark_function(np.sin, domain=[0, 6.28], **kw)
+        return json.loads(chart.to_spec().to_json()).get("mark_style") or {}
+
+    assert wire(clip=False) == wire(clip=np.False_) == {"clip": False}
+    assert wire() == wire(clip=True) == {}
+
+
+def test_an_override_reaches_the_wire_as_the_gate_resolved_it() -> None:
+    """``Chart.override`` styles a mark with the values the style gate
+    returns, the same ones the mark method stores, not the raw leaves."""
+    method = fm.Chart(_DF).mark_line(stroke_dash="dashed").encode(x="x", y="y")
+    override = fm.Chart(_DF).mark_line().encode(x="x", y="y").override(mark_stroke_dash="dashed")
+    assert method.to_spec().to_json() == override.to_spec().to_json()
+    assert override.to_svg() == method.to_svg()
 
 
 # ── violin ──────────────────────────────────────────────────────────────────

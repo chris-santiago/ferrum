@@ -554,7 +554,7 @@ pub fn check_mark_size(entry: &str, mark: &str, size: f64) -> PyResult<()> {
 /// `size` is [`check_constant_size`]'s, which runs first and names the
 /// mark's own sizing kwarg.
 pub(crate) fn check_style_fields_drawn(mark: Mark, o: &MarkKwargsSpec) -> Result<(), RenderError> {
-    match o.set_field_names().into_iter().find(|field| mark.style_field(field).is_none()) {
+    match set_style_fields(o)?.into_iter().find(|field| mark.style_field(field).is_none()) {
         Some(field) => Err(RenderError::MarkStyleNotDrawn { mark, field }),
         None => Ok(()),
     }
@@ -609,12 +609,18 @@ fn stroke_source_present(source: crate::spec::mark::StrokeSource, ctx: &DrawCtx<
 pub(crate) fn inert_style_fields(
     o: &MarkKwargsSpec,
     ctx: &DrawCtx<'_>,
-) -> Vec<(&'static str, crate::spec::mark::StyleNeed)> {
-    o.set_field_names()
+) -> Result<Vec<(&'static str, crate::spec::mark::StyleNeed)>, RenderError> {
+    Ok(set_style_fields(o)?
         .into_iter()
         .filter_map(|field| ctx.spec.mark.style_field(field)?.needs.map(|need| (field, need)))
         .filter(|&(_, need)| !style_need_met(need, ctx))
-        .collect()
+        .collect())
+}
+
+/// The style fields `o` sets ([`MarkKwargsSpec::set_field_names`]), a spec
+/// that cannot be read for them refused.
+fn set_style_fields(o: &MarkKwargsSpec) -> Result<Vec<&'static str>, RenderError> {
+    o.set_field_names().map_err(|e| RenderError::SceneConstruction(format!("mark style fields: {e}")))
 }
 
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
@@ -685,11 +691,13 @@ pub fn resolve_mark_style(
     }
 
     // --- Apply MarkKwargsSpec overrides (if any) ---
+    // The one fallback dot area, shared with the swarm packing bound. Written
+    // ahead of the refusals below, which discard the style when they refuse.
+    style.point.point_size = crate::render::marks::point::fallback_dot_area(overrides, theme);
     let Some(o) = overrides else { return Ok(style) };
 
     if let Some(size) = o.size {
         check_constant_size(*mark, size)?;
-        style.point.point_size = size;
     }
     check_style_fields_drawn(*mark, o)?;
     if let Some(opacity) = o.opacity { style.paint.opacity = opacity; }
@@ -754,7 +762,10 @@ pub fn resolve_mark_style(
     if let Some(ll) = o.leader_line { style.text.leader_line = Some(ll); }
     // Batch E Task 9: clip escape
     if let Some(c) = o.clip { style.misc.clip = Some(c); }
-    if let Some(b) = o.blend { style.misc.blend = Some(b); }
+    // blend — resolves or refuses, as stroke_cap does.
+    if let Some(ref b) = o.blend {
+        style.misc.blend = Some(ferrum_scene::BlendMode::parse(b).ok_or_else(|| RenderError::UnknownBlend { value: b.clone() })?);
+    }
     // Batch H Task 1: arrow / arrow_size (segment)
     if let Some(a) = o.arrow { style.segment.arrow = Some(a); }
     if let Some(sz) = o.arrow_size { style.segment.arrow_size = Some(sz); }
@@ -1616,8 +1627,9 @@ impl Vocabulary for ferrum_scene::StrokeJoin {
     }
 }
 
-/// The `blend=` vocabulary. `"alpha"` is `normal`'s alias, the same alias
-/// the type's own `Deserialize` accepts.
+/// The `blend=` vocabulary, which `resolve_mark_style` parses. `"alpha"` is
+/// `normal`'s alias, the same alias the scene type's own `Deserialize`
+/// accepts.
 impl Vocabulary for ferrum_scene::BlendMode {
     const ALL: &'static [Self] = &[Self::Normal, Self::Additive];
 
@@ -2698,6 +2710,26 @@ mod tests {
         let style = resolve_mark_style(Some(&ok), &theme, &Mark::Line).unwrap();
         assert_eq!(style.line.stroke_cap, Some(ferrum_scene::StrokeCap::Round));
         assert_eq!(style.line.stroke_join, Some(ferrum_scene::StrokeJoin::Bevel));
+    }
+
+    /// A `blend` outside its vocabulary refuses, naming the value and the
+    /// vocabulary; every spelling in it, the `"alpha"` alias included,
+    /// resolves to its mode.
+    #[test]
+    fn resolve_mark_style_refuses_an_unknown_blend() {
+        let theme = ThemeInputs::default();
+        let blend = |value: &str| MarkKwargsSpec { blend: Some(value.into()), ..Default::default() };
+        let err = resolve_mark_style(Some(&blend("multiply")), &theme, &Mark::Point).unwrap_err();
+        assert_eq!(err, RenderError::UnknownBlend { value: "multiply".into() });
+        assert_eq!(err.to_string(), "unknown blend 'multiply'; expected normal|alpha|additive");
+        for (value, mode) in [
+            ("normal", ferrum_scene::BlendMode::Normal),
+            ("alpha", ferrum_scene::BlendMode::Normal),
+            ("additive", ferrum_scene::BlendMode::Additive),
+        ] {
+            let style = resolve_mark_style(Some(&blend(value)), &theme, &Mark::Point).unwrap();
+            assert_eq!(style.misc.blend, Some(mode), "{value}");
+        }
     }
 
     /// A `MarkKwargsSpec` setting `field` alone, to a value every mark that

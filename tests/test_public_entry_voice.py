@@ -14,9 +14,11 @@ alike. Both populations are derived from the package, never listed.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import inspect
 import json
+import pickle
 import pkgutil
 import warnings
 from typing import Any, Callable
@@ -27,7 +29,9 @@ import pytest
 
 import ferrum as fm
 import ferrum.plots
+from ferrum._entry import _VOICE_SLOT, EntryRefusal, voiced_as
 from ferrum.diagnostics.visualizers._base import FerrumVisualizer
+from ferrum.marks.base import honored_kwargs, layer_style_fields
 from ferrum.plots._helpers import _figure_entry
 
 _RNG = np.random.default_rng(0)
@@ -126,7 +130,7 @@ _SIZE_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
     ),
     "Layer(point, size=0)": (
         lambda: fm.Layer(mark="point", mark_kwargs={"size": 0}),
-        "mark_point(size=...) must be a positive number; received 0",
+        "Layer(size=...) must be a positive number; received 0",
     ),
     "relplot(scatter, mark=size 0)": (
         lambda: fm.relplot(_DF, x="x", y="y", kind="scatter", mark={"size": 0}),
@@ -146,19 +150,19 @@ _SIZE_DOORS: dict[str, tuple[Callable[[], Any], str]] = {
     ),
     "Layer(area, size=5)": (
         lambda: fm.Layer(mark="area", mark_kwargs={"size": 5}),
-        "mark_area(size=...) has no effect on mark_area; received 5.",
+        "Layer(size=...) has no effect on mark_area; received 5.",
     ),
     "Layer(text, size=5)": (
         lambda: fm.Layer(mark="text", mark_kwargs={"size": 5}),
-        "mark_text(size=...) has no effect on mark_text; received 5. Set font_size= instead.",
+        "Layer(size=...) has no effect on mark_text; received 5. Set font_size= instead.",
     ),
     "displot(hist, mark=size 5)": (
         lambda: fm.displot(_DF, x="y", kind="hist", mark={"size": 5}),
-        "displot(size=...) has no effect on displot; received 5.",
+        "displot(size=...) has no effect on mark_bar; received 5.",
     ),
     "ClassBalanceVisualizer(mark=size 5)": (
         lambda: fm.ClassBalanceVisualizer(mark={"size": 5}).fit([0, 1, 1, 2, 2, 2]).show(),
-        "ClassBalanceVisualizer(size=...) has no effect on ClassBalanceVisualizer; received 5.",
+        "ClassBalanceVisualizer(size=...) has no effect on mark_bar; received 5.",
     ),
 }
 
@@ -438,14 +442,18 @@ def test_a_shap_figure_refuses_a_malformed_mark_before_the_shap_step(
     )
 
 
-def test_the_override_door_alone_has_no_voice() -> None:
-    """Control: outside a figure or visualizer the ``mark=`` door names no
-    one, so the class name above comes from the ``fit`` template."""
+def test_the_override_door_called_directly_speaks_as_the_entry_it_is_given() -> None:
+    """Outside a figure or visualizer the ``mark=`` door still names a call:
+    the one its caller must pass, so the class name above comes from the
+    ``fit`` template re-voicing it, not from an empty voice."""
     from ferrum._overrides import _apply_overrides
 
     with pytest.raises(ValueError) as exc_info:
-        _apply_overrides(fm.Chart(_DF).mark_point(), mark=5)  # type: ignore[arg-type]
-    assert str(exc_info.value).startswith("(mark=...) must be a dict")
+        _apply_overrides(fm.Chart(_DF).mark_point(), entry="caller", mark=5)  # type: ignore[arg-type]
+    assert str(exc_info.value) == (
+        "caller(mark=...) must be a dict, of mark kwargs or of sub-layer names to "
+        "their mark kwargs; got int"
+    )
 
 
 # ── jointplot's style dicts speak as jointplot, eager and lazy ──────────────
@@ -496,3 +504,357 @@ def test_a_mark_method_called_directly_speaks_as_itself(build: Callable, voice: 
     with pytest.raises(ValueError) as exc_info:
         build()
     assert str(exc_info.value).startswith(f"{voice}: unknown keyword argument 'bogus_kw'. ")
+
+
+# ── one speaker per door, built from a template, never empty ────────────────
+
+_POINT_HONORED = sorted(layer_style_fields("point"))
+_FONT_SIZE = "keyword argument 'font_size' is not honored by mark_point. Honored: "
+
+# door -> (build, the exact refusal of a font_size on a point, the error type)
+_VOICE_DOORS: dict[str, tuple[Callable[[], Any], str, type[Exception]]] = {
+    "mark_point": (
+        lambda: fm.Chart(_DF).mark_point(font_size=3),
+        f"mark_point: {_FONT_SIZE}{sorted(honored_kwargs('point'))}",
+        ValueError,
+    ),
+    "Layer": (
+        lambda: fm.Layer(mark="point", mark_kwargs={"font_size": 3}),
+        f"Layer: {_FONT_SIZE}{_POINT_HONORED}",
+        ValueError,
+    ),
+    "Layer markless": (
+        lambda: fm.Layer(mark_kwargs={"font_size": 3}),
+        f"Layer: {_FONT_SIZE}{_POINT_HONORED}",
+        ValueError,
+    ),
+    "Chart.override": (
+        lambda: (
+            fm.Chart(_DF).mark_point().encode(x="x", y="y").override(mark_font_size=3).to_spec()
+        ),
+        f"Chart.override: {_FONT_SIZE}{_POINT_HONORED}",
+        fm.FerrumOverrideError,
+    ),
+    "relplot mark=": (
+        lambda: fm.relplot(_DF, x="x", y="y", mark={"font_size": 3}),
+        f"relplot: {_FONT_SIZE}{_POINT_HONORED}",
+        ValueError,
+    ),
+    "lmplot scatter_kws": (
+        lambda: fm.lmplot(_DF, x="x", y="y", scatter_kws={"font_size": 3}),
+        f"lmplot: {_FONT_SIZE}{_POINT_HONORED}",
+        ValueError,
+    ),
+    "regplot scatter_kws": (
+        lambda: fm.regplot(_DF, x="x", y="y", scatter_kws={"font_size": 3}),
+        f"regplot: {_FONT_SIZE}{_POINT_HONORED}",
+        ValueError,
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_VOICE_DOORS))
+def test_each_door_refuses_in_the_voice_of_the_call_the_caller_made(door: str) -> None:
+    build, message, error = _VOICE_DOORS[door]
+    with pytest.raises(error) as exc_info:
+        build()
+    assert str(exc_info.value) == message
+    assert isinstance(exc_info.value, EntryRefusal)
+
+
+def test_a_door_that_honors_the_field_accepts_it() -> None:
+    """Control for the matrix above: the same doors take a field the point draws."""
+    assert fm.Layer(mark="point", mark_kwargs={"opacity": 0.5}).mark_kwargs == {"opacity": 0.5}
+    spec = fm.Chart(_DF).mark_point().encode(x="x", y="y").override(mark_opacity=0.5).to_spec()
+    assert json.loads(spec.to_json())["mark_style"]["opacity"] == 0.5
+
+
+def test_an_override_refusal_is_re_voiced_by_a_call_that_wrote_it() -> None:
+    """``FerrumOverrideError`` is an ``EntryRefusal``: a figure that renders an
+    override on the caller's behalf re-voices it, and its type survives."""
+    chart = fm.Chart(_DF).mark_point().encode(x="x", y="y").override(mark_font_size=3)
+    with pytest.raises(fm.FerrumOverrideError) as exc_info:
+        with voiced_as("roc_chart"):
+            chart.to_spec()
+    assert str(exc_info.value) == f"roc_chart: {_FONT_SIZE}{_POINT_HONORED}"
+
+
+_POLAR_POINT = fm.Chart(_DF).mark_point().encode(x="x", y="y").coord(fm.CoordPolar(theta="x"))
+
+
+@pytest.mark.parametrize(
+    ("chart", "message"),
+    [
+        (
+            fm.Chart(_DF).mark_point().override(x_axis_lable_angle=-45),
+            "Chart.override: Unknown override path 'x_axis_lable_angle'. "
+            "Did you mean: 'x_axis_label_angle'?",
+        ),
+        (
+            _POLAR_POINT.override(coord_ratio=1),
+            "Chart.override: coord_* override (ratio) is not a field of CoordPolar. Set a "
+            "matching coord via .coord(...) first, or override a field that coord exposes.",
+        ),
+    ],
+    ids=["unknown-path", "coord-leaf-of-another-coord"],
+)
+def test_every_override_refusal_names_chart_override(chart: Any, message: str) -> None:
+    with pytest.raises(fm.FerrumOverrideError) as exc_info:
+        chart.to_spec()
+    assert str(exc_info.value) == message
+
+
+def test_a_layered_override_refusal_names_chart_override() -> None:
+    chart = (fm.Chart(_DF).mark_point() + fm.Chart(_DF).mark_line()).encode(x="x", y="y")
+    with pytest.raises(fm.FerrumOverrideError) as exc_info:
+        chart.override(mark_opacity=0.5).to_spec()
+    assert str(exc_info.value) == (
+        "Chart.override: mark_* override (opacity) is ambiguous on a multi-mark chart: a "
+        "layered chart has no single primary mark to apply it to. Set the style on the "
+        "specific layer's mark_*() call instead."
+    )
+
+
+def test_an_entry_refusal_refuses_an_empty_voice() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        EntryRefusal(lambda entry: f"{entry}(mark=...) must be a dict", "")
+    assert not isinstance(exc_info.value, EntryRefusal)
+    assert str(exc_info.value) == (
+        "EntryRefusal needs the public call it speaks as; got an empty entry"
+    )
+
+
+@pytest.mark.parametrize(
+    "door",
+    [
+        "ferrum._overrides._apply_overrides",
+        "ferrum._overrides._apply_mark_overrides",
+        "ferrum._overrides.refuse_malformed_mark",
+        "ferrum.plots._helpers._style_kws",
+        "ferrum.plots._helpers._finalize_chart",
+    ],
+)
+def test_every_style_door_requires_the_entry_it_speaks_as(door: str) -> None:
+    module, name = door.rsplit(".", 1)
+    parameter = inspect.signature(getattr(importlib.import_module(module), name)).parameters[
+        "entry"
+    ]
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_re_voicing_a_refusal_formats_its_template_without_re_running_the_door(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal carries its text for any voice; asking for another voice
+    re-calls only the one pure validator that refused, never the resolver."""
+    import ferrum.marks.base as base
+
+    runs: list[str] = []
+    real = base._resolve_style
+
+    def counting(entry: str, *args: Any) -> Any:
+        runs.append(entry)
+        return real(entry, *args)
+
+    monkeypatch.setattr(base, "_resolve_style", counting)
+    for style, voiced in [
+        ({"font_size": 3}, f"relplot: {_FONT_SIZE}{_POINT_HONORED}"),
+        (
+            {"opacity": "x"},
+            "relplot(opacity=...) must be a real number (int, float, numpy scalar, or "
+            "Decimal), not str; received 'x'",
+        ),
+    ]:
+        with pytest.raises(EntryRefusal) as exc_info:
+            base.resolve_layer_style("Layer", "point", style)
+        runs.clear()
+        assert str(exc_info.value.spoken_as("relplot")) == voiced
+        assert runs == []
+
+
+def test_a_stray_value_error_is_not_relabelled_as_a_style_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ferrum.marks.base as base
+
+    def broken(mark_name: str, key: str) -> str:
+        raise ValueError("an internal defect")
+
+    monkeypatch.setattr(base, "_canonical_mark_kwarg", broken)
+    with pytest.raises(ValueError) as exc_info:
+        base.resolve_layer_style("Layer", "point", {"opacity": 0.5})
+    assert not isinstance(exc_info.value, EntryRefusal)
+    assert str(exc_info.value) == "an internal defect"
+
+
+# ── a refusal crosses a process boundary intact ─────────────────────────────
+
+
+def _refusal_from(build: Callable[[], Any]) -> EntryRefusal:
+    with pytest.raises(EntryRefusal) as exc_info:
+        build()
+    return exc_info.value
+
+
+def _layer_style_refusal(style: dict[str, Any]) -> EntryRefusal:
+    from ferrum.marks.base import resolve_layer_style
+
+    return _refusal_from(lambda: resolve_layer_style("Layer", "point", style))
+
+
+_REFUSALS: dict[str, Callable[[], EntryRefusal]] = {
+    # A template refusal: a style key the mark does not draw.
+    "template": lambda: _layer_style_refusal({"font_size": 3}),
+    # A validator refusal, whose text for another voice re-calls the validator.
+    "validator": lambda: _layer_style_refusal({"opacity": "x"}),
+    # A refusal under compare=, its model prefix wrapped around the template.
+    "compare-prefixed": lambda: _layer_style_refusal({"font_size": 3}).prefixed(
+        "compare={'m2': ...}: "
+    ),
+    "FerrumOverrideError style": lambda: _refusal_from(
+        lambda: fm.Chart(_DF).mark_point().encode(x="x", y="y").override(mark_font_size=3).to_spec()
+    ),
+    "FerrumOverrideError path": lambda: _refusal_from(
+        lambda: fm.Chart(_DF).mark_point().override(x_axis_lable_angle=-45).to_spec()
+    ),
+    # A color refusal echoes the caller's own string unescaped; when that
+    # string is the base voice-slot character, the frozen pickle template
+    # must not mistake it for the slot it substitutes on.
+    "color echoes the voice slot": lambda: _refusal_from(
+        lambda: fm.Chart(_DF).mark_point(color=_VOICE_SLOT)
+    ),
+}
+
+_COPIES: dict[str, Callable[[EntryRefusal], EntryRefusal]] = {
+    "pickle": lambda err: pickle.loads(pickle.dumps(err)),
+    "copy": copy.copy,
+    "deepcopy": copy.deepcopy,
+}
+
+
+@pytest.mark.parametrize("how", sorted(_COPIES))
+@pytest.mark.parametrize("refusal", sorted(_REFUSALS))
+def test_a_refusal_survives_pickle_and_copy_and_still_re_voices(refusal: str, how: str) -> None:
+    """A render in a process pool sends its refusal back pickled: the copy
+    keeps its type, text and entry, and re-voices as the original does."""
+    original = _REFUSALS[refusal]()
+    clone = _COPIES[how](original)
+    assert type(clone) is type(original)
+    assert str(clone) == str(original)
+    assert clone.args == original.args
+    assert clone.entry == original.entry
+    revoiced = str(original.spoken_as("roc_chart"))
+    assert revoiced != str(original)
+    assert "roc_chart" in revoiced
+    with pytest.raises(type(original)) as exc_info:
+        with voiced_as("roc_chart"):
+            raise clone
+    assert str(exc_info.value) == revoiced
+
+
+def test_the_public_override_error_pickles_as_itself() -> None:
+    """The public type, raised by a real render, round-trips by its own name."""
+    err = _REFUSALS["FerrumOverrideError path"]()
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is fm.FerrumOverrideError
+    assert str(clone) == (
+        "Chart.override: Unknown override path 'x_axis_lable_angle'. "
+        "Did you mean: 'x_axis_label_angle'?"
+    )
+    assert clone.entry == "Chart.override"
+
+
+# ── compare= names the model on every refusal ───────────────────────────────
+
+
+def _compare_source(names: list[str]) -> Any:
+    class _Source:
+        def items(self) -> list[tuple[str, str]]:
+            return [(name, name) for name in names]
+
+    return _Source()
+
+
+def _refuse_for(model: str) -> Callable[..., Any]:
+    """A builder that refuses only for *model*: a refusal that depends on which
+    model the panel draws (an undrawn sub-layer, a style no layer draws)."""
+
+    def build(source: str, **_: Any) -> Any:
+        if source == model:
+            from ferrum._overrides import _undrawn_sub_layer_message
+
+            raise EntryRefusal(_undrawn_sub_layer_message("auc_label", {"line"}), "roc_chart")
+        return fm.Chart(_DF).mark_point().encode(x="x", y="y")
+
+    return build
+
+
+def test_a_compare_refusal_names_the_model_whose_panel_refused() -> None:
+    from ferrum.plots._helpers import _compose_compare
+
+    with pytest.raises(EntryRefusal) as exc_info:
+        with voiced_as("pdp_chart"):
+            _compose_compare(
+                _compare_source(["base", "m2"]),
+                _refuse_for("m2"),
+                builder_kwargs={},
+                resolve={"x": "shared", "y": "shared"},
+            )
+    assert str(exc_info.value) == (
+        "compare={'m2': ...}: pdp_chart(mark={'auc_label': ...}): this call draws no "
+        "'auc_label' sub-layer, so nothing would take the style; it draws ['line']"
+    )
+
+
+def _residual_models() -> tuple[Any, Any, Any, Any]:
+    from sklearn.linear_model import LinearRegression
+    from sklearn.tree import DecisionTreeRegressor
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(40, 2))
+    y = X @ np.array([1.0, -2.0]) + rng.normal(size=40)
+    linear = LinearRegression().fit(X, y)
+    tree = DecisionTreeRegressor(max_depth=3, random_state=0).fit(X, y)
+    return linear, tree, X, y
+
+
+_LEVERAGE_PANELS = ["qq", "residuals_vs_leverage"]
+
+
+def test_a_real_figure_whose_second_model_alone_refuses_names_that_model() -> None:
+    """A tree has no leverage, so its residuals grid drops the leverage panel
+    and keeps only the QQ panel, which draws no point to take ``shape``. The
+    linear model's grid draws one, so only the tree's panel refuses."""
+    linear, tree, X, y = _residual_models()
+    with pytest.raises(EntryRefusal) as exc_info:
+        fm.residuals_chart(
+            linear, X, y, compare={"tree": tree}, panels=_LEVERAGE_PANELS, mark={"shape": "square"}
+        )
+    assert str(exc_info.value) == (
+        "compare={'tree': ...}: residuals_chart(mark=...): unknown sub-layer 'shape'; "
+        "this chart's sub-layers are ['point', 'reference']"
+    )
+
+
+def test_the_same_style_on_two_models_that_both_draw_it_renders() -> None:
+    """Control: the refusal above depends on the model, not on the style."""
+    linear, _, X, y = _residual_models()
+    chart = fm.residuals_chart(
+        linear, X, y, compare={"linear2": linear}, panels=_LEVERAGE_PANELS, mark={"shape": "square"}
+    )
+    assert chart.to_svg()
+
+
+def test_a_compare_refusal_that_fires_for_every_model_names_the_first() -> None:
+    """Control: a refusal of the caller's input alone fires on the first
+    model, and names it too, by the same rule."""
+    from sklearn.cluster import KMeans
+
+    X = _RNG.normal(size=(40, 2))
+    models = [KMeans(n_clusters=k, n_init=1, random_state=0).fit(X) for k in (2, 3)]
+    with pytest.raises(EntryRefusal) as exc_info:
+        fm.silhouette_chart(models[0], X, compare={"m2": models[1]}, mark={"bogus_kw": 1})
+    assert str(exc_info.value) == (
+        "compare={'base': ...}: silhouette_chart(mark=...): unknown sub-layer 'bogus_kw'; "
+        "this chart's sub-layers are ['rect', 'reference']"
+    )

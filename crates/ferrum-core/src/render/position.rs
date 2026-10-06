@@ -1085,16 +1085,15 @@ pub(crate) fn sizes_own_dots(layer: &crate::render::prepare::LayerPrepared) -> b
 
 /// The packing bound (px) of one swarm-fed layer: the widest diameter that
 /// layer can draw a dot at, read from its scale and style, not its data.
-/// - A size encoding bounds at the size range's maximum, or at the layer's
-///   fallback area (its own constant, else the theme `point_size`) when some
-///   row's size is null or maps nowhere and that fallback is wider.
-/// - A size field this layer's own batch cannot read as numeric at all (wrong
-///   dtype, or a later transform dropped it) bounds at the fallback area
-///   alone, never widened by the range: every row draws at the fallback, none
-///   reach the scale's range, mirroring the point-mark builder's own
-///   `col_as_f64(...).ok()` fallback (`marks/point.rs`) — the same "cannot
-///   read it" column is never refused there either, so it must not be
-///   refused, or treated as reaching the range, here.
+/// Which rows take their size from the scale and which fall back is the
+/// point-mark builder's own answer ([`scaled_dot_areas`](crate::render::marks::point::scaled_dot_areas)):
+/// - Rows the scale sizes bound at the size range's maximum; a row that
+///   falls back (null, or mapped nowhere) widens that to the layer's
+///   fallback area (its own constant, else the theme `point_size`) when the
+///   fallback is wider.
+/// - When every row falls back (no size scale, or a size field this layer's
+///   batch cannot read as numeric), the bound is the fallback alone, never
+///   widened by a range no row reaches.
 /// - A constant area `a` bounds at `2·√(a/π)`.
 /// - A layer that sizes nothing itself draws at the swarm's own `point_size`,
 ///   so bounds there.
@@ -1113,47 +1112,36 @@ fn swarm_layer_bound(
     if !sizes_own_dots(layer) {
         return Some(swarm.point_size);
     }
-    let fallback_area = layer.mark_style.as_ref().and_then(|m| m.size).unwrap_or(theme.sizes.point_size);
-    let Some((enc, scale)) = layer.encoding.size.as_ref().zip(scales.size.as_ref()) else {
-        return Some(ferrum_scene::dot_diameter(fallback_area));
+    let fallback_area = crate::render::marks::point::fallback_dot_area(layer.mark_style.as_ref(), theme);
+    let scale = scales.size.as_ref();
+    let bound_area = match (crate::render::marks::point::scaled_dot_areas(batch, layer.encoding.size.as_ref(), scale), scale) {
+        (Some(areas), Some(scale)) => {
+            let range_max = scale.min_px().max(scale.max_px());
+            if areas.iter().any(Option::is_none) { range_max.max(fallback_area) } else { range_max }
+        }
+        _ => fallback_area,
     };
-    let Ok(values) = crate::render::arrow_cast::col_as_f64(batch, &enc.field) else {
-        // Unreadable as numeric (unsupported dtype, or the column is simply
-        // not in this layer's own batch) — not "some row falls back", every
-        // row does, so the bound is the fallback alone. `col_as_f64` failing
-        // is not refused upstream: `marks/point.rs`'s own per-row loader
-        // reads this exact column through `.ok()`, collapsing the same two
-        // failure modes to "no size for this row" and drawing every row at
-        // `ctx.mark_style.point.point_size`'s radius (this layer's
-        // `fallback_area`) — so this bound must match what every row of this
-        // layer actually draws at, not widen past it toward a range no row
-        // reaches.
-        return Some(ferrum_scene::dot_diameter(fallback_area));
-    };
-    let range_max = scale.min_px().max(scale.max_px());
-    let some_row_falls_back = values.iter().any(|v| v.and_then(|v| scale.inner.to_pixel_f64(v)).is_none());
-    let bound_area = if some_row_falls_back { range_max.max(fallback_area) } else { range_max };
     Some(ferrum_scene::dot_diameter(bound_area))
 }
 
-/// The swarm each of a panel's layers is placed by, indexed like `layers`:
-/// one packing per swarm for the whole chart, at the largest bound
-/// ([`swarm_layer_bound`]) of any point layer it feeds, so no drawn dot
-/// overlaps a neighbour and every facet panel packs at the same diameter.
-/// `chart_layer_batches` are the layers' batches across every panel, before
-/// any facet filter: a layer with no rows in this panel still bounds the
-/// packing, and a null or unmapped size row anywhere in the chart widens it
-/// everywhere. Every layer a swarm feeds (points, text, any overlay) is
-/// placed by that one packing, so they share their centres; each still draws
-/// at its own size, a point layer that sizes nothing itself at the swarm's
-/// own `point_size`.
-pub(crate) fn panel_swarms(
+/// How each of a chart's layers is placed by the swarm that feeds it,
+/// indexed like `layers`: one packing per swarm for the whole chart, at the
+/// largest bound ([`swarm_layer_bound`]) of any point layer it feeds, so no
+/// drawn dot overlaps a neighbour and every facet panel packs at the same
+/// diameter. `chart_layer_batches` are the layers' batches across every
+/// panel, before any facet filter: a layer with no rows in this panel still
+/// bounds the packing, and a null or unmapped size row anywhere in the chart
+/// widens it everywhere. Every layer a swarm feeds (points, text, any
+/// overlay) is placed by that one packing, so they share their centres; each
+/// still draws at its own size, a point layer that sizes nothing itself at
+/// the declared swarm's own `point_size`.
+pub(crate) fn panel_swarms<'a>(
     layers: &[crate::render::prepare::LayerPrepared],
     chart_layer_batches: &[RecordBatch],
-    transform_swarms: &HashMap<String, crate::transform::swarm::SwarmSpec>,
+    transform_swarms: &'a HashMap<String, crate::transform::swarm::SwarmSpec>,
     scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
-) -> Vec<Option<crate::transform::swarm::SwarmSpec>> {
+) -> Vec<Option<crate::transform::swarm::SwarmPacking<'a>>> {
     let mut widest: HashMap<&str, f64> = HashMap::new();
     for (layer, batch) in layers.iter().zip(chart_layer_batches) {
         let key = swarm_key(layer);
@@ -1169,11 +1157,9 @@ pub(crate) fn panel_swarms(
         .iter()
         .map(|layer| {
             let key = swarm_key(layer);
-            let swarm = transform_swarms.get(key)?;
-            Some(match widest.get(key) {
-                Some(&point_size) => crate::transform::swarm::SwarmSpec { point_size, ..swarm.clone() },
-                None => swarm.clone(),
-            })
+            let spec = transform_swarms.get(key)?;
+            let diameter_px = widest.get(key).copied().unwrap_or(spec.point_size);
+            Some(crate::transform::swarm::SwarmPacking { spec, diameter_px })
         })
         .collect()
 }
@@ -1196,13 +1182,14 @@ pub(crate) fn panel_swarms(
 /// says so.
 pub(crate) fn apply_swarm(
     batch: &RecordBatch,
-    swarm: &crate::transform::swarm::SwarmSpec,
+    packing: crate::transform::swarm::SwarmPacking<'_>,
     scales: &ResolvedScales,
     layer_coord: Option<&crate::spec::coord::CoordKind>,
     entry: &str,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Option<RecordBatch>, crate::render::RenderError> {
     use crate::transform::swarm::{place_offsets, SwarmOrient};
+    let swarm = packing.spec;
     let coord_flipped = crate::spec::coord::flips_positional_channels(layer_coord);
     let failed = |reason: String| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Swarm",
@@ -1229,11 +1216,11 @@ pub(crate) fn apply_swarm(
     };
     let values = crate::render::arrow_cast::col_as_f64(batch, &swarm.value)
         .map_err(|e| failed(e.to_string()))?;
-    let offsets = place_offsets(swarm, batch, &values, |v| value_scale.to_pixel_f64(v))
+    let offsets = place_offsets(packing, batch, &values, |v| value_scale.to_pixel_f64(v))
         .map_err(failed)?;
 
     if let ScaleKind::Ordinal(category_scale) = cross_scale {
-        let reach = offsets.iter().fold(0.0_f64, |a, o| a.max(o.abs())) + swarm.point_size / 2.0;
+        let reach = offsets.iter().fold(0.0_f64, |a, o| a.max(o.abs())) + packing.diameter_px / 2.0;
         let half_slot = category_scale.step() / 2.0;
         let not_yet_warned = !warnings.iter().any(|w| {
             matches!(w, RenderWarning::SwarmOverflowsBand { entry: e, category, value, .. }
@@ -1773,7 +1760,8 @@ mod tests {
         // A CoordFlip on a Vertical swarm puts the value on x and the
         // packed offsets into `__pos_y_offset__` — the stale column's name.
         let flip = crate::spec::coord::CoordKind::Flip;
-        let out = apply_swarm(&b, &swarm, &dummy_scales(), Some(&flip), "mark_swarm", &mut Vec::new())
+        let packing = crate::transform::swarm::SwarmPacking { spec: &swarm, diameter_px: swarm.point_size };
+        let out = apply_swarm(&b, packing, &dummy_scales(), Some(&flip), "mark_swarm", &mut Vec::new())
             .unwrap()
             .unwrap();
         let names: Vec<String> = out.schema().fields().iter().map(|f| f.name().clone()).collect();
@@ -1862,6 +1850,87 @@ mod tests {
         let widened_by_range = ferrum_scene::dot_diameter(100.0_f64.max(theme.sizes.point_size));
         assert_eq!(bound, fallback_only, "a non-numeric size column must bound at the fallback area alone");
         assert_ne!(bound, widened_by_range, "must not widen toward a range max no row of this layer reaches");
+    }
+
+    /// One swarm feeding a constant-sized point layer and an unsized one
+    /// packs at the sized layer's diameter, while the packing still carries
+    /// the swarm as declared: its `point_size`, the size the unsized layer
+    /// draws at, is not overwritten by the wider packing diameter.
+    #[test]
+    fn panel_swarms_packs_at_the_widest_dot_and_keeps_the_declared_point_size() {
+        use crate::render::prepare::LayerPrepared;
+        use crate::spec::mark::Mark;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
+        let layer = |size: Option<f64>| {
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                mark_style: size.map(|size| MarkKwargsSpec { size: Some(size), ..Default::default() }),
+                ..Default::default()
+            };
+            LayerPrepared::from_chart_only(&spec)
+        };
+        let layers = [layer(Some(200.0)), layer(None)];
+        let batches = [batch_xyg(), batch_xyg()];
+        let declared = SwarmSpec {
+            category: "g".into(),
+            value: "y".into(),
+            point_size: 5.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        let swarms = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), declared.clone())]);
+        let theme = crate::layout::ThemeInputs::default();
+        let packings = panel_swarms(&layers, &batches, &swarms, &dummy_scales(), &theme);
+        assert_eq!(packings.len(), 2);
+        for packing in packings {
+            let packing = packing.expect("both layers read the swarm-fed output");
+            assert_eq!(packing.spec, &declared, "the declared swarm is carried unchanged");
+            assert_eq!(packing.diameter_px, ferrum_scene::dot_diameter(200.0));
+            assert!(packing.diameter_px > declared.point_size, "vacuity: the sized layer widens the packing");
+        }
+    }
+
+    /// Placement and the overflow reach read the packing diameter, not the
+    /// declared swarm's `point_size`: five dots at one value sit
+    /// `diameter_px + spacing` apart.
+    #[test]
+    fn apply_swarm_places_at_the_packing_diameter() {
+        use crate::transform::swarm::{SwarmOrient, SwarmPacking, SwarmSide, SwarmSpec};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["A"; 5])), Arc::new(Float64Array::from(vec![1.0; 5]))],
+        )
+        .unwrap();
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 5.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        let packing = SwarmPacking { spec: &swarm, diameter_px: 9.0 };
+        let out = apply_swarm(&b, packing, &dummy_scales(), None, "mark_swarm", &mut Vec::new()).unwrap().unwrap();
+        let mut offsets = out
+            .column_by_name("__pos_x_offset__")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(offsets, vec![-20.0, -10.0, 0.0, 10.0, 20.0]);
     }
 
     #[test]

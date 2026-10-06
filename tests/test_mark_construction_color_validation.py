@@ -107,16 +107,15 @@ class TestConstructionColorValidation:
         mb = MarkBase("point", fill="STEELBLUE")
         assert mb.kwargs["fill"] == "STEELBLUE"
 
-    def test_non_string_fill_is_not_validated(self) -> None:
-        # Only literal string fill/stroke values are validated; a non-string
-        # value must construct and round-trip unchanged rather than being
-        # routed into the color parser. This pins the
-        # `isinstance(paint_val, str)` guard in MarkBase.__init__: without
-        # it, `_is_paint_sentinel(0)` (or `to_hex(0)`, once the sentinel
-        # check is bypassed) raises an unwrapped low-level exception
-        # instead of constructing cleanly (quality-reviewer finding).
-        mb = MarkBase("point", fill=0)
-        assert mb.kwargs["fill"] == 0
+    def test_non_string_fill_is_refused_before_the_color_parser(self) -> None:
+        # A fill/stroke is a string on the wire, so a non-string refuses at
+        # the door, naming it, and is never routed into the color parser
+        # (where `_is_paint_sentinel(0)` or `to_hex(0)` would raise an
+        # unwrapped low-level exception).
+        for key in ("fill", "stroke"):
+            with pytest.raises(ValueError) as exc_info:
+                MarkBase("point", **{key: 0})
+            assert str(exc_info.value) == f"mark_point: {key} must be a string; got 0"
 
 
 # ---------------------------------------------------------------------------

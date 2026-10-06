@@ -78,7 +78,13 @@ def _silhouette_chart_from_source(
             title=ferrum.Title("Silhouette Plot", subtitle=subtitle),
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="silhouette_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -122,7 +128,13 @@ def _pca_scree_chart_from_source(
             )
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="pca_scree_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -164,7 +176,13 @@ def _pca_scree_chart_from_variance_df(
             )
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="pca_scree_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -230,7 +248,13 @@ def _intercluster_distance_chart_from_source(
     chart = _title_legend(_title_legend(chart, "color", "Cluster"), "size", "Cluster size")
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="intercluster_distance_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -256,7 +280,13 @@ def _manifold_chart_from_source(
     emb = source.embeddings(method=method)
     chart = ferrum.Chart(emb).mark_point().encode(x="dim_0", y="dim_1", color="label:N")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="manifold_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -365,7 +395,13 @@ def _elbow_chart_from_source(
 
     chart = ferrum.Chart(scores).mark_line().encode(x="k", y="score")
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="elbow_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -509,7 +545,13 @@ def _cluster_diagnostics_chart(
         # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="cluster_diagnostics",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

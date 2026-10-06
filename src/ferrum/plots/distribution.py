@@ -964,7 +964,13 @@ def _displot_build(
     chart = _apply_facet_sizing(chart, data=data, row=row, height=height, aspect=aspect)
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="displot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -2287,7 +2293,13 @@ def _catplot_build(
     chart = _apply_facet_sizing(chart, data=data, row=row, height=height, aspect=aspect)
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="catplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -2483,5 +2495,11 @@ def _relplot_build(
         chart = chart.properties(width=w, height=h)
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="relplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )

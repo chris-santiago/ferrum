@@ -222,7 +222,13 @@ def _residuals_chart_from_source(
         # columns are absent, so the call is unconditional.
         chart = _overlay_metrics_corner(chart)
         return _finalize_chart(
-            chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+            chart,
+            entry="residuals_chart",
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
+            theme=theme,
         )
 
     # Multi-panel path: each panel injects its own outlier columns with
@@ -252,7 +258,13 @@ def _residuals_chart_from_source(
     # _grid_panels applies theme internally; apply overrides before theme.
     chart = _grid_panels(charts)
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="residuals_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -448,7 +460,13 @@ def _prediction_error_chart_from_source(
     )
     chart = chart.properties(title=ferrum.Title("Prediction Error"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="prediction_error_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -1226,7 +1244,7 @@ def lmplot(
     scatter_layer = None
     if scatter:
         s = Chart(data)
-        skw = _style_kws("scatter_kws", "point", scatter_kws)
+        skw = _style_kws("lmplot", "scatter_kws", "point", scatter_kws)
         if x_jitter is not None:
             s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)), **skw)
         else:
@@ -1241,7 +1259,7 @@ def lmplot(
     # whenever those layers were not materialized yet -- the `scatter=False`
     # branch, whose chart still carries a pending stat mark until render
     # (#199).
-    lkw = _style_kws("line_kws", "line", line_kws)
+    lkw = _style_kws("lmplot", "line_kws", "line", line_kws)
 
     fit = _build_fit(
         method,
@@ -1281,7 +1299,13 @@ def lmplot(
             out = out.facet(row=row)
 
     return _finalize_chart(
-        out, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        out,
+        entry="lmplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -1648,7 +1672,13 @@ def residplot(
         chart._mark = None
 
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="residplot",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

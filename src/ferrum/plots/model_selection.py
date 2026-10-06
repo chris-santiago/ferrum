@@ -96,7 +96,13 @@ def _learning_curve_chart_from_source(
         )
     )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="learning_curve_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -169,7 +175,13 @@ def _validation_curve_chart_from_source(
         )
     )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="validation_curve_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -204,7 +216,13 @@ def _cv_scores_chart_from_source(
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="cv_scores_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -257,7 +275,13 @@ def _cv_scores_chart_compare_from_source(
     chart = _title_legend(chart.encode(y=Y("score", title="Score")), "color", "Model")
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="cv_scores_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -337,7 +361,13 @@ def _alpha_selection_chart_from_source(
             ),
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="alpha_selection_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

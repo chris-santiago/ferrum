@@ -181,6 +181,10 @@ pub(crate) enum CompositeRenderError {
         second: String,
         differences: Vec<SelectionFieldDifference>,
     },
+    /// Two declarations of one selection name differ, and one of them could
+    /// not be read as its wire fields to say how: refused, never reported
+    /// as a redefinition that differs in nothing.
+    SelectionUnreadable { kind: &'static str, name: String, message: String },
 }
 
 /// One field two same-named selection declarations disagree on, with each
@@ -241,6 +245,11 @@ impl std::fmt::Display for CompositeRenderError {
                     side(|d| &d.second),
                 )
             }
+            Self::SelectionUnreadable { kind, name, message } => write!(
+                f,
+                "{kind}: selection '{name}' is declared twice with different definitions, and \
+                 one could not be read to compare them: {message}"
+            ),
         }
     }
 }
@@ -2525,6 +2534,13 @@ fn refuse_redefined_selections(
         for selection in &input.spec.selections {
             let &mut (first_leaf, earlier) = first.entry(selection.name()).or_insert((leaf, selection));
             if earlier != selection {
+                let differences = selection_differences(earlier, selection).map_err(|e| {
+                    CompositeRenderError::SelectionUnreadable {
+                        kind: tree.kind_name(),
+                        name: selection.name().to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 let positions = leaf_positions(tree);
                 // Clone rather than `mem::take`: a leaf that declares the same
                 // name twice itself has `first_leaf == leaf`, so taking the
@@ -2535,7 +2551,7 @@ fn refuse_redefined_selections(
                     name: selection.name().to_string(),
                     first: position(first_leaf),
                     second: position(leaf),
-                    differences: selection_differences(earlier, selection),
+                    differences,
                 });
             }
         }
@@ -2596,13 +2612,15 @@ fn python_literal(value: &serde_json::Value) -> String {
 /// The wire fields two selection declarations disagree on, by field name;
 /// only `type` when their kinds differ, since every other field of one kind
 /// is then meaningless to the other. A field one kind lacks reads as
-/// `None`.
-fn selection_differences(a: &SelectionSpec, b: &SelectionSpec) -> Vec<SelectionFieldDifference> {
-    let fields = |s: &SelectionSpec| match serde_json::to_value(s) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
+/// `None`. A declaration that does not serialize to an object refuses.
+fn selection_differences(
+    a: &SelectionSpec,
+    b: &SelectionSpec,
+) -> serde_json::Result<Vec<SelectionFieldDifference>> {
+    let fields = |s: &SelectionSpec| -> serde_json::Result<serde_json::Map<String, serde_json::Value>> {
+        serde_json::to_value(s).and_then(serde_json::from_value)
     };
-    let (a, b) = (fields(a), fields(b));
+    let (a, b) = (fields(a)?, fields(b)?);
     let absent = serde_json::Value::Null;
     let fields: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
     let differences = fields
@@ -2615,11 +2633,11 @@ fn selection_differences(a: &SelectionSpec, b: &SelectionSpec) -> Vec<SelectionF
                 second: python_literal(second),
             })
         });
-    if a.get("type") != b.get("type") {
+    Ok(if a.get("type") != b.get("type") {
         differences.filter(|d| d.field == "type").collect()
     } else {
         differences.collect()
-    }
+    })
 }
 
 /// A fresh empty merge target sized to `(w, h)`, carrying the single-chart
@@ -5734,6 +5752,66 @@ mod tests {
             scene.panels[0].plot_area, scene.panels[1].plot_area,
             "overlay children share one rect; only vec order encodes z-order"
         );
+    }
+
+    /// A bar's `zero` on an overlay leaf warns inert exactly when the
+    /// zero-anchor rule ignores it. On a flat bar leaf the rule never reads
+    /// it: the leaf's domain is the same with and without it, and it warns.
+    /// On a layered bar leaf the rule reads it: the domain moves, and it
+    /// does not warn. The warning's need (a layered chart) and the rule
+    /// therefore agree on both leaf shapes, whether the overlay shares its y
+    /// scale or each leaf resolves its own.
+    #[test]
+    fn an_overlay_bar_leafs_zero_warns_inert_exactly_when_the_zero_anchor_ignores_it() {
+        use crate::layout::facet::ResolveMode;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let bar_leaf = |layered: bool, zero: Option<bool>| {
+            let style = zero.map(|zero| MarkKwargsSpec { zero: Some(zero), ..Default::default() });
+            let mut spec = scatter_spec();
+            spec.mark = Mark::Bar;
+            if layered {
+                let encoding = spec.encoding.clone();
+                spec.layers = Some(vec![crate::spec::layer::Layer { mark: Mark::Bar, encoding, mark_style: style, ..Default::default() }]);
+            } else {
+                spec.mark_style = style;
+            }
+            spec
+        };
+        let render = |bar: ChartSpec, y: ResolveMode| {
+            let holds = [
+                color_hold_with(bar, xy_batch(&[1.0, 2.0, 3.0], &[58.0, 60.0, 61.5]), ThemeInputs::default()),
+                color_hold_with(scatter_spec(), xy_batch(&[1.0, 2.0, 3.0], &[59.0, 60.0, 61.0]), ThemeInputs::default()),
+            ];
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let mut tree = composite(
+                CompositeLayout::Overlay,
+                vec![leaf_node_with(holds[0].spec.clone(), 0), leaf_node_with(holds[1].spec.clone(), 1)],
+            );
+            if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                resolve.y = y;
+            }
+            let (scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            let y_domain = match &scene.panels[0].coord {
+                ferrum_scene::CoordKind::Cartesian { y_domain, .. } => y_domain.expect("the bar leaf has a y domain"),
+                other => panic!("a cartesian bar leaf, got {other:?}"),
+            };
+            let inert = warnings
+                .iter()
+                .filter(|w| matches!(w, RenderWarning::MarkStyleInert { field, .. } if field == "zero"))
+                .count();
+            (y_domain, inert)
+        };
+        for y in [ResolveMode::Shared, ResolveMode::Independent] {
+            let (flat_default, flat_default_warned) = render(bar_leaf(false, None), y);
+            let (flat_opted_out, flat_opted_out_warned) = render(bar_leaf(false, Some(false)), y);
+            assert_eq!(flat_opted_out, flat_default, "{y:?}: a flat leaf's zero moves nothing");
+            assert_eq!((flat_default_warned, flat_opted_out_warned), (0, 1), "{y:?}: so a set zero warns inert");
+            let (layered_default, layered_default_warned) = render(bar_leaf(true, None), y);
+            let (layered_opted_out, layered_opted_out_warned) = render(bar_leaf(true, Some(false)), y);
+            assert_eq!(layered_default.0, 0.0, "{y:?}: vacuity: the layered bar anchors at zero by default");
+            assert!(layered_opted_out.0 > 0.0, "{y:?}: a layered leaf's zero=False lifts the anchor: {layered_opted_out:?}");
+            assert_eq!((layered_default_warned, layered_opted_out_warned), (0, 0), "{y:?}: so a set zero does not warn");
+        }
     }
 
     // -- P2 (2026-08-27 findings): overlay chrome suppression -----------------

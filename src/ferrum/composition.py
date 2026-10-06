@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
+from ferrum._layer import owned_conditional_ids
 from ferrum._overrides import _FIGURE_CHROME_KEYS
 from ferrum._validate import validate_choice
 from ferrum.selection import ConditionalSpec
@@ -4549,7 +4550,7 @@ def _bind_operand_conditionals(layers: list, conditionals: list) -> list:
     ``chart + SecondaryY(...)``) leave the host's conditionals unbound, so
     they reach every layer exactly as the host's field encodings do.
     """
-    owned = {id(c) for layer in layers for c in layer.conditionals}
+    owned = owned_conditional_ids(layers)
     unbound = tuple(
         c for c in conditionals if isinstance(c, ConditionalSpec) and id(c) not in owned
     )

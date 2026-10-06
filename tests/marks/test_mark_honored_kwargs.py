@@ -161,7 +161,7 @@ class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
         with pytest.raises(ValueError) as exc_info:
             chart.to_svg()
         assert str(exc_info.value) == (
-            "mark_density(size=...) has no effect on mark_density; received 0."
+            "mark_density(size=...) has no effect on mark_area; received 0."
         )
 
     def test_composite_mark_size_meets_the_rule_of_the_mark_that_draws_it(self):

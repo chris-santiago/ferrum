@@ -132,7 +132,7 @@ class FerrumVisualizer:
             # raise. self.mark is read directly, not via getattr(..., None):
             # the class annotation declares every concrete visualizer sets
             # it in __init__, and fit always runs after __init__.
-            refuse_malformed_mark(self.mark)
+            refuse_malformed_mark(entry, self.mark)
             self._source = self._build_source(X, y)
             self._materialize()
             chart = self._build_chart()

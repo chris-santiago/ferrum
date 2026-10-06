@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Mapping
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from ferrum._core import (
     blend_accepted_values,
     check_mark_size,
     interpolate_accepted_values,
+    mark_bool_kwargs,
     mark_integer_kwargs,
     mark_kwargs_fields,
     mark_numeric_kwargs,
+    mark_string_kwargs,
     stroke_cap_accepted_values,
     stroke_join_accepted_values,
 )
@@ -29,6 +31,7 @@ from ferrum._layer import (
 )
 from ferrum._validate import (
     as_finite_real,
+    coerce_bool,
     coerce_finite_real,
     coerce_non_negative_int,
     is_none_color_sentinel,
@@ -36,6 +39,7 @@ from ferrum._validate import (
     validate_choice,
     validate_color_value,
     validate_optional_vocabulary,
+    validate_str,
 )
 
 # Which style fields each mark draws is one Rust table
@@ -73,40 +77,38 @@ _LINETYPE_MAP: dict[str, list[float]] = {
 }
 
 
-_Resolver = TypeVar("_Resolver", bound=Callable[..., Any])
+_Checked = TypeVar("_Checked")
 
 
-def _refuses_in_any_voice(resolve: _Resolver) -> _Resolver:
-    """Make every refusal of ``resolve(entry, ...)`` an :class:`EntryRefusal`.
+def _voiced(entry: str, check: Callable[[str], _Checked]) -> _Checked:
+    """Return ``check(entry)``, its refusal an :class:`EntryRefusal` voiced as *entry*.
 
-    *resolve* judges a caller's style and raises ``ValueError`` voiced as
-    its first argument, the public call that received the style. The
-    refusal it raises instead carries the same judgment for any voice, so a
-    figure function or visualizer that wrote the style re-voices it as
-    itself (:func:`ferrum._entry.voiced_as`) and a mark method called
-    directly keeps its own. An :class:`EntryRefusal` raised inside
-    *resolve* already has that form and propagates unchanged.
+    *check* is one call of a pure validator, voiced as its argument (a
+    :mod:`ferrum._validate` check, :func:`ferrum._core.check_mark_size`).
+    The refusal's text for another voice re-calls that same validator with
+    the other voice (:func:`_check_refusal_text`), so a figure function or
+    visualizer that wrote the style re-voices it as itself
+    (:func:`ferrum._entry.voiced_as`) and a mark method called directly
+    keeps its own. Only *check*'s own ``ValueError`` becomes the refusal.
     """
+    try:
+        return check(entry)
+    except ValueError:
+        raise EntryRefusal(lambda voice: _check_refusal_text(check, voice), entry) from None
 
-    @functools.wraps(resolve)
-    def wrapper(entry: str, *args: Any) -> Any:
-        try:
-            return resolve(entry, *args)
-        except EntryRefusal:
-            raise
-        except ValueError as err:
-            first = str(err)
 
-        def message_for(voice: str) -> str:
-            try:
-                resolve(voice, *args)
-            except ValueError as err:
-                return str(err)
-            return first
-
-        raise EntryRefusal(message_for, entry) from None
-
-    return wrapper  # type: ignore[return-value]
+def _check_refusal_text(check: Callable[[str], Any], voice: str) -> str:
+    """The text *check*, a pure validator that refused one voice, refuses *voice* with."""
+    try:
+        check(voice)
+    except ValueError as err:
+        return str(err)
+    # A pure validator judges the value alone, so a refusal under one voice
+    # is a refusal under every voice; reaching here is a defect in *check*.
+    raise RuntimeError(
+        f"{check!r} refused one voice and accepted {voice!r}; a style validator must "
+        "judge the value alone"
+    )
 
 
 def _stroke_dash_error(context: str, value: Any) -> str:
@@ -270,6 +272,19 @@ _INTEGER_MARK_KWARGS: frozenset[str] = frozenset(mark_integer_kwargs())
 #: non-finite value refuses at the door.
 _REAL_MARK_KWARGS: frozenset[str] = frozenset(mark_numeric_kwargs()) - _INTEGER_MARK_KWARGS
 
+#: The style kwargs whose wire field is a truth value: the names Rust
+#: publishes as ``MarkKwargsSpec``'s ``bool`` fields. Each is stored as
+#: :func:`ferrum._validate.coerce_bool` returns it, so ``np.False_`` reaches
+#: the wire as ``false`` and ``"no"`` or ``0`` refuses at the door rather
+#: than being read for its truthiness.
+_BOOL_MARK_KWARGS: frozenset[str] = frozenset(mark_bool_kwargs())
+
+#: The style kwargs whose wire field is a string: the names Rust publishes as
+#: ``MarkKwargsSpec``'s string-valued fields (``shape``, ``fill`` and
+#: ``stroke`` among them). A non-string refuses at the door, ahead of the
+#: color, shape and vocabulary checks that judge a string's content.
+_STRING_MARK_KWARGS: frozenset[str] = frozenset(mark_string_kwargs())
+
 #: The style fields a Rust vocabulary governs, each with its accepted values
 #: in the order Rust publishes them.
 _STYLE_VOCABULARIES: dict[str, list[str]] = {
@@ -284,7 +299,7 @@ _STYLE_VOCABULARIES: dict[str, list[str]] = {
 def layer_style_fields(mark_name: str) -> frozenset[str]:
     """The style kwargs a layer drawing *mark_name* takes at a public door.
 
-    A primitive mark takes the fields Rust's style table says it draws
+    A mark with a row in Rust's style table takes the fields that row draws
     (:func:`ferrum._layer.drawn_style_fields`). Any other mark name (a
     composite, statistical or diagnostic mark) takes every field some mark
     draws: it spreads its style over the marks it emits, and a field none of
@@ -365,7 +380,6 @@ def _mark_kwarg_error(mark_name: str, key: str, honored: frozenset[str], *, entr
     )
 
 
-@_refuses_in_any_voice
 def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str | None]) -> None:
     """Hold a composite mark's constant `size=` to the size rule of the marks it emits.
 
@@ -380,15 +394,18 @@ def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str | 
     """
     if not drawn_marks:
         # The desugar emitted no mark at all, so no mark's size rule applies.
-        raise ValueError(
-            f"{entry}(size=...): {entry} draws no marks for this call, so size= has "
-            f"nothing to size; received {size!r}."
+        raise EntryRefusal(
+            lambda voice: (
+                f"{voice}(size=...): {voice} draws no marks for this call, so size= has "
+                f"nothing to size; received {size!r}."
+            ),
+            entry,
         )
     drawing = [mark for mark in drawn_marks if mark in _MARKS_DRAWING_CONSTANT_SIZE]
-    check_mark_size(entry, layer_mark((drawing or drawn_marks)[0]), size)
+    mark = layer_mark((drawing or drawn_marks)[0])
+    _voiced(entry, lambda voice: check_mark_size(voice, mark, size))
 
 
-@_refuses_in_any_voice
 def refuse_style_no_layer_draws(
     entry: str, style: Mapping[str, Any], drawn_marks: list[str | None]
 ) -> None:
@@ -412,13 +429,15 @@ def refuse_style_no_layer_draws(
     ]
     if untaken:
         marks = sorted({layer_mark(mark) for mark in drawn_marks})
-        raise ValueError(
-            f"{entry}: keyword argument(s) {untaken!r} are drawn by no mark this call draws "
-            f"({marks}), so nothing would take them"
+        raise EntryRefusal(
+            lambda voice: (
+                f"{voice}: keyword argument(s) {untaken!r} are drawn by no mark this call "
+                f"draws ({marks}), so nothing would take them"
+            ),
+            entry,
         )
 
 
-@_refuses_in_any_voice
 def check_constant_size(entry: str, mark: str, size: Any) -> float | None:
     """Return *size* as a number once it meets the one constant-size rule for *mark*.
 
@@ -430,10 +449,11 @@ def check_constant_size(entry: str, mark: str, size: Any) -> float | None:
     with the render refusal's own text (:func:`ferrum._core.check_mark_size`).
     Every door that writes a constant ``size`` into a primitive mark's
     kwargs calls this, voiced as the public call the caller made (*entry*).
+    Refusals are :class:`ferrum._entry.EntryRefusal`.
     """
-    value = coerce_finite_real(f"{entry}(size=...)", size)
+    value = _voiced(entry, lambda voice: coerce_finite_real(f"{voice}(size=...)", size))
     if value is not None:
-        check_mark_size(entry, mark, value)
+        _voiced(entry, lambda voice: check_mark_size(voice, mark, value))
     return value
 
 
@@ -473,7 +493,7 @@ def _validate_literal_color(entry: str, key: str, value: str) -> None:
     ``"transparent"`` with to_hex's sentinel-aware clearing-paint message,
     ``"theme:label"`` with the generic accepted-forms text), matching
     to_hex's behavior. This mark-kwarg call site already restricts *value*
-    to ``str`` before calling (see its own ``isinstance`` guard), so it
+    to ``str`` before calling (``_resolve_style``'s string-field gate), so it
     leaves ``validate_color_value``'s ``require_str`` at its default
     ``False`` -- unlike ``configure.py``'s config-surface fields, which
     request it to refuse a structurally-valid-to-``to_hex`` non-``str``
@@ -511,7 +531,12 @@ def _resolve_style(
 
     The body of both style rules, :func:`resolve_mark_kwargs` (a mark
     method's kwargs) and :func:`resolve_layer_style` (a layer's), which
-    differ only in the set they take.
+    differ only in the set they take. Every refusal is an
+    :class:`ferrum._entry.EntryRefusal` built at its raise site: a message
+    template, or one pure validator re-called in the new voice
+    (:func:`_voiced`). Each ``lambda`` below is called before the loop
+    moves on, or re-called once the refusal has ended it, so it always
+    reads the key and value it refused.
     """
     resolved: dict[str, Any] = {}
     for k, v in kwargs.items():
@@ -525,31 +550,53 @@ def _resolve_style(
         # A kwarg the mark does not take is refused as such before its
         # value is judged.
         if canonical not in honored:
-            raise ValueError(_mark_kwarg_error(mark_name, canonical, honored, entry=entry))
+            raise EntryRefusal(
+                lambda voice: _mark_kwarg_error(mark_name, canonical, honored, entry=voice),
+                entry,
+            )
         if canonical == "stroke_dash":
             # Named forms ("dashed", "dotted", ...), the comma-split
             # form, and list/tuple passthrough are all resolved by the
             # one shared helper -- reached identically whether the user
             # wrote the canonical ``stroke_dash=`` kwarg or either alias,
             # so a named string works either way.
-            v = _normalize_stroke_dash(v, context=f"{entry}: {k}")
+            v = _voiced(entry, lambda voice: _normalize_stroke_dash(v, context=f"{voice}: {k}"))
         elif canonical in _INTEGER_MARK_KWARGS:
-            v = coerce_non_negative_int(f"{entry}({k}=...)", v)
+            v = _voiced(entry, lambda voice: coerce_non_negative_int(f"{voice}({k}=...)", v))
         elif canonical in _REAL_MARK_KWARGS:
-            v = coerce_finite_real(f"{entry}({k}=...)", v)
+            v = _voiced(entry, lambda voice: coerce_finite_real(f"{voice}({k}=...)", v))
+        # ``None`` is the unset value of every optional field, as it is for
+        # the numeric fields above. A field a Rust vocabulary governs is
+        # left to that vocabulary's check below, which refuses a non-string
+        # as it refuses any other value outside the vocabulary.
+        elif canonical in _BOOL_MARK_KWARGS and v is not None:
+            v = _voiced(entry, lambda voice: coerce_bool(voice, k, v))
+        elif (
+            canonical in _STRING_MARK_KWARGS
+            and canonical not in _STYLE_VOCABULARIES
+            and v is not None
+        ):
+            _voiced(entry, lambda voice: validate_str(voice, k, v))
         elif canonical == "orient":
-            validate_choice(entry, "orient", v, ORIENT_CHOICES)
+            _voiced(entry, lambda voice: validate_choice(voice, "orient", v, ORIENT_CHOICES))
         resolved[canonical] = v
     # Validate shape= value for point marks. The constant shape is a fixed
     # string that must name one of the glyphs supported by the Rust renderer;
     # an unknown name would silently default to circle at render time.
     shape_val = resolved.get("shape")
-    if shape_val is not None and isinstance(shape_val, str):
-        validate_choice(entry, "shape", shape_val, _VALID_POINT_SHAPES)
+    if shape_val is not None:
+        _voiced(
+            entry, lambda voice: validate_choice(voice, "shape", shape_val, _VALID_POINT_SHAPES)
+        )
     # A value outside a vocabulary Rust publishes is refused at declaration,
     # in the text the same value is refused with at render.
     for field_name, accepted in _STYLE_VOCABULARIES.items():
-        validate_optional_vocabulary(entry, field_name, resolved.get(field_name), accepted)
+        _voiced(
+            entry,
+            lambda voice: validate_optional_vocabulary(
+                voice, field_name, resolved.get(field_name), accepted
+            ),
+        )
     # Validate literal fill/stroke color strings at construction time via
     # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
     # colors fail immediately rather than silently at render time. The
@@ -562,12 +609,11 @@ def _resolve_style(
     # original string; to_hex is consulted only for validation.
     for paint_key in ("fill", "stroke"):
         paint_val = resolved.get(paint_key)
-        if isinstance(paint_val, str) and not _is_paint_sentinel(paint_val):
-            _validate_literal_color(entry, paint_key, paint_val)
+        if paint_val is not None and not _is_paint_sentinel(paint_val):
+            _voiced(entry, lambda voice: _validate_literal_color(voice, paint_key, paint_val))
     return resolved
 
 
-@_refuses_in_any_voice
 def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Return *kwargs* as ``mark_<mark_name>(...)`` honors them: aliases resolved, values checked.
 
@@ -579,13 +625,14 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
     (:func:`check_constant_size`), an unknown point ``shape``, an
     ``orient`` or a value of a Rust vocabulary (``interpolate``,
     ``stroke_cap``, ``stroke_join``, ``blend``) outside its vocabulary, a
-    non-numeric value for a numeric field, or a literal ``fill``/``stroke``
-    that is not a color.
+    non-numeric value for a numeric field, a value that is not ``True`` or
+    ``False`` for a truth-valued field, a non-string value for a
+    string-valued field (``shape``, ``fill`` and ``stroke`` among them), or
+    a literal ``fill``/``stroke`` that is not a color.
     """
     return _resolve_style(entry, mark_name, kwargs, honored_kwargs(mark_name))
 
 
-@_refuses_in_any_voice
 def resolve_layer_style(entry: str, mark: str | None, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Return a caller's style *kwargs* for one layer drawing *mark*, as *mark* honors them.
 
@@ -602,11 +649,63 @@ def resolve_layer_style(entry: str, mark: str | None, kwargs: Mapping[str, Any])
     mark = layer_mark(mark)
     for key in kwargs:
         if key in METHOD_ONLY_KWARGS.get(mark, frozenset()):
-            raise ValueError(
-                f"{entry}: keyword argument {key!r} is an argument of mark_{mark}(), not a "
-                f"layer style; set it through mark_{mark}({key}=...)"
-            )
+            _refuse_method_only(entry, mark, key)
     return _resolve_style(entry, mark, kwargs, layer_style_fields(mark))
+
+
+def _refuse_method_only(entry: str, mark: str, key: str) -> NoReturn:
+    """Refuse *key*, an argument only ``mark_<mark>()`` takes, at a layer door."""
+    raise EntryRefusal(
+        lambda voice: (
+            f"{voice}: keyword argument {key!r} is an argument of mark_{mark}(), not a "
+            f"layer style; set it through mark_{mark}({key}=...)"
+        ),
+        entry,
+    )
+
+
+def refuse_untaken_layer_style(entry: str, mark: str | None, untaken: Mapping[str, Any]) -> None:
+    """Refuse style *untaken* that a layer drawing *mark* does not take, as that layer refuses it.
+
+    The refusal :func:`resolve_layer_style` gives the same keys, built
+    directly rather than by running it: a kwarg only the mark's method takes
+    names that method, a constant ``size`` the mark never draws meets the
+    size rule, and any other key is refused as not honored by *mark*. A
+    door that spreads one style dict over layers of different marks calls
+    this with the keys no layer took. No keys, no refusal.
+    """
+    if not untaken:
+        return
+    mark = layer_mark(mark)
+    method_only = METHOD_ONLY_KWARGS.get(mark, frozenset())
+    for key in untaken:
+        if key in method_only:
+            _refuse_method_only(entry, mark, key)
+    key, value = next(iter(untaken.items()))
+    canonical = _canonical_mark_kwarg(mark, key)
+    if canonical == "size" and drawn_style_fields(mark) is not None:
+        check_constant_size(entry, mark, value)
+    honored = layer_style_fields(mark)
+    raise EntryRefusal(
+        lambda voice: _mark_kwarg_error(mark, canonical, honored, entry=voice), entry
+    )
+
+
+def resolve_method_bool(entry: str, param: str, value: Any, default: bool) -> bool:
+    """Return a truth-valued argument a mark method consumes itself, as a ``bool``.
+
+    ``mark_errorband(borders=)``, ``mark_qq(line=, dequantize=)``,
+    ``mark_contour(fill=, smooth=)`` and ``mark_function(clip=)`` read their
+    argument to decide what the composite draws or computes instead of
+    forwarding it as style, so the style gate never sees it. This holds it to the same rule :func:`_resolve_style`
+    holds the field to on a layer: ``None`` is unset (*default*), and
+    anything else must be a truth value (:func:`ferrum._validate.coerce_bool`),
+    never read for its truthiness. Refusals are
+    :class:`ferrum._entry.EntryRefusal`, voiced as *entry*.
+    """
+    if value is None:
+        return default
+    return _voiced(entry, lambda voice: coerce_bool(voice, param, value))
 
 
 def layer_honors(mark: str | None, key: str) -> bool:
@@ -710,6 +809,8 @@ class MarkBase:
         -------
         bool
             ``False`` when ``zero=False`` was explicitly passed; ``True`` otherwise.
+            The stored value is already a ``bool`` (or ``None``, unset), since
+            the door refused any other.
 
         Examples
         --------
@@ -718,7 +819,8 @@ class MarkBase:
         >>> MarkBase("bar").zero_anchor()
         True
         """
-        return bool(self._kwargs.get("zero", True))
+        zero = self._kwargs.get("zero")
+        return True if zero is None else zero
 
     def orient_coord_flip(self) -> bool:
         """Return True if ``orient="horizontal"`` was passed, indicating coord flip.

@@ -258,6 +258,36 @@ pub(crate) fn emit_shape_nodes(
     }
 }
 
+/// The dot area (px²) a point layer draws a row at when its size channel
+/// does not size it: the layer's own constant `size`, else the theme
+/// `point_size`. The point builder reads it through
+/// [`resolve_mark_style`](crate::render::draw::resolve_mark_style), and the
+/// swarm packing bound reads it directly, so the two cannot disagree. Pure:
+/// it validates nothing, so a caller reading it ahead of the style's
+/// refusals does not refuse in the wrong voice.
+pub(crate) fn fallback_dot_area(
+    overrides: Option<&crate::spec::mark_style::MarkKwargsSpec>,
+    theme: &crate::layout::ThemeInputs,
+) -> f64 {
+    overrides.and_then(|o| o.size).unwrap_or(theme.sizes.point_size)
+}
+
+/// The dot area (px²) each row of a point layer's `batch` takes from its
+/// size channel: the row's value through the size scale, or `None` for a row
+/// that draws at the layer's resolved `point_size` instead (a null value, or
+/// one the scale maps nowhere). `None` overall when every row does: no size
+/// channel, no size scale, or a size column this batch cannot read as
+/// numeric, which is not refused.
+pub(crate) fn scaled_dot_areas(
+    batch: &arrow::array::RecordBatch,
+    size: Option<&crate::spec::encoding::EncodingSpec>,
+    scale: Option<&crate::render::scale_resolve::SizeScale>,
+) -> Option<Vec<Option<f64>>> {
+    let (size, scale) = size.zip(scale)?;
+    let values = col_as_f64(batch, &size.field).ok()?;
+    Some(values.into_iter().map(|v| v.and_then(|v| scale.inner.to_pixel_f64(v))).collect())
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
@@ -297,9 +327,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         crate::render::marks::channels::color_column_loader(ctx);
 
     // Per-row size / shape / opacity vectors.
-    let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let size_areas = scaled_dot_areas(ctx.batch, spec.encoding.size.as_ref(), ctx.scales.size.as_ref());
 
     let shape_values: Option<Vec<Option<String>>> = spec.encoding.shape
         .as_ref()
@@ -422,13 +450,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
 
         // Resolve per-row radius from size encoding.
-        let radius = if let (Some(values), Some(scale)) = (&size_values, &ctx.scales.size) {
-            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(area) => (area / std::f64::consts::PI).sqrt(),
-                None => default_radius,
-            }
-        } else {
-            default_radius
+        let radius = match size_areas.as_ref().and_then(|areas| areas[i]) {
+            Some(area) => (area / std::f64::consts::PI).sqrt(),
+            None => default_radius,
         };
 
         // Resolve per-row shape kind.
@@ -519,6 +543,38 @@ mod tests {
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::SceneNode;
+
+    /// A row takes its area from the size scale, or reads `None` (the
+    /// fallback) when its value is null or maps nowhere; every row falls back
+    /// (`None` overall) without a size scale or when the size column cannot
+    /// be read as numeric.
+    #[test]
+    fn scaled_dot_areas_reads_each_row_through_the_size_scale_or_falls_back() {
+        use crate::render::scale_resolve::SizeScale;
+        use crate::scale::linear::LinearScale;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Float64, true),
+                Field::new("t", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(0.0), None, Some(1.0)])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        let scale = SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![4.0, 100.0], false, true)),
+        };
+        let field = |name: &str| EncodingSpec { field: name.into(), ..Default::default() };
+        assert_eq!(scaled_dot_areas(&batch, Some(&field("s")), Some(&scale)), Some(vec![Some(4.0), None, Some(100.0)]));
+        assert_eq!(scaled_dot_areas(&batch, Some(&field("t")), Some(&scale)), None, "unreadable column");
+        assert_eq!(scaled_dot_areas(&batch, Some(&field("s")), None), None, "no size scale");
+        assert_eq!(scaled_dot_areas(&batch, None, Some(&scale)), None, "no size channel");
+    }
 
     fn three_row_spec() -> ChartSpec {
         ChartSpec {

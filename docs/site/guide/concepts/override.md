@@ -79,7 +79,7 @@ Unknown override paths raise `FerrumOverrideError` when the chart renders, not w
 closest matches:
 
 ```
-FerrumOverrideError: Unknown override path 'x_axis_lable_angle'.
+FerrumOverrideError: Chart.override: Unknown override path 'x_axis_lable_angle'.
 Did you mean: 'x_axis_label_angle'?
 ```
 

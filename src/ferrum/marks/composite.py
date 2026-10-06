@@ -705,6 +705,8 @@ def desugar_errorband(
             data_source="err",
         ),
     ]
+    # *borders* is the bool ``Chart.mark_errorband`` validated
+    # (``resolve_method_bool``), so a value like ``"no"`` never reaches here.
     if borders:
         layers.extend(
             [

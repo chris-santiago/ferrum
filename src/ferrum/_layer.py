@@ -14,11 +14,13 @@ from typing import Any, Optional
 
 from ferrum._core import mark_style_fields, marks_drawing_constant_size, style_table_marks
 
-# Primitive (renderer-native) mark names — those that do not desugar into a
-# composite of other marks.  Single-sourced here (a leaf imported by the
-# desugar pipeline) so chart.py, _desugar.py, and the statistical
-# chart-method mixin cannot drift across the T4.1 split seam.
-_PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
+# The marks whose ``mark_*`` method sets a flat mark directly, with no
+# desugar into a layered composite. A narrower set than the marks with a
+# row in Rust's style table (``style_table_marks()``), which also holds the
+# primitives only a composite emits (ribbon, segment, arc, ...). Kept here,
+# a leaf of the desugar pipeline, so chart.py, _desugar.py and the
+# statistical chart-method mixin read one set.
+_FLAT_MARK_METHODS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,24 @@ class _Layer:
     conditionals: tuple = field(default=(), compare=False, repr=False)
 
 
+def owned_conditional_ids(layers: list) -> set[int]:
+    """The identities of the conditionals some layer of *layers* owns (``_Layer.conditionals``)."""
+    return {id(c) for layer in layers for c in layer.conditionals}
+
+
+def drop_orphaned_conditionals(conditionals: list, kept: list, dropped: list) -> list:
+    """Return *conditionals* without the ones only the *dropped* layers owned.
+
+    A conditional owned by layers that are all gone must go with them: left
+    behind, it would be owned by no layer, which reads as declared on the
+    chart as a whole, and would restyle every remaining layer. A conditional
+    a *kept* layer also owns keeps its place, and one no layer ever owned
+    (declared on the chart as a whole) is untouched.
+    """
+    orphaned = owned_conditional_ids(dropped) - owned_conditional_ids(kept)
+    return [c for c in conditionals if id(c) not in orphaned]
+
+
 def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:
     """Merge a chart-level catch-all *style_dict* over an already-*resolved* style.
 
@@ -124,6 +144,7 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
 
 
 _MARKS_DRAWING_CONSTANT_SIZE = frozenset(marks_drawing_constant_size())
+_STYLE_TABLE_MARKS = frozenset(style_table_marks())
 
 
 def layer_mark(mark: str | None) -> str:
@@ -133,16 +154,14 @@ def layer_mark(mark: str | None) -> str:
 
 @functools.cache
 def drawn_style_fields(mark: str) -> frozenset[str] | None:
-    """The ``mark_style`` fields primitive *mark* draws, from Rust's one style table.
+    """The ``mark_style`` fields *mark* draws, from Rust's one style table.
 
-    ``None`` when *mark* is no primitive mark (a composite name such as
-    ``"boxplot"``): Rust refuses the name, and only the marks a composite
-    emits have a row in the table.
+    ``None`` when *mark* has no row in the table (a composite name such as
+    ``"boxplot"``): only the primitive marks a layer can draw have a row.
     """
-    try:
-        return frozenset(mark_style_fields(mark))
-    except ValueError:
+    if mark not in _STYLE_TABLE_MARKS:
         return None
+    return frozenset(mark_style_fields(mark))
 
 
 def layer_draws(mark: str | None, field_name: str) -> bool:

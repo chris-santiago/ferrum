@@ -700,7 +700,13 @@ def _rank1d_chart_from_dataframe(
             y=Y("score", scale={"type": "linear", "domain": x_domain}),
         )
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="rank1d_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -738,7 +744,13 @@ def _rank2d_chart_from_dataframe(
     chart = _title_legend(chart, "color", legend_title)
     chart = chart.properties(title=ferrum.Title(f"Feature Correlation ({algorithm.title()})"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="rank2d_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -910,7 +922,13 @@ def _parallel_coords_chart_from_dataframe(
     )
     chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="parallel_coordinates_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -999,7 +1017,13 @@ def _decision_boundary_chart_from_source(
         )
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         return _finalize_chart(
-            chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+            chart,
+            entry="decision_boundary_chart",
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
+            theme=theme,
         )
 
     from ferrum._layer import _Layer
@@ -1026,7 +1050,13 @@ def _decision_boundary_chart_from_source(
     )
     chart = chart.properties(title=ferrum.Title("Decision Boundary"))
     return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        chart,
+        entry="decision_boundary_chart",
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 

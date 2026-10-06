@@ -20,6 +20,11 @@ Independent predicates live here:
   (e.g. ``"pairplot"``), or ``"Class.attr"`` for a dataclass field validated
   in ``__post_init__`` (e.g. ``"BreakAxis.axis"``).
 
+- ``coerce_bool`` and ``validate_str`` are the type gates for a
+  truth-valued and a string-valued keyword, in ``validate_choice``'s message
+  shape. ``coerce_bool`` never reads a value for its truthiness: only a
+  ``bool`` (or ``numpy.bool_``) passes.
+
 - ``is_none_color_sentinel`` is the single Python definition of the
   paint-clear sentinel test, shared by ``marks/base.py``'s
   ``_is_paint_sentinel`` and ``selection.py``'s ``_color_to_wire_dict`` so
@@ -228,6 +233,36 @@ def validate_optional_vocabulary(
     """
     if value is not None and value not in accepted:
         raise ValueError(f"{door}: unknown {param} '{value}'; expected {'|'.join(accepted)}")
+
+
+def coerce_bool(door: str, param: str, value: Any) -> bool:
+    """Return *value* as a builtin ``bool``, refusing anything that is not a truth value.
+
+    A truth value is a ``bool`` or a ``numpy.bool_``; nothing else is read
+    for its truthiness, so ``"no"``, ``0`` or ``None`` refuse instead of
+    being taken as ``True`` or ``False``. The refusal has
+    :func:`validate_choice`'s shape, voiced as *door*, the public call::
+
+        {door}: {param} must be True or False; got {value!r}
+    """
+    if isinstance(value, bool):
+        return value
+    import numpy as np
+
+    if isinstance(value, np.bool_):
+        return value.item()
+    raise ValueError(f"{door}: {param} must be True or False; got {value!r}")
+
+
+def validate_str(door: str, param: str, value: Any) -> None:
+    """Refuse *value* unless it is a ``str``, voiced as *door*, the public call.
+
+    The string counterpart of :func:`coerce_bool`, in the same shape::
+
+        {door}: {param} must be a string; got {value!r}
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{door}: {param} must be a string; got {value!r}")
 
 
 def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
