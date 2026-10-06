@@ -598,7 +598,7 @@ This section is the canonical reference for that vocabulary. Docstrings across t
 | `stroke_cap` | Line cap style: `"butt"`, `"round"`, `"square"`. | point, line, bar, area, rule, tick, rect, segment, arc, geoshape |
 | `stroke_join` | Line join style: `"miter"`, `"round"`, `"bevel"`. | point, line, bar, area, rule, tick, rect, polygon, ribbon, segment, arc, geoshape |
 | `size` | Constant mark size: point area in px², or line width. Must be a finite number above zero. | point, line |
-| `blend` | How the mark composites over what is already drawn: `"normal"` (the default; `"alpha"` is the same mode under its older name) or `"additive"`. | every mark |
+| `blend` | How the mark composites over what is already drawn: `"normal"` (the default; `"alpha"` is the same mode under its older name) or `"additive"`. Any other value raises `ValueError`. Interactive output adds each mark's color, scaled by its opacity, mark over mark. Static SVG approximates additive with `mix-blend-mode:screen`: a layer's marks in each panel composite as one group, which is then screened over what is beneath. | every mark |
 | `corner_radius` | Corner rounding in pixels (per-corner tangent-circle fillets on an arc wedge, including a polar bar). | bar, rect, arc |
 | `font_size` | Font size in points. | text, rect, label |
 | `font_weight` | CSS font-weight, e.g. `"bold"`, `400`, `700`. | text, label |
@@ -620,7 +620,7 @@ This section is the canonical reference for that vocabulary. Docstrings across t
 | `width`, `height` | Rendered image size in pixels. An image draws them only when it has a `url` encoding. | image |
 | `zero` | Set `zero=False` to suppress the y-scale zero anchor. Default `True`. Taken at every door that styles a bar; on a flat bar chart a door-supplied `zero` is consumed exactly as `mark_bar(zero=...)` consumes it. | bar |
 
-Some fields draw only when another input is present: a stroke for `stroke_width` on a point or bar, raster data for an image's `cmap`, a `url` encoding for `width`/`height`. Such a field set without its input is accepted and warns that it draws nothing.
+Some fields draw only when another input is present. A stroke field's enabling input differs per mark: a point's stroke fields (`stroke_width`, `stroke_dash`, `stroke_join`; not `stroke_cap`, which a point always draws) need a `stroke=` colour, `filled=False`, or a numeric `stroke_width` encoding; an area's stroke fields need a `stroke=` colour or `line=True`/`borders=True`; a bar's or rect's stroke fields need a `stroke=` colour or a numeric `stroke_width` encoding; a polygon's, ribbon's, or arc's stroke fields need a `stroke=` colour alone. Beyond stroke: `arrow=True` for a segment's `arrow_size`; a quantitative colour encoding for a polygon's `cmap`; raster data for an image's `cmap`; a `url` encoding for an image's `width`/`height`; a band axis paired with a `y2`/`x2` range for a rect's `band_size`; a `text` encoding for a rect's `font_size`; and both `dx` and `dy` for a label's offsets, since a label places itself unless both are set. Such a field set without its input is accepted and warns that it draws nothing, e.g. `mark_bar: stroke_width has no effect on this bar mark without a stroke color (stroke=) or a numeric stroke_width encoding (which stroke='none' turns off); it was ignored`.
 
 ### Method arguments
 

@@ -216,6 +216,8 @@ linked = scatter | bars
 
 Clicking a point in the scatter selects all marks that share the same `category` value — in both panels. The `|` operator composes both charts into a side-by-side view — the same operator used for static concatenation, no separate "link API." The `fields=["category"]` parameter tells the selection to match marks by field value rather than by data index, which is what enables cross-panel linking even when the two charts have different data shapes (the bar chart uses an aggregate transform).
 
+Both charts declare the selection and both declare the conditional, and each half matters. A selection reacts to clicks and brushes only in the panels of the charts that declare it, so here a click in either panel drives `sel`. A conditional restyles only the marks of the chart that declares it, so a chart that should react to `sel` declares its own conditional on it. One name is one selection: declaring one selection name with two different definitions (say, `nearest=False` in one chart and `nearest=True` in the other) raises `ValueError` naming both, so share one selection object between the charts.
+
 ## Listening for selections in Python
 
 For programmatic responses to user interaction, register a callback with `on_selection_change`:
