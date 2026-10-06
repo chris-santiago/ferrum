@@ -223,6 +223,61 @@ fn size_scale_defaults_to_theme_point_size_range() {
     assert_eq!(scale.max_px(), 36.0);
 }
 
+/// The load-bearing fact behind `build_scene`'s once-per-chart swarm packing
+/// bound (`position::panel_swarms`, read against `prep.provisional_scales`,
+/// which `resolve_param_domains` never touches): the size scale's domain is
+/// the data extent, never the spec's `domain`, so a size `domainParam`
+/// substitution cannot change it. If the size scale ever starts honoring an
+/// explicit domain, this fails, and the packing bound must then read the
+/// param-resolved size scale the panels draw with.
+#[test]
+fn size_scale_is_unchanged_by_domain_param_substitution() {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    use ferrum_scene::{ParamKind, ParameterSpec};
+    let mut spec = make_spec_with_size();
+    spec.encoding.size.as_mut().unwrap().scale = Some(ScaleSpec::Linear {
+        common: ContinuousScaleCommon {
+            domain: None,
+            range: None,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: Some("sd".into()),
+            reverse: false,
+        },
+        nice: false,
+        zero: false,
+        system_injected: false,
+    });
+    spec.params = vec![ParameterSpec {
+        name: "sd".into(),
+        kind: ParamKind::Variable,
+        value: Some(serde_json::json!([0, 2])),
+        bind: None,
+        select: None,
+    }];
+    let mut substituted = spec.clone();
+    resolve_param_domains(&mut substituted);
+    let substituted_domain = match substituted.encoding.size.as_ref().unwrap().scale.as_ref().unwrap() {
+        ScaleSpec::Linear { common, .. } => common.domain.clone(),
+        other => panic!("expected a linear size scale, got {other:?}"),
+    };
+    assert_eq!(substituted_domain, Some(vec![0.0, 2.0]), "the param must reach the spec's size domain");
+
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let size_scale = |s: &ChartSpec| {
+        build_size_scale(&s.encoding, &batch, &outputs, false, &theme, None).unwrap().0.unwrap()
+    };
+    let (raw, resolved) = (size_scale(&spec), size_scale(&substituted));
+    for v in [1.0, 5.0, 10.0] {
+        let px = resolved.inner.to_pixel_f64(v);
+        assert!(px.is_some(), "every data value maps through the size scale, got None for {v}");
+        assert_eq!(raw.inner.to_pixel_f64(v), px, "size domainParam changed the area of {v}");
+    }
+}
+
 #[test]
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();

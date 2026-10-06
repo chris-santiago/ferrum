@@ -2202,7 +2202,7 @@ impl std::fmt::Display for RenderWarning {
                 write!(
                     f,
                     "{entry}: {field} has no effect on this {mark} mark without {}; it was ignored",
-                    needs.describe()
+                    needs.describe(*mark)
                 )
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {

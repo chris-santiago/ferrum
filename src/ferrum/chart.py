@@ -2632,13 +2632,13 @@ class Chart(
         if rhs._conditionals:
             # One conditional per wire channel, enforced across the merge
             # too: the merged chart's `conditionals` list holds at most one
-            # per channel, whichever layers each would reach (a `size`
-            # conditional reaches the layers that declare it, a color or
-            # opacity conditional every layer), so two colliding on one
-            # channel is exactly as undefined here as within one `encode()`
-            # call. Checked against `new._conditionals` as it accumulates,
-            # so a third+ chart in a chained `a + b + c` merge collides
-            # against everything merged so far.
+            # per channel, whichever layers each would reach (a conditional
+            # reaches the layers that declare it; one declared on a chart
+            # or host as a whole reaches every layer), so two colliding on
+            # one channel is exactly as undefined here as within one
+            # `encode()` call. Checked against `new._conditionals` as it
+            # accumulates, so a third+ chart in a chained `a + b + c` merge
+            # collides against everything merged so far.
             for cond in rhs._conditionals:
                 wire = _channel_claimed_by(cond)
                 earlier = _conditional_on_wire(new, wire) if wire is not None else None

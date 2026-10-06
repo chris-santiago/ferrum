@@ -582,22 +582,25 @@ pub(crate) fn style_need_met(need: crate::spec::mark::StyleNeed, ctx: &DrawCtx<'
     }
 }
 
-/// Whether the layer `ctx` draws strokes its marks paint: a `stroke=` color;
-/// a hollow point (`filled=False`), whose outline takes the fill; an area's
-/// border lines (`line=`/`borders=`), which take the fill; or, on a filled
-/// mark that rescues its stroke from a bound width column (bar, point,
-/// rect), that column over an absent stroke ([`resolve_effective_stroke`]).
-/// A cleared stroke (`stroke="none"`) shuts the rescue, as it does there.
+/// Whether the layer `ctx` draws strokes its marks paint: whether any of the
+/// mark's [`Mark::stroke_sources`] is present.
 fn stroke_is_drawn(ctx: &DrawCtx<'_>) -> bool {
+    ctx.spec.mark.stroke_sources().iter().any(|&source| stroke_source_present(source, ctx))
+}
+
+/// Whether one input that turns a stroke on is present on the layer `ctx`
+/// draws. A bound width column rescues only an absent stroke, as in
+/// [`resolve_effective_stroke`]: a cleared stroke (`stroke="none"`) shuts it.
+fn stroke_source_present(source: crate::spec::mark::StrokeSource, ctx: &DrawCtx<'_>) -> bool {
+    use crate::spec::mark::StrokeSource;
     let style = ctx.mark_style;
-    let mark = ctx.spec.mark;
     let paint = style.paint.stroke_paint();
-    matches!(paint, ClearablePaint::Paint(_))
-        || (matches!(paint, ClearablePaint::Absent)
-            && matches!(mark, Mark::Bar | Mark::Point | Mark::Rect)
-            && stroke_width_bound(ctx))
-        || (mark == Mark::Point && style.point.filled == Some(false))
-        || (mark == Mark::Area && (style.area.line_border == Some(true) || style.area.borders == Some(true)))
+    match source {
+        StrokeSource::Color => matches!(paint, ClearablePaint::Paint(_)),
+        StrokeSource::Hollow => style.point.filled == Some(false),
+        StrokeSource::AreaBorders => style.area.line_border == Some(true) || style.area.borders == Some(true),
+        StrokeSource::WidthColumn => matches!(paint, ClearablePaint::Absent) && stroke_width_bound(ctx),
+    }
 }
 
 /// The conditional style fields `o` sets that this layer leaves inert: each

@@ -209,6 +209,48 @@ impl Mark {
             _ => None,
         }
     }
+
+    /// Every input that turns this mark's stroke on, which is what a
+    /// [`StyleNeed::Stroke`] field needs. `render::draw::stroke_is_drawn`
+    /// tests exactly these, and the inert-field warning names exactly these,
+    /// so the two cannot disagree.
+    pub(crate) fn stroke_sources(self) -> &'static [StrokeSource] {
+        use StrokeSource::*;
+        match self {
+            Mark::Point => &[Color, Hollow, WidthColumn],
+            Mark::Area => &[Color, AreaBorders],
+            Mark::Bar | Mark::Rect => &[Color, WidthColumn],
+            _ => &[Color],
+        }
+    }
+}
+
+/// One input that turns a mark's stroke on ([`Mark::stroke_sources`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrokeSource {
+    /// A `stroke=` color.
+    Color,
+    /// `filled=False` on a point, whose hollow outline takes the fill.
+    Hollow,
+    /// `line=True` or `borders=True` on an area, whose border lines take the
+    /// fill.
+    AreaBorders,
+    /// A bound numeric `stroke_width` column on a filled mark whose stroke is
+    /// unset: the stroke takes the fill so the width shows. A cleared stroke
+    /// (`stroke="none"`) shuts it.
+    WidthColumn,
+}
+
+impl StrokeSource {
+    /// The input, as the inert-field warning names it.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Color => "a stroke color (stroke=)",
+            Self::Hollow => "a hollow outline (filled=False)",
+            Self::AreaBorders => "border lines (line=True or borders=True)",
+            Self::WidthColumn => "a numeric stroke_width encoding (which stroke='none' turns off)",
+        }
+    }
 }
 
 /// What a mark draws for `size` ([`Mark::size_drawing`]).
@@ -249,11 +291,8 @@ const fn drawn_with(name: &'static str, need: StyleNeed) -> StyleField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StyleNeed {
-    /// A drawn stroke: a `stroke=` color (or `filled=False` on a point,
-    /// whose outline then takes the fill; or `line=`/`borders=` on an area,
-    /// whose border lines take the fill; or a bound `stroke_width` column on
-    /// a bar, point or rect, whose stroke then takes the fill), on a mark
-    /// whose stroke is off by default.
+    /// A drawn stroke, on a mark whose stroke is off by default: any one of
+    /// the mark's [`Mark::stroke_sources`].
     Stroke,
     /// `arrow=True` on a segment.
     Arrow,
@@ -294,10 +333,21 @@ impl StyleNeed {
         }
     }
 
-    /// The missing input, as the inert-field warning names it.
-    pub(crate) fn describe(self) -> &'static str {
-        match self {
-            Self::Stroke => "a stroke color (stroke=)",
+    /// The missing input on `mark`, as the inert-field warning names it. A
+    /// stroke need names every one of the mark's [`Mark::stroke_sources`].
+    pub(crate) fn describe(self, mark: Mark) -> String {
+        let fixed = match self {
+            Self::Stroke => {
+                let sources = mark.stroke_sources();
+                let mut text = String::new();
+                for (i, source) in sources.iter().enumerate() {
+                    if i > 0 {
+                        text.push_str(if i + 1 == sources.len() { " or " } else { ", " });
+                    }
+                    text.push_str(source.describe());
+                }
+                return text;
+            }
             Self::Arrow => "arrow=True",
             Self::QuantitativeColor => "a quantitative color encoding",
             Self::BandScale => "a band axis paired with a y2 or x2 range",
@@ -306,7 +356,8 @@ impl StyleNeed {
             Self::UrlChannel => "a url encoding",
             Self::RasterData => "raster data from mark_raster()",
             Self::LayeredChart => "a layered chart (a single bar chart sets it through mark_bar(zero=))",
-        }
+        };
+        fixed.to_string()
     }
 }
 
@@ -333,7 +384,7 @@ pub fn marks_drawing_constant_size() -> Vec<&'static str> {
 /// [`for_each_mark!`] order. Python reads its mark population from here
 /// rather than keeping a list of its own. Registered in `lib.rs`.
 #[pyo3::pyfunction]
-pub fn style_table_marks() -> Vec<&'static str> {
+pub(crate) fn style_table_marks() -> Vec<&'static str> {
     all_marks().map(|m| m.as_str()).collect()
 }
 
@@ -343,7 +394,7 @@ pub fn style_table_marks() -> Vec<&'static str> {
 /// derives every mark's honored style kwargs from it. Refuses an unknown
 /// mark. Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
 #[pyo3::pyfunction]
-pub fn mark_style_fields<'py>(
+pub(crate) fn mark_style_fields<'py>(
     py: pyo3::Python<'py>,
     mark: &str,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyDict>> {

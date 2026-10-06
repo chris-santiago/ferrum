@@ -211,6 +211,30 @@ pub fn build_scene(
         })
         .collect();
 
+    // The swarm each layer is placed by: one packing per swarm for the whole
+    // chart, shared by every layer it feeds in every panel ([`position::panel_swarms`]'s
+    // doc). The packing bound reads only `scales.size`'s pixel range and which
+    // rows it maps, and `prep.provisional_scales.size` (resolved once, chart-
+    // wide, in `prepare_render_inputs`) answers both exactly as the panel
+    // scale `marks/point.rs` draws with does. Its range is the theme's size
+    // band or the explicit `scale.range`, never panel geometry. Its domain is
+    // the data extent (the facet-shared union when faceted, the composite's
+    // shared size domain when a leaf), never the spec's `domain`: so the
+    // per-panel `resolve_param_domains` substitution, which the provisional
+    // scales skip, cannot change it, and a size `domainParam` narrower than
+    // the data maps every row exactly as the drawn scale does
+    // (`scale_resolve::tests::size_scale_is_unchanged_by_domain_param_substitution`
+    // pins this; if the size scale ever honors a domain, the bound must read
+    // the param-resolved scale). Computed once here, before the panel loop,
+    // so a facet chart does not rescan every size column once per panel.
+    let chart_swarms = position::panel_swarms(
+        &prep.layers,
+        &chart_layer_batches,
+        &prep.transform_swarms,
+        &prep.provisional_scales,
+        theme,
+    );
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel {
@@ -439,7 +463,7 @@ pub fn build_scene(
 
         // Per-layer mark batches (MOD-09).
         let mut mark_batches =
-            build_panel_mark_batches(spec, prep, &layer_batches, &chart_layer_batches, &scales, panel, theme, warnings)?;
+            build_panel_mark_batches(&panel_resolve_ctx, &layer_batches, &chart_swarms, &scales, panel, warnings)?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -1758,21 +1782,20 @@ fn layer_geometry_encoding(
 /// mark-batch loop). Pure extraction — same position adjustment, same synthetic
 /// per-layer ChartSpec, same polar node transform, same alignment guard, same
 /// MarkBatch assembly. Returns the batches in layer order.
-#[allow(clippy::too_many_arguments)]
+///
+/// `swarms` is the chart-wide packing [`position::panel_swarms`] computed once
+/// before the panel loop (`build_scene`) — shared by every panel, indexed like
+/// `ctx.prep.layers`.
 fn build_panel_mark_batches(
-    spec: &ChartSpec,
-    prep: &PreparedInputs,
+    ctx: &PanelResolveCtx,
     layer_batches: &[RecordBatch],
-    chart_layer_batches: &[RecordBatch],
+    swarms: &[Option<crate::transform::swarm::SwarmSpec>],
     scales: &scale_resolve::ResolvedScales,
     panel: &crate::layout::PanelLayout,
-    theme: &ThemeInputs,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<MarkBatch>, RenderError> {
+    let &PanelResolveCtx { spec, prep, theme, .. } = ctx;
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
-    // The swarm each layer is placed by: one packing per swarm for the whole
-    // chart, shared by every layer it feeds in every panel.
-    let swarms = position::panel_swarms(&prep.layers, chart_layer_batches, &prep.transform_swarms, scales, theme);
 
     for (li, layer) in prep.layers.iter().enumerate() {
         let layer_batch = &layer_batches[li];
@@ -13242,8 +13265,48 @@ mod tests {
         scene.unwrap();
         assert_eq!(
             inert_warnings(&warnings),
-            vec!["layer 1: catplot: stroke_width has no effect on this bar mark without a stroke color (stroke=); it was ignored"]
+            vec![
+                "layer 1: catplot: stroke_width has no effect on this bar mark without a stroke color (stroke=) or a \
+                 numeric stroke_width encoding (which stroke='none' turns off); it was ignored"
+            ]
         );
+    }
+
+    /// A stroke field's inert warning names every input that turns that
+    /// mark's stroke on, and only those: a point's hollow outline and width
+    /// column, an area's border lines, a bar's width column, and nothing
+    /// beyond the stroke color for a polygon.
+    #[test]
+    fn an_inert_stroke_field_names_every_input_that_strokes_its_mark() {
+        let cases = [
+            (
+                Mark::Point,
+                "mark_point: stroke_width has no effect on this point mark without a stroke color (stroke=), \
+                 a hollow outline (filled=False) or a numeric stroke_width encoding (which stroke='none' turns \
+                 off); it was ignored",
+            ),
+            (
+                Mark::Area,
+                "mark_area: stroke_width has no effect on this area mark without a stroke color (stroke=) or \
+                 border lines (line=True or borders=True); it was ignored",
+            ),
+            (
+                Mark::Bar,
+                "mark_bar: stroke_width has no effect on this bar mark without a stroke color (stroke=) or a \
+                 numeric stroke_width encoding (which stroke='none' turns off); it was ignored",
+            ),
+            (
+                Mark::Polygon,
+                "mark_polygon: stroke_width has no effect on this polygon mark without a stroke color \
+                 (stroke=); it was ignored",
+            ),
+        ];
+        for (mark, expected) in cases {
+            let spec = style_fixture(mark, serde_json::json!({"stroke_width": 3.0}), false).unwrap();
+            let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &xy_span_batch());
+            scene.unwrap();
+            assert_eq!(inert_warnings(&warnings), vec![expected], "{mark:?}");
+        }
     }
 
     /// A field the mark never draws refuses at render, from any producer,
@@ -13497,7 +13560,10 @@ mod tests {
         );
         assert_eq!(
             inert_warnings(&warnings),
-            vec!["mark_bar: stroke_dash has no effect on this bar mark without a stroke color (stroke=); it was ignored"]
+            vec![
+                "mark_bar: stroke_dash has no effect on this bar mark without a stroke color (stroke=) or a numeric \
+                 stroke_width encoding (which stroke='none' turns off); it was ignored"
+            ]
         );
     }
 
@@ -13569,7 +13635,7 @@ mod tests {
     /// from the table.
     #[test]
     fn the_stroke_need_warns_exactly_when_the_mark_paints_no_stroke() {
-        use crate::spec::mark::StyleNeed;
+        use crate::spec::mark::{StrokeSource, StyleNeed};
         let mut cells = (0, 0);
         for mark in crate::spec::mark::all_marks() {
             let stroke_fields: Vec<&str> =
@@ -13577,10 +13643,18 @@ mod tests {
             if stroke_fields.is_empty() {
                 continue;
             }
-            let mut switches = vec![serde_json::json!({}), serde_json::json!({"stroke": "#123456"}), serde_json::json!({"stroke": "none"})];
-            for (field, value) in [("filled", false), ("line", true), ("borders", true)] {
-                if mark.style_field(field).is_some() {
-                    switches.push(serde_json::json!({ field: value }));
+            // The off switches, then each of the mark's own stroke sources
+            // (the width column is the `width_column` axis below).
+            let mut switches = vec![serde_json::json!({}), serde_json::json!({"stroke": "none"})];
+            for source in mark.stroke_sources() {
+                match source {
+                    StrokeSource::Color => switches.push(serde_json::json!({"stroke": "#123456"})),
+                    StrokeSource::Hollow => switches.push(serde_json::json!({"filled": false})),
+                    StrokeSource::AreaBorders => {
+                        switches.push(serde_json::json!({"line": true}));
+                        switches.push(serde_json::json!({"borders": true}));
+                    }
+                    StrokeSource::WidthColumn => {}
                 }
             }
             for switch in &switches {

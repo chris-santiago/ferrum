@@ -829,3 +829,29 @@ def test_a_null_size_row_in_one_facet_widens_every_facet():
         pytest.approx(fallback + 1.0, abs=0.01),
         pytest.approx(fallback + 1.0, abs=0.01),
     ]
+
+
+def test_a_size_domain_param_narrower_than_the_data_overlaps_nothing():
+    """The lite reviewer's probe: a size ``domainParam`` of ``[0, 1]`` over
+    weights reaching 5.4, with a constant ``size=400`` fallback wider than the
+    range max. The packing bound is resolved once per chart without the
+    param substitution the drawn panel scale gets, so it must read a size
+    scale that maps every row exactly as the drawn one does. Nothing
+    overlaps: no two drawn dots sit closer than their radii sum, and centres
+    sit the widest drawn dot's diameter plus ``spacing`` apart at least."""
+    df = _spread_df().head(60).with_columns(pl.Series("weight", _short_weights(60)))
+    size = fm.Size("weight", legend=None, scale={"domain": fm.param("sd", value=[0, 1])})
+    points = _circles(
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(size=400.0)
+        .encode(x="group:N", y="value", size=size)
+        .to_svg()
+    )
+    assert 2.0 * math.sqrt(400.0 / math.pi) > _RANGE_MAX
+    assert len(points) == 60
+    assert len({round(r, 3) for _, _, r in points}) > 1
+    for (ax, ay, ar), (bx, by, br) in itertools.combinations(points, 2):
+        assert math.hypot(ax - bx, ay - by) >= ar + br - 2e-3, "two drawn dots overlap"
+    widest = 2.0 * max(r for _, _, r in points)
+    assert _min_centre_distance(points) >= widest + 1.0 - 0.01

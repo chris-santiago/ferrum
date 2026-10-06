@@ -270,14 +270,114 @@ pub(crate) fn mark_kwargs_field_names() -> &'static [&'static str] {
 }
 
 impl MarkKwargsSpec {
-    /// The wire keys this spec sets, in declaration order. Read off the
-    /// struct's own serialization, which omits every unset field, so the list
-    /// cannot drift from the struct.
+    /// The wire keys this spec sets, in declaration order: the keys the
+    /// derived `Serialize` writes (it skips every unset field), recorded by
+    /// [`KeyRecorder`] without serializing any value, so the list cannot
+    /// drift from the struct.
     pub(crate) fn set_field_names(&self) -> Vec<&'static str> {
-        let serde_json::Value::Object(set) = serde_json::to_value(self).unwrap_or_default() else {
-            return Vec::new();
-        };
-        mark_kwargs_field_names().iter().copied().filter(|name| set.contains_key(*name)).collect()
+        let mut keys = Vec::new();
+        // `KeyRecorder` refuses only a non-struct shape, which the derived
+        // `Serialize` of this struct never writes. Should that change (a
+        // `#[serde(flatten)]` field switches the derive to a map), every debug
+        // build and test run fails here instead of returning an empty list
+        // that silently switches off the inert-field refusals; a release
+        // build never panics on a user's call.
+        let recorded = self.serialize(KeyRecorder(&mut keys));
+        debug_assert!(recorded.is_ok(), "MarkKwargsSpec no longer serializes as a struct: {recorded:?}");
+        keys
+    }
+}
+
+/// One `Serializer` method per entry that refuses its shape with
+/// [`KEY_RECORDER_REFUSAL`].
+macro_rules! key_recorder_refuses {
+    ($($method:ident($($arg:ty),*) -> $ret:ty;)*) => {
+        $(fn $method(self, $(_: $arg),*) -> Result<$ret, Self::Error> {
+            Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
+        })*
+    };
+}
+
+/// A `Serializer` that takes a struct and records the key of each field it
+/// writes, ignoring the field's value; any other shape is refused.
+struct KeyRecorder<'a>(&'a mut Vec<&'static str>);
+
+const KEY_RECORDER_REFUSAL: &str = "KeyRecorder records a struct's keys only";
+
+impl serde::ser::SerializeStruct for KeyRecorder<'_> {
+    type Ok = ();
+    type Error = serde::de::value::Error;
+
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, _value: &T) -> Result<(), Self::Error> {
+        self.0.push(key);
+        Ok(())
+    }
+
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::Serializer for KeyRecorder<'_> {
+    type Ok = ();
+    type Error = serde::de::value::Error;
+    type SerializeSeq = serde::ser::Impossible<(), Self::Error>;
+    type SerializeTuple = serde::ser::Impossible<(), Self::Error>;
+    type SerializeTupleStruct = serde::ser::Impossible<(), Self::Error>;
+    type SerializeTupleVariant = serde::ser::Impossible<(), Self::Error>;
+    type SerializeMap = serde::ser::Impossible<(), Self::Error>;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = serde::ser::Impossible<(), Self::Error>;
+
+    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    // Every other shape is refused; serde offers no forwarding helper on the
+    // serializing side, so the refusals are generated.
+    key_recorder_refuses! {
+        serialize_bool(bool) -> ();
+        serialize_i8(i8) -> ();
+        serialize_i16(i16) -> ();
+        serialize_i32(i32) -> ();
+        serialize_i64(i64) -> ();
+        serialize_u8(u8) -> ();
+        serialize_u16(u16) -> ();
+        serialize_u32(u32) -> ();
+        serialize_u64(u64) -> ();
+        serialize_f32(f32) -> ();
+        serialize_f64(f64) -> ();
+        serialize_char(char) -> ();
+        serialize_str(&str) -> ();
+        serialize_bytes(&[u8]) -> ();
+        serialize_none() -> ();
+        serialize_unit() -> ();
+        serialize_unit_struct(&'static str) -> ();
+        serialize_unit_variant(&'static str, u32, &'static str) -> ();
+        serialize_seq(Option<usize>) -> Self::SerializeSeq;
+        serialize_tuple(usize) -> Self::SerializeTuple;
+        serialize_tuple_struct(&'static str, usize) -> Self::SerializeTupleStruct;
+        serialize_tuple_variant(&'static str, u32, &'static str, usize) -> Self::SerializeTupleVariant;
+        serialize_map(Option<usize>) -> Self::SerializeMap;
+        serialize_struct_variant(&'static str, u32, &'static str, usize) -> Self::SerializeStructVariant;
+    }
+
+    fn serialize_some<T: ?Sized + Serialize>(self, _value: &T) -> Result<(), Self::Error> {
+        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
+    }
+
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, _value: &T) -> Result<(), Self::Error> {
+        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
+    }
+
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T,
+    ) -> Result<(), Self::Error> {
+        Err(serde::ser::Error::custom(KEY_RECORDER_REFUSAL))
     }
 }
 

@@ -1088,6 +1088,13 @@ pub(crate) fn sizes_own_dots(layer: &crate::render::prepare::LayerPrepared) -> b
 /// - A size encoding bounds at the size range's maximum, or at the layer's
 ///   fallback area (its own constant, else the theme `point_size`) when some
 ///   row's size is null or maps nowhere and that fallback is wider.
+/// - A size field this layer's own batch cannot read as numeric at all (wrong
+///   dtype, or a later transform dropped it) bounds at the fallback area
+///   alone, never widened by the range: every row draws at the fallback, none
+///   reach the scale's range, mirroring the point-mark builder's own
+///   `col_as_f64(...).ok()` fallback (`marks/point.rs`) — the same "cannot
+///   read it" column is never refused there either, so it must not be
+///   refused, or treated as reaching the range, here.
 /// - A constant area `a` bounds at `2·√(a/π)`.
 /// - A layer that sizes nothing itself draws at the swarm's own `point_size`,
 ///   so bounds there.
@@ -1110,11 +1117,21 @@ fn swarm_layer_bound(
     let Some((enc, scale)) = layer.encoding.size.as_ref().zip(scales.size.as_ref()) else {
         return Some(ferrum_scene::dot_diameter(fallback_area));
     };
-    let range_max = scale.min_px().max(scale.max_px());
-    let some_row_falls_back = match crate::render::arrow_cast::col_as_f64(batch, &enc.field) {
-        Ok(values) => values.iter().any(|v| v.and_then(|v| scale.inner.to_pixel_f64(v)).is_none()),
-        Err(_) => true,
+    let Ok(values) = crate::render::arrow_cast::col_as_f64(batch, &enc.field) else {
+        // Unreadable as numeric (unsupported dtype, or the column is simply
+        // not in this layer's own batch) — not "some row falls back", every
+        // row does, so the bound is the fallback alone. `col_as_f64` failing
+        // is not refused upstream: `marks/point.rs`'s own per-row loader
+        // reads this exact column through `.ok()`, collapsing the same two
+        // failure modes to "no size for this row" and drawing every row at
+        // `ctx.mark_style.point.point_size`'s radius (this layer's
+        // `fallback_area`) — so this bound must match what every row of this
+        // layer actually draws at, not widen past it toward a range no row
+        // reaches.
+        return Some(ferrum_scene::dot_diameter(fallback_area));
     };
+    let range_max = scale.min_px().max(scale.max_px());
+    let some_row_falls_back = values.iter().any(|v| v.and_then(|v| scale.inner.to_pixel_f64(v)).is_none());
     let bound_area = if some_row_falls_back { range_max.max(fallback_area) } else { range_max };
     Some(ferrum_scene::dot_diameter(bound_area))
 }
@@ -1776,6 +1793,75 @@ mod tests {
         let mut sorted = offsets.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(sorted, vec![-12.0, -6.0, 0.0, 6.0, 12.0]);
+    }
+
+    /// A swarm-fed point layer whose OWN size field is not numeric in its own
+    /// batch — wrong dtype, or a later transform dropped the column — is not
+    /// "some row falls back" (the `Ok(values)` case, where a row's size is
+    /// null or maps nowhere on an otherwise-numeric column): every row of
+    /// THIS layer falls back, because `marks/point.rs`'s own per-row loader
+    /// reads this exact column through `col_as_f64(...).ok()`, drawing every
+    /// row at the fallback radius regardless of why the read failed. The
+    /// packing bound must match that — the fallback area alone — never
+    /// widened toward a size-range maximum no row of this layer actually
+    /// reaches. A range max of 100px with a 36px theme fallback is the
+    /// regression shape: the pre-fix `Err(_) => true` arm fed `some_row_falls_back`
+    /// unconditionally, so `range_max.max(fallback_area)` picked the much
+    /// wider range max.
+    #[test]
+    fn swarm_layer_bound_non_numeric_size_column_bounds_at_the_fallback_not_the_range() {
+        use crate::render::scale_resolve::SizeScale;
+        use crate::render::prepare::LayerPrepared;
+        use crate::scale::linear::LinearScale;
+        use crate::spec::mark::Mark;
+        use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                size: Some(EncodingSpec { field: "size_col".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let layer = LayerPrepared::from_chart_only(&spec);
+
+        // `size_col` exists but is Utf8 — `col_as_f64` fails with
+        // `UnsupportedDtype`, not a missing column.
+        let schema = Arc::new(Schema::new(vec![Field::new("size_col", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["small", "medium", "large"]))],
+        )
+        .unwrap();
+
+        let mut scales = dummy_scales();
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0],
+                vec![4.0, 100.0],
+                false,
+                true,
+            )),
+        });
+
+        let theme = crate::layout::ThemeInputs::default();
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 10.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+
+        let bound = swarm_layer_bound(&layer, &batch, &swarm, &scales, &theme).unwrap();
+        let fallback_only = ferrum_scene::dot_diameter(theme.sizes.point_size);
+        let widened_by_range = ferrum_scene::dot_diameter(100.0_f64.max(theme.sizes.point_size));
+        assert_eq!(bound, fallback_only, "a non-numeric size column must bound at the fallback area alone");
+        assert_ne!(bound, widened_by_range, "must not widen toward a range max no row of this layer reaches");
     }
 
     #[test]
