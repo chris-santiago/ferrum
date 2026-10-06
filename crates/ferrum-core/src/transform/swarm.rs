@@ -9,7 +9,15 @@
 //! scale kind all known, so only there can neighbouring centres sit exactly
 //! `point_size + spacing` px apart on every layout. There too, a point layer
 //! with no size of its own takes the dot diameter `point_size`
-//! ([`SwarmSpec::dot_area`]), so the drawn dots match their placement.
+//! ([`SwarmSpec::dot_area`]). A swarm packs at one diameter for the whole
+//! chart, the largest bound of any point layer it feeds, counted across every
+//! facet panel (a layer empty in one panel still counts there): a size
+//! encoding's range maximum (or its null-size fallback when a row anywhere
+//! falls back and that is wider), a constant size's own diameter, else
+//! `point_size`. Every facet panel therefore packs at the same spacing. Every
+//! layer it feeds is placed by that one packing
+//! (`render::position::panel_swarms`), so overlays share their centres and no
+//! drawn dot overlaps a neighbour.
 //!
 //! Output schema: the input schema, unchanged. The cross-axis offset is a
 //! pixel quantity of the rendered panel with no data-unit form before layout,
@@ -734,6 +742,150 @@ mod tests {
         own_field["layers"][0]["encoding"]["size"] = json!({"field": "v"});
         let radii = circle_radii(&render(own_field, &batch));
         assert!(radii.iter().any(|r| *r != radii[0]), "a size field still varies the radius");
+    }
+
+    /// A swarm packs at the largest bound of the point layers it feeds, so
+    /// centres sit `bound + spacing` apart: a constant area `a` bounds at
+    /// `2·√(a/π)` on the layered and the flat route; a size field bounds at its
+    /// range maximum even when no row reaches it, or at its null-size fallback
+    /// when a row falls back and that is wider; an unsized layer bounds at the
+    /// swarm's `point_size`. Control: with no size of its own the layer packs
+    /// at the swarm's `point_size`.
+    #[test]
+    fn a_swarm_packs_at_the_largest_bound_of_the_point_layers_it_feeds() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let batch = spread_batch();
+        let (size, spacing) = (4.0, 1.0);
+        let mut layered = swarm_chart(size, spacing, false, json!({}), None);
+        layered["layers"][0].as_object_mut().unwrap().remove("mark_style");
+        let mut flat = layered.clone();
+        let flat_obj = flat.as_object_mut().unwrap();
+        flat_obj.remove("layers");
+        flat_obj["encoding"]["x"] = json!({"field": "g", "type": "nominal"});
+        flat_obj["transforms"][0].as_object_mut().unwrap().remove("name");
+
+        assert_packed(&circle_centres(&render(layered.clone(), &batch)), size + spacing, "no own size");
+
+        let area = 100.0;
+        let diameter = ferrum_scene::dot_diameter(area);
+        let mut own_layered = layered.clone();
+        own_layered["layers"][0]["mark_style"] = json!({"size": area});
+        let mut own_flat = flat;
+        own_flat["mark_style"] = json!({"size": area});
+        for (route, chart) in [("layered", own_layered), ("flat", own_flat)] {
+            let svg = render(chart, &batch);
+            let radii = circle_radii(&svg);
+            assert_eq!(radii.len(), 300, "{route}: every dot drawn");
+            assert!(radii.iter().all(|r| (r - diameter / 2.0).abs() < 5e-4), "{route}: radii {:?}", &radii[..3]);
+            assert_packed(&circle_centres(&svg), diameter + spacing, &format!("{route} own size {area}"));
+        }
+
+        // An unsized layer beside a sibling sized smaller than the swarm: the
+        // unsized dots draw at `point_size`, so the packing is no tighter.
+        let small = 4.0;
+        assert!(ferrum_scene::dot_diameter(small) < size, "the sized sibling is the smaller");
+        let mut with_unsized = layered.clone();
+        let mut unsized_layer = with_unsized["layers"][0].clone();
+        unsized_layer["name"] = json!("unsized");
+        with_unsized["layers"][0]["mark_style"] = json!({"size": small});
+        with_unsized["layers"].as_array_mut().unwrap().push(unsized_layer);
+        let svg = render(with_unsized, &batch);
+        let radii = circle_radii(&svg);
+        assert_eq!(radii.iter().filter(|r| **r == size / 2.0).count(), 300, "the unsized layer draws at point_size");
+        assert_packed(&distinct(&circle_centres(&svg)), size + spacing, "unsized beside a smaller sibling");
+
+        // Legend off, so every circle measured is a data dot: no data dot
+        // reaches the range max, yet the packing is at the range max.
+        let range_max = ferrum_scene::dot_diameter(crate::layout::ThemeInputs::default().sizes.point_size_max);
+        let mut encoded = layered;
+        encoded["layers"][0]["encoding"]["size"] = json!({"field": "v", "legend": {"orient": "none"}});
+        let svg = render(encoded.clone(), &batch);
+        let radii = circle_radii(&svg);
+        assert_eq!(radii.len(), 300, "every dot drawn");
+        assert!(radii.iter().any(|r| *r != radii[0]), "the size field varies the radius");
+        let drawn = 2.0 * radii.iter().fold(0.0_f64, |a, r| a.max(*r));
+        assert!(drawn < range_max - 0.05, "the data stops short of the range max ({drawn} vs {range_max})");
+        assert_packed(&circle_centres(&svg), range_max + spacing, "size field");
+
+        // A null-size row draws at the layer's fallback area, here its own
+        // constant, wider than the range max: the packing takes the fallback.
+        // Control: with no null row the same fallback packs nothing wider.
+        let fallback_area = 400.0;
+        let fallback = ferrum_scene::dot_diameter(fallback_area);
+        assert!(fallback > range_max, "the fallback is the wider of the two");
+        let mut with_fallback = encoded;
+        with_fallback["layers"][0]["mark_style"] = json!({"size": fallback_area});
+        with_fallback["layers"][0]["encoding"]["size"] = json!({"field": "s", "legend": {"orient": "none"}});
+        let with_null = with_null_size_column(&batch);
+        let svg = render(with_fallback.clone(), &with_null);
+        let radii = circle_radii(&svg);
+        assert_eq!(radii.len(), 300, "every dot drawn, the null-size one too");
+        assert!(radii.iter().any(|r| (r - fallback / 2.0).abs() < 5e-4), "the null-size row draws at the fallback");
+        assert_packed(&circle_centres(&svg), fallback + spacing, "size field with a wider fallback");
+        with_fallback["layers"][0]["encoding"]["size"]["field"] = json!("v");
+        assert_packed(&circle_centres(&render(with_fallback, &with_null)), range_max + spacing, "no null row");
+    }
+
+    /// `pts` with coincident centres (layers sharing one packing) kept once.
+    fn distinct(pts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for p in pts {
+            if !out.iter().any(|q| q == p) {
+                out.push(*p);
+            }
+        }
+        out
+    }
+
+    /// `batch` plus a size column `s` equal to `v` except one null row.
+    fn with_null_size_column(batch: &RecordBatch) -> RecordBatch {
+        let v = batch.column_by_name("v").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+        let s: Float64Array = v.iter().enumerate().map(|(i, x)| if i == 0 { None } else { x }).collect();
+        let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new("s", DataType::Float64, true));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(s));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    /// The band-overflow warning reads the diameter the layer draws at: a
+    /// swarm that fits its slot at the swarm's own `point_size` but not at the
+    /// layer's own size warns, with the reach measured at the drawn diameter.
+    #[test]
+    fn a_layer_size_that_overflows_the_slot_warns() {
+        use serde_json::json;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let g: Vec<&str> = (0..16).map(|i| if i < 8 { "a" } else { "b" }).collect();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(g)), Arc::new(Float64Array::from(vec![5.0; 16]))])
+            .unwrap();
+        let overflowing = |chart: serde_json::Value| -> Vec<crate::render::RenderWarning> {
+            render_output(chart, &batch)
+                .warnings
+                .into_iter()
+                .filter(|w| matches!(w, crate::render::RenderWarning::SwarmOverflowsBand { .. }))
+                .collect()
+        };
+        let mut chart = swarm_chart(4.0, 1.0, false, json!({}), None);
+        chart["layers"][0].as_object_mut().unwrap().remove("mark_style");
+        assert_eq!(overflowing(chart.clone()), vec![], "control: the swarm's own size fits");
+
+        let area = std::f64::consts::PI * 400.0;
+        chart["layers"][0]["mark_style"] = json!({"size": area});
+        let warned = overflowing(chart);
+        assert_eq!(warned.len(), 1);
+        let crate::render::RenderWarning::SwarmOverflowsBand { reach_px, half_slot_px, .. } = &warned[0] else {
+            unreachable!()
+        };
+        // Eight dots on one value pack four to a side, `d + 1` px apart, plus
+        // the drawn radius `d / 2`.
+        let d = ferrum_scene::dot_diameter(area);
+        assert!((*reach_px - (4.0 * (d + 1.0) + d / 2.0)).abs() < 1e-9, "{reach_px}");
+        assert!(reach_px > half_slot_px);
     }
 
     fn spread_batch() -> RecordBatch {

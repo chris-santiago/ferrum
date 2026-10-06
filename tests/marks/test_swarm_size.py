@@ -485,3 +485,347 @@ def test_hand_built_swarm_defaults_draw_exactly_like_mark_swarm():
     assert {r for _, _, r in composite} == {2.0}
     assert hand_built() == composite
     assert hand_built(point_size=5.0) != composite
+
+
+# ---------------------------------------------------------------------------
+# A layer's own size: placement packs at the diameter the dot is drawn at, on
+# every door that reaches a swarm-fed point layer.
+# ---------------------------------------------------------------------------
+
+_OWN_AREA = 40.0
+
+
+def _spread_df() -> pl.DataFrame:
+    values = _spread_values()
+    return pl.DataFrame({"group": ["A"] * len(values), "value": values})
+
+
+def _door_catplot(df: pl.DataFrame, area: float | None):
+    mark = None if area is None else {"point": {"size": area}}
+    return fm.catplot(df, x="group", y="value", kind="swarm", mark=mark)
+
+
+def _door_layer_kwargs(df: pl.DataFrame, area: float | None):
+    layer_kwargs = None if area is None else {"point": {"size": area}}
+    return fm.Chart(df).mark_swarm(layer_kwargs=layer_kwargs).encode(x="group", y="value")
+
+
+def _door_hand_built(df: pl.DataFrame, area: float | None):
+    point_kwargs = {} if area is None else {"size": area}
+    return (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(**point_kwargs)
+        .encode(x="group:N", y="value")
+    )
+
+
+def _door_layer(df: pl.DataFrame, area: float | None):
+    """An ``fm.Layer`` attached beside the chart's own swarm-fed layer, which
+    draws squares so the measured circles are the ``fm.Layer``'s alone. Both
+    layers are fed by the one swarm, so the squares sit on the circles'
+    centres (``test_every_layer_fed_by_one_swarm_shares_its_centres``)."""
+    mark_kwargs = None if area is None else {"size": area}
+    return (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(shape="square")
+        .encode(x="group:N", y="value")
+        .layer(fm.Layer(mark="point", mark_kwargs=mark_kwargs))
+    )
+
+
+_DOORS = {
+    "catplot_mark": _door_catplot,
+    "mark_swarm_layer_kwargs": _door_layer_kwargs,
+    "hand_built_swarm": _door_hand_built,
+    "fm_layer": _door_layer,
+}
+
+
+def _min_centre_distance(points: list[tuple[float, float, float]]) -> float:
+    return min(
+        math.hypot(ax - bx, ay - by)
+        for (ax, ay, _), (bx, by, _) in itertools.combinations(points, 2)
+    )
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_a_layer_size_packs_at_the_diameter_it_draws(door):
+    """A point ``size`` on the swarm-fed layer is an area ``a``; the dot is
+    drawn ``2 * sqrt(a / pi)`` across and placement packs at that diameter,
+    so the minimum centre distance is the drawn diameter plus the default
+    ``spacing`` of 1, on every door. Control: the same door with no size of
+    its own draws and packs at the swarm's default 4 px."""
+    df = _spread_df()
+    points = _circles(_DOORS[door](df, _OWN_AREA).to_svg())
+    drawn = 2.0 * max(r for _, _, r in points)
+    assert drawn == pytest.approx(2.0 * math.sqrt(_OWN_AREA / math.pi), abs=2e-3)
+    assert _min_centre_distance(points) == pytest.approx(drawn + 1.0, abs=0.01)
+
+    control = _circles(_DOORS[door](df, None).to_svg())
+    assert {r for _, _, r in control} == {2.0}
+    assert _min_centre_distance(control) == pytest.approx(5.0, abs=0.01)
+
+
+_RANGE_MAX = 2.0 * math.sqrt(36.0 / math.pi)
+
+
+def _short_weights(n: int) -> list[float]:
+    """Size values whose niced scale domain ends past the data, so no row maps
+    to the range's largest area (36) and the widest dot drawn stops short."""
+    return [0.9 * (i % 7) for i in range(n)]
+
+
+def test_a_size_encoding_packs_at_the_size_range_maximum():
+    """Under a size encoding the swarm packs at the size range's largest area
+    (the theme's ``point_size_max`` of 36), read from the scale, not the data:
+    here no row reaches it, yet centres sit one range-max diameter plus
+    ``spacing`` apart, as they would in any facet panel whose data did."""
+    df = _spread_df().with_columns(pl.Series("weight", _short_weights(300)))
+    points = _circles(
+        fm.Chart(df)
+        .mark_swarm()
+        .encode(x="group", y="value", size=fm.Size("weight", legend=None))
+        .to_svg()
+    )
+    radii = {round(r, 3) for _, _, r in points}
+    assert len(points) == 300
+    assert len(radii) > 1
+    assert 2.0 * max(radii) < _RANGE_MAX - 0.05, "the data stops short of the range max"
+    assert _min_centre_distance(points) == pytest.approx(_RANGE_MAX + 1.0, abs=0.01)
+
+
+_OVERFLOW_RE = re.compile(r"packs its dots up to ([0-9.]+) px")
+
+
+def _overflow_reaches(chart) -> list[float]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart.to_svg()
+    return [float(m.group(1)) for w in caught if (m := _OVERFLOW_RE.search(str(w.message)))]
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_a_layer_size_that_overflows_the_slot_warns(door):
+    """Eight equal values a category pack four to a side. At the swarm's own
+    4 px they fit their slot; a layer area of ``400 * pi`` draws 40 px dots
+    that reach past it, so exactly one overflow warning fires, measuring the
+    reach at the drawn diameter: four steps of 41 px plus a 20 px radius."""
+    df = pl.DataFrame({"group": ["a"] * 8 + ["b"] * 8, "value": [5.0] * 16})
+    assert _overflow_reaches(_DOORS[door](df, None)) == []
+    assert _overflow_reaches(_DOORS[door](df, 400.0 * math.pi)) == [pytest.approx(184.0, abs=0.05)]
+
+
+# ---------------------------------------------------------------------------
+# One packing per swarm per panel: every layer one swarm feeds sits on the
+# same centres, packed at the largest bound of the point layers it feeds.
+# ---------------------------------------------------------------------------
+
+_SQUARE_RE = re.compile(
+    r'<rect x="([0-9.]+)" y="([0-9.]+)" width="([0-9.]+)" height="\3"[^>]*\sfill='
+)
+_LABEL_RE = re.compile(r'<text x="([0-9.]+)" y="([0-9.]+)"[^>]*>L\d+</text>')
+
+
+def _square_centres(svg: str) -> list[tuple[float, float]]:
+    squares = [tuple(float(v) for v in m) for m in _SQUARE_RE.findall(svg)]
+    return sorted((x + w / 2.0, y + w / 2.0) for x, y, w in squares if w < 100.0)
+
+
+def _labelled_df() -> pl.DataFrame:
+    df = _spread_df().head(60)
+    return df.with_columns(pl.Series("lab", [f"L{i}" for i in range(len(df))]))
+
+
+def test_every_layer_fed_by_one_swarm_shares_its_centres():
+    """A hand-built ``Swarm`` feeding a ``mark_point(size=200)`` and a text
+    layer packs once, at the sized dots' diameter, so every label sits on its
+    dot: the label x equals the dot cx and the label y is the dot cy plus one
+    constant baseline shift. The ``fm.Layer`` door's own-sized circles and the
+    chart's unsized squares likewise share every centre."""
+    df = _labelled_df()
+    svg = (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(size=200.0)
+        .encode(x="group:N", y="value")
+        .layer(fm.Layer(mark="text", encoding={"text": "lab"}))
+        .to_svg()
+    )
+    dots = sorted((cx, cy) for cx, cy, _ in _circles(svg))
+    labels = sorted((float(x), float(y)) for x, y in _LABEL_RE.findall(svg))
+    assert len(labels) == len(dots) == len(df)
+    assert [x for x, _ in labels] == pytest.approx([x for x, _ in dots], abs=1e-3)
+    shifts = [ly - dy for (_, ly), (_, dy) in zip(labels, dots)]
+    assert max(shifts) - min(shifts) == pytest.approx(0.0, abs=1e-3)
+    sized = 2.0 * math.sqrt(200.0 / math.pi)
+    assert _min_centre_distance(_circles(svg)) == pytest.approx(sized + 1.0, abs=0.01)
+
+    layered = _door_layer(_spread_df(), _OWN_AREA).to_svg()
+    circles = sorted((cx, cy) for cx, cy, _ in _circles(layered))
+    squares = _square_centres(layered)
+    assert len(squares) == len(circles) == 300
+    # The rect corner and width are each rounded to 3 decimals, so a square's
+    # centre is within 1e-3 px of the circle it sits on.
+    for sx, sy in squares:
+        assert min(math.hypot(sx - cx, sy - cy) for cx, cy in circles) < 2e-3
+
+
+def _null_size_df() -> pl.DataFrame:
+    df = _spread_df().head(60)
+    weights = [None, *_short_weights(len(df))[1:]]
+    return df.with_columns(pl.Series("weight", weights, dtype=pl.Float64))
+
+
+@pytest.mark.parametrize("fallback", ["layer_size", "theme_point_size"])
+def test_a_null_size_fallback_wider_than_the_range_max_packs_at_the_fallback(fallback):
+    """Under a size encoding a row whose size is null draws at the layer's
+    fallback area, its own constant ``size`` or else the theme's
+    ``point_size``. At 400 that is wider than the range's largest area (36),
+    so the swarm packs at the fallback diameter and even that dot overlaps
+    nothing."""
+    area = 400.0
+    chart = (
+        fm.Chart(_null_size_df())
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(**({"size": area} if fallback == "layer_size" else {}))
+        .encode(x="group:N", y="value", size=fm.Size("weight", legend=None))
+    )
+    if fallback == "theme_point_size":
+        chart = chart.theme(fm.Theme(point_size=area))
+    points = _circles(chart.to_svg())
+    widest = 2.0 * math.sqrt(area / math.pi)
+    assert widest > 2.0 * math.sqrt(36.0 / math.pi)
+    assert len(points) == 60
+    assert 2.0 * max(r for _, _, r in points) == pytest.approx(widest, abs=2e-3)
+    assert len({round(r, 3) for _, _, r in points}) > 1
+    assert _min_centre_distance(points) == pytest.approx(widest + 1.0, abs=0.01)
+
+
+def test_an_unsized_sibling_draws_at_the_swarm_size_while_sharing_centres():
+    """One swarm feeds sized squares (``size=100``) and an unsized ``fm.Layer``
+    of circles. The swarm packs once, at the squares' diameter, so the circles
+    sit on the squares' centres, but each layer draws at its own size: the
+    unsized circles keep the swarm's own 4 px, not the shared packing
+    diameter."""
+    svg = (
+        fm.Chart(_spread_df())
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(shape="square", size=100.0)
+        .encode(x="group:N", y="value")
+        .layer(fm.Layer(mark="point"))
+        .to_svg()
+    )
+    circles = _circles(svg)
+    squares = _square_centres(svg)
+    assert len(squares) == len(circles) == 300
+    assert {r for _, _, r in circles} == {2.0}
+    for sx, sy in squares:
+        assert min(math.hypot(sx - cx, sy - cy) for cx, cy, _ in circles) < 2e-3
+    sized = 2.0 * math.sqrt(100.0 / math.pi)
+    assert _min_centre_distance(circles) == pytest.approx(sized + 1.0, abs=0.01)
+
+
+def _unsized_beside_smaller(df: pl.DataFrame):
+    """The quality reviewer's probe: sized squares smaller than the swarm's
+    own 4 px (``size=4``, about 2.26 px across) beside an unsized
+    ``fm.Layer`` of circles, which draws at the swarm's 4 px."""
+    return (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(shape="square", size=4.0)
+        .encode(x="group:N", y="value")
+        .layer(fm.Layer(mark="point"))
+    )
+
+
+def test_an_unsized_layer_beside_a_smaller_sized_sibling_overlaps_nothing():
+    """An unsized layer bounds the packing at the swarm's own 4 px, so a
+    sized sibling smaller than that cannot pull centres closer than the
+    unsized dots are drawn: no two centres sit nearer than 4 + 1 px. The
+    spread column only bounds that from below; packing at the squares'
+    2.26 px would put neighbours about 3.27 px apart. The overflow reach
+    is measured at that diameter too: 120 equal values pack 60 steps of
+    5 px to one side, plus the 2 px radius."""
+    values = [i * 0.01 for i in range(120)]
+    df = pl.DataFrame({"group": ["A"] * 120, "value": values})
+    circles = _circles(_unsized_beside_smaller(df).to_svg())
+    assert len(circles) == 120
+    assert {r for _, _, r in circles} == {2.0}
+    assert _min_centre_distance(circles) >= 5.0 - 0.002
+
+    stacked = pl.DataFrame({"group": ["a"] * 120 + ["b"] * 120, "value": [5.0] * 240})
+    assert _overflow_reaches(_unsized_beside_smaller(stacked)) == [pytest.approx(302.0, abs=0.05)]
+
+
+@pytest.mark.parametrize("fallback", ["layer_size", "theme_point_size"])
+def test_a_size_encoding_with_no_null_rows_packs_at_the_range_max(fallback):
+    """The fallback area (the layer's own ``size``, else the theme's
+    ``point_size``) is drawn only by a row whose size is null or maps
+    nowhere. With no such row, a fallback of 400 wider than the range's
+    largest area (36) never widens the packing: centres sit one range-max
+    diameter plus ``spacing`` apart, though no row reaches the range max."""
+    df = _null_size_df().with_columns(pl.col("weight").fill_null(0.9))
+    chart = (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(**({"size": 400.0} if fallback == "layer_size" else {}))
+        .encode(x="group:N", y="value", size=fm.Size("weight", legend=None))
+    )
+    if fallback == "theme_point_size":
+        chart = chart.theme(fm.Theme(point_size=400.0))
+    points = _circles(chart.to_svg())
+    assert len(points) == 60
+    assert 2.0 * max(r for _, _, r in points) < _RANGE_MAX - 0.05, (
+        "the data stops short of the range max"
+    )
+    assert _min_centre_distance(points) == pytest.approx(_RANGE_MAX + 1.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# One packing diameter per swarm per chart: every facet panel packs at the
+# bound taken across all panels, so facets share their spacing.
+# ---------------------------------------------------------------------------
+
+
+def _panels(points: list[tuple[float, float, float]]) -> list[list[tuple[float, float, float]]]:
+    """Split a two-panel ``col=`` facet's dots at the widest horizontal gap."""
+    xs = sorted(points)
+    gap = max(range(len(xs) - 1), key=lambda i: xs[i + 1][0] - xs[i][0])
+    mid = (xs[gap][0] + xs[gap + 1][0]) / 2.0
+    return [[p for p in points if p[0] < mid], [p for p in points if p[0] >= mid]]
+
+
+def test_a_null_size_row_in_one_facet_widens_every_facet():
+    """The quality reviewer's facet probe: a size-encoded swarm with a
+    constant ``size=200`` fallback, faceted into panels P and Q, with one null
+    size row in P only. The null row draws at the 200 fallback, wider than the
+    range max, so the swarm packs at that diameter in both panels: Q, whose
+    rows all map, spaces its dots exactly as P does, not at the range max."""
+    n = 6
+    sizes = [float(i % 5 + 1) for i in range(n)]
+    df = pl.DataFrame(
+        {
+            "f": ["P"] * n + ["Q"] * n,
+            "group": ["A"] * (2 * n),
+            "value": [5.0] * (2 * n),
+            "s": [None, *sizes[1:], *sizes],
+        }
+    )
+    svg = (
+        fm.Chart(df)
+        .transform(fm.Swarm(category="group", value="value"))
+        .mark_point(size=200.0)
+        .encode(x="group:N", y="value", size=fm.Size("s", legend=None))
+        .facet(col="f")
+        .to_svg()
+    )
+    panels = _panels(_circles(svg))
+    assert [len(p) for p in panels] == [n, n]
+    fallback = 2.0 * math.sqrt(200.0 / math.pi)
+    assert fallback > _RANGE_MAX
+    assert [_min_centre_distance(p) for p in panels] == [
+        pytest.approx(fallback + 1.0, abs=0.01),
+        pytest.approx(fallback + 1.0, abs=0.01),
+    ]

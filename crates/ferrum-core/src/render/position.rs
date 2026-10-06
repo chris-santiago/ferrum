@@ -1070,6 +1070,97 @@ fn jitter_axis_values(
 // Swarm
 // ---------------------------------------------------------------------------
 
+/// The transform output a layer reads, the key a `Swarm` that fed it is
+/// recorded under in `transform_swarms`.
+pub(crate) fn swarm_key(layer: &crate::render::prepare::LayerPrepared) -> &str {
+    layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY)
+}
+
+/// Whether a layer sizes its dots itself, by a constant `size` or a size
+/// field. A swarm-fed point layer that does not draws them at the swarm's own
+/// `point_size` ([`SwarmSpec::dot_area`](crate::transform::swarm::SwarmSpec::dot_area)).
+pub(crate) fn sizes_own_dots(layer: &crate::render::prepare::LayerPrepared) -> bool {
+    layer.mark_style.as_ref().and_then(|m| m.size).is_some() || layer.encoding.size.is_some()
+}
+
+/// The packing bound (px) of one swarm-fed layer: the widest diameter that
+/// layer can draw a dot at, read from its scale and style, not its data.
+/// - A size encoding bounds at the size range's maximum, or at the layer's
+///   fallback area (its own constant, else the theme `point_size`) when some
+///   row's size is null or maps nowhere and that fallback is wider.
+/// - A constant area `a` bounds at `2·√(a/π)`.
+/// - A layer that sizes nothing itself draws at the swarm's own `point_size`,
+///   so bounds there.
+///
+/// `None` for a non-point layer, which draws no dot.
+fn swarm_layer_bound(
+    layer: &crate::render::prepare::LayerPrepared,
+    batch: &RecordBatch,
+    swarm: &crate::transform::swarm::SwarmSpec,
+    scales: &ResolvedScales,
+    theme: &crate::layout::ThemeInputs,
+) -> Option<f64> {
+    if layer.mark != crate::spec::mark::Mark::Point {
+        return None;
+    }
+    if !sizes_own_dots(layer) {
+        return Some(swarm.point_size);
+    }
+    let fallback_area = layer.mark_style.as_ref().and_then(|m| m.size).unwrap_or(theme.sizes.point_size);
+    let Some((enc, scale)) = layer.encoding.size.as_ref().zip(scales.size.as_ref()) else {
+        return Some(ferrum_scene::dot_diameter(fallback_area));
+    };
+    let range_max = scale.min_px().max(scale.max_px());
+    let some_row_falls_back = match crate::render::arrow_cast::col_as_f64(batch, &enc.field) {
+        Ok(values) => values.iter().any(|v| v.and_then(|v| scale.inner.to_pixel_f64(v)).is_none()),
+        Err(_) => true,
+    };
+    let bound_area = if some_row_falls_back { range_max.max(fallback_area) } else { range_max };
+    Some(ferrum_scene::dot_diameter(bound_area))
+}
+
+/// The swarm each of a panel's layers is placed by, indexed like `layers`:
+/// one packing per swarm for the whole chart, at the largest bound
+/// ([`swarm_layer_bound`]) of any point layer it feeds, so no drawn dot
+/// overlaps a neighbour and every facet panel packs at the same diameter.
+/// `chart_layer_batches` are the layers' batches across every panel, before
+/// any facet filter: a layer with no rows in this panel still bounds the
+/// packing, and a null or unmapped size row anywhere in the chart widens it
+/// everywhere. Every layer a swarm feeds (points, text, any overlay) is
+/// placed by that one packing, so they share their centres; each still draws
+/// at its own size, a point layer that sizes nothing itself at the swarm's
+/// own `point_size`.
+pub(crate) fn panel_swarms(
+    layers: &[crate::render::prepare::LayerPrepared],
+    chart_layer_batches: &[RecordBatch],
+    transform_swarms: &HashMap<String, crate::transform::swarm::SwarmSpec>,
+    scales: &ResolvedScales,
+    theme: &crate::layout::ThemeInputs,
+) -> Vec<Option<crate::transform::swarm::SwarmSpec>> {
+    let mut widest: HashMap<&str, f64> = HashMap::new();
+    for (layer, batch) in layers.iter().zip(chart_layer_batches) {
+        let key = swarm_key(layer);
+        let Some(swarm) = transform_swarms.get(key) else {
+            continue;
+        };
+        if let Some(d) = swarm_layer_bound(layer, batch, swarm, scales, theme) {
+            let entry = widest.entry(key).or_insert(d);
+            *entry = entry.max(d);
+        }
+    }
+    layers
+        .iter()
+        .map(|layer| {
+            let key = swarm_key(layer);
+            let swarm = transform_swarms.get(key)?;
+            Some(match widest.get(key) {
+                Some(&point_size) => crate::transform::swarm::SwarmSpec { point_size, ..swarm.clone() },
+                None => swarm.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Place a swarm layer's dots through the resolved panel scale.
 ///
 /// The `Swarm` transform only validates its columns; the packing needs the

@@ -194,6 +194,23 @@ pub fn build_scene(
     let mut break_ledger = BreakWarningLedger::default();
     let merged_breaks = merge_break_specs(&chart_config.structural, &mut break_ledger);
 
+    // Each layer's batch across the whole chart, before any facet filter: the
+    // base data, or the named `data_source` output it reads. A panel's layer
+    // batches are these filtered to its facet; a swarm's packing bound reads
+    // them whole, so every facet panel packs at the same diameter.
+    let chart_layer_batches: Vec<RecordBatch> = prep
+        .layers
+        .iter()
+        .map(|layer| match &layer.data_source {
+            None => prep.final_batch().clone(),
+            Some(name) => prep
+                .transform_outputs
+                .get(name)
+                .expect("layer.data_source validated by prepare_render_inputs")
+                .clone(),
+        })
+        .collect();
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel {
@@ -248,13 +265,10 @@ pub fn build_scene(
         let layer_batches: Vec<RecordBatch> = prep
             .layers
             .iter()
-            .map(|layer| match &layer.data_source {
+            .zip(&chart_layer_batches)
+            .map(|(layer, src)| match &layer.data_source {
                 None => Ok(panel_batch.clone()),
-                Some(name) => {
-                    let src = prep
-                        .transform_outputs
-                        .get(name)
-                        .expect("layer.data_source validated by prepare_render_inputs");
+                Some(_) => {
                     if let Some(key) = &panel.facet_key {
                         let col_filtered = filter_batch_by_facet(src, &key.field, &key.value)?;
                         if let Some(rk) = &panel.row_facet_key {
@@ -425,7 +439,7 @@ pub fn build_scene(
 
         // Per-layer mark batches (MOD-09).
         let mut mark_batches =
-            build_panel_mark_batches(spec, prep, &layer_batches, &scales, panel, theme, warnings)?;
+            build_panel_mark_batches(spec, prep, &layer_batches, &chart_layer_batches, &scales, panel, theme, warnings)?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -1744,16 +1758,21 @@ fn layer_geometry_encoding(
 /// mark-batch loop). Pure extraction — same position adjustment, same synthetic
 /// per-layer ChartSpec, same polar node transform, same alignment guard, same
 /// MarkBatch assembly. Returns the batches in layer order.
+#[allow(clippy::too_many_arguments)]
 fn build_panel_mark_batches(
     spec: &ChartSpec,
     prep: &PreparedInputs,
     layer_batches: &[RecordBatch],
+    chart_layer_batches: &[RecordBatch],
     scales: &scale_resolve::ResolvedScales,
     panel: &crate::layout::PanelLayout,
     theme: &ThemeInputs,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<MarkBatch>, RenderError> {
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
+    // The swarm each layer is placed by: one packing per swarm for the whole
+    // chart, shared by every layer it feeds in every panel.
+    let swarms = position::panel_swarms(&prep.layers, chart_layer_batches, &prep.transform_swarms, scales, theme);
 
     for (li, layer) in prep.layers.iter().enumerate() {
         let layer_batch = &layer_batches[li];
@@ -1848,10 +1867,9 @@ fn build_panel_mark_batches(
 
         // A layer whose data a `Swarm` fed (as the transform routing
         // recorded it) gets its dots placed here, through this panel's
-        // resolved scales, before any position adjustment.
-        let swarm = prep
-            .transform_swarms
-            .get(layer.data_source.as_deref().unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY));
+        // resolved scales, before any position adjustment, at its swarm's
+        // one packing diameter for this panel.
+        let swarm = swarms[li].as_ref();
         let swarm_placed: Option<RecordBatch> = match swarm {
             Some(swarm) => position::apply_swarm(layer_batch, swarm, scales, layer_coord.as_ref(), &entry, warnings).map_err(name_layer)?,
             None => None,
@@ -1888,14 +1906,12 @@ fn build_panel_mark_batches(
         let mut mark_style =
             draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark).map_err(name_layer)?;
         // A swarm-fed point layer that sizes its dots neither by a constant
-        // nor by a field draws them at the diameter the swarm placed them by,
-        // so neighbours sit `spacing` px apart edge to edge.
-        if let Some(swarm) = swarm.filter(|_| {
-            layer.mark == crate::spec::mark::Mark::Point
-                && layer.mark_style.as_ref().and_then(|m| m.size).is_none()
-                && layer.encoding.size.is_none()
-        }) {
-            mark_style.point.point_size = swarm.dot_area();
+        // nor by a field draws them at the swarm's own `point_size`, not at
+        // the panel's shared packing diameter a sized sibling may widen.
+        if layer.mark == crate::spec::mark::Mark::Point && !position::sizes_own_dots(layer) {
+            if let Some(declared) = prep.transform_swarms.get(position::swarm_key(layer)) {
+                mark_style.point.point_size = declared.dot_area();
+            }
         }
 
         let has_own_literal_paint = mark_style.paint.stroke_source
