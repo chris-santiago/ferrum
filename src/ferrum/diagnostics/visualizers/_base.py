@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum._entry import stamp_entry, voiced_as
+from ferrum._overrides import refuse_malformed_mark
 
 
 class FerrumVisualizer:
@@ -32,9 +33,10 @@ class FerrumVisualizer:
     Concrete visualizers override the ``_build_source``, ``_materialize``
     and ``_build_chart`` hooks, never ``fit``. ``fit`` runs all three in the
     class's voice (:func:`ferrum._entry.voiced_as`) and stamps the class
-    name on the chart (:func:`ferrum._entry.stamp_entry`), so a malformed
-    ``mark=`` refuses at ``fit``, the first point the chart's layers exist,
-    and every warning and refusal about the chart names the class.
+    name on the chart (:func:`ferrum._entry.stamp_entry`), so every warning
+    and refusal about the chart names the class. A malformed ``mark=``
+    refuses at ``fit`` before any hook runs, so before anything is computed
+    from the model.
 
     Parameters
     ----------
@@ -56,6 +58,12 @@ class FerrumVisualizer:
     >>> viz.show()                # returns a Chart
     >>> viz._metrics              # headline metric(s)
     """
+
+    #: Per-layer ``mark=`` overrides; every concrete visualizer sets one.
+    #: ``fit`` refuses a malformed one before it builds the source.
+    #: Declared, not defaulted, so the base class's public surface stays
+    #: ``fit`` / ``has_score`` / ``score`` / ``show``.
+    mark: dict | None
 
     @property
     def has_score(self) -> bool:
@@ -100,7 +108,8 @@ class FerrumVisualizer:
 
         Builds the source (``_build_source``), calls ``_materialize`` to
         populate ``_metrics``, then ``_build_chart`` to assemble the ferrum
-        ``Chart``, all speaking as the class. Returns ``self`` for method
+        ``Chart``, all speaking as the class. A malformed ``mark=`` refuses
+        first, before the source is built. Returns ``self`` for method
         chaining.
 
         Parameters
@@ -118,6 +127,12 @@ class FerrumVisualizer:
         """
         entry = type(self).__name__
         with voiced_as(entry):
+            # The caller's mark= is judged before anything is computed from
+            # the model, so its refusal never depends on what that would
+            # raise. self.mark is read directly, not via getattr(..., None):
+            # the class annotation declares every concrete visualizer sets
+            # it in __init__, and fit always runs after __init__.
+            refuse_malformed_mark(self.mark)
             self._source = self._build_source(X, y)
             self._materialize()
             chart = self._build_chart()

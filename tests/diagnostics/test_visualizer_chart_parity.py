@@ -645,6 +645,10 @@ _VALUE_SENTINELS: dict[tuple[type[FerrumVisualizer], str], Any] = {
     (ParallelCoordinatesVisualizer, "features"): ["f0", "f1"],
 }
 
+#: The same, for a param every visualizer judges before the builder call:
+#: ``fit`` refuses a ``mark=`` that is not a dict before it builds anything.
+_FAMILY_VALUE_SENTINELS: dict[str, Any] = {"mark": {"<sentinel mark>": True}}
+
 #: Per-row values for a param that selects which builder runs, so each of
 #: the visualizer's registry rows reaches its own target.
 _ROW_VALUES: dict[tuple[type[FerrumVisualizer], Callable[..., Any]], dict[str, Any]] = {
@@ -781,7 +785,12 @@ def _forwarding_kwargs(case: ParityCase) -> dict[str, Any]:
     """One distinct, non-default value per keyword-only `__init__` param."""
     row_values = _ROW_VALUES.get((case.visualizer, case.target), {})
     kwargs = {
-        name: row_values.get(name, _VALUE_SENTINELS.get((case.visualizer, name), _Sentinel(name)))
+        name: row_values.get(
+            name,
+            _VALUE_SENTINELS.get(
+                (case.visualizer, name), _FAMILY_VALUE_SENTINELS.get(name, _Sentinel(name))
+            ),
+        )
         for name in sorted(_own_param_names(case.visualizer))
     }
     values = list(kwargs.values())
@@ -942,6 +951,13 @@ def test_forwarding_exceptions_are_not_stale(monkeypatch: pytest.MonkeyPatch) ->
             stale.append(f"value sentinel {visualizer.__name__}.{param} names no param.")
         elif param in defaults and defaults[param] == value:
             stale.append(f"value sentinel {visualizer.__name__}.{param} equals the default.")
+
+    for param, value in _FAMILY_VALUE_SENTINELS.items():
+        takers = [v for v in results if param in _own_param_names(v)]
+        if not takers:
+            stale.append(f"family value sentinel {param!r} names no visualizer's param.")
+        elif any(_keyword_only_defaults(v.__init__).get(param) == value for v in takers):
+            stale.append(f"family value sentinel {param!r} equals a default.")
 
     registry_rows = {(case.visualizer, case.target) for case in _PARITY_REGISTRY}
     for (visualizer, target), values in _ROW_VALUES.items():

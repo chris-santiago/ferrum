@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
-from ferrum._entry import EntryRefusal, speak_as
-from ferrum._overrides import _apply_overrides
+from ferrum._entry import EntryRefusal, speak_as, voiced_as
+from ferrum._overrides import _apply_overrides, refuse_malformed_mark
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
@@ -579,10 +579,16 @@ def _figure_entry(fn: _F) -> _F:
     composite result. Every public function of a
     ``ferrum.plots`` module carries it; ``tests/test_public_entry_voice.py``
     derives that population from the modules themselves.
+
+    A malformed ``mark=`` (keyword-only on every figure function) refuses
+    before *fn* runs, so before anything is computed from the model
+    (:func:`ferrum._overrides.refuse_malformed_mark`).
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with voiced_as(fn.__name__):
+            refuse_malformed_mark(kwargs.get("mark"))
         return speak_as(fn.__name__, fn, *args, **kwargs)
 
     return wrapper  # type: ignore[return-value]

@@ -374,6 +374,70 @@ def test_a_visualizer_fits_with_no_mark_override(name: str) -> None:
     assert viz.show() is not None
 
 
+# A malformed ``mark=`` is the caller's input, judged before anything is
+# computed from the model, so its refusal never depends on what that
+# computation would raise first. Each test makes the SHAP step raise a
+# sentinel; the control proves the step runs when ``mark=`` is well formed,
+# so the mark refusal below wins only because it is judged first.
+_SHAP_VISUALIZERS = sorted(n for n in _VISUALIZER_CASES if n.startswith("SHAP"))
+
+
+class _ShapStepReached(Exception):
+    """Raised in place of SHAP values, marking that the SHAP step ran."""
+
+
+def _make_the_shap_step_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ferrum.diagnostics.sources._importance import FeatureImportanceMixin
+
+    def raise_instead(self: Any, **kwargs: Any) -> Any:
+        raise _ShapStepReached
+
+    monkeypatch.setattr(FeatureImportanceMixin, "shap_values", raise_instead)
+
+
+@pytest.mark.parametrize("name", _SHAP_VISUALIZERS)
+def test_a_shap_visualizer_refuses_a_malformed_mark_before_the_shap_step(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_the_shap_step_raise(monkeypatch)
+    with pytest.raises(_ShapStepReached):
+        _quietly(lambda: _VISUALIZER_CASES[name](None))
+    with pytest.raises(ValueError) as exc_info:
+        _quietly(lambda: _VISUALIZER_CASES[name](5))
+    assert str(exc_info.value) == (
+        f"{name}(mark=...) must be a dict, of mark kwargs or of sub-layer names to "
+        "their mark kwargs; got int"
+    )
+
+
+_SHAP_FIGURES: dict[str, dict[str, Any]] = {
+    "shap_bar_chart": {},
+    "shap_beeswarm_chart": {},
+    "shap_waterfall_chart": {"sample_idx": 0},
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SHAP_FIGURES))
+def test_a_shap_figure_refuses_a_malformed_mark_before_the_shap_step(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sklearn.tree import DecisionTreeRegressor
+
+    xa = np.random.default_rng(2).normal(size=(40, 3))
+    tree = DecisionTreeRegressor(max_depth=2, random_state=0).fit(xa, xa[:, 0])
+    figure = getattr(fm, name)
+    kwargs = {"random_state": 0, **_SHAP_FIGURES[name]}
+    _make_the_shap_step_raise(monkeypatch)
+    with pytest.raises(_ShapStepReached):
+        _quietly(lambda: figure(tree, xa, **kwargs))
+    with pytest.raises(ValueError) as exc_info:
+        _quietly(lambda: figure(tree, xa, mark=5, **kwargs))
+    assert str(exc_info.value) == (
+        f"{name}(mark=...) must be a dict, of mark kwargs or of sub-layer names to "
+        "their mark kwargs; got int"
+    )
+
+
 def test_the_override_door_alone_has_no_voice() -> None:
     """Control: outside a figure or visualizer the ``mark=`` door names no
     one, so the class name above comes from the ``fit`` template."""

@@ -130,6 +130,27 @@ def _apply_overrides(
     return chart
 
 
+def refuse_malformed_mark(mark: Any) -> None:
+    """Refuse a ``mark=`` override that is neither ``None`` nor a dict.
+
+    The shape is the caller's input alone, so every public entry that takes
+    ``mark=`` (a figure function, a visualizer's ``fit``) runs this before it
+    computes anything from the model: the refusal cannot then depend on what
+    the computation would have refused first, nor on process state that
+    computation reads. :class:`EntryRefusal`, voiced by the entry.
+    """
+    if mark is None or isinstance(mark, dict):
+        return
+    kind = type(mark).__name__
+    raise EntryRefusal(
+        lambda entry: (
+            f"{entry}(mark=...) must be a dict, of mark kwargs or of sub-layer "
+            f"names to their mark kwargs; got {kind}"
+        ),
+        "",
+    )
+
+
 def _apply_mark_overrides(
     chart: "Chart",
     overrides: Any,
@@ -146,15 +167,7 @@ def _apply_mark_overrides(
     compound fan-out (*_landed* given) a child takes only what applies to
     it and records the keys it took; the caller refuses the rest.
     """
-    if not isinstance(overrides, dict):
-        kind = type(overrides).__name__
-        raise EntryRefusal(
-            lambda entry: (
-                f"{entry}(mark=...) must be a dict, of mark kwargs or of sub-layer "
-                f"names to their mark kwargs; got {kind}"
-            ),
-            "",
-        )
+    refuse_malformed_mark(overrides)
     resolved = chart._resolve_pending()
     names = resolved.layer_names
 
