@@ -23,6 +23,17 @@ use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 
+/// Whether this polygon's `color` channel is quantitative: its column is a
+/// float column, which the polygon paints through a colormap (`cmap`) rather
+/// than a categorical palette. The style table's
+/// [`StyleNeed::QuantitativeColor`](crate::spec::mark::StyleNeed) reads this
+/// same fact.
+pub(crate) fn color_is_quantitative(ctx: &DrawCtx) -> bool {
+    color_field(ctx, ctx.spec)
+        .and_then(|f| ctx.batch.column_by_name(f))
+        .is_some_and(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
         resolve_group_fill_color, to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
@@ -106,9 +117,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // --- Resolve color encoding mode ---
     let cf = color_field(ctx, spec);
     let color_arr = cf.and_then(|f| ctx.batch.column_by_name(f));
-    let color_is_quantitative = color_arr
-        .map(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
-        .unwrap_or(false);
+    let color_is_quantitative = color_is_quantitative(ctx);
 
     // NF-A3 (spec §4.4, sweep completed 2026-09-02): the category read is
     // `col_as_ordinal_category_str`, never `col_as_str`. `col_as_str` errors on

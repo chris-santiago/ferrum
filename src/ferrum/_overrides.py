@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._entry import EntryRefusal
+from ferrum._layer import layer_mark
 from ferrum.marks.base import layer_honors, resolve_layer_style
 
 if TYPE_CHECKING:
@@ -214,7 +215,9 @@ def _apply_unnamed_style(
     mark honors it, the way a composite's catch-all ``size`` reaches only
     the layers that draw it. A key no layer honors refuses, unless this
     chart is one child of a compound fan-out (*landed* given), where it
-    records the keys it took and leaves the rest to its siblings.
+    records the keys it took and leaves the rest to its siblings. A layer
+    with no mark is voiced as ``mark_point`` (:func:`ferrum._layer.layer_mark`),
+    the same mark its judgment is held to -- not ``mark_None``.
     """
     new = chart._clone()
     marks = [ly.mark for ly in new._layers] if new._layers else [new._mark]
@@ -224,7 +227,9 @@ def _apply_unnamed_style(
         landed |= taken
     else:
         _refuse_untaken(marks[0], {k: v for k, v in overrides.items() if k not in taken})
-    styles = [resolve_layer_style(f"mark_{m}", m, part) for m, part in zip(marks, parts)]
+    styles = [
+        resolve_layer_style(f"mark_{layer_mark(m)}", m, part) for m, part in zip(marks, parts)
+    ]
     if new._layers:
         new._layers = [
             replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **style})
@@ -255,19 +260,18 @@ def _undrawn_sub_layer_message(key: str, drawn: set[str]) -> Callable[[str], str
     )
 
 
-def _refuse_untaken(mark: Any, untaken: dict[str, Any]) -> None:
+def _refuse_untaken(mark: str | None, untaken: dict[str, Any]) -> None:
     """Refuse the ``mark=`` style keys no layer of a chart honors.
 
-    For a named *mark*, the chart's first layer's, the refusal is that
-    mark's own for the keys (``relplot: keyword argument 'interpolate' is
-    not honored by mark_point``), so it names the mark and what it honors.
-    Any other mark has no honored set to name, so the refusal names the
-    keys alone. Either way the keys never pass silently.
+    The chart's first layer's mark names the keys it honors (``relplot:
+    keyword argument 'interpolate' is not honored by mark_point``), so the
+    refusal names the mark and what it honors. A markless layer draws a
+    point (:func:`ferrum._layer.layer_mark`) and is held to the same point
+    refusal. Either way the keys never pass silently.
     """
     if not untaken:
         return
-    if isinstance(mark, str):
-        resolve_layer_style(f"mark_{mark}", mark, untaken)
+    resolve_layer_style(f"mark_{layer_mark(mark)}", mark, untaken)
     keys = sorted(untaken)
     raise EntryRefusal(
         lambda entry: (

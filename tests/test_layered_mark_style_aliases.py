@@ -174,6 +174,64 @@ def test_layered_detail_on_non_consuming_marks_warns_once():
         chart.to_spec()
 
 
+def test_detail_ignored_warning_names_the_marks_the_table_says_draw_it():
+    """The warning's mark list is read live off Rust's style table, not a Python literal.
+
+    Patches ``marks_drawing`` (the reader of the table) to a value the real
+    table never returns, so a message built from a hand-copied literal
+    would stay unchanged while the derived one tracks the patch.
+    """
+    import ferrum.encoding._aliases as aliases_mod
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(aliases_mod, "marks_drawing", lambda field: ("bar", "rect"))
+        reset_warnings()
+        with pytest.warns(UserWarning) as record:
+            fm.Chart(DF).mark_point().encode(**XY, detail="g").to_spec()
+    assert str(record[0].message) == (
+        "encode(detail=...) is accepted but ignored by mark_point; "
+        "only mark_bar and mark_rect read the detail channel for per-group splitting."
+    )
+
+
+@pytest.mark.parametrize(
+    ("drawers", "expected"),
+    [
+        (
+            (),
+            "encode(detail=...) is accepted but ignored by mark_point; "
+            "no mark reads the detail channel for per-group splitting.",
+        ),
+        (
+            ("bar",),
+            "encode(detail=...) is accepted but ignored by mark_point; "
+            "only mark_bar reads the detail channel for per-group splitting.",
+        ),
+        (
+            ("bar", "rect", "line"),
+            "encode(detail=...) is accepted but ignored by mark_point; "
+            "only mark_bar, mark_rect, and mark_line read the detail channel "
+            "for per-group splitting.",
+        ),
+    ],
+)
+def test_detail_ignored_warning_reads_grammatically_for_every_drawer_count(drawers, expected):
+    """The drawer-list clause must read grammatically whether the table
+    names zero, one, or three-or-more marks. ``_prose_list([])`` used to
+    return ``""``, which would have read "only  read the detail channel" for
+    the zero-drawer case; the two-drawer case is already pinned by
+    ``test_detail_ignored_warning_names_the_marks_the_table_says_draw_it``
+    above."""
+    import ferrum.encoding._aliases as aliases_mod
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(aliases_mod, "marks_drawing", lambda field: drawers)
+        reset_warnings()
+        with pytest.warns(UserWarning) as record:
+            fm.Chart(DF).mark_point().encode(**XY, detail="g").to_spec()
+    assert str(record[0].message) == expected
+
+
 def test_layered_detail_with_a_consuming_layer_does_not_warn():
     reset_warnings()
     with warnings.catch_warnings():

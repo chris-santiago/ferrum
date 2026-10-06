@@ -219,7 +219,13 @@ def test_mark_function_style_kwargs_reach_its_line() -> None:
         ({"size": 0}, "mark_function(size=...) must be a positive number; received 0"),
         (
             {"arrow": True},
-            "mark_function: keyword argument 'arrow' is not honored by mark_function.",
+            "mark_function: keyword argument(s) ['arrow'] are drawn by no mark this call "
+            "draws (['line']), so nothing would take them",
+        ),
+        (
+            {"detail": "x"},
+            "mark_function: keyword argument 'detail' is not a style kwarg; set it through "
+            "encode(detail=...)",
         ),
     ],
 )
@@ -229,7 +235,7 @@ def test_mark_function_refuses_a_bad_style_kwarg_in_its_own_voice(
     df = pl.DataFrame({"x": [0.0, 1.0, 2.0]})
     with pytest.raises(ValueError) as exc_info:
         fm.Chart(df).encode(x="x").mark_function(lambda x: x, **kwargs)
-    assert str(exc_info.value).startswith(message)
+    assert str(exc_info.value) == message
 
 
 # ── One voice for warnings and refusals ─────────────────────────────────────

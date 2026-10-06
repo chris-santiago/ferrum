@@ -138,6 +138,17 @@ def load_interactive(page: Any, html_path: Path) -> None:
     page.wait_for_timeout(_LOAD_SETTLE_MS)
 
 
+def load_svg(page: Any, svg_path: Path) -> None:
+    """Navigate *page* to a static ``.svg`` file under the harness's page-load ceiling.
+
+    A static SVG needs no GPU settle, but its navigation shares the CDP pipe
+    that ``screenshot`` documents: a stall under a loaded machine is an
+    occasional pipe stall, not a slow render, so it takes the same ceiling
+    rather than Playwright's 30s default.
+    """
+    page.goto(svg_path.resolve().as_uri(), timeout=_ACTION_TIMEOUT_MS)
+
+
 def canvas_rect(page: Any) -> CanvasRect:
     """Return the WASM canvas's client-space bounding rect."""
     r = page.evaluate(

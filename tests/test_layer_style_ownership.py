@@ -31,18 +31,16 @@ RED-first proof, per the wave's binding "matrix first" rule.
 `ferrum._core.mark_kwargs_fields()` (serde's own field list, in declaration
 order) and drops `fill`/`stroke` (paint,
 already covered by the batch-A `without_paint` strip and out of `#119`'s
-scope). `_primitive_reachable_fields()` intersects that set with the keys
-`MarkBase.to_mark_kwargs_dict`'s source actually forwards (parsed from its
-own `for k in (...)` tuple, not copied by hand) -- this is "every non-paint
-field reachable from a mark kwarg" per the brief, and it excludes the three
-alias/desugar-set fields (`clip`, `detail`, `value_axis`) that no primitive
-`mark_*()` call can set directly (`misc.py`'s probes confirmed `mark_*`
-refuses them) plus the two structurally-unreachable-today fields (`cmap`,
-`width`/`height`) and `zero` (forwarded onto the layer only, never onto chart
-kwargs -- `composition.py:4252-4254` -- so it is inert by construction, not a
-producer bug). `test_derived_population_matches_probe_table` fails loudly if
-a future `MarkKwargsSpec` field is reachable through a mark kwarg but has no
-row here.
+scope). `_primitive_reachable_fields()` intersects that set with the kwargs
+some primitive `mark_*()` method honors (`ferrum.marks.base.honored_kwargs`,
+read off Rust's style table) -- this is "every non-paint field reachable
+from a mark kwarg" per the brief. It excludes the fields only ferrum's own
+code writes (`clip`, `detail`, `value_axis`), which every `mark_*()` refuses,
+and `zero`, which `mark_bar` consumes into the chart's zero-anchor rather
+than its style. `_UNPROBED` names, with the reason, the reachable fields a
+one-row probe cannot draw. `test_derived_population_matches_probe_table`
+fails loudly if a future `MarkKwargsSpec` field is reachable through a mark
+kwarg but has no row here.
 
 **Path coverage is the full population everywhere a mark-compatibility fact
 does not narrow it.** All seven §4.8 producers are covered, each of the four
@@ -117,7 +115,6 @@ silently absorbed.
 
 from __future__ import annotations
 
-import inspect
 import json
 import re
 from dataclasses import dataclass, replace
@@ -128,9 +125,9 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import mark_kwargs_fields
-from ferrum._layer import _PRIMITIVE_MARKS
+from ferrum._layer import _PRIMITIVE_MARKS, drawn_style_fields
 from ferrum._scene import _render_scene
-from ferrum.marks.base import MarkBase
+from ferrum.marks.base import honored_kwargs
 
 from _svg_rects import THEME_BACKGROUND, data_bar_rects
 
@@ -148,19 +145,31 @@ def _rust_non_paint_fields() -> list[str]:
 
 
 def _primitive_reachable_fields() -> set[str]:
-    """Non-paint fields `MarkBase.to_mark_kwargs_dict` actually forwards.
+    """Non-paint fields some primitive `mark_*()` method puts on its chart's style.
 
-    Parses the accepted-key tuple out of that method's own source rather than
-    mirroring it, so a future accepted/dropped key changes this population
-    automatically.
+    Read from Rust's style table through `honored_kwargs`, over every
+    `Chart.mark_<name>` method whose name is a primitive mark, so a field
+    a mark starts or stops drawing changes this population automatically.
+    `zero` is consumed by `mark_bar` into the chart's zero-anchor
+    (`Chart._set_mark`), never its style.
     """
-    src = inspect.getsource(MarkBase.to_mark_kwargs_dict)
-    block = src[src.index("for k in (") : src.index("):", src.index("for k in ("))]
-    accepted = set(re.findall(r'"(\w+)"', block))
-    return {f for f in _rust_non_paint_fields() if f in accepted}
+    method_marks = [
+        name[len("mark_") :]
+        for name in dir(fm.Chart)
+        if name.startswith("mark_") and drawn_style_fields(name[len("mark_") :]) is not None
+    ]
+    honored = set().union(*(honored_kwargs(m) for m in method_marks))
+    return {f for f in _rust_non_paint_fields() if f in honored} - {"zero"}
 
 
-PRIMITIVE_REACHABLE_FIELDS = _primitive_reachable_fields()
+#: Reachable fields no one-row probe here can draw, each with the reason.
+_UNPROBED = {
+    "cmap": "an image draws it only over raster data, which only mark_raster produces",
+    "width": "an image draws it only over a url encoding, which needs fetchable images",
+    "height": "an image draws it only over a url encoding, which needs fetchable images",
+}
+
+PRIMITIVE_REACHABLE_FIELDS = _primitive_reachable_fields() - set(_UNPROBED)
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +391,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "corner_radius": FieldProbe(
         "corner_radius",
-        "point",
+        "bar",
         {"corner_radius": 6},
         "bar",
         "bar",
@@ -395,7 +404,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "stroke_width": FieldProbe(
         "stroke_width",
-        "point",
+        "line",
         {"stroke_width": 5},
         "line",
         "line",
@@ -409,7 +418,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "stroke_dash": FieldProbe(
         "stroke_dash",
-        "point",
+        "line",
         {"stroke_dash": [4, 2]},
         "line",
         "line",
@@ -423,7 +432,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "font_size": FieldProbe(
         "font_size",
-        "point",
+        "text",
         {"font_size": 30},
         "text",
         "text",
@@ -436,7 +445,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "font_weight": FieldProbe(
         "font_weight",
-        "point",
+        "text",
         {"font_weight": "bold"},
         "text",
         "text",
@@ -449,7 +458,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "align": FieldProbe(
         "align",
-        "point",
+        "text",
         {"align": "left"},
         "text",
         "text",
@@ -462,7 +471,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "baseline": FieldProbe(
         "baseline",
-        "point",
+        "text",
         {"baseline": "top"},
         "text",
         "text",
@@ -475,7 +484,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "dx": FieldProbe(
         "dx",
-        "point",
+        "text",
         {"dx": 20},
         "text",
         "text",
@@ -488,7 +497,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "dy": FieldProbe(
         "dy",
-        "point",
+        "text",
         {"dy": 20},
         "text",
         "text",
@@ -501,7 +510,7 @@ PROBES: dict[str, FieldProbe] = {
     ),
     "angle": FieldProbe(
         "angle",
-        "point",
+        "text",
         {"angle": 45},
         "text",
         "text",
@@ -673,6 +682,20 @@ PROBES: dict[str, FieldProbe] = {
         "count",
         svg_count=_blue_line_count,
         scene_count=lambda s: _batch_node_total(s, "label"),
+    ),
+    "blend": FieldProbe(
+        "blend",
+        "point",
+        {"blend": "additive"},
+        "point",
+        "point",
+        _XY,
+        ROW,
+        "count",
+        svg_count=lambda svg: svg.count("mix-blend-mode:screen"),
+        scene_count=lambda s: sum(
+            1 for m in s["panels"][0]["marks"] if m.get("blend") == "additive"
+        ),
     ),
 }
 

@@ -464,9 +464,14 @@ impl MarkBatch {
     }
 }
 
+/// How a batch's marks composite over what is already drawn. A mark style
+/// field (`blend=`); `"alpha"` is accepted as an alias of `normal`, the
+/// spelling `mark_raster(blend=)` has always taken. Serializes as its
+/// canonical name only.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
+    #[serde(alias = "alpha")]
     Normal,
     Additive,
 }
@@ -957,5 +962,17 @@ mod tests {
         }"#;
         let from_wire: MarkBatch = serde_json::from_str(minimal).unwrap();
         assert_eq!(from_wire, MarkBatch::default());
+    }
+
+    /// `"alpha"` reads as `normal`, and `normal` is what is written back, so
+    /// the alias never reaches a serialized scene.
+    #[test]
+    fn blend_mode_alpha_is_an_alias_of_normal() {
+        use super::BlendMode;
+        let alpha: BlendMode = serde_json::from_str("\"alpha\"").unwrap();
+        assert_eq!(alpha, BlendMode::Normal);
+        assert_eq!(serde_json::to_string(&alpha).unwrap(), "\"normal\"");
+        assert_eq!(serde_json::from_str::<BlendMode>("\"additive\"").unwrap(), BlendMode::Additive);
+        assert!(serde_json::from_str::<BlendMode>("\"multiply\"").is_err());
     }
 }

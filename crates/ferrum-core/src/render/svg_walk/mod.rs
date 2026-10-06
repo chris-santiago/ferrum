@@ -81,7 +81,6 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
             h: panel.clip.h,
         };
         svg.clip_open(&clip_id, clip_rect);
-        svg.use_clip_open(&clip_id);
 
         // Marks (non-text/label first, inside clip). A clip-exempt batch
         // (`MarkBatch::clip == false`, batch E Task 9) is skipped here — it
@@ -89,18 +88,14 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
         // clip-exempt batch is deferred to the separate pass below, which
         // paints ALL of them above ALL clipped batches (see that pass's
         // comment for the full order and the test pinning it).
-        for batch in &panel.marks {
-            if matches!(
-                batch.kind,
-                ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
-            ) || !batch.clip
-            {
-                continue;
-            }
-            emit_mark_batch(&mut svg, batch)?;
-        }
-
-        svg.use_clip_close();
+        let clipped = panel.marks.iter().filter(|batch| {
+            batch.clip
+                && !matches!(
+                    batch.kind,
+                    ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
+                )
+        });
+        emit_clipped_marks(&mut svg, clipped, &clip_id)?;
 
         // Clip-exempt marks (batch E Task 9, `mark_function(clip=False)`):
         // rendered OUTSIDE the panel clip region, mirroring the existing
@@ -118,7 +113,7 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
             {
                 continue;
             }
-            emit_mark_batch(&mut svg, batch)?;
+            emit_mark_batch(&mut svg, batch, None)?;
         }
 
         // Above-marks axis/grid chrome (GH #89B): nodes from an axis or its
@@ -142,50 +137,11 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
         // Text/Label-kind mark batches (mark_text, mark_label) outside clip so
         // dy/dx offsets near panel edges are not cut off.
         for batch in &panel.marks {
-            if !matches!(
+            if matches!(
                 batch.kind,
                 ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
             ) {
-                continue;
-            }
-            for (i, node) in batch.nodes.iter().enumerate() {
-                let href = batch
-                    .hrefs
-                    .as_ref()
-                    .and_then(|h| h.get(i).and_then(|o| o.as_deref()));
-                let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
-                let desc = batch
-                    .descriptions
-                    .as_ref()
-                    .and_then(|d| d.get(i).and_then(|o| o.as_deref()));
-                let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
-                if needs_wrap {
-                    if let Some(url) = href {
-                        svg.a_open(url);
-                    }
-                    svg.g_open(None);
-                    if let Some(tt) = tooltip {
-                        let text: String = tt
-                            .fields
-                            .iter()
-                            .map(|f| format!("{}: {}", f.name, f.value))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        if !text.is_empty() {
-                            svg.title_elem(&text);
-                        }
-                    }
-                    if let Some(d) = desc {
-                        svg.desc_elem(d);
-                    }
-                    emit_node(&mut svg, node)?;
-                    svg.g_close();
-                    if href.is_some() {
-                        svg.a_close();
-                    }
-                } else {
-                    emit_node(&mut svg, node)?;
-                }
+                emit_mark_batch(&mut svg, batch, None)?;
             }
         }
 
@@ -207,16 +163,63 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
     Ok(svg.finish())
 }
 
-/// Emit one non-text/label mark batch: the additive-blend wrapper, the
-/// stroke-cap/stroke-join wrapper, and each node's href/tooltip/description
-/// wrap. Shared by the clipped-marks pass and the clip-exempt escape pass
-/// (`MarkBatch::clip == false`, batch E Task 9) in `walk_svg` — both need
-/// byte-identical wrapping; only their clip-group placement differs.
-fn emit_mark_batch(svg: &mut SvgBuffer, batch: &ferrum_scene::MarkBatch) -> Result<(), TaperError> {
-    // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
-    let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
+/// Emit a panel's clipped mark batches, in order, under the clip path
+/// `clip_id`. Unblended batches draw in the panel's clip group. A `clip-path`
+/// group isolates its children, so a blended batch draws outside that group,
+/// clipped inside its own blend group (see [`emit_mark_batch`]); the panel's
+/// clip group closes before it and reopens only for a following unblended
+/// batch, so no clip group is left empty. A panel without a blended batch
+/// draws one clip group, empty when it has no clipped batch.
+fn emit_clipped_marks<'a>(
+    svg: &mut SvgBuffer,
+    batches: impl Iterator<Item = &'a ferrum_scene::MarkBatch> + Clone,
+    clip_id: &str,
+) -> Result<(), TaperError> {
+    let mut clip_group_open = !batches.clone().any(blends);
+    if clip_group_open {
+        svg.use_clip_open(clip_id);
+    }
+    for batch in batches {
+        let blended = blends(batch);
+        if blended && clip_group_open {
+            svg.use_clip_close();
+            clip_group_open = false;
+        } else if !blended && !clip_group_open {
+            svg.use_clip_open(clip_id);
+            clip_group_open = true;
+        }
+        emit_mark_batch(svg, batch, blended.then_some(clip_id))?;
+    }
+    if clip_group_open {
+        svg.use_clip_close();
+    }
+    Ok(())
+}
+
+/// Emit one mark batch: the additive-blend wrapper, the stroke-cap/stroke-join
+/// wrapper, and each node's href/tooltip/description wrap. Shared by the
+/// clipped-marks pass, the clip-exempt escape pass (`MarkBatch::clip ==
+/// false`) and the text/label pass in `walk_svg`, so every batch kind wraps
+/// identically; only their placement around the clip group differs. A text or
+/// label batch carries no stroke cap or join, so it gets no cap/join wrapper.
+///
+/// An additive batch draws inside `<g style="mix-blend-mode:screen">`, the
+/// nearest compositing mode SVG renderers draw. A `clip-path` group isolates
+/// its children, so a blend group inside the panel's clip group would blend
+/// with nothing beneath it and draw normal; a blended batch therefore sits
+/// outside that group, and `clip` names the clip path it draws under inside
+/// its own blend group. `clip` is `None` for every other batch.
+fn emit_mark_batch(
+    svg: &mut SvgBuffer,
+    batch: &ferrum_scene::MarkBatch,
+    clip: Option<&str>,
+) -> Result<(), TaperError> {
+    let blend_wrap = blends(batch);
     if blend_wrap {
         svg.raw("<g style=\"mix-blend-mode:screen\">");
+    }
+    if let Some(clip_id) = clip {
+        svg.use_clip_open(clip_id);
     }
     // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
     // matching the old draw() pattern.
@@ -289,10 +292,19 @@ fn emit_mark_batch(svg: &mut SvgBuffer, batch: &ferrum_scene::MarkBatch) -> Resu
     if cap_join_wrap.is_some() {
         svg.g_close();
     }
+    if clip.is_some() {
+        svg.use_clip_close();
+    }
     if blend_wrap {
         svg.raw("</g>");
     }
     Ok(())
+}
+
+/// Whether `batch` composites over what is beneath it rather than drawing
+/// normal.
+fn blends(batch: &ferrum_scene::MarkBatch) -> bool {
+    matches!(batch.blend, ferrum_scene::BlendMode::Additive)
 }
 
 /// The stroke cap and join a mark batch's `<g>` wrapper gives the nodes

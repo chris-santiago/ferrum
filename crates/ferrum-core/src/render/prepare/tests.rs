@@ -3071,7 +3071,6 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             mark_style: None,
             data_source: None,
             position: None,
-            blend: None,
             name: None,
             independent_y: false,
             coord: None,

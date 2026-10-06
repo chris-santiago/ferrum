@@ -121,6 +121,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // published so every Python door that builds mark kwargs refuses with the
     // renderer's own rule and text.
     m.add_function(wrap_pyfunction!(spec::mark::marks_drawing_constant_size, m)?)?;
+    m.add_function(wrap_pyfunction!(spec::mark::mark_style_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(spec::mark::style_table_marks, m)?)?;
+    m.add_function(wrap_pyfunction!(render::draw::blend_accepted_values, m)?)?;
+    m.add_function(wrap_pyfunction!(render::draw::stroke_cap_accepted_values, m)?)?;
+    m.add_function(wrap_pyfunction!(render::draw::stroke_join_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::check_mark_size, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;

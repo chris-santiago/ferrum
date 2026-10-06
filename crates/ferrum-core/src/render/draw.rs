@@ -135,10 +135,11 @@ impl DrawCtx<'_> {
     ///
     /// This lives on `DrawCtx` rather than in each mark because
     /// [`MarkKwargsSpec::clip`](crate::spec::mark_style::MarkKwargsSpec) is a
-    /// general mark-style field with no per-mark allowlist on the Rust side:
-    /// any spec that sets it — including a layer's own `mark_style` on the wire
-    /// — reaches `resolve_mark_style` whatever the mark is. So every mark that
-    /// can receive it must mean the same thing by it. When only `line.rs`
+    /// style field nearly every mark draws ([`Mark::style_fields`]; text and
+    /// label paint outside the clip and refuse it): any spec that sets it —
+    /// including a layer's own `mark_style` on the wire — reaches
+    /// `resolve_mark_style` for each of them. So every mark that can receive
+    /// it must mean the same thing by it. When only `line.rs`
     /// carried the gate, an `area` or `ribbon` layer carrying `clip: false` got
     /// the SVG-group escape and kept dropping the very vertices that escape
     /// existed to reveal. (Python's own mark allowlist is narrower today —
@@ -329,10 +330,11 @@ pub struct LineStyle {
     /// is valid by construction. `None` means the user set nothing and the
     /// drawer applies [`Interpolate::default`] (linear).
     pub interpolate: Option<Interpolate>,
-    /// S2: stroke_cap (line).
-    pub stroke_cap: Option<String>,
-    /// S3: stroke_join (line/area).
-    pub stroke_join: Option<String>,
+    /// S2: stroke_cap. Parsed, and refused outside its vocabulary, once in
+    /// [`resolve_mark_style`], like `interpolate`.
+    pub stroke_cap: Option<ferrum_scene::StrokeCap>,
+    /// S3: stroke_join. Parsed and refused as `stroke_cap` is.
+    pub stroke_join: Option<ferrum_scene::StrokeJoin>,
     /// `mark_line`'s constant `size=` (a dot area in px², drawn at its
     /// diameter) and `stroke_width=` (px) exactly as written. The resolved
     /// width lives in [`MarkPaint::stroke_width`]; these keep the bindings
@@ -388,7 +390,7 @@ pub struct SegmentStyle {
 
 /// Per-mark overrides that don't cluster with a single style family:
 /// `band_size` (tick/rect band fraction), image-tile `width`/`height`, the
-/// `clip` escape, and the declared `value_axis`.
+/// `clip` escape, the `blend` mode, and the declared `value_axis`.
 #[derive(Debug, Clone, Default)]
 pub struct MiscStyle {
     /// S8: band fraction for tick/rect category bands.
@@ -401,6 +403,9 @@ pub struct MiscStyle {
     /// `MarkBatch` construction site, matching every mark before this field
     /// existed.
     pub clip: Option<bool>,
+    /// The batch's blend mode ([`MarkKwargsSpec::blend`]). `None` resolves to
+    /// `normal` at the `MarkBatch` construction site.
+    pub blend: Option<ferrum_scene::BlendMode>,
     /// `#172`(2): the producer's declaration of which positional channel
     /// carries this mark's value. Resolved straight through from
     /// [`MarkKwargsSpec::value_axis`], whose doc carries the full rationale,
@@ -544,6 +549,71 @@ pub fn check_mark_size(entry: &str, mark: &str, size: f64) -> PyResult<()> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.in_layer_context(None, entry).to_string()))
 }
 
+/// Refuse any style field `o` sets that `mark` never draws
+/// ([`Mark::style_fields`]): accepted, it would render exactly as without it.
+/// `size` is [`check_constant_size`]'s, which runs first and names the
+/// mark's own sizing kwarg.
+pub(crate) fn check_style_fields_drawn(mark: Mark, o: &MarkKwargsSpec) -> Result<(), RenderError> {
+    match o.set_field_names().into_iter().find(|field| mark.style_field(field).is_none()) {
+        Some(field) => Err(RenderError::MarkStyleNotDrawn { mark, field }),
+        None => Ok(()),
+    }
+}
+
+/// Whether the input `need` names is present on the layer `ctx` draws:
+/// evaluated after scales resolve, against the same facts the mark's builder
+/// reads.
+pub(crate) fn style_need_met(need: crate::spec::mark::StyleNeed, ctx: &DrawCtx<'_>) -> bool {
+    use crate::spec::mark::StyleNeed;
+    let style = ctx.mark_style;
+    let encoding = &ctx.spec.encoding;
+    match need {
+        StyleNeed::Stroke => stroke_is_drawn(ctx),
+        StyleNeed::Arrow => style.segment.arrow == Some(true),
+        StyleNeed::QuantitativeColor => super::marks::polygon::color_is_quantitative(ctx),
+        StyleNeed::BandScale => super::marks::rect::RectShape::of(ctx) == super::marks::rect::RectShape::BandRange,
+        StyleNeed::LeaderPlacement => style.text.dx.is_some() && style.text.dy.is_some(),
+        StyleNeed::TextChannel => {
+            encoding.text.is_some() && super::marks::rect::RectShape::of(ctx) == super::marks::rect::RectShape::Heatmap
+        }
+        StyleNeed::UrlChannel => encoding.url.is_some(),
+        StyleNeed::RasterData => encoding.url.is_none(),
+        StyleNeed::LayeredChart => ctx.spec.layers.is_some(),
+    }
+}
+
+/// Whether the layer `ctx` draws strokes its marks paint: a `stroke=` color;
+/// a hollow point (`filled=False`), whose outline takes the fill; an area's
+/// border lines (`line=`/`borders=`), which take the fill; or, on a filled
+/// mark that rescues its stroke from a bound width column (bar, point,
+/// rect), that column over an absent stroke ([`resolve_effective_stroke`]).
+/// A cleared stroke (`stroke="none"`) shuts the rescue, as it does there.
+fn stroke_is_drawn(ctx: &DrawCtx<'_>) -> bool {
+    let style = ctx.mark_style;
+    let mark = ctx.spec.mark;
+    let paint = style.paint.stroke_paint();
+    matches!(paint, ClearablePaint::Paint(_))
+        || (matches!(paint, ClearablePaint::Absent)
+            && matches!(mark, Mark::Bar | Mark::Point | Mark::Rect)
+            && stroke_width_bound(ctx))
+        || (mark == Mark::Point && style.point.filled == Some(false))
+        || (mark == Mark::Area && (style.area.line_border == Some(true) || style.area.borders == Some(true)))
+}
+
+/// The conditional style fields `o` sets that this layer leaves inert: each
+/// field [`Mark::style_fields`] lists with a need ([`style_need_met`]) that is
+/// absent.
+pub(crate) fn inert_style_fields(
+    o: &MarkKwargsSpec,
+    ctx: &DrawCtx<'_>,
+) -> Vec<(&'static str, crate::spec::mark::StyleNeed)> {
+    o.set_field_names()
+        .into_iter()
+        .filter_map(|field| ctx.spec.mark.style_field(field)?.needs.map(|need| (field, need)))
+        .filter(|&(_, need)| !style_need_met(need, ctx))
+        .collect()
+}
+
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
 ///
 /// When `overrides` is `None`, the result is identical to the Phase 7 path
@@ -618,6 +688,7 @@ pub fn resolve_mark_style(
         check_constant_size(*mark, size)?;
         style.point.point_size = size;
     }
+    check_style_fields_drawn(*mark, o)?;
     if let Some(opacity) = o.opacity { style.paint.opacity = opacity; }
     if let Some(cr) = o.corner_radius { style.paint.corner_radius = cr; }
     if let Some(sw) = o.stroke_width { style.paint.stroke_width = sw; }
@@ -654,10 +725,13 @@ pub fn resolve_mark_style(
     // S1: interpolate — resolves or refuses; there is no third "unrecognized
     // method silently renders straight" outcome (spec §7, no silent fallbacks).
     if let Some(ref i) = o.interpolate { style.line.interpolate = Some(Interpolate::parse(i).ok_or_else(|| RenderError::UnknownInterpolate { value: i.clone() })?); }
-    // S2: stroke_cap
-    if let Some(ref sc) = o.stroke_cap { style.line.stroke_cap = Some(sc.clone()); }
-    // S3: stroke_join
-    if let Some(ref sj) = o.stroke_join { style.line.stroke_join = Some(sj.clone()); }
+    // S2/S3: stroke_cap / stroke_join — resolve or refuse, as interpolate does.
+    if let Some(ref sc) = o.stroke_cap {
+        style.line.stroke_cap = Some(ferrum_scene::StrokeCap::parse(sc).ok_or_else(|| RenderError::UnknownStrokeCap { value: sc.clone() })?);
+    }
+    if let Some(ref sj) = o.stroke_join {
+        style.line.stroke_join = Some(ferrum_scene::StrokeJoin::parse(sj).ok_or_else(|| RenderError::UnknownStrokeJoin { value: sj.clone() })?);
+    }
     // S5: filled
     if let Some(f) = o.filled { style.point.filled = Some(f); }
     // S6: shape (constant)
@@ -677,6 +751,7 @@ pub fn resolve_mark_style(
     if let Some(ll) = o.leader_line { style.text.leader_line = Some(ll); }
     // Batch E Task 9: clip escape
     if let Some(c) = o.clip { style.misc.clip = Some(c); }
+    if let Some(b) = o.blend { style.misc.blend = Some(b); }
     // Batch H Task 1: arrow / arrow_size (segment)
     if let Some(a) = o.arrow { style.segment.arrow = Some(a); }
     if let Some(sz) = o.arrow_size { style.segment.arrow_size = Some(sz); }
@@ -1244,8 +1319,8 @@ pub fn to_scene_stroke(
     width: f64,
     opacity: f64,
     dash: Option<&[f64]>,
-    cap: Option<&str>,
-    join: Option<&str>,
+    cap: Option<ferrum_scene::StrokeCap>,
+    join: Option<ferrum_scene::StrokeJoin>,
 ) -> ferrum_scene::StrokeStyle {
     ferrum_scene::StrokeStyle {
         color: paint.scene_paint(),
@@ -1253,8 +1328,8 @@ pub fn to_scene_stroke(
         opacity,
         dash: dash.map(|d| d.to_vec()),
         stroke_opacity: opacity,
-        stroke_cap: cap.and_then(parse_stroke_cap),
-        stroke_join: join.and_then(parse_stroke_join),
+        stroke_cap: cap,
+        stroke_join: join,
     }
 }
 
@@ -1361,6 +1436,28 @@ pub(crate) fn resolve_group_fill_color(
     fallback: ClearablePaint,
 ) -> ClearablePaint {
     resolve_fill_color(scale, group_key, group_key.and_then(|k| k.parse().ok()), fallback)
+}
+
+/// Whether this layer's encoding binds a `stroke_width` channel that resolves
+/// to a present, numeric column — the single presence fact
+/// [`stroke_width_column`] builds its `Vec` from and [`stroke_is_drawn`] tests
+/// without building it, so the two readers cannot drift.
+fn stroke_width_bound(ctx: &DrawCtx<'_>) -> bool {
+    ctx.spec.encoding.stroke_width.as_ref().is_some_and(|e| {
+        ctx.batch
+            .column_by_name(&e.field)
+            .is_some_and(|col| super::arrow_cast::supported_numeric_dtype(col.data_type()))
+    })
+}
+
+/// The bound `stroke_width` column, read per row, when it is numeric. On a
+/// filled mark its presence is the gate of [`resolve_effective_stroke`]'s
+/// rescue; [`style_need_met`] reads the same fact for a stroke need.
+pub(crate) fn stroke_width_column(ctx: &DrawCtx<'_>) -> Option<Vec<Option<f64>>> {
+    if !stroke_width_bound(ctx) {
+        return None;
+    }
+    ctx.spec.encoding.stroke_width.as_ref().and_then(|e| col_as_f64(ctx.batch, &e.field).ok())
 }
 
 /// Resolve the effective per-row stroke color for a *filled* mark
@@ -1490,22 +1587,65 @@ pub fn stroke_dash_palette() -> Vec<Vec<f64>> {
         .collect()
 }
 
-pub(crate) fn parse_stroke_cap(s: &str) -> Option<ferrum_scene::StrokeCap> {
-    match s {
-        "round" => Some(ferrum_scene::StrokeCap::Round),
-        "square" => Some(ferrum_scene::StrokeCap::Square),
-        "butt" => Some(ferrum_scene::StrokeCap::Butt),
-        _ => None,
+/// The `stroke_cap=` vocabulary: SVG's `stroke-linecap` values.
+impl Vocabulary for ferrum_scene::StrokeCap {
+    const ALL: &'static [Self] = &[Self::Butt, Self::Round, Self::Square];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Butt => &["butt"],
+            Self::Round => &["round"],
+            Self::Square => &["square"],
+        }
     }
 }
 
-pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
-    match s {
-        "round" => Some(ferrum_scene::StrokeJoin::Round),
-        "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
-        "miter" => Some(ferrum_scene::StrokeJoin::Miter),
-        _ => None,
+/// The `stroke_join=` vocabulary: SVG's `stroke-linejoin` values.
+impl Vocabulary for ferrum_scene::StrokeJoin {
+    const ALL: &'static [Self] = &[Self::Miter, Self::Round, Self::Bevel];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Miter => &["miter"],
+            Self::Round => &["round"],
+            Self::Bevel => &["bevel"],
+        }
     }
+}
+
+/// The `blend=` vocabulary. `"alpha"` is `normal`'s alias, the same alias
+/// the type's own `Deserialize` accepts.
+impl Vocabulary for ferrum_scene::BlendMode {
+    const ALL: &'static [Self] = &[Self::Normal, Self::Additive];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Normal => &["normal", "alpha"],
+            Self::Additive => &["additive"],
+        }
+    }
+}
+
+/// `ferrum._core.stroke_cap_accepted_values()`: every `stroke_cap=`
+/// spelling, so Python gates the vocabulary the renderer parses instead of
+/// mirroring it. Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn stroke_cap_accepted_values() -> Vec<&'static str> {
+    ferrum_scene::StrokeCap::all()
+}
+
+/// `ferrum._core.stroke_join_accepted_values()`: as
+/// [`stroke_cap_accepted_values`], for `stroke_join=`.
+#[pyfunction]
+pub(crate) fn stroke_join_accepted_values() -> Vec<&'static str> {
+    ferrum_scene::StrokeJoin::all()
+}
+
+/// `ferrum._core.blend_accepted_values()`: every `blend=` spelling, aliases
+/// included, as [`stroke_cap_accepted_values`] publishes `stroke_cap=`'s.
+#[pyfunction]
+pub(crate) fn blend_accepted_values() -> Vec<&'static str> {
+    ferrum_scene::BlendMode::all()
 }
 
 /// Dispatch a mark's `build` fn. `Mark::Rule` and `Mark::Segment` are
@@ -2485,34 +2625,124 @@ mod tests {
             "baseline=\"top\" must produce TextBaseline::Top (svg_walk: dominant-baseline=\"hanging\")");
     }
 
-    // --- RSUP-07: parse_stroke_cap / parse_stroke_join string→enum contracts ---
+    // --- RSUP-07: stroke_cap / stroke_join string→enum contracts ---
 
     #[test]
-    fn parse_stroke_cap_maps_known_strings() {
-        assert_eq!(parse_stroke_cap("round"),  Some(ferrum_scene::StrokeCap::Round));
-        assert_eq!(parse_stroke_cap("square"), Some(ferrum_scene::StrokeCap::Square));
-        assert_eq!(parse_stroke_cap("butt"),   Some(ferrum_scene::StrokeCap::Butt));
+    fn stroke_cap_vocabulary_maps_known_strings() {
+        use ferrum_scene::StrokeCap;
+        assert_eq!(StrokeCap::parse("round"),  Some(StrokeCap::Round));
+        assert_eq!(StrokeCap::parse("square"), Some(StrokeCap::Square));
+        assert_eq!(StrokeCap::parse("butt"),   Some(StrokeCap::Butt));
     }
 
     #[test]
-    fn parse_stroke_cap_returns_none_for_unknown() {
-        assert_eq!(parse_stroke_cap("flat"),   None);
-        assert_eq!(parse_stroke_cap(""),        None);
-        assert_eq!(parse_stroke_cap("Round"),  None, "matching must be case-sensitive");
+    fn stroke_cap_vocabulary_returns_none_for_unknown() {
+        use ferrum_scene::StrokeCap;
+        assert_eq!(StrokeCap::parse("flat"),   None);
+        assert_eq!(StrokeCap::parse(""),        None);
+        assert_eq!(StrokeCap::parse("Round"),  None, "matching must be case-sensitive");
     }
 
     #[test]
-    fn parse_stroke_join_maps_known_strings() {
-        assert_eq!(parse_stroke_join("round"), Some(ferrum_scene::StrokeJoin::Round));
-        assert_eq!(parse_stroke_join("bevel"), Some(ferrum_scene::StrokeJoin::Bevel));
-        assert_eq!(parse_stroke_join("miter"), Some(ferrum_scene::StrokeJoin::Miter));
+    fn stroke_join_vocabulary_maps_known_strings() {
+        use ferrum_scene::StrokeJoin;
+        assert_eq!(StrokeJoin::parse("round"), Some(StrokeJoin::Round));
+        assert_eq!(StrokeJoin::parse("bevel"), Some(StrokeJoin::Bevel));
+        assert_eq!(StrokeJoin::parse("miter"), Some(StrokeJoin::Miter));
     }
 
     #[test]
-    fn parse_stroke_join_returns_none_for_unknown() {
-        assert_eq!(parse_stroke_join("arcs"),  None);
-        assert_eq!(parse_stroke_join(""),       None);
-        assert_eq!(parse_stroke_join("Miter"), None, "matching must be case-sensitive");
+    fn stroke_join_vocabulary_returns_none_for_unknown() {
+        use ferrum_scene::StrokeJoin;
+        assert_eq!(StrokeJoin::parse("arcs"),  None);
+        assert_eq!(StrokeJoin::parse(""),       None);
+        assert_eq!(StrokeJoin::parse("Miter"), None, "matching must be case-sensitive");
+    }
+
+    /// Each vocabulary's spellings are exactly what the scene type's own
+    /// serde spells, so the published list and the wire agree: every
+    /// spelling deserializes to the variant it parses to.
+    #[test]
+    fn stroke_and_blend_vocabularies_agree_with_serde() {
+        fn agree<V: Vocabulary + serde::de::DeserializeOwned + std::fmt::Debug>() {
+            for spelling in V::all() {
+                let parsed: V = serde_json::from_value(serde_json::json!(spelling)).unwrap();
+                assert_eq!(Some(parsed), V::parse(spelling), "{spelling}");
+            }
+        }
+        agree::<ferrum_scene::StrokeCap>();
+        agree::<ferrum_scene::StrokeJoin>();
+        agree::<ferrum_scene::BlendMode>();
+        assert_eq!(super::stroke_cap_accepted_values(), vec!["butt", "round", "square"]);
+        assert_eq!(super::stroke_join_accepted_values(), vec!["miter", "round", "bevel"]);
+        assert_eq!(super::blend_accepted_values(), vec!["normal", "alpha", "additive"]);
+    }
+
+    /// A `stroke_cap`/`stroke_join` outside its vocabulary refuses, naming
+    /// the value and the vocabulary, where it used to parse to nothing and
+    /// draw the default.
+    #[test]
+    fn resolve_mark_style_refuses_an_unknown_stroke_cap_or_join() {
+        let theme = ThemeInputs::default();
+        let cap = MarkKwargsSpec { stroke_cap: Some("flat".into()), ..Default::default() };
+        let err = resolve_mark_style(Some(&cap), &theme, &Mark::Line).unwrap_err();
+        assert_eq!(err, RenderError::UnknownStrokeCap { value: "flat".into() });
+        assert_eq!(err.to_string(), "unknown stroke_cap 'flat'; expected butt|round|square");
+        let join = MarkKwargsSpec { stroke_join: Some("arcs".into()), ..Default::default() };
+        let err = resolve_mark_style(Some(&join), &theme, &Mark::Line).unwrap_err();
+        assert_eq!(err.to_string(), "unknown stroke_join 'arcs'; expected miter|round|bevel");
+        let ok = MarkKwargsSpec { stroke_cap: Some("round".into()), stroke_join: Some("bevel".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&ok), &theme, &Mark::Line).unwrap();
+        assert_eq!(style.line.stroke_cap, Some(ferrum_scene::StrokeCap::Round));
+        assert_eq!(style.line.stroke_join, Some(ferrum_scene::StrokeJoin::Bevel));
+    }
+
+    /// A `MarkKwargsSpec` setting `field` alone, to a value every mark that
+    /// draws it resolves: the field's own vocabulary where it has one, else
+    /// the first of a number, a bool or a column name its type accepts.
+    fn sample_set(field: &str) -> MarkKwargsSpec {
+        let value = match field {
+            "stroke" | "fill" => serde_json::json!("#ff0000"),
+            "stroke_cap" | "stroke_join" => serde_json::json!("round"),
+            "interpolate" => serde_json::json!("step"),
+            "value_axis" => serde_json::json!("x"),
+            "blend" => serde_json::json!("additive"),
+            "shape" => serde_json::json!("square"),
+            "stroke_dash" => serde_json::json!([3.0, 3.0]),
+            _ => {
+                return [serde_json::json!(4), serde_json::json!(true), serde_json::json!("g")]
+                    .into_iter()
+                    .find_map(|v| serde_json::from_value(serde_json::json!({ field: v })).ok())
+                    .unwrap_or_else(|| panic!("no sample value for '{field}'"));
+            }
+        };
+        serde_json::from_value(serde_json::json!({ field: value })).unwrap()
+    }
+
+    /// Every style field outside a mark's table refuses, naming the mark and
+    /// the field; every field inside it resolves. Derived over every mark
+    /// and every wire key, so neither list is hand-kept here. `size` keeps
+    /// its own refusal, which names the mark's sizing kwarg.
+    #[test]
+    fn resolve_mark_style_refuses_exactly_the_fields_a_mark_never_draws() {
+        let theme = ThemeInputs::default();
+        let mut refused = 0;
+        for mark in crate::spec::mark::all_marks() {
+            for &field in crate::spec::mark_style::mark_kwargs_field_names() {
+                let spec = sample_set(field);
+                let got = resolve_mark_style(Some(&spec), &theme, &mark);
+                match (mark.style_field(field), got) {
+                    (Some(_), Ok(_)) => {}
+                    (None, Err(RenderError::MarkSizeNotDrawn { .. })) if field == "size" => refused += 1,
+                    (None, Err(RenderError::MarkStyleNotDrawn { mark: m, field: f })) => {
+                        assert_eq!((m, f), (mark, field));
+                        refused += 1;
+                    }
+                    (entry, got) => panic!("{mark:?}.{field}: table says {entry:?}, resolve gave {got:?}"),
+                }
+            }
+        }
+        assert!(refused > 0, "vacuity control: some mark must refuse some field");
     }
 
     // ── Batch E Task 9: clip escape (`mark_function(clip=False)`) ──────────

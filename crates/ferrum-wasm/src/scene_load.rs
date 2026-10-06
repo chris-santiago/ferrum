@@ -192,6 +192,19 @@ pub struct TextElementData {
     /// rescale affine by explicit slot instead of the column-frequency
     /// heuristic it replaces.
     pub slot: Option<usize>,
+    /// The mark batch this text draws in, when that batch blends
+    /// additively: the page's text overlay draws each such batch in its own
+    /// screen-blended layer. `None` for chrome text and for the text of a
+    /// batch that does not blend.
+    pub blend_batch: Option<BlendedBatch>,
+}
+
+/// A mark batch that blends additively, by its panel and its index within
+/// `panel.marks`: the key the text overlay groups that batch's text under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlendedBatch {
+    pub panel_id: usize,
+    pub batch_idx: usize,
 }
 
 /// A verbatim SVG fragment collected from `SceneNode::Raw`.
@@ -217,6 +230,9 @@ pub struct ImageQuad {
     pub data: Vec<u8>,
     pub img_width: u32,
     pub img_height: u32,
+    /// Draw with the additive-blend textured pipeline: the owning mark
+    /// batch's blend. `false` for an image outside a mark batch.
+    pub additive: bool,
 }
 
 /// Per-batch metadata extracted from the packed binary sidecar.
@@ -460,6 +476,9 @@ pub struct MarkMeshPanel {
     /// copied from the owning `MarkBatch::y_slot`. `0` = the primary/left-axis
     /// scale — the byte-stable default for every single-y chart.
     pub y_slot: usize,
+    /// Draw this slice with the additive-blend mesh pipeline, copied from the
+    /// owning batch's blend the way `y_slot` is.
+    pub additive: bool,
 }
 
 /// Accumulator for one full scene-load pass.
@@ -549,7 +568,8 @@ impl SceneCollector {
 
     /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
     /// polygons, polylines) and immediately emit draw commands for any new
-    /// circle/rect instances, tagged with the batch they came from.
+    /// circle/rect instances, tagged with the batch they came from. Image
+    /// quads and text elements the nodes add take the batch's blend.
     pub fn collect_mark(
         &mut self,
         nodes: &[SceneNode],
@@ -557,6 +577,8 @@ impl SceneCollector {
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
     ) -> Result<(), TaperError> {
+        let first_image = self.images.len();
+        let first_text = self.texts.len();
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -568,6 +590,15 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         )?;
+        for image in &mut self.images[first_image..] {
+            image.additive = target.additive;
+        }
+        let blend_batch = target
+            .additive
+            .then_some(BlendedBatch { panel_id: target.panel_id, batch_idx: target.batch_idx });
+        for text in &mut self.texts[first_text..] {
+            text.blend_batch = blend_batch;
+        }
         self.emit(Some(target));
         Ok(())
     }
@@ -633,21 +664,21 @@ impl SceneCollector {
         self.prev_r = new_r;
     }
 
-    /// Record the mark-mesh index range for one panel.
+    /// Record the mark-mesh index range one mark batch contributed.
     ///
-    /// Call this once per panel in the scene-graph walk: pass the mesh index
-    /// count *before* collecting any mark batches for the panel as
-    /// `index_start_before`, and the count *after* all batches have been
-    /// collected as `index_end_after`. If the panel contributed no mesh
-    /// geometry (e.g. a panel with only packed circle/rect batches), no entry
-    /// is recorded.
+    /// Pass the mesh index count *before* collecting the batch as
+    /// `index_start_before` and the count *after* as `index_end_after`. The
+    /// slice takes its panel, y-slot and blend from the batch's `target`, and
+    /// scissors to `plot_area` (a mesh slice always has a rect, so a
+    /// clip-exempt batch passes the full scene extent rather than
+    /// `target.plot_area`'s `None`). A batch that contributed no mesh
+    /// geometry (e.g. only circle/rect instances) records no entry.
     pub fn record_mark_mesh_panel(
         &mut self,
         index_start_before: u32,
         index_end_after: u32,
         plot_area: [f32; 4],
-        panel_id: usize,
-        y_slot: usize,
+        target: MarkDrawTarget,
     ) {
         let index_count = index_end_after - index_start_before;
         if index_count > 0 {
@@ -655,8 +686,9 @@ impl SceneCollector {
                 index_start: index_start_before,
                 index_count,
                 plot_area,
-                panel_id,
-                y_slot,
+                panel_id: target.panel_id,
+                y_slot: target.y_slot,
+                additive: target.additive,
             });
         }
     }
@@ -1305,13 +1337,7 @@ fn collect_panel_marks(
             let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
             collector.collect_mark(&scaled_nodes, target, batch.stroke_cap, batch.stroke_join)?;
             let mesh_end = collector.mesh.indices.len() as u32;
-            collector.record_mark_mesh_panel(
-                mesh_start,
-                mesh_end,
-                batch_mesh_plot_area_arr,
-                panel_idx,
-                batch.y_slot,
-            );
+            collector.record_mark_mesh_panel(mesh_start, mesh_end, batch_mesh_plot_area_arr, target);
         }
     }
     Ok(())
@@ -1847,6 +1873,7 @@ fn collect_nodes(
                     content: content.clone(),
                     style: style.clone(),
                     slot: *slot,
+                    blend_batch: None,
                 });
             }
             SceneNode::Image { x, y, w, h, data } => match data {
@@ -1923,6 +1950,7 @@ fn decode_image_quad(x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) -> Option
         data: rgba,
         img_width: info.width,
         img_height: info.height,
+        additive: false,
     })
 }
 
@@ -2148,9 +2176,11 @@ pub fn tooltip_field_value(tooltip_bytes: &[u8], row_idx: usize, field: &str) ->
 
 /// Returns `true` when a mark batch should use the additive blend pipeline.
 ///
-/// Only `BlendMode::Additive` raster batches use additive compositing; all
-/// other batches use the standard alpha pipeline. This pure-logic helper is
-/// tested on the host; the actual pipeline selection in `render.rs` calls it.
+/// Every `BlendMode::Additive` batch, of any mark kind, composites
+/// additively; every other batch uses the standard alpha pipeline.
+/// `collect_panel_marks` reads it once per batch into the batch's
+/// [`MarkDrawTarget`], from which every draw command, mark-mesh slice, image
+/// quad and overlay text element of the batch takes its blend.
 pub fn batch_uses_additive_blend(blend: BlendMode) -> bool {
     matches!(blend, BlendMode::Additive)
 }
@@ -5588,6 +5618,133 @@ mod tests {
         assert_eq!(rect_cmds[0].instance_count, 1);
     }
 
+    /// A 1x1 opaque PNG, for an inline image node the loader decodes.
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[200, 40, 40, 255]).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    /// One node of every `SceneNode` variant the GPU draws, as instances,
+    /// mark mesh or a textured quad.
+    fn one_node_of_every_gpu_kind() -> Vec<SceneNode> {
+        let fill = FillStroke {
+            fill: Some(Color::rgb(200, 40, 40)),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let stroke = StrokeStyle {
+            color: Some(Color::rgb(40, 40, 200)),
+            width: 2.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+        vec![
+            SceneNode::Rect { x: 5.0, y: 5.0, w: 10.0, h: 10.0, style: fill.clone(), corner_radius: 0.0 },
+            SceneNode::Circle { cx: 30.0, cy: 30.0, r: 5.0, style: fill.clone() },
+            SceneNode::Line { x1: 0.0, y1: 50.0, x2: 90.0, y2: 50.0, style: stroke.clone() },
+            SceneNode::Path {
+                commands: vec![PathCmd::MoveTo { x: 0.0, y: 60.0 }, PathCmd::LineTo { x: 90.0, y: 70.0 }],
+                style: FillStroke { fill: None, stroke: Some(Color::rgb(40, 40, 200)), stroke_width: 2.0, ..fill.clone() },
+                closed: false,
+                widths: None,
+            },
+            SceneNode::Polygon { rings: vec![vec![[60.0, 5.0], [90.0, 5.0], [75.0, 30.0]]], style: fill },
+            SceneNode::Polyline { points: vec![(0.0, 80.0), (45.0, 90.0), (90.0, 80.0)], style: stroke, widths: None },
+            SceneNode::Image {
+                x: 40.0,
+                y: 5.0,
+                w: 10.0,
+                h: 10.0,
+                data: ImageData::Inline { bytes: one_pixel_png(), mime: ImageMime::Png },
+            },
+        ]
+    }
+
+    /// The fixture's GPU variant names. The match is exhaustive, so a new
+    /// `SceneNode` variant must say here whether the GPU draws it.
+    fn gpu_kind_name(node: &SceneNode) -> Option<&'static str> {
+        match node {
+            SceneNode::Rect { .. } => Some("rect"),
+            SceneNode::Circle { .. } => Some("circle"),
+            SceneNode::Line { .. } => Some("line"),
+            SceneNode::Path { .. } => Some("path"),
+            SceneNode::Polygon { .. } => Some("polygon"),
+            SceneNode::Polyline { .. } => Some("polyline"),
+            SceneNode::Image { .. } => Some("image"),
+            SceneNode::Text { .. } | SceneNode::Raw { .. } | SceneNode::Group { .. } => None,
+        }
+    }
+
+    /// Every primitive a mark batch draws (circle and rect draw commands,
+    /// mark-mesh slices, image quads, and the text the page's overlay draws)
+    /// draws with that batch's blend, so an additive batch is additive on
+    /// every pipeline and in the overlay, and a normal batch beside it (the
+    /// vacuity control) is not. The overlay JSON names the blended batch on
+    /// its text and nothing on the normal batch's.
+    #[test]
+    fn every_primitive_of_a_batch_draws_with_the_batch_blend() {
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
+        let mut nodes = one_node_of_every_gpu_kind();
+        let kinds: std::collections::BTreeSet<&str> = nodes.iter().filter_map(gpu_kind_name).collect();
+        assert_eq!(kinds.len(), nodes.len(), "one node per GPU kind");
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        nodes.push(SceneNode::Text { x: 50.0, y: 50.0, content: "mark text".into(), style, slot: None });
+        let mut scene = make_blend_test_scene();
+        scene.panels[0].marks = [BlendMode::Additive, BlendMode::Normal]
+            .into_iter()
+            .map(|blend| MarkBatch { kind: MarkBatchKind::Point, nodes: nodes.clone(), blend, ..MarkBatch::default() })
+            .collect();
+        let data = load_scene(&scene).unwrap();
+        let want = [true, false];
+
+        for kind in [DrawKind::Circle, DrawKind::Rect] {
+            let by_batch: Vec<(Option<usize>, bool)> = data
+                .draw_commands
+                .iter()
+                .filter(|c| c.is_mark && c.kind == kind)
+                .map(|c| (c.batch_idx, c.additive))
+                .collect();
+            assert_eq!(by_batch, vec![(Some(0), true), (Some(1), false)], "{kind:?} draw commands");
+        }
+        let mesh: Vec<bool> = data.mark_mesh_panels.iter().map(|m| m.additive).collect();
+        assert_eq!(mesh, want, "mark-mesh slices");
+        let images: Vec<bool> = data.image_quads.iter().map(|q| q.additive).collect();
+        assert_eq!(images, want, "image quads");
+        let texts: Vec<&TextElementData> = data.text_elements.iter().filter(|t| t.content == "mark text").collect();
+        let blend_batches: Vec<Option<BlendedBatch>> = texts.iter().map(|t| t.blend_batch).collect();
+        assert_eq!(blend_batches, [Some(BlendedBatch { panel_id: 0, batch_idx: 0 }), None], "text elements");
+        let blend_json: Vec<Option<serde_json::Value>> =
+            texts.iter().map(|t| crate::text_json::text_element_to_json(t).get("blend").cloned()).collect();
+        assert_eq!(
+            blend_json,
+            [Some(serde_json::json!({"mode": "additive", "panel": 0, "batch": 0})), None],
+            "overlay JSON"
+        );
+    }
+
     // ── B3: stroke color uses raw alpha, no opacity baked ─────────────
 
     #[test]
@@ -6838,16 +6995,17 @@ mod tests {
     #[test]
     fn record_mark_mesh_panel_accumulates_and_drops_zeros() {
         let mut collector = SceneCollector::new();
+        let target = |panel_id| MarkDrawTarget { panel_id, batch_idx: 0, y_slot: 0, plot_area: None, additive: false };
 
         // Record a non-zero range for panel 0.
-        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0], 0, 0);
+        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0], target(0));
         assert_eq!(collector.mark_mesh_panels.len(), 1);
         assert_eq!(collector.mark_mesh_panels[0].index_start, 0);
         assert_eq!(collector.mark_mesh_panels[0].index_count, 30);
         assert_eq!(collector.mark_mesh_panels[0].panel_id, 0);
 
         // Record a zero-count range — must be dropped.
-        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], 1, 0);
+        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], target(1));
         assert_eq!(
             collector.mark_mesh_panels.len(),
             1,
@@ -6855,7 +7013,7 @@ mod tests {
         );
 
         // Record a second non-zero range that follows the first (panel 2).
-        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0], 2, 0);
+        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0], target(2));
         assert_eq!(collector.mark_mesh_panels.len(), 2);
         assert_eq!(collector.mark_mesh_panels[1].index_start, 30);
         assert_eq!(collector.mark_mesh_panels[1].index_count, 25);

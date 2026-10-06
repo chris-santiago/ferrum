@@ -14,6 +14,8 @@ that already populated the target wins over a later one (the later one then sees
 
 from __future__ import annotations
 
+from ferrum._layer import layer_draws, marks_drawing
+
 # The alias TABLE itself lives in the sibling routing module
 # (``_channel_policy``, the zero-import leaf that owns every other
 # per-channel-name disposition) and is re-exported here, where the loop that
@@ -29,12 +31,6 @@ from ferrum.encoding._channel_policy import (  # noqa: F401  (re-exported)
     _ENCODING_ALIASES,
     _EncodingAlias,
 )
-
-# Marks whose Rust builder reads mark_style.group.detail for per-group
-# splitting (crates/ferrum-core/src/render/draw.rs, area.rs, polygon.rs;
-# channels.rs's build_color_detail_groups). Every other mark ignores the
-# field entirely, so `detail` on those marks is warn_once'd after aliasing.
-_DETAIL_CONSUMING_MARKS = frozenset(("line", "area", "polygon"))
 
 
 def _channel_field(ch: object) -> str | None:
@@ -174,8 +170,10 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
     (2026-08-27 P1 remediation) a layer's own ``detail`` was dropped
     entirely because only the chart-level alias pass ran.
 
-    Warns once when *mark* is not one of the Rust builders that read
-    ``mark_style.group.detail`` (``_DETAIL_CONSUMING_MARKS``); no-op when
+    Only a mark whose row of Rust's style table draws ``detail``
+    (:func:`ferrum._layer.layer_draws`) gets it written into *mk*; any other
+    mark warns once instead, and its style is left without the field the
+    renderer would refuse. No-op when
     ``detail`` is absent or carries no concrete field -- string-valued
     (``Layer(encoding={"detail": "g"})``) and ``ChannelBase``-valued
     ``detail`` are both concrete fields, handled identically via
@@ -192,21 +190,38 @@ def alias_detail_channel(enc: dict, mk: dict, mark: str | None) -> dict:
     field = _channel_field(detail_ch)
     if field is None:
         return mk
-    mk.setdefault("detail", field)
-    if mark not in _DETAIL_CONSUMING_MARKS:
+    if layer_draws(mark, "detail"):
+        mk.setdefault("detail", field)
+    else:
         _warn_detail_ignored(mark)
     return mk
+
+
+def _prose_list(items: list[str]) -> str:
+    """Join *items* as English prose: "", "a", "a and b", or "a, b, and c"."""
+    if not items:
+        return ""
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 def _warn_detail_ignored(mark: str | None) -> None:
     from ferrum._warn import warn_once
 
+    drawers = [f"mark_{m}" for m in marks_drawing("detail")]
+    if not drawers:
+        clause = "no mark reads"
+    elif len(drawers) == 1:
+        clause = f"only {drawers[0]} reads"
+    else:
+        clause = f"only {_prose_list(drawers)} read"
     warn_once(
         "encoding",
         "detail",
         message=(
             f"encode(detail=...) is accepted but ignored by mark_{mark or 'point'}; "
-            "only mark_line, mark_area, and mark_polygon read the detail "
+            f"{clause} the detail "
             "channel for per-group splitting."
         ),
     )
@@ -219,14 +234,15 @@ def layered_chart_detail(detail_ch: object, layer_marks: list) -> list[object | 
     serialization (``color`` is inherited the same way, by Rust). ``detail`` is
     mark style on the wire, not an encoding Rust inherits, so Python hands it
     to each layer: the returned list, aligned with *layer_marks*, holds the
-    channel for every line/area/polygon layer and ``None`` for the rest. A
+    channel for every layer whose mark draws ``detail`` (Rust's style table)
+    and ``None`` for the rest. A
     layer's own ``detail`` still wins (``_build_layers_list`` only fills an
     absent one). When no layer's mark reads ``detail``, the flat chart's
     "accepted but ignored" warning fires once and nothing is inherited.
     """
     if _channel_field(detail_ch) is None:
         return [None] * len(layer_marks)
-    inherits = [mark in _DETAIL_CONSUMING_MARKS for mark in layer_marks]
+    inherits = [layer_draws(mark, "detail") for mark in layer_marks]
     if not any(inherits):
         _warn_detail_ignored(layer_marks[0] if layer_marks else None)
     return [detail_ch if inherit else None for inherit in inherits]

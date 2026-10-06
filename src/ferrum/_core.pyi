@@ -75,8 +75,8 @@ class EncodingSpec:
 #    # every key optional, each omitted when unset so a spec that uses none
 #    # serializes exactly as a spec predating it:
 #    "mark_style"?: dict, "transforms"?: list, "data_source"?: str,
-#    "position"?: dict, "blend"?: str, "name"?: str, "independent_y"?: bool,
-#    "coord"?: dict}
+#    "position"?: dict, "name"?: str, "independent_y"?: bool, "coord"?: dict}
+# A layer refuses any other key. Its blend mode is `mark_style["blend"]`.
 # `coord` (per-layer coordinate system, GH #172(1)) takes the same
 # internally-tagged `{"kind": ...}` dict the chart-level `coord` accepts, and
 # places THIS layer's marks: a projection (`{"kind": "polar"|"geo"}`) or the
@@ -998,6 +998,26 @@ def numeric_columns(schema: Any, entry: str) -> list[str]: ...
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
 # at declaration instead of mirroring the list as a Python literal.
 def interpolate_accepted_values() -> list[str]: ...
+
+# Rust's per-mark style table (``Mark::style_fields``): each ``mark_style``
+# field ``mark`` draws, mapped to the input it needs to draw (a
+# ``StyleNeed`` name such as ``"stroke"``), or ``None`` when it draws
+# whenever set. Raises ``ValueError`` for a name that is no primitive mark.
+def mark_style_fields(mark: str) -> dict[str, Optional[str]]: ...
+
+# The marks ``mark_style_fields`` has a row for, in table order, so Python
+# reads its mark population from here rather than keeping a list of its own.
+def style_table_marks() -> list[str]: ...
+
+# The ``blend=`` vocabulary (``BlendMode``, with its ``"alpha"`` alias of
+# ``"normal"``), in Rust's order.
+def blend_accepted_values() -> list[str]: ...
+
+# The ``stroke_cap=`` vocabulary, in Rust's order.
+def stroke_cap_accepted_values() -> list[str]: ...
+
+# The ``stroke_join=`` vocabulary, in Rust's order.
+def stroke_join_accepted_values() -> list[str]: ...
 
 # #137: the ``Smooth(x_estimator=)`` vocabulary, published from
 # Rust's ``XEstimator`` (a declared subset of the aggregate vocabulary, in its

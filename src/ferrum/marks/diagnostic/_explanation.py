@@ -12,11 +12,10 @@ from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
 )
+from ferrum.marks.base import ORIENT_CHOICES
 
 if TYPE_CHECKING:
     from ferrum.encoding.base import ChannelBase
-
-_ORIENT_CHOICES = ("horizontal", "vertical")
 
 # --- 10d: feature importance / SHAP / PDP -----------------------------
 
@@ -58,7 +57,7 @@ def desugar_importance(
     # at the desugar layer.
     del top_k
     user_kw = _validate("importance", mark_kwargs)
-    validate_choice("mark_importance", "orient", orient, _ORIENT_CHOICES)
+    validate_choice("mark_importance", "orient", orient, ORIENT_CHOICES)
 
     if orient == "horizontal":
         value_axis, group_axis, err_axis2 = "x", "y", "x2"
@@ -91,7 +90,7 @@ def desugar_importance(
         }
         layers.append(_Layer(name="errorbar", mark="rule", encoding=err_enc))
 
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("importance", layers, user_kw))
 
 
 register_layer_names("importance", frozenset({"bar", "errorbar"}))
@@ -178,7 +177,7 @@ def desugar_shap_beeswarm(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("shap_beeswarm", layers, user_kw))
 
 
 register_layer_names("shap_beeswarm", frozenset({"point", "reference"}))
@@ -213,7 +212,7 @@ def desugar_shap_bar(
     # close-out); informational at the desugar layer.
     del max_display
     user_kw = _validate("shap_bar", mark_kwargs)
-    validate_choice("mark_shap_bar", "orient", orient, _ORIENT_CHOICES)
+    validate_choice("mark_shap_bar", "orient", orient, ORIENT_CHOICES)
 
     if orient == "horizontal":
         value_axis, group_axis = "x", "y"
@@ -237,7 +236,7 @@ def desugar_shap_bar(
     if color_field is not None:
         bar_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="bar", mark="bar", encoding=bar_enc)]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("shap_bar", layers, user_kw))
 
 
 register_layer_names("shap_bar", frozenset({"bar"}))
@@ -297,7 +296,7 @@ def desugar_shap_waterfall(
             },
         ),
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("shap_waterfall", layers, user_kw))
 
 
 register_layer_names("shap_waterfall", frozenset({"bar"}))
@@ -361,7 +360,7 @@ def desugar_pdp(
         if color_field is not None:
             line_enc["color"] = nominal_color_channel(color_field)
         layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
-        return MarkDesugarResult(layers=_apply(layers, user_kw))
+        return MarkDesugarResult(layers=_apply("pdp", layers, user_kw))
 
     from ferrum.encoding import Y as _Y
 
@@ -386,7 +385,7 @@ def desugar_pdp(
                 },
             ),
         ]
-        return MarkDesugarResult(layers=_apply(layers, user_kw))
+        return MarkDesugarResult(layers=_apply("pdp", layers, user_kw))
 
     # kind == "both" (validated above)
     # ICE layer: y = _pd_ice_value (null on average row → skipped).
@@ -421,7 +420,7 @@ def desugar_pdp(
             mark_kwargs={"stroke_width": 2.5},
         ),
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("pdp", layers, user_kw))
 
 
 register_layer_names("pdp", frozenset({"line", "ice", "average"}))

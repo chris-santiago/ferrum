@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Sequence
 
+from ferrum._core import blend_accepted_values
 from ferrum._layer import _PRIMITIVE_MARKS
-from ferrum._validate import validate_choice
+from ferrum._validate import validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
+from ferrum.marks.base import ORIENT_CHOICES
 from ferrum.marks.composite import _MISSING
 from ferrum.marks.statistical import (
     _resolve_density,
@@ -22,8 +24,6 @@ from ferrum.marks.statistical import (
 
 if TYPE_CHECKING:
     import polars as pl
-
-_ORIENT_CHOICES = ("horizontal", "vertical")
 
 
 def _mark_raster_field_schema(data: Any) -> "pl.Schema | None":
@@ -85,7 +85,7 @@ def _normalize_orient(func_name: str, orient: str | None, horizontal: bool) -> b
     the validator's error-message prefix.
     """
     if orient is not None:
-        validate_choice(func_name, "orient", orient, _ORIENT_CHOICES)
+        validate_choice(func_name, "orient", orient, ORIENT_CHOICES)
         return orient == "horizontal"
     return bool(horizontal)
 
@@ -105,7 +105,7 @@ def _normalize_orient_to_orientation(func_name: str, kwargs: dict) -> dict:
     if "orient" not in kwargs:
         return kwargs
     orient_val = kwargs["orient"]
-    validate_choice(func_name, "orient", orient_val, _ORIENT_CHOICES)
+    validate_choice(func_name, "orient", orient_val, ORIENT_CHOICES)
     new_kwargs = {k: v for k, v in kwargs.items() if k != "orient"}
     new_kwargs["orientation"] = orient_val
     return new_kwargs
@@ -1103,7 +1103,12 @@ class StatisticalMarksMixin:
             rendered plot area).  Pass an integer, or a ``(nx, ny)`` tuple,
             for an explicit grid size unaffected by chart dimensions.
         blend : str, optional
-            Alpha-compositing blend mode.  Default is ``"alpha"``.
+            Blend mode of the image layer, one of
+            ``ferrum._core.blend_accepted_values()``; default ``"alpha"``,
+            an alias of ``"normal"``.  ``"additive"`` adds the image's
+            colors to what is drawn beneath it (static SVG approximates it
+            with ``mix-blend-mode:screen``).  Any other value raises
+            ``ValueError`` at this call.
         min_count : int or None, optional
             Minimum count threshold; pixels below this are rendered transparent.
             ``None`` (default) shows all pixels.
@@ -1129,7 +1134,7 @@ class StatisticalMarksMixin:
             ``transform_registry("raster")["methods"]``, or if ``aggregate``
             is in ``transform_registry("raster")["methods_needing_field"]``
             and ``field`` is not given -- both checked eagerly at this call
-            (#136).
+            (#136) -- or if ``blend`` is outside its vocabulary.
 
         Examples
         --------
@@ -1147,9 +1152,11 @@ class StatisticalMarksMixin:
         from ferrum.marks.heavy_stat import desugar_raster
         from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
-        # The aggregate/field pair is refused here, at the call, not at render.
+        # The aggregate/field pair and the blend mode are refused here, at the
+        # call, not at render.
         validate_aggregate("raster", "mark_raster", aggregate)
         require_aggregate_field("raster", "mark_raster", aggregate, field)
+        validate_optional_vocabulary("mark_raster", "blend", blend, blend_accepted_values())
 
         # #136 (close-remediation): when the Chart already carries data
         # (Chart(df).mark_raster(...), not a deferred-data chart), field=
@@ -1450,12 +1457,11 @@ class StatisticalMarksMixin:
             from ferrum.position import validate_position_eligibility
 
             validate_position_eligibility("function", position)
-        from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws
+        from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws
         from ferrum.marks.heavy_stat import desugar_function
 
         style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
-        if "size" in style:
-            refuse_size_no_layer_draws("mark_function", style["size"], ["line"])
+        refuse_style_no_layer_draws("mark_function", style, ["line"])
 
         # Infer parent x data for domain resolution.
         # For multi-layer charts, try the first layer's data; for single-chart,

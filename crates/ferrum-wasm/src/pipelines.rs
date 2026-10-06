@@ -5,10 +5,15 @@ pub struct RenderPipelines {
     pub instanced_rect: RenderPipeline,
     pub mesh: RenderPipeline,
     pub textured: RenderPipeline,
-    /// Second pipeline with additive blend state (src + dst, no alpha attenuation).
-    /// Selected per-batch when `MarkBatch.blend == BlendMode::Additive`.
+    /// The additive-blend twin of each mark pipeline ([`additive_blend_state`]:
+    /// the source color scaled by its alpha, added to the destination),
+    /// selected per batch when `MarkBatch.blend == BlendMode::Additive`:
+    /// instanced circles and rects per draw command, mesh per mark-mesh slice,
+    /// textured per image quad.
     pub instanced_circle_additive: RenderPipeline,
     pub instanced_rect_additive: RenderPipeline,
+    pub mesh_additive: RenderPipeline,
+    pub textured_additive: RenderPipeline,
     pub uniform_bgl: wgpu::BindGroupLayout,
     pub texture_bgl: wgpu::BindGroupLayout,
 }
@@ -125,6 +130,23 @@ impl RenderPipelines {
             &rect_instance_layout(),
             sample_count,
         );
+        let mesh_additive = build_mesh_pipeline(
+            device,
+            &mesh_shader,
+            format,
+            &uniform_bgl,
+            additive_blend,
+            sample_count,
+        );
+        let textured_additive = build_textured_pipeline(
+            device,
+            &textured_shader,
+            format,
+            &uniform_bgl,
+            &texture_bgl,
+            additive_blend,
+            sample_count,
+        );
 
         Self {
             instanced_circle,
@@ -133,6 +155,8 @@ impl RenderPipelines {
             textured,
             instanced_circle_additive,
             instanced_rect_additive,
+            mesh_additive,
+            textured_additive,
             uniform_bgl,
             texture_bgl,
         }
@@ -266,23 +290,24 @@ fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-/// Additive blend state: src + dst with no alpha attenuation.
+/// Additive blend state: the source color scaled by its alpha, added to the
+/// destination color, with the destination alpha left as it is.
 ///
-/// Used for `mark_raster(blend="additive")` GPU compositing. Per-batch
-/// pipeline selection: raster batches with `BlendMode::Additive` use this
-/// pipeline; all others use `wgpu::BlendState::ALPHA_BLENDING`.
-///
-/// Spec §4 / §5 / §8: implemented as a second `wgpu::RenderPipeline` —
-/// NOT a post-process pass, NOT a fragment shader hack.
+/// The shaders write straight (non-premultiplied) color with the mark's
+/// opacity in alpha, so scaling by source alpha makes `opacity < 1`
+/// attenuate the added color the way the static SVG's group opacity
+/// attenuates its screened color. Selected per batch for every mark whose
+/// `MarkBatch.blend` is `BlendMode::Additive`; every other batch uses
+/// `wgpu::BlendState::ALPHA_BLENDING`.
 pub fn additive_blend_state() -> wgpu::BlendState {
     wgpu::BlendState {
         color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
+            src_factor: wgpu::BlendFactor::SrcAlpha,
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         },
         alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
+            src_factor: wgpu::BlendFactor::Zero,
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         },

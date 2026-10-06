@@ -31,6 +31,7 @@ from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
+from ferrum.marks.base import ORIENT_CHOICES
 from ferrum.plots._helpers import (
     _compose_compare,
     _figure_entry,
@@ -55,7 +56,6 @@ from ferrum.plots._helpers import (
 #: ``Chart.mark_shap_beeswarm(order=)`` -- see that module for the
 #: 2026-08-27 close-out note on the sibling-drift finding this resolves.
 _SHAP_ORDER_VALUES: frozenset[str] = frozenset(SHAP_ORDER_VALUES)
-_ORIENT_VALUES: frozenset[str] = frozenset({"horizontal", "vertical"})
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +950,7 @@ def importance_chart(
     model. Error rules and value labels dodge alongside their bars. The
     single-model path (no ``compare=``) is unchanged.
     """
-    validate_choice("importance_chart", "orient", orient, _ORIENT_VALUES)
+    validate_choice("importance_chart", "orient", orient, ORIENT_CHOICES)
     _require_positive("importance_chart", "top_k", top_k)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(

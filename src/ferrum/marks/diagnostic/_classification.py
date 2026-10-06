@@ -88,7 +88,7 @@ def desugar_roc(
                 mark_kwargs={"align": "left"},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("roc", layers, user_kw))
 
 
 register_layer_names("roc", frozenset({"line", "reference", "auc_label"}))
@@ -201,7 +201,7 @@ def desugar_pr(
                 mark_kwargs={"align": "left"},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("pr", layers, user_kw))
 
 
 register_layer_names("pr", frozenset({"line", "iso_line", "iso_label", "ap_label"}))
@@ -263,7 +263,7 @@ def desugar_calibration(
                 data_source="calibration_ref",
             )
         )
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply("calibration", layers, user_kw))
 
 
 register_layer_names("calibration", frozenset({"line", "reference"}))
@@ -292,7 +292,7 @@ def desugar_gain(
     if color_field is not None:
         line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("gain", layers, user_kw))
 
 
 register_layer_names("gain", frozenset({"line"}))
@@ -320,7 +320,7 @@ def desugar_lift(
     if color_field is not None:
         line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("lift", layers, user_kw))
 
 
 register_layer_names("lift", frozenset({"line"}))
@@ -420,7 +420,9 @@ def desugar_discrimination_threshold(
                 mark_kwargs={"align": "left", "dx": 4, "dy": -4},
             )
         )
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(
+        transforms=transforms, layers=_apply("discrimination_threshold", layers, user_kw)
+    )
 
 
 register_layer_names("discrimination_threshold", frozenset({"line", "threshold", "optimum_label"}))
@@ -479,7 +481,7 @@ def desugar_confusion(
                 encoding={"x": "predicted", "y": "actual", "text": "value_fmt"},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("confusion", layers, user_kw))
 
 
 register_layer_names("confusion", frozenset({"rect", "label"}))
@@ -543,7 +545,7 @@ def desugar_class_prediction_error(
                 position=text_stack,
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("class_prediction_error", layers, user_kw))
 
 
 register_layer_names("class_prediction_error", frozenset({"bar", "label"}))

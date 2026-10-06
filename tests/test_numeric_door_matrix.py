@@ -44,12 +44,13 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import mark_integer_kwargs, mark_numeric_kwargs
+from ferrum._layer import drawn_style_fields
 from ferrum.marks.base import (
     _INTEGER_MARK_KWARGS,
     _REAL_MARK_KWARGS,
     _mark_kwarg_error,
-    MARK_HONORED_KWARGS,
     MarkBase,
+    honored_kwargs,
 )
 from ferrum.plots.distribution import _CATPLOT_AGGREGATING_KINDS, _CATPLOT_VALID_KINDS
 
@@ -520,26 +521,22 @@ def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> Non
     coerced at that mark's door by the contract of its wire type: ``np.int64``
     is stored as a builtin ``int`` and a non-number refuses in the door's
     voice; a fraction is kept by a real-number field and refused by an
-    unsigned-integer one (the ``mark_integer_kwargs()`` subset). A published
-    name no mark honors (a wire field set by the renderer, not a ``mark_*``
-    kwarg) is refused as an unknown kwarg by every mark."""
+    unsigned-integer one (the ``mark_integer_kwargs()`` subset). Every
+    published name is drawn by some mark, so each has a door."""
     published = mark_numeric_kwargs()
     integer = mark_integer_kwargs()
     assert published, "the binding must publish the numeric fields"
     assert integer and set(integer) < set(published)
-    honored = set().union(*MARK_HONORED_KWARGS.values())
-    assert _INTEGER_MARK_KWARGS == frozenset(integer) & honored
-    assert _REAL_MARK_KWARGS == (frozenset(published) & honored) - frozenset(integer)
-    honoring = {
-        name: [m for m, honored in MARK_HONORED_KWARGS.items() if name in honored]
-        for name in published
-    }
-    assert any(honoring.values())
+    assert _INTEGER_MARK_KWARGS == frozenset(integer)
+    assert _REAL_MARK_KWARGS == frozenset(published) - frozenset(integer)
+    method_marks = sorted(
+        name[len("mark_") :]
+        for name in dir(fm.Chart)
+        if name.startswith("mark_") and drawn_style_fields(name[len("mark_") :]) is not None
+    )
+    honoring = {name: [m for m in method_marks if name in honored_kwargs(m)] for name in published}
+    assert all(honoring.values()), honoring
     for name, marks in honoring.items():
-        if not marks:
-            with pytest.raises(ValueError, match=f"unknown keyword argument '{name}'"):
-                MarkBase("point", **{name: 2})
-            continue
         mark = marks[0]
         stored = MarkBase(mark, **{name: np.int64(2)}).kwargs[name]
         assert stored == 2 and type(stored) is int, (name, stored)
@@ -560,13 +557,15 @@ def test_every_published_numeric_mark_kwarg_is_coerced_at_the_mark_door() -> Non
 def test_an_unhonored_kwarg_is_refused_as_unhonored_before_its_value_is_judged() -> None:
     """A kwarg the mark does not honor is refused as not honored whatever its
     value, not as a malformed value the mark would never use."""
-    assert "limit" not in MARK_HONORED_KWARGS["point"]
+    assert "limit" not in honored_kwargs("point")
     with pytest.raises(ValueError) as by_value:
         MarkBase("point", limit="x")
     with pytest.raises(ValueError) as by_name:
         MarkBase("point", limit=2)
     assert str(by_value.value) == str(by_name.value)
-    assert str(by_value.value) == _mark_kwarg_error("point", "limit")
+    assert str(by_value.value) == _mark_kwarg_error(
+        "point", "limit", honored_kwargs("point"), entry="mark_point"
+    )
 
 
 # --- stored and wire types --------------------------------------------------------

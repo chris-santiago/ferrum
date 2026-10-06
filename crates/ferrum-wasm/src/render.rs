@@ -8,6 +8,8 @@ use crate::scene_load::{DrawCommand, DrawKind, MarkMeshPanel, SceneData};
 struct ImageGpu {
     vertex_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Draw with the additive-blend textured pipeline (`ImageQuad::additive`).
+    additive: bool,
 }
 
 /// One per-panel mark-transform uniform slot: a small uniform buffer holding
@@ -472,6 +474,7 @@ fn upload_image_quad(
     Some(ImageGpu {
         vertex_buffer,
         bind_group,
+        additive: img.additive,
     })
 }
 
@@ -681,7 +684,7 @@ pub fn render_frame(
                     // Pass state does not persist across `ensure_scissor!`'s
                     // pass split, so pipeline/buffers are re-bound every
                     // iteration (a cheap no-op when the pass didn't change).
-                    pass.set_pipeline(&pipelines.mesh);
+                    pass.set_pipeline(if panel.additive { &pipelines.mesh_additive } else { &pipelines.mesh });
                     pass.set_vertex_buffer(0, vb.slice(..));
                     pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     // Bind this (panel, y-slot) pair's composed affine so a
@@ -702,7 +705,7 @@ pub fn render_frame(
         if !buffers.image_draws.is_empty() {
             ensure_scissor!(None::<[u32; 4]>);
             for img in &buffers.image_draws {
-                pass.set_pipeline(&pipelines.textured);
+                pass.set_pipeline(if img.additive { &pipelines.textured_additive } else { &pipelines.textured });
                 // Images (heatmap rasters) carry no panel association yet (W4); bind
                 // panel 0's slot-0 transform, matching the single-panel common case
                 // the former single mark uniform served.

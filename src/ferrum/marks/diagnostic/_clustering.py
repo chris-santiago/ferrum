@@ -62,7 +62,7 @@ def desugar_silhouette(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("silhouette", layers, user_kw))
 
 
 register_layer_names("silhouette", frozenset({"rect", "reference"}))
@@ -132,7 +132,7 @@ def desugar_pca_scree(
                 },
             ),
         ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("pca_scree", layers, user_kw))
 
 
 register_layer_names("pca_scree", frozenset({"bar", "cumulative"}))
@@ -237,7 +237,7 @@ def desugar_intercluster_distance(
                 mark_kwargs={"dy": label_dy},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("intercluster_distance", layers, user_kw))
 
 
 register_layer_names("intercluster_distance", frozenset({"point", "label"}))
@@ -286,7 +286,7 @@ def desugar_decision_boundary(
             mark_kwargs={"opacity": 0.5},
         ),
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("decision_boundary", layers, user_kw))
 
 
 register_layer_names("decision_boundary", frozenset({"rect"}))

@@ -299,7 +299,8 @@ def desugar_violin(
     Layers emitted
     --------------
     1. ``polygon`` — ``x=x_field``, ``y="violin_y"``,
-       ``mark_kwargs={"detail": "group_id", "fill_opacity": 0.5}``.
+       ``mark_kwargs={"detail": "group_id"}``, filled at the theme's area
+       opacity.
     2. Inner marks — vary by ``inner`` value (see below).
 
     Inner variants
@@ -343,8 +344,8 @@ def desugar_violin(
         encoding.  When set, the ``Violin`` (and inner ``BoxStats``) groupby
         becomes ``[x_field, color_field]`` so the KDE is computed per (x, hue)
         group, the violin body gains a ``color`` encoding, and the per-hue
-        violins are overlaid (distinct fills, ``fill_opacity=0.5``) within each
-        x-category band.  When ``None`` the output is byte-identical to a
+        violins are overlaid (distinct fills at the theme's area opacity)
+        within each x-category band.  When ``None`` the output is byte-identical to a
         single-group violin.
     color_sort : optional
         Explicit hue-level order for the color channel, injected by the
@@ -467,7 +468,7 @@ def desugar_violin(
         name="body",
         mark="polygon",
         encoding=body_encoding,
-        mark_kwargs={"detail": _violin_cols["group_id"], "fill_opacity": 0.5},
+        mark_kwargs={"detail": _violin_cols["group_id"]},
         data_source="violin",
     )
     if inner == "none":
@@ -767,7 +768,8 @@ def desugar_raster(
     Layers emitted
     --------------
     1. ``image`` — ``x=x_field``, ``y=y_field``,
-       ``mark_kwargs={"cmap": cmap}``.
+       ``mark_kwargs={"cmap": cmap, "blend": blend}``, each key only when
+       set (``blend`` only when it is not the default).
 
     Parameters
     ----------
@@ -794,9 +796,12 @@ def desugar_raster(
         scales with a pre-layout estimate of the chart's dimensions (not an
         exact match for the rendered plot area — see ``mark_raster``'s
         docstring).
-    blend : {"alpha", "additive"}, default "alpha"
-        Pixel-level blending mode.  ``"additive"`` renders with
-        ``mix-blend-mode:screen`` in the SVG output.
+    blend : str, default "alpha"
+        Pixel-level blending mode, one of
+        ``ferrum._core.blend_accepted_values()`` (``"alpha"`` is an alias
+        of ``"normal"``), checked by ``mark_raster``.  ``"additive"`` is
+        written to the image layer's mark style; the SVG output approximates
+        it with ``mix-blend-mode:screen``.
     min_count : int or None, default None
         Pixel cells with fewer than ``min_count`` points render as
         transparent.
@@ -842,6 +847,10 @@ def desugar_raster(
     mk: dict = {}
     if cmap is not None:
         mk["cmap"] = cmap
+    # The default blend, and an unset one, write nothing, so a raster that
+    # never asked for a blend serializes exactly as it always has.
+    if blend not in (None, "alpha"):
+        mk["blend"] = blend
     layers = [
         _Layer(
             name="image",
@@ -849,7 +858,6 @@ def desugar_raster(
             encoding={"x": x_field, "y": y_field},
             mark_kwargs=mk if mk else None,
             data_source="raster",
-            blend="additive" if blend == "additive" else None,
         )
     ]
     return MarkDesugarResult(transforms=transforms, layers=layers)

@@ -12,7 +12,13 @@ use serde::{Deserialize, Serialize};
 /// `LayerPrepared::from_chart_and_layer` reads `layer.mark_style` alone;
 /// `ChartSpec.mark_style` is read only by `LayerPrepared::from_chart_only`,
 /// the flat (no-`layers`) path. A layer's style is its own.
+///
+/// An unknown key refuses (`deny_unknown_fields`), as `ChartSpec`'s do: every
+/// producer, Python or a hand-built wire spec, reaches one table of what each
+/// mark draws ([`crate::spec::mark::Mark::style_fields`]) rather than having
+/// a misspelt or retired key dropped without a word.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MarkKwargsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
@@ -118,6 +124,31 @@ pub struct MarkKwargsSpec {
     /// byte-stable, matching every mark before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<bool>,
+    /// How this mark's batch composites over what is drawn beneath it
+    /// (`MarkBatch::blend`), a per-batch render bit like `clip`. `None`
+    /// resolves to `normal`, every batch's blend before this field existed.
+    /// `"alpha"` is accepted as an alias of `normal`; any other value outside
+    /// the vocabulary refuses as the struct is read.
+    ///
+    /// The outputs differ where a batch's own marks overlap. The interactive
+    /// renderer draws true additive per mark, the mark's color scaled by its
+    /// opacity, so overlapping marks of one batch add to each other as well
+    /// as to what is beneath. Static SVG approximates `additive` with
+    /// `mix-blend-mode:screen`, the nearest compositing mode SVG renderers
+    /// draw: it composites the batch as one group, its overlapping marks
+    /// drawn normal over each other, then screens that group over what is
+    /// beneath. Interactive text and label marks, drawn in the page's text
+    /// overlay rather than on the GPU, take the static approximation.
+    ///
+    /// The outputs also differ in hue below full opacity. The interactive
+    /// renderer adds in linear light (an sRGB target decodes, adds and
+    /// re-encodes), while static SVG screens in sRGB. At opacity 1 over a
+    /// background that does not share the mark's channels both reduce to the
+    /// same sum; at opacity < 1 both attenuate the added color, but the
+    /// linear-light sum of a partial color re-encodes brighter than the sRGB
+    /// screen of it, so the same mark reads a different shade on each output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<ferrum_scene::BlendMode>,
     // ── T5r cycle 2: zero (bar, layered zero-anchor opt-out) ─────────────────
     /// Per-layer mirror of the single-chart `mark_bar(zero=False)` /
     /// `MarkBase.zero_anchor()` concept, consulted by
@@ -238,6 +269,18 @@ pub(crate) fn mark_kwargs_field_names() -> &'static [&'static str] {
     fields
 }
 
+impl MarkKwargsSpec {
+    /// The wire keys this spec sets, in declaration order. Read off the
+    /// struct's own serialization, which omits every unset field, so the list
+    /// cannot drift from the struct.
+    pub(crate) fn set_field_names(&self) -> Vec<&'static str> {
+        let serde_json::Value::Object(set) = serde_json::to_value(self).unwrap_or_default() else {
+            return Vec::new();
+        };
+        mark_kwargs_field_names().iter().copied().filter(|name| set.contains_key(*name)).collect()
+    }
+}
+
 /// `ferrum._core.mark_kwargs_fields()`: [`mark_kwargs_field_names`], so
 /// Python reads the mark-kwargs wire keys instead of parsing this file.
 /// Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
@@ -333,6 +376,7 @@ mod tests {
             width: _,
             height: _,
             clip: _,
+            blend: _,
             zero: _,
             arrow: _,
             arrow_size: _,
@@ -414,9 +458,9 @@ mod tests {
     }
 
     /// Every traced name is a real field: a wrong-typed value under it is
-    /// refused, where an unknown key would be ignored (the struct does not
-    /// deny unknown fields). The reverse holds by construction: the list is
-    /// serde's own. `size`/`value_axis` bracket the declaration order.
+    /// refused for its type, where an unknown key is refused as unknown. The
+    /// reverse holds by construction: the list is serde's own.
+    /// `size`/`value_axis` bracket the declaration order.
     #[test]
     fn mark_kwargs_field_names_are_the_structs_fields() {
         let names = super::mark_kwargs_field_names();
@@ -424,13 +468,12 @@ mod tests {
         assert_eq!(names.last(), Some(&"value_axis"));
         for name in names {
             let json = serde_json::json!({ *name: [[[]]] });
-            assert!(
-                serde_json::from_value::<super::MarkKwargsSpec>(json).is_err(),
-                "'{name}' is not a MarkKwargsSpec field"
-            );
+            let err = serde_json::from_value::<super::MarkKwargsSpec>(json).unwrap_err().to_string();
+            assert!(!err.contains("unknown field"), "'{name}' is not a MarkKwargsSpec field: {err}");
         }
         let unknown = serde_json::json!({ "not_a_field": [[[]]] });
-        assert!(serde_json::from_value::<super::MarkKwargsSpec>(unknown).is_ok(), "control");
+        let err = serde_json::from_value::<super::MarkKwargsSpec>(unknown).unwrap_err().to_string();
+        assert!(err.contains("unknown field `not_a_field`"), "control: {err}");
         assert_eq!(super::mark_kwargs_fields(), names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
     }
 
@@ -581,6 +624,47 @@ mod tests {
         let m: MarkKwargsSpec = serde_json::from_str(json).unwrap();
         assert_eq!(m.zero, None);
         assert_eq!(m.size, Some(50.0));
+    }
+
+    // ── blend (a per-mark style field) ────────────────────────────────────────
+
+    /// `blend` round-trips as its canonical name, reads `"alpha"` as
+    /// `normal`, refuses a value outside the vocabulary, and is absent when
+    /// unset, so every spec without it serializes as before.
+    #[test]
+    fn mark_kwargs_blend_round_trips_aliases_alpha_and_refuses_unknown() {
+        use ferrum_scene::BlendMode;
+        let m = MarkKwargsSpec { blend: Some(BlendMode::Additive), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"blend":"additive"}"#);
+        assert_eq!(serde_json::from_str::<MarkKwargsSpec>(&json).unwrap(), m);
+        let alpha: MarkKwargsSpec = serde_json::from_str(r#"{"blend":"alpha"}"#).unwrap();
+        assert_eq!(alpha.blend, Some(BlendMode::Normal));
+        assert_eq!(serde_json::to_string(&alpha).unwrap(), r#"{"blend":"normal"}"#);
+        let err = serde_json::from_str::<MarkKwargsSpec>(r#"{"blend":"multiply"}"#).unwrap_err().to_string();
+        assert!(err.contains("unknown variant `multiply`"), "{err}");
+        assert!(!serde_json::to_string(&MarkKwargsSpec::default()).unwrap().contains("blend"));
+    }
+
+    /// An unknown key refuses, naming it, where it used to be dropped.
+    #[test]
+    fn mark_kwargs_refuses_an_unknown_key() {
+        let err = serde_json::from_str::<MarkKwargsSpec>(r#"{"fill_opacity":0.5}"#).unwrap_err().to_string();
+        assert!(err.contains("unknown field `fill_opacity`"), "{err}");
+    }
+
+    /// `set_field_names` lists exactly the set keys in declaration order,
+    /// a cleared dash (`[]`) and a `false` included.
+    #[test]
+    fn set_field_names_lists_the_set_keys_in_declaration_order() {
+        let m = MarkKwargsSpec {
+            arrow: Some(false),
+            fill: Some("#123456".into()),
+            stroke_dash: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(m.set_field_names(), vec!["fill", "stroke_dash", "arrow"]);
+        assert!(MarkKwargsSpec::default().set_field_names().is_empty());
     }
 
     // ── Batch H Task 1: arrow / arrow_size (segment) ─────────────────────────

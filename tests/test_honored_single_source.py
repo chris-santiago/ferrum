@@ -389,7 +389,7 @@ def test_fill_kept_silently_when_color_present():
 def test_detail_routes_into_mark_kwargs():
     reset_warnings()
     detail = fm.Detail("series")
-    _enc, mk = apply_channel_aliases({"detail": detail}, {})
+    _enc, mk = apply_channel_aliases({"detail": detail}, {}, "line")
     assert mk["detail"] == "series"
 
 

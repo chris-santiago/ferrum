@@ -11,14 +11,22 @@ from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
 from ferrum._core import (
+    blend_accepted_values,
     check_mark_size,
     interpolate_accepted_values,
     mark_integer_kwargs,
     mark_kwargs_fields,
     mark_numeric_kwargs,
+    stroke_cap_accepted_values,
+    stroke_join_accepted_values,
 )
 from ferrum._entry import EntryRefusal
-from ferrum._layer import _MARKS_DRAWING_CONSTANT_SIZE
+from ferrum._layer import (
+    _MARKS_DRAWING_CONSTANT_SIZE,
+    drawn_style_fields,
+    layer_draws,
+    layer_mark,
+)
 from ferrum._validate import (
     as_finite_real,
     coerce_finite_real,
@@ -30,14 +38,15 @@ from ferrum._validate import (
     validate_optional_vocabulary,
 )
 
-# Which marks draw a constant `size=`, and which values are legal, is one
-# Rust rule (`marks_drawing_constant_size`, `check_mark_size`) that every
-# layer also meets at render. Python runs it early, at each door that builds
-# a mark's kwargs, so a refusal surfaces at construction with the render
-# text. A composite mark accepts `size=` here (`_COMPOSITE_FALLBACK_KWARGS`)
-# and is checked once its desugar has run (`refuse_size_no_layer_draws`).
-# Single-sourced in ``_layer`` (see its module docstring); imported here
-# rather than re-derived so the two modules cannot drift.
+# Which style fields each mark draws is one Rust table
+# (`ferrum._core.mark_style_fields`), and which constant `size=` values are
+# legal is one Rust rule (`check_mark_size`); every layer meets both at
+# render. Python runs them early, at each door that builds a mark's kwargs,
+# so a refusal surfaces at construction. A composite mark takes every field
+# some mark draws (`layer_style_fields`) and is held to the marks it emitted
+# once its desugar has run (`refuse_style_no_layer_draws`). The table is
+# read through ``_layer`` (`drawn_style_fields`), so the two modules cannot
+# drift.
 
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
@@ -220,108 +229,92 @@ _VALID_POINT_SHAPES: frozenset[str] = frozenset(
 )
 
 
-# Core style fields honored by every mark (Phase 8a: "covers all kwargs
-# accepted by the 8 primitive mark_*() Python methods" —
-# crates/ferrum-core/src/spec/mark_style.rs's own module doc). ``blend``
-# (layer blend mode) joins this baseline: it is mark-agnostic, not owned by
-# any one mark family.
-_UNIVERSAL_MARK_KWARGS: frozenset[str] = frozenset(
-    [
-        "stroke",
-        "fill",
-        "opacity",
-        "corner_radius",
-        "stroke_width",
-        "stroke_dash",
-        "font_size",
-        "font_weight",
-        "align",
-        "baseline",
-        "dx",
-        "dy",
-        "angle",
-        "blend",
-    ]
-)
+#: Every ``mark_style`` wire field, in ``MarkKwargsSpec`` declaration order.
+#: Each is drawn by at least one primitive mark (Rust's style table,
+#: :func:`ferrum._core.mark_style_fields`).
+_STYLE_FIELDS: tuple[str, ...] = tuple(mark_kwargs_fields())
 
-# Per-primitive-mark additions, mirrored from MarkKwargsSpec's own
-# section-header comments in crates/ferrum-core/src/spec/mark_style.rs (each
-# field's doc comment names its owning mark(s)) plus ``orient``, which is
-# Python-only (consumed as a coord-flip flag, never forwarded to Rust — see
-# ``orient_coord_flip``) but still mark-specific (bar/tick).  Drift-pinned
-# against the Rust section headers by
-# ``tests/marks/test_mark_honored_kwargs.py``.
-_PRIMITIVE_MARK_EXTRAS: dict[str, frozenset[str]] = {
-    "point": frozenset({"filled", "shape"}),
-    "line": frozenset({"interpolate", "stroke_cap", "stroke_join"}),
-    "area": frozenset({"interpolate", "stroke_join", "line", "borders"}),
-    "bar": frozenset({"orient", "zero"}),
-    "rule": frozenset(),
-    "text": frozenset({"limit"}),
-    "tick": frozenset({"orient", "band_size"}),
-    "rect": frozenset({"band_size"}),
-    "segment": frozenset({"arrow", "arrow_size"}),
-    "arc": frozenset(),
-    "image": frozenset(),
-    "geoshape": frozenset(),
-    "label": frozenset({"leader_line"}),
+#: The style fields only ferrum's own code writes, each with the public call
+#: a caller sets it through. Rust reads them on the wire (a desugar or the
+#: channel aliasing writes them), but no style door takes them.
+_INTERNAL_STYLE_DOORS: dict[str, str] = {
+    "detail": "encode(detail=...)",
+    "clip": "mark_function(clip=...)",
+    "value_axis": "the orient= of the statistical mark that draws it",
 }
 
-#: Per-mark honored-kwarg vocabularies (#243), replacing the single flat
-#: allowlist that every mark used to share regardless of whether it actually
-#: honored a given field. Keyed by the 13 primitive mark names (the ones
-#: ``MarkBase``/``Chart._set_mark`` validate directly); ``size`` joins the
-#: marks Rust says draw it (:data:`_MARKS_DRAWING_CONSTANT_SIZE`). Every composite,
-#: statistical, and diagnostic mark name (``"boxplot"``, ``"density"``,
-#: ``"roc"``, …) reached through :func:`mark_honors` falls back to
-#: :data:`_COMPOSITE_FALLBACK_KWARGS`, not :data:`_UNIVERSAL_MARK_KWARGS` --
-#: see that fallback's own docstring for why ``size`` rejoins it there. A
-#: future composite mark that wants to honor some OTHER mark-specific field
-#: must add an explicit entry here rather than relying on the fallback.
-MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
-    mark: _UNIVERSAL_MARK_KWARGS
-    | extras
-    | (frozenset({"size"}) if mark in _MARKS_DRAWING_CONSTANT_SIZE else frozenset())
-    for mark, extras in _PRIMITIVE_MARK_EXTRAS.items()
+#: The kwargs a ``mark_<name>()`` method consumes itself rather than
+#: forwarding as style: ``orient="horizontal"`` flips the chart's coordinates
+#: (:meth:`MarkBase.orient_coord_flip`). Python-owned, because it describes
+#: Python's methods; every other door refuses it, naming the method.
+METHOD_ONLY_KWARGS: dict[str, frozenset[str]] = {
+    "bar": frozenset({"orient"}),
+    "tick": frozenset({"orient"}),
 }
 
-#: Fallback honored set for every mark name with no entry in
-#: :data:`MARK_HONORED_KWARGS` (every composite, statistical, and
-#: diagnostic mark -- ``"boxplot"``, ``"density"``, ``"roc"``, …). It keeps
-#: ``size``: a composite's catch-all ``size=`` is spread over every mark it
-#: emits and drawn by an emitted point or line, and a composite whose
-#: emitted marks draw no ``size`` refuses it after its desugar runs
-#: (:func:`refuse_size_no_layer_draws`). A composite that takes ``size`` as
-#: a named parameter (``mark_boxplot``, ``mark_swarm``) consumes it before
-#: the catch-all sees it.
-_COMPOSITE_FALLBACK_KWARGS: frozenset[str] = _UNIVERSAL_MARK_KWARGS | frozenset({"size"})
-
-_ANY_HONORED_MARK_KWARG: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
+#: The ``orient=`` values every mark method, desugar and figure function takes
+#: (``orientation=`` on ``mark_density``/``mark_histogram``).
+ORIENT_CHOICES = ("horizontal", "vertical")
 
 #: The style kwargs whose wire field is an unsigned integer: the names Rust
-#: publishes as ``MarkKwargsSpec``'s ``usize`` fields that some ``mark_*``
-#: accepts. Each is stored as :func:`ferrum._validate.coerce_non_negative_int`
-#: returns it, so ``np.int64(3)`` reaches the wire as ``3`` and ``2.5``, ``-1``
-#: or ``True`` refuses at the ``mark_*`` door.
-_INTEGER_MARK_KWARGS: frozenset[str] = frozenset(mark_integer_kwargs()) & _ANY_HONORED_MARK_KWARG
+#: publishes as ``MarkKwargsSpec``'s ``usize`` fields. Each is stored as
+#: :func:`ferrum._validate.coerce_non_negative_int` returns it, so
+#: ``np.int64(3)`` reaches the wire as ``3`` and ``2.5``, ``-1`` or ``True``
+#: refuses at the door.
+_INTEGER_MARK_KWARGS: frozenset[str] = frozenset(mark_integer_kwargs())
 
 #: The style kwargs whose wire field is a real number: the rest of the names
-#: Rust publishes as ``MarkKwargsSpec``'s numeric fields that some ``mark_*``
-#: accepts. Each is stored as :func:`ferrum._validate.coerce_finite_real`
-#: returns it, so a numpy scalar or ``Decimal`` reaches the wire as a builtin
-#: number and a non-number or non-finite value refuses at the ``mark_*`` door.
-_REAL_MARK_KWARGS: frozenset[str] = (
-    frozenset(mark_numeric_kwargs()) & _ANY_HONORED_MARK_KWARG
-) - _INTEGER_MARK_KWARGS
+#: Rust publishes as ``MarkKwargsSpec``'s numeric fields. Each is stored as
+#: :func:`ferrum._validate.coerce_finite_real` returns it, so a numpy scalar
+#: or ``Decimal`` reaches the wire as a builtin number and a non-number or
+#: non-finite value refuses at the door.
+_REAL_MARK_KWARGS: frozenset[str] = frozenset(mark_numeric_kwargs()) - _INTEGER_MARK_KWARGS
+
+#: The style fields a Rust vocabulary governs, each with its accepted values
+#: in the order Rust publishes them.
+_STYLE_VOCABULARIES: dict[str, list[str]] = {
+    "interpolate": interpolate_accepted_values(),
+    "stroke_cap": stroke_cap_accepted_values(),
+    "stroke_join": stroke_join_accepted_values(),
+    "blend": blend_accepted_values(),
+}
+
+
+@functools.cache
+def layer_style_fields(mark_name: str) -> frozenset[str]:
+    """The style kwargs a layer drawing *mark_name* takes at a public door.
+
+    A primitive mark takes the fields Rust's style table says it draws
+    (:func:`ferrum._layer.drawn_style_fields`). Any other mark name (a
+    composite, statistical or diagnostic mark) takes every field some mark
+    draws: it spreads its style over the marks it emits, and a field none of
+    them draws refuses once they are known
+    (:func:`refuse_style_no_layer_draws`). The internal fields
+    (:data:`_INTERNAL_STYLE_DOORS`) are never taken.
+    """
+    drawn = drawn_style_fields(mark_name)
+    taken = drawn if drawn is not None else frozenset(_STYLE_FIELDS)
+    return taken - frozenset(_INTERNAL_STYLE_DOORS)
+
+
+def honored_kwargs(mark_name: str) -> frozenset[str]:
+    """The kwargs ``mark_<mark_name>(...)`` honors (aliases already resolved).
+
+    :func:`layer_style_fields` plus the kwargs the method consumes itself
+    (:data:`METHOD_ONLY_KWARGS`).
+
+    Examples
+    --------
+    >>> sorted(honored_kwargs("bar") - layer_style_fields("bar"))
+    ['orient']
+    >>> "font_size" in honored_kwargs("point")
+    False
+    """
+    return layer_style_fields(mark_name) | METHOD_ONLY_KWARGS.get(mark_name, frozenset())
 
 
 def mark_honors(mark_name: str, kwarg: str) -> bool:
-    """Return ``True`` if ``mark_name`` honors the (already alias-resolved) *kwarg*.
-
-    Looks up :data:`MARK_HONORED_KWARGS`; a *mark_name* with no explicit
-    entry (every non-primitive mark) falls back to
-    :data:`_COMPOSITE_FALLBACK_KWARGS` — see that fallback's docstring for
-    why it is exact today.
+    """Return ``True`` if ``mark_<mark_name>(...)`` honors the (already alias-resolved) *kwarg*.
 
     Examples
     --------
@@ -334,44 +327,46 @@ def mark_honors(mark_name: str, kwarg: str) -> bool:
     >>> mark_honors("boxplot", "opacity")
     True
     """
-    return kwarg in MARK_HONORED_KWARGS.get(mark_name, _COMPOSITE_FALLBACK_KWARGS)
+    return kwarg in honored_kwargs(mark_name)
 
 
-def _honored_set_for(mark_name: str) -> frozenset[str]:
-    """The honored set :func:`mark_honors` actually consulted for *mark_name*."""
-    return MARK_HONORED_KWARGS.get(mark_name, _COMPOSITE_FALLBACK_KWARGS)
+def _internal_field_error(key: str, *, entry: str) -> str:
+    """The refusal of an internal style field *key*, naming the call that sets it."""
+    return (
+        f"{entry}: keyword argument {key!r} is not a style kwarg; set it through "
+        f"{_INTERNAL_STYLE_DOORS[key]}"
+    )
 
 
-def _mark_kwarg_error(mark_name: str, key: str, *, entry: str | None = None) -> str:
-    """Build the refusal message for one kwarg *key* not honored by *mark_name*.
+def _mark_kwarg_error(mark_name: str, key: str, honored: frozenset[str], *, entry: str) -> str:
+    """Build the refusal message for one kwarg *key* that *mark_name* does not take.
 
     Voiced as *entry*, the public call that received the kwarg, which is
     ``mark_<mark_name>`` unless another door (a figure function, a
-    visualizer) wrote it into the mark.
+    visualizer, ``Chart.override``) wrote it into the mark. *honored* is
+    the set the door took, named in the message.
 
-    Two phrasings, both naming the honored set (decision: "naming the mark
-    and its honored set"):
+    Three phrasings:
 
+    - *key* is a field only ferrum's own code writes
+      (:data:`_INTERNAL_STYLE_DOORS`): it names the public call that sets it.
     - *key* names no style field on any mark at all (a genuine typo, e.g.
-      ``mark_point(squiggly=True)``): "unknown keyword argument" -- the
-      pre-#243 wording, kept so existing typo-detection tests/messages are
-      unaffected.
-    - *key* is a real field, just not one *mark_name* honors (e.g.
-      ``mark_bar(arrow=True)`` -- ``arrow`` is real, but only
-      ``mark_segment`` honors it): "is not honored by", the new #243
-      per-mark distinction.
+      ``mark_point(squiggly=True)``): "unknown keyword argument".
+    - *key* is a real field, just not one *mark_name* draws (e.g.
+      ``mark_bar(arrow=True)``): "is not honored by".
     """
-    honored = sorted(_honored_set_for(mark_name))
-    voice = entry or f"mark_{mark_name}"
+    if key in _INTERNAL_STYLE_DOORS:
+        return _internal_field_error(key, entry=entry)
     if key not in _VALID_MARK_KWARGS:
-        return f"{voice}: unknown keyword argument {key!r}. Honored: {honored}"
+        return f"{entry}: unknown keyword argument {key!r}. Honored: {sorted(honored)}"
     return (
-        f"{voice}: keyword argument {key!r} is not honored by mark_{mark_name}. Honored: {honored}"
+        f"{entry}: keyword argument {key!r} is not honored by mark_{mark_name}. "
+        f"Honored: {sorted(honored)}"
     )
 
 
 @_refuses_in_any_voice
-def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) -> None:
+def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str | None]) -> None:
     """Hold a composite mark's constant `size=` to the size rule of the marks it emits.
 
     A composite, statistical or diagnostic mark spreads its catch-all
@@ -390,7 +385,37 @@ def refuse_size_no_layer_draws(entry: str, size: float, drawn_marks: list[str]) 
             f"nothing to size; received {size!r}."
         )
     drawing = [mark for mark in drawn_marks if mark in _MARKS_DRAWING_CONSTANT_SIZE]
-    check_mark_size(entry, (drawing or drawn_marks)[0], size)
+    check_mark_size(entry, layer_mark((drawing or drawn_marks)[0]), size)
+
+
+@_refuses_in_any_voice
+def refuse_style_no_layer_draws(
+    entry: str, style: Mapping[str, Any], drawn_marks: list[str | None]
+) -> None:
+    """Hold a composite mark's catch-all *style* to the marks it emitted.
+
+    *style* is the resolved catch-all the composite spreads over the layers
+    its desugar emitted, whose marks are *drawn_marks*; each field reaches
+    only the layers whose mark draws it
+    (:func:`ferrum._layer.apply_catch_all_style`). A constant ``size`` meets
+    :func:`refuse_size_no_layer_draws`. Any other field that no emitted mark
+    draws refuses, voiced as *entry*, the public call the caller invoked,
+    since nothing would take it. Called once the desugar has run, the first
+    point the emitted marks are known.
+    """
+    if "size" in style:
+        refuse_size_no_layer_draws(entry, style["size"], drawn_marks)
+    untaken = [
+        key
+        for key in style
+        if key != "size" and not any(layer_draws(mark, key) for mark in drawn_marks)
+    ]
+    if untaken:
+        marks = sorted({layer_mark(mark) for mark in drawn_marks})
+        raise ValueError(
+            f"{entry}: keyword argument(s) {untaken!r} are drawn by no mark this call draws "
+            f"({marks}), so nothing would take them"
+        )
 
 
 @_refuses_in_any_voice
@@ -416,7 +441,7 @@ def _mark_kwargs_error_plural(mark_name: str, keys: list[str], *, entry: str) ->
     """Plural counterpart of :func:`_mark_kwarg_error` for a batch of *keys*
     (used by ``validate_user_mark_kwargs``, which reports every offending
     key from one call rather than failing on the first), voiced as *entry*."""
-    honored = sorted(_honored_set_for(mark_name))
+    honored = sorted(honored_kwargs(mark_name))
     if all(key not in _VALID_MARK_KWARGS for key in keys):
         return f"{entry}: unknown keyword argument(s) {keys!r}. Honored: {honored}"
     return (
@@ -424,17 +449,13 @@ def _mark_kwargs_error_plural(mark_name: str, keys: list[str], *, entry: str) ->
     )
 
 
-#: The full known mark-kwarg vocabulary — the union honored by at least one
-#: primitive mark. Used by the ``Chart.override(mark_<leaf>=...)`` registry
-#: (``_override_apply.py``) to decide whether a ``mark_`` override *path*
-#: exists at all; that registry is built once at import time with no
-#: per-chart mark context, so it validates against this union rather than a
-#: specific mark's narrower honored set (see ``_override_apply.py``'s module
-#: docstring for the tracked gap).  Kept under the historical name so the two
-#: existing drift guards (``tests/test_override.py``,
-#: ``tests/test_mark_style_kwargs_doc.py``) that import it directly keep
-#: working unchanged.
-_VALID_MARK_KWARGS: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
+#: Every kwarg some style door can name: the wire fields and the method-only
+#: kwargs. A key outside it is a typo ("unknown keyword argument"); a key in
+#: it that a door does not take is refused as not honored there. Also the
+#: leaf vocabulary of the ``Chart.override(mark_<leaf>=...)`` registry
+#: (``_override_apply.py``), which is built with no per-chart mark context;
+#: the per-mark check runs where the style is applied.
+_VALID_MARK_KWARGS: frozenset[str] = frozenset(_STYLE_FIELDS).union(*METHOD_ONLY_KWARGS.values())
 
 
 def _validate_literal_color(entry: str, key: str, value: str) -> None:
@@ -483,20 +504,14 @@ def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
     return _MARK_KWARG_ALIASES.get(key, key)
 
 
-@_refuses_in_any_voice
-def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    """Return *kwargs* as *mark_name* honors them: aliases resolved, values checked.
+def _resolve_style(
+    entry: str, mark_name: str, kwargs: Mapping[str, Any], honored: frozenset[str]
+) -> dict[str, Any]:
+    """Return *kwargs* with aliases resolved and values checked, each key held to *honored*.
 
-    The one honored-kwarg rule for a mark's style, whichever door wrote it:
-    ``mark_<name>(...)`` (through :class:`MarkBase`), ``fm.Layer(mark_kwargs=)``,
-    a figure function's ``mark=`` dict or ``*_kws`` and a composite's
-    ``layer_kwargs=``. Every refusal is an :class:`ferrum._entry.EntryRefusal`
-    voiced as *entry*, the public call that received the kwarg: a kwarg
-    *mark_name* does not honor (:func:`mark_honors`), a constant ``size``
-    that breaks the size rule (:func:`check_constant_size`), an unknown
-    point ``shape``, an ``interpolate`` outside Rust's vocabulary, a
-    non-numeric value for a numeric field, or a literal ``fill``/``stroke``
-    that is not a color.
+    The body of both style rules, :func:`resolve_mark_kwargs` (a mark
+    method's kwargs) and :func:`resolve_layer_style` (a layer's), which
+    differ only in the set they take.
     """
     resolved: dict[str, Any] = {}
     for k, v in kwargs.items():
@@ -504,13 +519,13 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
         # A constant `size=` on a primitive meets the one size rule,
         # which names the mark's own width/font kwarg where one exists,
         # ahead of the generic not-honored door below.
-        if canonical == "size" and mark_name in MARK_HONORED_KWARGS:
+        if canonical == "size" and drawn_style_fields(mark_name) is not None:
             resolved[canonical] = check_constant_size(entry, mark_name, v)
             continue
-        # A kwarg the mark does not honor is refused as such before its
+        # A kwarg the mark does not take is refused as such before its
         # value is judged.
-        if not mark_honors(mark_name, canonical):
-            raise ValueError(_mark_kwarg_error(mark_name, canonical, entry=entry))
+        if canonical not in honored:
+            raise ValueError(_mark_kwarg_error(mark_name, canonical, honored, entry=entry))
         if canonical == "stroke_dash":
             # Named forms ("dashed", "dotted", ...), the comma-split
             # form, and list/tuple passthrough are all resolved by the
@@ -522,6 +537,8 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
             v = coerce_non_negative_int(f"{entry}({k}=...)", v)
         elif canonical in _REAL_MARK_KWARGS:
             v = coerce_finite_real(f"{entry}({k}=...)", v)
+        elif canonical == "orient":
+            validate_choice(entry, "orient", v, ORIENT_CHOICES)
         resolved[canonical] = v
     # Validate shape= value for point marks. The constant shape is a fixed
     # string that must name one of the glyphs supported by the Rust renderer;
@@ -529,13 +546,10 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
     shape_val = resolved.get("shape")
     if shape_val is not None and isinstance(shape_val, str):
         validate_choice(entry, "shape", shape_val, _VALID_POINT_SHAPES)
-    # interpolate= is refused at declaration, like every door that takes it.
-    validate_optional_vocabulary(
-        entry,
-        "interpolate",
-        resolved.get("interpolate"),
-        interpolate_accepted_values(),
-    )
+    # A value outside a vocabulary Rust publishes is refused at declaration,
+    # in the text the same value is refused with at render.
+    for field_name, accepted in _STYLE_VOCABULARIES.items():
+        validate_optional_vocabulary(entry, field_name, resolved.get(field_name), accepted)
     # Validate literal fill/stroke color strings at construction time via
     # ferrum's single Rust color parser (ferrum.color.to_hex) so bad
     # colors fail immediately rather than silently at render time. The
@@ -553,45 +567,57 @@ def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -
     return resolved
 
 
-#: Every ``mark_style`` wire key Rust reads, for a layer mark Python keeps no
-#: per-mark honored set for (``ribbon``, ``polygon``, ...).
-_WIRE_MARK_KWARGS: frozenset[str] = frozenset(mark_kwargs_fields())
+@_refuses_in_any_voice
+def resolve_mark_kwargs(entry: str, mark_name: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return *kwargs* as ``mark_<mark_name>(...)`` honors them: aliases resolved, values checked.
+
+    The honored-kwarg rule for a mark method's kwargs (through
+    :class:`MarkBase`), and for a composite's catch-all style. Every refusal
+    is an :class:`ferrum._entry.EntryRefusal` voiced as *entry*, the public
+    call that received the kwarg: a kwarg the method does not honor
+    (:func:`honored_kwargs`), a constant ``size`` that breaks the size rule
+    (:func:`check_constant_size`), an unknown point ``shape``, an
+    ``orient`` or a value of a Rust vocabulary (``interpolate``,
+    ``stroke_cap``, ``stroke_join``, ``blend``) outside its vocabulary, a
+    non-numeric value for a numeric field, or a literal ``fill``/``stroke``
+    that is not a color.
+    """
+    return _resolve_style(entry, mark_name, kwargs, honored_kwargs(mark_name))
 
 
 @_refuses_in_any_voice
-def resolve_layer_style(entry: str, mark: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+def resolve_layer_style(entry: str, mark: str | None, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Return a caller's style *kwargs* for one layer drawing *mark*, as *mark* honors them.
 
-    A primitive mark meets :func:`resolve_mark_kwargs`. Any other mark name
-    has no Python honored set, so a key Rust reads for no mark at all
-    refuses, and the rest pass through for Rust to judge. A *mark* that is
-    not a name (a ``MarkSpec``) is returned unchanged. Refusals are
+    The rule of every door that styles a layer rather than calling a mark
+    method: ``fm.Layer(mark_kwargs=)``, a figure function's ``mark=`` dict
+    or ``*_kws``, a composite's ``layer_kwargs=`` and
+    ``Chart.override(mark_<leaf>=)``. A layer takes the fields its mark
+    draws (:func:`layer_style_fields`); a kwarg its mark's method consumes
+    itself (:data:`METHOD_ONLY_KWARGS`) refuses, naming that method. A
+    layer with no *mark* draws a point (:func:`ferrum._layer.layer_mark`)
+    and is held to the point's fields. Refusals are
     :class:`ferrum._entry.EntryRefusal`, voiced as *entry*.
     """
-    if not isinstance(mark, str):
-        return dict(kwargs)
-    if mark in MARK_HONORED_KWARGS:
-        return resolve_mark_kwargs(entry, mark, kwargs)
-    unknown = sorted(k for k in kwargs if k not in _WIRE_MARK_KWARGS)
-    if unknown:
-        raise ValueError(
-            f"{entry}: keyword argument(s) {unknown!r} are not mark style fields. "
-            f"Fields: {sorted(_WIRE_MARK_KWARGS)}"
-        )
-    return dict(kwargs)
+    mark = layer_mark(mark)
+    for key in kwargs:
+        if key in METHOD_ONLY_KWARGS.get(mark, frozenset()):
+            raise ValueError(
+                f"{entry}: keyword argument {key!r} is an argument of mark_{mark}(), not a "
+                f"layer style; set it through mark_{mark}({key}=...)"
+            )
+    return _resolve_style(entry, mark, kwargs, layer_style_fields(mark))
 
 
-def layer_honors(mark: Any, key: str) -> bool:
+def layer_honors(mark: str | None, key: str) -> bool:
     """Whether a layer drawing *mark* honors the style kwarg *key* (aliases resolved).
 
     The membership half of :func:`resolve_layer_style`, for a door that
-    spreads one style dict over layers of different marks.
+    spreads one style dict over layers of different marks. A layer with no
+    *mark* draws a point.
     """
-    if not isinstance(mark, str):
-        return True
-    if mark in MARK_HONORED_KWARGS:
-        return mark_honors(mark, _canonical_mark_kwarg(mark, key))
-    return key in _WIRE_MARK_KWARGS
+    mark = layer_mark(mark)
+    return _canonical_mark_kwarg(mark, key) in layer_style_fields(mark)
 
 
 class MarkBase:
@@ -601,9 +627,9 @@ class MarkBase:
     serializing them into ``ChartSpec.mark_style``. Raises ``ValueError``
     on the first keyword argument *mark_name* does not honor — whether
     because it names no known style field at all, or because it names a
-    real field owned by a different mark family — so typos and
+    field the mark never draws (Rust's style table) — so typos and
     doesn't-apply-here kwargs both surface immediately rather than
-    silently disappearing into the renderer (#243).
+    silently disappearing into the renderer.
 
     Parameters
     ----------
@@ -652,14 +678,18 @@ class MarkBase:
         this dict is ever inspected.
 
         ``orient`` is consumed Python-side (sets ``_coord = "flip"`` on the
-        chart) and is never forwarded to the Rust renderer.
+        chart) and is never forwarded to the Rust renderer. ``zero`` is
+        included: a composite spreads it to the bar layers it emits, and
+        ``Chart._set_mark`` consumes it on a single bar chart
+        (:meth:`zero_anchor`).
 
         Returns
         -------
         dict
-            Mapping of renderer-level style keys to their values.  Only
-            keys present in the stored kwargs are included; absent keys do
-            not appear (no ``None`` defaults).
+            Mapping of renderer-level style keys to their values, in
+            ``MarkKwargsSpec`` declaration order.  Only keys present in the
+            stored kwargs are included; absent keys do not appear (no
+            ``None`` defaults).
 
         Examples
         --------
@@ -667,54 +697,7 @@ class MarkBase:
         >>> mb.to_mark_kwargs_dict()
         {'size': 40, 'opacity': 0.8}
         """
-        out = {}
-        for k in (
-            # Core style fields (Phase 8a)
-            "size",
-            "stroke",
-            "fill",
-            "opacity",
-            "corner_radius",
-            "stroke_width",
-            "stroke_dash",
-            "font_size",
-            "font_weight",
-            "align",
-            "baseline",
-            "dx",
-            "dy",
-            "angle",
-            # S1: interpolate (line/area)
-            "interpolate",
-            # S2: stroke_cap (line)
-            "stroke_cap",
-            # S3: stroke_join (line/area)
-            "stroke_join",
-            # S5: filled (point)
-            "filled",
-            # S6: shape (point, constant)
-            "shape",
-            # S7: limit (text)
-            "limit",
-            # S8: band_size (tick/rect)
-            "band_size",
-            # S9: line border on area
-            "line",
-            # S10: borders on area/errorband
-            "borders",
-            # S11: blend mode (layer blend)
-            "blend",
-            # S12: leader_line (label)
-            "leader_line",
-            # Batch H T1/T2: arrow / arrow_size (segment)
-            "arrow",
-            "arrow_size",
-        ):
-            if k in self._kwargs:
-                out[k] = self._kwargs[k]
-        # S4: orient="horizontal" → consumed Python-side; set coord flip flag.
-        # The caller (_set_mark) reads this via orient_coord_flip().
-        return out
+        return {k: self._kwargs[k] for k in _STYLE_FIELDS if k in self._kwargs}
 
     def zero_anchor(self) -> bool:
         """Return the effective value of the ``zero=`` parameter (default ``True``).

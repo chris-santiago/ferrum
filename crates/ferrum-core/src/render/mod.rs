@@ -363,6 +363,19 @@ pub enum RenderError {
     /// user had no way to tell an unimplemented curve from a misspelled one.
     /// Raised by [`draw::resolve_mark_style`], before any geometry is built.
     UnknownInterpolate { value: String },
+    /// A `stroke_cap=` outside its vocabulary (`butt|round|square`), refused
+    /// as [`Self::UnknownInterpolate`] is, where it used to parse to nothing
+    /// and draw the default cap. Raised by [`draw::resolve_mark_style`].
+    UnknownStrokeCap { value: String },
+    /// A `stroke_join=` outside its vocabulary (`miter|round|bevel`), refused
+    /// as [`Self::UnknownStrokeCap`] is.
+    UnknownStrokeJoin { value: String },
+    /// A style field the mark never draws ([`crate::spec::mark::Mark::style_fields`]):
+    /// accepted, it would render exactly as without it. REFUSE MALFORMED, from
+    /// [`draw::resolve_mark_style`] for every producer; the per-layer draw loop
+    /// wraps it in [`Self::InLayer`], which names the public entry. A constant
+    /// `size` keeps its own refusal, [`Self::MarkSizeNotDrawn`].
+    MarkStyleNotDrawn { mark: crate::spec::mark::Mark, field: &'static str },
     /// A mark whose geometry only makes sense under one specific coordinate
     /// system was asked to render under a different one (batch E, spec §6.4).
     /// `mark` names the mark (e.g. `"mark_geoshape"`, `"mark_arc"`);
@@ -951,6 +964,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::InvalidFormatSpec { .. }
         | RenderError::InvalidScaleDomainConfig { .. }
         | RenderError::UnknownInterpolate { .. }
+        | RenderError::UnknownStrokeCap { .. }
+        | RenderError::UnknownStrokeJoin { .. }
+        | RenderError::MarkStyleNotDrawn { .. }
         | RenderError::MarkRequiresCoord { .. }
         // Carries a `coord_flipped` field, patched at its own single
         // construction site (`scene_build::validate_layer_positional_columns`,
@@ -1141,6 +1157,14 @@ impl std::fmt::Display for RenderError {
                 use crate::transform::vocabulary::Vocabulary;
                 f.write_str(&marks::curve::Interpolate::refusal("interpolate", value))
             }
+            Self::UnknownStrokeCap { value } => {
+                use crate::transform::vocabulary::Vocabulary;
+                f.write_str(&ferrum_scene::StrokeCap::refusal("stroke_cap", value))
+            }
+            Self::UnknownStrokeJoin { value } => {
+                use crate::transform::vocabulary::Vocabulary;
+                f.write_str(&ferrum_scene::StrokeJoin::refusal("stroke_join", value))
+            }
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
             Self::MarkRequiresCoord { mark, .. } => self.fmt_as(mark, f),
@@ -1315,9 +1339,9 @@ impl std::fmt::Display for RenderError {
                 Some(field) => write!(f, "could not normalize column '{field}' to Utf8: {reason}"),
             },
             Self::LineWidthConflict { .. } | Self::LineWidthNotPositive { .. } => self.fmt_as("mark_line", f),
-            Self::MarkSizeOutOfRange { mark, .. } | Self::MarkSizeNotDrawn { mark, .. } => {
-                self.fmt_as(&format!("mark_{}", mark.as_str()), f)
-            }
+            Self::MarkSizeOutOfRange { mark, .. }
+            | Self::MarkSizeNotDrawn { mark, .. }
+            | Self::MarkStyleNotDrawn { mark, .. } => self.fmt_as(&format!("mark_{}", mark.as_str()), f),
             Self::InLayer { layer, entry, source } => {
                 if let Some(layer) = layer {
                     write!(f, "layer {layer}: ")?;
@@ -1357,6 +1381,14 @@ impl RenderError {
             }
             Self::MarkSizeOutOfRange { value, .. } => {
                 write!(f, "{entry}(size=...) must be a positive number; received {value}")
+            }
+            Self::MarkStyleNotDrawn { mark, field } => {
+                let drawn: Vec<&str> = mark.style_fields().iter().map(|f| f.name).collect();
+                write!(
+                    f,
+                    "{entry}: {field} has no effect on a {mark} mark; a {mark} mark draws {}",
+                    drawn.join(", ")
+                )
             }
             Self::MarkSizeNotDrawn { mark, value } => {
                 write!(f, "{entry}(size=...) has no effect on {entry}; received {value}.")?;
@@ -1916,6 +1948,19 @@ pub enum RenderWarning {
         channel: String,
         placement: ExcludedLayerPlacement,
     },
+    /// A style field the mark draws only alongside another input
+    /// ([`crate::spec::mark::Mark::style_fields`]) was set without that
+    /// input, so it drew nothing: WARN DEGRADED. Decided once per layer after
+    /// scales resolve (`draw::inert_style_fields`), never per facet panel.
+    /// Voiced as the layer's refusals are ([`RenderError::InLayer`]): `layer`
+    /// is its index on a layered chart, `entry` the public call that built it.
+    MarkStyleInert {
+        layer: Option<usize>,
+        entry: String,
+        mark: crate::spec::mark::Mark,
+        field: String,
+        needs: crate::spec::mark::StyleNeed,
+    },
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -2150,6 +2195,16 @@ impl std::fmt::Display for RenderWarning {
                  they spill into the neighbouring categories; reduce the dot size or spacing, or give the \
                  chart more room along the category axis"
             ),
+            RenderWarning::MarkStyleInert { layer, entry, mark, field, needs } => {
+                if let Some(layer) = layer {
+                    write!(f, "layer {layer}: ")?;
+                }
+                write!(
+                    f,
+                    "{entry}: {field} has no effect on this {mark} mark without {}; it was ignored",
+                    needs.describe()
+                )
+            }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {
                 let draws = match placement {
                     ExcludedLayerPlacement::SharedAxis => {
@@ -4743,11 +4798,12 @@ mod orchestration_tests {
     fn render_svg_text_fill_clear_beats_a_color_channel_on_text_and_label() {
         for mark in [Mark::Text, Mark::Label] {
             let label = format!("{mark:?}");
-            // `leader_line` only exists on label; it rides along so the leader
-            // stroke (painted in the fill) is covered by the zero-alpha check.
+            // `leader_line` only exists on label (text refuses it); it rides
+            // along there so the leader stroke (painted in the fill) is
+            // covered by the zero-alpha check.
             let cleared_kwargs = || MarkKwargsSpec {
                 fill: Some("none".into()),
-                leader_line: Some(true),
+                leader_line: matches!(mark, Mark::Label).then_some(true),
                 ..Default::default()
             };
             let (spec_p, batch) = text_clear_spec(mark.clone(), MarkKwargsSpec::default(), true);

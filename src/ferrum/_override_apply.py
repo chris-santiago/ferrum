@@ -41,8 +41,8 @@ encoding-scale
     the wire one is emitted.
 mark
     ``mark_<leaf>``; valid leaves are ``ferrum.marks.base._VALID_MARK_KWARGS``
-    (the union honored by at least one mark — see #243's per-mark
-    ``MARK_HONORED_KWARGS``/``mark_honors``). This registry is built once at
+    (every ``mark_style`` field plus the method-only kwargs, so a leaf no
+    style door takes is refused with its own reason). This registry is built once at
     import time with no per-chart mark context, so it resolves a leaf that
     exists for any mark; the per-mark check runs where the style is applied
     and the chart's own mark is known (``_override_consume.apply_mark_style``),

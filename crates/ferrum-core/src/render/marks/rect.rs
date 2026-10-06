@@ -8,7 +8,7 @@
 //!   path; only y2 present → ordinal-range; else heatmap.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -28,22 +28,47 @@ use crate::render::RenderError;
 /// `text` channel and their existing per-field `Err(_) => return
 /// empty_result()` swallows are unchanged.
 pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
-    let both_ranges = ctx.spec.encoding.x2.is_some() && ctx.spec.encoding.y2.is_some();
-    let both_quant = matches!(
-        (&ctx.scales.x, &ctx.scales.y),
-        (
-            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
-            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
-        )
-    );
-    if both_ranges && both_quant {
-        build_quantitative_range(ctx)
-    } else if ctx.spec.encoding.y2.is_some() || ctx.spec.encoding.x2.is_some() {
-        // y2.is_some(): normal orientation (ordinal x + quantitative y/y2).
-        // x2.is_some() without y2: CoordFlip case (ordinal y + quantitative x/x2).
-        build_ordinal_range(ctx)
-    } else {
-        build_heatmap(ctx)
+    match RectShape::of(ctx) {
+        RectShape::QuantitativeRange => build_quantitative_range(ctx),
+        RectShape::BandRange => build_ordinal_range(ctx),
+        RectShape::Heatmap => build_heatmap(ctx),
+    }
+}
+
+/// Which of its three shapes a rect layer draws. The style table's
+/// conditional rect fields read the same answer: `band_size` sizes only a
+/// [`Self::BandRange`] body, and `font_size` only a [`Self::Heatmap`]'s cell
+/// labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RectShape {
+    /// `x`/`x2` and `y`/`y2` ranges on two quantitative axes.
+    QuantitativeRange,
+    /// A band axis and a `y`/`y2` range (or `x`/`x2` under `CoordFlip`): a
+    /// box body, `band_size` of its band wide.
+    BandRange,
+    /// One cell per band pair, filling the band on both axes.
+    Heatmap,
+}
+
+impl RectShape {
+    pub(crate) fn of(ctx: &DrawCtx) -> Self {
+        let both_ranges = ctx.spec.encoding.x2.is_some() && ctx.spec.encoding.y2.is_some();
+        let both_quant = matches!(
+            (&ctx.scales.x, &ctx.scales.y),
+            (
+                ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
+                ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
+            )
+        );
+        if both_ranges && both_quant {
+            Self::QuantitativeRange
+        } else if ctx.spec.encoding.y2.is_some() || ctx.spec.encoding.x2.is_some() {
+            // y2.is_some(): normal orientation (ordinal x + quantitative y/y2).
+            // x2.is_some() without y2: CoordFlip case (ordinal y + quantitative x/x2).
+            Self::BandRange
+        } else {
+            Self::Heatmap
+        }
     }
 }
 
@@ -78,9 +103,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
     // scale-mapped at the call site below; stroke_opacity is not read by rect.
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
-    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values = stroke_width_column(ctx);
     // T12: rect gains the stroke_dash read it lacked — numeric keeps the
     // DASH_PALETTE index contract byte-identically; categorical resolves
     // through ctx.scales.stroke_dash.
@@ -194,9 +217,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
     // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
     // scale-mapped at the call sites below; stroke_opacity is not read by rect.
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
-    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values = stroke_width_column(ctx);
     // T12: rect gains the stroke_dash read it lacked (both orientations below).
     let dash_cols = stroke_dash_column_loader(ctx);
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -495,9 +516,7 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
-    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values = stroke_width_column(ctx);
     // T12: rect gains the stroke_dash read it lacked.
     let dash_cols = stroke_dash_column_loader(ctx);
 

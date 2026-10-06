@@ -75,7 +75,7 @@ def desugar_residuals(
                 },
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("residuals", layers, user_kw))
 
 
 register_layer_names("residuals", frozenset({"point", "reference", "outlier"}))
@@ -135,7 +135,7 @@ def desugar_prediction_error(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("prediction_error", layers, user_kw))
 
 
 register_layer_names("prediction_error", frozenset({"point", "band", "identity"}))

@@ -19,7 +19,7 @@
 //! default exactly as before. `Utf8` shape columns are byte-identical.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -316,9 +316,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     // Per-row stroke/angle channel values (direct passthrough — no scale transform).
-    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values = stroke_width_column(ctx);
 
     // T12: categorical resolves through ctx.scales.stroke_dash (StrokeDashScale);
     // numeric keeps the DASH_PALETTE index contract byte-identically.

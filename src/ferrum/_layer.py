@@ -8,10 +8,11 @@ canonicalises on ``mark_kwargs``.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
-from ferrum._core import marks_drawing_constant_size
+from ferrum._core import mark_style_fields, marks_drawing_constant_size, style_table_marks
 
 # Primitive (renderer-native) mark names — those that do not desugar into a
 # composite of other marks.  Single-sourced here (a leaf imported by the
@@ -48,7 +49,6 @@ class _Layer:
     caller_style_keys: frozenset = frozenset()
     data_source: Optional[str] = None
     position: Any = None
-    blend: Optional[str] = None
     # Secondary-y-axis wire flag (GH #52). Two producers set it:
     # LayerChart._build_merged (ferrum.composition), on non-primary layers
     # that carry their own `y` encoding, and chart._desugar_secondary_y,
@@ -126,6 +126,48 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
 _MARKS_DRAWING_CONSTANT_SIZE = frozenset(marks_drawing_constant_size())
 
 
+def layer_mark(mark: str | None) -> str:
+    """The mark a layer draws: its own, or a point when it names none, as on the wire."""
+    return mark or "point"
+
+
+@functools.cache
+def drawn_style_fields(mark: str) -> frozenset[str] | None:
+    """The ``mark_style`` fields primitive *mark* draws, from Rust's one style table.
+
+    ``None`` when *mark* is no primitive mark (a composite name such as
+    ``"boxplot"``): Rust refuses the name, and only the marks a composite
+    emits have a row in the table.
+    """
+    try:
+        return frozenset(mark_style_fields(mark))
+    except ValueError:
+        return None
+
+
+def layer_draws(mark: str | None, field_name: str) -> bool:
+    """Whether a layer drawing *mark* draws the style field *field_name*.
+
+    A layer with no mark draws a point (:func:`layer_mark`). A composite
+    name has no row in the table, so the field is left for the renderer to
+    judge.
+    """
+    drawn = drawn_style_fields(layer_mark(mark))
+    return drawn is None or field_name in drawn
+
+
+@functools.cache
+def marks_drawing(field_name: str) -> tuple[str, ...]:
+    """The primitive marks, in :func:`ferrum._core.style_table_marks` order,
+    whose row draws *field_name*.
+
+    Read by a caller that names which marks draw a field in a warning or
+    error -- e.g. ``encoding/_aliases.py``'s "ignored" warning for
+    ``detail`` -- instead of hand-listing the marks as a Python literal.
+    """
+    return tuple(mark for mark in style_table_marks() if layer_draws(mark, field_name))
+
+
 def apply_catch_all_style(layer: _Layer, style_dict: dict) -> _Layer:
     """Merge a catch-all *style_dict* into *layer*'s ``mark_kwargs``.
 
@@ -138,18 +180,15 @@ def apply_catch_all_style(layer: _Layer, style_dict: dict) -> _Layer:
     call it: ``_desugar._resolve_pending_impl``, which spreads the chart-level
     ``**mark_kwargs`` over a layered desugar's emitted layers, and
     ``marks/_mark_kwargs.apply_user_mark_kwargs``, which spreads a desugar's
-    own validated ``**mark_kwargs`` over the layers it just built. They used
-    to be two bodies agreeing by coincidence -- the second was unconditionally
-    user-wins and ignored ``caller_style_keys`` entirely, which was invisible
-    only because no layer reaching it recorded any.
+    own validated ``**mark_kwargs`` over the layers it just built.
 
-    A catch-all ``size`` reaches only a layer whose mark draws a constant
-    size (:func:`ferrum._core.marks_drawing_constant_size`): render refuses
-    a constant size on any other mark, and the caller aimed ``size`` at the
-    marks that draw it, not at, say, a smooth's confidence band.
+    A catch-all field reaches only a layer whose mark draws it
+    (:func:`layer_draws`): the caller aimed the style at the marks that draw
+    it, not at, say, a smooth's confidence band, and render refuses a field
+    on a mark that never draws it. Each spreader refuses a field that no
+    layer it emitted draws (``ferrum.marks.base.refuse_style_no_layer_draws``).
     """
-    if "size" in style_dict and layer.mark not in _MARKS_DRAWING_CONSTANT_SIZE:
-        style_dict = {k: v for k, v in style_dict.items() if k != "size"}
+    style_dict = {k: v for k, v in style_dict.items() if layer_draws(layer.mark, k)}
     if not style_dict:
         return layer
     merged = catch_all_over(layer.mark_kwargs, style_dict, layer.caller_style_keys)

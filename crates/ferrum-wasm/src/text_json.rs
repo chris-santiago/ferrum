@@ -302,9 +302,12 @@ pub(crate) fn build_zoomed_text_json(
     serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Serialize a single text element to a JSON value.
+/// Serialize a single text element to a JSON value. The text of an
+/// additively blending batch carries `"blend": {"mode": "additive", "panel":
+/// p, "batch": b}`, which the overlay draws in that batch's own
+/// screen-blended layer; every other element omits the key.
 pub(crate) fn text_element_to_json(t: &TextElementData) -> serde_json::Value {
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "x": t.x,
         "y": t.y,
         "content": t.content,
@@ -315,7 +318,15 @@ pub(crate) fn text_element_to_json(t: &TextElementData) -> serde_json::Value {
         "baseline": text_baseline_string(&t.style.baseline),
         "angle": t.style.angle,
         "color": color_string(&t.style),
-    })
+    });
+    if let Some(batch) = t.blend_batch {
+        json["blend"] = serde_json::json!({
+            "mode": "additive",
+            "panel": batch.panel_id,
+            "batch": batch.batch_idx,
+        });
+    }
+    json
 }
 
 /// Serialize a tick label to a JSON value, optionally inheriting style from a
@@ -409,6 +420,7 @@ mod bug_hunt_interactive_slots {
             content: content.to_string(),
             style: style(),
             slot: None,
+            blend_batch: None,
         }
     }
 
@@ -422,6 +434,7 @@ mod bug_hunt_interactive_slots {
             content: content.to_string(),
             style: style(),
             slot: Some(slot),
+            blend_batch: None,
         }
     }
 
@@ -803,6 +816,7 @@ mod tests {
             content: content.to_string(),
             style: make_style(),
             slot: None,
+            blend_batch: None,
         }
     }
 
@@ -815,6 +829,7 @@ mod tests {
             content: content.to_string(),
             style: make_style(),
             slot: Some(slot),
+            blend_batch: None,
         }
     }
 
@@ -1060,6 +1075,7 @@ mod tests {
             content: "Rotated".to_string(),
             style: rotated_style,
             slot: None,
+            blend_batch: None,
         }];
         let transform = crate::zoom_pan::Affine2 {
             sx: 1.0,
@@ -1115,6 +1131,7 @@ mod tests {
             content: "R".to_string(),
             style: right_style,
             slot: None,
+            blend_batch: None,
         }];
         let transform = crate::zoom_pan::Affine2 {
             sx: 1.0,
@@ -1183,6 +1200,7 @@ mod tests {
                 content: "X".to_string(),
                 style: x_style,
                 slot: None,
+                blend_batch: None,
             },
             TextElementData {
                 x: 40.0,
@@ -1190,6 +1208,7 @@ mod tests {
                 content: "Y".to_string(),
                 style: y_style,
                 slot: None,
+                blend_batch: None,
             },
         ];
         let transform = crate::zoom_pan::Affine2 {
@@ -1628,6 +1647,7 @@ mod tests {
             content: r#"say "hello" \ world"#.to_string(),
             style: make_style(),
             slot: None,
+            blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
@@ -1645,6 +1665,7 @@ mod tests {
             content: "NaN test".to_string(),
             style: make_style(),
             slot: None,
+            blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
         // serde_json serializes NaN as null.
@@ -1663,6 +1684,7 @@ mod tests {
             content: "inf test".to_string(),
             style: make_style(),
             slot: None,
+            blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
         let parsed: Vec<serde_json::Value> =

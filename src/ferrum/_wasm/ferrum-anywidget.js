@@ -98,7 +98,87 @@ function _crc32(buf) {
 }
 
 // ── SVG text placement ───────────────────────────────────────────────────
+// Text of a mark batch that blends additively (`t.blend`) cannot blend from
+// inside the shared overlay: it would screen against that transparent <svg>,
+// not the canvas beneath. Each blended batch's text is instead drawn in its own
+// overlay <svg>, styled `mix-blend-mode: screen` (the static SVG's
+// approximation of additive), so it screens over what is painted beneath it.
+// The chart wrapper is `isolation: isolate`, so the blend reaches the canvas
+// and nothing outside the chart.
+//
+// Text keeps paint order across the split, as the static SVG paints it: the
+// elements arrive in paint order, and `_textRuns` cuts them into ordered runs
+// at every blended batch. Each run gets its own `svg.ferrum-text-run` sibling,
+// stacked in run order just before `svgEl`, which holds the final unblended
+// run (legend text, axis labels, annotations, and anything else painted after
+// the last blended batch). So a blended batch screens over the text painted
+// before it and beneath the text painted after it.
 function _placeTextSvg(svgEl, texts) {
+  const { runs, tail } = _textRuns(texts);
+  _joinLabels(svgEl, tail);
+  _placeTextRuns(svgEl, runs);
+}
+
+// Cut `texts` (in paint order) into the runs that paint beneath the final
+// unblended run: each blended batch is one run, keyed `panel:batch`, and the
+// unblended text before it is a run keyed `before:panel:batch`.
+//
+// A batch's blended text is usually contiguous, but zoom's tick-coincidence
+// heuristic (build_zoomed_text_json) can re-emit one of a batch's labels as
+// an unblended tick label mid-batch, splitting one batch into two non-adjacent
+// blended runs that would otherwise share the same `panel:batch` key. Each
+// base key is suffixed with an occurrence count past the first so every run
+// gets a unique key — two runs sharing a key would make `_placeTextRuns`
+// reuse one DOM element for both, and the second join would overwrite the
+// first run's glyphs.
+function _textRuns(texts) {
+  const runs = [];
+  const seen = new Map();
+  let plain = [];
+  for (const t of texts) {
+    if (!t.blend) { plain.push(t); continue; }
+    const base = `${t.blend.panel}:${t.blend.batch}`;
+    const last = runs[runs.length - 1];
+    if (plain.length === 0 && last && last.base === base) { last.texts.push(t); continue; }
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    const key = n === 1 ? base : `${base}#${n}`;
+    if (plain.length > 0) {
+      runs.push({ key: `before:${key}`, base: null, blend: false, texts: plain });
+      plain = [];
+    }
+    runs.push({ key, base, blend: true, texts: [t] });
+  }
+  return { runs, tail: plain };
+}
+
+// One `svg.ferrum-text-run` per run, in run order just before `svgEl`; runs
+// no longer present are removed, kept runs are updated in place.
+function _placeTextRuns(svgEl, runs) {
+  const parent = svgEl.parentNode;
+  const keys = new Set(runs.map((r) => r.key));
+  const existing = new Map();
+  for (const el of parent.querySelectorAll(':scope > svg.ferrum-text-run')) {
+    if (keys.has(el.dataset.run)) existing.set(el.dataset.run, el);
+    else el.remove();
+  }
+  for (const run of runs) {
+    let el = existing.get(run.key);
+    if (!el) {
+      el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      el.setAttribute('class', 'ferrum-text-run');
+      el.dataset.run = run.key;
+      el.setAttribute('width', svgEl.getAttribute('width'));
+      el.setAttribute('height', svgEl.getAttribute('height'));
+      el.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;'
+        + (run.blend ? 'mix-blend-mode:screen;' : '');
+    }
+    parent.insertBefore(el, svgEl);
+    _joinLabels(el, run.texts);
+  }
+}
+
+function _joinLabels(svgEl, texts) {
   // R6 fix: update labels in place via a D3 data-join instead of remove+append.
   // The old remove+re-append moved every label to the end of the SVG child
   // list on each zoom/pan tick, flipping their z-order relative to raw-overlay
@@ -131,6 +211,37 @@ function _placeTextSvg(svgEl, texts) {
     .attr('pointer-events', 'none')
     .attr('transform', (t) => (t.angle ? `rotate(${t.angle}, ${t.x}, ${t.y})` : null))
     .text((t) => t.content);
+}
+
+// Rasterize one overlay <svg>, authored in CSS pixels (`w` x `h`), to an
+// Image of the export size, with `fontRules` inlined so its text renders
+// without the parent document's CSS.
+async function _rasterizeOverlay(svg, w, h, exportW, exportH, fontRules) {
+  const svgClone = svg.cloneNode(true);
+  svgClone.setAttribute('width', String(exportW));
+  svgClone.setAttribute('height', String(exportH));
+  svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  // The clone is drawn into a canvas, not the page: the canvas composite
+  // operation does the blending, so the clone carries no CSS blend.
+  svgClone.style.removeProperty('mix-blend-mode');
+  if (fontRules.length > 0) {
+    const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    styleEl.textContent = fontRules.join('\n');
+    svgClone.insertBefore(styleEl, svgClone.firstChild);
+  }
+  const svgXml = new XMLSerializer().serializeToString(svgClone);
+  const svgBlob = new Blob([svgXml], { type: 'image/svg+xml;charset=utf-8' });
+  const svgUrl = URL.createObjectURL(svgBlob);
+  try {
+    return await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = svgUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(svgUrl);
+  }
 }
 
 // ── D6 legend toggle (BindingRole::Legend) ────────────────────────────────
@@ -470,6 +581,9 @@ async function _render(container, sceneJson, adapter) {
   // ── Inner chart wrapper (position:relative for canvas + SVG + tooltip) ─
   const chartWrapper = document.createElement('div');
   chartWrapper.style.position = 'relative';
+  // Bounds the screen blend of blended text runs (see _placeTextSvg) to
+  // the chart: they composite over the canvas, never the host page.
+  chartWrapper.style.isolation = 'isolate';
   container.appendChild(chartWrapper);
 
   // ── Canvas ───────────────────────────────────────────────────────
@@ -648,13 +762,12 @@ async function _render(container, sceneJson, adapter) {
       const ctx = off.getContext('2d');
       ctx.drawImage(canvas, 0, 0, exportW, exportH);
 
-      // Composite SVG text overlay (axis labels, title, legend text).
-      // The SVG is authored in CSS pixels; viewBox scales to export size.
+      // Composite the SVG overlays in the page's paint order (see
+      // _placeTextSvg): each text run, screened over what is beneath it when
+      // it is a blended batch's, then the shared overlay (axis labels, title,
+      // legend text). They are authored in CSS pixels; viewBox scales them
+      // to export size.
       try {
-        const svgClone = svgEl.cloneNode(true);
-        svgClone.setAttribute('width', String(exportW));
-        svgClone.setAttribute('height', String(exportH));
-        svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
         // Inline @font-face from the document's stylesheets so the SVG
         // renders text correctly when rasterized via Image.
         const fontRules = [];
@@ -667,22 +780,13 @@ async function _render(container, sceneJson, adapter) {
             }
           }
         } catch (_) { /* cross-origin stylesheet, skip */ }
-        if (fontRules.length > 0) {
-          const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-          styleEl.textContent = fontRules.join('\n');
-          svgClone.insertBefore(styleEl, svgClone.firstChild);
+        const runs = chartWrapper.querySelectorAll(':scope > svg.ferrum-text-run');
+        for (const run of [...runs, svgEl]) {
+          const img = await _rasterizeOverlay(run, w, h, exportW, exportH, fontRules);
+          ctx.globalCompositeOperation = run.style.mixBlendMode === 'screen' ? 'screen' : 'source-over';
+          ctx.drawImage(img, 0, 0, off.width, off.height);
         }
-        const svgXml = new XMLSerializer().serializeToString(svgClone);
-        const svgBlob = new Blob([svgXml], { type: 'image/svg+xml;charset=utf-8' });
-        const svgUrl = URL.createObjectURL(svgBlob);
-        const img = await new Promise((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = reject;
-          i.src = svgUrl;
-        });
-        ctx.drawImage(img, 0, 0, off.width, off.height);
-        URL.revokeObjectURL(svgUrl);
+        ctx.globalCompositeOperation = 'source-over';
       } catch (svgErr) {
         console.warn('[ferrum] SVG text composite failed, exporting without text:', svgErr);
       }

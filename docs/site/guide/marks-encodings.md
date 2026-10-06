@@ -580,49 +580,55 @@ chart = fm.Chart(df).mark_point(shape="|").encode(x="x", y="group:N")
 
 ## Mark style kwargs
 
-Every `mark_*()` method accepts `**kwargs` — constant style overrides passed straight through to the renderer, layered on top of (or instead of) any data-driven encoding. Ferrum validates these against each mark's own honored-kwarg vocabulary: passing a name that mark does not honor raises `TypeError` immediately, naming the mark and its honored set, rather than silently accepting-and-dropping it (#243).
+Every `mark_*()` method accepts `**kwargs`: constant style overrides passed straight through to the renderer, layered on top of (or instead of) any data-driven encoding. Ferrum holds them to Rust's style table, which records, for each primitive mark, exactly the style fields that mark draws. A field the mark never draws (`mark_line(fill=...)`, `mark_text(stroke=...)`, `mark_point(font_size=...)`) raises `ValueError` immediately, naming the mark and the fields it takes, rather than being silently accepted and dropped (#243). So does a name that is no style field at all.
 
-This section is the canonical reference for that vocabulary. Docstrings across the codebase that describe a mark's `**kwargs` point back here by name rather than re-listing every accepted key. The "Core style" table below is honored by every mark; the "Mark-specific" table names, per row, exactly which mark(s) honor that kwarg — passing it to any other mark raises `TypeError` rather than being silently ignored.
+The same rule holds at every door that styles a mark, not only the `mark_*()` methods: `fm.Layer(mark_kwargs=...)`, a figure function's `mark=` dict and `*_kws`, a composite's `layer_kwargs=`, and `Chart.override(mark_<field>=...)`. Each refusal is voiced as the public call you made. A composite, statistical or diagnostic mark (`mark_boxplot`, `mark_density`, `mark_roc`, …) takes every field below through its own `**kwargs` and spreads each one over only the marks it draws that draw that field; a field none of its marks draws raises `ValueError`.
 
-### Core style
+This section is the canonical reference for that vocabulary. Docstrings across the codebase that describe a mark's `**kwargs` point back here by name rather than re-listing every accepted key. The "Drawn by" column names the primitive marks that draw each field, as of this release; the table in Rust is the source of truth.
+
+### Style fields
+
+| Kwarg | Meaning | Drawn by |
+|---|---|---|
+| `fill` | Fill colour override (CSS colour string or hex). | point, bar, area, text, tick, rect, polygon, ribbon, arc, label, geoshape |
+| `stroke` | Stroke/outline colour override. | point, line, bar, area, rule, tick, rect, polygon, ribbon, segment, arc, geoshape |
+| `opacity` | Overall opacity in `[0, 1]`. | every mark but image |
+| `stroke_width` | Stroke/outline width in pixels. | point, line, bar, area, rule, tick, rect, polygon, ribbon, segment, arc, geoshape |
+| `stroke_dash` | Dash pattern as alternating on/off pixel lengths, e.g. `[4, 2]`, or a name such as `"dashed"`. | point, line, bar, rule, tick, rect, segment, arc |
+| `stroke_cap` | Line cap style: `"butt"`, `"round"`, `"square"`. | point, line, bar, area, rule, tick, rect, segment, arc, geoshape |
+| `stroke_join` | Line join style: `"miter"`, `"round"`, `"bevel"`. | point, line, bar, area, rule, tick, rect, polygon, ribbon, segment, arc, geoshape |
+| `size` | Constant mark size: point area in px², or line width. Must be a finite number above zero. | point, line |
+| `blend` | How the mark composites over what is already drawn: `"normal"` (the default; `"alpha"` is the same mode under its older name) or `"additive"`. | every mark |
+| `corner_radius` | Corner rounding in pixels (per-corner tangent-circle fillets on an arc wedge, including a polar bar). | bar, rect, arc |
+| `font_size` | Font size in points. | text, rect, label |
+| `font_weight` | CSS font-weight, e.g. `"bold"`, `400`, `700`. | text, label |
+| `align` | Horizontal text alignment: `"left"`, `"center"`, `"right"`. | text |
+| `baseline` | Vertical text alignment: `"top"`, `"middle"`, `"bottom"`. | text |
+| `dx`, `dy` | Fixed pixel offset from the anchor point. | text, label |
+| `angle` | Rotation in degrees. | text |
+| `limit` | Maximum rendered text width in pixels; clips overflow. | text |
+| `leader_line` | Draw a thin connecting line from the data point to the placed label. Default `False`. | label |
+| `interpolate` | Curve interpolation: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. (`mark_ribbon` also takes its own named `interpolate=` parameter.) | line, area, ribbon |
+| `line` | Whether to draw the area's top boundary as a line. Default `False`. | area |
+| `borders` | Whether to draw border lines at the band edges. (`mark_errorband` takes its own named `borders=` parameter.) | area |
+| `filled` | Whether points are filled (default) or open outlines. | point |
+| `shape` | Point glyph name; see the [`mark_point()`][ferrum.Chart.mark_point] docstring for the full glyph list. | point |
+| `band_size` | Extent of the tick/band along its cross axis. On an ordinal tick this is a fraction of the category band width (default `0.6`); on a rug tick (a single quantitative axis, no categorical channel) it is a fraction of the panel's cross-extent, and unset keeps the fixed tick length. | tick, rect |
+| `arrow` | Draw a filled triangle arrowhead at each segment's `(x2, y2)` end. Default `False`. | segment |
+| `arrow_size` | Arrowhead size in pixels when `arrow=True`. Default `8.0`. | segment |
+| `cmap` | Colormap name. An image draws it only over raster data, which only `mark_raster` produces; a polygon draws it only under a quantitative colour encoding. | polygon, image |
+| `width`, `height` | Rendered image size in pixels. An image draws them only when it has a `url` encoding. | image |
+| `zero` | Set `zero=False` to suppress the y-scale zero anchor. Default `True`. Taken at every door that styles a bar; on a flat bar chart a door-supplied `zero` is consumed exactly as `mark_bar(zero=...)` consumes it. | bar |
+
+Some fields draw only when another input is present: a stroke for `stroke_width` on a point or bar, raster data for an image's `cmap`, a `url` encoding for `width`/`height`. Such a field set without its input is accepted and warns that it draws nothing.
+
+### Method arguments
 
 | Kwarg | Meaning |
 |---|---|
-| `size` | Mark size (point area in px², or a mark-specific extent). |
-| `fill` | Fill colour override (CSS colour string or hex). |
-| `stroke` | Stroke/outline colour override. |
-| `opacity` | Overall opacity in `[0, 1]`. |
-| `stroke_width` | Stroke/outline width in pixels. |
-| `stroke_dash` | Dash pattern as alternating on/off pixel lengths, e.g. `[4, 2]`. |
-| `corner_radius` | Corner rounding in pixels (`mark_bar`, `mark_rect`, `mark_arc` — per-corner tangent-circle fillets on the wedge, including a polar `mark_bar`). |
-| `font_size` | Font size in points (`mark_text`, `mark_label`). |
-| `font_weight` | CSS font-weight, e.g. `"bold"`, `400`, `700` (`mark_text`, `mark_label`). |
-| `align` | Horizontal text alignment: `"left"`, `"center"`, `"right"`. |
-| `baseline` | Vertical text alignment: `"top"`, `"middle"`, `"bottom"`. |
-| `dx`, `dy` | Fixed pixel offset from the anchor point (`mark_text`, `mark_label`). |
-| `angle` | Rotation in degrees. |
-| `blend` | Alpha-compositing blend mode for layered marks: `"alpha"` (default), `"additive"`. |
+| `orient` | `orient="horizontal"` flips the mark to a horizontal orientation; `"vertical"` is the default. Taken only by `mark_bar()` and `mark_tick()`, which consume it themselves; every other door refuses it, naming the method. |
 
-### Mark-specific (validated per-mark)
-
-| Kwarg | Meaning |
-|---|---|
-| `interpolate` | Curve interpolation for `mark_line`/`mark_area`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. (`mark_ribbon` takes its own named `interpolate=` parameter rather than this `**kwargs` vocabulary.) |
-| `stroke_cap` | Line cap style for `mark_line`: `"butt"`, `"round"`, `"square"`. |
-| `stroke_join` | Line join style for `mark_line`/`mark_area`: `"miter"`, `"round"`, `"bevel"`. |
-| `orient` | `mark_bar`/`mark_tick`: `orient="horizontal"` flips the mark to a horizontal orientation. |
-| `filled` | `mark_point`: whether points are filled (default) or open outlines. |
-| `shape` | `mark_point`: point glyph name — see the [`mark_point()`][ferrum.Chart.mark_point] docstring for the full glyph list. |
-| `limit` | `mark_text`: maximum rendered width in pixels; clips overflow. |
-| `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. On an ordinal `mark_tick` this is still a fraction of the category band width (default `0.6`, unchanged); on a rug `mark_tick` (a single quantitative axis, no categorical channel) it is now a fraction of the panel's cross-extent instead of being silently ignored — unset keeps the old fixed tick length. |
-| `line` | `mark_area`: whether to draw the top boundary as a line. Default `False`. |
-| `borders` | `mark_area`: whether to draw border lines at the band edges. (`mark_errorband` takes its own named `borders=` parameter rather than this `**kwargs` vocabulary.) |
-| `arrow` | `mark_segment`: draw a filled triangle arrowhead at each segment's `(x2, y2)` end. Default `False`. |
-| `arrow_size` | `mark_segment`: arrowhead size in pixels when `arrow=True`. Default `8.0`. |
-| `leader_line` | `mark_label`: draw a thin connecting line from the data point to the placed label. Default `False`. |
-| `zero` | `mark_bar`: set `zero=False` to suppress the y-scale zero-anchor. Default `True`. |
-
-Statistical marks' own tunables (`mark_smooth(method=, ci=, bandwidth=, degree=, k=, n=, ...)`, `mark_density(bandwidth=, kernel=, extent=, cumulative=, multiple=, ...)`, `mark_histogram(bins=, bin_count=, bin_width=, density=, cumulative=, multiple=, position_by=, ...)`, `mark_errorbar(method=, ...)`) are named parameters of those specific `mark_*()` methods, not entries in this `**kwargs` vocabulary — see each method's own docstring on [`Chart`][ferrum.Chart] for its full parameter list. Every composite, statistical, and diagnostic mark (`mark_boxplot`, `mark_density`, `mark_roc`, …) still accepts the two tables above through its own `**kwargs`, on top of its named parameters.
+Statistical marks' own tunables (`mark_smooth(method=, ci=, bandwidth=, degree=, k=, n=, ...)`, `mark_density(bandwidth=, kernel=, extent=, cumulative=, multiple=, ...)`, `mark_histogram(bins=, bin_count=, bin_width=, density=, cumulative=, multiple=, position_by=, ...)`, `mark_errorbar(method=, ...)`) are named parameters of those specific `mark_*()` methods, not entries in this `**kwargs` vocabulary; see each method's own docstring on [`Chart`][ferrum.Chart] for its full parameter list.
 
 ## Friendly kwarg aliases
 

@@ -12,6 +12,7 @@ from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
 )
+from ferrum.marks.base import ORIENT_CHOICES
 
 
 def desugar_rank1d(
@@ -32,7 +33,7 @@ def desugar_rank1d(
     """
     del x_field, y_field
 
-    validate_choice("mark_rank1d", "orient", orient, ("horizontal", "vertical"))
+    validate_choice("mark_rank1d", "orient", orient, ORIENT_CHOICES)
     user_kw = _validate("rank1d", mark_kwargs)
     if orient == "horizontal":
         enc: dict[str, Any] = {"x": "score", "y": "feature"}
@@ -41,7 +42,7 @@ def desugar_rank1d(
     if color_field is not None:
         enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="bar", mark="bar", encoding=enc)]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("rank1d", layers, user_kw))
 
 
 register_layer_names("rank1d", frozenset({"bar"}))
@@ -95,7 +96,7 @@ def desugar_rank2d(
                 },
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("rank2d", layers, user_kw))
 
 
 register_layer_names("rank2d", frozenset({"rect", "label"}))
@@ -139,7 +140,7 @@ def desugar_parallel_coordinates(
             },
         )
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("parallel_coordinates", layers, user_kw))
 
 
 register_layer_names("parallel_coordinates", frozenset({"line"}))

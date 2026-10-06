@@ -1937,6 +1937,22 @@ fn build_panel_mark_batches(
             batch: layer_batch,
             mark_style: &mark_style,
         };
+        // A conditional style field set without the input it needs drew
+        // nothing: warned once per layer, however many panels draw it.
+        if let Some(overrides) = layer.mark_style.as_ref() {
+            for (field, needs) in draw::inert_style_fields(overrides, &ctx) {
+                let inert = RenderWarning::MarkStyleInert {
+                    layer: spec.layers.is_some().then_some(li),
+                    entry: entry.clone(),
+                    mark: layer.mark,
+                    field: field.to_string(),
+                    needs,
+                };
+                if !warnings.contains(&inert) {
+                    warnings.push(inert);
+                }
+            }
+        }
 
         // Both refusal gates below read the encoding the mark builder will
         // actually see — the DrawCtx-local copy, not the pre-normalization
@@ -2041,17 +2057,9 @@ fn build_panel_mark_batches(
             hrefs: result.hrefs,
             descriptions: result.descriptions,
             keys,
-            blend: layer.blend.unwrap_or(BlendMode::Normal),
-            stroke_cap: mark_style
-                .line
-                .stroke_cap
-                .as_deref()
-                .and_then(draw::parse_stroke_cap),
-            stroke_join: mark_style
-                .line
-                .stroke_join
-                .as_deref()
-                .and_then(draw::parse_stroke_join),
+            blend: mark_style.misc.blend.unwrap_or(BlendMode::Normal),
+            stroke_cap: mark_style.line.stroke_cap,
+            stroke_join: mark_style.line.stroke_join,
             packed_instances: None,
             // Secondary-y-axis (GH #52 Task 8): tag this batch with the same
             // slot its marks were positioned through above. `0` on every
@@ -4233,7 +4241,6 @@ mod tests {
             mark_style: None,
             data_source: None,
             position: None,
-            blend: None,
             independent_y,
             color_is_own: false,
             x_is_own: false,
@@ -13134,6 +13141,495 @@ mod tests {
         assert_eq!(scene.selections[0].panels, None);
         let json = serde_json::to_value(&scene.selections[0]).unwrap();
         assert!(json.get("panels").is_none(), "a one-panel scene omits `panels`: {json}");
+    }
+
+    // ── the style table at render: refusal, inert warning, blend ─────────────
+
+    fn xy_span_batch() -> RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![3.0, 1.0, 2.0, 4.0])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn spec_from(json: serde_json::Value) -> ChartSpec {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn inert_warnings(warnings: &[RenderWarning]) -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::MarkStyleInert { .. }))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    /// A conditional style field set without the input it needs warns once,
+    /// in the layer's voice, however many facet panels draw the layer; with
+    /// the input present it draws and does not warn.
+    #[test]
+    fn a_conditional_style_field_without_its_need_warns_once_per_layer() {
+        let faceted = |style: serde_json::Value| {
+            spec_from(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "segment",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}, "x2": {"field": "x2"}, "y2": {"field": "y2"}},
+                "facet": {"field": "g", "mode": {"kind": "wrap", "ncols": 2}},
+                "mark_style": style,
+            }))
+        };
+        let (scene, warnings) =
+            try_build_scene_for_capturing_warnings(&faceted(serde_json::json!({"arrow_size": 12.0})), &xy_span_batch());
+        assert_eq!(scene.unwrap().panels.len(), 2, "two facet panels draw the layer");
+        assert_eq!(
+            inert_warnings(&warnings),
+            vec!["mark_segment: arrow_size has no effect on this segment mark without arrow=True; it was ignored"]
+        );
+        let (_, warnings) = try_build_scene_for_capturing_warnings(
+            &faceted(serde_json::json!({"arrow_size": 12.0, "arrow": true})),
+            &xy_span_batch(),
+        );
+        assert!(inert_warnings(&warnings).is_empty(), "{:?}", inert_warnings(&warnings));
+    }
+
+    /// On a layered chart the warning names the layer and its entry, and a
+    /// sibling's input never enables another layer's field.
+    #[test]
+    fn an_inert_style_field_on_a_layer_names_that_layer() {
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "bar",
+            "encoding": {"x": {"field": "g"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke": "#123456"}},
+                {"mark": "bar", "encoding": {"x": {"field": "g"}, "y": {"field": "y"}}, "mark_style": {"stroke_width": 3.0}, "entry": "catplot"},
+            ],
+        }));
+        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &xy_span_batch());
+        scene.unwrap();
+        assert_eq!(
+            inert_warnings(&warnings),
+            vec!["layer 1: catplot: stroke_width has no effect on this bar mark without a stroke color (stroke=); it was ignored"]
+        );
+    }
+
+    /// A field the mark never draws refuses at render, from any producer,
+    /// voiced as the layer's entry and naming the fields the mark does draw.
+    #[test]
+    fn a_never_drawn_style_field_refuses_in_the_layer_voice() {
+        let spec = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"font_size": 12.0}},
+            ],
+        }));
+        let err = try_build_scene_for(&spec, &xy_span_batch()).unwrap_err();
+        assert_eq!(err.root(), &RenderError::MarkStyleNotDrawn { mark: Mark::Point, field: "font_size" });
+        assert_eq!(
+            err.to_string(),
+            "layer 1: mark_point: font_size has no effect on a point mark; a point mark draws size, stroke, \
+             fill, opacity, stroke_width, stroke_dash, stroke_cap, stroke_join, filled, shape, clip, blend"
+        );
+    }
+
+    /// `blend` resolves per layer onto that layer's batch: only the layer that
+    /// set it blends, a flat chart blends through its own `mark_style`, and
+    /// `"alpha"` is `normal`.
+    #[test]
+    fn blend_resolves_onto_the_batch_of_the_layer_that_set_it() {
+        let layered = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "point",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "layers": [
+                {"mark": "point", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"blend": "additive"}},
+                {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}},
+                {"mark": "line", "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}, "mark_style": {"blend": "alpha"}},
+            ],
+        }));
+        let scene = build_scene_for(&layered, &xy_span_batch());
+        let blends: Vec<BlendMode> = scene.panels[0].marks.iter().map(|b| b.blend).collect();
+        assert_eq!(blends, vec![BlendMode::Additive, BlendMode::Normal, BlendMode::Normal]);
+        let flat = spec_from(serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": "area",
+            "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            "mark_style": {"blend": "additive"},
+        }));
+        let scene = build_scene_for(&flat, &xy_span_batch());
+        assert_eq!(scene.panels[0].marks[0].blend, BlendMode::Additive);
+    }
+
+    /// One `<g>` element of a rendered SVG: its opening tag, the opening tags
+    /// of the groups enclosing it (outermost first), the opening tag of its
+    /// first child element, and whether it holds anything at all.
+    struct SvgGroup {
+        tag: String,
+        enclosing: Vec<String>,
+        first_child: Option<String>,
+        empty: bool,
+    }
+
+    const SCREEN_GROUP: &str = "<g style=\"mix-blend-mode:screen\">";
+
+    /// Every `<g>` of `svg`, in document order.
+    fn svg_groups(svg: &str) -> Vec<SvgGroup> {
+        let mut groups: Vec<SvgGroup> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut rest = svg;
+        while let Some(at) = rest.find('<') {
+            if let Some(&g) = open.last() {
+                if !rest[..at].trim().is_empty() {
+                    groups[g].empty = false;
+                }
+            }
+            rest = &rest[at..];
+            let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+            let tag = &rest[..end];
+            rest = &rest[end..];
+            if tag.starts_with("</") {
+                if tag == "</g>" {
+                    open.pop();
+                }
+                continue;
+            }
+            if let Some(&g) = open.last() {
+                groups[g].empty = false;
+                groups[g].first_child.get_or_insert_with(|| tag.to_string());
+            }
+            if tag == "<g>" || tag.starts_with("<g ") {
+                let enclosing = open.iter().map(|&g| groups[g].tag.clone()).collect();
+                groups.push(SvgGroup { tag: tag.to_string(), enclosing, first_child: None, empty: true });
+                if !tag.ends_with("/>") {
+                    open.push(groups.len() - 1);
+                }
+            }
+        }
+        groups
+    }
+
+    fn is_clip_group(tag: &str) -> bool {
+        tag.starts_with("<g clip-path=")
+    }
+
+    /// The static SVG's blend-group shape: `blended` blend groups, none inside
+    /// a clip group (which would isolate it from what is beneath and draw it
+    /// normal), and each clipped inside itself when `clipped`.
+    fn assert_blend_groups(svg: &str, blended: usize, clipped: bool, what: &str) {
+        let groups = svg_groups(svg);
+        let screens: Vec<&SvgGroup> = groups.iter().filter(|g| g.tag == SCREEN_GROUP).collect();
+        assert_eq!(screens.len(), blended, "{what}: {} blend groups for {blended} blended batches", screens.len());
+        for (i, group) in screens.iter().enumerate() {
+            assert!(
+                !group.enclosing.iter().any(|t| is_clip_group(t)),
+                "{what}: blend group {i} sits inside a clip group"
+            );
+            if clipped {
+                assert!(
+                    group.first_child.as_deref().is_some_and(is_clip_group),
+                    "{what}: blend group {i} is not clipped inside itself: first child {:?}",
+                    group.first_child
+                );
+            }
+        }
+    }
+
+    /// How many clip groups of `svg` hold nothing.
+    fn empty_clip_groups(svg: &str) -> usize {
+        svg_groups(svg).iter().filter(|g| is_clip_group(&g.tag) && g.empty).count()
+    }
+
+    /// Every mark whose table draws `blend` paints each of its batches inside
+    /// the static SVG's blend group when it blends additively, text and label
+    /// included, and in no blend group when it does not. Blending leaves no
+    /// more empty clip groups than the unblended render has (a text-only
+    /// panel's clip group is empty either way). Marks are derived from the
+    /// table; the `normal` cells are the vacuity control.
+    #[test]
+    fn every_mark_drawing_blend_paints_its_batches_in_the_svg_blend_group() {
+        let mut cells = (0, 0);
+        for mark in crate::spec::mark::all_marks() {
+            if mark.style_field("blend").is_none() {
+                continue;
+            }
+            let mut empty = Vec::new();
+            for (blend, additive) in [("additive", true), ("normal", false)] {
+                let Some(spec) = style_fixture(mark, serde_json::json!({"blend": blend}), false) else {
+                    continue;
+                };
+                let scene = try_build_scene_for(&spec, &xy_span_batch())
+                    .unwrap_or_else(|e| panic!("{mark:?} blend={blend}: {e}"));
+                let batches = scene.panels.iter().map(|p| p.marks.len()).sum::<usize>();
+                assert!(batches > 0, "{mark:?} blend={blend}: the fixture drew no batch");
+                let svg = super::super::svg_walk::walk_svg(&scene, false).unwrap();
+                let blended = if additive { batches } else { 0 };
+                let clipped = mark.style_field("clip").is_some();
+                assert_blend_groups(&svg, blended, clipped, &format!("{mark:?} blend={blend}"));
+                empty.push(empty_clip_groups(&svg));
+                if additive { cells.0 += 1 } else { cells.1 += 1 }
+            }
+            if let [with_blend, without] = empty[..] {
+                assert_eq!(with_blend, without, "{mark:?}: blending left {with_blend} empty clip groups, not {without}");
+            }
+        }
+        assert!(cells.0 > 0 && cells.1 > 0, "vacuity control: both blended and unblended cells, got {cells:?}");
+    }
+
+    /// Blended and unblended batches mixed in one panel keep their paint
+    /// order: each blended batch draws in its own clipped blend group, each
+    /// run of unblended batches in the panel's clip group, and no clip group
+    /// is left empty, whether a blended batch comes first, last, or next to
+    /// another. The unblended chart is the vacuity control: one clip group.
+    #[test]
+    fn blended_and_unblended_batches_in_one_panel_keep_their_order_and_clip() {
+        let layered = |blends: [&str; 4]| {
+            let marks = ["point", "line", "area", "point"];
+            let layers: Vec<serde_json::Value> = marks
+                .iter()
+                .zip(blends)
+                .map(|(mark, blend)| {
+                    serde_json::json!({
+                        "mark": mark,
+                        "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                        "mark_style": {"blend": blend},
+                    })
+                })
+                .collect();
+            let spec = spec_from(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+                "layers": layers,
+            }));
+            super::super::svg_walk::walk_svg(&build_scene_for(&spec, &xy_span_batch()), false).unwrap()
+        };
+        // The containers each batch draws in, in paint order: `screen` for a
+        // blend group, `clip` for the panel's clip group.
+        let containers = |svg: &str| -> Vec<&'static str> {
+            svg_groups(svg)
+                .iter()
+                .filter(|g| g.enclosing.iter().all(|t| t != SCREEN_GROUP))
+                .filter_map(|g| match g.tag.as_str() {
+                    SCREEN_GROUP => Some("screen"),
+                    t if is_clip_group(t) => Some("clip"),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cases: [([&str; 4], &[&str]); 4] = [
+            (["additive", "normal", "additive", "additive"], &["screen", "clip", "screen", "screen"]),
+            (["normal", "additive", "additive", "normal"], &["clip", "screen", "screen", "clip"]),
+            (["normal", "normal", "additive", "normal"], &["clip", "screen", "clip"]),
+            (["normal", "normal", "normal", "normal"], &["clip"]),
+        ];
+        for (blends, want) in cases {
+            let svg = layered(blends);
+            let blended = blends.iter().filter(|b| **b == "additive").count();
+            assert_blend_groups(&svg, blended, true, &format!("{blends:?}"));
+            assert_eq!(empty_clip_groups(&svg), 0, "{blends:?}: an empty clip group");
+            assert_eq!(containers(&svg), want, "{blends:?}");
+        }
+    }
+
+    /// A bound `stroke_width` column paints a bar's, point's or rect's stroke
+    /// in the fill when no `stroke=` is set, so a constant stroke style on
+    /// those marks is drawn there and must not be reported inert; a cleared
+    /// `stroke="none"` shuts that stroke, and the same style then warns.
+    #[test]
+    fn a_bound_stroke_width_column_draws_the_stroke_its_style_fields_need() {
+        let bar = |style: serde_json::Value| {
+            spec_from(serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "bar",
+                "encoding": {"x": {"field": "g"}, "y": {"field": "y"}, "stroke_width": {"field": "x2"}},
+                "mark_style": style,
+            }))
+        };
+        let (scene, warnings) =
+            try_build_scene_for_capturing_warnings(&bar(serde_json::json!({"stroke_dash": [4.0, 2.0]})), &xy_span_batch());
+        assert!(inert_warnings(&warnings).is_empty(), "{:?}", inert_warnings(&warnings));
+        let dashes: Vec<serde_json::Value> = scene.unwrap().panels[0].marks[0]
+            .nodes
+            .iter()
+            .map(|n| serde_json::to_value(n).unwrap())
+            .filter_map(|n| n.pointer("/style/stroke_dash").cloned())
+            .collect();
+        assert!(!dashes.is_empty() && dashes.iter().all(|d| d == &serde_json::json!([4.0, 2.0])), "{dashes:?}");
+        let (_, warnings) = try_build_scene_for_capturing_warnings(
+            &bar(serde_json::json!({"stroke_dash": [4.0, 2.0], "stroke": "none"})),
+            &xy_span_batch(),
+        );
+        assert_eq!(
+            inert_warnings(&warnings),
+            vec!["mark_bar: stroke_dash has no effect on this bar mark without a stroke color (stroke=); it was ignored"]
+        );
+    }
+
+    /// A minimal chart of `mark` over [`xy_span_batch`], or `None` for the
+    /// marks that need data of their own kind (raster or url tiles, geometry).
+    fn style_fixture(mark: Mark, style: serde_json::Value, width_column: bool) -> Option<ChartSpec> {
+        let f = |field: &str| serde_json::json!({"field": field});
+        let mut encoding = match mark {
+            Mark::Point | Mark::Line | Mark::Area | Mark::Polygon => serde_json::json!({"x": f("x"), "y": f("y")}),
+            Mark::Bar => serde_json::json!({"x": f("g"), "y": f("y")}),
+            Mark::Tick => serde_json::json!({"x": f("x"), "y": f("g")}),
+            Mark::Ribbon => serde_json::json!({"x": f("x"), "y": f("y"), "y2": f("y2")}),
+            Mark::Rule | Mark::Rect | Mark::Segment => {
+                serde_json::json!({"x": f("x"), "y": f("y"), "x2": f("x2"), "y2": f("y2")})
+            }
+            Mark::Text | Mark::Label => serde_json::json!({"x": f("x"), "y": f("y"), "text": f("g")}),
+            Mark::Arc => serde_json::json!({"x": f("x")}),
+            Mark::Image | Mark::Geoshape => return None,
+        };
+        if width_column {
+            encoding["stroke_width"] = f("x2");
+        }
+        let mut spec = serde_json::json!({
+            "data": {"kind": "named", "name": "default"},
+            "mark": mark,
+            "encoding": encoding,
+            "mark_style": style,
+        });
+        if mark == Mark::Arc {
+            spec["coord"] = serde_json::json!({"kind": "polar"});
+        }
+        Some(spec_from(spec))
+    }
+
+    /// Whether any node of the scene's marks paints a stroke of positive
+    /// width: a fill-and-stroke node's `stroke`, or a stroke style's `color`.
+    fn scene_draws_a_stroke(scene: &ferrum_scene::SceneGraph) -> bool {
+        fn walk(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(o) => {
+                    let painted = |paint: &str, width: &str| {
+                        o.get(paint).is_some_and(|p| !p.is_null())
+                            && o.get(width).and_then(serde_json::Value::as_f64).is_some_and(|w| w > 0.0)
+                    };
+                    painted("stroke", "stroke_width") || painted("color", "width") || o.values().any(walk)
+                }
+                serde_json::Value::Array(a) => a.iter().any(walk),
+                _ => false,
+            }
+        }
+        scene.panels.iter().flat_map(|p| &p.marks).any(|b| b.nodes.iter().any(|n| walk(&serde_json::to_value(n).unwrap())))
+    }
+
+    /// A stroke-shape value each stroke-needing field draws when stroked.
+    fn stroke_field_sample(field: &str) -> serde_json::Value {
+        match field {
+            "stroke_width" => serde_json::json!(3.0),
+            "stroke_dash" => serde_json::json!([3.0, 3.0]),
+            "stroke_cap" | "stroke_join" => serde_json::json!("round"),
+            _ => panic!("no stroke sample for '{field}'"),
+        }
+    }
+
+    /// The stroke need is the fact the builders draw: for every mark whose
+    /// table makes a field need a stroke, and every way a stroke is turned
+    /// on or off (a `stroke=` color, a cleared stroke, a bound width column,
+    /// a hollow point, an area's border lines), the field warns inert exactly
+    /// when the built scene paints no stroke. Marks and fields are derived
+    /// from the table.
+    #[test]
+    fn the_stroke_need_warns_exactly_when_the_mark_paints_no_stroke() {
+        use crate::spec::mark::StyleNeed;
+        let mut cells = (0, 0);
+        for mark in crate::spec::mark::all_marks() {
+            let stroke_fields: Vec<&str> =
+                mark.style_fields().iter().filter(|f| f.needs == Some(StyleNeed::Stroke)).map(|f| f.name).collect();
+            if stroke_fields.is_empty() {
+                continue;
+            }
+            let mut switches = vec![serde_json::json!({}), serde_json::json!({"stroke": "#123456"}), serde_json::json!({"stroke": "none"})];
+            for (field, value) in [("filled", false), ("line", true), ("borders", true)] {
+                if mark.style_field(field).is_some() {
+                    switches.push(serde_json::json!({ field: value }));
+                }
+            }
+            for switch in &switches {
+                for width_column in [false, true] {
+                    for &field in &stroke_fields {
+                        let mut style = switch.clone();
+                        style["stroke_width"] = serde_json::json!(3.0);
+                        style[field] = stroke_field_sample(field);
+                        let spec = style_fixture(mark, style.clone(), width_column)
+                            .unwrap_or_else(|| panic!("{mark:?} has stroke fields but no fixture"));
+                        let (scene, warnings) = try_build_scene_for_capturing_warnings(&spec, &xy_span_batch());
+                        let scene = scene.unwrap_or_else(|e| panic!("{mark:?} {style} column={width_column}: {e}"));
+                        let warned = warnings.iter().any(|w| {
+                            matches!(w, RenderWarning::MarkStyleInert { field: f, .. } if f == field)
+                        });
+                        let stroked = scene_draws_a_stroke(&scene);
+                        assert_eq!(warned, !stroked, "{mark:?} {style} column={width_column}: warned={warned}, stroked={stroked}");
+                        if stroked { cells.0 += 1 } else { cells.1 += 1 }
+                    }
+                }
+            }
+        }
+        assert!(cells.0 > 0 && cells.1 > 0, "vacuity control: both stroked and strokeless cells, got {cells:?}");
+    }
+
+    /// Every paint field a mark's table lists as drawn changes that mark's
+    /// scene when set (with a stroke color on for the fields that need one):
+    /// a builder that stopped reading a listed field fails here instead of
+    /// accepting it in silence. Marks and fields are derived from the table.
+    #[test]
+    fn every_listed_paint_field_changes_the_marks_scene() {
+        use crate::spec::mark::StyleNeed;
+        let samples = [
+            ("stroke", serde_json::json!("#ff0000")),
+            ("fill", serde_json::json!("#00ff00")),
+            ("opacity", serde_json::json!(0.5)),
+            ("stroke_width", serde_json::json!(4.0)),
+            ("stroke_dash", serde_json::json!([3.0, 3.0])),
+            ("corner_radius", serde_json::json!(4.0)),
+        ];
+        let mut checked = 0;
+        let mut unfixtured = Vec::new();
+        for mark in crate::spec::mark::all_marks() {
+            if style_fixture(mark, serde_json::json!({}), false).is_none() {
+                unfixtured.push(mark);
+                continue;
+            }
+            for (field, value) in &samples {
+                let base = match mark.style_field(field).map(|f| f.needs) {
+                    Some(None) => serde_json::json!({}),
+                    Some(Some(StyleNeed::Stroke)) => serde_json::json!({"stroke": "#123456"}),
+                    _ => continue,
+                };
+                let mut set = base.clone();
+                set[*field] = value.clone();
+                let build = |style: serde_json::Value| {
+                    let scene = build_scene_for(&style_fixture(mark, style, false).unwrap(), &xy_span_batch());
+                    serde_json::to_value(&scene.panels[0].marks).unwrap()
+                };
+                assert_ne!(build(base), build(set), "{mark:?}.{field} is listed as drawn but changed nothing");
+                checked += 1;
+            }
+        }
+        assert_eq!(unfixtured, vec![Mark::Image, Mark::Geoshape]);
+        assert!(checked > 0, "vacuity control: some listed paint field was checked");
     }
 }
 

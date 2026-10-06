@@ -14,8 +14,7 @@ from ferrum._validate import validate_choice
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks._multiple import MULTIPLE_MODES as _MULTIPLE_MODES
 from ferrum.marks._multiple import multiple_semantics
-
-_ORIENTATIONS = ("horizontal", "vertical")
+from ferrum.marks.base import ORIENT_CHOICES
 
 
 def desugar_density(
@@ -165,7 +164,7 @@ def desugar_density(
     if kernel is not None:
         validate_choice("mark_density", "kernel", kernel, transform_registry("kde")["methods"])
     validate_choice("mark_density", "multiple", multiple, _MULTIPLE_MODES)
-    validate_choice("mark_density", "orientation", orientation, _ORIENTATIONS)
+    validate_choice("mark_density", "orientation", orientation, ORIENT_CHOICES)
     # GH #77: orientation="horizontal" remaps the density column onto
     # encoding.x directly (`encoding_remap` below) without setting CoordFlip,
     # so the Stack must say so explicitly — otherwise Rust's `apply_stack`
@@ -354,7 +353,7 @@ def desugar_histogram(
             "bins are always left-closed, right-open [lo, hi)"
         )
     validate_choice("mark_histogram", "multiple", multiple, _MULTIPLE_MODES)
-    validate_choice("mark_histogram", "orientation", orientation, _ORIENTATIONS)
+    validate_choice("mark_histogram", "orientation", orientation, ORIENT_CHOICES)
     # `position_by` ends up as `Stack(by=)`/`Dodge(by=)`, whose contract is
     # `Optional[str]`, so anything else reaches serialization untyped: a
     # channel object raised the bare `TypeError: Object of type Color is not

@@ -1,49 +1,36 @@
 """Per-mark honored-kwarg vocabularies (#243) and the mark_raster eager
 validation + Float64-claim probe (#136).
 
-Before this batch, ``MarkBase``/``validate_user_mark_kwargs`` validated
-every mark's ``**kwargs`` against one flat, shared allowlist
-(``_VALID_MARK_KWARGS``): any name accepted for ANY mark was silently
-accepted for EVERY mark, whether or not that mark actually honored it (e.g.
-``mark_bar(arrow=True)`` was accepted and then silently dropped -- ``arrow``
-only means anything on ``mark_segment``). This settles #154 (``band_size``
-on ``mark_bar``) the same way.
+Before #243, ``MarkBase``/``validate_user_mark_kwargs`` validated every
+mark's ``**kwargs`` against one flat, shared allowlist: any name accepted
+for ANY mark was silently accepted for EVERY mark, whether or not that mark
+actually honored it (e.g. ``mark_bar(arrow=True)`` was accepted and then
+silently dropped -- ``arrow`` only means anything on ``mark_segment``). This
+settles #154 (``band_size`` on ``mark_bar``) the same way.
 
-``MARK_HONORED_KWARGS`` (``ferrum.marks.base``) replaces the flat allowlist
-with a per-mark vocabulary for the 13 primitive marks, mirrored from
-``MarkKwargsSpec``'s own per-field section-header comments in
-``crates/ferrum-core/src/spec/mark_style.rs``; ``mark_honors()`` is the one
-shared predicate all three consumers (``MarkBase.__init__``,
-``validate_user_mark_kwargs``, and -- at the union level --
-``_override_apply``'s ``mark_`` prefix registry) now consult.
+``ferrum.marks.base.honored_kwargs`` is each mark's vocabulary, read off
+Rust's per-mark style table (``ferrum._core.mark_style_fields``) plus the
+kwargs a mark method consumes itself (``METHOD_ONLY_KWARGS``);
+``mark_honors()`` is the one shared predicate ``MarkBase.__init__`` and
+``validate_user_mark_kwargs`` consult.
 """
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
 
 import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum._core import mark_kwargs_fields, mark_style_fields
+from ferrum._layer import drawn_style_fields
 from ferrum.marks.base import (
-    MARK_HONORED_KWARGS,
-    _PRIMITIVE_MARK_EXTRAS,
-    _UNIVERSAL_MARK_KWARGS,
+    _INTERNAL_STYLE_DOORS,
+    METHOD_ONLY_KWARGS,
+    honored_kwargs,
+    layer_style_fields,
     mark_honors,
 )
 from ferrum.marks._mark_kwargs import validate_user_mark_kwargs
-
-_MARK_STYLE_RS = (
-    Path(__file__).resolve().parent.parent.parent
-    / "crates"
-    / "ferrum-core"
-    / "src"
-    / "spec"
-    / "mark_style.rs"
-)
-
 
 # ---------------------------------------------------------------------------
 # RED: mark_bar(arrow=True) -- accepted-and-silently-dropped before, typed
@@ -104,8 +91,17 @@ class TestBandSizeSettlesFinding154:
 # aliases) keep size=.
 # ---------------------------------------------------------------------------
 
+#: The marks a primitive ``mark_<name>()`` method sets on a flat chart, read
+#: off ``Chart``'s own methods (``mark_ribbon`` is a composite method).
+_PRIMITIVE_METHOD_MARKS = sorted(
+    mark
+    for mark in (name[len("mark_") :] for name in dir(fm.Chart) if name.startswith("mark_"))
+    if drawn_style_fields(mark) is not None
+    and getattr(fm.Chart(None), f"mark_{mark}")()._pending_stat_mark is None
+)
+
 _SIZE_REFUSING_PRIMITIVES = sorted(
-    mark for mark in _PRIMITIVE_MARK_EXTRAS if "size" not in MARK_HONORED_KWARGS[mark]
+    mark for mark in _PRIMITIVE_METHOD_MARKS if "size" not in honored_kwargs(mark)
 )
 
 #: Literal expected refusal text for every refusing primitive, pointer and
@@ -133,10 +129,10 @@ _SIZE_REFUSAL_MESSAGES: dict[str, str] = {
 
 class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
     def test_population_is_every_primitive_but_point_and_line(self):
-        """Vacuity control: the refusing population is derived from the
-        registry, not hand-listed, and must land on exactly the 13
-        primitives minus point/line -- neither empty nor everything."""
-        assert _SIZE_REFUSING_PRIMITIVES == sorted(set(_PRIMITIVE_MARK_EXTRAS) - {"point", "line"})
+        """Vacuity control: the refusing population is derived from Rust's
+        table, not hand-listed, and must land on exactly the 13 primitive
+        methods minus point/line -- neither empty nor everything."""
+        assert _SIZE_REFUSING_PRIMITIVES == sorted(set(_PRIMITIVE_METHOD_MARKS) - {"point", "line"})
         assert len(_SIZE_REFUSING_PRIMITIVES) == 11
         # The literal-pin table below must track this registry-derived
         # population exactly, so the two cannot drift apart.
@@ -184,35 +180,40 @@ class TestConstantSizeRefusedOnMarksThatDoNotDrawIt:
 
 
 # ---------------------------------------------------------------------------
-# mark_honors()/MARK_HONORED_KWARGS direct-unit coverage.
+# mark_honors()/honored_kwargs direct-unit coverage.
 # ---------------------------------------------------------------------------
 
 
 class TestMarkHonors:
-    def test_universal_kwargs_honored_by_every_primitive(self):
-        for mark in MARK_HONORED_KWARGS:
-            for kwarg in _UNIVERSAL_MARK_KWARGS:
-                assert mark_honors(mark, kwarg), f"{mark} should honor universal {kwarg!r}"
+    @pytest.mark.parametrize("mark", _PRIMITIVE_METHOD_MARKS)
+    def test_a_mark_method_honors_its_table_row_and_its_own_kwargs(self, mark):
+        drawn = set(mark_style_fields(mark))
+        assert honored_kwargs(mark) == (drawn - set(_INTERNAL_STYLE_DOORS)) | set(
+            METHOD_ONLY_KWARGS.get(mark, ())
+        )
+        assert layer_style_fields(mark) == drawn - set(_INTERNAL_STYLE_DOORS)
 
     def test_point_honors_shape_and_filled_only_extra(self):
         assert mark_honors("point", "shape")
         assert mark_honors("point", "filled")
         assert not mark_honors("point", "band_size")
         assert not mark_honors("point", "arrow")
+        assert not mark_honors("point", "font_size")
 
-    def test_unrecognized_mark_falls_back_to_universal(self):
-        # Composite/diagnostic mark names have no explicit entry; they fall
-        # back to the universal set.
-        assert "boxplot" not in MARK_HONORED_KWARGS
-        assert mark_honors("boxplot", "opacity")
-        assert not mark_honors("boxplot", "shape")
+    def test_a_composite_honors_every_public_field(self):
+        """A composite spreads its style over the marks it emits, so it takes
+        every field some mark draws and is held to its emitted marks once
+        its desugar has run; the internal fields it never takes."""
+        assert honored_kwargs("boxplot") == set(mark_kwargs_fields()) - set(_INTERNAL_STYLE_DOORS)
+        assert mark_honors("boxplot", "shape")
+        assert not mark_honors("boxplot", "detail")
 
     def test_forwarded_to_transform_kwargs_are_not_honored_by_any_mark(self):
         # method/ci/bandwidth/... were never real MarkKwargsSpec fields --
         # they are named parameters of specific mark_*() methods
         # (mark_smooth, mark_density, mark_histogram), always intercepted by
         # signature-based partitioning before reaching MarkBase. They must
-        # not appear in any mark's honored set nor the universal fallback.
+        # not appear in any mark's honored set, composite marks included.
         for stale in (
             "method",
             "ci",
@@ -228,8 +229,7 @@ class TestMarkHonors:
             "right",
             "multiple",
         ):
-            assert stale not in _UNIVERSAL_MARK_KWARGS
-            for mark in MARK_HONORED_KWARGS:
+            for mark in [*_PRIMITIVE_METHOD_MARKS, "boxplot"]:
                 assert not mark_honors(mark, stale), f"{mark} must not honor {stale!r}"
 
 
@@ -239,10 +239,11 @@ class TestValidateUserMarkKwargs:
 
     def test_not_honored_kwarg_raises_naming_mark_and_honored_set(self):
         with pytest.raises(ValueError) as exc_info:
-            validate_user_mark_kwargs("boxplot", {"shape": "diamond"})
+            validate_user_mark_kwargs("boxplot", {"detail": "g"})
         message = str(exc_info.value)
-        assert "mark_boxplot" in message
-        assert "shape" in message
+        assert message.startswith(
+            "mark_boxplot: keyword argument(s) ['detail'] not honored by mark_boxplot. Honored: "
+        )
         assert "opacity" in message  # a member of the honored set is named
 
     def test_empty_dict_short_circuits(self):
@@ -287,91 +288,6 @@ class TestOverrideMarkPrefix:
         df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
         assert base.override(mark_shape="diamond").to_svg() != base.to_svg()
-
-
-# ---------------------------------------------------------------------------
-# Drift pin: MARK_HONORED_KWARGS's per-primitive extras must match
-# MarkKwargsSpec's own section-header comments in mark_style.rs.
-# ---------------------------------------------------------------------------
-
-_HEADER_RE = re.compile(r"([a-z_]+(?:\s*/\s*[a-z_]+)*)\s*\(([^()]*)\)")
-_PUB_FIELD_RE = re.compile(r"^\s*pub\s+([a-z_0-9]+):\s*Option<")
-
-
-def _parse_rust_field_mark_map() -> dict[str, frozenset[str]]:
-    """Parse ``mark_style.rs``'s struct body for section-header comments of
-    the form ``// ── <label>: <field>[ / <field>] (<mark>[, <mark>...]) ──``
-    and pair each named field with the primitive mark names mentioned in its
-    header (filtering out non-mark descriptive words like "constant").
-
-    Only the struct body (before ``#[cfg(test)]``) is scanned -- the test
-    module below it repeats some header text as section dividers with no
-    adjoining ``pub`` field, which would otherwise pollute the map with
-    stale duplicate entries (harmlessly, since they're identical, but the
-    struct body is the single source of truth).
-    """
-    text = _MARK_STYLE_RS.read_text()
-    struct_text = text.split("#[cfg(test)]")[0]
-    primitive_marks = frozenset(_PRIMITIVE_MARK_EXTRAS)
-
-    pending_fields: set[str] = set()
-    pending_marks: frozenset[str] = frozenset()
-    result: dict[str, set[str]] = {}
-    for line in struct_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//"):
-            header_match = _HEADER_RE.search(stripped)
-            if header_match:
-                field_names = {n.strip() for n in header_match.group(1).split("/")}
-                marks = {m.strip() for m in re.split(r"[,/]", header_match.group(2))}
-                marks &= primitive_marks
-                if marks:
-                    pending_fields = field_names
-                    pending_marks = frozenset(marks)
-            continue
-        pub_match = _PUB_FIELD_RE.match(line)
-        if pub_match and pub_match.group(1) in pending_fields:
-            result.setdefault(pub_match.group(1), set()).update(pending_marks)
-    return {k: frozenset(v) for k, v in result.items()}
-
-
-class TestDriftPinAgainstRustSectionHeaders:
-    def test_parser_finds_known_pairs(self):
-        """Sanity: guard against the regex silently matching nothing, which
-        would make the drift-pin assertions below vacuously true."""
-        rust_map = _parse_rust_field_mark_map()
-        assert rust_map, "drift-pin parser found no section headers in mark_style.rs"
-        assert rust_map["interpolate"] >= {"line", "area"}
-        assert rust_map["band_size"] == {"tick", "rect"}
-        assert rust_map["arrow"] == {"segment"}
-        assert rust_map["arrow_size"] == {"segment"}
-        assert rust_map["borders"] == {"area"}
-        assert rust_map["leader_line"] == {"label"}
-        assert rust_map["zero"] == {"bar"}
-
-    def test_every_rust_documented_pairing_is_granted_in_python(self):
-        rust_map = _parse_rust_field_mark_map()
-        for field, marks in rust_map.items():
-            for mark in marks:
-                assert field in MARK_HONORED_KWARGS[mark], (
-                    f"mark_style.rs documents {field!r} as owned by mark_{mark}, "
-                    f"but MARK_HONORED_KWARGS[{mark!r}] does not include "
-                    f"{field!r}. Update ferrum.marks.base._PRIMITIVE_MARK_EXTRAS."
-                )
-
-    def test_python_does_not_over_grant_rust_documented_fields(self):
-        rust_map = _parse_rust_field_mark_map()
-        for mark, extras in _PRIMITIVE_MARK_EXTRAS.items():
-            for field in extras:
-                if field not in rust_map:
-                    # Python-only fields (e.g. "orient") have no Rust
-                    # MarkKwargsSpec entry at all; nothing to cross-check.
-                    continue
-                assert mark in rust_map[field], (
-                    f"MARK_HONORED_KWARGS[{mark!r}] grants {field!r}, but "
-                    f"mark_style.rs's section header for {field!r} only names "
-                    f"{sorted(rust_map[field])} -- drift between Python and Rust."
-                )
 
 
 # ---------------------------------------------------------------------------

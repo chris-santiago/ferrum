@@ -1,7 +1,7 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{col_as_f64, resolve_stroke_paint, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, resolve_stroke_paint, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::arrowhead::{
     arrowhead_path_with_opacity, arrowhead_triangle, DEFAULT_ARROW_HEAD_SIZE,
@@ -66,9 +66,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let opacity_res =
         OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
-    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values = stroke_width_column(ctx);
 
     // Per-row stroke color through the shared NF-A3 reader (same path as
     // rule.rs). Only wins when no explicit user stroke override is set.

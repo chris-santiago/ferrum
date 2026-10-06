@@ -207,7 +207,7 @@ class TestOneCatchAllMerger:
             mark_kwargs={"stroke": "#ff0000"},
             caller_style_keys=frozenset({"stroke"}),
         )
-        (merged,) = apply_user_mark_kwargs([layer], {"stroke": "#0000ff", "opacity": 0.5})
+        (merged,) = apply_user_mark_kwargs("smooth", [layer], {"stroke": "#0000ff", "opacity": 0.5})
         assert merged.mark_kwargs == {"stroke": "#ff0000", "opacity": 0.5}, (
             "the key the caller aimed at this layer must outrank the broad "
             "one, and the broad one must still apply where nothing narrower "
@@ -219,7 +219,7 @@ class TestOneCatchAllMerger:
         desugar's own default and the caller's catch-all overrides it (this
         is what lets ``mark_boxplot(opacity=0.8)`` beat a ribbon's 0.3)."""
         layer = _Layer(name="ribbon", mark="ribbon", mark_kwargs={"opacity": 0.3})
-        (merged,) = apply_user_mark_kwargs([layer], {"opacity": 0.8})
+        (merged,) = apply_user_mark_kwargs("ribbon", [layer], {"opacity": 0.8})
         assert merged.mark_kwargs == {"opacity": 0.8}
 
     def test_the_two_spreaders_agree_layer_for_layer(self):
@@ -236,10 +236,10 @@ class TestOneCatchAllMerger:
             _Layer(name="metrics", mark="text"),
         ]
         style = {"stroke": "#0000ff", "opacity": 0.5}
-        assert apply_user_mark_kwargs(layers, style) == [
+        assert apply_user_mark_kwargs("smooth", layers, style) == [
             apply_catch_all_style(layer, style) for layer in layers
         ]
 
     def test_an_empty_catch_all_returns_the_layers_untouched(self):
         layers = [_Layer(name="line", mark="line", mark_kwargs={"stroke": "#ff0000"})]
-        assert apply_user_mark_kwargs(layers, {}) is layers
+        assert apply_user_mark_kwargs("smooth", layers, {}) is layers

@@ -390,7 +390,7 @@ def desugar_boxplot(
             )
         )
 
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply("boxplot", layers, user_kw))
 
 
 register_layer_names(
@@ -559,7 +559,7 @@ def desugar_errorbar(
                 ),
             ]
         )
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply("errorbar", layers, user_kw))
 
 
 register_layer_names(
@@ -722,7 +722,7 @@ def desugar_errorband(
                 ),
             ]
         )
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply("errorband", layers, user_kw))
 
 
 register_layer_names(
@@ -818,7 +818,7 @@ def desugar_ribbon(
             mark_kwargs={"opacity": opacity, "stroke": "none", "interpolate": interpolate},
         ),
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("ribbon", layers, user_kw))
 
 
 register_layer_names(
@@ -1346,7 +1346,7 @@ def desugar_boxen(
         )
     )
 
-    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply("boxen", layers, user_kw))
 
 
 register_layer_names(

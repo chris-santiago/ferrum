@@ -32,7 +32,7 @@
 //! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::curve::{StepSpelling, Trace};
@@ -232,8 +232,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     };
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
-    let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sw_vals = stroke_width_column(ctx);
     // Per-row `(value, area)` from an encoded `size`, through the shared size
     // scale. A null, non-finite or unmappable row is `None` and takes its
     // series' constant width below (see `vertex_width`).
@@ -366,8 +365,8 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                 group_stroke_width,
                 1.0,
                 effective_dash,
-                ctx.mark_style.line.stroke_cap.as_deref(),
-                ctx.mark_style.line.stroke_join.as_deref(),
+                ctx.mark_style.line.stroke_cap,
+                ctx.mark_style.line.stroke_join,
             );
             stroke_style.stroke_opacity = group_stroke_opacity;
             // Polyline uses `StrokeStyle`, which has no fill channel — the

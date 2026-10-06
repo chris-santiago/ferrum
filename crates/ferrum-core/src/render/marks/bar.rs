@@ -8,7 +8,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns, PaintChannels};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns, PaintChannels};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
@@ -112,8 +112,7 @@ struct StrokeChannels<'a> {
 impl<'a> StrokeChannels<'a> {
     fn load(ctx: &DrawCtx<'a>) -> Self {
         Self {
-            width: ctx.spec.encoding.stroke_width.as_ref()
-                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            width: stroke_width_column(ctx),
             dash: stroke_dash_column_loader(ctx),
             dash_scale: ctx.scales.stroke_dash.as_ref(),
             angle: ctx.spec.encoding.angle.as_ref()

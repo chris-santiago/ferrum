@@ -85,6 +85,120 @@ impl Mark {
         self.size_drawing() == SizeDrawing::ConstantOrEncoded
     }
 
+    /// Every style field (`MarkKwargsSpec` wire key) this mark draws, in the
+    /// struct's declaration order: the one table of what each mark draws.
+    /// A set field outside it refuses at render
+    /// ([`crate::render::RenderError::MarkStyleNotDrawn`]); a conditional
+    /// entry warns when its input is absent. `size` appears exactly where
+    /// [`Self::draws_constant_size`] holds; its refusal elsewhere stays
+    /// [`crate::render::RenderError::MarkSizeNotDrawn`], which names the
+    /// mark's own sizing kwarg. `blend` is drawn by every mark.
+    ///
+    /// The table records what each mark's builder reads. Stroke shape
+    /// (`stroke_cap`, `stroke_join`) draws only where the mark strokes an
+    /// open path, a corner or a dash: a polygon's and a ribbon's closed,
+    /// undashed outlines have no ends for a cap.
+    pub(crate) fn style_fields(self) -> &'static [StyleField] {
+        use StyleNeed::*;
+        const POINT: &[StyleField] = &[
+            drawn("size"), drawn("stroke"), drawn("fill"), drawn("opacity"),
+            drawn_with("stroke_width", Stroke), drawn_with("stroke_dash", Stroke),
+            drawn("stroke_cap"), drawn_with("stroke_join", Stroke), drawn("filled"), drawn("shape"),
+            drawn("clip"), drawn("blend"),
+        ];
+        const LINE: &[StyleField] = &[
+            drawn("size"), drawn("stroke"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
+            drawn("detail"), drawn("interpolate"), drawn("stroke_cap"), drawn("stroke_join"), drawn("clip"),
+            drawn("blend"), drawn("value_axis"),
+        ];
+        const BAR: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("corner_radius"),
+            drawn_with("stroke_width", Stroke), drawn_with("stroke_dash", Stroke),
+            drawn_with("stroke_cap", Stroke), drawn_with("stroke_join", Stroke), drawn("clip"), drawn("blend"),
+            drawn_with("zero", LayeredChart),
+        ];
+        const AREA: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn_with("stroke_width", Stroke),
+            drawn("detail"), drawn("interpolate"), drawn_with("stroke_cap", Stroke),
+            drawn_with("stroke_join", Stroke), drawn("line"), drawn("borders"), drawn("clip"), drawn("blend"),
+            drawn("value_axis"),
+        ];
+        const RULE: &[StyleField] = &[
+            drawn("stroke"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
+            drawn("stroke_cap"), drawn("stroke_join"), drawn("clip"), drawn("blend"),
+        ];
+        const TEXT: &[StyleField] = &[
+            drawn("fill"), drawn("opacity"), drawn("font_size"), drawn("font_weight"), drawn("align"),
+            drawn("baseline"), drawn("dx"), drawn("dy"), drawn("angle"), drawn("limit"), drawn("blend"),
+        ];
+        const TICK: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
+            drawn("stroke_cap"), drawn("stroke_join"), drawn("band_size"), drawn("clip"), drawn("blend"),
+        ];
+        const RECT: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("corner_radius"),
+            drawn_with("stroke_width", Stroke), drawn_with("stroke_dash", Stroke),
+            drawn_with("font_size", TextChannel), drawn_with("stroke_cap", Stroke),
+            drawn_with("stroke_join", Stroke), drawn_with("band_size", BandScale), drawn("clip"),
+            drawn("blend"),
+        ];
+        const POLYGON: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn_with("stroke_width", Stroke),
+            drawn("detail"), drawn_with("cmap", QuantitativeColor), drawn_with("stroke_join", Stroke),
+            drawn("clip"), drawn("blend"),
+        ];
+        const IMAGE: &[StyleField] = &[
+            drawn_with("cmap", RasterData), drawn_with("width", UrlChannel),
+            drawn_with("height", UrlChannel), drawn("clip"), drawn("blend"),
+        ];
+        const RIBBON: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn_with("stroke_width", Stroke),
+            drawn("interpolate"), drawn_with("stroke_join", Stroke), drawn("clip"), drawn("blend"),
+        ];
+        const SEGMENT: &[StyleField] = &[
+            drawn("stroke"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_dash"),
+            drawn("stroke_cap"), drawn("stroke_join"), drawn("clip"), drawn("blend"), drawn("arrow"),
+            drawn_with("arrow_size", Arrow),
+        ];
+        const ARC: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("corner_radius"),
+            drawn_with("stroke_width", Stroke), drawn_with("stroke_dash", Stroke),
+            drawn_with("stroke_cap", Stroke), drawn_with("stroke_join", Stroke), drawn("clip"), drawn("blend"),
+        ];
+        const LABEL: &[StyleField] = &[
+            drawn("fill"), drawn("opacity"), drawn("font_size"), drawn("font_weight"),
+            drawn_with("dx", LeaderPlacement), drawn_with("dy", LeaderPlacement), drawn("leader_line"),
+            drawn("blend"),
+        ];
+        const GEOSHAPE: &[StyleField] = &[
+            drawn("stroke"), drawn("fill"), drawn("opacity"), drawn("stroke_width"), drawn("stroke_cap"),
+            drawn("stroke_join"), drawn("clip"), drawn("blend"),
+        ];
+        match self {
+            Mark::Point => POINT,
+            Mark::Line => LINE,
+            Mark::Bar => BAR,
+            Mark::Area => AREA,
+            Mark::Rule => RULE,
+            Mark::Text => TEXT,
+            Mark::Tick => TICK,
+            Mark::Rect => RECT,
+            Mark::Polygon => POLYGON,
+            Mark::Image => IMAGE,
+            Mark::Ribbon => RIBBON,
+            Mark::Segment => SEGMENT,
+            Mark::Arc => ARC,
+            Mark::Label => LABEL,
+            Mark::Geoshape => GEOSHAPE,
+        }
+    }
+
+    /// This mark's [`Self::style_fields`] entry for wire key `name`, or
+    /// `None` when the mark never draws it.
+    pub(crate) fn style_field(self, name: &str) -> Option<StyleField> {
+        self.style_fields().iter().copied().find(|f| f.name == name)
+    }
+
     /// The mark's own kwarg that sets how big or thick it draws, named when a
     /// constant `size=` it never draws is refused.
     pub(crate) fn size_knob(self) -> Option<&'static str> {
@@ -110,17 +224,136 @@ pub(crate) enum SizeDrawing {
     Never,
 }
 
-/// The primitive marks that draw a constant `size=`, in [`for_each_mark!`]
-/// order: Python's mark constructors read this rather than keeping a list of
-/// their own.
-#[pyo3::pyfunction]
-pub fn marks_drawing_constant_size() -> Vec<&'static str> {
+/// What a mark draws for one style field ([`Mark::style_fields`]): the
+/// field's wire key, and the input it needs alongside it, if any. A field
+/// with no `needs` draws whenever it is set; one with `needs` draws only
+/// when that input is present too, and is reported inert
+/// ([`crate::render::RenderWarning::MarkStyleInert`]) when it is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StyleField {
+    pub(crate) name: &'static str,
+    pub(crate) needs: Option<StyleNeed>,
+}
+
+const fn drawn(name: &'static str) -> StyleField {
+    StyleField { name, needs: None }
+}
+
+const fn drawn_with(name: &'static str, need: StyleNeed) -> StyleField {
+    StyleField { name, needs: Some(need) }
+}
+
+/// The input a conditionally drawn style field needs ([`StyleField::needs`]).
+/// Whether it is present is decided once per layer, after scales resolve,
+/// by `render::draw::style_need_met`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleNeed {
+    /// A drawn stroke: a `stroke=` color (or `filled=False` on a point,
+    /// whose outline then takes the fill; or `line=`/`borders=` on an area,
+    /// whose border lines take the fill; or a bound `stroke_width` column on
+    /// a bar, point or rect, whose stroke then takes the fill), on a mark
+    /// whose stroke is off by default.
+    Stroke,
+    /// `arrow=True` on a segment.
+    Arrow,
+    /// A quantitative color encoding, which a colormap maps.
+    QuantitativeColor,
+    /// A band (ordinal) axis paired with a `y2`/`x2` range: the box-body
+    /// shape a rect sizes by `band_size`. A heatmap's cells fill their bands
+    /// and read no `band_size`.
+    BandScale,
+    /// Fixed label placement: both `dx` and `dy` set. A label places itself
+    /// by collision avoidance unless both offsets are given.
+    LeaderPlacement,
+    /// A `text` encoding on a heatmap rect, whose cells then carry labels.
+    TextChannel,
+    /// A `url` encoding: an image's url tiles, which `width`/`height` size.
+    UrlChannel,
+    /// Raster data (`mark_raster()`), which a colormap colors: an image
+    /// without a `url` encoding.
+    RasterData,
+    /// A layered chart. A single bar chart anchors at zero through
+    /// `mark_bar(zero=)`, which the chart consumes; a layer reads its own.
+    LayeredChart,
+}
+
+impl StyleNeed {
+    /// The wire name: what `mark_style_fields` publishes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stroke => "stroke",
+            Self::Arrow => "arrow",
+            Self::QuantitativeColor => "quantitative_color",
+            Self::BandScale => "band_scale",
+            Self::LeaderPlacement => "leader_placement",
+            Self::TextChannel => "text_channel",
+            Self::UrlChannel => "url_channel",
+            Self::RasterData => "raster_data",
+            Self::LayeredChart => "layered_chart",
+        }
+    }
+
+    /// The missing input, as the inert-field warning names it.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::Stroke => "a stroke color (stroke=)",
+            Self::Arrow => "arrow=True",
+            Self::QuantitativeColor => "a quantitative color encoding",
+            Self::BandScale => "a band axis paired with a y2 or x2 range",
+            Self::LeaderPlacement => "both dx and dy (a label places itself unless both are set)",
+            Self::TextChannel => "a text encoding",
+            Self::UrlChannel => "a url encoding",
+            Self::RasterData => "raster data from mark_raster()",
+            Self::LayeredChart => "a layered chart (a single bar chart sets it through mark_bar(zero=))",
+        }
+    }
+}
+
+/// Every primitive mark, in [`for_each_mark!`] order.
+pub(crate) fn all_marks() -> impl Iterator<Item = Mark> {
     macro_rules! names {
         ($($V:ident => $name:ident,)*) => {
             [$( Mark::$V, )*]
         };
     }
-    for_each_mark!(names).into_iter().filter(|m| m.draws_constant_size()).map(|m| m.as_str()).collect()
+    for_each_mark!(names).into_iter()
+}
+
+/// The primitive marks that draw a constant `size=`, in [`for_each_mark!`]
+/// order: Python's mark constructors read this rather than keeping a list of
+/// their own.
+#[pyo3::pyfunction]
+pub fn marks_drawing_constant_size() -> Vec<&'static str> {
+    all_marks().filter(|m| m.draws_constant_size()).map(|m| m.as_str()).collect()
+}
+
+/// `ferrum._core.style_table_marks()`: the marks [`Mark::style_fields`] has a
+/// row for, in table order, which is every primitive mark in
+/// [`for_each_mark!`] order. Python reads its mark population from here
+/// rather than keeping a list of its own. Registered in `lib.rs`.
+#[pyo3::pyfunction]
+pub fn style_table_marks() -> Vec<&'static str> {
+    all_marks().map(|m| m.as_str()).collect()
+}
+
+/// `ferrum._core.mark_style_fields(mark)`: [`Mark::style_fields`] as a dict
+/// from each field the mark draws to the name of the input it needs
+/// ([`StyleNeed::as_str`]), or `None` when it draws whenever set. Python
+/// derives every mark's honored style kwargs from it. Refuses an unknown
+/// mark. Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyo3::pyfunction]
+pub fn mark_style_fields<'py>(
+    py: pyo3::Python<'py>,
+    mark: &str,
+) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyDict>> {
+    use pyo3::types::PyDictMethods;
+    let mark: Mark = mark.parse().map_err(|e: ParseMarkError| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let fields = pyo3::types::PyDict::new(py);
+    for field in mark.style_fields() {
+        fields.set_item(field.name, field.needs.map(StyleNeed::as_str))?;
+    }
+    Ok(fields)
 }
 
 impl fmt::Display for Mark {
@@ -197,6 +430,83 @@ mod tests {
         assert_eq!(parsed, Mark::Segment);
         assert_eq!(Mark::from_str("segment").unwrap(), Mark::Segment);
         assert_eq!(Mark::Segment.as_str(), "segment");
+    }
+
+    /// Every table entry names a real `MarkKwargsSpec` wire key, once per
+    /// mark, in the struct's declaration order.
+    #[test]
+    fn style_fields_name_real_wire_keys_in_declaration_order() {
+        let keys = crate::spec::mark_style::mark_kwargs_field_names();
+        for mark in all_marks() {
+            let positions: Vec<usize> = mark
+                .style_fields()
+                .iter()
+                .map(|f| keys.iter().position(|k| *k == f.name).unwrap_or_else(|| panic!("{mark}: '{}' is no wire key", f.name)))
+                .collect();
+            assert!(positions.windows(2).all(|w| w[0] < w[1]), "{mark}: out of order or repeated: {positions:?}");
+        }
+    }
+
+    /// `size` is in a mark's table exactly where the size table says the mark
+    /// draws a constant size, so the two tables cannot disagree; `blend` is
+    /// in every mark's; and some field is outside some mark's (the gate has
+    /// something to refuse).
+    #[test]
+    fn style_fields_agree_with_the_size_table_and_list_blend_everywhere() {
+        let keys = crate::spec::mark_style::mark_kwargs_field_names();
+        for mark in all_marks() {
+            assert_eq!(mark.style_field("size").is_some(), mark.draws_constant_size(), "{mark}");
+            assert_eq!(mark.style_field("blend"), Some(StyleField { name: "blend", needs: None }), "{mark}");
+            assert!(mark.style_fields().len() < keys.len(), "{mark} draws every field");
+        }
+        assert_eq!(Mark::Segment.style_field("arrow_size").and_then(|f| f.needs), Some(StyleNeed::Arrow));
+        assert_eq!(Mark::Point.style_field("font_size"), None);
+    }
+
+    /// The published dict is the table, in order, each need by its wire name.
+    #[test]
+    fn mark_style_fields_publishes_the_table() {
+        use pyo3::types::{PyAnyMethods, PyDictMethods, PyListMethods};
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let fields = mark_style_fields(py, "segment").unwrap();
+            let names: Vec<String> = fields.keys().iter().map(|k| k.extract().unwrap()).collect();
+            let expected: Vec<&str> = Mark::Segment.style_fields().iter().map(|f| f.name).collect();
+            assert_eq!(names, expected);
+            let arrow_size: Option<String> = fields.get_item("arrow_size").unwrap().unwrap().extract().unwrap();
+            assert_eq!(arrow_size.as_deref(), Some("arrow"));
+            let stroke: Option<String> = fields.get_item("stroke").unwrap().unwrap().extract().unwrap();
+            assert_eq!(stroke, None);
+            let err = mark_style_fields(py, "pont").unwrap_err().to_string();
+            assert!(err.contains("unknown mark 'pont'"), "{err}");
+        });
+    }
+
+    /// The published marks are the table's rows, in order, each one a name
+    /// `mark_style_fields` reads.
+    #[test]
+    fn style_table_marks_publishes_every_row_in_table_order() {
+        let marks = style_table_marks();
+        assert_eq!(
+            marks,
+            [
+                "point", "line", "bar", "area", "rule", "text", "tick", "rect", "polygon", "image", "ribbon",
+                "segment", "arc", "label", "geoshape",
+            ]
+        );
+        for name in marks {
+            let mark: Mark = name.parse().unwrap();
+            assert!(!mark.style_fields().is_empty(), "{name} has no table row");
+        }
+    }
+
+    /// The wire names are the serde spellings, which a warning serializes.
+    #[test]
+    fn style_need_wire_names_are_the_serde_spellings() {
+        use StyleNeed::*;
+        for need in [Stroke, Arrow, QuantitativeColor, BandScale, LeaderPlacement, TextChannel, UrlChannel, RasterData, LayeredChart] {
+            assert_eq!(serde_json::to_string(&need).unwrap(), format!("\"{}\"", need.as_str()));
+        }
     }
 
     #[test]

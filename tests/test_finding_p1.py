@@ -309,12 +309,12 @@ class TestDetailMarkConditionalWarn:
         assert any("mark_point" in m for m in messages)
         assert any("mark_bar" in m for m in messages)
 
-    def test_detail_still_aliases_into_mark_style_even_when_warned(self):
-        """The channel is still routed to mark_style.detail; the warning only
-        documents that no builder currently reads it for this mark."""
+    def test_detail_is_not_routed_into_a_mark_that_never_draws_it(self):
+        """The warning is the whole answer: a point's style never carries a
+        ``detail`` the renderer would refuse, since a point never draws it."""
         resolved = fm.Chart(_df()).mark_point().encode(x="x", y="y", detail="g")._resolve_pending()
         spec_dict = json.loads(resolved.to_spec().to_json())
-        assert spec_dict.get("mark_style", {}).get("detail") == "g"
+        assert "detail" not in spec_dict.get("mark_style", {})
 
 
 class TestPerLayerDetailAlias:
@@ -334,7 +334,7 @@ class TestPerLayerDetailAlias:
         assert not _user_warnings(caught, contains="detail")
         assert layers[1].get("mark_style", {}).get("detail") == "g"
 
-    def test_per_layer_detail_on_point_warns_and_still_routes(self):
+    def test_per_layer_detail_on_point_warns_and_is_not_routed(self):
         reset_warnings()
         base = fm.Chart(_df()).mark_line().encode(x="x", y="y")
         overlay = fm.Chart(_df()).mark_point().encode(x="x", y="y", detail="g")
@@ -346,7 +346,7 @@ class TestPerLayerDetailAlias:
         detail_warnings = _user_warnings(caught, contains="detail")
         assert len(detail_warnings) == 1
         assert "mark_point" in str(detail_warnings[0].message)
-        assert layers[1].get("mark_style", {}).get("detail") == "g"
+        assert "detail" not in layers[1].get("mark_style", {})
 
     def test_layer_without_detail_encoding_untouched(self):
         base = fm.Chart(_df()).mark_point().encode(x="x", y="y")
@@ -683,11 +683,11 @@ class TestLayerStringEncodings:
         assert "<svg" in svg
         assert not _user_warnings(caught, contains="fill")
 
-    def test_string_detail_on_non_consuming_mark_warns_and_routes(self):
-        """String-valued detail must reach mark_style.detail AND warn on a
-        mark whose Rust builder does not read it -- both were silently
-        dropped pre-fix (getattr(detail_ch, "field", None) returns None for
-        a string)."""
+    def test_string_detail_on_non_consuming_mark_warns_and_is_not_routed(self):
+        """String-valued detail must warn on a mark whose Rust builder does
+        not read it, and stay off that mark's style -- the warning was
+        silently skipped pre-fix (getattr(detail_ch, "field", None) returns
+        None for a string)."""
         reset_warnings()
         chart = self._layered_chart({"x": "x", "y": "y", "detail": "g"}, layer_mark="point")
         with warnings.catch_warnings(record=True) as caught:
@@ -697,7 +697,7 @@ class TestLayerStringEncodings:
         detail_warnings = _user_warnings(caught, contains="detail")
         assert len(detail_warnings) == 1
         assert "mark_point" in str(detail_warnings[0].message)
-        assert layers[-1].get("mark_style", {}).get("detail") == "g"
+        assert "detail" not in layers[-1].get("mark_style", {})
 
     def test_string_detail_on_consuming_mark_routes_without_warning(self):
         reset_warnings()

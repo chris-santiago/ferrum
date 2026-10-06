@@ -1835,34 +1835,119 @@ var fi={value:()=>{}};function nr(){for(var t=0,e=arguments.length,r={},n;t<e;++
 // by the assembler, leaving the symbols in module scope.
 
 // ── SVG text placement ───────────────────────────────────────────────────
+// Text of a mark batch that blends additively (`t.blend`) cannot blend from
+// inside the shared overlay: it would screen against that transparent <svg>,
+// not the canvas beneath. Each blended batch's text is instead drawn in its own
+// overlay <svg>, styled `mix-blend-mode: screen` (the static SVG's
+// approximation of additive), so it screens over what is painted beneath it.
+// The chart wrapper is `isolation: isolate`, so the blend reaches the canvas
+// and nothing outside the chart.
+//
+// Text keeps paint order across the split, as the static SVG paints it: the
+// elements arrive in paint order, and `_textRuns` cuts them into ordered runs
+// at every blended batch. Each run gets its own `svg.ferrum-text-run` sibling,
+// stacked in run order just before `svgEl`, which holds the final unblended
+// run (legend text, axis labels, annotations, and anything else painted after
+// the last blended batch). So a blended batch screens over the text painted
+// before it and beneath the text painted after it.
 function _placeTextSvg(svgEl, texts) {
-  const svg = select(svgEl);
-  svg.selectAll('text.ferrum-label').remove();
+  const { runs, tail } = _textRuns(texts);
+  _joinLabels(svgEl, tail);
+  _placeTextRuns(svgEl, runs);
+}
+
+// Cut `texts` (in paint order) into the runs that paint beneath the final
+// unblended run: each blended batch is one run, keyed `panel:batch`, and the
+// unblended text before it is a run keyed `before:panel:batch`.
+//
+// A batch's blended text is usually contiguous, but zoom's tick-coincidence
+// heuristic (build_zoomed_text_json) can re-emit one of a batch's labels as
+// an unblended tick label mid-batch, splitting one batch into two non-adjacent
+// blended runs that would otherwise share the same `panel:batch` key. Each
+// base key is suffixed with an occurrence count past the first so every run
+// gets a unique key — two runs sharing a key would make `_placeTextRuns`
+// reuse one DOM element for both, and the second join would overwrite the
+// first run's glyphs.
+function _textRuns(texts) {
+  const runs = [];
+  const seen = new Map();
+  let plain = [];
   for (const t of texts) {
-    const anchor = t.anchor === 'center' ? 'middle' : t.anchor;
-    let baseline;
-    switch (t.baseline) {
-      case 'top': baseline = 'hanging'; break;
-      case 'middle': baseline = 'central'; break;
-      case 'bottom': baseline = 'text-after-edge'; break;
-      case 'alphabetic': default: baseline = 'auto'; break;
+    if (!t.blend) { plain.push(t); continue; }
+    const base = `${t.blend.panel}:${t.blend.batch}`;
+    const last = runs[runs.length - 1];
+    if (plain.length === 0 && last && last.base === base) { last.texts.push(t); continue; }
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    const key = n === 1 ? base : `${base}#${n}`;
+    if (plain.length > 0) {
+      runs.push({ key: `before:${key}`, base: null, blend: false, texts: plain });
+      plain = [];
     }
-    const el = svg.append('text')
-      .attr('class', 'ferrum-label')
-      .attr('x', t.x)
-      .attr('y', t.y)
-      .attr('text-anchor', anchor)
-      .attr('dominant-baseline', baseline)
-      .attr('font-size', t.fontSize + 'px')
-      .attr('font-weight', t.fontWeight)
-      .attr('font-family', t.fontFamily)
-      .attr('fill', t.color)
-      .attr('pointer-events', 'none')
-      .text(t.content);
-    if (t.angle) {
-      el.attr('transform', `rotate(${t.angle}, ${t.x}, ${t.y})`);
-    }
+    runs.push({ key, base, blend: true, texts: [t] });
   }
+  return { runs, tail: plain };
+}
+
+// One `svg.ferrum-text-run` per run, in run order just before `svgEl`; runs
+// no longer present are removed, kept runs are updated in place.
+function _placeTextRuns(svgEl, runs) {
+  const parent = svgEl.parentNode;
+  const keys = new Set(runs.map((r) => r.key));
+  const existing = new Map();
+  for (const el of parent.querySelectorAll(':scope > svg.ferrum-text-run')) {
+    if (keys.has(el.dataset.run)) existing.set(el.dataset.run, el);
+    else el.remove();
+  }
+  for (const run of runs) {
+    let el = existing.get(run.key);
+    if (!el) {
+      el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      el.setAttribute('class', 'ferrum-text-run');
+      el.dataset.run = run.key;
+      el.setAttribute('width', svgEl.getAttribute('width'));
+      el.setAttribute('height', svgEl.getAttribute('height'));
+      el.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;'
+        + (run.blend ? 'mix-blend-mode:screen;' : '');
+    }
+    parent.insertBefore(el, svgEl);
+    _joinLabels(el, run.texts);
+  }
+}
+
+function _joinLabels(svgEl, texts) {
+  // R6 fix: update labels in place via a D3 data-join instead of remove+append.
+  // The old remove+re-append moved every label to the end of the SVG child
+  // list on each zoom/pan tick, flipping their z-order relative to raw-overlay
+  // groups (annotations/axes) that are appended once at first render. A join
+  // keyed by index keeps persisted labels at their original DOM position, so
+  // their paint order (above raw geometry) is preserved across ticks. Legend
+  // click handlers attached by `_wireLegendToggles` survive in-place updates
+  // (the element — and its listener — persists), so no re-binding is needed.
+  const _baseline = (b) => {
+    switch (b) {
+      case 'top': return 'hanging';
+      case 'middle': return 'central';
+      case 'bottom': return 'text-after-edge';
+      case 'alphabetic': default: return 'auto';
+    }
+  };
+  select(svgEl)
+    .selectAll('text.ferrum-label')
+    .data(texts)
+    .join('text')
+    .attr('class', 'ferrum-label')
+    .attr('x', (t) => t.x)
+    .attr('y', (t) => t.y)
+    .attr('text-anchor', (t) => (t.anchor === 'center' ? 'middle' : t.anchor))
+    .attr('dominant-baseline', (t) => _baseline(t.baseline))
+    .attr('font-size', (t) => t.fontSize + 'px')
+    .attr('font-weight', (t) => t.fontWeight)
+    .attr('font-family', (t) => t.fontFamily)
+    .attr('fill', (t) => t.color)
+    .attr('pointer-events', 'none')
+    .attr('transform', (t) => (t.angle ? `rotate(${t.angle}, ${t.x}, ${t.y})` : null))
+    .text((t) => t.content);
 }
 
 // Hit-test pixel (x, y) against the mark batches.
@@ -1930,6 +2015,9 @@ function _hitTest(marks, x, y) {
 async function _render(container, sceneJson, adapter) {
   container.replaceChildren();
   container.style.position = 'relative';
+  // Bounds the screen blend of blended text runs (see _placeTextSvg) to
+  // the chart.
+  container.style.isolation = 'isolate';
 
   const scene = JSON.parse(sceneJson);
   const w = scene.width || 640, h = scene.height || 480;

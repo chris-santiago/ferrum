@@ -1205,7 +1205,8 @@ class Chart(
         m = MarkBase(name, **kwargs)
         new = self._clone()
         new._mark = name
-        new._mark_kwargs = m.to_mark_kwargs_dict()
+        # D3: zero= is consumed below, not forwarded as this chart's style.
+        new._mark_kwargs = {k: v for k, v in m.to_mark_kwargs_dict().items() if k != "zero"}
         new._position = position
         # The mark this call sets speaks as this call, not as whatever entry
         # built the mark it replaces.
@@ -1214,7 +1215,6 @@ class Chart(
         if m.orient_coord_flip():
             new._coord = "flip"
         # D3: zero=False suppresses the bar y-scale zero-anchor injection.
-        # Consumed Python-side; not forwarded to the Rust renderer.
         new._mark_zero = m.zero_anchor()
         return new
 
@@ -3452,10 +3452,31 @@ class Chart(
             if isinstance(_t, _PendingAggregate) and _t.field is not None:
                 agg_field_remap[_t.field] = _t.output_col
 
+        # Mark style: apply mark_* override last so it beats the chart's mark style.
+        # A layered chart (multiple marks) has no single primary mark — apply_mark_style
+        # raises FerrumOverrideError on a mark_* override there (spec §11 Q4).
+        if _override_payload is not None and _override_payload.mark_style:
+            from ferrum._override_consume import apply_mark_style
+
+            mk = apply_mark_style(
+                mk, _override_payload, mark=None if resolved._layers is not None else resolved._mark
+            )
+        # A single bar chart's `zero` is consumed here, whichever door wrote it
+        # (a figure's `mark=`, a composite's catch-all, `.override(mark_zero=)`),
+        # exactly as `mark_bar(zero=)` is: it decides the y zero-anchor below
+        # and never reaches the wire, where only a layered bar reads it.
+        mark_zero = resolved._mark_zero
+        if resolved._mark == "bar" and "zero" in mk:
+            mark_zero = bool(mk.pop("zero"))
+
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
         _override_encoding = _override_payload.encoding if _override_payload is not None else None
-        kw.update(self._build_encoding_specs(resolved, enc, agg_field_remap, _override_encoding))
+        kw.update(
+            self._build_encoding_specs(
+                resolved, enc, agg_field_remap, _override_encoding, mark_zero=mark_zero
+            )
+        )
 
         # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
         effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
@@ -3514,15 +3535,6 @@ class Chart(
             # Back-compat: orient_coord_flip sets _coord = "flip" (a string).
             # New coord objects expose to_spec_dict(); CoordFlip returns "flip".
             kw["coord"] = c.to_spec_dict() if hasattr(c, "to_spec_dict") else c
-        # Mark style: apply mark_* override last so it beats the chart's mark style.
-        # A layered chart (multiple marks) has no single primary mark — apply_mark_style
-        # raises FerrumOverrideError on a mark_* override there (spec §11 Q4).
-        if _override_payload is not None and _override_payload.mark_style:
-            from ferrum._override_consume import apply_mark_style
-
-            mk = apply_mark_style(
-                mk, _override_payload, mark=None if resolved._layers is not None else resolved._mark
-            )
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:

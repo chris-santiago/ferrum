@@ -67,8 +67,6 @@ pub struct LayerPrepared {
     /// `Layer.position` (preferred) or `ChartSpec.position` (chart-level
     /// fallback for single-layer charts).
     pub position: Option<crate::spec::position::PositionAdjust>,
-    /// Pixel-level blend mode for this layer's MarkBatch.
-    pub blend: Option<ferrum_scene::BlendMode>,
     /// Whether this layer resolves its own independent y-scale slot instead of
     /// sharing the primary (layer 0) y-scale (secondary-y-axis, GH #52). Mirrors
     /// [`crate::spec::layer::Layer::independent_y`]; always `false` for a
@@ -167,7 +165,6 @@ impl LayerPrepared {
             mark_style: spec.mark_style.clone(),
             data_source: None,
             position: spec.position.clone(),
-            blend: None,
             independent_y: false,
             color_is_own: spec.encoding.color.is_some(),
             x_is_own: spec.encoding.x.is_some(),
@@ -222,7 +219,6 @@ impl LayerPrepared {
             mark_style,
             data_source: layer.data_source.clone(),
             position: layer.position.clone().or_else(|| spec.position.clone()),
-            blend: layer.blend,
             independent_y: layer.independent_y,
             color_is_own,
             x_is_own,

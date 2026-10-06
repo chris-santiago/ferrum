@@ -67,7 +67,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, resolve_stroke_paint, DrawCtx,
+    col_as_f64, col_as_positional_category_str, resolve_stroke_paint, stroke_width_column, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{
@@ -312,8 +312,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // line.rs — see `rule_stroke_style`'s doc for the categorical/numeric split.
     let opacity_res =
         OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
-    let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sw_vals = stroke_width_column(ctx);
     let dash_cols = stroke_dash_column_loader(ctx);
     // Per-row stroke color through the shared NF-A3 reader. `?`, not `.ok()`:
     // this module's doc promises an available typed error is never discarded,

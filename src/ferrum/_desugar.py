@@ -56,7 +56,7 @@ from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
 from ferrum._warn import user_stacklevel
 from ferrum._entry import EntryRefusal, voiced_as
-from ferrum.marks.base import MarkBase, refuse_size_no_layer_draws, resolve_layer_style
+from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws, resolve_layer_style
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1241,15 +1241,15 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
     # Every layer this desugar emits (or, when it lowers to one unlayered
     # mark, the chart itself) names the public entry the caller invoked, and
     # so does every warning and refusal raised about it here: what the
-    # desugar degraded, and the size= rule, so a figure function forwarding
-    # size= to a composite that draws neither point nor line refuses in its
-    # own voice.
+    # desugar degraded, and a catch-all style field no emitted mark draws
+    # (size= included), so a figure function forwarding style to a composite
+    # that draws none of it refuses in its own voice.
     for note in result.degraded:
         warnings.warn(f"{entry}: {note}", stacklevel=user_stacklevel())
-    if "size" in style_dict:
-        refuse_size_no_layer_draws(
+    if style_dict:
+        refuse_style_no_layer_draws(
             entry,
-            style_dict["size"],
+            style_dict,
             [lyr.mark for lyr in result.layers] if result.layers is not None else [result.mark],
         )
     new = chart._clone()

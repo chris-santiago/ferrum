@@ -6,7 +6,13 @@ use crate::transform::core::TransformSpec;
 
 /// A single layer within a multi-layer ChartSpec. Inherits chart-level
 /// encoding for any field set to None at the layer level.
+///
+/// An unknown key refuses (`deny_unknown_fields`), as `ChartSpec`'s and
+/// `MarkKwargsSpec`'s do: a misspelt or retired layer key (a layer-level
+/// `blend`, which is a style field in `mark_style`) is never dropped without
+/// a word.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Layer {
     pub mark: Mark,
     #[serde(default)]
@@ -24,9 +30,6 @@ pub struct Layer {
     pub data_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub position: Option<crate::spec::position::PositionAdjust>,
-    /// Pixel-level blending mode for this layer. `None` = Normal (default).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub blend: Option<ferrum_scene::BlendMode>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     /// Whether this layer resolves its own y-scale slot instead of sharing
@@ -83,7 +86,6 @@ impl Default for Layer {
             mark_style: None,
             data_source: None,
             position: None,
-            blend: None,
             name: None,
             independent_y: false,
             coord: None,
@@ -185,6 +187,18 @@ mod tests {
         );
         let parsed: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, layer);
+    }
+
+    /// A key `Layer` does not have refuses, naming it, where it used to be
+    /// dropped: a layer-level `blend` rendered as `normal` with no error.
+    #[test]
+    fn an_unknown_layer_key_refuses() {
+        let err = serde_json::from_value::<Layer>(serde_json::json!({"mark": "image", "blend": "additive"}))
+            .unwrap_err();
+        assert!(err.to_string().starts_with("unknown field `blend`, expected one of"), "{err}");
+        let blended = serde_json::from_value::<Layer>(serde_json::json!({"mark": "image", "mark_style": {"blend": "additive"}}))
+            .unwrap();
+        assert_eq!(blended.mark_style.and_then(|s| s.blend), Some(ferrum_scene::BlendMode::Additive));
     }
 
     #[test]

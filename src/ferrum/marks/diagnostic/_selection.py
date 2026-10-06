@@ -92,7 +92,7 @@ def desugar_learning_curve(
         "color": nominal_color_channel(color_field),
     }
     layers = [ci_layer, _Layer(name="line", mark="line", encoding=line_enc)]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("learning_curve", layers, user_kw))
 
 
 register_layer_names("learning_curve", frozenset({"band", "line"}))
@@ -169,7 +169,7 @@ def desugar_validation_curve(
             },
         ),
     ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("validation_curve", layers, user_kw))
 
 
 register_layer_names("validation_curve", frozenset({"band", "line"}))
@@ -226,7 +226,9 @@ def desugar_cv_scores(
             if isinstance(y_val, str):
                 enc["y"] = Y(y_val, title="score")
                 layers = [replace(first, encoding=enc), *layers[1:]]
-        return MarkDesugarResult(transforms=box_result.transforms, layers=_apply(layers, user_kw))
+        return MarkDesugarResult(
+            transforms=box_result.transforms, layers=_apply("cv_scores", layers, user_kw)
+        )
     if kind == "bar":
         layers = [
             _Layer(
@@ -241,7 +243,7 @@ def desugar_cv_scores(
                 mark_kwargs={"stroke_dash": [4, 4]},
             ),
         ]
-        return MarkDesugarResult(layers=_apply(layers, user_kw))
+        return MarkDesugarResult(layers=_apply("cv_scores", layers, user_kw))
     # kind == "strip" (validated above)
     # Typed Nominal like the `bar` kind's "split" binding above: both spellings
     # of this field are group discriminators (the compare path additionally
@@ -264,7 +266,7 @@ def desugar_cv_scores(
                 position=Jitter(axis="x", width=0.3, seed=42),
             ),
         ]
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("cv_scores", layers, user_kw))
 
 
 # cv_scores registers the UNION of all three kinds' sub-layer names so a valid
@@ -327,7 +329,7 @@ def desugar_alpha_selection(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(layers=_apply("alpha_selection", layers, user_kw))
 
 
 register_layer_names("alpha_selection", frozenset({"line", "best"}))

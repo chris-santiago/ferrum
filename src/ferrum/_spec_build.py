@@ -31,6 +31,7 @@ from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._encode_lowering import _infer_agg_groupby, _lower_bin_encoding
+from ferrum._layer import layer_mark
 from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
 
 
@@ -318,7 +319,13 @@ class SpecBuildMixin:
         return _remap_polar_channels(resolved._coord, enc)
 
     def _build_encoding_specs(
-        self, resolved, enc: dict, agg_field_remap: dict, override_encoding: dict | None = None
+        self,
+        resolved,
+        enc: dict,
+        agg_field_remap: dict,
+        override_encoding: dict | None = None,
+        *,
+        mark_zero: bool,
     ) -> dict:
         """Build ``EncodingSpec`` entries for each honored channel.
 
@@ -343,6 +350,9 @@ class SpecBuildMixin:
             injection (see the in-body comment below for why), so an override
             scale leaf beats the channel's own ``scale=`` setting (override
             wins the cascade, spec §7).
+        mark_zero :
+            Whether a bar chart's y-scale is anchored at zero: ``False`` once
+            the chart's ``zero=False`` has been consumed, whichever door set it.
 
         Returns
         -------
@@ -432,7 +442,7 @@ class SpecBuildMixin:
             # x2 only affects the horizontal bin width of histograms; it must
             # NOT suppress the y zero-anchor.
             _y2_bound = "y2" in enc
-            _zero_anchor_wanted = getattr(resolved, "_mark_zero", True) and not _y2_bound
+            _zero_anchor_wanted = mark_zero and not _y2_bound
             # D4-C: only inject the linear+zero scale when the y encoding is
             # quantitative.  Ordinal/nominal y (e.g. string category on a
             # horizontal bar) requires a band scale — forcing linear here raises
@@ -622,7 +632,7 @@ class SpecBuildMixin:
                     # D5b (layered path): strip ``stack=`` on marks that cannot
                     # honor stacking and warn. Shares ``_strip_unstackable`` with
                     # the single-chart path in ``_build_encoding_specs``.
-                    _strip_unstackable(d, layer.mark or "point")
+                    _strip_unstackable(d, layer_mark(layer.mark))
                     # Presence, not truthiness: each key's own handler in
                     # ``_SPEC_DICT_HANDLERS`` already decides whether the key
                     # belongs in `d` (e.g. `_emit_axis`/`_emit_format` only add
@@ -689,7 +699,7 @@ class SpecBuildMixin:
                         {"field": ch}, axis, override_encoding
                     )
             layer_dict: dict = {
-                "mark": layer.mark or "point",
+                "mark": layer_mark(layer.mark),
                 "encoding": encoding_dict,
             }
             # Wire format to Rust's coerce_layers preserves the legacy
@@ -709,8 +719,6 @@ class SpecBuildMixin:
                     if hasattr(layer.position, "to_spec_dict")
                     else layer.position
                 )
-            if layer.blend is not None:
-                layer_dict["blend"] = layer.blend
             if layer.name is not None:
                 layer_dict["name"] = layer.name
             # Secondary-y-axis wire flag (GH #52 Task 4). Only emitted when
