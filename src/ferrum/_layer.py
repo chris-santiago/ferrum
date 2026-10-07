@@ -130,7 +130,11 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
       per-layer parameters, is the more specific instruction, so the catch-all
       leaves it alone (``mark_smooth(layer_kwargs={"line": {"stroke": ...}})``
       beats a bare ``stroke=`` on the fit line, while the band still takes the
-      bare one).
+      bare one);
+    - a ``None`` value in the catch-all means unset, the same rule every
+      other style door applies, so it never overrides a resolved default
+      (``mark_smooth(opacity=None)`` still draws the ribbon at its built-in
+      ``0.3``, not fully opaque).
 
     Both callers -- :func:`apply_catch_all_style` for a ``_Layer`` and
     ``_desugar._merge_desugar_mark_kwargs`` for a single-mark result -- read
@@ -139,7 +143,7 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
     """
     return {
         **(resolved or {}),
-        **{k: v for k, v in style_dict.items() if k not in caller_style_keys},
+        **{k: v for k, v in style_dict.items() if k not in caller_style_keys and v is not None},
     }
 
 

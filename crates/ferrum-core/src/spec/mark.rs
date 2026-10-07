@@ -352,7 +352,7 @@ impl StyleNeed {
             Self::QuantitativeColor => "a quantitative color encoding",
             Self::BandScale => "a band axis paired with a y2 or x2 range",
             Self::LeaderPlacement => "both dx and dy (a label places itself unless both are set)",
-            Self::TextChannel => "a text encoding",
+            Self::TextChannel => "both a text encoding and the heatmap shape (one cell per x/y band pair, no x2 or y2 range)",
             Self::UrlChannel => "a url encoding",
             Self::RasterData => "raster data from mark_raster()",
             Self::LayeredChart => "a layered chart (a single bar chart sets it through mark_bar(zero=))",

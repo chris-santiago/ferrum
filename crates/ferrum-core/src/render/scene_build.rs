@@ -1964,16 +1964,11 @@ fn build_panel_mark_batches(
         // carries its own literal stroke/fill override. Resolved, and any
         // malformed field refused, once per chart ([`resolve_layer_styles`]).
         let mut mark_style = layer_styles[li].clone();
-        // A swarm-fed point layer that sizes its dots neither by a constant
-        // nor by a field draws them at the declared swarm's own `point_size`,
-        // not at the packing diameter a sized sibling may widen. A layer no
-        // swarm feeds already carries this fallback from `resolve_mark_style`
-        // (`layer_styles[li]`, cloned above), so there is nothing to re-set.
+        // Set the fallback dot area: unchanged for an unfed layer, or the
+        // swarm's own dot (drawn at declared `point_size`) for a swarm-fed
+        // layer that sizes nothing itself.
         if layer.mark == crate::spec::mark::Mark::Point {
-            if let Some(packing) = swarm {
-                mark_style.point.point_size =
-                    crate::render::marks::point::drawn_fallback_area(layer, Some(packing.spec), theme);
-            }
+            mark_style.point.point_size = crate::render::marks::point::fallback_dot(layer, swarm.map(|p| p.spec), theme).area();
         }
 
         let has_own_literal_paint = mark_style.paint.stroke_source

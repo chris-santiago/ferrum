@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import warnings
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
 import polars as pl
@@ -643,71 +644,187 @@ def _point_and_line() -> Any:
     return (fm.Chart(_DF).mark_point() + fm.Chart(_DF).mark_line()).encode(x="x", y="y")
 
 
-def test_a_key_no_layer_takes_names_every_layers_mark() -> None:
-    """On a layered chart each layer's own refusal is named, so the refusal
-    does not imply the other layers' fields are wrong too."""
+def _layer_line(mark: str, reasons: list[str], honored: list[str] | None) -> str:
+    """One layer's line of a refusal spanning layers, as the caller reads it."""
+    listed = f". Honored: {honored}" if honored is not None else ""
+    return f"\n  mark_{mark}: " + "; ".join(reasons) + listed
+
+
+def _not_honored_reason(mark: str, field: str) -> str:
+    return f"keyword argument {field!r} is not honored by mark_{mark}"
+
+
+def _spread_refusal(chart: Any, style: dict) -> EntryRefusal:
     from ferrum._overrides import _apply_overrides
 
-    with pytest.raises(ValueError) as exc_info:
-        _apply_overrides(_point_and_line(), entry="relplot", mark={"font_size": 3})
-    assert str(exc_info.value) == (
-        "relplot: no layer of this chart (mark_point, mark_line) takes ['font_size']: "
-        + _not_honored("relplot", "point", "font_size", _layer_honored("point"))
-        + "; "
-        + _not_honored("relplot", "line", "font_size", _layer_honored("line"))
+    with pytest.raises(EntryRefusal) as exc_info:
+        _apply_overrides(chart, entry="relplot", mark=style)
+    return exc_info.value
+
+
+def test_a_key_no_layer_takes_names_every_layers_mark() -> None:
+    """On a layered chart each layer's own refusal is named on its own line,
+    so the refusal does not imply the other layers' fields are wrong too."""
+    refusal = _spread_refusal(_point_and_line(), {"font_size": 3})
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['font_size']:"
+        + _layer_line("point", [_not_honored_reason("point", "font_size")], _layer_honored("point"))
+        + _layer_line("line", [_not_honored_reason("line", "font_size")], _layer_honored("line"))
     )
 
 
 def test_every_key_no_layer_takes_is_named() -> None:
-    """Every untaken key is refused, not only the first."""
-    from ferrum._overrides import _apply_overrides
-
-    with pytest.raises(ValueError) as exc_info:
-        _apply_overrides(
-            fm.Chart(_DF).mark_point(),
-            entry="relplot",
-            mark={"font_size": 3, "opacity": 0.5, "interpolate": "step"},
+    """Every untaken key is refused, not only the first, and a key the
+    layer takes is not named."""
+    refusal = _spread_refusal(
+        fm.Chart(_DF).mark_point(), {"font_size": 3, "opacity": 0.5, "interpolate": "step"}
+    )
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['font_size', 'interpolate']:"
+        + _layer_line(
+            "point",
+            [
+                _not_honored_reason("point", "font_size"),
+                _not_honored_reason("point", "interpolate"),
+            ],
+            _layer_honored("point"),
         )
-    point = _layer_honored("point")
-    assert str(exc_info.value) == (
-        "relplot: no layer of this chart (mark_point) takes ['font_size', 'interpolate']: "
-        + _not_honored("relplot", "point", "font_size", point)
-        + "; "
-        + _not_honored("relplot", "point", "interpolate", point)
     )
 
 
-def test_an_unset_size_no_layer_takes_refuses_as_not_honored() -> None:
-    """A `size=None` the size rule lets through is still a key the area does
-    not take, so it refuses as not honored rather than with no reason."""
-    from ferrum.marks.base import refuse_untaken_layer_style
-
-    with pytest.raises(ValueError) as exc_info:
-        refuse_untaken_layer_style("relplot", ["area"], {"size": None})
-    assert str(exc_info.value) == _not_honored("relplot", "area", "size", _layer_honored("area"))
-
-
-def test_an_unset_size_is_named_beside_another_untaken_key() -> None:
-    """Every untaken key is named, a `size=None` the size rule lets through
-    included."""
-    from ferrum.marks.base import refuse_untaken_layer_style
-
-    with pytest.raises(ValueError) as exc_info:
-        refuse_untaken_layer_style("relplot", ["area"], {"bogus": 1, "size": None})
-    area = _layer_honored("area")
-    assert str(exc_info.value) == (
-        "relplot: no layer of this chart (mark_area) takes ['bogus', 'size']: "
-        f"relplot: unknown keyword argument 'bogus'. Honored: {area}; "
-        + _not_honored("relplot", "area", "size", area)
+def test_an_unknown_key_names_each_layers_mark_beside_its_honored_list() -> None:
+    """An unknown key on a chart of several marks is refused on each layer's
+    line, so each Honored list sits beside the mark that takes it."""
+    refusal = _spread_refusal(_point_and_line(), {"bogus": 1, "font_size": 3})
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['bogus', 'font_size']:"
+        + _layer_line(
+            "point",
+            ["unknown keyword argument 'bogus'", _not_honored_reason("point", "font_size")],
+            _layer_honored("point"),
+        )
+        + _layer_line(
+            "line",
+            ["unknown keyword argument 'bogus'", _not_honored_reason("line", "font_size")],
+            _layer_honored("line"),
+        )
     )
 
 
-def test_an_unset_size_on_a_single_layer_door_stays_unset() -> None:
-    """Control: `fm.Layer(mark_kwargs=)` reads `size=None` on an area as
-    unset, as it did before the spread door's refusal was shared."""
+def test_a_refusal_spanning_layers_names_its_call_once_in_any_voice() -> None:
+    """The call is named once, at the head, in whichever voice speaks it, and
+    each layer lists what it takes once."""
+    chart = (
+        fm.Chart(_DF).mark_point() + fm.Chart(_DF).mark_line() + fm.Chart(_DF).mark_area()
+    ).encode(x="x", y="y")
+    refusal = _spread_refusal(chart, {"bogus": 1, "font_size": 3})
+    for voice in ("relplot", "catplot"):
+        text = str(refusal.spoken_as(voice))
+        assert text.startswith(f"{voice}: no layer of this chart takes ['bogus', 'font_size']:")
+        assert text.count(voice) == 1, text
+        assert text.count("Honored:") == text.count("\n") == 3, text
+
+
+def test_a_size_no_layer_draws_names_each_marks_size_rule_once_per_layer() -> None:
+    """A constant size on layers that draw none gets each mark's size-rule
+    reason, its remedy kept, with the call named only at the head."""
     from ferrum.marks.base import resolve_layer_style
 
-    assert resolve_layer_style("Layer", "area", {"size": None}) == {"size": None}
+    def size_reason(mark: str) -> str:
+        with pytest.raises(ValueError) as layer_door:
+            resolve_layer_style("relplot", mark, {"size": 3.0})
+        text = str(layer_door.value)
+        assert text.startswith("relplot(size=...) "), text
+        return "keyword argument 'size' " + text.removeprefix("relplot(size=...) ").removesuffix(
+            "."
+        )
+
+    chart = (fm.Chart(_DF).mark_area() + fm.Chart(_DF).mark_rule()).encode(x="x", y="y")
+    refusal = _spread_refusal(chart, {"size": 3.0})
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['size']:"
+        + _layer_line("area", [size_reason("area")], None)
+        + _layer_line("rule", [size_reason("rule")], None)
+    )
+    assert "Set stroke_width= instead" in size_reason("rule")
+
+
+#: Every primitive mark that draws no constant size.
+_SIZELESS_MARKS = [m for m in _MARKS if "size" not in _layer_honored(m)]
+
+
+@pytest.mark.parametrize("mark", _SIZELESS_MARKS)
+def test_an_unset_size_is_unset_at_the_spread_door_as_at_the_layer_door(mark: str) -> None:
+    """`size=None` on a mark that draws no size is unset at every door: the
+    layer door keeps it unset and the spread door refuses nothing."""
+    from ferrum.marks.base import refuse_untaken_layer_style, resolve_layer_style
+
+    assert resolve_layer_style("Layer", mark, {"size": None}) == {"size": None}
+    assert refuse_untaken_layer_style("relplot", [mark], {"size": None}) is None
+    assert refuse_untaken_layer_style("relplot", [mark, "point"], {"size": None}) is None
+
+
+def test_an_unset_size_on_a_chart_whose_layers_draw_none_styles_nothing() -> None:
+    """Through the figure's `mark=` door: no refusal and no layer restyled.
+    Control: a set size on the same chart refuses."""
+    from ferrum._overrides import _apply_overrides
+
+    chart = (fm.Chart(_DF).mark_area() + fm.Chart(_DF).mark_rule()).encode(x="x", y="y")
+    styled = _apply_overrides(chart, entry="relplot", mark={"size": None})
+    assert not any(ly.mark_kwargs for ly in styled._layers)
+    assert styled.to_svg() == chart.to_svg()
+    _spread_refusal(chart, {"size": 3.0})
+
+
+def test_an_unset_size_beside_another_untaken_key_refuses_only_that_key() -> None:
+    """Only the key that is set is refused, with the layer door's own text."""
+    from ferrum.marks.base import refuse_untaken_layer_style, resolve_layer_style
+
+    with pytest.raises(ValueError) as layer_door:
+        resolve_layer_style("relplot", "area", {"bogus": 1, "size": None})
+    with pytest.raises(ValueError) as spread_door:
+        refuse_untaken_layer_style("relplot", ["area"], {"bogus": 1, "size": None})
+    assert str(spread_door.value) == str(layer_door.value)
+    assert "'size'" not in str(spread_door.value)
+
+
+# ── None is unset at every door ─────────────────────────────────────────────
+
+#: Every kwarg a mark method takes, each mark it draws.
+_METHOD_NONE_CELLS = [(m, f) for m in _METHOD_MARKS for f in _method_honored(m)]
+#: Every kwarg a layer takes, and a size it never draws.
+_LAYER_NONE_CELLS = [(m, f) for m in _MARKS for f in sorted({*_layer_honored(m), "size"})]
+
+
+def test_the_none_populations_reach_a_method_only_kwarg_and_an_undrawn_size() -> None:
+    assert ("bar", "orient") in _METHOD_NONE_CELLS
+    assert ("rule", "size") in _LAYER_NONE_CELLS
+    assert ("point", "bogus") not in _METHOD_NONE_CELLS
+
+
+@pytest.mark.parametrize(("mark", "field"), _METHOD_NONE_CELLS)
+def test_none_is_unset_at_a_mark_method(mark: str, field: str) -> None:
+    from ferrum.marks.base import resolve_mark_kwargs
+
+    getattr(fm.Chart(_DF), f"mark_{mark}")(**{field: None})
+    assert resolve_mark_kwargs(f"mark_{mark}", mark, {field: None}) == {field: None}
+
+
+@pytest.mark.parametrize(("mark", "field"), _LAYER_NONE_CELLS)
+def test_none_is_unset_on_a_layer(mark: str, field: str) -> None:
+    assert fm.Layer(mark=mark, mark_kwargs={field: None}).mark_kwargs == {field: None}
+
+
+@pytest.mark.parametrize("mark", ["bar", "tick"])
+def test_orient_none_draws_as_no_orient(mark: str) -> None:
+    """`orient=None` is unset, so the mark draws exactly as with no orient;
+    control: `orient="horizontal"` flips it."""
+    plain = getattr(fm.Chart(_CAT), f"mark_{mark}")().encode(x="g", y="v").to_svg()
+    unset = getattr(fm.Chart(_CAT), f"mark_{mark}")(orient=None).encode(x="g", y="v").to_svg()
+    flipped = (
+        getattr(fm.Chart(_CAT), f"mark_{mark}")(orient="horizontal").encode(x="g", y="v").to_svg()
+    )
+    assert unset == plain != flipped
 
 
 def test_a_key_one_layer_takes_reaches_it_on_a_layered_chart() -> None:
@@ -805,6 +922,30 @@ def test_a_desugar_called_directly_refuses_a_field_no_layer_draws() -> None:
     assert str(exc_info.value) == _no_layer_draws("mark_errorbar", ["shape"], ["rule", "tick"])
 
 
+@pytest.mark.parametrize(("entry", "field"), _COMPOSITE_CELLS)
+def test_a_composite_reads_none_as_unset_for_a_field_no_emitted_mark_draws(
+    entry: str, field: str
+) -> None:
+    """The same cells set to `None`: unset, so nothing is refused and the
+    chart draws as it does without the field."""
+    build = _COMPOSITES[entry]
+    assert build({field: None}).to_svg() == build({}).to_svg()
+
+
+_SIZED_COMPOSITES: dict[str, Callable[[dict], Any]] = {
+    **_COMPOSITES,
+    "mark_function": lambda st: fm.Chart(None).mark_function(np.sin, domain=[0, 6.0], **st),
+}
+
+
+@pytest.mark.parametrize("entry", sorted(_SIZED_COMPOSITES))
+def test_a_composite_size_none_is_unset(entry: str) -> None:
+    """`size=None` reaches no size rule, so it neither refuses nor raises a
+    raw type error, and the chart draws as it does without it."""
+    build = _SIZED_COMPOSITES[entry]
+    assert build({"size": None}).to_svg() == build({}).to_svg()
+
+
 def test_a_composite_spreads_a_field_only_onto_the_layers_that_draw_it() -> None:
     """Control: the field reaches the line, which draws it, and not the
     ribbon, which never would."""
@@ -813,6 +954,25 @@ def test_a_composite_spreads_a_field_only_onto_the_layers_that_draw_it() -> None
     dashes = {ly["mark"]: ly.get("mark_style", {}).get("stroke_dash") for ly in layers}
     assert dashes == {"ribbon": None, "line": [4.0, 2.0]}
     _no_warnings(chart.to_svg)
+
+
+def test_a_composite_catch_all_none_leaves_the_desugars_own_default() -> None:
+    """`None` on the chart-level catch-all is unset, so it does not
+    overwrite a desugar's own built-in default: the ribbon still draws
+    its hard-coded `opacity=0.3`, not fully opaque, and a non-`None`
+    catch-all still overrides it as before."""
+    chart = _COMPOSITES["mark_smooth"]({"opacity": None})
+    layers = json.loads(chart.to_spec().to_json())["layers"]
+    opacities = {ly["mark"]: ly.get("mark_style", {}).get("opacity") for ly in layers}
+    assert opacities == {"ribbon": 0.3, "line": None}
+    _no_warnings(chart.to_svg)
+
+    overridden = _COMPOSITES["mark_smooth"]({"opacity": 0.8})
+    overridden_layers = json.loads(overridden.to_spec().to_json())["layers"]
+    assert {ly["mark"]: ly.get("mark_style", {}).get("opacity") for ly in overridden_layers} == {
+        "ribbon": 0.8,
+        "line": 0.8,
+    }
 
 
 def test_a_compound_figure_spreads_a_field_only_onto_the_panels_that_draw_it() -> None:
@@ -847,19 +1007,116 @@ _DRAWABLE: dict[str, dict[str, str]] = {
     "ribbon": {"x": "x", "y": "y", "y2": "y2"},
     "segment": {"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
 }
-#: The style that supplies each need a style kwarg can supply.
-_ENABLES = {"stroke": {"stroke": "#000000"}, "arrow": {"arrow": True}}
-_INERT_CELLS = [
-    (m, f, need)
-    for m in _METHOD_MARKS
-    for f, need in mark_style_fields(m).items()
-    if need in _ENABLES
-]
+_URL = "data:image/png;base64,iVBORw0KGgo="
+#: `_WIDE` with a second band column and an image url per row.
+_NEEDS = _WIDE.with_columns(pl.Series("h", ["p", "q", "p"]), pl.Series("u", [_URL] * 3))
+#: Points binned by a raster into a 4 x 4 grid of differing counts.
+_GRID = pl.DataFrame(
+    [(float(i), float(j)) for i in range(4) for j in range(4) for _ in range(i + 4 * j + 1)],
+    schema=["x", "y"],
+    orient="row",
+)
+_POLY = pl.DataFrame(
+    {"x": [0.0, 1.0, 1.0, 0.0], "y": [0.0, 0.0, 1.0, 1.0], "v": [1.0, 2.0, 3.0, 4.0]}
+)
+_HEATMAP = {"x": "g", "y": "h", "color": "x"}
+_RANGES = {"x": "x", "x2": "x2", "y": "y", "y2": "y2"}
+
+
+def _polygon(style: dict, *, color: str = "v") -> Any:
+    """A polygon layer over its own vertices; no mark method draws one."""
+    data = _POLY.with_columns(pl.col("v").cast(pl.Utf8).alias("c"))
+    return (
+        fm.Chart(data)
+        .mark_point()
+        .encode(x="x", y="y", color=color)
+        .layer(fm.Layer(mark="polygon", mark_kwargs=style))
+    )
 
 
 def _drawable(mark: str, style: dict) -> Any:
+    if mark == "polygon":
+        return _polygon(style)
     chart = getattr(fm.Chart(_WIDE), f"mark_{mark}")(**style).encode(**_DRAWABLE[mark])
     return chart.coord(fm.CoordPolar()) if mark == "arc" else chart
+
+
+def _rect(style: dict, encoding: dict[str, str]) -> Any:
+    return fm.Chart(_NEEDS).mark_rect(**style).encode(**encoding)
+
+
+def _label(style: dict) -> Any:
+    return fm.Chart(_NEEDS).mark_label(**style).encode(x="x", y="y", text="g")
+
+
+def _image(style: dict) -> Any:
+    return fm.Chart(_NEEDS).mark_image(**style).encode(x="x", y="y", url="u")
+
+
+def _raster(style: dict) -> Any:
+    return fm.Chart(_GRID).mark_raster(resolution=4, **style).encode(x="x", y="y")
+
+
+def _layered_bar(style: dict) -> Any:
+    """A bar layer on a chart of several layers, its values far from zero."""
+    data = _CAT.with_columns(pl.col("v") + 50.0)
+    return fm.catplot(data, x="g", y="v", kind="bar", mark={"bar": style})
+
+
+class _Scenes(NamedTuple):
+    """Charts drawing a field without (*unmet*) and with (*met*) the input it needs."""
+
+    unmet: Callable[[str, dict], list[Any]]
+    met: Callable[[str, dict], Any]
+
+
+#: For each need Rust's style table names, the charts that lack and supply it.
+#: A need set by style is supplied by that style; one set by an encoding, the
+#: data or the mark's shape is supplied by a chart that has it.
+_NEED_SCENES: dict[str, _Scenes] = {
+    "stroke": _Scenes(
+        lambda m, st: [_drawable(m, st)],
+        lambda m, st: _drawable(m, {"stroke": "#000000", **st}),
+    ),
+    "arrow": _Scenes(
+        lambda m, st: [_drawable(m, st)],
+        lambda m, st: _drawable(m, {"arrow": True, **st}),
+    ),
+    # dx alone or dy alone: the label places itself.
+    "leader_placement": _Scenes(
+        lambda m, st: [_label(st)],
+        lambda m, st: _label({"dx": 7.0, "dy": 7.0, **st}),
+    ),
+    # A text encoding on a heatmap: a heatmap without one, and text on a
+    # rect of two quantitative ranges, both lack it.
+    "text_channel": _Scenes(
+        lambda m, st: [_rect(st, _HEATMAP), _rect(st, {**_RANGES, "text": "g"})],
+        lambda m, st: _rect(st, {**_HEATMAP, "text": "g"}),
+    ),
+    # A band axis paired with a range.
+    "band_scale": _Scenes(
+        lambda m, st: [_rect(st, _HEATMAP), _rect(st, _RANGES)],
+        lambda m, st: _rect(st, {"x": "g", "y": "y", "y2": "y2"}),
+    ),
+    "url_channel": _Scenes(lambda m, st: [_raster(st)], lambda m, st: _image(st)),
+    "raster_data": _Scenes(lambda m, st: [_image(st)], lambda m, st: _raster(st)),
+    "quantitative_color": _Scenes(
+        lambda m, st: [_polygon(st, color="c")], lambda m, st: _polygon(st)
+    ),
+    # A flat bar's zero= is consumed by Python and never reaches the mark
+    # (`test_a_flat_bar_figure_zero_is_consumed_not_put_on_the_wire`), so no
+    # public chart lacks this need.
+    "layered_chart": _Scenes(lambda m, st: [], lambda m, st: _layered_bar(st)),
+}
+#: Every field Rust's style table conditions on a need, on every mark.
+_NEED_CELLS = [
+    (m, f, need) for m in _MARKS for f, need in mark_style_fields(m).items() if need is not None
+]
+_UNMET_CELLS = [
+    (m, f, need, i)
+    for m, f, need in _NEED_CELLS
+    for i in range(len(_NEED_SCENES[need].unmet(m, {}) if need in _NEED_SCENES else []))
+]
 
 
 def _render_warnings(chart: Any) -> tuple[str, list[str]]:
@@ -869,33 +1126,57 @@ def _render_warnings(chart: Any) -> tuple[str, list[str]]:
     return svg, [str(w.message) for w in caught]
 
 
-def test_the_inert_population_is_every_style_supplied_need() -> None:
-    assert {need for _, _, need in _INERT_CELLS} == set(_ENABLES)
-    assert {"point", "bar", "segment"} <= {m for m, _, _ in _INERT_CELLS}
+def _inert(messages: list[str]) -> list[str]:
+    return [m for m in messages if " has no effect on this " in m]
 
 
-@pytest.mark.parametrize(("mark", "field", "need"), _INERT_CELLS)
-def test_a_field_without_its_enabling_input_warns_inert(mark: str, field: str, need: str) -> None:
-    chart = _drawable(mark, {field: _SAMPLE[field]})
-    # A method whose mark is a composite's one layer speaks as a layer.
-    layer = "layer 0: " if chart._resolve_pending()._layers else ""
+def test_the_inert_population_is_every_need_rust_names() -> None:
+    """Every need the table names has scenes, every scene a cell, and every
+    need but the one no public chart lacks has an unmet scene."""
+    needs = {need for _, _, need in _NEED_CELLS}
+    assert needs == set(_NEED_SCENES)
+    assert {need for _, _, need, _ in _UNMET_CELLS} == needs - {"layered_chart"}
+    assert {"leader_placement", "text_channel", "band_scale", "url_channel"} <= needs
+    assert ("label", "dx", "leader_placement", 0) in _UNMET_CELLS
+    assert ("rect", "font_size", "text_channel", 1) in _UNMET_CELLS
+
+
+@pytest.mark.parametrize(("mark", "field", "need", "scene"), _UNMET_CELLS)
+def test_a_field_without_its_enabling_input_warns_inert(
+    mark: str, field: str, need: str, scene: int
+) -> None:
+    """The field warns once, naming itself and its mark."""
+    chart = _NEED_SCENES[need].unmet(mark, {field: _SAMPLE[field]})[scene]
     _, messages = _render_warnings(chart)
-    inert = [m for m in messages if "has no effect on this" in m]
+    inert = _inert(messages)
     assert len(inert) == 1, messages
-    assert inert[0].startswith(
-        f"{layer}mark_{mark}: {field} has no effect on this {mark} mark without "
-    )
-    assert inert[0].endswith("; it was ignored")
+    assert re.search(
+        rf"mark_\w+: {field} has no effect on this {mark} mark without .+; it was ignored$",
+        inert[0],
+    ), inert[0]
 
 
-@pytest.mark.parametrize(("mark", "field", "need"), _INERT_CELLS)
+@pytest.mark.parametrize("scene", range(len(_NEED_SCENES["text_channel"].unmet("rect", {}))))
+def test_a_rect_font_size_names_both_inputs_it_needs(scene: int) -> None:
+    """A heatmap without a text encoding and text on a rect of two ranges
+    both lack the one input pair a rect's font size draws with, so both
+    warnings name the text encoding and the heatmap shape."""
+    chart = _NEED_SCENES["text_channel"].unmet("rect", {"font_size": 14.0})[scene]
+    _, messages = _render_warnings(chart)
+    assert _inert(messages) == [
+        "mark_rect: font_size has no effect on this rect mark without both a text encoding "
+        "and the heatmap shape (one cell per x/y band pair, no x2 or y2 range); it was ignored"
+    ]
+
+
+@pytest.mark.parametrize(("mark", "field", "need"), _NEED_CELLS)
 def test_a_field_with_its_enabling_input_draws_without_warning(
     mark: str, field: str, need: str
 ) -> None:
-    enabled = _ENABLES[need]
-    svg, messages = _render_warnings(_drawable(mark, {**enabled, field: _SAMPLE[field]}))
-    assert not [m for m in messages if "has no effect on this" in m], messages
-    assert svg != _drawable(mark, enabled).to_svg()
+    met = _NEED_SCENES[need].met
+    svg, messages = _render_warnings(met(mark, {field: _SAMPLE[field]}))
+    assert not _inert(messages), messages
+    assert svg != met(mark, {}).to_svg()
 
 
 # ── vocabularies ────────────────────────────────────────────────────────────

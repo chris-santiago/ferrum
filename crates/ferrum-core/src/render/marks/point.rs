@@ -262,7 +262,7 @@ pub(crate) fn emit_shape_nodes(
 /// does not size it: the layer's own constant `size`, else the theme
 /// `point_size`. The point builder reads it through
 /// [`resolve_mark_style`](crate::render::draw::resolve_mark_style), and the
-/// swarm packing bound reads it directly, so the two cannot disagree. Pure:
+/// swarm packing bound through [`fallback_dot`], so the two cannot disagree. Pure:
 /// it validates nothing, so a caller reading it ahead of the style's
 /// refusals does not refuse in the wrong voice.
 pub(crate) fn fallback_dot_area(
@@ -272,51 +272,52 @@ pub(crate) fn fallback_dot_area(
     overrides.and_then(|o| o.size).unwrap_or(theme.sizes.point_size)
 }
 
-/// The one decision [`drawn_fallback_area`] and [`drawn_fallback_diameter`]
-/// both read: `swarm` overrides a point layer's fallback only when a swarm
-/// feeds it and it sizes no dot of its own ([`sizes_own_dots`](crate::render::position::sizes_own_dots)).
-/// `None` when the layer sizes its own dots, or no swarm feeds it — the
-/// "a swarm-fed point layer that sizes no dot of its own" rule therefore
-/// lives in exactly this one place, not composed separately by either sibling.
-fn swarm_size_override<'a>(
-    layer: &crate::render::prepare::LayerPrepared,
-    swarm: Option<&'a crate::transform::swarm::SwarmSpec>,
-) -> Option<&'a crate::transform::swarm::SwarmSpec> {
-    swarm.filter(|_| !crate::render::position::sizes_own_dots(layer))
+/// The size a point layer draws a row at when that row does not take its
+/// size from the layer's own size channel. Decided once by [`fallback_dot`];
+/// every reader projects it through [`area`](Self::area) or
+/// [`diameter`](Self::diameter) and none restates which variant applies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FallbackDot<'a> {
+    /// A swarm feeds the layer and the layer sizes no dot of its own: it
+    /// draws at the declared swarm's `point_size`.
+    Swarm(&'a crate::transform::swarm::SwarmSpec),
+    /// Any other point layer: [`fallback_dot_area`], the layer's own
+    /// constant `size`, else the theme `point_size` (px²).
+    Area(f64),
 }
 
-/// The area (px²) a point layer draws a row at when that row does not take
-/// its size from the layer's own size channel: a swarm's own dot area on
-/// the [`swarm_size_override`] branch, else [`fallback_dot_area`]. The
-/// point builder reads this; the swarm packing bound reads the
-/// diameter-space sibling [`drawn_fallback_diameter`] instead of
-/// round-tripping through this area.
-pub(crate) fn drawn_fallback_area(
-    layer: &crate::render::prepare::LayerPrepared,
-    swarm: Option<&crate::transform::swarm::SwarmSpec>,
-    theme: &crate::layout::ThemeInputs,
-) -> f64 {
-    match swarm_size_override(layer, swarm) {
-        Some(swarm) => swarm.dot_area(),
-        None => fallback_dot_area(layer.mark_style.as_ref(), theme),
+impl FallbackDot<'_> {
+    /// The dot area (px²), which the point builder draws at.
+    pub(crate) fn area(self) -> f64 {
+        match self {
+            Self::Swarm(swarm) => swarm.dot_area(),
+            Self::Area(area) => area,
+        }
+    }
+
+    /// The dot diameter (px), which the swarm packing bound reads. A swarm
+    /// dot is its declared `point_size` exactly, not a round trip through
+    /// [`area`](Self::area): `dot_diameter(dot_area(x)) != x` at ULP level.
+    pub(crate) fn diameter(self) -> f64 {
+        match self {
+            Self::Swarm(swarm) => swarm.point_size,
+            Self::Area(area) => ferrum_scene::dot_diameter(area),
+        }
     }
 }
 
-/// The diameter-space sibling of [`drawn_fallback_area`]: the diameter (px)
-/// a point layer draws an unsized row at. On the [`swarm_size_override`]
-/// branch this reads the swarm's own declared `point_size` directly rather
-/// than round-tripping through `drawn_fallback_area`'s area —
-/// `dot_diameter(dot_area(x)) != x` at ULP level, and the swarm packing
-/// bound must stay bit-exact. The swarm packing bound and `drawn_fallback_area`
-/// both read the same [`swarm_size_override`] decision, so the two cannot drift.
-pub(crate) fn drawn_fallback_diameter(
+/// The one decision of what a point layer's unsized rows draw at: a swarm's
+/// own dot when `swarm` feeds the layer and the layer sizes no dot itself
+/// ([`sizes_own_dots`](crate::render::position::sizes_own_dots)), else
+/// [`fallback_dot_area`].
+pub(crate) fn fallback_dot<'a>(
     layer: &crate::render::prepare::LayerPrepared,
-    swarm: Option<&crate::transform::swarm::SwarmSpec>,
+    swarm: Option<&'a crate::transform::swarm::SwarmSpec>,
     theme: &crate::layout::ThemeInputs,
-) -> f64 {
-    match swarm_size_override(layer, swarm) {
-        Some(swarm) => swarm.point_size,
-        None => ferrum_scene::dot_diameter(fallback_dot_area(layer.mark_style.as_ref(), theme)),
+) -> FallbackDot<'a> {
+    match swarm {
+        Some(swarm) if !crate::render::position::sizes_own_dots(layer) => FallbackDot::Swarm(swarm),
+        _ => FallbackDot::Area(fallback_dot_area(layer.mark_style.as_ref(), theme)),
     }
 }
 
@@ -1905,5 +1906,65 @@ mod tests {
         assert!(result.tooltips.is_none());
         assert!(result.hrefs.is_none());
         assert!(result.descriptions.is_none());
+    }
+
+    /// One decision, two exact projections, over {unsized, constant-sized,
+    /// field-sized, both} × {swarm-fed, unfed}: only an unsized fed layer
+    /// draws the swarm's own dot, whose diameter is the declared
+    /// `point_size` bit-exact; every other layer draws its own constant,
+    /// else the theme's.
+    #[test]
+    fn fallback_dot_is_the_swarm_dot_only_for_an_unsized_fed_layer() {
+        use crate::render::prepare::LayerPrepared;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
+        let theme = ThemeInputs::default();
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 3.3,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        // Vacuity: this declared size does not survive an area round trip,
+        // so only a projection that reads it directly is bit-exact.
+        assert_ne!(ferrum_scene::dot_diameter(swarm.dot_area()), swarm.point_size);
+        let constant = 200.0;
+        assert_ne!(constant, theme.sizes.point_size);
+        let layer = |own: Option<f64>, field: bool| {
+            LayerPrepared::from_chart_only(&ChartSpec {
+                mark: Mark::Point,
+                mark_style: own.map(|size| MarkKwargsSpec { size: Some(size), ..Default::default() }),
+                encoding: Encoding {
+                    size: field.then(|| EncodingSpec { field: "s".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+        let theme_dot = FallbackDot::Area(theme.sizes.point_size);
+        let own_dot = FallbackDot::Area(constant);
+        let cells = [
+            ("unsized", layer(None, false), FallbackDot::Swarm(&swarm), theme_dot),
+            ("constant", layer(Some(constant), false), own_dot, own_dot),
+            ("field", layer(None, true), theme_dot, theme_dot),
+            ("constant and field", layer(Some(constant), true), own_dot, own_dot),
+        ];
+        for (name, layer, fed, unfed) in cells {
+            for (feed, expected) in [(Some(&swarm), fed), (None, unfed)] {
+                let dot = fallback_dot(&layer, feed, &theme);
+                let fed = feed.is_some();
+                assert_eq!(dot, expected, "{name} fed={fed}");
+                let (area, diameter) = match expected {
+                    FallbackDot::Swarm(s) => (s.dot_area(), s.point_size),
+                    FallbackDot::Area(a) => (a, ferrum_scene::dot_diameter(a)),
+                };
+                assert_eq!(dot.area().to_bits(), area.to_bits(), "{name} fed={fed} area");
+                assert_eq!(dot.diameter().to_bits(), diameter.to_bits(), "{name} fed={fed} diameter");
+            }
+        }
     }
 }

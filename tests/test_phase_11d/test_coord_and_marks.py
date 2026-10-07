@@ -5,6 +5,7 @@ No golden file comparison — visual inspection handled separately.
 """
 
 import json
+import warnings
 
 import polars as pl
 import pytest
@@ -198,6 +199,34 @@ def test_mark_label_manual_override_bypasses_avoidance(label_df):
     assert "<svg" in svg
     for lbl in ("first", "second", "third"):
         assert f">{lbl}<" in svg, f"label '{lbl}' missing from SVG"
+
+
+@pytest.mark.parametrize("offset", ["dx", "dy"])
+def test_mark_label_one_offset_alone_warns_and_is_ignored(label_df, offset):
+    """A label places itself unless both dx and dy are set, so one offset
+    alone warns once, naming that offset, and the labels render exactly as
+    with no offset. Control: both offsets draw silently, at a placement of
+    their own."""
+
+    def render(**offsets):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = (
+                fm.Chart(label_df).mark_label(**offsets).encode(x="x", y="y", text="label").to_svg()
+            )
+        return svg, [str(w.message) for w in caught]
+
+    placed, silent = render()
+    alone, messages = render(**{offset: 5.0})
+    inert = [m for m in messages if " has no effect on this " in m]
+    assert len(inert) == 1, messages
+    assert inert[0].startswith(f"mark_label: {offset} has no effect on this label mark without ")
+    assert alone == placed
+    assert not silent
+
+    fixed, both_messages = render(dx=5.0, dy=5.0)
+    assert not both_messages
+    assert fixed != placed
 
 
 # ── CoordGeo + mark_geoshape ───────────────────────────────────────────────

@@ -596,6 +596,28 @@ def test_a_size_encoding_packs_at_the_size_range_maximum():
     assert _min_centre_distance(points) == pytest.approx(_RANGE_MAX + 1.0, abs=0.01)
 
 
+def test_a_reversed_size_range_packs_at_its_widest_drawn_dot():
+    """A size range given high-to-low (``range=[36, 4]``) draws its largest
+    dot, area 36, at the smallest values, so the packing bound is the
+    range's largest area, not its last: centres sit one 36-area diameter
+    plus ``spacing`` apart and no two drawn dots overlap. Control: the same
+    range given low-to-high packs alike."""
+    df = _spread_df().with_columns(pl.Series("weight", _short_weights(300)))
+
+    def circles(size_range: list[float]) -> list[tuple[float, float, float]]:
+        size = fm.Size("weight", legend=None, scale=fm.LinearScale(range=size_range))
+        return _circles(fm.Chart(df).mark_swarm().encode(x="group", y="value", size=size).to_svg())
+
+    reversed_points = circles([36.0, 4.0])
+    widest = 2.0 * max(r for _, _, r in reversed_points)
+    assert len(reversed_points) == 300
+    assert widest == pytest.approx(_RANGE_MAX, abs=2e-3), "the zero weights draw the widest dot"
+    for (ax, ay, ar), (bx, by, br) in itertools.combinations(reversed_points, 2):
+        assert math.hypot(ax - bx, ay - by) >= ar + br - 2e-3, "two drawn dots overlap"
+    assert _min_centre_distance(reversed_points) == pytest.approx(widest + 1.0, abs=0.01)
+    assert _min_centre_distance(circles([4.0, 36.0])) == pytest.approx(_RANGE_MAX + 1.0, abs=0.01)
+
+
 _OVERFLOW_RE = re.compile(r"packs its dots up to ([0-9.]+) px")
 
 

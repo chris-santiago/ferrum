@@ -1095,8 +1095,9 @@ pub(crate) fn sizes_own_dots(layer: &crate::render::prepare::LayerPrepared) -> b
 ///   batch cannot read as numeric), the bound is the fallback alone, never
 ///   widened by a range no row reaches.
 /// - A constant area `a` bounds at `2·√(a/π)`.
-/// - A layer that sizes nothing itself draws at the swarm's own `point_size`,
-///   so bounds there.
+/// - A layer that sizes nothing itself draws at the swarm's own `point_size`
+///   ([`fallback_dot`](crate::render::marks::point::fallback_dot)), so bounds
+///   there.
 ///
 /// `None` for a non-point layer, which draws no dot.
 fn swarm_layer_bound(
@@ -1106,19 +1107,15 @@ fn swarm_layer_bound(
     scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
 ) -> Option<f64> {
+    use crate::render::marks::point::{fallback_dot, FallbackDot};
     if layer.mark != crate::spec::mark::Mark::Point {
         return None;
     }
-    if !sizes_own_dots(layer) {
-        // The widest diameter an unsized dot draws at when a swarm feeds
-        // this layer: `drawn_fallback_diameter`'s swarm branch, read
-        // directly in diameter space so this stays exact, not the
-        // area/diameter round trip the sized layer's per-row fallback
-        // below takes through `drawn_fallback_area` plus `dot_diameter`,
-        // which would drift by a few ULPs here.
-        return Some(crate::render::marks::point::drawn_fallback_diameter(layer, Some(swarm), theme));
-    }
-    let fallback_area = crate::render::marks::point::drawn_fallback_area(layer, None, theme);
+    let fallback_area = match fallback_dot(layer, Some(swarm), theme) {
+        FallbackDot::Area(area) => area,
+        // Every row draws the swarm's own dot: no size channel sizes any.
+        swarm_dot @ FallbackDot::Swarm(_) => return Some(swarm_dot.diameter()),
+    };
     let scale = scales.size.as_ref();
     let bound_area = match (crate::render::marks::point::scaled_dot_areas(batch, layer.encoding.size.as_ref(), scale), scale) {
         (Some(areas), Some(scale)) => {
@@ -1856,6 +1853,58 @@ mod tests {
         let widened_by_range = ferrum_scene::dot_diameter(100.0_f64.max(theme.sizes.point_size));
         assert_eq!(bound, fallback_only, "a non-numeric size column must bound at the fallback area alone");
         assert_ne!(bound, widened_by_range, "must not widen toward a range max no row of this layer reaches");
+    }
+
+    /// A size scale whose range runs high to low (`range=[36, 4]`) draws its
+    /// widest dot at the range's FIRST end, so the packing bound reads the
+    /// wider end of the range whichever way it runs, and bounds every dot
+    /// the layer draws. Forward and reversed ranges bound alike.
+    #[test]
+    fn swarm_layer_bound_reads_the_wider_end_of_a_reversed_size_range() {
+        use crate::render::prepare::LayerPrepared;
+        use crate::render::scale_resolve::SizeScale;
+        use crate::scale::linear::LinearScale;
+        use crate::spec::mark::Mark;
+        use crate::transform::swarm::{SwarmOrient, SwarmSide, SwarmSpec};
+
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                size: Some(EncodingSpec { field: "s".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let layer = LayerPrepared::from_chart_only(&spec);
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Float64, false)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![0.0, 0.5, 1.0]))]).unwrap();
+        let theme = crate::layout::ThemeInputs::default();
+        let swarm = SwarmSpec {
+            category: "g".into(),
+            value: "v".into(),
+            point_size: 3.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
+            dodge: None,
+            name: None,
+        };
+        let bound_for = |range: Vec<f64>| {
+            let mut scales = dummy_scales();
+            scales.size = Some(SizeScale {
+                inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], range, false, false)),
+            });
+            let areas = crate::render::marks::point::scaled_dot_areas(&batch, layer.encoding.size.as_ref(), scales.size.as_ref())
+                .expect("every row is sized");
+            let widest_drawn = areas.into_iter().map(|a| a.expect("every row maps")).fold(0.0, f64::max);
+            (swarm_layer_bound(&layer, &batch, &swarm, &scales, &theme).unwrap(), widest_drawn)
+        };
+        let (reversed, widest_reversed) = bound_for(vec![36.0, 4.0]);
+        assert_eq!(widest_reversed, 36.0, "vacuity: the reversed range draws its widest dot at its first end");
+        assert_eq!(reversed, ferrum_scene::dot_diameter(36.0));
+        assert!(reversed >= ferrum_scene::dot_diameter(widest_reversed));
+        let (forward, _) = bound_for(vec![4.0, 36.0]);
+        assert_eq!(forward, reversed);
     }
 
     /// One swarm feeding a constant-sized point layer and an unsized one

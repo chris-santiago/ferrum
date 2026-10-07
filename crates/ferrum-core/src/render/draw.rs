@@ -625,18 +625,15 @@ fn set_style_fields(o: &MarkKwargsSpec) -> Result<Vec<&'static str>, RenderError
 
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
 ///
-/// When `overrides` is `None`, the result is identical to the Phase 7 path
-/// (pure theme defaults, mark-aware) — goldens remain byte-identical, and the
-/// call is infallible in practice since only the override block can refuse.
+/// When `overrides` is `None`, the result is the mark-aware theme defaults,
+/// and the call cannot refuse, since only the override block refuses.
 ///
 /// String color fields (stroke, fill) resolve through [`resolve_paint_color`]:
 /// full CSS vocabulary, the `"theme:label"` sentinel, and the two clearing
-/// spellings `"none"`/`"transparent"` (spec §4.1, 2026-09-01 T8 quality-review
-/// supersession — `"transparent"` joined `"none"` as a clear, superseding the
-/// earlier none-only shape this comment used to describe) honored, and an
-/// unparseable value refused as [`RenderError::InvalidColor`]. The refusal
-/// reaches the user at the `build_panel_mark_batches` seam (the sole production
-/// caller), alongside `validate_mark_encoding`'s.
+/// spellings `"none"`/`"transparent"` (spec §4.1) honored, and an unparseable
+/// value refused as [`RenderError::InvalidColor`]. The sole production caller
+/// is `scene_build::resolve_layer_styles`, which resolves every layer's style
+/// once per chart, before the panel loop, and voices a refusal as that layer's.
 pub fn resolve_mark_style(
     overrides: Option<&MarkKwargsSpec>,
     theme: &ThemeInputs,
@@ -2828,4 +2825,157 @@ mod tests {
         assert_eq!(style.segment.arrow_size, Some(12.0));
     }
 
+    /// Every [`StyleNeed`](crate::spec::mark::StyleNeed) arm, met and unmet,
+    /// decided on the facts the mark's builder reads. The needs are every
+    /// need some mark's style table names; the cells come from an
+    /// exhaustive match, so a new need cannot land without its own met and
+    /// unmet cells.
+    #[test]
+    fn style_need_met_decides_every_need_met_and_unmet() {
+        use crate::layout::Rect;
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use crate::spec::mark::StyleNeed;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        struct Cell {
+            label: &'static str,
+            mark: Mark,
+            encoding: Encoding,
+            style: serde_json::Value,
+            layered: bool,
+            met: bool,
+        }
+        fn channel(field: &str, type_: SDT) -> Option<EncodingSpec> {
+            Some(EncodingSpec { field: field.into(), type_: Some(type_), ..Default::default() })
+        }
+        fn cells(need: StyleNeed) -> Vec<Cell> {
+            let q = |f| channel(f, SDT::Quantitative);
+            let o = |f| channel(f, SDT::Ordinal);
+            let n = |f| channel(f, SDT::Nominal);
+            let xy = Encoding { x: q("q"), y: q("q2"), ..Default::default() };
+            let heatmap = Encoding { x: o("c"), y: o("c2"), ..Default::default() };
+            let band_range = Encoding { x: o("c"), y: q("q"), y2: q("q2"), ..Default::default() };
+            let band_range_flipped = Encoding { y: o("c"), x: q("q"), x2: q("q2"), ..Default::default() };
+            let quant_range = Encoding { x: q("q"), x2: q("q2"), y: q("q"), y2: q("q2"), ..Default::default() };
+            let text = |e: &Encoding| Encoding { text: n("t"), ..e.clone() };
+            let cell = |label, mark, encoding, style, met| Cell { label, mark, encoding, style, layered: false, met };
+            match need {
+                StyleNeed::Stroke => vec![
+                    cell("stroke color", Mark::Point, xy.clone(), json!({"stroke": "#123456"}), true),
+                    cell("no stroke", Mark::Point, xy.clone(), json!({}), false),
+                    cell("cleared stroke", Mark::Point, xy, json!({"stroke": "none"}), false),
+                ],
+                StyleNeed::Arrow => vec![
+                    cell("arrow=True", Mark::Segment, quant_range.clone(), json!({"arrow": true}), true),
+                    cell("arrow=False", Mark::Segment, quant_range.clone(), json!({"arrow": false}), false),
+                    cell("no arrow", Mark::Segment, quant_range, json!({}), false),
+                ],
+                StyleNeed::QuantitativeColor => vec![
+                    cell("float color", Mark::Polygon, Encoding { color: q("q"), ..xy.clone() }, json!({}), true),
+                    cell("string color", Mark::Polygon, Encoding { color: n("c"), ..xy.clone() }, json!({}), false),
+                    cell("no color", Mark::Polygon, xy, json!({}), false),
+                ],
+                StyleNeed::BandScale => vec![
+                    cell("band x with y2", Mark::Rect, band_range, json!({}), true),
+                    cell("band y with x2", Mark::Rect, band_range_flipped, json!({}), true),
+                    cell("heatmap", Mark::Rect, heatmap, json!({}), false),
+                    cell("quantitative ranges", Mark::Rect, quant_range, json!({}), false),
+                ],
+                StyleNeed::LeaderPlacement => vec![
+                    cell("dx and dy", Mark::Label, text(&xy), json!({"dx": 5.0, "dy": 5.0}), true),
+                    cell("dx only", Mark::Label, text(&xy), json!({"dx": 5.0}), false),
+                    cell("dy only", Mark::Label, text(&xy), json!({"dy": 5.0}), false),
+                    cell("neither", Mark::Label, text(&xy), json!({}), false),
+                ],
+                StyleNeed::TextChannel => vec![
+                    cell("text on a heatmap", Mark::Rect, text(&heatmap), json!({}), true),
+                    cell("heatmap without text", Mark::Rect, heatmap, json!({}), false),
+                    cell("text on a band range", Mark::Rect, text(&band_range), json!({}), false),
+                    cell("text on quantitative ranges", Mark::Rect, text(&quant_range), json!({}), false),
+                ],
+                StyleNeed::UrlChannel => vec![
+                    cell("url", Mark::Image, Encoding { url: n("u"), ..xy.clone() }, json!({}), true),
+                    cell("no url", Mark::Image, xy, json!({}), false),
+                ],
+                StyleNeed::RasterData => vec![
+                    cell("no url", Mark::Image, xy.clone(), json!({}), true),
+                    cell("url", Mark::Image, Encoding { url: n("u"), ..xy }, json!({}), false),
+                ],
+                StyleNeed::LayeredChart => vec![
+                    Cell { layered: true, ..cell("layered", Mark::Bar, band_range.clone(), json!({}), true) },
+                    cell("single", Mark::Bar, band_range, json!({}), false),
+                ],
+            }
+        }
+
+        let mut needs: Vec<StyleNeed> = Vec::new();
+        for mark in crate::spec::mark::all_marks() {
+            for need in mark.style_fields().iter().filter_map(|f| f.needs) {
+                if !needs.contains(&need) {
+                    needs.push(need);
+                }
+            }
+        }
+        assert_eq!(needs.len(), 9, "every need some table names: {needs:?}");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("q", DataType::Float64, false),
+            Field::new("q2", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+            Field::new("c2", DataType::Utf8, false),
+            Field::new("t", DataType::Utf8, false),
+            Field::new("u", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(StringArray::from(vec!["x", "y", "z"])),
+            Arc::new(StringArray::from(vec!["p", "q", "r"])),
+            Arc::new(StringArray::from(vec!["u1", "u2", "u3"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        for need in needs {
+            let (mut met, mut unmet) = (0, 0);
+            for cell in cells(need) {
+                let mut spec = ChartSpec { mark: cell.mark, encoding: cell.encoding, ..Default::default() };
+                let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme)
+                    .unwrap_or_else(|e| panic!("{need:?} {}: {e}", cell.label));
+                if cell.layered {
+                    spec.layers = Some(Vec::new());
+                }
+                let kwargs: MarkKwargsSpec = serde_json::from_value(cell.style).unwrap();
+                let mark_style = resolve_mark_style(Some(&kwargs), &theme, &cell.mark)
+                    .unwrap_or_else(|e| panic!("{need:?} {}: {e}", cell.label));
+                let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+                assert_eq!(style_need_met(need, &ctx), cell.met, "{need:?} {}", cell.label);
+                if cell.met { met += 1 } else { unmet += 1 }
+            }
+            assert!(met > 0 && unmet > 0, "{need:?} needs both a met and an unmet cell, got {met}/{unmet}");
+        }
+    }
+
+    /// The text-channel warning names both conditions a rect's `font_size`
+    /// needs: a text encoding, and the heatmap shape that labels its cells.
+    #[test]
+    fn the_text_channel_inert_warning_names_the_text_encoding_and_the_heatmap_shape() {
+        let warning = crate::render::RenderWarning::MarkStyleInert {
+            layer: None,
+            entry: "mark_rect".into(),
+            mark: Mark::Rect,
+            field: "font_size".into(),
+            needs: crate::spec::mark::StyleNeed::TextChannel,
+        };
+        assert_eq!(
+            warning.to_string(),
+            "mark_rect: font_size has no effect on this rect mark without both a text encoding and the heatmap \
+             shape (one cell per x/y band pair, no x2 or y2 range); it was ignored"
+        );
+    }
 }
