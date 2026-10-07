@@ -728,8 +728,7 @@ def test_an_unsized_sibling_draws_at_the_swarm_size_while_sharing_centres():
 
 
 def _unsized_beside_smaller(df: pl.DataFrame):
-    """The quality reviewer's probe: sized squares smaller than the swarm's
-    own 4 px (``size=4``, about 2.26 px across) beside an unsized
+    """Sized squares smaller than the swarm's own 4 px (``size=4``, about 2.26 px across) beside an unsized
     ``fm.Layer`` of circles, which draws at the swarm's 4 px."""
     return (
         fm.Chart(df)
@@ -798,8 +797,7 @@ def _panels(points: list[tuple[float, float, float]]) -> list[list[tuple[float, 
 
 
 def test_a_null_size_row_in_one_facet_widens_every_facet():
-    """The quality reviewer's facet probe: a size-encoded swarm with a
-    constant ``size=200`` fallback, faceted into panels P and Q, with one null
+    """A size-encoded swarm with a constant ``size=200`` fallback, faceted into panels P and Q, with one null
     size row in P only. The null row draws at the 200 fallback, wider than the
     range max, so the swarm packs at that diameter in both panels: Q, whose
     rows all map, spaces its dots exactly as P does, not at the range max."""
@@ -832,7 +830,7 @@ def test_a_null_size_row_in_one_facet_widens_every_facet():
 
 
 def test_a_size_domain_param_narrower_than_the_data_overlaps_nothing():
-    """The lite reviewer's probe: a size ``domainParam`` of ``[0, 1]`` over
+    """A size ``domainParam`` of ``[0, 1]`` over
     weights reaching 5.4, with a constant ``size=400`` fallback wider than the
     range max. The packing bound is resolved once per chart without the
     param substitution the drawn panel scale gets, so it must read a size

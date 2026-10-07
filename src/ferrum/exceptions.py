@@ -7,13 +7,13 @@ from collections.abc import Callable
 from ferrum._entry import EntryRefusal
 
 
-class FerrumOverrideError(EntryRefusal):
+class FerrumOverrideError(ValueError):
     """Raised when a [override][ferrum.Chart.override] path or value cannot be applied.
 
-    A ``ValueError``, like every other refusal of malformed input. Its text
-    names the public call, ``Chart.override``, and like every style refusal
-    it can be re-voiced as a call that wrote the override on the caller's
-    behalf.
+    A ``ValueError``, like every other refusal of malformed input, built
+    from its message alone: ``FerrumOverrideError("...")``. Its text names
+    the public call, ``Chart.override``; an override a figure renders on the
+    caller's behalf names that figure instead.
 
     ``Chart.override(**kwargs)`` is a flat snake_case escape hatch onto the
     chart's presentation spec.  Because the Rust spec deserializers silently
@@ -26,10 +26,6 @@ class FerrumOverrideError(EntryRefusal):
     ``mark_*`` leaf the chart's mark does not take, or a value of the wrong
     type, raises it too, with the text the style doors refuse it with.
 
-    Like every :class:`~ferrum._entry.EntryRefusal`, it is built from
-    *message_for*, its text for any voice, and *entry*, the voice it is
-    raised in.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -40,5 +36,17 @@ class FerrumOverrideError(EntryRefusal):
     'x_axis_lable_angle'. Did you mean: 'x_axis_label_angle'?
     """
 
+
+class _OverrideRefusal(FerrumOverrideError, EntryRefusal):
+    """A :class:`FerrumOverrideError` that ``Chart.override`` raises, re-voiceable as any call.
+
+    Carries the refusal's text for any voice, as every
+    :class:`~ferrum._entry.EntryRefusal` does, so a figure that renders an
+    override on the caller's behalf re-voices it as itself
+    (:func:`ferrum._entry.voiced_as`), while a caller still catches it as
+    :class:`FerrumOverrideError`. Private, so the voice protocol stays out
+    of the public constructor.
+    """
+
     def __init__(self, message_for: Callable[[str], str], entry: str = "Chart.override") -> None:
-        super().__init__(message_for, entry)
+        EntryRefusal.__init__(self, message_for, entry)

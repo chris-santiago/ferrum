@@ -1110,9 +1110,15 @@ fn swarm_layer_bound(
         return None;
     }
     if !sizes_own_dots(layer) {
-        return Some(swarm.point_size);
+        // The widest diameter an unsized dot draws at when a swarm feeds
+        // this layer: `drawn_fallback_diameter`'s swarm branch, read
+        // directly in diameter space so this stays exact, not the
+        // area/diameter round trip the sized layer's per-row fallback
+        // below takes through `drawn_fallback_area` plus `dot_diameter`,
+        // which would drift by a few ULPs here.
+        return Some(crate::render::marks::point::drawn_fallback_diameter(layer, Some(swarm), theme));
     }
-    let fallback_area = crate::render::marks::point::fallback_dot_area(layer.mark_style.as_ref(), theme);
+    let fallback_area = crate::render::marks::point::drawn_fallback_area(layer, None, theme);
     let scale = scales.size.as_ref();
     let bound_area = match (crate::render::marks::point::scaled_dot_areas(batch, layer.encoding.size.as_ref(), scale), scale) {
         (Some(areas), Some(scale)) => {

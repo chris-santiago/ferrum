@@ -1966,10 +1966,13 @@ fn build_panel_mark_batches(
         let mut mark_style = layer_styles[li].clone();
         // A swarm-fed point layer that sizes its dots neither by a constant
         // nor by a field draws them at the declared swarm's own `point_size`,
-        // not at the packing diameter a sized sibling may widen.
-        if layer.mark == crate::spec::mark::Mark::Point && !position::sizes_own_dots(layer) {
+        // not at the packing diameter a sized sibling may widen. A layer no
+        // swarm feeds already carries this fallback from `resolve_mark_style`
+        // (`layer_styles[li]`, cloned above), so there is nothing to re-set.
+        if layer.mark == crate::spec::mark::Mark::Point {
             if let Some(packing) = swarm {
-                mark_style.point.point_size = packing.spec.dot_area();
+                mark_style.point.point_size =
+                    crate::render::marks::point::drawn_fallback_area(layer, Some(packing.spec), theme);
             }
         }
 

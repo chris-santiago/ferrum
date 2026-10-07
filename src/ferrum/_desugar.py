@@ -314,13 +314,20 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
             ),
             entry,
         )
-    from ferrum._overrides import LAYER_NAME_CATALOG
+    from ferrum._overrides import LAYER_NAME_CATALOG, unknown_sub_layer_message
 
     valid = LAYER_NAME_CATALOG.get(kind, frozenset())
     aimed: dict = {}
     for name, style in layer_kwargs.items():
         if name not in valid:
-            raise EntryRefusal(_unknown_layer_kwargs_message(name, valid), entry)
+            unknown = unknown_sub_layer_message("layer_kwargs", name, valid)
+            raise EntryRefusal(
+                lambda voice: (
+                    f"{unknown(voice)}. Pass style that should reach every layer as a "
+                    f"plain mark kwarg instead, e.g. {voice}(opacity=0.5)."
+                ),
+                entry,
+            )
         if not isinstance(style, dict):
             got = type(style).__name__
             raise EntryRefusal(
@@ -333,24 +340,6 @@ def validate_layer_kwargs(kind: str, layer_kwargs: Any, *, where: str | None = N
         if style:
             aimed[name] = dict(style)
     return aimed
-
-
-def _unknown_layer_kwargs_message(name: Any, valid: frozenset[str]) -> Callable[[str], str]:
-    """The refusal text, for any voice, of ``layer_kwargs=`` aimed at *name*, no sub-layer."""
-
-    def message_for(voice: str) -> str:
-        drawn = (
-            f"{voice} draws {sorted(valid)}"
-            if valid
-            else f"{voice} draws no named sub-layers, so it has nothing to aim at"
-        )
-        return (
-            f"{voice}(layer_kwargs=): unknown sub-layer {name!r}; {drawn}. "
-            "Pass style that should reach every layer as a plain mark kwarg "
-            f"instead, e.g. {voice}(opacity=0.5)."
-        )
-
-    return message_for
 
 
 def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
@@ -379,15 +368,11 @@ def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
 
 def _refuse_undrawn_layer_kwargs(layer_kwargs: dict, drawn: set, entry: str) -> None:
     """Refuse per-layer style aimed at a catalogued layer this call did not draw."""
+    from ferrum._overrides import undrawn_sub_layer_message
+
     undrawn = sorted(name for name in layer_kwargs if name not in drawn)
     if undrawn:
-        raise EntryRefusal(
-            lambda voice: (
-                f"{voice}(layer_kwargs=): this call draws no {undrawn!r} sub-layer, so "
-                f"nothing would take the style; it draws {sorted(drawn)}"
-            ),
-            entry,
-        )
+        raise EntryRefusal(undrawn_sub_layer_message("layer_kwargs", undrawn, drawn), entry)
 
 
 def _aim_single_mark_kwargs(

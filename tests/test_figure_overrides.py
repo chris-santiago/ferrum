@@ -442,7 +442,8 @@ class TestErrorPaths:
     def test_unknown_sublayer_raises_valueerror(self, clf_data):
         model, X, y = clf_data
         with pytest.raises(
-            ValueError, match=r"^calibration_chart\(mark=\.\.\.\): unknown sub-layer"
+            ValueError,
+            match=r"^calibration_chart\(mark=\{'imaginary': \.\.\.\}\): unknown sub-layer",
         ):
             fm.calibration_chart(model, X, y, mark={"imaginary": False})
 

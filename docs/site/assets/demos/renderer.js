@@ -1916,7 +1916,7 @@ function _placeTextRuns(svgEl, runs) {
 }
 
 function _joinLabels(svgEl, texts) {
-  // R6 fix: update labels in place via a D3 data-join instead of remove+append.
+  // Update labels in place via a D3 data-join instead of remove+append.
   // The old remove+re-append moved every label to the end of the SVG child
   // list on each zoom/pan tick, flipping their z-order relative to raw-overlay
   // groups (annotations/axes) that are appended once at first render. A join

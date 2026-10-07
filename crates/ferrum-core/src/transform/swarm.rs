@@ -104,7 +104,6 @@ impl SwarmSpec {
     pub(crate) fn dot_area(&self) -> f64 {
         std::f64::consts::PI * (self.point_size / 2.0).powi(2)
     }
-
 }
 
 /// How one declared swarm packs on a chart: the swarm as declared, and the

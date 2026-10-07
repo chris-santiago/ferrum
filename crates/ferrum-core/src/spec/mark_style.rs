@@ -359,8 +359,8 @@ pub(crate) fn mark_bool_kwarg_names() -> Vec<&'static str> {
 
 /// `ferrum._core.mark_bool_kwargs()`: [`mark_bool_kwarg_names`], so Python's
 /// mark-kwarg funnel type-gates exactly the struct's boolean fields instead
-/// of hand-listing them (C1, 2026-10-06 wave-7-close decision). Registered in
-/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+/// of hand-listing them. Registered in `lib.rs`, typed in
+/// `src/ferrum/_core.pyi`.
 #[pyfunction]
 pub(crate) fn mark_bool_kwargs() -> Vec<&'static str> {
     mark_bool_kwarg_names()
@@ -384,8 +384,8 @@ pub(crate) fn mark_string_kwarg_names() -> Vec<&'static str> {
 
 /// `ferrum._core.mark_string_kwargs()`: [`mark_string_kwarg_names`], so
 /// Python's mark-kwarg funnel type-gates exactly the struct's string-shaped
-/// fields instead of hand-listing them (C1, 2026-10-06 wave-7-close
-/// decision). Registered in `lib.rs`, typed in `src/ferrum/_core.pyi`.
+/// fields instead of hand-listing them. Registered in `lib.rs`, typed in
+/// `src/ferrum/_core.pyi`.
 #[pyfunction]
 pub(crate) fn mark_string_kwargs() -> Vec<&'static str> {
     mark_string_kwarg_names()

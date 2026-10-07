@@ -83,7 +83,7 @@ from ferrum.coord import (
     CoordPolar,
 )
 from ferrum.encoding import _channel_class_map
-from ferrum.exceptions import FerrumOverrideError
+from ferrum.exceptions import _OverrideRefusal
 from ferrum.marks.base import _VALID_MARK_KWARGS
 
 
@@ -621,14 +621,14 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
             # Check if this is a known deprecated path with a documented replacement.
             if path in _DEPRECATED_PATHS:
                 replacement = _DEPRECATED_PATHS[path]
-                raise FerrumOverrideError(
+                raise _OverrideRefusal(
                     lambda entry: (
                         f"{entry}: Unknown override path {path!r} (deprecated). "
                         f"Use {replacement} instead."
                     )
                 )
             suggestion = _suggestion(path)
-            raise FerrumOverrideError(
+            raise _OverrideRefusal(
                 lambda entry: f"{entry}: Unknown override path {path!r}.{suggestion}"
             )
 

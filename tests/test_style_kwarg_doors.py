@@ -187,7 +187,7 @@ def test_an_unknown_sub_layer_names_the_figure() -> None:
     with pytest.raises(ValueError) as exc_info:
         fm.roc_chart(y_true=_YT, y_pred=_YP, mark={"bogus": {}})
     assert str(exc_info.value) == (
-        "roc_chart(mark=...): unknown sub-layer 'bogus'; this chart's sub-layers are "
+        "roc_chart(mark={'bogus': ...}): unknown sub-layer 'bogus'; this chart's sub-layers are "
         "['auc_label', 'line', 'reference']"
     )
 
@@ -220,8 +220,13 @@ def test_layer_kwargs_for_an_undrawn_layer_refuses() -> None:
         .mark_boxplot(outliers=False, layer_kwargs={"outlier": {"fill": "#ff0000"}})
         .encode(x="g", y="v")
     )
-    with pytest.raises(ValueError, match=r"draws no \['outlier'\] sub-layer"):
+    with pytest.raises(ValueError) as exc_info:
         chart.to_svg()
+    assert str(exc_info.value) == (
+        "mark_boxplot(layer_kwargs={'outlier': ...}): this call draws no 'outlier' sub-layer, "
+        "so nothing would take the style; it draws "
+        "['box', 'lower_cap', 'median', 'upper_cap', 'whisker']"
+    )
 
 
 # ── decimal numeric columns ─────────────────────────────────────────────────
@@ -597,6 +602,120 @@ def test_the_method_honors_its_own_kwarg(mark: str) -> None:
         getattr(fm.Chart(_CAT), f"mark_{mark}")(orient="horizontal").encode(x="g", y="v").to_svg()
     )
     assert flipped != flat
+
+
+# ── a key no layer takes: one judgment, every key, every layer's mark ───────
+
+#: Every key a layer door can refuse on a primitive mark: each field it never
+#: draws, a constant `size` where it draws none, and its method-only kwargs.
+_UNTAKEN_CELLS = [
+    (m, f)
+    for m in _MARKS
+    for f in [*_undrawn_fields(m), "size", *sorted(_METHOD_ONLY.get(m, ()))]
+    if f not in _layer_honored(m)
+]
+
+
+def test_the_untaken_population_covers_every_kind_of_refusal() -> None:
+    """Vacuity control: the cells reach a method-only key, a size the mark
+    never draws, and a field it never draws, and skip a key it takes."""
+    assert ("bar", "orient") in _UNTAKEN_CELLS
+    assert ("rule", "size") in _UNTAKEN_CELLS
+    assert ("point", "interpolate") in _UNTAKEN_CELLS
+    assert ("point", "size") not in _UNTAKEN_CELLS
+
+
+@pytest.mark.parametrize(("mark", "field"), _UNTAKEN_CELLS)
+def test_an_untaken_key_on_one_mark_refuses_as_the_layer_door_does(mark: str, field: str) -> None:
+    """The spread door and the layer door judge a key one way, so one key on
+    a chart of one mark refuses with the layer door's own text."""
+    from ferrum.marks.base import refuse_untaken_layer_style, resolve_layer_style
+
+    value = 3.0 if field == "size" else _SAMPLE.get(field, "horizontal")
+    with pytest.raises(ValueError) as layer_door:
+        resolve_layer_style("relplot", mark, {field: value})
+    with pytest.raises(ValueError) as spread_door:
+        refuse_untaken_layer_style("relplot", [mark], {field: value})
+    assert str(spread_door.value) == str(layer_door.value)
+
+
+def _point_and_line() -> Any:
+    return (fm.Chart(_DF).mark_point() + fm.Chart(_DF).mark_line()).encode(x="x", y="y")
+
+
+def test_a_key_no_layer_takes_names_every_layers_mark() -> None:
+    """On a layered chart each layer's own refusal is named, so the refusal
+    does not imply the other layers' fields are wrong too."""
+    from ferrum._overrides import _apply_overrides
+
+    with pytest.raises(ValueError) as exc_info:
+        _apply_overrides(_point_and_line(), entry="relplot", mark={"font_size": 3})
+    assert str(exc_info.value) == (
+        "relplot: no layer of this chart (mark_point, mark_line) takes ['font_size']: "
+        + _not_honored("relplot", "point", "font_size", _layer_honored("point"))
+        + "; "
+        + _not_honored("relplot", "line", "font_size", _layer_honored("line"))
+    )
+
+
+def test_every_key_no_layer_takes_is_named() -> None:
+    """Every untaken key is refused, not only the first."""
+    from ferrum._overrides import _apply_overrides
+
+    with pytest.raises(ValueError) as exc_info:
+        _apply_overrides(
+            fm.Chart(_DF).mark_point(),
+            entry="relplot",
+            mark={"font_size": 3, "opacity": 0.5, "interpolate": "step"},
+        )
+    point = _layer_honored("point")
+    assert str(exc_info.value) == (
+        "relplot: no layer of this chart (mark_point) takes ['font_size', 'interpolate']: "
+        + _not_honored("relplot", "point", "font_size", point)
+        + "; "
+        + _not_honored("relplot", "point", "interpolate", point)
+    )
+
+
+def test_an_unset_size_no_layer_takes_refuses_as_not_honored() -> None:
+    """A `size=None` the size rule lets through is still a key the area does
+    not take, so it refuses as not honored rather than with no reason."""
+    from ferrum.marks.base import refuse_untaken_layer_style
+
+    with pytest.raises(ValueError) as exc_info:
+        refuse_untaken_layer_style("relplot", ["area"], {"size": None})
+    assert str(exc_info.value) == _not_honored("relplot", "area", "size", _layer_honored("area"))
+
+
+def test_an_unset_size_is_named_beside_another_untaken_key() -> None:
+    """Every untaken key is named, a `size=None` the size rule lets through
+    included."""
+    from ferrum.marks.base import refuse_untaken_layer_style
+
+    with pytest.raises(ValueError) as exc_info:
+        refuse_untaken_layer_style("relplot", ["area"], {"bogus": 1, "size": None})
+    area = _layer_honored("area")
+    assert str(exc_info.value) == (
+        "relplot: no layer of this chart (mark_area) takes ['bogus', 'size']: "
+        f"relplot: unknown keyword argument 'bogus'. Honored: {area}; "
+        + _not_honored("relplot", "area", "size", area)
+    )
+
+
+def test_an_unset_size_on_a_single_layer_door_stays_unset() -> None:
+    """Control: `fm.Layer(mark_kwargs=)` reads `size=None` on an area as
+    unset, as it did before the spread door's refusal was shared."""
+    from ferrum.marks.base import resolve_layer_style
+
+    assert resolve_layer_style("Layer", "area", {"size": None}) == {"size": None}
+
+
+def test_a_key_one_layer_takes_reaches_it_on_a_layered_chart() -> None:
+    """Control: a key the line takes is not refused because the point does not."""
+    from ferrum._overrides import _apply_overrides
+
+    styled = _apply_overrides(_point_and_line(), entry="relplot", mark={"interpolate": "step"})
+    assert [ly.mark_kwargs for ly in styled._layers] == [{}, {"interpolate": "step"}]
 
 
 # ── a flat bar's zero is consumed as mark_bar(zero=) consumes it ────────────

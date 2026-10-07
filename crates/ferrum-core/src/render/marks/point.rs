@@ -272,6 +272,54 @@ pub(crate) fn fallback_dot_area(
     overrides.and_then(|o| o.size).unwrap_or(theme.sizes.point_size)
 }
 
+/// The one decision [`drawn_fallback_area`] and [`drawn_fallback_diameter`]
+/// both read: `swarm` overrides a point layer's fallback only when a swarm
+/// feeds it and it sizes no dot of its own ([`sizes_own_dots`](crate::render::position::sizes_own_dots)).
+/// `None` when the layer sizes its own dots, or no swarm feeds it — the
+/// "a swarm-fed point layer that sizes no dot of its own" rule therefore
+/// lives in exactly this one place, not composed separately by either sibling.
+fn swarm_size_override<'a>(
+    layer: &crate::render::prepare::LayerPrepared,
+    swarm: Option<&'a crate::transform::swarm::SwarmSpec>,
+) -> Option<&'a crate::transform::swarm::SwarmSpec> {
+    swarm.filter(|_| !crate::render::position::sizes_own_dots(layer))
+}
+
+/// The area (px²) a point layer draws a row at when that row does not take
+/// its size from the layer's own size channel: a swarm's own dot area on
+/// the [`swarm_size_override`] branch, else [`fallback_dot_area`]. The
+/// point builder reads this; the swarm packing bound reads the
+/// diameter-space sibling [`drawn_fallback_diameter`] instead of
+/// round-tripping through this area.
+pub(crate) fn drawn_fallback_area(
+    layer: &crate::render::prepare::LayerPrepared,
+    swarm: Option<&crate::transform::swarm::SwarmSpec>,
+    theme: &crate::layout::ThemeInputs,
+) -> f64 {
+    match swarm_size_override(layer, swarm) {
+        Some(swarm) => swarm.dot_area(),
+        None => fallback_dot_area(layer.mark_style.as_ref(), theme),
+    }
+}
+
+/// The diameter-space sibling of [`drawn_fallback_area`]: the diameter (px)
+/// a point layer draws an unsized row at. On the [`swarm_size_override`]
+/// branch this reads the swarm's own declared `point_size` directly rather
+/// than round-tripping through `drawn_fallback_area`'s area —
+/// `dot_diameter(dot_area(x)) != x` at ULP level, and the swarm packing
+/// bound must stay bit-exact. The swarm packing bound and `drawn_fallback_area`
+/// both read the same [`swarm_size_override`] decision, so the two cannot drift.
+pub(crate) fn drawn_fallback_diameter(
+    layer: &crate::render::prepare::LayerPrepared,
+    swarm: Option<&crate::transform::swarm::SwarmSpec>,
+    theme: &crate::layout::ThemeInputs,
+) -> f64 {
+    match swarm_size_override(layer, swarm) {
+        Some(swarm) => swarm.point_size,
+        None => ferrum_scene::dot_diameter(fallback_dot_area(layer.mark_style.as_ref(), theme)),
+    }
+}
+
 /// The dot area (px²) each row of a point layer's `batch` takes from its
 /// size channel: the row's value through the size scale, or `None` for a row
 /// that draws at the layer's resolved `point_size` instead (a null value, or

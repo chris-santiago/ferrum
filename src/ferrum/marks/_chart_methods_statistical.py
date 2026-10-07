@@ -8,7 +8,6 @@ and introduces no ``__init__`` or ``__slots__``.
 
 from __future__ import annotations
 
-import inspect
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
@@ -25,13 +24,6 @@ from ferrum.marks.statistical import (
 
 if TYPE_CHECKING:
     import polars as pl
-
-
-# ``mark_density``'s truth-valued args default to whatever ``desugar_density``
-# defaults them to -- read once from the desugar's own signature (reachable
-# through ``_resolve_density.__wrapped__``) rather than restated as a second
-# literal that could drift from it.
-_DENSITY_METHOD_BOOL_PARAMS = inspect.signature(_resolve_density).parameters
 
 
 def _mark_raster_field_schema(data: Any) -> "pl.Schema | None":
@@ -124,7 +116,9 @@ class StatisticalMarksMixin:
 
     # ---- Marks (statistical) ----
 
-    def mark_density(self, *, position=None, **kwargs) -> "Chart":
+    def mark_density(
+        self, *, fill=True, cumulative=False, smooth=True, position=None, **kwargs
+    ) -> "Chart":
         """Render a kernel-density estimate (KDE) curve or filled contour.
 
         When only ``x`` is encoded, draws a 1-D KDE area curve.  When both
@@ -190,19 +184,18 @@ class StatisticalMarksMixin:
 
         # Normalize orient= → orientation= so the desugar's existing param name
         # is used.  orient= wins over orientation= when both are present.
-        kwargs = dict(_normalize_orient_to_orientation("mark_density", kwargs))
+        kwargs = _normalize_orient_to_orientation("mark_density", kwargs)
         # The truth-valued arguments the desugar reads to decide what it draws
         # (an area or a line, a CDF or a PDF, a smoothed bivariate grid) are
         # held to a truth value at the call, so `fill="red"` is refused rather
         # than read as True.
-        for arg in ("fill", "cumulative", "smooth"):
-            if arg in kwargs:
-                default = _DENSITY_METHOD_BOOL_PARAMS[arg].default
-                kwargs[arg] = resolve_method_bool("mark_density", arg, kwargs[arg], default)
+        fill = resolve_method_bool("mark_density", "fill", fill, True)
+        cumulative = resolve_method_bool("mark_density", "cumulative", cumulative, False)
+        smooth = resolve_method_bool("mark_density", "smooth", smooth, True)
         return self._set_composite_mark(
             "density",
             _resolve_density,
-            kwargs,
+            {"fill": fill, "cumulative": cumulative, "smooth": smooth, **kwargs},
             placeholder="area",
             position=position,
         )

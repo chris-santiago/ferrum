@@ -7,6 +7,7 @@ assembled chart just before ``.theme()`` is applied.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -187,7 +188,7 @@ def _apply_mark_overrides(
         if key not in valid:
             if _landed is not None:
                 continue
-            raise EntryRefusal(_unknown_sub_layer_message(key, valid), entry)
+            raise EntryRefusal(unknown_sub_layer_message("mark", key, valid), entry)
         if val is not False and val is not None and not isinstance(val, dict):
             raise EntryRefusal(_non_dict_override_message(key, type(val).__name__), entry)
         # Dropping a layer that is already absent, or styling it with nothing,
@@ -197,7 +198,7 @@ def _apply_mark_overrides(
                 _landed.add(key)
             continue
         if _landed is None:
-            raise EntryRefusal(_undrawn_sub_layer_message(key, drawn), entry)
+            raise EntryRefusal(undrawn_sub_layer_message("mark", [key], drawn), entry)
 
     new = resolved._clone()
     new_layers: list = []
@@ -247,10 +248,8 @@ def _apply_unnamed_style(
     if landed is not None:
         landed |= taken
     else:
-        # The first layer's mark names what it honors (``relplot: keyword
-        # argument 'interpolate' is not honored by mark_point``).
         refuse_untaken_layer_style(
-            entry, marks[0], {k: v for k, v in overrides.items() if k not in taken}
+            entry, marks, {k: v for k, v in overrides.items() if k not in taken}
         )
     styles = [resolve_layer_style(entry, m, part) for m, part in zip(marks, parts)]
     if new._layers:
@@ -263,9 +262,44 @@ def _apply_unnamed_style(
     return new
 
 
-def _unknown_sub_layer_message(key: str, valid: set[str]) -> Callable[[str], str]:
-    return lambda entry: (
-        f"{entry}(mark=...): unknown sub-layer {key!r}; this chart's sub-layers are {sorted(valid)}"
+def _sub_layer_call(voice: str, door: str, names: Sequence[str]) -> str:
+    """``voice(door={'a': ..., 'b': ...})``: the call that aimed style at the sub-layers *names*."""
+    aimed = ", ".join(f"{name!r}: ..." for name in names)
+    return f"{voice}({door}={{{aimed}}})"
+
+
+def unknown_sub_layer_message(door: str, name: Any, valid: Collection[str]) -> Callable[[str], str]:
+    """The refusal text, for any voice, of style aimed through *door* at *name*, no sub-layer.
+
+    *door* is the argument that aims style at a sub-layer by name (a
+    figure's ``mark``, a composite mark's ``layer_kwargs``); *valid* is
+    every sub-layer name the call could draw. Both doors refuse with it.
+    """
+
+    def message_for(voice: str) -> str:
+        names = (
+            f"this chart's sub-layers are {sorted(valid)}"
+            if valid
+            else "this chart has no named sub-layers to aim at"
+        )
+        return f"{_sub_layer_call(voice, door, [name])}: unknown sub-layer {name!r}; {names}"
+
+    return message_for
+
+
+def undrawn_sub_layer_message(
+    door: str, names: Sequence[str], drawn: Collection[str]
+) -> Callable[[str], str]:
+    """The refusal text, for any voice, of style aimed through *door* at sub-layers not drawn.
+
+    *names* are sub-layers the call could draw but did not this time (a
+    boxplot's outliers under ``outliers=False``); *drawn* are those it drew.
+    Both doors that aim style at a sub-layer by name refuse with it.
+    """
+    undrawn = " or ".join(repr(name) for name in names)
+    return lambda voice: (
+        f"{_sub_layer_call(voice, door, names)}: this call draws no {undrawn} sub-layer, so "
+        f"nothing would take the style; it draws {sorted(drawn)}"
     )
 
 
@@ -273,13 +307,6 @@ def _non_dict_override_message(key: str, kind: str) -> Callable[[str], str]:
     return lambda entry: (
         f"{entry}(mark={{{key!r}: ...}}) must be a dict of mark kwargs, or False to "
         f"drop the sub-layer; got {kind}"
-    )
-
-
-def _undrawn_sub_layer_message(key: str, drawn: set[str]) -> Callable[[str], str]:
-    return lambda entry: (
-        f"{entry}(mark={{{key!r}: ...}}): this call draws no {key!r} sub-layer, so "
-        f"nothing would take the style; it draws {sorted(drawn)}"
     )
 
 

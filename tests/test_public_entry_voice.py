@@ -753,10 +753,11 @@ def test_a_refusal_survives_pickle_and_copy_and_still_re_voices(refusal: str, ho
 
 
 def test_the_public_override_error_pickles_as_itself() -> None:
-    """The public type, raised by a real render, round-trips by its own name."""
+    """The public type, raised by a real render, round-trips as that type."""
     err = _REFUSALS["FerrumOverrideError path"]()
     clone = pickle.loads(pickle.dumps(err))
-    assert type(clone) is fm.FerrumOverrideError
+    assert isinstance(clone, fm.FerrumOverrideError)
+    assert type(clone) is type(err)
     assert str(clone) == (
         "Chart.override: Unknown override path 'x_axis_lable_angle'. "
         "Did you mean: 'x_axis_label_angle'?"
@@ -781,9 +782,11 @@ def _refuse_for(model: str) -> Callable[..., Any]:
 
     def build(source: str, **_: Any) -> Any:
         if source == model:
-            from ferrum._overrides import _undrawn_sub_layer_message
+            from ferrum._overrides import undrawn_sub_layer_message
 
-            raise EntryRefusal(_undrawn_sub_layer_message("auc_label", {"line"}), "roc_chart")
+            raise EntryRefusal(
+                undrawn_sub_layer_message("mark", ["auc_label"], {"line"}), "roc_chart"
+            )
         return fm.Chart(_DF).mark_point().encode(x="x", y="y")
 
     return build
@@ -831,7 +834,8 @@ def test_a_real_figure_whose_second_model_alone_refuses_names_that_model() -> No
             linear, X, y, compare={"tree": tree}, panels=_LEVERAGE_PANELS, mark={"shape": "square"}
         )
     assert str(exc_info.value) == (
-        "compare={'tree': ...}: residuals_chart(mark=...): unknown sub-layer 'shape'; "
+        "compare={'tree': ...}: residuals_chart(mark={'shape': ...}): unknown sub-layer "
+        "'shape'; "
         "this chart's sub-layers are ['point', 'reference']"
     )
 
@@ -855,6 +859,229 @@ def test_a_compare_refusal_that_fires_for_every_model_names_the_first() -> None:
     with pytest.raises(EntryRefusal) as exc_info:
         fm.silhouette_chart(models[0], X, compare={"m2": models[1]}, mark={"bogus_kw": 1})
     assert str(exc_info.value) == (
-        "compare={'base': ...}: silhouette_chart(mark=...): unknown sub-layer 'bogus_kw'; "
+        "compare={'base': ...}: silhouette_chart(mark={'bogus_kw': ...}): unknown sub-layer "
+        "'bogus_kw'; "
         "this chart's sub-layers are ['rect', 'reference']"
     )
+
+
+# ── the public override error takes a plain message ─────────────────────────
+
+
+def test_the_public_override_error_is_built_from_a_message() -> None:
+    """``FerrumOverrideError`` is constructible from a string, as a caller
+    raising or wrapping it expects; the voice protocol is not its constructor."""
+    err = fm.FerrumOverrideError("Chart.override: bad path 'x'")
+    assert str(err) == "Chart.override: bad path 'x'"
+    assert err.args == ("Chart.override: bad path 'x'",)
+    assert isinstance(err, ValueError)
+    assert not isinstance(err, EntryRefusal)
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is fm.FerrumOverrideError and str(clone) == str(err)
+
+
+def test_an_override_refusal_is_caught_as_the_public_type_and_re_voices() -> None:
+    """What ``.override`` raises is still caught as ``FerrumOverrideError``
+    and still re-voiced by a call that rendered it on the caller's behalf."""
+    err = _REFUSALS["FerrumOverrideError path"]()
+    assert isinstance(err, fm.FerrumOverrideError)
+    assert str(err.spoken_as("roc_chart")) == (
+        "roc_chart: Unknown override path 'x_axis_lable_angle'. Did you mean: 'x_axis_label_angle'?"
+    )
+
+
+# ── every builder's voice names the public function that owns it ────────────
+
+
+def _entry_literal_mismatches(sources: dict[str, str]) -> tuple[int, list[str]]:
+    """Check every ``entry="<name>"`` literal in *sources* (module name to
+    source) against the public functions that own the function it sits in.
+
+    A public function owns itself and every private function it reaches
+    through private functions only (a public function it calls owns its own
+    builders). Returns how many literals were checked and every literal
+    that names no owner.
+    """
+    import ast
+
+    defs: dict[str, ast.FunctionDef] = {}
+    public: set[str] = set()
+    for module, source in sources.items():
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.FunctionDef):
+                assert node.name not in defs, f"{node.name} is defined twice"
+                defs[node.name] = node
+                if not module.startswith("_") and not node.name.startswith("_"):
+                    public.add(node.name)
+    refs = {
+        name: {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in defs}
+        for name, node in defs.items()
+    }
+
+    def owned_by(owner: str) -> set[str]:
+        seen, todo = {owner}, [owner]
+        while todo:
+            for ref in refs[todo.pop()]:
+                if ref not in seen and ref.startswith("_"):
+                    seen.add(ref)
+                    todo.append(ref)
+        return seen
+
+    owners: dict[str, set[str]] = {}
+    for owner in public:
+        for name in owned_by(owner):
+            owners.setdefault(name, set()).add(owner)
+    checked, mismatches = 0, []
+    for name, node in defs.items():
+        for call in ast.walk(node):
+            for kw in getattr(call, "keywords", []):
+                if kw.arg == "entry" and isinstance(kw.value, ast.Constant):
+                    checked += 1
+                    if kw.value.value not in owners.get(name, set()):
+                        mismatches.append(
+                            f"{name}: entry={kw.value.value!r}, owners "
+                            f"{sorted(owners.get(name, set()))}"
+                        )
+    return checked, mismatches
+
+
+def _plots_sources() -> dict[str, str]:
+    return {
+        info.name: inspect.getsource(importlib.import_module(f"ferrum.plots.{info.name}"))
+        for info in pkgutil.iter_modules(ferrum.plots.__path__)
+    }
+
+
+def test_every_builder_entry_literal_names_the_public_function_that_owns_it() -> None:
+    """A builder's ``entry=`` voice is re-voiced on every public path, so no
+    rendered output catches a stale one; this pins each literal to a public
+    function that calls the builder."""
+    checked, mismatches = _entry_literal_mismatches(_plots_sources())
+    assert checked >= 45
+    assert mismatches == []
+
+
+def test_the_entry_literal_check_catches_a_builder_voiced_as_another_figure() -> None:
+    """Control: a builder whose literal names a figure that does not own it."""
+    source = (
+        "def roc_chart(y):\n"
+        "    return _roc_from_source(y)\n"
+        "def pr_chart(y):\n"
+        "    return _pr_from_source(y)\n"
+        "def _roc_from_source(y):\n"
+        "    return _finalize_chart(y, entry='roc_chart')\n"
+        "def _pr_from_source(y):\n"
+        "    return _finalize_chart(y, entry='roc_chart')\n"
+    )
+    assert _entry_literal_mismatches({"fake": source}) == (
+        2,
+        ["_pr_from_source: entry='roc_chart', owners ['pr_chart']"],
+    )
+
+
+# ── every validator a refusal re-calls is pure ──────────────────────────────
+
+_VOICES = ("voice_one", "voice_two")
+
+# Each validator ``_voiced`` re-calls, refusing a value in a voice, called as
+# ``ferrum.marks.base`` calls it.
+_VOICED_CALLEES: dict[str, Callable[[str], Any]] = {
+    "check_mark_size": lambda voice: _base().check_mark_size(voice, "rule", 3.0),
+    "coerce_finite_real": lambda voice: _base().coerce_finite_real(f"{voice}(opacity=...)", "x"),
+    "coerce_non_negative_int": lambda voice: _base().coerce_non_negative_int(f"{voice}(n=...)", -1),
+    "coerce_bool": lambda voice: _base().coerce_bool(voice, "filled", "no"),
+    "validate_str": lambda voice: _base().validate_str(voice, "shape", 3),
+    "validate_choice": lambda voice: _base().validate_choice(
+        voice, "orient", "sideways", ("horizontal", "vertical")
+    ),
+    "validate_optional_vocabulary": lambda voice: _base().validate_optional_vocabulary(
+        voice, "stroke_cap", "pointy", ["butt", "round", "square"]
+    ),
+    "_normalize_stroke_dash": lambda voice: _base()._normalize_stroke_dash(
+        "wavy", context=f"{voice}: stroke_dash"
+    ),
+    "_validate_literal_color": lambda voice: _base()._validate_literal_color(
+        voice, "fill", "not-a-color"
+    ),
+}
+
+
+def _base() -> Any:
+    import ferrum.marks.base as base
+
+    return base
+
+
+def _voiced_callees() -> set[str]:
+    """Every function a ``_voiced(entry, lambda voice: f(...))`` call in
+    ``ferrum.marks.base`` re-calls, read from its source."""
+    import ast
+
+    callees = set()
+    for node in ast.walk(ast.parse(inspect.getsource(_base()))):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_voiced":
+            check = node.args[1]
+            assert isinstance(check, ast.Lambda) and isinstance(check.body, ast.Call)
+            callees.add(check.body.func.id)
+    return callees
+
+
+def test_the_validator_population_is_every_voiced_callee() -> None:
+    callees = _voiced_callees()
+    assert len(callees) >= 8
+    assert set(_VOICED_CALLEES) == callees
+
+
+@pytest.mark.parametrize("callee", sorted(_VOICED_CALLEES))
+def test_every_voiced_validator_refuses_every_voice_alike(callee: str) -> None:
+    """A refusal re-voiced re-calls its validator in the new voice, so the
+    validator must judge the value alone: it refuses both voices, with the
+    same text but for the voice."""
+    texts = []
+    for voice in _VOICES:
+        with pytest.raises(ValueError) as exc_info:
+            _VOICED_CALLEES[callee](voice)
+        texts.append(str(exc_info.value))
+    assert _VOICES[0] in texts[0]
+    assert texts[1] == texts[0].replace(*_VOICES)
+
+
+def test_a_re_voice_a_validator_accepts_keeps_the_text_it_was_raised_with() -> None:
+    """Should a validator accept the new voice, the refusal keeps its frozen
+    text rather than turning into a different error on the user's path."""
+    base = _base()
+
+    def impure(voice: str) -> None:
+        if voice == "mark_point":
+            raise ValueError(f"{voice}: refused")
+
+    with pytest.raises(EntryRefusal) as exc_info:
+        base._voiced("mark_point", impure)
+    revoiced = exc_info.value.spoken_as("relplot")
+    assert type(revoiced) is EntryRefusal
+    assert str(revoiced) == "mark_point: refused"
+    with pytest.raises(EntryRefusal) as exc_info:
+        with voiced_as("relplot"):
+            base._voiced("mark_point", impure)
+    assert str(exc_info.value) == "mark_point: refused"
+
+
+# ── mark_density's truth values are explicit keyword parameters ─────────────
+
+
+def test_mark_density_declares_its_truth_valued_parameters() -> None:
+    """Like ``mark_contour`` and ``mark_qq``, ``mark_density`` names its
+    truth-valued arguments and their defaults in its own signature."""
+    params = inspect.signature(fm.Chart.mark_density).parameters
+    assert {
+        name: (params[name].kind, params[name].default)
+        for name in (
+            "fill",
+            "cumulative",
+            "smooth",
+        )
+    } == {
+        "fill": (inspect.Parameter.KEYWORD_ONLY, True),
+        "cumulative": (inspect.Parameter.KEYWORD_ONLY, False),
+        "smooth": (inspect.Parameter.KEYWORD_ONLY, True),
+    }

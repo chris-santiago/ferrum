@@ -2206,9 +2206,9 @@ mod tests {
 
     /// `panel_ids_at` is the one seam where position-indexed input (a
     /// click's hit panel, `handle_drag`'s `panel_pos` — the WASM entry's own
-    /// JS-facing parameter, H2) becomes the `Panel.id`s a selection's
-    /// `panels` owner list carries. A renumbered scene's positions never
-    /// leak through as ids, and a position past the end names no panel.
+    /// JS-facing parameter) becomes the `Panel.id`s a selection's `panels`
+    /// owner list carries. A renumbered scene's positions never leak
+    /// through as ids, and a position past the end names no panel.
     #[test]
     fn panel_ids_at_translates_position_to_panel_id() {
         let mut panels = two_panels();

@@ -33,7 +33,7 @@ from ferrum._core import (  # type: ignore[attr-defined]
 )
 from ferrum._override_apply import OverridePayload
 from ferrum._entry import EntryRefusal
-from ferrum.exceptions import FerrumOverrideError
+from ferrum.exceptions import _OverrideRefusal
 from ferrum.marks.base import resolve_layer_style
 
 
@@ -182,7 +182,7 @@ def apply_mark_style(
         return mark_style
     if mark is None:
         leaves = ", ".join(sorted(payload.mark_style))
-        raise FerrumOverrideError(
+        raise _OverrideRefusal(
             lambda entry: (
                 f"{entry}: mark_* override ({leaves}) is ambiguous on a multi-mark chart: "
                 "a layered chart has no single primary mark to apply it to. "
@@ -192,7 +192,7 @@ def apply_mark_style(
     try:
         style = resolve_layer_style("Chart.override", mark, payload.mark_style)
     except EntryRefusal as err:
-        raise FerrumOverrideError(err.message_for, err.entry) from None
+        raise _OverrideRefusal(err.message_for, err.entry) from None
     return {**mark_style, **style}
 
 
@@ -240,7 +240,7 @@ def apply_coord(coord: Any, payload: OverridePayload) -> Any:
     if bad:
         leaves = ", ".join(sorted(bad))
         coord_kind = type(base).__name__
-        raise FerrumOverrideError(
+        raise _OverrideRefusal(
             lambda entry: (
                 f"{entry}: coord_* override ({leaves}) is not a field of "
                 f"{coord_kind}. Set a matching coord via .coord(...) first, "

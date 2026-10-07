@@ -106,8 +106,8 @@ class TestTheDoorIsGeneral:
         with pytest.raises(ValueError) as exc_info:
             chart.to_svg()
         assert str(exc_info.value) == (
-            "mark_boxplot(layer_kwargs=): this call draws no ['outlier'] sub-layer, so "
-            "nothing would take the style; it draws "
+            "mark_boxplot(layer_kwargs={'outlier': ...}): this call draws no 'outlier' "
+            "sub-layer, so nothing would take the style; it draws "
             "['box', 'lower_cap', 'median', 'upper_cap', 'whisker']"
         )
 
@@ -144,11 +144,10 @@ class TestTheDoorRefusesInTheCallersVoice:
         lands on the line that wrote the typo, not at ``.to_svg()``."""
         with pytest.raises(ValueError) as excinfo:
             fm.Chart(xy_df).mark_smooth(layer_kwargs={"lines": {"stroke": AIMED}})
-        message = str(excinfo.value)
-        assert "mark_smooth(layer_kwargs=)" in message
-        assert "'lines'" in message
-        assert "['line', 'metrics', 'ribbon']" in message, (
-            f"the refusal must name the accepted set; got {message!r}"
+        assert str(excinfo.value) == (
+            "mark_smooth(layer_kwargs={'lines': ...}): unknown sub-layer 'lines'; this "
+            "chart's sub-layers are ['line', 'metrics', 'ribbon']. Pass style that should "
+            "reach every layer as a plain mark kwarg instead, e.g. mark_smooth(opacity=0.5)."
         )
 
     def test_another_mark_refuses_in_its_own_name(self, cat_df):
@@ -157,18 +156,25 @@ class TestTheDoorRefusesInTheCallersVoice:
         chart = fm.Chart(cat_df).mark_boxplot(layer_kwargs={"whiskers": {}}).encode(x="g", y="v")
         with pytest.raises(ValueError) as excinfo:
             chart.to_svg()
-        message = str(excinfo.value)
-        assert "mark_boxplot(layer_kwargs=)" in message
-        assert "'whiskers'" in message
-        assert "'whisker'" in message, f"the accepted set must be named; got {message!r}"
+        assert str(excinfo.value) == (
+            "mark_boxplot(layer_kwargs={'whiskers': ...}): unknown sub-layer 'whiskers'; "
+            "this chart's sub-layers are ['box', 'lower_cap', 'median', 'outlier', "
+            "'upper_cap', 'whisker']. Pass style that should reach every layer as a plain "
+            "mark kwarg instead, e.g. mark_boxplot(opacity=0.5)."
+        )
 
     def test_a_mark_with_no_named_layers_says_so(self, xy_df):
         """``mark_histogram`` emits one unnamed bar mark, so there is nothing
         to aim at -- and the refusal says that rather than listing an empty
         set with no explanation."""
         chart = fm.Chart(xy_df).mark_histogram(layer_kwargs={"bar": {}}).encode(x="x")
-        with pytest.raises(ValueError, match="no named sub-layers"):
+        with pytest.raises(ValueError) as excinfo:
             chart.to_svg()
+        assert str(excinfo.value) == (
+            "mark_histogram(layer_kwargs={'bar': ...}): unknown sub-layer 'bar'; this chart "
+            "has no named sub-layers to aim at. Pass style that should reach every layer as "
+            "a plain mark kwarg instead, e.g. mark_histogram(opacity=0.5)."
+        )
 
     @pytest.mark.parametrize(
         "bad",

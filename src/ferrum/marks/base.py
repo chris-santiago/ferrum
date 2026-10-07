@@ -7,8 +7,8 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Mapping
-from typing import Any, NoReturn, TypeVar
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, TypeVar
 
 from ferrum._core import (
     blend_accepted_values,
@@ -93,22 +93,40 @@ def _voiced(entry: str, check: Callable[[str], _Checked]) -> _Checked:
     """
     try:
         return check(entry)
-    except ValueError:
-        raise EntryRefusal(lambda voice: _check_refusal_text(check, voice), entry) from None
+    except ValueError as err:
+        raise _validator_refusal(entry, check, str(err)) from None
 
 
-def _check_refusal_text(check: Callable[[str], Any], voice: str) -> str:
-    """The text *check*, a pure validator that refused one voice, refuses *voice* with."""
+def _refusal_of(entry: str, check: Callable[[str], Any]) -> EntryRefusal | None:
+    """The refusal :func:`_voiced` raises for *check*, returned rather than raised.
+
+    ``None`` when *check* accepts *entry*.
+    """
+    try:
+        check(entry)
+    except ValueError as err:
+        return _validator_refusal(entry, check, str(err))
+    return None
+
+
+def _validator_refusal(entry: str, check: Callable[[str], Any], text: str) -> EntryRefusal:
+    """*check*'s refusal *text*, voiced as *entry* and re-voiceable by re-calling *check*."""
+    return EntryRefusal(lambda voice: _check_refusal_text(check, voice, text), entry)
+
+
+def _check_refusal_text(check: Callable[[str], Any], voice: str, frozen: str) -> str:
+    """The text *check*, a pure validator that refused one voice, refuses *voice* with.
+
+    A pure validator judges the value alone, so it refuses every voice
+    alike. Should *check* accept *voice*, the refusal keeps *frozen*, the
+    text it was raised with, so re-voicing never turns a refusal into a
+    different error.
+    """
     try:
         check(voice)
     except ValueError as err:
         return str(err)
-    # A pure validator judges the value alone, so a refusal under one voice
-    # is a refusal under every voice; reaching here is a defect in *check*.
-    raise RuntimeError(
-        f"{check!r} refused one voice and accepted {voice!r}; a style validator must "
-        "judge the value alone"
-    )
+    return frozen
 
 
 def _stroke_dash_error(context: str, value: Any) -> str:
@@ -524,6 +542,44 @@ def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
     return _MARK_KWARG_ALIASES.get(key, key)
 
 
+def _untaken_key_refusal(
+    entry: str, mark_name: str, key: str, value: Any, honored: frozenset[str]
+) -> EntryRefusal:
+    """The refusal a door holding *mark_name* to *honored* gives *key* = *value*, a key it does not take.
+
+    *key* (aliases resolved) is outside *honored*; every such key is
+    refused, so a caller asks :func:`layer_honors` or *honored* whether a
+    key is taken and this function only how it is refused. The one order
+    every door refuses a key it does not take in, except :func:`_resolve_style`
+    treats ``size=None`` as unset before checking if size is taken:
+
+    - an argument only ``mark_<mark_name>()`` takes
+      (:data:`METHOD_ONLY_KWARGS`) names that method;
+    - a constant ``size`` on a primitive mark that the one size rule
+      (:func:`check_constant_size`) refuses gets that rule's text, which
+      names the mark's own width or font kwarg where it has one;
+    - any other key, a ``size`` the size rule lets through among them, is
+      refused as unknown, internal or not honored by ``mark_<mark_name>``
+      (:func:`_mark_kwarg_error`).
+
+    The refusal is voiced as *entry*, and returned rather than raised so a
+    door that spreads one style dict over several layers can name every
+    layer's refusal.
+    """
+    canonical = _canonical_mark_kwarg(mark_name, key)
+    if canonical in METHOD_ONLY_KWARGS.get(mark_name, frozenset()):
+        return EntryRefusal(_method_only_message(mark_name, canonical), entry)
+    if canonical == "size" and drawn_style_fields(mark_name) is not None:
+        size_refusal = _refusal_of(
+            entry, lambda voice: check_constant_size(voice, mark_name, value)
+        )
+        if size_refusal is not None:
+            return size_refusal
+    return EntryRefusal(
+        lambda voice: _mark_kwarg_error(mark_name, canonical, honored, entry=voice), entry
+    )
+
+
 def _resolve_style(
     entry: str, mark_name: str, kwargs: Mapping[str, Any], honored: frozenset[str]
 ) -> dict[str, Any]:
@@ -541,19 +597,16 @@ def _resolve_style(
     resolved: dict[str, Any] = {}
     for k, v in kwargs.items():
         canonical = _canonical_mark_kwarg(mark_name, k)
-        # A constant `size=` on a primitive meets the one size rule,
-        # which names the mark's own width/font kwarg where one exists,
-        # ahead of the generic not-honored door below.
         if canonical == "size" and drawn_style_fields(mark_name) is not None:
+            # A constant `size=` on a primitive meets the one size rule,
+            # taken or not: ``None`` is unset and passes on any primitive,
+            # and any other value the mark never draws is refused by it.
             resolved[canonical] = check_constant_size(entry, mark_name, v)
             continue
         # A kwarg the mark does not take is refused as such before its
         # value is judged.
         if canonical not in honored:
-            raise EntryRefusal(
-                lambda voice: _mark_kwarg_error(mark_name, canonical, honored, entry=voice),
-                entry,
-            )
+            raise _untaken_key_refusal(entry, mark_name, k, v, honored)
         if canonical == "stroke_dash":
             # Named forms ("dashed", "dotted", ...), the comma-split
             # form, and list/tuple passthrough are all resolved by the
@@ -647,47 +700,50 @@ def resolve_layer_style(entry: str, mark: str | None, kwargs: Mapping[str, Any])
     :class:`ferrum._entry.EntryRefusal`, voiced as *entry*.
     """
     mark = layer_mark(mark)
-    for key in kwargs:
-        if key in METHOD_ONLY_KWARGS.get(mark, frozenset()):
-            _refuse_method_only(entry, mark, key)
     return _resolve_style(entry, mark, kwargs, layer_style_fields(mark))
 
 
-def _refuse_method_only(entry: str, mark: str, key: str) -> NoReturn:
-    """Refuse *key*, an argument only ``mark_<mark>()`` takes, at a layer door."""
-    raise EntryRefusal(
-        lambda voice: (
-            f"{voice}: keyword argument {key!r} is an argument of mark_{mark}(), not a "
-            f"layer style; set it through mark_{mark}({key}=...)"
-        ),
-        entry,
+def _method_only_message(mark: str, key: str) -> Callable[[str], str]:
+    """The refusal text, for any voice, of *key*, an argument only ``mark_<mark>()`` takes."""
+    return lambda voice: (
+        f"{voice}: keyword argument {key!r} is an argument of mark_{mark}(), not a "
+        f"layer style; set it through mark_{mark}({key}=...)"
     )
 
 
-def refuse_untaken_layer_style(entry: str, mark: str | None, untaken: Mapping[str, Any]) -> None:
-    """Refuse style *untaken* that a layer drawing *mark* does not take, as that layer refuses it.
+def refuse_untaken_layer_style(
+    entry: str, marks: Sequence[str | None], untaken: Mapping[str, Any]
+) -> None:
+    """Refuse style *untaken* that no layer of a chart drawing *marks* takes.
 
-    The refusal :func:`resolve_layer_style` gives the same keys, built
-    directly rather than by running it: a kwarg only the mark's method takes
-    names that method, a constant ``size`` the mark never draws meets the
-    size rule, and any other key is refused as not honored by *mark*. A
-    door that spreads one style dict over layers of different marks calls
-    this with the keys no layer took. No keys, no refusal.
+    A door that spreads one style dict over layers of different marks calls
+    this with the keys no layer took. Each layer refuses each key
+    (:func:`_untaken_key_refusal`): a kwarg only the mark's method takes
+    names that method, a constant ``size`` the mark never draws that the
+    size rule refuses gets the rule's text, and any other key, an unset
+    ``size=None`` among them, is refused as not honored by the mark. One key on a chart of one mark
+    refuses with that layer's text; otherwise the refusal names every
+    untaken key and every layer's mark, then gives each layer's refusal of
+    each key. Voiced as *entry*. No keys, no refusal.
     """
     if not untaken:
         return
-    mark = layer_mark(mark)
-    method_only = METHOD_ONLY_KWARGS.get(mark, frozenset())
-    for key in untaken:
-        if key in method_only:
-            _refuse_method_only(entry, mark, key)
-    key, value = next(iter(untaken.items()))
-    canonical = _canonical_mark_kwarg(mark, key)
-    if canonical == "size" and drawn_style_fields(mark) is not None:
-        check_constant_size(entry, mark, value)
-    honored = layer_style_fields(mark)
+    layer_marks = list(dict.fromkeys(layer_mark(mark) for mark in marks))
+    refusals = [
+        _untaken_key_refusal(entry, mark, key, value, layer_style_fields(mark))
+        for key, value in untaken.items()
+        for mark in layer_marks
+    ]
+    if len(refusals) == 1:
+        raise refusals[0]
+    keys = list(untaken)
+    drawn = ", ".join(f"mark_{mark}" for mark in layer_marks)
     raise EntryRefusal(
-        lambda voice: _mark_kwarg_error(mark, canonical, honored, entry=voice), entry
+        lambda voice: (
+            f"{voice}: no layer of this chart ({drawn}) takes {keys!r}: "
+            + "; ".join(refusal.message_for(voice) for refusal in refusals)
+        ),
+        entry,
     )
 
 
