@@ -1958,10 +1958,11 @@ pub enum RenderWarning {
     },
     /// A style field the mark draws only alongside another input
     /// ([`crate::spec::mark::Mark::style_fields`]) was set without that
-    /// input, so it drew nothing: WARN DEGRADED. Decided once per layer after
-    /// scales resolve (`draw::inert_style_fields`), never per facet panel.
-    /// Voiced as the layer's refusals are ([`RenderError::InLayer`]): `layer`
-    /// is its index on a layered chart, `entry` the public call that built it.
+    /// input, so it drew nothing: WARN DEGRADED. Decided after scales
+    /// resolve (`draw::inert_style_fields`), per panel, deduplicated so a
+    /// facet chart raises it once rather than once per panel. Voiced as the
+    /// layer's refusals are ([`RenderError::InLayer`]): `layer` is its index
+    /// on a layered chart, `entry` the public call that built it.
     MarkStyleInert {
         layer: Option<usize>,
         entry: String,

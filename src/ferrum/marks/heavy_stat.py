@@ -1153,9 +1153,9 @@ def desugar_swarm(
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
-        # emits `__pos_x_offset__` as a placeholder column; the renderer's
-        # standard position-offset path fills it with the packed pixel offset
-        # and applies it on top of the category band center — same mechanism
+        # emits no offset column; the renderer adds `__pos_x_offset__` itself
+        # at placement time, filling it with the packed pixel offset and
+        # applying it on top of the category band center — same mechanism
         # Dodge uses (Phase 9c). That band centre only exists on an ordinal
         # scale, so the channel is typed Nominal unless the caller declared
         # otherwise (#171).
@@ -1170,11 +1170,11 @@ def desugar_swarm(
         ]
     else:
         # Horizontal swarm: value axis = x, category axis = y.
-        # The Rust transform receives orient="horizontal" and emits the
-        # `__pos_y_offset__` placeholder column instead of `__pos_x_offset__`.
-        # Encoding the original field names lets the ordinal y axis render
-        # category labels correctly, and the renderer fills `__pos_y_offset__`
-        # with the packed pixel offset via
+        # The Rust transform receives orient="horizontal" but still emits no
+        # offset column; the renderer adds `__pos_y_offset__` itself instead
+        # of `__pos_x_offset__`. Encoding the original field names lets the
+        # ordinal y axis render category labels correctly, and the renderer
+        # fills `__pos_y_offset__` with the packed pixel offset via
         # `render/position.rs::read_position_offsets`.
         y_enc_val = typed_positional_channel(cat, channel=Y, declared_type=cat_type, sort=cat_sort)
         layers = [

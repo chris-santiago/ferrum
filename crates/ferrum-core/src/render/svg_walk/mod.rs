@@ -8,6 +8,7 @@ use super::color::from_rgba;
 use super::svg::{escape_attr, fmt_f, FillStroke, Stroke, SvgBuffer, TextStyle};
 use super::{RenderError, CLIP_ID_PREFIX};
 use crate::layout::{Rect, TextAnchor};
+use crate::transform::vocabulary::Vocabulary;
 
 pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderError> {
     let viewport = Rect {
@@ -104,7 +105,7 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> Result<String, RenderE
         // Text/Label batches — above every clipped data batch, below
         // annotation/text chrome, a defined order pinned by
         // `clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text`
-        // (svg_walk.rs test module).
+        // (svg_walk/tests.rs).
         for batch in &panel.marks {
             if matches!(
                 batch.kind,
@@ -222,24 +223,16 @@ fn emit_mark_batch(
         svg.use_clip_open(clip_id);
     }
     // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
-    // matching the old draw() pattern.
+    // matching the old draw() pattern. The spellings are the same ones
+    // `stroke_cap_accepted_values`/`stroke_join_accepted_values` publish
+    // (`Vocabulary::as_str`), not a second hand-written table.
     let cap_join_wrap = if batch.stroke_cap.is_some() || batch.stroke_join.is_some() {
         let mut g_attrs = String::new();
-        if let Some(ref cap) = batch.stroke_cap {
-            let s = match cap {
-                ferrum_scene::StrokeCap::Butt => "butt",
-                ferrum_scene::StrokeCap::Round => "round",
-                ferrum_scene::StrokeCap::Square => "square",
-            };
-            g_attrs.push_str(&format!(" stroke-linecap=\"{}\"", s));
+        if let Some(cap) = batch.stroke_cap {
+            g_attrs.push_str(&format!(" stroke-linecap=\"{}\"", cap.as_str()));
         }
-        if let Some(ref join) = batch.stroke_join {
-            let s = match join {
-                ferrum_scene::StrokeJoin::Miter => "miter",
-                ferrum_scene::StrokeJoin::Round => "round",
-                ferrum_scene::StrokeJoin::Bevel => "bevel",
-            };
-            g_attrs.push_str(&format!(" stroke-linejoin=\"{}\"", s));
+        if let Some(join) = batch.stroke_join {
+            g_attrs.push_str(&format!(" stroke-linejoin=\"{}\"", join.as_str()));
         }
         Some(g_attrs)
     } else {

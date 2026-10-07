@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
@@ -195,8 +196,9 @@ def desugar_intercluster_distance(
     the cluster id above each point, offset by a `dy` big enough to clear
     even the largest possible bubble (``sqrt(max_size / pi)``) plus a
     small gap -- the same constant-pixel-offset idiom other diagnostics
-    use for a point's label (e.g. ``desugar_cluster_diagnostics``'s elbow
-    annotation), rather than centering on the bubble where a size-scaled
+    use for a point's label (e.g.
+    ``plots.clustering._cluster_diagnostics_chart``'s elbow annotation),
+    rather than centering on the bubble where a size-scaled
     point and dark theme text can overlap and clip each other.
     ``min_size`` and ``max_size`` set the point-area range (in pixel²
     units, before sqrt → radius); the defaults ``min_size=60.0`` /
@@ -205,8 +207,6 @@ def desugar_intercluster_distance(
     KMeans cluster counts.
     """
     del x_field, y_field
-    import math
-
     from ferrum.encoding import Size
 
     user_kw = _validate("intercluster_distance", mark_kwargs)

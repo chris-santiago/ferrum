@@ -2203,4 +2203,19 @@ mod tests {
         assert!(brushed("b"), "a brush on position 1 drives id 3's owner");
         assert!(!brushed("a"), "and leaves id 7's owner empty");
     }
+
+    /// `panel_ids_at` is the one seam where position-indexed input (a
+    /// click's hit panel, `handle_drag`'s `panel_pos` — the WASM entry's own
+    /// JS-facing parameter, H2) becomes the `Panel.id`s a selection's
+    /// `panels` owner list carries. A renumbered scene's positions never
+    /// leak through as ids, and a position past the end names no panel.
+    #[test]
+    fn panel_ids_at_translates_position_to_panel_id() {
+        let mut panels = two_panels();
+        panels[0].id = 7;
+        panels[1].id = 3;
+        assert_eq!(panel_ids_at(&panels, [0, 1]), vec![7, 3]);
+        assert_eq!(panel_ids_at(&panels, [1, 0]), vec![3, 7], "position, not id, drives the order");
+        assert_eq!(panel_ids_at(&panels, [2]), Vec::<usize>::new(), "a position past the end names no panel");
+    }
 }

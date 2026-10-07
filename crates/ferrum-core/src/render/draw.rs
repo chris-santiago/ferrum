@@ -778,7 +778,7 @@ pub fn resolve_mark_style(
         style.line.size = o.size;
         style.line.stroke_width = o.stroke_width;
         if let (Some(area), None) = (o.size, o.stroke_width) {
-            style.paint.stroke_width = super::marks::line::dot_diameter(area);
+            style.paint.stroke_width = ferrum_scene::dot_diameter(area);
         }
     }
 
@@ -1528,7 +1528,7 @@ pub(crate) fn resolve_effective_stroke(
 /// - `"bottom"` / `"text-after-edge"` / `"ideographic"` → `Bottom`
 /// - `"alphabetic"` → `Alphabetic`
 ///
-/// `svg_walk.rs` renders the enum variants as:
+/// `svg_walk/mod.rs::emit_node` renders the enum variants as:
 /// - `Top` → `dominant-baseline="hanging"` (valid SVG)
 /// - `Middle` → `dominant-baseline="central"` (valid SVG)
 /// - `Bottom` → `dominant-baseline="text-after-edge"` (valid SVG)
@@ -1767,15 +1767,12 @@ mod tests {
     /// draws a constant size draws an encoded one too.
     #[test]
     fn every_mark_resolves_a_constant_size_by_the_one_size_rule() {
-        macro_rules! every_mark {
-            ($($V:ident => $name:ident,)*) => { vec![$(Mark::$V),*] };
-        }
         let theme = ThemeInputs::default();
         let resolve = |mark: Mark, size: f64| {
             resolve_mark_style(Some(&MarkKwargsSpec { size: Some(size), ..Default::default() }), &theme, &mark)
         };
         let mut drawing = Vec::new();
-        for mark in crate::for_each_mark!(every_mark) {
+        for mark in crate::spec::mark::all_marks() {
             for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
                 let err = resolve(mark, bad).expect_err("a non-positive or non-finite size refuses");
                 let expected_draws = matches!(err, RenderError::MarkSizeOutOfRange { .. });

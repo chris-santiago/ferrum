@@ -41,9 +41,9 @@ from ferrum.plots._helpers import (
     _require_positive,
     _resolve_source,
     _should_facet_by_class,
+    _title_legend,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
-    _title_legend,
 )
 
 

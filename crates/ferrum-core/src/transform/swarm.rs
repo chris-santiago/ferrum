@@ -16,7 +16,7 @@
 //! falls back and that is wider), a constant size's own diameter, else
 //! `point_size`. Every facet panel therefore packs at the same spacing. Every
 //! layer it feeds is placed by that one packing
-//! (`render::position::panel_swarms`), so overlays share their centres and no
+//! (`render::position::chart_swarms`), so overlays share their centres and no
 //! drawn dot overlaps a neighbour.
 //!
 //! Output schema: the input schema, unchanged. The cross-axis offset is a
@@ -109,7 +109,7 @@ impl SwarmSpec {
 
 /// How one declared swarm packs on a chart: the swarm as declared, and the
 /// diameter (px) its dots are packed at, the widest dot any layer it feeds
-/// can draw (`render::position::panel_swarms`). The two are kept apart
+/// can draw (`render::position::chart_swarms`). The two are kept apart
 /// because they differ whenever a sized layer draws wider than the swarm's
 /// own `point_size`: placement and overflow read `diameter_px`, while a fed
 /// point layer with no size of its own still draws at `spec.point_size`.
@@ -117,14 +117,6 @@ impl SwarmSpec {
 pub(crate) struct SwarmPacking<'a> {
     pub spec: &'a SwarmSpec,
     pub diameter_px: f64,
-}
-
-impl SwarmPacking<'_> {
-    /// The pixel step between neighbouring centres: one packing diameter
-    /// plus the edge gap.
-    fn step_px(&self) -> f64 {
-        self.diameter_px + self.spec.spacing
-    }
 }
 
 pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -214,7 +206,9 @@ pub(crate) fn place_offsets(
     let dodge_of = |i: usize| dodge.filter(|a| !a.is_null(i)).map(|a| a.value(i));
     let dodge_groups: Vec<&str> = (0..n).filter_map(dodge_of).collect::<BTreeSet<_>>().into_iter().collect();
     let n_groups = dodge_groups.len().max(1) as f64;
-    let step = packing.step_px();
+    // The pixel step between neighbouring centres: one packing diameter
+    // plus the edge gap.
+    let step = packing.diameter_px + spec.spacing;
     let centre_px = |name: Option<&str>| -> f64 {
         name.and_then(|name| dodge_groups.iter().position(|g| *g == name))
             .map_or(0.0, |gi| (gi as f64 - (n_groups - 1.0) / 2.0) * step)

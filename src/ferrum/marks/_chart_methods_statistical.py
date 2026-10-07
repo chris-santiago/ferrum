@@ -8,6 +8,7 @@ and introduces no ``__init__`` or ``__slots__``.
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
@@ -24,6 +25,13 @@ from ferrum.marks.statistical import (
 
 if TYPE_CHECKING:
     import polars as pl
+
+
+# ``mark_density``'s truth-valued args default to whatever ``desugar_density``
+# defaults them to -- read once from the desugar's own signature (reachable
+# through ``_resolve_density.__wrapped__``) rather than restated as a second
+# literal that could drift from it.
+_DENSITY_METHOD_BOOL_PARAMS = inspect.signature(_resolve_density).parameters
 
 
 def _mark_raster_field_schema(data: Any) -> "pl.Schema | None":
@@ -187,8 +195,9 @@ class StatisticalMarksMixin:
         # (an area or a line, a CDF or a PDF, a smoothed bivariate grid) are
         # held to a truth value at the call, so `fill="red"` is refused rather
         # than read as True.
-        for arg, default in (("fill", True), ("cumulative", False), ("smooth", True)):
+        for arg in ("fill", "cumulative", "smooth"):
             if arg in kwargs:
+                default = _DENSITY_METHOD_BOOL_PARAMS[arg].default
                 kwargs[arg] = resolve_method_bool("mark_density", arg, kwargs[arg], default)
         return self._set_composite_mark(
             "density",

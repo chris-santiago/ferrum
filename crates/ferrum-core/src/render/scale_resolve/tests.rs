@@ -224,7 +224,7 @@ fn size_scale_defaults_to_theme_point_size_range() {
 }
 
 /// The load-bearing fact behind `build_scene`'s once-per-chart swarm packing
-/// bound (`position::panel_swarms`, read against `prep.provisional_scales`,
+/// bound (`position::chart_swarms`, read against `prep.provisional_scales`,
 /// which `resolve_param_domains` never touches): the size scale's domain is
 /// the data extent, never the spec's `domain`, so a size `domainParam`
 /// substitution cannot change it. If the size scale ever starts honoring an

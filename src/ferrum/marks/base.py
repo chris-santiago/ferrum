@@ -515,9 +515,9 @@ def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
     """The style field *key* names on *mark_name*, its aliases resolved.
 
     ``color`` is mark-type-aware: stroke-primary marks (line, rule, segment,
-    trail) map it to ``stroke``, every other mark to ``fill``. The other
-    aliases (``alpha``, ``linetype``) are mark-independent; a canonical key
-    maps to itself.
+    trail, function) map it to ``stroke``, every other mark to ``fill``. The
+    other aliases (``alpha``, ``linetype``) are mark-independent; a canonical
+    key maps to itself.
     """
     if key == "color":
         return "stroke" if mark_name in _STROKE_PRIMARY_MARKS else "fill"
@@ -695,9 +695,10 @@ def resolve_method_bool(entry: str, param: str, value: Any, default: bool) -> bo
     """Return a truth-valued argument a mark method consumes itself, as a ``bool``.
 
     ``mark_errorband(borders=)``, ``mark_qq(line=, dequantize=)``,
-    ``mark_contour(fill=, smooth=)`` and ``mark_function(clip=)`` read their
-    argument to decide what the composite draws or computes instead of
-    forwarding it as style, so the style gate never sees it. This holds it to the same rule :func:`_resolve_style`
+    ``mark_contour(fill=, smooth=)``, ``mark_function(clip=)`` and
+    ``mark_density(fill=, cumulative=, smooth=)`` read their argument to
+    decide what the composite draws or computes instead of forwarding it as
+    style, so the style gate never sees it. This holds it to the same rule :func:`_resolve_style`
     holds the field to on a layer: ``None`` is unset (*default*), and
     anything else must be a truth value (:func:`ferrum._validate.coerce_bool`),
     never read for its truthiness. Refusals are

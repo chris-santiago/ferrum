@@ -130,18 +130,18 @@ export class WasmRenderer {
      * only selection-mutating method that does — see the two-shape contract
      * note above the selection-mutating methods). `rescaled`/`rescaled_text`
      * are non-null only when a D6 Domain binding rescaled a target panel.
-     * @param {number} panel_id
+     * @param {number} panel_pos
      * @param {number} x0
      * @param {number} y0
      * @param {number} x1
      * @param {number} y1
      * @returns {string}
      */
-    handleDrag(panel_id, x0, y0, x1, y1) {
+    handleDrag(panel_pos, x0, y0, x1, y1) {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ret = wasm.wasmrenderer_handleDrag(this.__wbg_ptr, panel_id, x0, y0, x1, y1);
+            const ret = wasm.wasmrenderer_handleDrag(this.__wbg_ptr, panel_pos, x0, y0, x1, y1);
             var ptr1 = ret[0];
             var len1 = ret[1];
             if (ret[3]) {

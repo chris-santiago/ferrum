@@ -1135,7 +1135,7 @@ fn swarm_layer_bound(
 /// overlay) is placed by that one packing, so they share their centres; each
 /// still draws at its own size, a point layer that sizes nothing itself at
 /// the declared swarm's own `point_size`.
-pub(crate) fn panel_swarms<'a>(
+pub(crate) fn chart_swarms<'a>(
     layers: &[crate::render::prepare::LayerPrepared],
     chart_layer_batches: &[RecordBatch],
     transform_swarms: &'a HashMap<String, crate::transform::swarm::SwarmSpec>,
@@ -1857,7 +1857,7 @@ mod tests {
     /// the swarm as declared: its `point_size`, the size the unsized layer
     /// draws at, is not overwritten by the wider packing diameter.
     #[test]
-    fn panel_swarms_packs_at_the_widest_dot_and_keeps_the_declared_point_size() {
+    fn chart_swarms_packs_at_the_widest_dot_and_keeps_the_declared_point_size() {
         use crate::render::prepare::LayerPrepared;
         use crate::spec::mark::Mark;
         use crate::spec::mark_style::MarkKwargsSpec;
@@ -1884,7 +1884,7 @@ mod tests {
         };
         let swarms = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), declared.clone())]);
         let theme = crate::layout::ThemeInputs::default();
-        let packings = panel_swarms(&layers, &batches, &swarms, &dummy_scales(), &theme);
+        let packings = chart_swarms(&layers, &batches, &swarms, &dummy_scales(), &theme);
         assert_eq!(packings.len(), 2);
         for packing in packings {
             let packing = packing.expect("both layers read the swarm-fed output");

@@ -610,10 +610,9 @@ pub struct LegendPreparedOverrides {
 }
 
 impl PreparedInputs {
-    /// Layer 0's resolved (post-`CoordFlip`) rendering encoding, computed
-    /// once at construction into this struct's `rendering_encoding` field
-    /// rather than re-derived here, so this accessor never indexes
-    /// `layers[0]`.
+    /// Layer 0's resolved (post-`CoordFlip`) rendering encoding: the
+    /// `rendering_encoding` field this struct already carries (see that
+    /// field's doc for why).
     pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
         &self.rendering_encoding
     }

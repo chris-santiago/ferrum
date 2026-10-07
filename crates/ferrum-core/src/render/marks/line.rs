@@ -44,7 +44,7 @@ use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBi
 /// See [`StepSpelling`] for why the two spellings coexist.
 const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
-pub(crate) use ferrum_scene::dot_diameter;
+use ferrum_scene::dot_diameter;
 
 /// The width of one drawn vertex of a line sized by `field`: the dot diameter
 /// of its `(value, area)` on the size scale, or `fallback` (the series'

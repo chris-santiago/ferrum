@@ -6,6 +6,7 @@ Shared by the ``ferrum.plots.*`` domain modules.
 from __future__ import annotations
 
 import functools
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
@@ -201,8 +202,6 @@ def _title_legend(chart: "Chart", channel: str, title: str) -> "Chart":
     title to its resolution (``_PendingMark.legend_titles``), so the figure
     does not resolve it early.
     """
-    from dataclasses import replace
-
     from ferrum._layer import titled_encoding
 
     title_pair = ((channel, title),)
@@ -792,8 +791,6 @@ def _merge_layers(
     it is domain-agnostic and is imported by both ``regression.py`` and
     ``matrix.py``.
     """
-    from dataclasses import replace as _replace
-
     from ferrum._layer import _Layer
 
     s_resolved = scatter_chart._resolve_pending()
@@ -822,7 +819,7 @@ def _merge_layers(
     if f_resolved._layers is not None:
         fit_layers = list(f_resolved._layers)
         if fit_name and fit_layers and fit_layers[0].name is None:
-            fit_layers[0] = _replace(fit_layers[0], name=fit_name)
+            fit_layers[0] = replace(fit_layers[0], name=fit_name)
     else:
         fit_layers = [
             _Layer(

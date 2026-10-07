@@ -54,8 +54,8 @@ from ferrum._layer import (
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
-from ferrum._warn import user_stacklevel
 from ferrum._entry import EntryRefusal, voiced_as
+from ferrum._warn import user_stacklevel
 from ferrum.marks.base import MarkBase, refuse_style_no_layer_draws, resolve_layer_style
 from ferrum.marks.statistical import _build_prior_layer
 

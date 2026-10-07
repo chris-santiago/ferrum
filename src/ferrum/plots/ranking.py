@@ -39,9 +39,9 @@ from ferrum.plots._helpers import (
     _is_raw_tabular_data,
     _resolve_first_param,
     _resolve_source,
+    _title_legend,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
-    _title_legend,
 )
 
 

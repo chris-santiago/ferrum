@@ -423,7 +423,7 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "handleDrag")]
     pub fn handle_drag(
         &mut self,
-        panel_id: u32,
+        panel_pos: u32,
         x0: f32,
         y0: f32,
         x1: f32,
@@ -439,21 +439,24 @@ impl WasmRenderer {
         let (sx0, sy0) = self
             .zoom
             .transforms
-            .get(panel_id as usize)
+            .get(panel_pos as usize)
             .map(|t| t.inverse_apply(x0 as f64, y0 as f64))
             .unwrap_or((x0 as f64, y0 as f64));
         let (sx1, sy1) = self
             .zoom
             .transforms
-            .get(panel_id as usize)
+            .get(panel_pos as usize)
             .map(|t| t.inverse_apply(x1 as f64, y1 as f64))
             .unwrap_or((x1 as f64, y1 as f64));
 
-        // Update interval selection state in scene-space.
+        // Update interval selection state in scene-space. `panel_pos` is this
+        // brush's position in `panels` (not its `Panel.id`);
+        // `InteractionState::handle_drag` translates it to the owner ids a
+        // selection's `panels` list carries.
         self.interaction_state.handle_drag(
             loaded.hit_panels(),
             &self.selections,
-            panel_id as usize,
+            panel_pos as usize,
             (sx0, sy0),
             (sx1, sy1),
         );
@@ -463,14 +466,14 @@ impl WasmRenderer {
         // extent into the target panel's pixel space via the shared data
         // domain, then reuses the conditional-containment dimming path.
         // No-op (and no behavior change) when there are no Filter bindings.
-        let selection = self.apply_crossfilter(panel_id as usize, (sx0, sx1), (sy0, sy1))?;
+        let selection = self.apply_crossfilter(panel_pos as usize, (sx0, sx1), (sy0, sy1))?;
 
         // D6 reactive rescale (BindingRole::Domain): rescale a bound target
         // panel to the brushed sub-domain via the existing zoom transform.
         // No-op (returns None) when there are no Domain bindings for the
         // brushed selection.
         let rescaled = self.apply_reactive_rescale(
-            panel_id as usize,
+            panel_pos as usize,
             (x0 as f64, x1 as f64),
             (y0 as f64, y1 as f64),
         );

@@ -971,7 +971,7 @@ fn corner_radius_fully_cut_middle_piece_stays_a_plain_rect_with_zero_radius() {
 }
 
 /// Quality-review cycle-3 finding 1 (S3): `SceneNode::Rect` rotates
-/// about its own centre (`svg_walk.rs::emit_node`'s `Rect` arm), while
+/// about its own centre (`svg_walk/mod.rs::emit_node`'s `Rect` arm), while
 /// `SceneNode::Path` rotates about its first `MoveTo`. Converting a
 /// rotated, rounded, cut piece to a `Path` would silently relocate its
 /// rotation anchor relative to its unbroken rounded sibling (measured:

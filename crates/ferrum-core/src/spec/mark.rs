@@ -375,7 +375,7 @@ pub(crate) fn all_marks() -> impl Iterator<Item = Mark> {
 /// order: Python's mark constructors read this rather than keeping a list of
 /// their own.
 #[pyo3::pyfunction]
-pub fn marks_drawing_constant_size() -> Vec<&'static str> {
+pub(crate) fn marks_drawing_constant_size() -> Vec<&'static str> {
     all_marks().filter(|m| m.draws_constant_size()).map(|m| m.as_str()).collect()
 }
 

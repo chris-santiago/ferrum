@@ -41,7 +41,7 @@ export class WasmRenderer {
      * note above the selection-mutating methods). `rescaled`/`rescaled_text`
      * are non-null only when a D6 Domain binding rescaled a target panel.
      */
-    handleDrag(panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
+    handleDrag(panel_pos: number, x0: number, y0: number, x1: number, y1: number): string;
     /**
      * Return tooltip JSON for a specific mark instance.
      *

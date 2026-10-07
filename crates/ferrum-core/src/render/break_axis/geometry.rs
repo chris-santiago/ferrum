@@ -131,7 +131,7 @@ pub(super) fn path_commands(points: &[(f64, f64)], closed: bool) -> Vec<PathCmd>
 ///   `Rect`-only behavior for no visual gain.
 /// - **`style.angle != 0.0`** (quality-review finding, cycle 3):
 ///   `SceneNode::Rect` rotates about its own centre
-///   (`svg_walk.rs::emit_node`'s `Rect` arm), while `SceneNode::Path` rotates
+///   (`svg_walk/mod.rs::emit_node`'s `Rect` arm), while `SceneNode::Path` rotates
 ///   about its first `MoveTo` — a converted piece would silently jump to a
 ///   different rotation anchor than its unbroken rounded sibling (hundreds
 ///   of pixels, measured), and lose the rotation entirely in WASM, which

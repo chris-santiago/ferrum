@@ -212,7 +212,7 @@ pub fn build_scene(
         .collect();
 
     // The swarm each layer is placed by: one packing per swarm for the whole
-    // chart, shared by every layer it feeds in every panel ([`position::panel_swarms`]'s
+    // chart, shared by every layer it feeds in every panel ([`position::chart_swarms`]'s
     // doc). The packing bound reads only `scales.size`'s pixel range and which
     // rows it maps, and `prep.provisional_scales.size` (resolved once, chart-
     // wide, in `prepare_render_inputs`) answers both exactly as the panel
@@ -227,7 +227,7 @@ pub fn build_scene(
     // pins this; if the size scale ever honors a domain, the bound must read
     // the param-resolved scale). Computed once here, before the panel loop,
     // so a facet chart does not rescan every size column once per panel.
-    let chart_swarms = position::panel_swarms(
+    let chart_swarms = position::chart_swarms(
         &prep.layers,
         &chart_layer_batches,
         &prep.transform_swarms,
@@ -1828,7 +1828,7 @@ fn resolve_layer_styles(
 ///
 /// `layer_styles` are the chart's layer styles [`resolve_layer_styles`]
 /// resolved once before the panel loop, and `swarms` the chart-wide packing
-/// [`position::panel_swarms`] computed there too — both shared by every
+/// [`position::chart_swarms`] computed there too — both shared by every
 /// panel, indexed like `ctx.prep.layers`.
 fn build_panel_mark_batches(
     ctx: &PanelResolveCtx,

@@ -2261,11 +2261,8 @@ mod tests {
     /// radii never depend on the swatch.
     #[test]
     fn size_legend_symbol_matrix_over_consumers_and_composite_siblings() {
-        macro_rules! every_mark {
-            ($($V:ident => $name:ident,)*) => { vec![$(Mark::$V),*] };
-        }
         let non_drawing: Vec<Mark> =
-            crate::for_each_mark!(every_mark).into_iter().filter(|m| !m.draws_size_channel()).collect();
+            crate::spec::mark::all_marks().filter(|m| !m.draws_size_channel()).collect();
         assert!(non_drawing.contains(&Mark::Rule), "test sanity: the population is derived, not empty");
         let kinds = [SizeLayer::Draws(Mark::Line), SizeLayer::Draws(Mark::Point), SizeLayer::LineYielding];
         let layer_sets: Vec<Vec<SizeLayer>> = (0..1u32 << kinds.len())

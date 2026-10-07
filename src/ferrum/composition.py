@@ -4371,11 +4371,12 @@ def _layer_mark_kwargs(c) -> dict | None:
 
     The chart's own ``_mark_kwargs`` plus the one piece of mark state that
     lives OUTSIDE that dict: ``mark_bar(zero=False)``'s zero-anchor opt-out.
-    ``MarkBase.to_mark_kwargs_dict`` deliberately excludes ``zero`` because on
-    a single-mark chart it is consumed Python-side (``_build_encoding_specs``
-    suppresses its ``scale.zero=True`` injection), and ``_mark_zero`` is a
-    chart attribute a ``_Layer`` has no slot for. So a bar composed into a
-    layer used to arrive with the opt-out silently dropped.
+    ``Chart._set_mark`` strips ``zero`` out of ``_mark_kwargs`` and stores it
+    separately as ``_mark_zero`` because on a single-mark chart it is
+    consumed Python-side (``_build_encoding_specs`` suppresses its
+    ``scale.zero=True`` injection), and ``_mark_zero`` is a chart attribute a
+    ``_Layer`` has no slot for. So a bar composed into a layer used to
+    arrive with the opt-out silently dropped.
 
     That was harmless while nothing anchored a layered bar. It stopped being
     harmless when the renderer gained the layered-bar zero rule
@@ -4393,7 +4394,7 @@ def _layer_mark_kwargs(c) -> dict | None:
     leaves ``zero`` at its default serializes byte-identically to before.
     """
     kwargs = dict(c._mark_kwargs) if c._mark_kwargs else {}
-    if getattr(c, "_mark_zero", True) is False:
+    if c._mark_zero is False:
         kwargs["zero"] = False
     return kwargs or None
 

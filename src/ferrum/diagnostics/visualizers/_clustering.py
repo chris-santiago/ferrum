@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-
 from ._base import FerrumVisualizer
 
 
