@@ -12,7 +12,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._entry import EntryRefusal
-from ferrum._layer import drop_orphaned_conditionals
+from ferrum._layer import drop_orphaned_conditionals, merge_style
 from ferrum.marks.base import layer_honors, refuse_untaken_layer_style, resolve_layer_style
 
 if TYPE_CHECKING:
@@ -210,10 +210,7 @@ def _apply_mark_overrides(
         elif val is False or val is None:
             dropped.append(ly)
         else:
-            styled = {
-                **(ly.mark_kwargs or {}),
-                **resolve_layer_style(entry, ly.mark, val),
-            }
+            styled = merge_style(ly.mark_kwargs, resolve_layer_style(entry, ly.mark, val))
             new_layers.append(replace(ly, mark_kwargs=styled))
     if not new_layers:
         raise EntryRefusal(
@@ -254,11 +251,11 @@ def _apply_unnamed_style(
     styles = [resolve_layer_style(entry, m, part) for m, part in zip(marks, parts)]
     if new._layers:
         new._layers = [
-            replace(ly, mark_kwargs={**(ly.mark_kwargs or {}), **style})
+            replace(ly, mark_kwargs=merge_style(ly.mark_kwargs, style))
             for ly, style in zip(new._layers, styles)
         ]
     elif styles[0]:
-        new._mark_kwargs = {**(new._mark_kwargs or {}), **styles[0]}
+        new._mark_kwargs = merge_style(new._mark_kwargs, styles[0])
     return new
 
 

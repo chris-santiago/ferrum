@@ -33,6 +33,7 @@ from ferrum._core import (  # type: ignore[attr-defined]
 )
 from ferrum._override_apply import OverridePayload
 from ferrum._entry import EntryRefusal
+from ferrum._layer import merge_style
 from ferrum.exceptions import _OverrideRefusal
 from ferrum.marks.base import resolve_layer_style
 
@@ -193,7 +194,7 @@ def apply_mark_style(
         style = resolve_layer_style("Chart.override", mark, payload.mark_style)
     except EntryRefusal as err:
         raise _OverrideRefusal(err.message_for, err.entry) from None
-    return {**mark_style, **style}
+    return merge_style(mark_style, style)
 
 
 def apply_coord(coord: Any, payload: OverridePayload) -> Any:

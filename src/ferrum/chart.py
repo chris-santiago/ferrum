@@ -2675,7 +2675,9 @@ class Chart(
         if rhs._structural:
             new._structural = new._structural + rhs._structural
         if rhs._overrides:
-            new._overrides = {**new._overrides, **rhs._overrides}
+            from ferrum._override_apply import merge_overrides
+
+            new._overrides = merge_overrides(new._overrides, rhs._overrides)
         _warn_on_layer_conflicts(lhs, rhs)
         return new
 
@@ -3054,7 +3056,9 @@ class Chart(
         """Store low-level spec-path overrides to be applied at render time.
 
         Overrides are merged into `_overrides` with later calls winning
-        on key conflicts. The ``override()`` call never mutates the receiver.
+        on key conflicts, except that a ``mark_<leaf>=None`` is unset and
+        leaves a value an earlier call set. The ``override()`` call never
+        mutates the receiver.
 
         Parameters
         ----------
@@ -3071,8 +3075,10 @@ class Chart(
         --------
         >>> chart.override(x_axis_label_angle=-45, width=600)
         """
+        from ferrum._override_apply import merge_overrides
+
         new = self._clone()
-        new._overrides = {**new._overrides, **kwargs}
+        new._overrides = merge_overrides(new._overrides, kwargs)
         return new
 
     def coord(self, coord: Any) -> "Chart":

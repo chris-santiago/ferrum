@@ -131,6 +131,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::draw::stroke_cap_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::stroke_join_accepted_values, m)?)?;
     m.add_function(wrap_pyfunction!(render::draw::check_mark_size, m)?)?;
+    m.add_function(wrap_pyfunction!(render::draw::mark_size_reason, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

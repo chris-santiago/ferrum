@@ -1371,6 +1371,28 @@ impl From<ferrum_scene::TaperError> for RenderError {
     }
 }
 
+/// The size rule's reason clause for a size value [`draw::check_constant_size`]
+/// (via [`RenderError::MarkSizeOutOfRange`]) rejects as out of range: the
+/// text [`RenderError::fmt_as`] writes after `{entry}(size=...) `, and the
+/// text `mark_size_reason` returns to Python with no call name, so the two
+/// cannot diverge.
+fn mark_size_out_of_range_reason(value: f64) -> String {
+    format!("must be a positive number; received {value}")
+}
+
+/// The size rule's reason clause for a mark [`draw::check_constant_size`] (via
+/// [`RenderError::MarkSizeNotDrawn`]) finds draws no constant size: the text
+/// [`RenderError::fmt_as`] writes after `{entry}(size=...) ` (sans that
+/// method's own trailing period), and the text `mark_size_reason` returns to
+/// Python with no call name, so the two cannot diverge.
+fn mark_size_not_drawn_reason(mark: crate::spec::mark::Mark, value: f64) -> String {
+    let mut reason = format!("has no effect on mark_{mark}; received {value}");
+    if let Some(knob) = mark.size_knob() {
+        reason.push_str(&format!(". Set {knob}= instead"));
+    }
+    reason
+}
+
 impl RenderError {
     /// Write this refusal voiced as `entry`, the public call the caller
     /// invoked. A refusal whose sentence is built around the call names it in
@@ -1388,7 +1410,7 @@ impl RenderError {
                 )
             }
             Self::MarkSizeOutOfRange { value, .. } => {
-                write!(f, "{entry}(size=...) must be a positive number; received {value}")
+                write!(f, "{entry}(size=...) {}", mark_size_out_of_range_reason(*value))
             }
             Self::MarkStyleNotDrawn { mark, field } => {
                 let drawn: Vec<&str> = mark.style_fields().iter().map(|f| f.name).collect();
@@ -1399,11 +1421,7 @@ impl RenderError {
                 )
             }
             Self::MarkSizeNotDrawn { mark, value } => {
-                write!(f, "{entry}(size=...) has no effect on mark_{mark}; received {value}.")?;
-                match mark.size_knob() {
-                    Some(knob) => write!(f, " Set {knob}= instead."),
-                    None => Ok(()),
-                }
+                write!(f, "{entry}(size=...) {}.", mark_size_not_drawn_reason(*mark, *value))
             }
             Self::LineWidthNotPositive { source } => match &**source {
                 NonPositiveLineWidth::Scaled { field, value, area } => write!(
@@ -1468,6 +1486,18 @@ impl RenderError {
         match self {
             Self::InLayer { source, .. } => source.root(),
             other => other,
+        }
+    }
+
+    /// This error's size-rule reason clause, naming no call: `Some` for
+    /// [`Self::MarkSizeOutOfRange`] and [`Self::MarkSizeNotDrawn`], the two
+    /// variants [`draw::check_constant_size`] raises; `None` for every other
+    /// variant. The sole caller is `mark_size_reason`.
+    pub(crate) fn size_rule_reason(&self) -> Option<String> {
+        match self {
+            Self::MarkSizeOutOfRange { value, .. } => Some(mark_size_out_of_range_reason(*value)),
+            Self::MarkSizeNotDrawn { mark, value } => Some(mark_size_not_drawn_reason(*mark, *value)),
+            _ => None,
         }
     }
 }
@@ -2820,6 +2850,41 @@ mod tests {
             format!("{via_layer_with_knob}"),
             "Layer(size=...) has no effect on mark_text; received 5. Set font_size= instead."
         );
+    }
+
+    /// [`RenderError::size_rule_reason`] is the clause the full refusal
+    /// places after `{entry}(size=...) `, for both of the size rule's
+    /// variants, so the full message and the reason exposed to Python
+    /// (`mark_size_reason`) cannot drift apart: this pins the reason's exact
+    /// text and that the full message contains it verbatim.
+    #[test]
+    fn size_rule_reason_is_contained_in_the_full_refusal_for_both_variants() {
+        use crate::spec::mark::Mark;
+
+        let not_drawn = RenderError::MarkSizeNotDrawn { mark: Mark::Area, value: 5.0 };
+        let reason = not_drawn.size_rule_reason().expect("MarkSizeNotDrawn has a reason");
+        assert_eq!(reason, "has no effect on mark_area; received 5");
+        let full = format!("{}", not_drawn.in_layer_context(None, "relplot"));
+        assert_eq!(full, format!("relplot(size=...) {reason}."));
+        assert!(full.contains(&reason), "full: {full}, reason: {reason}");
+
+        let not_drawn_with_knob = RenderError::MarkSizeNotDrawn { mark: Mark::Text, value: 5.0 };
+        let reason =
+            not_drawn_with_knob.size_rule_reason().expect("MarkSizeNotDrawn has a reason");
+        assert_eq!(reason, "has no effect on mark_text; received 5. Set font_size= instead");
+        let full = format!("{}", not_drawn_with_knob.in_layer_context(None, "relplot"));
+        assert_eq!(full, format!("relplot(size=...) {reason}."));
+        assert!(full.contains(&reason), "full: {full}, reason: {reason}");
+
+        let out_of_range = RenderError::MarkSizeOutOfRange { mark: Mark::Point, value: -1.0 };
+        let reason = out_of_range.size_rule_reason().expect("MarkSizeOutOfRange has a reason");
+        assert_eq!(reason, "must be a positive number; received -1");
+        let full = format!("{}", out_of_range.in_layer_context(None, "relplot"));
+        assert_eq!(full, format!("relplot(size=...) {reason}"));
+        assert!(full.contains(&reason), "full: {full}, reason: {reason}");
+
+        // Vacuity control: a variant the size rule never raises has no reason.
+        assert_eq!(RenderError::UnknownColumn { name: "x".into() }.size_rule_reason(), None);
     }
 }
 

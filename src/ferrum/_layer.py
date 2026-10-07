@@ -9,6 +9,7 @@ canonicalises on ``mark_kwargs``.
 from __future__ import annotations
 
 import functools
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
@@ -117,6 +118,27 @@ def drop_orphaned_conditionals(conditionals: list, kept: list, dropped: list) ->
     return [c for c in conditionals if id(c) not in orphaned]
 
 
+def is_unset(value: Any) -> bool:
+    """Whether a style *value* leaves its key unset: ``None`` is unset at every style door."""
+    return value is None
+
+
+def set_style(style: Mapping[str, Any]) -> dict[str, Any]:
+    """The keys of *style* the caller actually set, without the unset ones (:func:`is_unset`)."""
+    return {key: value for key, value in style.items() if not is_unset(value)}
+
+
+def merge_style(existing: Mapping[str, Any] | None, style: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge a caller's *style* over an *existing* style and return the result as a new dict.
+
+    A key *style* sets wins. A key *style* leaves unset (:func:`is_unset`)
+    sets nothing, so it never erases a value *existing* already holds. Every
+    door that merges a caller's style over a style already set merges through
+    this.
+    """
+    return {**(existing or {}), **set_style(style)}
+
+
 def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: frozenset) -> dict:
     """Merge a chart-level catch-all *style_dict* over an already-*resolved* style.
 
@@ -131,20 +153,18 @@ def catch_all_over(resolved: dict | None, style_dict: dict, caller_style_keys: f
       leaves it alone (``mark_smooth(layer_kwargs={"line": {"stroke": ...}})``
       beats a bare ``stroke=`` on the fit line, while the band still takes the
       bare one);
-    - a ``None`` value in the catch-all means unset, the same rule every
-      other style door applies, so it never overrides a resolved default
-      (``mark_smooth(opacity=None)`` still draws the ribbon at its built-in
-      ``0.3``, not fully opaque).
+    - a ``None`` value in the catch-all is unset (:func:`merge_style`), so
+      it never overrides a resolved default (``mark_smooth(opacity=None)``
+      still draws the ribbon at its built-in ``0.3``, not fully opaque).
 
     Both callers -- :func:`apply_catch_all_style` for a ``_Layer`` and
     ``_desugar._merge_desugar_mark_kwargs`` for a single-mark result -- read
     the rule from here rather than restating it, so the two shapes of a
     desugar result cannot answer it differently.
     """
-    return {
-        **(resolved or {}),
-        **{k: v for k, v in style_dict.items() if k not in caller_style_keys and v is not None},
-    }
+    return merge_style(
+        resolved, {k: v for k, v in style_dict.items() if k not in caller_style_keys}
+    )
 
 
 _MARKS_DRAWING_CONSTANT_SIZE = frozenset(marks_drawing_constant_size())

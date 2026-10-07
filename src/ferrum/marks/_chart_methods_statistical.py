@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
-from ferrum._layer import _FLAT_MARK_METHODS
+from ferrum._layer import _FLAT_MARK_METHODS, merge_style
 from ferrum._validate import validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import ORIENT_CHOICES
@@ -1353,9 +1353,10 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        size : float, optional
+        size : float or None, optional
             Point diameter in pixels: both the drawn dot's diameter and
-            the placement diameter.  Default is ``4``.  This is a diameter,
+            the placement diameter.  Default is ``4``; ``None`` is unset
+            and draws at that default.  This is a diameter,
             unlike ``mark_point(size=)``, which is an area in square
             pixels; ``fm.Swarm(point_size=)`` is the same diameter, with
             the same default of ``4`` for a hand-built swarm.  Placement is
@@ -1363,7 +1364,10 @@ class StatisticalMarksMixin:
             value-axis scale, so the rendered centre-to-centre distance
             between adjacent placed dots is exactly ``size + spacing`` px
             — a title, a facet strip, an explicit domain, a log scale, or
-            a dodge band all reshape the panel without loosening this.
+            a dodge band all reshape the panel without loosening this. Any
+            other value must be a positive finite real number; ``0``, a
+            negative number, ``NaN``/``inf``, a ``bool``, a ``str`` or any
+            other non-number refuses as ``mark_swarm(size=...)``.
         orient : {"vertical", "horizontal"} or None, optional
             Canonical orientation control.  ``"vertical"`` (default) spreads
             points along x; ``"horizontal"`` spreads along y.  When both
@@ -1559,7 +1563,7 @@ class StatisticalMarksMixin:
             fn_chart._mark = mark
             fn_chart._entry = "mark_function"
             if line_mark_kwargs:
-                fn_chart._mark_kwargs = {**fn_chart._mark_kwargs, **line_mark_kwargs}
+                fn_chart._mark_kwargs = merge_style(fn_chart._mark_kwargs, line_mark_kwargs)
             if remap:
                 from ferrum._desugar import _apply_remap
 
@@ -1573,7 +1577,7 @@ class StatisticalMarksMixin:
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if line_mark_kwargs:
-            new._mark_kwargs = {**new._mark_kwargs, **line_mark_kwargs}
+            new._mark_kwargs = merge_style(new._mark_kwargs, line_mark_kwargs)
         if remap:
             from ferrum._desugar import _apply_remap
 

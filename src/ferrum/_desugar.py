@@ -49,6 +49,8 @@ from ferrum._layer import (
     MarkDesugarResult,
     apply_catch_all_style,
     catch_all_over,
+    merge_style,
+    set_style,
     titled_encoding,
 )
 from ferrum.encoding.base import ChannelBase
@@ -358,10 +360,12 @@ def _aim_layer_kwargs(layer: _Layer, layer_kwargs: dict, entry: str) -> _Layer:
     aimed = layer_kwargs.get(layer.name) if layer.name is not None else None
     if not aimed:
         return layer
-    aimed = resolve_layer_style(entry, layer.mark, aimed)
+    aimed = set_style(resolve_layer_style(entry, layer.mark, aimed))
+    if not aimed:
+        return layer
     return replace(
         layer,
-        mark_kwargs={**(layer.mark_kwargs or {}), **aimed},
+        mark_kwargs=merge_style(layer.mark_kwargs, aimed),
         caller_style_keys=layer.caller_style_keys | frozenset(aimed),
     )
 
@@ -390,9 +394,11 @@ def _aim_single_mark_kwargs(
     aimed = layer_kwargs.get(result.layer_name) if result.layer_name is not None else None
     if not aimed:
         return result.mark_kwargs, result.caller_style_keys
-    aimed = resolve_layer_style(entry, result.mark, aimed)
+    aimed = set_style(resolve_layer_style(entry, result.mark, aimed))
+    if not aimed:
+        return result.mark_kwargs, result.caller_style_keys
     return (
-        {**(result.mark_kwargs or {}), **aimed},
+        merge_style(result.mark_kwargs, aimed),
         result.caller_style_keys | frozenset(aimed),
     )
 
@@ -1352,22 +1358,19 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
     new._transforms = list(chart._transforms) + list(transforms)
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named
-    # keys, not a fixed winner -- then
-    # merge THAT onto `new._mark_kwargs` -- which `_clone()` already
-    # inherited from `chart._mark_kwargs` -- rather than replacing it
-    # outright. Mirrors `Chart.mark_function`'s own direct-path merge
-    # (`{**new._mark_kwargs, **line_mark_kwargs}`,
-    # `marks/_chart_methods_statistical.py`): a chart that already carries
-    # its own mark kwargs (e.g. `.mark_line(stroke_width=7)` called before a
-    # dispatcher-routed desugar) must keep them, not lose them to whatever
-    # this desugar/caller combination computed (design review cycle-2 S2).
-    # Only touches `new._mark_kwargs` when there is something new to fold
-    # in, so output stays byte-identical when neither source has anything.
+    # keys, not a fixed winner -- then merge THAT onto `new._mark_kwargs`
+    # (which `_clone()` already inherited from `chart._mark_kwargs`) through
+    # `merge_style`, as `Chart.mark_function`'s direct path does: a chart
+    # that already carries its own mark kwargs (e.g.
+    # `.mark_line(stroke_width=7)` called before a dispatcher-routed desugar)
+    # keeps them unless this call sets the same key. Only touches
+    # `new._mark_kwargs` when there is something new to fold in, so output
+    # stays byte-identical when neither source has anything.
     merged_mark_kwargs = _merge_desugar_mark_kwargs(
         single_mark_kwargs, style_dict, single_caller_keys
     )
     if merged_mark_kwargs:
-        new._mark_kwargs = {**new._mark_kwargs, **merged_mark_kwargs}
+        new._mark_kwargs = merge_style(new._mark_kwargs, merged_mark_kwargs)
     if result.data is not None:
         new._data = result.data
     if result.position is not None:

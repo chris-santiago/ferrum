@@ -18,7 +18,7 @@ from ferrum import (
     Violin,
 )
 from ferrum._core import secondary_key, transform_registry
-from ferrum._layer import MarkDesugarResult, _Layer
+from ferrum._layer import MarkDesugarResult, _Layer, is_unset
 from ferrum._overrides import register_layer_names
 from ferrum._registry import (
     registry_output_columns,
@@ -31,6 +31,7 @@ from ferrum.marks._desugar_helpers import (
     resolve_color_groupby,
     typed_positional_channel,
 )
+from ferrum.marks.base import check_constant_size
 
 
 def desugar_contour(
@@ -1031,7 +1032,7 @@ def desugar_swarm(
     x_field: str | None,
     y_field: str | None,
     *,
-    size: int = 4,
+    size: float | None = 4,
     orient: str = "vertical",
     spacing: float = 1.0,
     side: str = "both",
@@ -1078,15 +1079,20 @@ def desugar_swarm(
         Field name on the x axis (category when vertical). Required.
     y_field : str or None
         Field name on the y axis (value when vertical). Required.
-    size : int, default 4
+    size : float or None, default 4
         Point diameter in pixels: the diameter dots are placed at render
         time and the drawn dot's diameter are both ``size``, so the drawn
-        dot's radius is ``size / 2``.  Placement is computed at render time
+        dot's radius is ``size / 2``. ``None`` is unset: the ``Swarm``
+        transform's own default diameter, ``4``, applies.  Placement is computed at render time
         against the panel's resolved value-axis scale (not a pre-layout
         estimate), so the rendered centre-to-centre distance between
         adjacent placed dots is exactly ``size + spacing`` px in every
         layout -- a title, a facet strip, an explicit domain, a log scale,
-        or a dodge band all reshape the panel without loosening this.
+        or a dodge band all reshape the panel without loosening this. Any
+        other value must be a positive finite real number
+        (:func:`ferrum.marks.base.check_constant_size`); ``0``, a negative
+        number, ``NaN``/``inf``, a ``bool``, a ``str`` or any other
+        non-number refuses as ``mark_swarm(size=...)``.
     orient : {"vertical", "horizontal"}, default "vertical"
         Swarm orientation.  ``"vertical"`` means the value axis is y.
     spacing : float, default 1.0
@@ -1117,7 +1123,8 @@ def desugar_swarm(
     Raises
     ------
     ValueError
-        If either ``x_field`` or ``y_field`` is ``None``.
+        If either ``x_field`` or ``y_field`` is ``None``, or if ``size`` is
+        set and is not a positive finite real number.
 
     Examples
     --------
@@ -1136,12 +1143,13 @@ def desugar_swarm(
     swarm_kwargs: dict = dict(
         category=cat,
         value=val,
-        point_size=float(size),
         spacing=spacing,
         side=side,
         orient=orient,
         name="swarm",
     )
+    if not is_unset(size):
+        swarm_kwargs["point_size"] = check_constant_size("mark_swarm", "point", size)
     if dodge is not None:
         swarm_kwargs["dodge"] = str(dodge)
     # The point layer sets no size of its own: the renderer draws a

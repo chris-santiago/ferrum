@@ -13,6 +13,7 @@ from typing import Any, NamedTuple, TypeVar
 from ferrum._core import (
     blend_accepted_values,
     check_mark_size,
+    mark_size_reason,
     interpolate_accepted_values,
     mark_bool_kwargs,
     mark_integer_kwargs,
@@ -26,8 +27,10 @@ from ferrum._entry import EntryRefusal
 from ferrum._layer import (
     _MARKS_DRAWING_CONSTANT_SIZE,
     drawn_style_fields,
+    is_unset,
     layer_draws,
     layer_mark,
+    set_style,
 )
 from ferrum._validate import (
     as_finite_real,
@@ -178,7 +181,7 @@ def _normalize_stroke_dash(value: Any, *, context: str) -> list[float] | None:
     the caller invoked, without the value; this function appends
     ``={value!r}``) and the value.
     """
-    if value is None:
+    if is_unset(value):
         return None
     if isinstance(value, str):
         if value in _LINETYPE_MAP:
@@ -441,12 +444,12 @@ def refuse_style_no_layer_draws(
     meets neither. Called once the desugar has run, the first point the
     emitted marks are known.
     """
-    set_style = {key: value for key, value in style.items() if value is not None}
-    if "size" in set_style:
-        refuse_size_no_layer_draws(entry, set_style["size"], drawn_marks)
+    given = set_style(style)
+    if "size" in given:
+        refuse_size_no_layer_draws(entry, given["size"], drawn_marks)
     untaken = [
         key
-        for key in set_style
+        for key in given
         if key != "size" and not any(layer_draws(mark, key) for mark in drawn_marks)
     ]
     if untaken:
@@ -474,7 +477,7 @@ def check_constant_size(entry: str, mark: str, size: Any) -> float | None:
     Refusals are :class:`ferrum._entry.EntryRefusal`.
     """
     value = _voiced(entry, lambda voice: coerce_finite_real(f"{voice}(size=...)", size))
-    if value is not None:
+    if not is_unset(value):
         _voiced(entry, lambda voice: check_mark_size(voice, mark, value))
     return value
 
@@ -546,19 +549,26 @@ def _canonical_mark_kwarg(mark_name: str, key: str) -> str:
     return _MARK_KWARG_ALIASES.get(key, key)
 
 
-def _size_rule_reason(refusal: EntryRefusal, voice: str) -> str:
-    """The size rule's *refusal* as a clause naming ``size``, for a line naming the mark.
+#: How a reason clause names the constant ``size`` argument.
+_SIZE_ARGUMENT = "keyword argument 'size'"
 
-    Every size-rule refusal speaks of the argument as ``<voice>(size=...)``
-    (:func:`check_constant_size`); the clause names it as the other reasons
-    name theirs, ``keyword argument 'size'``, so the call is named once, at
-    the head of the refusal.
+
+def _size_rule_reason(mark: str, size: Any) -> str | None:
+    """Why *mark* refuses a constant ``size`` of *size*, as a clause naming no call.
+
+    ``None`` when the size rule (:func:`check_constant_size`) accepts it. A
+    value that is not a finite real number is refused by
+    :func:`ferrum._validate.coerce_finite_real`, and any other by Rust's size
+    rule (:func:`ferrum._core.mark_size_reason`), the source of the full
+    refusal's text too. The clause names the argument as the other reasons
+    name theirs, so a refusal spanning layers names its call once, at its head.
     """
-    text = refusal.message_for(voice)
-    call = f"{voice}(size=...) "
-    if text.startswith(call):
-        text = "keyword argument 'size' " + text.removeprefix(call)
-    return text.removesuffix(".")
+    try:
+        value = coerce_finite_real(_SIZE_ARGUMENT, size)
+    except ValueError as err:
+        return str(err)
+    reason = mark_size_reason(mark, float(value))
+    return None if reason is None else f"{_SIZE_ARGUMENT} {reason}"
 
 
 class _Untaken(NamedTuple):
@@ -566,8 +576,8 @@ class _Untaken(NamedTuple):
 
     #: The whole refusal, as a door holding that one layer raises it.
     refusal: EntryRefusal
-    #: The same refusal as a clause, for any voice, in a line naming the mark.
-    reason: Callable[[str], str]
+    #: The same refusal as a clause naming no call, in a line naming the mark.
+    reason: str
     #: Whether the refusal lists the fields the mark takes.
     lists_honored: bool
 
@@ -594,32 +604,36 @@ def _untaken_key(
     The refusal is voiced as *entry*, and returned rather than raised so a
     door that spreads one style dict over several layers can name every
     layer's refusal.
+
+    Whether the size rule refuses *value* is decided once, by
+    :func:`_size_rule_reason` alone: a voice-free call into the same Rust
+    source (`RenderError::size_rule_reason`) the full refusal's text comes
+    from. The full, re-voiceable :class:`EntryRefusal` is built only once
+    that single decision says the value refuses, so the clause this
+    function returns and the refusal it pairs it with can never name two
+    different outcomes for the same *value*.
     """
     canonical = _canonical_mark_kwarg(mark_name, key)
     if canonical in METHOD_ONLY_KWARGS.get(mark_name, frozenset()):
         method_only = _method_only_reason(mark_name, canonical)
         return _Untaken(
-            EntryRefusal(lambda voice: f"{voice}: {method_only}", entry),
-            lambda _voice: method_only,
-            False,
+            EntryRefusal(lambda voice: f"{voice}: {method_only}", entry), method_only, False
         )
     if canonical == "size" and drawn_style_fields(mark_name) is not None:
-        if value is None:
+        if is_unset(value):
             return None
-        size_refusal = _refusal_of(
-            entry, lambda voice: check_constant_size(voice, mark_name, value)
-        )
-        if size_refusal is not None:
-            refused_size = size_refusal
-            return _Untaken(
-                refused_size, lambda voice: _size_rule_reason(refused_size, voice), False
+        size_reason = _size_rule_reason(mark_name, value)
+        if size_reason is not None:
+            size_refusal = _refusal_of(
+                entry, lambda voice: check_constant_size(voice, mark_name, value)
             )
+            return _Untaken(size_refusal, size_reason, False)
     reason, lists_honored = _mark_kwarg_reason(mark_name, canonical)
     return _Untaken(
         EntryRefusal(
             lambda voice: _mark_kwarg_error(mark_name, canonical, honored, entry=voice), entry
         ),
-        lambda _voice: reason,
+        reason,
         lists_honored,
     )
 
@@ -668,22 +682,22 @@ def _resolve_style(
         # the numeric fields above. A field a Rust vocabulary governs is
         # left to that vocabulary's check below, which refuses a non-string
         # as it refuses any other value outside the vocabulary.
-        elif canonical in _BOOL_MARK_KWARGS and v is not None:
+        elif canonical in _BOOL_MARK_KWARGS and not is_unset(v):
             v = _voiced(entry, lambda voice: coerce_bool(voice, k, v))
         elif (
             canonical in _STRING_MARK_KWARGS
             and canonical not in _STYLE_VOCABULARIES
-            and v is not None
+            and not is_unset(v)
         ):
             _voiced(entry, lambda voice: validate_str(voice, k, v))
-        elif canonical == "orient" and v is not None:
+        elif canonical == "orient" and not is_unset(v):
             _voiced(entry, lambda voice: validate_choice(voice, "orient", v, ORIENT_CHOICES))
         resolved[canonical] = v
     # Validate shape= value for point marks. The constant shape is a fixed
     # string that must name one of the glyphs supported by the Rust renderer;
     # an unknown name would silently default to circle at render time.
     shape_val = resolved.get("shape")
-    if shape_val is not None:
+    if not is_unset(shape_val):
         _voiced(
             entry, lambda voice: validate_choice(voice, "shape", shape_val, _VALID_POINT_SHAPES)
         )
@@ -708,7 +722,7 @@ def _resolve_style(
     # original string; to_hex is consulted only for validation.
     for paint_key in ("fill", "stroke"):
         paint_val = resolved.get(paint_key)
-        if paint_val is not None and not _is_paint_sentinel(paint_val):
+        if not is_unset(paint_val) and not _is_paint_sentinel(paint_val):
             _voiced(entry, lambda voice: _validate_literal_color(voice, paint_key, paint_val))
     return resolved
 
@@ -790,26 +804,27 @@ def refuse_untaken_layer_style(
     keys = list(refused_keys)
     if len(layer_marks) == 1 and len(keys) == 1:
         raise layers[0][2][0].refusal
+    lines = "".join(
+        f"\n  {_layer_refusal_line(mark, honored, refusals)}" for mark, honored, refusals in layers
+    )
     raise EntryRefusal(
-        lambda voice: (
-            f"{voice}: no layer of this chart takes {keys!r}:"
-            + "".join(
-                f"\n  {_layer_refusal_line(voice, mark, honored, refusals)}"
-                for mark, honored, refusals in layers
-            )
-        ),
-        entry,
+        lambda voice: f"{voice}: no layer of this chart takes {keys!r}:{lines}", entry
     )
 
 
-def _layer_refusal_line(
-    voice: str, mark: str, honored: frozenset[str], refusals: Sequence[_Untaken]
-) -> str:
-    """One layer's line of a refusal that spans layers: its mark, then its reasons."""
-    reasons = "; ".join(refusal.reason(voice) for refusal in refusals)
+def _layer_refusal_line(mark: str, honored: frozenset[str], refusals: Sequence[_Untaken]) -> str:
+    """One layer's line of a refusal that spans layers: its mark, then its reasons.
+
+    Each reason is a sentence of its own, and so is the list of the fields
+    the mark takes, when a reason calls for it: a reason may hold a sentence
+    break itself (the size rule's remedy), so a reason never ends inside
+    another's punctuation.
+    """
+    sentences = [refusal.reason for refusal in refusals]
     if any(refusal.lists_honored for refusal in refusals):
-        reasons += f". Honored: {sorted(honored)}"
-    return f"mark_{mark}: {reasons}"
+        sentences.append(f"Honored: {sorted(honored)}")
+    first, *rest = sentences
+    return f"mark_{mark}: " + ". ".join([first, *(s[:1].upper() + s[1:] for s in rest)])
 
 
 def resolve_method_bool(entry: str, param: str, value: Any, default: bool) -> bool:
@@ -825,7 +840,7 @@ def resolve_method_bool(entry: str, param: str, value: Any, default: bool) -> bo
     never read for its truthiness. Refusals are
     :class:`ferrum._entry.EntryRefusal`, voiced as *entry*.
     """
-    if value is None:
+    if is_unset(value):
         return default
     return _voiced(entry, lambda voice: coerce_bool(voice, param, value))
 

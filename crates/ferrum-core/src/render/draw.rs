@@ -542,11 +542,22 @@ pub(crate) fn check_constant_size(mark: Mark, size: f64) -> Result<(), RenderErr
 /// layer: [`check_constant_size`]'s rule, run where Python builds mark kwargs.
 #[pyfunction]
 pub fn check_mark_size(entry: &str, mark: &str, size: f64) -> PyResult<()> {
-    let mark: Mark = mark.parse().map_err(|e: crate::spec::mark::ParseMarkError| {
-        pyo3::exceptions::PyValueError::new_err(e.to_string())
-    })?;
+    let mark = crate::spec::mark::parse_mark_arg(mark)?;
     check_constant_size(mark, size)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.in_layer_context(None, entry).to_string()))
+}
+
+/// [`check_constant_size`]'s reason clause for `size` on `mark`, naming no
+/// call: the text [`check_mark_size`]'s refusal and a per-layer size refusal
+/// line both place after `{entry}(size=...) ` / `keyword argument 'size' `.
+/// `None` when `mark` draws a constant `size` of that value, i.e.
+/// [`check_constant_size`] accepts it. Built from
+/// [`RenderError::size_rule_reason`], the same source [`check_mark_size`]'s
+/// full refusal text comes from, so the two cannot diverge.
+#[pyfunction]
+pub fn mark_size_reason(mark: &str, size: f64) -> PyResult<Option<String>> {
+    let mark = crate::spec::mark::parse_mark_arg(mark)?;
+    Ok(check_constant_size(mark, size).err().and_then(|e| e.size_rule_reason()))
 }
 
 /// Refuse any style field `o` sets that `mark` never draws

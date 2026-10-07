@@ -399,7 +399,7 @@ pub(crate) fn mark_style_fields<'py>(
     mark: &str,
 ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyDict>> {
     use pyo3::types::PyDictMethods;
-    let mark: Mark = mark.parse().map_err(|e: ParseMarkError| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let mark = parse_mark_arg(mark)?;
     let fields = pyo3::types::PyDict::new(py);
     for field in mark.style_fields() {
         fields.set_item(field.name, field.needs.map(StyleNeed::as_str))?;
@@ -427,6 +427,15 @@ impl fmt::Display for ParseMarkError {
 }
 
 impl std::error::Error for ParseMarkError {}
+
+/// Parses `mark` into a [`Mark`], refusing an unknown name with the
+/// [`pyo3::exceptions::PyValueError`] every mark-name-accepting `#[pyfunction]`
+/// raises before it applies its own rule: [`mark_style_fields`],
+/// [`crate::render::draw::check_mark_size`] and
+/// [`crate::render::draw::mark_size_reason`] all parse through here.
+pub(crate) fn parse_mark_arg(mark: &str) -> pyo3::PyResult<Mark> {
+    mark.parse().map_err(|e: ParseMarkError| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
 
 impl FromStr for Mark {
     type Err = ParseMarkError;

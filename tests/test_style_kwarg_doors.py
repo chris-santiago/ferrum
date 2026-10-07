@@ -644,16 +644,6 @@ def _point_and_line() -> Any:
     return (fm.Chart(_DF).mark_point() + fm.Chart(_DF).mark_line()).encode(x="x", y="y")
 
 
-def _layer_line(mark: str, reasons: list[str], honored: list[str] | None) -> str:
-    """One layer's line of a refusal spanning layers, as the caller reads it."""
-    listed = f". Honored: {honored}" if honored is not None else ""
-    return f"\n  mark_{mark}: " + "; ".join(reasons) + listed
-
-
-def _not_honored_reason(mark: str, field: str) -> str:
-    return f"keyword argument {field!r} is not honored by mark_{mark}"
-
-
 def _spread_refusal(chart: Any, style: dict) -> EntryRefusal:
     from ferrum._overrides import _apply_overrides
 
@@ -668,27 +658,24 @@ def test_a_key_no_layer_takes_names_every_layers_mark() -> None:
     refusal = _spread_refusal(_point_and_line(), {"font_size": 3})
     assert str(refusal) == (
         "relplot: no layer of this chart takes ['font_size']:"
-        + _layer_line("point", [_not_honored_reason("point", "font_size")], _layer_honored("point"))
-        + _layer_line("line", [_not_honored_reason("line", "font_size")], _layer_honored("line"))
+        "\n  mark_point: keyword argument 'font_size' is not honored by mark_point. "
+        f"Honored: {_layer_honored('point')}"
+        "\n  mark_line: keyword argument 'font_size' is not honored by mark_line. "
+        f"Honored: {_layer_honored('line')}"
     )
 
 
 def test_every_key_no_layer_takes_is_named() -> None:
-    """Every untaken key is refused, not only the first, and a key the
-    layer takes is not named."""
+    """Every untaken key is refused, not only the first, each as a sentence of
+    its own, and a key the layer takes is not named."""
     refusal = _spread_refusal(
         fm.Chart(_DF).mark_point(), {"font_size": 3, "opacity": 0.5, "interpolate": "step"}
     )
     assert str(refusal) == (
         "relplot: no layer of this chart takes ['font_size', 'interpolate']:"
-        + _layer_line(
-            "point",
-            [
-                _not_honored_reason("point", "font_size"),
-                _not_honored_reason("point", "interpolate"),
-            ],
-            _layer_honored("point"),
-        )
+        "\n  mark_point: keyword argument 'font_size' is not honored by mark_point. "
+        "Keyword argument 'interpolate' is not honored by mark_point. "
+        f"Honored: {_layer_honored('point')}"
     )
 
 
@@ -698,16 +685,27 @@ def test_an_unknown_key_names_each_layers_mark_beside_its_honored_list() -> None
     refusal = _spread_refusal(_point_and_line(), {"bogus": 1, "font_size": 3})
     assert str(refusal) == (
         "relplot: no layer of this chart takes ['bogus', 'font_size']:"
-        + _layer_line(
-            "point",
-            ["unknown keyword argument 'bogus'", _not_honored_reason("point", "font_size")],
-            _layer_honored("point"),
-        )
-        + _layer_line(
-            "line",
-            ["unknown keyword argument 'bogus'", _not_honored_reason("line", "font_size")],
-            _layer_honored("line"),
-        )
+        "\n  mark_point: unknown keyword argument 'bogus'. "
+        "Keyword argument 'font_size' is not honored by mark_point. "
+        f"Honored: {_layer_honored('point')}"
+        "\n  mark_line: unknown keyword argument 'bogus'. "
+        "Keyword argument 'font_size' is not honored by mark_line. "
+        f"Honored: {_layer_honored('line')}"
+    )
+
+
+def test_a_method_only_key_across_layers_lists_honored_only_where_it_is_not_honored() -> None:
+    """`orient` is `mark_bar()`'s own argument, so the bar line names that
+    method and lists no fields; on the point it is a field the mark does not
+    take, so that line lists the point's fields."""
+    chart = (fm.Chart(_DF).mark_bar() + fm.Chart(_DF).mark_point()).encode(x="x", y="y")
+    refusal = _spread_refusal(chart, {"orient": "horizontal"})
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['orient']:"
+        "\n  mark_bar: keyword argument 'orient' is an argument of mark_bar(), not a layer "
+        "style; set it through mark_bar(orient=...)"
+        "\n  mark_point: keyword argument 'orient' is not honored by mark_point. "
+        f"Honored: {_layer_honored('point')}"
     )
 
 
@@ -728,25 +726,71 @@ def test_a_refusal_spanning_layers_names_its_call_once_in_any_voice() -> None:
 def test_a_size_no_layer_draws_names_each_marks_size_rule_once_per_layer() -> None:
     """A constant size on layers that draw none gets each mark's size-rule
     reason, its remedy kept, with the call named only at the head."""
-    from ferrum.marks.base import resolve_layer_style
-
-    def size_reason(mark: str) -> str:
-        with pytest.raises(ValueError) as layer_door:
-            resolve_layer_style("relplot", mark, {"size": 3.0})
-        text = str(layer_door.value)
-        assert text.startswith("relplot(size=...) "), text
-        return "keyword argument 'size' " + text.removeprefix("relplot(size=...) ").removesuffix(
-            "."
-        )
-
     chart = (fm.Chart(_DF).mark_area() + fm.Chart(_DF).mark_rule()).encode(x="x", y="y")
     refusal = _spread_refusal(chart, {"size": 3.0})
     assert str(refusal) == (
         "relplot: no layer of this chart takes ['size']:"
-        + _layer_line("area", [size_reason("area")], None)
-        + _layer_line("rule", [size_reason("rule")], None)
+        "\n  mark_area: keyword argument 'size' has no effect on mark_area; received 3"
+        "\n  mark_rule: keyword argument 'size' has no effect on mark_rule; received 3. "
+        "Set stroke_width= instead"
     )
-    assert "Set stroke_width= instead" in size_reason("rule")
+
+
+def test_a_size_reason_beside_another_ends_as_a_sentence_of_its_own() -> None:
+    """The size rule's remedy is a sentence of its own, so the next reason
+    starts a new sentence instead of following it after a semicolon."""
+    chart = (fm.Chart(_DF).mark_rule() + fm.Chart(_DF).mark_area()).encode(x="x", y="y")
+    refusal = _spread_refusal(chart, {"size": 3.0, "bogus": 1})
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['size', 'bogus']:"
+        "\n  mark_rule: keyword argument 'size' has no effect on mark_rule; received 3. "
+        "Set stroke_width= instead. Unknown keyword argument 'bogus'. "
+        f"Honored: {_layer_honored('rule')}"
+        "\n  mark_area: keyword argument 'size' has no effect on mark_area; received 3. "
+        "Unknown keyword argument 'bogus'. "
+        f"Honored: {_layer_honored('area')}"
+    )
+
+
+def test_a_non_numeric_size_reason_names_the_argument_not_the_call() -> None:
+    chart = (fm.Chart(_DF).mark_area() + fm.Chart(_DF).mark_rule()).encode(x="x", y="y")
+    refusal = _spread_refusal(chart, {"size": "big"})
+    reason = (
+        "keyword argument 'size' must be a real number (int, float, numpy scalar, or "
+        "Decimal), not str; received 'big'"
+    )
+    assert str(refusal) == (
+        "relplot: no layer of this chart takes ['size']:"
+        f"\n  mark_area: {reason}\n  mark_rule: {reason}"
+    )
+
+
+def test_the_size_branchs_reason_and_refusal_report_the_same_outcome() -> None:
+    """`_untaken_key`'s size branch decides whether a constant `size=` on
+    `mark` refuses by one call, `_size_rule_reason`, and only builds the
+    full, re-voiceable refusal once that single decision says to refuse.
+    The clause this returns and the refusal's own rendered text can
+    therefore never report a different outcome for the same `mark` and
+    `size` -- covering both ways a constant size refuses: a mark that
+    draws none at all (`area`) and a value outside the positive range
+    (`point`, `-1.0`). The third case pins the other side of that single
+    gate: a value the size rule accepts is never refused as a size-rule
+    violation, even when `honored` (deliberately empty here) omits
+    `size` for an unrelated reason -- it falls through to the generic
+    not-honored refusal instead.
+    """
+    from ferrum.marks.base import _untaken_key
+
+    for mark, size in [("area", 3.0), ("point", -1.0)]:
+        untaken = _untaken_key("relplot", mark, "size", size, frozenset())
+        assert untaken is not None
+        clause = untaken.reason.removeprefix("keyword argument 'size' ")
+        assert clause in str(untaken.refusal), (mark, size, untaken.reason, str(untaken.refusal))
+
+    accepted = _untaken_key("relplot", "point", "size", 5.0, frozenset())
+    assert accepted is not None
+    assert "positive number" not in accepted.reason
+    assert "not honored by mark_point" in accepted.reason
 
 
 #: Every primitive mark that draws no constant size.

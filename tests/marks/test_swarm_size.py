@@ -106,6 +106,79 @@ def test_mark_swarm_horizontal_radius_is_half_size(size):
         assert r == pytest.approx(size / 2), f"size={size} must draw r={size / 2}, got {r}"
 
 
+@pytest.mark.parametrize("orient", ["vertical", "horizontal"])
+def test_an_unset_swarm_size_draws_at_the_default_diameter(orient):
+    """`size=None` is unset: the swarm draws and packs exactly as with no
+    size, r = 2; control: `size=6` draws r = 3."""
+    enc = {"x": "group", "y": "value"} if orient == "vertical" else {"x": "value", "y": "group"}
+
+    def svg(**size):
+        return fm.Chart(_df()).mark_swarm(orient=orient, **size).encode(**enc).to_svg()
+
+    unset = svg(size=None)
+    assert set(_radii(unset)) == {2.0}
+    assert unset == svg()
+    assert set(_radii(svg(size=6))) == {3.0}
+
+
+def test_a_numpy_scalar_swarm_size_draws_at_half_its_value():
+    """A positive finite real number includes a numpy scalar: it is
+    accepted exactly like the equivalent Python float, not refused as a
+    non-number."""
+    svg = fm.Chart(_df()).mark_swarm(size=np.float64(6.0)).encode(x="group", y="value").to_svg()
+    assert set(_radii(svg)) == {3.0}
+
+
+@pytest.mark.parametrize(
+    "size,expected",
+    [
+        (0, "mark_swarm(size=...) must be a positive number; received 0"),
+        (-1, "mark_swarm(size=...) must be a positive number; received -1"),
+        (
+            float("nan"),
+            "mark_swarm(size=...) must be a finite number a float can hold; received nan",
+        ),
+        (
+            float("inf"),
+            "mark_swarm(size=...) must be a finite number a float can hold; received inf",
+        ),
+        (
+            True,
+            "mark_swarm(size=...) must be a real number (int, float, numpy scalar, or "
+            "Decimal), not bool; received True",
+        ),
+        (
+            "big",
+            "mark_swarm(size=...) must be a real number (int, float, numpy scalar, or "
+            "Decimal), not str; received 'big'",
+        ),
+    ],
+)
+def test_a_malformed_swarm_size_refuses_as_mark_swarm_with_the_shared_validators_text(
+    size, expected
+):
+    """Every value class `mark_swarm(size=)` refuses -- zero, a negative
+    number, NaN/inf, a bool, a str -- raises the exact text
+    `ferrum.marks.base.check_constant_size` (the shared finite-positive-size
+    validator every other mark method's `size=` already goes through)
+    raises for `mark_swarm`, named as the public call, not a raw
+    unvoiced error from a hand-rolled `float(size)`."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.Chart(_df()).mark_swarm(size=size).encode(x="group", y="value").to_svg()
+    assert str(exc_info.value) == expected
+
+
+def test_an_object_swarm_size_refuses_naming_its_own_type():
+    """Any other object (not a number, not a str) refuses by the same
+    validator, naming its own type."""
+    with pytest.raises(ValueError) as exc_info:
+        fm.Chart(_df()).mark_swarm(size=object()).encode(x="group", y="value").to_svg()
+    assert str(exc_info.value).startswith(
+        "mark_swarm(size=...) must be a real number (int, float, numpy scalar, or "
+        "Decimal), not object; received <object object at "
+    )
+
+
 def test_catplot_swarm_radius_is_half_default_size():
     # catplot(kind="swarm") has no top-level size= passthrough; it always
     # builds mark_swarm() at the default size=4, which must draw r=2.

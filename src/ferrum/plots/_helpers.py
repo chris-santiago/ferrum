@@ -13,6 +13,7 @@ import polars as pl
 
 from ferrum._entry import EntryRefusal, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
+from ferrum._layer import set_style
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import resolve_layer_style
@@ -561,9 +562,11 @@ def _style_kws(entry: str, param: str, mark: str, kws: Any) -> dict:
     """Return a figure's ``<param>=`` style dict (``line_kws``) for the layer drawing *mark*.
 
     Held to *mark*'s honored kwargs with aliases resolved
-    (:func:`ferrum.marks.base.resolve_layer_style`); ``None`` is no style. A
-    refusal is an :class:`EntryRefusal` voiced as *entry*, the figure that
-    received the dict.
+    (:func:`ferrum.marks.base.resolve_layer_style`); ``None`` is no style,
+    and a key set to ``None`` is unset, so it is left out and the layer's own
+    default for it stands (:func:`ferrum._layer.set_style`). A refusal is an
+    :class:`EntryRefusal` voiced as *entry*, the figure that received the
+    dict.
     """
     if kws is None:
         return {}
@@ -572,7 +575,7 @@ def _style_kws(entry: str, param: str, mark: str, kws: Any) -> dict:
         raise EntryRefusal(
             lambda voice: f"{voice}({param}=...) must be a dict of mark kwargs; got {kind}", entry
         )
-    return resolve_layer_style(entry, mark, kws)
+    return set_style(resolve_layer_style(entry, mark, kws))
 
 
 def _figure_entry(fn: _F) -> _F:

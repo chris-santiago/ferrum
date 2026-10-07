@@ -997,6 +997,12 @@ def marks_drawing_constant_size() -> list[str]: ...
 # a primitive mark name; any other name raises ``ValueError``.
 def check_mark_size(entry: str, mark: str, size: float) -> None: ...
 
+# The constant-size rule's reason clause for ``size`` on ``mark``, naming no
+# call and with no trailing period, from the same source as
+# ``check_mark_size``'s refusal text; ``None`` when the rule accepts ``size``.
+# ``mark`` must be a primitive mark name; any other name raises ``ValueError``.
+def mark_size_reason(mark: str, size: float) -> str | None: ...
+
 # The numeric columns of ``schema`` (any object exporting
 # ``__arrow_c_schema__``), in schema order: exactly the integer and float
 # columns ``Linkage`` clusters and ``Reorder(axis="columns")`` permutes. A

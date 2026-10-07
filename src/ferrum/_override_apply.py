@@ -65,8 +65,10 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, fields
 from enum import Enum
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from ferrum._layer import is_unset
 from ferrum._validate import coerce_pixel_value
 from ferrum.configure import (
     AxisConfig,
@@ -532,6 +534,31 @@ def resolve(path: str) -> ResolvedPath | None:
             config_cls=rule.config_cls,
         )
     return None
+
+
+def merge_overrides(existing: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge later *overrides* over the *existing* stored ``Chart.override`` paths.
+
+    The later value wins on a shared path, except a mark-style leaf
+    (``mark_<leaf>``) it leaves unset (:func:`ferrum._layer.is_unset`): that
+    sets nothing, so a value an earlier call set stands. An unset leaf no
+    earlier call set is still stored, so a leaf no style door takes is
+    refused whatever its value.
+    """
+    return {
+        **existing,
+        **{
+            path: value
+            for path, value in overrides.items()
+            if not (is_unset(value) and path in existing and _is_mark_style_path(path))
+        },
+    }
+
+
+def _is_mark_style_path(path: str) -> bool:
+    """Whether the override *path* names a mark-style leaf (``mark_<leaf>``)."""
+    resolved = resolve(path)
+    return resolved is not None and resolved.target is Target.MARK
 
 
 def _build_deprecated_paths() -> dict[str, str]:
