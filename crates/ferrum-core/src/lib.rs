@@ -26,6 +26,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // for the side effect of its exception (rust-design recommendation 5 /
     // python-design S2, converged).
     m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_dict, m)?)?;
+    // `#157`: the override door's own data-free scale-value check (today,
+    // band padding's d3 bounds), so `_override_consume.py`'s
+    // `refuse_malformed_scale_overrides` can ask Rust "is this one override
+    // value valid?" and name the call itself.
+    m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_values, m)?)?;
     // The sort-field-object vocabulary (`parse_sort_field_object`/
     // `EncodingSpec::new` enforce), published so
     // every sort-accepting Python channel (`X`/`Y`/`Facet`/...) validates

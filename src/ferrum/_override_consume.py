@@ -25,11 +25,13 @@ payload once per render via ``build_payload`` and threads it through these helpe
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, NoReturn
 
 from ferrum._core import (  # type: ignore[attr-defined]
     scale_accepted_keys as _scale_accepted_keys,
     validate_scale_dict as _validate_scale_dict,
+    validate_scale_values as _validate_scale_values,
 )
 from ferrum._override_apply import OverridePayload
 from ferrum._entry import EntryRefusal
@@ -121,6 +123,78 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
             )
         base_scale = {k: v for k, v in base_scale.items() if k not in drop}
     return {**base_scale, **scale_overrides}
+
+
+def refuse_malformed_scale_overrides(
+    scale_type: Any, scale_overrides: Mapping[str, Any], paths: Mapping[str, str]
+) -> None:
+    """Refuse a malformed OVERRIDE scale value, naming the override path.
+
+    Rust owns every verdict: ``ferrum._core.validate_scale_values`` runs the
+    same data-free checks the render path would otherwise run (today, band-
+    padding bounds) and raises a bare clause with no call, channel or key in
+    it. This function adds only provenance -- it routes each override wire
+    key's value to that gate one at a time and, on refusal, names the flat
+    override path the caller actually wrote (``x_scale_padding``, not
+    ``padding``). It holds no bound, no vocabulary and no default of its own.
+
+    *scale_overrides* is one channel's ``payload.encoding[channel]["scale"]``
+    (wire-keyed) and *paths* its matching ``payload.encoding_paths[channel]``
+    (wire key -> flat override path); both are derived from the same
+    ``{wire_key: (value, path)}`` record in ``build_payload``, so every key
+    in *scale_overrides* has a matching entry in *paths* by construction, not
+    by convention. *scale_type* is the EFFECTIVE type after
+    :func:`merge_encoding_scale` -- the override's own type when the
+    override changes it, the chart's own when it doesn't, or ``None`` when
+    neither side names one (the typeless case ``_scale_to_dict`` itself
+    defaults to ``"linear"``).
+
+    If the override sets ``"type"`` itself, that value is probed alone
+    first, under its own raw value (not yet merged) -- a malformed type
+    (non-``str``, or an unknown variant) is refused immediately, naming
+    ``type``'s own override path, without probing any other key under a
+    type that is not even real. Every other overridden wire key is then
+    probed as a one-key fragment, built through
+    :func:`ferrum.encoding._scale._scale_to_dict` so a ``Parameter`` domain
+    or a temporal date/string converts exactly as it would in the merged
+    dict, before the bare value ever reaches Rust. The fragment omits the
+    ``type`` key entirely when *scale_type* is ``None``, so
+    ``_scale_to_dict`` supplies its own typeless default rather than this
+    function mirroring it as a second ``"linear"`` literal. That conversion
+    call sits INSIDE the probe's ``try``, alongside the Rust check, because
+    the conversion itself can raise on a malformed value (an unparseable
+    date, a non-numeric non-date element) -- that failure is named here
+    too, not left to surface unnamed from a later, unguarded conversion of
+    the merged dict.
+
+    Raises
+    ------
+    FerrumOverrideError
+        On the first malformed value, as ``_OverrideRefusal(lambda entry:
+        f"{entry}({path}=...) {clause}")`` -- the same voice the constructor
+        refusals (e.g. ``BandScale(padding=...)``) and this module's own
+        ``{entry}(mark={...})`` refusal use.
+    """
+    from ferrum.encoding._scale import _scale_to_dict
+
+    def _refuse(path: str, clause: str) -> NoReturn:
+        raise _OverrideRefusal(lambda entry: f"{entry}({path}=...) {clause}") from None
+
+    if "type" in scale_overrides:
+        try:
+            _validate_scale_values({"type": scale_overrides["type"]})
+        except ValueError as err:
+            _refuse(paths["type"], str(err))
+
+    for key, value in scale_overrides.items():
+        if key == "type":
+            continue
+        try:
+            type_key = {} if scale_type is None else {"type": scale_type}
+            fragment = _scale_to_dict({**type_key, key: value})
+            _validate_scale_values(fragment)
+        except (TypeError, ValueError) as err:
+            _refuse(paths[key], str(err))
 
 
 def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -> dict[str, Any]:

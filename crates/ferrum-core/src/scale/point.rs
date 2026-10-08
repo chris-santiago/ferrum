@@ -2,13 +2,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
-use super::discrete::DiscreteLayout;
+use super::discrete::{DiscreteLayout, DEFAULT_POINT_PADDING};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct PointScaleData {
     domain: Vec<String>,
-    padding: f64,
+    /// As the user set it; `None` resolves to [`DEFAULT_POINT_PADDING`].
+    padding: Option<f64>,
     align: f64,
     reverse: bool,
 }
@@ -26,7 +27,7 @@ impl PointScaleData {
             Some(i) => i,
             None => return f64::NAN,
         };
-        let pos = DiscreteLayout::point(self.padding, self.align)
+        let pos = DiscreteLayout::point(self.resolved_padding(), self.align)
             .geometry(self.domain.len(), range_lo, range_hi)
             .position(idx);
         if self.reverse {
@@ -34,6 +35,10 @@ impl PointScaleData {
         } else {
             pos
         }
+    }
+
+    fn resolved_padding(&self) -> f64 {
+        self.padding.unwrap_or(DEFAULT_POINT_PADDING)
     }
 }
 
@@ -83,6 +88,9 @@ pub struct PointScale {
 impl PointScale {
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     ///
+    /// `padding` reaches the wire only when the user set it; the renderer
+    /// resolves an unset one to the same default this class does.
+    ///
     /// The explicit `range` (`PointScale(..., range=[lo, hi])`) IS carried into
     /// the wire form (issue #39 fix, previously silently dropped by the legacy
     /// `_scale_to_dict` deserialiser).
@@ -104,22 +112,22 @@ impl PointScale {
 #[pymethods]
 impl PointScale {
     #[new]
-    #[pyo3(signature = (*, domain = None, padding = 0.5, align = 0.5, reverse = false, range = None))]
+    #[pyo3(signature = (*, domain = None, padding = None, align = 0.5, reverse = false, range = None))]
     fn new(
         domain: Option<Vec<String>>,
-        padding: f64,
+        padding: Option<f64>,
         align: f64,
         reverse: bool,
         range: Option<Vec<f64>>,
     ) -> PyResult<Self> {
-        if !padding.is_finite() || padding < 0.0 {
+        if let Some(padding) = padding.filter(|p| !p.is_finite() || *p < 0.0) {
             return Err(PyValueError::new_err(format!(
-                "padding must be >= 0; got {padding}"
+                "PointScale(padding=...) must be a finite number >= 0; received {padding}"
             )));
         }
         if !align.is_finite() || !(0.0..=1.0).contains(&align) {
             return Err(PyValueError::new_err(format!(
-                "align must be in [0, 1]; got {align}"
+                "PointScale(align=...) must be a number in [0, 1]; received {align}"
             )));
         }
         let r = match range {
@@ -168,7 +176,7 @@ impl PointScale {
 
     /// Outer padding as a fraction of step size.
     #[getter]
-    fn padding(&self) -> f64 { self.data.padding }
+    fn padding(&self) -> f64 { self.data.resolved_padding() }
 
     /// Alignment within leftover space.
     #[getter]
@@ -184,9 +192,10 @@ impl PointScale {
     }
 
     fn __repr__(&self) -> String {
+        let padding = self.data.padding.map_or_else(|| "None".to_string(), |p| p.to_string());
         format!(
             "PointScale(domain={:?}, padding={}, align={}, reverse={})",
-            self.data.domain, self.data.padding, self.data.align,
+            self.data.domain, padding, self.data.align,
             if self.data.reverse { "True" } else { "False" }
         )
     }
@@ -219,7 +228,7 @@ mod tests {
                 let facade = PointScale {
                     data: PointScaleData {
                         domain: domain.clone(),
-                        padding,
+                        padding: Some(padding),
                         align,
                         reverse: false,
                     },
@@ -247,7 +256,7 @@ mod tests {
     fn point_scale_basic_positions() {
         let s = PointScaleData {
             domain: vec!["a".into(), "b".into(), "c".into()],
-            padding: 0.0,
+            padding: Some(0.0),
             align: 0.5,
             reverse: false,
         };
@@ -264,7 +273,7 @@ mod tests {
     fn point_scale_with_padding() {
         let s = PointScaleData {
             domain: vec!["a".into(), "b".into(), "c".into()],
-            padding: 0.5,
+            padding: Some(0.5),
             align: 0.5,
             reverse: false,
         };
@@ -282,7 +291,7 @@ mod tests {
     fn point_scale_reverse() {
         let s = PointScaleData {
             domain: vec!["a".into(), "b".into(), "c".into()],
-            padding: 0.0,
+            padding: Some(0.0),
             align: 0.5,
             reverse: true,
         };
@@ -297,7 +306,7 @@ mod tests {
     fn point_scale_single_category() {
         let s = PointScaleData {
             domain: vec!["x".into()],
-            padding: 0.5,
+            padding: Some(0.5),
             align: 0.5,
             reverse: false,
         };
@@ -309,7 +318,7 @@ mod tests {
     fn point_scale_unknown_returns_nan() {
         let s = PointScaleData {
             domain: vec!["a".into()],
-            padding: 0.0,
+            padding: Some(0.0),
             align: 0.5,
             reverse: false,
         };
@@ -322,7 +331,7 @@ mod tests {
     fn point(domain: &[&str], padding: f64, align: f64, reverse: bool) -> PointScaleData {
         PointScaleData {
             domain: domain.iter().map(|s| s.to_string()).collect(),
-            padding,
+            padding: Some(padding),
             align,
             reverse,
         }
@@ -386,5 +395,47 @@ mod tests {
         assert!((s.scale_str("a", 0.0, 300.0) - 250.0).abs() < 1e-9);
         assert!((s.scale_str("b", 0.0, 300.0) - 150.0).abs() < 1e-9);
         assert!((s.scale_str("c", 0.0, 300.0) - 50.0).abs() < 1e-9);
+    }
+
+    /// `PointScale` puts `padding` on the wire only when the user set it; an
+    /// unset padding still resolves to the 0.5 default in both the facade and
+    /// the renderer, so rendering is unchanged.
+    #[test]
+    fn point_wire_carries_padding_only_when_set() {
+        let unset = PointScale::new(None, None, 0.5, false, None).unwrap();
+        let json = serde_json::to_value(unset.to_scale_spec()).unwrap();
+        assert!(json.get("padding").is_none(), "{json}");
+        assert_eq!(unset.padding(), DEFAULT_POINT_PADDING);
+        let explicit = PointScale::new(None, Some(0.5), 0.5, false, None).unwrap();
+        assert_eq!(serde_json::to_value(explicit.to_scale_spec()).unwrap()["padding"], serde_json::json!(0.5));
+        assert_ne!(unset, explicit);
+        let domain = Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        let unset = PointScale::new(domain.clone(), None, 0.5, false, None).unwrap();
+        let explicit = PointScale::new(domain, Some(0.5), 0.5, false, None).unwrap();
+        assert_eq!(["a", "b", "c"].map(|c| unset.scale(c)), ["a", "b", "c"].map(|c| explicit.scale(c)));
+    }
+
+    /// The constructor's refusals name `PointScale` and the argument passed.
+    #[test]
+    fn constructor_refusals_name_the_call_and_the_argument() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let refusal = |padding: Option<f64>, align: f64| {
+                PointScale::new(None, padding, align, false, None)
+                    .expect_err("out-of-bounds argument")
+                    .value(py)
+                    .to_string()
+            };
+            assert_eq!(
+                refusal(Some(-0.5), 0.5),
+                "PointScale(padding=...) must be a finite number >= 0; received -0.5"
+            );
+            assert_eq!(
+                refusal(Some(f64::INFINITY), 0.5),
+                "PointScale(padding=...) must be a finite number >= 0; received inf"
+            );
+            assert_eq!(refusal(None, 2.0), "PointScale(align=...) must be a number in [0, 1]; received 2");
+            assert_eq!(refusal(None, f64::NAN), "PointScale(align=...) must be a number in [0, 1]; received NaN");
+        });
     }
 }

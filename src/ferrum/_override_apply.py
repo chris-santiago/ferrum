@@ -166,6 +166,16 @@ class OverridePayload:
         e.g. ``{"x": {"scale": {"domain": [0, 10]}}}``.  Keys are always the
         gate's wire spelling, so ``x_scale_padding_inner`` and
         ``x_scale_paddingInner`` both fold to ``{"paddingInner": ...}``.
+    encoding_paths:
+        ``{channel: {wire_key: path}}``, the flat override path the caller
+        actually wrote for each emitted ``encoding`` leaf (e.g.
+        ``{"x": {"paddingInner": "x_scale_padding_inner"}}``).  Derived from
+        the same ``{wire_key: (value, path)}`` record ``encoding`` is built
+        from (see :func:`build_payload`), so the two can never disagree
+        key-for-key -- there is no second dict for a future writer to update
+        out of step.  Read by
+        :func:`ferrum._override_consume.refuse_malformed_scale_overrides` to
+        name the call in a per-leaf refusal.
     mark_style:
         ``{leaf: value}`` for mark-style targets, e.g. ``{"corner_radius": 4}``.
     coord:
@@ -181,6 +191,7 @@ class OverridePayload:
 
     chart_config: dict[str, dict[str, Any]]
     encoding: dict[str, dict[str, dict[str, Any]]]
+    encoding_paths: dict[str, dict[str, str]]
     mark_style: dict[str, Any]
     coord: dict[str, Any]
     properties: dict[str, Any]
@@ -793,7 +804,11 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
 
     chart_config_leaves: dict[str, dict[str, Any]] = {}
     chart_config_classes: dict[str, type | None] = {}
-    encoding: dict[str, dict[str, dict[str, Any]]] = {}
+    # One combined record per channel, {wire_leaf: (value, path)}. `encoding`
+    # and `encoding_paths` are derived from this single mapping after the
+    # loop (below), so the two can never disagree key-for-key -- a future
+    # writer can only grow or shrink them together, not separately.
+    encoding_entries: dict[str, dict[str, tuple[Any, str]]] = {}
     mark_style: dict[str, Any] = {}
     coord: dict[str, Any] = {}
     properties: dict[str, Any] = {}
@@ -811,12 +826,27 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
             chart_config_leaves.setdefault(target_key, {})[loc.leaf] = value
             chart_config_classes[target_key] = resolved.config_cls
         elif resolved.target is Target.ENCODING_SCALE:
-            channel = encoding.setdefault(_target_key(loc, path=path), {})
-            # Emit the WIRE spelling: the scale-key gate accepts
-            # ``paddingInner``, the flat override surface reads
-            # ``padding_inner``, and both must land on the same wire key.
-            wire_leaf = _SCALE_LEAF_WIRE_ALIASES.get(loc.leaf, loc.leaf)
-            channel.setdefault("scale", {})[wire_leaf] = value
+            # A None scale-override leaf is no override (#157): it emits
+            # nothing, so the chart's own scale value for that wire key
+            # stands, matching every other non-mark override target (e.g.
+            # `_chart_config_wire_fragment`, which drops a None leaf before
+            # it ever reaches the merge). Without this, a None override
+            # would reach the wire as an explicit null, which either
+            # silently erases the chart's own value (every Option-typed
+            # key: domain, range, scheme, stops, ...) or raises a raw,
+            # unnamed serde error (every non-Option key: align, reverse,
+            # nice, ...). Checked once here for every leaf, not per key.
+            if value is not None:
+                # Emit the WIRE spelling: the scale-key gate accepts
+                # ``paddingInner``, the flat override surface reads
+                # ``padding_inner``, and both must land on the same wire key.
+                # The path travels with the value in one tuple (not a
+                # second parallel dict), so a later spelling of the same
+                # wire key in this call overwrites both together by
+                # construction, never just one of them.
+                wire_leaf = _SCALE_LEAF_WIRE_ALIASES.get(loc.leaf, loc.leaf)
+                target_key = _target_key(loc, path=path)
+                encoding_entries.setdefault(target_key, {})[wire_leaf] = (value, path)
         elif resolved.target is Target.MARK:
             mark_style[loc.leaf] = value
         elif resolved.target is Target.COORD:
@@ -831,10 +861,21 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
         target_key: _chart_config_wire_fragment(chart_config_classes[target_key], leaves)
         for target_key, leaves in chart_config_leaves.items()
     }
+    # Two views of `encoding_entries`, built from the identical key set, so
+    # `encoding` and `encoding_paths` cannot disagree key-for-key.
+    encoding = {
+        channel: {"scale": {wire_leaf: value for wire_leaf, (value, _path) in leaves.items()}}
+        for channel, leaves in encoding_entries.items()
+    }
+    encoding_paths = {
+        channel: {wire_leaf: path for wire_leaf, (_value, path) in leaves.items()}
+        for channel, leaves in encoding_entries.items()
+    }
 
     return OverridePayload(
         chart_config=chart_config,
         encoding=encoding,
+        encoding_paths=encoding_paths,
         mark_style=mark_style,
         coord=coord,
         properties=properties,

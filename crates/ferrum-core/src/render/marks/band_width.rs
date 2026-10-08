@@ -56,9 +56,8 @@ use crate::spec::position::PositionAdjust;
 fn band(padding_inner: f64, range: [f64; 2]) -> ScaleSpec {
     ScaleSpec::Band {
         domain: None,
-        padding: 0.0,
-        padding_inner: Some(padding_inner),
-        padding_outer: Some(0.0),
+        padding: crate::scale::discrete::BandPadding::new(Some(0.0), Some(padding_inner), Some(0.0))
+            .expect("in-bounds band padding"),
         align: 0.5,
         range: Some(range.to_vec()),
     }
@@ -525,9 +524,8 @@ fn align_translates_the_clamped_band_in_rendered_geometry() {
                     SpecType::Nominal,
                     Some(ScaleSpec::Band {
                         domain: Some(vec!["a".into()]),
-                        padding: 0.0,
-                        padding_inner: Some(0.5),
-                        padding_outer: Some(0.0),
+                        padding: crate::scale::discrete::BandPadding::new(Some(0.0), Some(0.5), Some(0.0))
+                            .expect("in-bounds band padding"),
                         align,
                         range: Some(vec![0.0, 400.0]),
                     }),
@@ -568,9 +566,8 @@ fn align_translates_the_clamped_band_in_rendered_geometry() {
 fn a_batch_missing_categories_sizes_by_the_scale_domain() {
     let full_domain = ScaleSpec::Band {
         domain: Some(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
-        padding: 0.0,
-        padding_inner: Some(0.0),
-        padding_outer: Some(0.0),
+        padding: crate::scale::discrete::BandPadding::new(Some(0.0), Some(0.0), Some(0.0))
+            .expect("in-bounds band padding"),
         align: 0.5,
         range: Some(vec![0.0, 400.0]),
     };
@@ -851,5 +848,54 @@ fn unpadded_auto_path_reproduces_the_former_widths_for_every_ordinal_mark() {
             assert_eq!(*w, slot_w, "heatmap cell width at {plot:?}");
             assert_eq!(*h, plot.h / 2.0, "heatmap cell height (two `grp` categories) at {plot:?}");
         }
+    }
+}
+
+// ── A named band scale without padding (#157) ───────────────────────────────
+
+/// A `{"type": "band"}` scale with no padding draws every band consumer
+/// exactly where the auto-inferred categorical axis draws it: bars, dodged
+/// bars, ticks and heatmap cells, compared scene node for scene node.
+///
+/// Before #157 the unset scale carried a hidden `padding = 0.1`, so every
+/// width here came out narrower (98.629px against 112.327px for four bars on
+/// a 561.636px panel) and every center moved inward.
+#[test]
+fn an_unpadded_named_band_scale_draws_like_the_auto_axis() {
+    // The dict door: a scale dict naming only its type.
+    let named = || Some(serde_json::from_str::<ScaleSpec>(r#"{"type":"band"}"#).unwrap());
+    let plot = Rect { x: 0.0, y: 0.0, w: 561.636, h: 350.0 };
+    let dodge = || Some(PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.05 });
+    for (mark, position, y2) in [
+        (Mark::Bar, None, false),
+        (Mark::Bar, dodge(), false),
+        (Mark::Tick, None, false),
+        (Mark::Rect, None, true),
+    ] {
+        let encoding = |scale: Option<ScaleSpec>| Encoding {
+            x: enc("cat", SpecType::Nominal, scale),
+            y: if y2 { enc("grp", SpecType::Nominal, None) } else { enc("val", SpecType::Quantitative, None) },
+            color: if position.is_some() { enc("grp", SpecType::Nominal, None) } else { None },
+            ..Default::default()
+        };
+        let what = format!("{mark:?} position={position:?}");
+        let auto = render_nodes(mark.clone(), encoding(None), &four_cats(), position.clone(), plot);
+        let auto = counted(auto, 4, &what);
+        let band = render_nodes(mark.clone(), encoding(named()), &four_cats(), position.clone(), plot);
+        assert_eq!(band, auto, "{what}");
+    }
+    let bars = rect_x_w(&render_nodes(
+        Mark::Bar,
+        Encoding {
+            x: enc("cat", SpecType::Nominal, named()),
+            y: enc("val", SpecType::Quantitative, None),
+            ..Default::default()
+        },
+        &four_cats(),
+        None,
+        plot,
+    ));
+    for (_, w) in counted(bars, 4, "named band bars") {
+        assert!((w - 112.327).abs() < 1e-3, "bar width {w}");
     }
 }

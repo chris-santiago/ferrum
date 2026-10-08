@@ -351,6 +351,12 @@ pub enum RenderError {
     /// through it, mirroring how `scale_resolve::color` quotes the same
     /// sentence for a raw-dict discretizing scale.
     InvalidScaleDomainConfig { channel: String, reason: String },
+    /// A band scale's `padding`/`paddingInner`/`paddingOuter` outside d3's
+    /// bounds. The `BandScale` constructor refuses the same values at the
+    /// call; this is the refusal for a scale dict (or an override type
+    /// switch), which reaches Rust unvalidated. `channel` follows
+    /// `InvalidScaleDomainConfig`'s convention.
+    InvalidBandPadding { channel: String, error: crate::scale::discrete::BandPaddingError },
     /// An `interpolate=` mark kwarg named a curve method outside the accepted
     /// vocabulary (spec §6.1). `value` is the rejected string; the accepted set
     /// in the message comes from
@@ -966,6 +972,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::UnsupportedChannelCombination { .. }
         | RenderError::InvalidFormatSpec { .. }
         | RenderError::InvalidScaleDomainConfig { .. }
+        | RenderError::InvalidBandPadding { .. }
         | RenderError::UnknownInterpolate { .. }
         | RenderError::UnknownStrokeCap { .. }
         | RenderError::UnknownStrokeJoin { .. }
@@ -1156,6 +1163,12 @@ impl std::fmt::Display for RenderError {
             Self::InvalidScaleDomainConfig { channel, reason } => write!(
                 f,
                 "{channel} axis scale-domain config: {reason}"
+            ),
+            Self::InvalidBandPadding { channel, error } => write!(
+                f,
+                "band scale on {channel}: {} {}",
+                error.key().wire_key(),
+                error.reason()
             ),
             Self::UnknownInterpolate { value } => {
                 use crate::transform::vocabulary::Vocabulary;
@@ -3440,9 +3453,8 @@ mod orchestration_tests {
     fn padded_band() -> crate::spec::encoding::ScaleSpec {
         crate::spec::encoding::ScaleSpec::Band {
             domain: Some(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
-            padding: 0.1,
-            padding_inner: None,
-            padding_outer: None,
+            padding: crate::scale::discrete::BandPadding::new(Some(0.1), None, None)
+                .expect("in-bounds band padding"),
             align: 0.5,
             range: None,
         }
@@ -3633,17 +3645,16 @@ mod orchestration_tests {
         .unwrap()
     }
 
-    /// An explicit-`range=` `BandScale` over `domain`, at the library's
-    /// default padding/align — the shape the spec reviewer measured.
+    /// An explicit-`range=` `BandScale` over `domain`, at
+    /// `padding=0.1` and the default align — the shape the spec reviewer measured.
     fn explicit_range_band(
         domain: Vec<&str>,
         range: [f64; 2],
     ) -> crate::spec::encoding::ScaleSpec {
         crate::spec::encoding::ScaleSpec::Band {
             domain: Some(domain.into_iter().map(String::from).collect()),
-            padding: 0.1,
-            padding_inner: None,
-            padding_outer: None,
+            padding: crate::scale::discrete::BandPadding::new(Some(0.1), None, None)
+                .expect("in-bounds band padding"),
             align: 0.5,
             range: Some(vec![range[0], range[1]]),
         }

@@ -107,11 +107,17 @@ class TestBandScale:
     """BandScale converts to the expected dict shape."""
 
     def test_defaults(self):
+        """An unset BandScale puts no padding keys on the wire (#157): the
+        band inherits the auto-inferred categorical layout (no inner/outer
+        padding), not Vega-Lite's 0.1 convention, and the wire omits every
+        key the caller never set.
+        """
         s = fm.BandScale()
         d = _scale_to_dict(s)
         assert d["type"] == "band"
-        assert d["paddingInner"] == pytest.approx(0.1)
-        assert d["paddingOuter"] == pytest.approx(0.1)
+        assert "padding" not in d
+        assert "paddingInner" not in d
+        assert "paddingOuter" not in d
         assert d["align"] == 0.5
 
     def test_custom_padding(self):
@@ -135,10 +141,14 @@ class TestPointScale:
     """PointScale converts to the expected dict shape."""
 
     def test_defaults(self):
+        """An unset PointScale puts no ``padding`` key on the wire either
+        (#157): its 0.5 default lives only in Rust's serde default, read
+        when the wire key is absent, so rendering stays byte-identical.
+        """
         s = fm.PointScale()
         d = _scale_to_dict(s)
         assert d["type"] == "point"
-        assert d["padding"] == 0.5
+        assert "padding" not in d
         assert d["align"] == 0.5
         assert d["reverse"] is False
 

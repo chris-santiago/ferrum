@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
-use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN};
+use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN, DEFAULT_POINT_PADDING};
 use crate::scale::linear::LinearScale;
 use crate::scale::log::LogScale;
 use crate::scale::ordinal::OrdinalScale;
@@ -613,19 +613,18 @@ pub(in crate::render) fn build_from_scale_spec(
                 TimeScale::new_internal(d, r, common.clamp, *nice).with_utc(true),
             )
         }
-        ScaleSpec::Band { domain, padding, padding_inner, padding_outer, align, range } => {
+        ScaleSpec::Band { domain, padding, align, range } => {
+            // A scale dict's padding reaches here unvalidated; refuse it
+            // before it becomes geometry.
+            let layout = padding.layout(*align).map_err(|error| RenderError::InvalidBandPadding {
+                channel: channel.to_string(),
+                error,
+            })?;
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field, paired_positional)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings)?;
-            // d3's `padding` is a shorthand that sets BOTH inner and outer;
-            // an explicit `padding_inner`/`padding_outer` overrides its side.
-            let layout = DiscreteLayout::band(
-                padding_inner.unwrap_or(*padding),
-                padding_outer.unwrap_or(*padding),
-                *align,
-            );
             let categories = d.len();
             let (band_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
             let scale = OrdinalScale::new_internal(d, band_range, layout)
@@ -655,9 +654,9 @@ pub(in crate::render) fn build_from_scale_spec(
             }
             let categories = d.len();
             let (point_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
+            let layout = DiscreteLayout::point(padding.unwrap_or(DEFAULT_POINT_PADDING), *align);
             let scale =
-                OrdinalScale::new_internal(d, point_range, DiscreteLayout::point(*padding, *align))
-                    .with_explicit_range(explicit);
+                OrdinalScale::new_internal(d, point_range, layout).with_explicit_range(explicit);
             warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
             ScaleKind::Ordinal(scale)
         }
@@ -1440,6 +1439,14 @@ mod tests {
         spec: &crate::spec::encoding::ScaleSpec,
         cats: &[String],
     ) -> ScaleKind {
+        try_resolve_scale_spec_for_cats(spec, cats).unwrap()
+    }
+
+    /// [`resolve_scale_spec_for_cats`], keeping the resolver's refusal.
+    fn try_resolve_scale_spec_for_cats(
+        spec: &crate::spec::encoding::ScaleSpec,
+        cats: &[String],
+    ) -> Result<ScaleKind, RenderError> {
         let batch = category_batch("cat", cats);
 
         let enc = crate::spec::encoding::EncodingSpec {
@@ -1456,7 +1463,6 @@ mod tests {
         };
         let mut warnings = Vec::new();
         super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &|| super::column_extent(&batch, "cat"), &mut warnings)
-            .unwrap()
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -1467,7 +1473,7 @@ mod tests {
     ) -> ScaleKind {
         let spec = crate::spec::encoding::ScaleSpec::Point {
             domain: Some(explicit_domain.clone()),
-            padding: 0.0,
+            padding: Some(0.0),
             align: 0.5,
             reverse,
             range,
@@ -1545,7 +1551,7 @@ mod tests {
         let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
         let spec = ScaleSpec::Point {
             domain: Some(domain.clone()),
-            padding: 0.5,
+            padding: Some(0.5),
             align: 0.5,
             reverse: false,
             range: Some(vec![40.0, 260.0]),
@@ -1564,7 +1570,7 @@ mod tests {
     /// Resolve a `ScaleSpec::Band` over `[a, b, c, d]` on `[40, 260]` with the
     /// given padding trio, and report its centers and bandwidth.
     fn band_geometry(
-        padding: f64,
+        padding: Option<f64>,
         padding_inner: Option<f64>,
         padding_outer: Option<f64>,
         align: f64,
@@ -1572,9 +1578,8 @@ mod tests {
         let cats: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
         let spec = crate::spec::encoding::ScaleSpec::Band {
             domain: Some(cats.clone()),
-            padding,
-            padding_inner,
-            padding_outer,
+            padding: crate::scale::discrete::BandPadding::new(padding, padding_inner, padding_outer)
+                .expect("in-bounds band padding"),
             align,
             range: Some(vec![40.0, 260.0]),
         };
@@ -1591,7 +1596,7 @@ mod tests {
     /// exactly — the reduction every default golden depends on.
     #[test]
     fn band_spec_zero_padding_keeps_symmetric_centers() {
-        let (centers, bandwidth) = band_geometry(0.0, None, None, 0.5);
+        let (centers, bandwidth) = band_geometry(Some(0.0), None, None, 0.5);
         assert_eq!(centers, vec![67.5, 122.5, 177.5, 232.5]);
         assert_eq!(bandwidth, 55.0);
     }
@@ -1601,17 +1606,17 @@ mod tests {
     /// from setting only one side (F-L04-03's mapping contract).
     #[test]
     fn band_spec_padding_shorthand_sets_inner_and_outer() {
-        let shorthand = band_geometry(0.2, None, None, 0.5);
-        let both_explicit = band_geometry(0.0, Some(0.2), Some(0.2), 0.5);
+        let shorthand = band_geometry(Some(0.2), None, None, 0.5);
+        let both_explicit = band_geometry(None, Some(0.2), Some(0.2), 0.5);
         assert_eq!(shorthand, both_explicit, "padding must set both sides");
 
-        let inner_only = band_geometry(0.0, Some(0.2), None, 0.5);
+        let inner_only = band_geometry(None, Some(0.2), None, 0.5);
         assert_ne!(
             shorthand, inner_only,
             "padding_inner alone must not reproduce the shorthand's outer padding"
         );
         // Explicit sides override the shorthand independently.
-        assert_eq!(band_geometry(0.2, Some(0.0), None, 0.5), band_geometry(0.0, None, Some(0.2), 0.5));
+        assert_eq!(band_geometry(Some(0.2), Some(0.0), None, 0.5), band_geometry(Some(0.0), None, Some(0.2), 0.5));
     }
 
     /// Hand-computed d3 oracle through the resolver: `[a, b, c, d]` on
@@ -1620,7 +1625,7 @@ mod tests {
     /// start = 40 + 0.3·50 = 55 → band middles 75 / 125 / 175 / 225.
     #[test]
     fn band_spec_padding_moves_geometry_to_d3_values() {
-        let (centers, bandwidth) = band_geometry(0.0, Some(0.2), Some(0.3), 0.5);
+        let (centers, bandwidth) = band_geometry(None, Some(0.2), Some(0.3), 0.5);
         assert!((bandwidth - 40.0).abs() < 1e-9, "bandwidth {bandwidth}");
         for (got, want) in centers.iter().zip([75.0, 125.0, 175.0, 225.0]) {
             assert!((got - want).abs() < 1e-9, "center {got} vs {want} in {centers:?}");
@@ -1629,8 +1634,8 @@ mod tests {
         // Discriminating companion: `padding_inner = 0.2, padding_outer = 0.1`
         // leaves the denominator at 4.0, so the step and every band middle are
         // the unpadded ones — inner padding narrows the band without moving it.
-        let (unpadded_centers, unpadded_bandwidth) = band_geometry(0.0, None, None, 0.5);
-        let (narrowed_centers, narrowed_bandwidth) = band_geometry(0.0, Some(0.2), Some(0.1), 0.5);
+        let (unpadded_centers, unpadded_bandwidth) = band_geometry(Some(0.0), None, None, 0.5);
+        let (narrowed_centers, narrowed_bandwidth) = band_geometry(None, Some(0.2), Some(0.1), 0.5);
         assert_eq!(narrowed_centers, unpadded_centers);
         assert_eq!(unpadded_bandwidth, 55.0);
         assert_eq!(narrowed_bandwidth, 44.0);
@@ -1645,9 +1650,8 @@ mod tests {
         let center = |align: f64| {
             let spec = crate::spec::encoding::ScaleSpec::Band {
                 domain: Some(cats.clone()),
-                padding: 0.0,
-                padding_inner: Some(0.5),
-                padding_outer: Some(0.0),
+                padding: crate::scale::discrete::BandPadding::new(Some(0.0), Some(0.5), Some(0.0))
+                    .expect("in-bounds band padding"),
                 align,
                 range: Some(vec![0.0, 100.0]),
             };
@@ -1662,6 +1666,96 @@ mod tests {
         assert_eq!(center(0.0), 25.0);
         assert_eq!(center(0.5), 50.0);
         assert_eq!(center(1.0), 75.0);
+    }
+
+    // ── ScaleSpec::Band padding through the wire (#157) ─────────────────────
+
+    /// Parse `json` through `ScaleSpec`'s own (key-gated) deserialize, the
+    /// route a scale dict and an override type switch take, and resolve it
+    /// over `[a, b, c, d]` on the `(0, 500)` panel.
+    fn resolve_band_json(json: &str) -> Result<ScaleKind, RenderError> {
+        let spec: crate::spec::encoding::ScaleSpec = serde_json::from_str(json).unwrap();
+        let cats: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        try_resolve_scale_spec_for_cats(&spec, &cats)
+    }
+
+    fn ordinal_geometry(scale: ScaleKind) -> (Vec<f64>, f64) {
+        let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
+        (
+            ["a", "b", "c", "d"].iter().map(|c| ordinal.scale_internal(c).expect("in domain")).collect(),
+            ordinal.bandwidth(),
+        )
+    }
+
+    /// The same four categories laid out by `layout` over the same panel,
+    /// built directly rather than through the wire.
+    fn direct_geometry(layout: DiscreteLayout) -> (Vec<f64>, f64) {
+        let cats: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        ordinal_geometry(ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+            cats,
+            vec![0.0, 500.0],
+            layout,
+        )))
+    }
+
+    /// A `{"type": "band"}` dict with no padding key lays out exactly as the
+    /// auto-inferred categorical axis (`DiscreteLayout::UNPADDED`), bit for
+    /// bit. Before #157 its serde default was a hidden `padding = 0.1`.
+    #[test]
+    fn band_dict_without_padding_resolves_to_the_auto_inferred_layout() {
+        let got = ordinal_geometry(resolve_band_json(r#"{"type":"band"}"#).unwrap());
+        assert_eq!(got, direct_geometry(DiscreteLayout::UNPADDED));
+        assert_eq!(got, (vec![62.5, 187.5, 312.5, 437.5], 125.0));
+        let explicit_null = r#"{"type":"band","padding":null,"paddingInner":null,"paddingOuter":null}"#;
+        assert_eq!(ordinal_geometry(resolve_band_json(explicit_null).unwrap()), got);
+    }
+
+    /// Every explicit padding shape resolves through the wire to d3's layout,
+    /// bit for bit.
+    #[test]
+    fn band_dict_padding_resolves_to_d3_layouts() {
+        for (json, layout) in [
+            (r#"{"type":"band","padding":0.1}"#, DiscreteLayout::band(0.1, 0.1, 0.5)),
+            (r#"{"type":"band","padding":0.0}"#, DiscreteLayout::UNPADDED),
+            (r#"{"type":"band","paddingInner":0.2}"#, DiscreteLayout::band(0.2, 0.0, 0.5)),
+            (r#"{"type":"band","paddingOuter":0.3}"#, DiscreteLayout::band(0.0, 0.3, 0.5)),
+            (r#"{"type":"band","paddingInner":0.2,"paddingOuter":0.3}"#, DiscreteLayout::band(0.2, 0.3, 0.5)),
+            (r#"{"type":"band","padding":0.4,"paddingInner":0.2}"#, DiscreteLayout::band(0.2, 0.4, 0.5)),
+            (r#"{"type":"band","paddingOuter":2.5}"#, DiscreteLayout::band(0.0, 2.5, 0.5)),
+        ] {
+            assert_eq!(
+                ordinal_geometry(resolve_band_json(json).unwrap()),
+                direct_geometry(layout),
+                "{json}"
+            );
+        }
+    }
+
+    /// A scale dict's malformed padding is refused at render, naming the
+    /// channel, the band scale and the key, including a `padding` that both
+    /// explicit sides mask.
+    #[test]
+    fn band_dict_malformed_padding_is_refused_naming_the_key() {
+        for (json, message) in [
+            (r#"{"type":"band","padding":1.5}"#, "band scale on x: padding must be a number in [0, 1]; received 1.5"),
+            (r#"{"type":"band","padding":-0.1}"#, "band scale on x: padding must be a number in [0, 1]; received -0.1"),
+            (
+                r#"{"type":"band","paddingInner":1.01}"#,
+                "band scale on x: paddingInner must be a number in [0, 1]; received 1.01",
+            ),
+            (
+                r#"{"type":"band","paddingOuter":-1}"#,
+                "band scale on x: paddingOuter must be a finite number >= 0; received -1",
+            ),
+            (
+                r#"{"type":"band","padding":7,"paddingInner":0.2,"paddingOuter":0.3}"#,
+                "band scale on x: padding must be a number in [0, 1]; received 7",
+            ),
+        ] {
+            let error = resolve_band_json(json).expect_err(json);
+            assert!(matches!(error, RenderError::InvalidBandPadding { .. }), "{json}: {error:?}");
+            assert_eq!(error.to_string(), message, "{json}");
+        }
     }
 
     // ── explicitness gates: degenerate inputs (ported from

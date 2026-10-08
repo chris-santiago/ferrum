@@ -19,7 +19,7 @@ mod tests;
 
 pub use gate::{
     scale_accepted_keys, scale_temporal_type_tags, scale_type_tags, sort_accepted_vocabulary,
-    validate_scale_dict,
+    validate_scale_dict, validate_scale_values,
 };
 use gate::deserialize_scale_value;
 
@@ -183,8 +183,8 @@ pub struct ContinuousScaleCommon {
 /// | `Pow` | `ScaleKind::Pow` (stored exponent) |
 /// | `Sqrt` | `ScaleKind::Pow(0.5)` |
 /// | `Ordinal` | `ScaleKind::Ordinal` |
-/// | `Band` | `ScaleKind::Ordinal` under the band model: inner = `padding_inner.unwrap_or(padding)`, outer = `padding_outer.unwrap_or(padding)` (d3's `padding` shorthand sets BOTH sides), `align` threaded |
-/// | `Point` | `ScaleKind::Ordinal` under the point model: `padding` (an end padding) and `align` per the point formula; `reverse` reverses the resolved domain order post-sort, GH #65 |
+/// | `Band` | `ScaleKind::Ordinal` under the band model: `padding` resolves through `scale::discrete::BandPadding::layout` (validation and d3's precedence live there only), `align` threaded |
+/// | `Point` | `ScaleKind::Ordinal` under the point model: `padding` (an end padding, `scale::discrete::DEFAULT_POINT_PADDING` when unset) and `align` per the point formula; `reverse` reverses the resolved domain order post-sort, GH #65 |
 /// | `Sequential`, `Diverging`, `Quantize` | `ScaleKind::Linear` (positional fallback) |
 /// | `BinOrdinal` | `ScaleKind::Linear` |
 ///
@@ -367,12 +367,11 @@ pub enum ScaleSpec {
     Band {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain: Option<Vec<String>>,
-        #[serde(default = "default_band_padding")]
-        padding: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingInner")]
-        padding_inner: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingOuter")]
-        padding_outer: Option<f64>,
+        /// `padding`, `paddingInner` and `paddingOuter`, each on the wire only
+        /// when set. Unset padding inherits the auto-inferred categorical
+        /// layout; `BandPadding` owns that rule, the bounds and resolution.
+        #[serde(flatten)]
+        padding: crate::scale::discrete::BandPadding,
         #[serde(default = "default_band_align")]
         align: f64,
         /// Explicit pixel range `[lo, hi]`. Defaults to the plot extent when
@@ -384,8 +383,10 @@ pub enum ScaleSpec {
     Point {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain: Option<Vec<String>>,
-        #[serde(default = "default_point_padding")]
-        padding: f64,
+        /// On the wire only when set; unset resolves to
+        /// `scale::discrete::DEFAULT_POINT_PADDING`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
         #[serde(default = "default_band_align")]
         align: f64,
         #[serde(default)]
@@ -651,12 +652,6 @@ fn default_symlog_constant() -> f64 {
 }
 fn default_pow_exponent() -> f64 {
     2.0
-}
-pub(crate) fn default_band_padding() -> f64 {
-    0.1
-}
-fn default_point_padding() -> f64 {
-    0.5
 }
 fn default_band_align() -> f64 {
     0.5

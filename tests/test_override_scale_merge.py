@@ -372,9 +372,25 @@ _NONSTRING_TYPE_VALUES: list[tuple[str, object]] = [
 ]
 _NONSTRING_IDS = [name for name, _value in _NONSTRING_TYPE_VALUES]
 
+#: The two OVERRIDE-value tests directly below exercise genuinely malformed
+#: ``type`` override values -- ones that must still refuse somehow. ``None``
+#: moved out of that subset under #157: a ``None`` override leaf is no
+#: override (the ``ENCODING_SCALE`` payload branch drops it before the merge
+#: ever sees it), so ``.override(y_scale_type=None)`` is a deliberate no-op,
+#: not a malformed value, and must NOT raise -- pinned separately below by
+#: ``test_override_none_type_is_no_op_keeps_the_base_scale_type``. It stays
+#: in the shared ``_NONSTRING_TYPE_VALUES`` list itself: section 6 reuses the
+#: full list for the BASE scale's own ``"type"`` key (a value embedded in
+#: ``scale={"type": ..., ...}`` via ``.encode()``, not an override leaf),
+#: which the None-override-is-no-op rule does not touch.
+_MALFORMED_TYPE_VALUES = [
+    (name, value) for name, value in _NONSTRING_TYPE_VALUES if value is not None
+]
+_MALFORMED_TYPE_IDS = [name for name, _value in _MALFORMED_TYPE_VALUES]
+
 
 @pytest.mark.parametrize(
-    "new_type_value", [value for _name, value in _NONSTRING_TYPE_VALUES], ids=_NONSTRING_IDS
+    "new_type_value", [value for _name, value in _MALFORMED_TYPE_VALUES], ids=_MALFORMED_TYPE_IDS
 )
 def test_override_nonstring_type_over_explicit_base_does_not_leak_pyo3_argument_error(
     new_type_value: object,
@@ -398,7 +414,7 @@ def test_override_nonstring_type_over_explicit_base_does_not_leak_pyo3_argument_
 
 
 @pytest.mark.parametrize(
-    "new_type_value", [value for _name, value in _NONSTRING_TYPE_VALUES], ids=_NONSTRING_IDS
+    "new_type_value", [value for _name, value in _MALFORMED_TYPE_VALUES], ids=_MALFORMED_TYPE_IDS
 )
 def test_override_nonstring_type_same_error_class_with_and_without_base_scale(
     new_type_value: object,
@@ -427,6 +443,22 @@ def test_override_nonstring_type_same_error_class_with_and_without_base_scale(
     assert str(with_base.value) == str(without_base.value), (
         "with-base and no-base spellings must raise the same message"
     )
+
+
+def test_override_none_type_is_no_op_keeps_the_base_scale_type() -> None:
+    """``.override(y_scale_type=None)`` is no override (#157): a None
+    scale-override leaf is dropped before the merge ever sees it, so the
+    channel's own scale type stands -- unlike every other non-string type
+    value above (section 5), which still refuses.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    base = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x="cat", y=fm.Y("val", scale=fm.LogScale(domain=[1.0, 100.0])))
+    )
+    overridden = base.override(y_scale_type=None)
+    assert overridden.to_svg() == base.to_svg()
 
 
 def test_override_bogus_type_over_explicit_base_surfaces_gate_unknown_variant() -> None:

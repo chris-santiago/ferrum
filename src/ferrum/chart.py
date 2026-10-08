@@ -3479,10 +3479,9 @@ class Chart(
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
-        _override_encoding = _override_payload.encoding if _override_payload is not None else None
         kw.update(
             self._build_encoding_specs(
-                resolved, enc, agg_field_remap, _override_encoding, mark_zero=mark_zero
+                resolved, enc, agg_field_remap, _override_payload, mark_zero=mark_zero
             )
         )
 
@@ -3551,7 +3550,7 @@ class Chart(
                 inherited_details=layered_chart_detail(
                     chart_detail, [layer.mark for layer in serialized_layers]
                 ),
-                override_encoding=_override_encoding,
+                override=_override_payload,
             )
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()

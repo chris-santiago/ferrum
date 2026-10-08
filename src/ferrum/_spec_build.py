@@ -32,7 +32,11 @@ from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KN
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._encode_lowering import _infer_agg_groupby, _lower_bin_encoding
 from ferrum._layer import layer_mark
-from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
+from ferrum._override_apply import OverridePayload
+from ferrum._override_consume import (
+    merge_encoding_scale as _merge_encoding_scale,
+    refuse_malformed_scale_overrides as _refuse_malformed_scale_overrides,
+)
 
 
 class _ResolvedBins(NamedTuple):
@@ -47,7 +51,7 @@ class _ResolvedBins(NamedTuple):
     encoding: dict
 
 
-def _with_override_scale(d: dict, channel: str, override_encoding: dict | None) -> dict:
+def _with_override_scale(d: dict, channel: str, override: OverridePayload | None) -> dict:
     """Return channel spec dict *d* with ``Chart.override``'s scale leaves for *channel* merged in.
 
     The one place an override's ``<channel>_scale_*`` leaves meet a channel's
@@ -55,21 +59,51 @@ def _with_override_scale(d: dict, channel: str, override_encoding: dict | None) 
     declares the channel alike, so a layered chart renders the override exactly
     as the channel's own ``scale=`` would. Override leaves win (spec §7). The
     merged dict goes back through ``_scale_to_dict`` so a typeless override
-    (just ``domain``) gains the ``type`` discriminator the wire requires, and
-    through the scale gate, so a refused override refuses in the gate's own
-    voice on every path, including a layer-only channel whose JSON wire dict
-    would otherwise refuse in serde's. *d* is never mutated.
+    (just ``domain``) gains the ``type`` discriminator the wire requires.
+
+    Three refusal layers run in order, named after the value's own origin
+    (#157):
+
+    - :func:`~ferrum._override_consume.merge_encoding_scale`'s own probes
+      refuse the CHART's own keys in the gate's voice, as before;
+    - :func:`~ferrum._override_consume.refuse_malformed_scale_overrides`
+      refuses the OVERRIDE's own values, naming the flat override path the
+      caller actually wrote (``x_scale_padding``, not ``padding``);
+    - the merged gate (``validate_scale_dict``) is the backstop for anything
+      left, so a refused override still refuses in the gate's own voice on
+      every path, including a layer-only channel whose JSON wire dict would
+      otherwise refuse in serde's.
+
+    *d* is never mutated.
     """
-    if override_encoding is None:
+    if override is None:
         return d
-    scale_overrides = override_encoding.get(channel, {}).get("scale")
+    scale_overrides = override.encoding.get(channel, {}).get("scale")
     if not scale_overrides:
         return d
     from ferrum.encoding._scale import _scale_to_dict
 
     existing_scale = d.get("scale")
     base_scale = existing_scale if isinstance(existing_scale, dict) else {}
-    merged = _scale_to_dict(_merge_encoding_scale(base_scale, scale_overrides))
+    # `_merge_encoding_scale` alone (no `_scale_to_dict` conversion yet) gives
+    # the effective type for the per-key probe below. The probe must run
+    # BEFORE `_scale_to_dict` converts the merged dict as a whole: that
+    # conversion (temporal domain elements, a reactive Parameter) can itself
+    # raise on a malformed override value -- e.g. an unparseable date in
+    # `x_scale_domain=["garbage", ...]` -- and a raise there would reach the
+    # caller unnamed, before the probe ever got a turn. The probe's own
+    # per-key fragment runs the identical conversion (see
+    # `refuse_malformed_scale_overrides`), so it catches that failure too.
+    pre_merge = _merge_encoding_scale(base_scale, scale_overrides)
+    # `pre_merge.get("type")`, not `.get("type", "linear")`: the typeless
+    # default is `_scale_to_dict`'s one to own (`out.setdefault("type",
+    # "linear")`). Passing `None` through to `refuse_malformed_scale_overrides`
+    # lets its own per-key fragment omit the `type` key too, so the same
+    # single call supplies the default for both the probe and the merge.
+    _refuse_malformed_scale_overrides(
+        pre_merge.get("type"), scale_overrides, override.encoding_paths.get(channel, {})
+    )
+    merged = _scale_to_dict(pre_merge)
     _validate_scale_dict(merged)
     return {**d, "scale": merged}
 
@@ -323,7 +357,7 @@ class SpecBuildMixin:
         resolved,
         enc: dict,
         agg_field_remap: dict,
-        override_encoding: dict | None = None,
+        override: OverridePayload | None = None,
         *,
         mark_zero: bool,
     ) -> dict:
@@ -344,12 +378,13 @@ class SpecBuildMixin:
         agg_field_remap :
             Map from original field name → output column name for any
             ``_PendingAggregate`` transforms already present.
-        override_encoding :
-            ``Chart.override`` encoding-scale payload (``{channel: {"scale": {...}}}``),
-            or ``None``.  Applied FIRST per channel, before the bar zero-anchor
-            injection (see the in-body comment below for why), so an override
-            scale leaf beats the channel's own ``scale=`` setting (override
-            wins the cascade, spec §7).
+        override :
+            The resolved ``Chart.override`` payload, or ``None``. Its
+            ``encoding``/``encoding_paths`` fields are applied FIRST per
+            channel, before the bar zero-anchor injection (see the in-body
+            comment below for why), so an override scale leaf beats the
+            channel's own ``scale=`` setting (override wins the cascade,
+            spec §7).
         mark_zero :
             Whether a bar chart's y-scale is anchored at zero: ``False`` once
             the chart's ``zero=False`` has been consumed, whichever door set it.
@@ -429,7 +464,7 @@ class SpecBuildMixin:
             # gate-refused shape the zero-anchor fix below exists to avoid,
             # just reached through override composition instead of a direct
             # scale= dict.
-            d = _with_override_scale(d, axis, override_encoding)
+            d = _with_override_scale(d, axis, override)
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or
@@ -521,7 +556,7 @@ class SpecBuildMixin:
         layers: list | None = None,
         *,
         inherited_details: list[object | None] | None = None,
-        override_encoding: dict | None = None,
+        override: OverridePayload | None = None,
     ) -> list:
         """Convert ``_layers`` to a list of JSON-serializable dicts for Rust.
 
@@ -539,9 +574,9 @@ class SpecBuildMixin:
             when it has none of its own, or ``None`` (see
             :func:`ferrum.encoding._aliases.layered_chart_detail`, which owns
             the "which marks read ``detail``" rule).
-        override_encoding :
-            ``Chart.override`` encoding-scale payload (``{channel: {"scale": {...}}}``),
-            or ``None``. Merged into every channel a layer declares, exactly as
+        override :
+            The resolved ``Chart.override`` payload, or ``None``. Merged
+            into every channel a layer declares, exactly as
             ``_build_encoding_specs`` merges it into the chart-level encoding;
             a layer that does not declare the channel inherits the chart-level
             (already overridden) one. ``to_spec`` builds the chart-level
@@ -611,7 +646,7 @@ class SpecBuildMixin:
                     # Auto-infer temporal type from column dtype when no explicit type
                     # annotation was given (same logic as _build_encoding_specs).
                     d = _apply_inferred_type(d, field, self._data)
-                    d = _with_override_scale(d, axis, override_encoding)
+                    d = _with_override_scale(d, axis, override)
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -695,9 +730,7 @@ class SpecBuildMixin:
                         enc_json_dict["formatType"] = d["format_type"]
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
-                    encoding_dict[axis] = _with_override_scale(
-                        {"field": ch}, axis, override_encoding
-                    )
+                    encoding_dict[axis] = _with_override_scale({"field": ch}, axis, override)
             layer_dict: dict = {
                 "mark": layer_mark(layer.mark),
                 "encoding": encoding_dict,

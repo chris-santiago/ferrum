@@ -99,9 +99,17 @@
 
 use std::borrow::Cow;
 
+use serde::{Deserialize, Serialize};
+
 /// d3's default `align` for band and point scales: leftover pixels (when the
 /// denominator clamp creates any) are split evenly before and after.
 pub(crate) const DEFAULT_ALIGN: f64 = 0.5;
+
+/// A point scale's end padding when the user sets none: half a step at each
+/// end, which places `n` points where an unpadded band scale centers its `n`
+/// bands. The resolver and the `PointScale` getter both read it; the wire
+/// carries a point scale's padding only when the user set one.
+pub(crate) const DEFAULT_POINT_PADDING: f64 = 0.5;
 
 /// Which d3 model a discrete scale's pixel geometry follows.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,10 +152,14 @@ impl DiscreteLayout {
         DiscreteLayout { model: DiscreteModel::Point { padding }, align }
     }
 
-    /// The band model's `padding_inner`, for the facades that report it back
-    /// to Python (`BandScale.padding_inner`, `OrdinalScale.padding`). Both
-    /// callers are band-model by construction; a point scale has no inner
-    /// padding and reports `0.0`.
+    /// The `align` this layout distributes leftover space by.
+    pub(crate) fn align(&self) -> f64 {
+        self.align
+    }
+
+    /// The band model's `padding_inner`, for the facade that reports it back
+    /// to Python (`OrdinalScale.padding`), which is band-model by
+    /// construction; a point scale has no inner padding and reports `0.0`.
     pub(crate) fn padding_inner(&self) -> f64 {
         match self.model {
             DiscreteModel::Band { padding_inner, .. } => padding_inner,
@@ -218,6 +230,185 @@ impl DiscreteLayout {
                 }
             }
         }
+    }
+}
+
+/// One of the three band-padding arguments, as a [`BandPaddingError`] names
+/// it to whoever wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BandPaddingKey {
+    /// d3's `padding(p)`: sets both sides.
+    Padding,
+    /// d3's `paddingInner`.
+    Inner,
+    /// d3's `paddingOuter`.
+    Outer,
+}
+
+impl BandPaddingKey {
+    /// The argument's name on the `BandScale` constructor.
+    pub(crate) fn argument(self) -> &'static str {
+        match self {
+            BandPaddingKey::Padding => "padding",
+            BandPaddingKey::Inner => "padding_inner",
+            BandPaddingKey::Outer => "padding_outer",
+        }
+    }
+
+    /// The key's spelling in a `{"type": "band"}` scale dict.
+    pub(crate) fn wire_key(self) -> &'static str {
+        match self {
+            BandPaddingKey::Padding => "padding",
+            BandPaddingKey::Inner => "paddingInner",
+            BandPaddingKey::Outer => "paddingOuter",
+        }
+    }
+
+    /// d3's bounds: `paddingInner` is clamped to at most 1 (a band can shrink
+    /// to nothing but not below), `paddingOuter` is unbounded above, and
+    /// `padding` sets both sides so it takes the tighter of the two.
+    fn accepts(self, value: f64) -> bool {
+        match self {
+            BandPaddingKey::Padding | BandPaddingKey::Inner => (0.0..=1.0).contains(&value),
+            BandPaddingKey::Outer => value.is_finite() && value >= 0.0,
+        }
+    }
+
+    fn requirement(self) -> &'static str {
+        match self {
+            BandPaddingKey::Padding | BandPaddingKey::Inner => "must be a number in [0, 1]",
+            BandPaddingKey::Outer => "must be a finite number >= 0",
+        }
+    }
+}
+
+/// A band-padding value outside d3's bounds. Each door words the refusal in
+/// its own voice around [`reason`](Self::reason): the `BandScale` constructor
+/// names its argument, the render path names the scale dict's key.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BandPaddingError {
+    key: BandPaddingKey,
+    value: f64,
+}
+
+impl BandPaddingError {
+    pub(crate) fn key(&self) -> BandPaddingKey {
+        self.key
+    }
+
+    /// `must be a number in [0, 1]; received 1.5`.
+    pub(crate) fn reason(&self) -> String {
+        format!("{}; received {}", self.key.requirement(), self.value)
+    }
+}
+
+/// A band scale's padding as the user stated it: d3's `padding`,
+/// `paddingInner` and `paddingOuter`, each either set or unset.
+///
+/// The one owner of band padding. Every way a band scale is declared (the
+/// `BandScale` class, a `{"type": "band"}` dict, an override type switch)
+/// carries this value; the positional resolver, the compute facade and the
+/// class getters all read it. It owns three things:
+///
+/// - **The unset state.** A side nobody set falls back to `padding`, then to
+///   0, exactly as d3 `scaleBand` (whose `paddingInner` and `paddingOuter`
+///   both start at 0, with `padding(p)` setting both). With nothing set the
+///   layout is [`DiscreteLayout::UNPADDED`], the auto-inferred categorical
+///   axis. An explicit 0 is a different value from unset: it stays on the
+///   wire and in the getters.
+/// - **Validation** ([`BandPaddingKey::accepts`]). Every set value is
+///   checked, including a `padding` that explicit inner and outer values
+///   override, so a malformed argument is refused even when it moves nothing.
+/// - **Resolution** ([`layout`](Self::layout)), which validates first, so no
+///   unvalidated value can become geometry.
+///
+/// Deserialized without validation: a scale dict's malformed padding is
+/// refused at render, where the refusal can name the channel.
+// `pub` (not `pub(crate)`) only so it can appear in the `pub`
+// `ScaleSpec::Band` variant without tripping `private_interfaces`, the same
+// arrangement as `scale::ordinal::OrdinalRangeValue`; the `scale` module is
+// private, so this type stays crate-internal.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct BandPadding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    padding: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingInner")]
+    inner: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingOuter")]
+    outer: Option<f64>,
+}
+
+impl BandPadding {
+    /// The values a caller passed, refused if any set value is out of bounds.
+    pub(crate) fn new(
+        padding: Option<f64>,
+        inner: Option<f64>,
+        outer: Option<f64>,
+    ) -> Result<Self, BandPaddingError> {
+        let value = BandPadding { padding, inner, outer };
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<(), BandPaddingError> {
+        let sides = [
+            (BandPaddingKey::Padding, self.padding),
+            (BandPaddingKey::Inner, self.inner),
+            (BandPaddingKey::Outer, self.outer),
+        ];
+        for (key, value) in sides {
+            if let Some(value) = value {
+                if !key.accepts(value) {
+                    return Err(BandPaddingError { key, value });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The `padding` the user set, or `None`.
+    pub(crate) fn padding(&self) -> Option<f64> {
+        self.padding
+    }
+
+    /// The inner padding the user's arguments state: `padding_inner`, else
+    /// `padding`, else `None` (inherits the auto-inferred layout's 0).
+    pub(crate) fn inner(&self) -> Option<f64> {
+        self.inner.or(self.padding)
+    }
+
+    /// The outer padding the user's arguments state; mirrors [`inner`](Self::inner).
+    pub(crate) fn outer(&self) -> Option<f64> {
+        self.outer.or(self.padding)
+    }
+
+    /// The `padding_inner` argument exactly as passed, for the wire and repr.
+    pub(crate) fn inner_as_set(&self) -> Option<f64> {
+        self.inner
+    }
+
+    /// The `padding_outer` argument exactly as passed, for the wire and repr.
+    pub(crate) fn outer_as_set(&self) -> Option<f64> {
+        self.outer
+    }
+
+    /// The band layout this padding resolves to at `align`, after validating
+    /// every set value. An unset side is 0, so an all-unset value yields
+    /// [`DiscreteLayout::UNPADDED`] bit-for-bit at the default align.
+    pub(crate) fn layout(&self, align: f64) -> Result<DiscreteLayout, BandPaddingError> {
+        self.validate()?;
+        Ok(self.resolve(align))
+    }
+
+    /// [`layout`](Self::layout) without the validation: the band layout this
+    /// padding resolves to at `align`, trusting every set value is already
+    /// in bounds. The one place the unset-side-falls-back-to-0 rule is
+    /// written, so every caller — the validating [`layout`](Self::layout)
+    /// and a caller holding padding it already validated itself (e.g.
+    /// `BandScale::new`, via [`BandPadding::new`](Self::new)) — resolves
+    /// through the same formula.
+    pub(crate) fn resolve(&self, align: f64) -> DiscreteLayout {
+        DiscreteLayout::band(self.inner().unwrap_or(0.0), self.outer().unwrap_or(0.0), align)
     }
 }
 
@@ -642,5 +833,159 @@ mod tests {
         assert_eq!(DiscreteLayout::band(0.3, 0.2, 0.25).padding_inner(), 0.3);
         assert_eq!(DiscreteLayout::point(0.4, 0.5).padding_inner(), 0.0);
         assert_eq!(DiscreteLayout::UNPADDED.padding_inner(), 0.0);
+    }
+
+    // ── BandPadding: unset state, d3 bounds, d3 resolution (#157) ───────────
+
+    fn pad(padding: Option<f64>, inner: Option<f64>, outer: Option<f64>) -> BandPadding {
+        BandPadding::new(padding, inner, outer).expect("in-bounds band padding")
+    }
+
+    fn refusal(padding: Option<f64>, inner: Option<f64>, outer: Option<f64>) -> BandPaddingError {
+        BandPadding::new(padding, inner, outer).expect_err("out-of-bounds band padding")
+    }
+
+    /// Nothing set resolves to the auto-inferred categorical layout, compared
+    /// as the layout value itself (bit-for-bit, `assert_eq!` on f64) and as the
+    /// geometry it produces.
+    #[test]
+    fn unset_band_padding_is_the_unpadded_layout() {
+        let layout = BandPadding::default().layout(DEFAULT_ALIGN).unwrap();
+        assert_eq!(layout, DiscreteLayout::UNPADDED);
+        assert_eq!(
+            layout.geometry(4, 0.0, 561.636),
+            DiscreteLayout::UNPADDED.geometry(4, 0.0, 561.636)
+        );
+        assert_eq!(BandPadding::default(), pad(None, None, None));
+    }
+
+    /// `padding` alone sets both sides, exactly as d3's `padding(p)`.
+    #[test]
+    fn padding_alone_sets_both_sides() {
+        let layout = pad(Some(0.1), None, None).layout(0.5).unwrap();
+        assert_eq!(layout, DiscreteLayout::band(0.1, 0.1, 0.5));
+        // 4 bars over the 561.636px panel: the disclosed 0.8·0.9·w/4.1.
+        let bar = 0.8 * layout.geometry(4, 0.0, 561.636).bandwidth();
+        assert!((bar - 98.629).abs() < 1e-3, "padded bar width {bar}");
+        let unpadded = 0.8 * DiscreteLayout::UNPADDED.geometry(4, 0.0, 561.636).bandwidth();
+        assert!((unpadded - 112.327).abs() < 1e-3, "unpadded bar width {unpadded}");
+    }
+
+    /// One side set: the other falls back to `padding`, then to 0 (d3's own
+    /// `paddingInner = paddingOuter = 0` defaults), never to a hidden 0.1.
+    #[test]
+    fn one_side_set_leaves_the_other_at_zero() {
+        assert_eq!(pad(None, Some(0.2), None).layout(0.5).unwrap(), DiscreteLayout::band(0.2, 0.0, 0.5));
+        assert_eq!(pad(None, None, Some(0.3)).layout(0.5).unwrap(), DiscreteLayout::band(0.0, 0.3, 0.5));
+    }
+
+    /// Both sides set win over nothing; an explicit side beats `padding`
+    /// while the unset side still takes `padding`.
+    #[test]
+    fn explicit_sides_take_precedence_over_padding() {
+        assert_eq!(pad(None, Some(0.2), Some(0.3)).layout(0.5).unwrap(), DiscreteLayout::band(0.2, 0.3, 0.5));
+        assert_eq!(pad(Some(0.4), Some(0.2), None).layout(0.5).unwrap(), DiscreteLayout::band(0.2, 0.4, 0.5));
+        assert_eq!(pad(Some(0.4), None, Some(0.2)).layout(0.5).unwrap(), DiscreteLayout::band(0.4, 0.2, 0.5));
+    }
+
+    /// The getters report what the user's arguments state: `padding` as
+    /// passed, each side as `side ?? padding`, `None` when neither is set.
+    #[test]
+    fn getters_report_the_stated_padding() {
+        let unset = BandPadding::default();
+        assert_eq!((unset.padding(), unset.inner(), unset.outer()), (None, None, None));
+        let shorthand = pad(Some(0.1), None, None);
+        assert_eq!((shorthand.padding(), shorthand.inner(), shorthand.outer()), (Some(0.1), Some(0.1), Some(0.1)));
+        let mixed = pad(Some(0.4), Some(0.2), None);
+        assert_eq!((mixed.padding(), mixed.inner(), mixed.outer()), (Some(0.4), Some(0.2), Some(0.4)));
+        assert_eq!((mixed.inner_as_set(), mixed.outer_as_set()), (Some(0.2), None));
+        let inner_only = pad(None, Some(0.2), None);
+        assert_eq!((inner_only.padding(), inner_only.inner(), inner_only.outer()), (None, Some(0.2), None));
+    }
+
+    /// An explicit 0 is a value, not "unset": it differs from the unset value in
+    /// equality, the getters and the wire, while resolving to the same layout.
+    #[test]
+    fn explicit_zero_is_distinct_from_unset() {
+        let zero = pad(Some(0.0), None, None);
+        assert_ne!(zero, BandPadding::default());
+        assert_eq!(zero.padding(), Some(0.0));
+        assert_eq!(zero.inner(), Some(0.0));
+        assert_eq!(serde_json::to_value(zero).unwrap(), serde_json::json!({"padding": 0.0}));
+        assert_eq!(serde_json::to_value(BandPadding::default()).unwrap(), serde_json::json!({}));
+        assert_eq!(zero.layout(DEFAULT_ALIGN).unwrap(), DiscreteLayout::UNPADDED);
+    }
+
+    /// The wire carries only the keys the user set, under d3's spellings, and
+    /// reads an absent or `null` key as unset.
+    #[test]
+    fn wire_form_carries_only_set_keys() {
+        assert_eq!(
+            serde_json::to_value(pad(None, Some(0.2), None)).unwrap(),
+            serde_json::json!({"paddingInner": 0.2})
+        );
+        assert_eq!(
+            serde_json::to_value(pad(Some(0.1), Some(0.2), Some(0.3))).unwrap(),
+            serde_json::json!({"padding": 0.1, "paddingInner": 0.2, "paddingOuter": 0.3})
+        );
+        let parsed: BandPadding =
+            serde_json::from_value(serde_json::json!({"padding": null, "paddingOuter": 0.3})).unwrap();
+        assert_eq!(parsed, pad(None, None, Some(0.3)));
+        let empty: BandPadding = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, BandPadding::default());
+    }
+
+    /// d3's bounds: `padding` and `paddingInner` in [0, 1] inclusive (an inner
+    /// padding of 1 is a zero-width band, which d3 allows), `paddingOuter`
+    /// finite and >= 0 with no upper bound. NaN and infinities are refused.
+    #[test]
+    fn bounds_follow_d3() {
+        for v in [0.0, 0.5, 1.0] {
+            assert!(BandPadding::new(Some(v), None, None).is_ok(), "padding={v}");
+            assert!(BandPadding::new(None, Some(v), None).is_ok(), "inner={v}");
+        }
+        for v in [0.0, 1.0, 1.5, 10.0] {
+            assert!(BandPadding::new(None, None, Some(v)).is_ok(), "outer={v}");
+        }
+        for v in [-0.1, 1.000_001, 2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(refusal(Some(v), None, None).key(), BandPaddingKey::Padding, "padding={v}");
+            assert_eq!(refusal(None, Some(v), None).key(), BandPaddingKey::Inner, "inner={v}");
+        }
+        for v in [-0.1, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(refusal(None, None, Some(v)).key(), BandPaddingKey::Outer, "outer={v}");
+        }
+    }
+
+    /// A malformed `padding` is refused even when explicit inner and outer
+    /// values mean it would move nothing.
+    #[test]
+    fn malformed_padding_masked_by_both_sides_is_still_refused() {
+        let error = refusal(Some(1.5), Some(0.2), Some(0.3));
+        assert_eq!(error.key(), BandPaddingKey::Padding);
+        assert_eq!(error.reason(), "must be a number in [0, 1]; received 1.5");
+    }
+
+    /// The refusal names the requirement and the value received; each key
+    /// knows its constructor argument and its wire spelling.
+    #[test]
+    fn refusal_reason_and_key_names() {
+        assert_eq!(refusal(None, Some(f64::NAN), None).reason(), "must be a number in [0, 1]; received NaN");
+        assert_eq!(refusal(None, None, Some(-1.0)).reason(), "must be a finite number >= 0; received -1");
+        assert_eq!(refusal(None, None, Some(f64::INFINITY)).reason(), "must be a finite number >= 0; received inf");
+        let names = [BandPaddingKey::Padding, BandPaddingKey::Inner, BandPaddingKey::Outer]
+            .map(|k| (k.argument(), k.wire_key()));
+        assert_eq!(
+            names,
+            [("padding", "padding"), ("padding_inner", "paddingInner"), ("padding_outer", "paddingOuter")]
+        );
+    }
+
+    /// A deserialized value is not validated until it resolves, and resolving
+    /// refuses it: no unvalidated padding can become geometry.
+    #[test]
+    fn a_deserialized_malformed_value_cannot_resolve() {
+        let parsed: BandPadding = serde_json::from_value(serde_json::json!({"paddingInner": 1.5})).unwrap();
+        let error = parsed.layout(DEFAULT_ALIGN).expect_err("1.5 is outside [0, 1]");
+        assert_eq!(error.key(), BandPaddingKey::Inner);
     }
 }

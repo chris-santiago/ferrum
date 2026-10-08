@@ -41,7 +41,7 @@
 //! carries `#[serde(alias)]` today, and `no_scale_spec_field_carries_a_serde_alias`
 //! below scans this module's source files to keep it that way.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde::{Deserialize, Serialize};
@@ -373,31 +373,97 @@ fn convert_raw_dict_temporal_domain<'py>(
     Ok(Some(out.into_any()))
 }
 
+/// Shared first half of the chokepoint both [`deserialize_scale_value`] and
+/// [`deserialize_scale_value_bare`] build on: raw-dict temporal-domain
+/// conversion (`convert_raw_dict_temporal_domain`), then `json.dumps` to a
+/// JSON string. `None` only when `scale` itself is `None`; every other error
+/// (an unconvertible temporal element, or an unencodable object reaching
+/// `json.dumps`) propagates as the raw `PyErr` it already is — neither this
+/// function nor either of its two callers below adds a prefix to it, so an
+/// `object()` domain element still raises the same unprefixed `TypeError`
+/// `EncodingSpec::new`'s `scale=` parameter always has.
+fn scale_value_to_json(py: Python, scale: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+    let scale_converted = convert_raw_dict_temporal_domain(scale)?;
+    let Some(obj) = scale_converted else { return Ok(None) };
+    let json_module = py.import("json")?;
+    Ok(Some(json_module.call_method1("dumps", (obj,))?.extract()?))
+}
+
 /// Convert + deserialize a scale value into a `ScaleSpec`, exactly as
-/// `EncodingSpec::new`'s `scale=` parameter does: raw-dict temporal-domain
-/// conversion first (`convert_raw_dict_temporal_domain`), then a JSON
-/// round-trip through `ScaleSpec`'s own gated `Deserialize` impl
-/// (`validate_scale_spec_keys`, run at that impl's own boundary).
+/// `EncodingSpec::new`'s `scale=` parameter does: [`scale_value_to_json`]
+/// first, then a JSON round-trip through `ScaleSpec`'s own gated
+/// `Deserialize` impl (`validate_scale_spec_keys`, run at that impl's own
+/// boundary), with the serde error prefixed by `prefix` — `"scale: "` for
+/// [`deserialize_scale_value`], empty for [`deserialize_scale_value_bare`],
+/// which [`validate_scale_values`] uses to build its own override-door voice
+/// around the bare clause instead.
 ///
 /// **The single chokepoint both `EncodingSpec::new` and [`validate_scale_dict`]
-/// call** — batch-C close remediation, converging the rust- and
-/// python-design reviews' independent findings on the same fix: neither
-/// caller re-implements the dict→JSON→`ScaleSpec` sequence, so there is no
-/// second validation path that could drift from this one. Error messages are
-/// therefore byte-identical between the two callers by construction, not by
-/// coincidence — pinned by
+/// call, through [`deserialize_scale_value`]** — batch-C close remediation,
+/// converging the rust- and python-design reviews' independent findings on
+/// the same fix: neither caller re-implements the dict→JSON→`ScaleSpec`
+/// sequence, so there is no second validation path that could drift from
+/// this one. Error messages are therefore byte-identical between the two
+/// callers by construction, not by coincidence — pinned by
 /// `validate_scale_dict_message_matches_encoding_spec_route` below.
+fn deserialize_scale_value_with_prefix(
+    py: Python,
+    scale: Option<&Bound<'_, PyAny>>,
+    prefix: &str,
+) -> PyResult<Option<ScaleSpec>> {
+    let Some(s) = scale_value_to_json(py, scale)? else { return Ok(None) };
+    Ok(Some(
+        serde_json::from_str(&s).map_err(|e| PyValueError::new_err(format!("{prefix}{e}")))?,
+    ))
+}
+
 pub(super) fn deserialize_scale_value(
     py: Python,
     scale: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<ScaleSpec>> {
-    let scale_converted = convert_raw_dict_temporal_domain(scale)?;
-    let Some(obj) = scale_converted else { return Ok(None) };
-    let json_module = py.import("json")?;
-    let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-    Ok(Some(
-        serde_json::from_str(&s).map_err(|e| PyValueError::new_err(format!("scale: {e}")))?,
-    ))
+    deserialize_scale_value_with_prefix(py, scale, "scale: ")
+}
+
+fn deserialize_scale_value_bare(
+    py: Python,
+    scale: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<ScaleSpec>> {
+    deserialize_scale_value_with_prefix(py, scale, "")
+}
+
+/// Validate one override-door scale value (#157): the same conversion +
+/// deserialize chokepoint [`deserialize_scale_value`] runs, via its
+/// un-prefixed twin [`deserialize_scale_value_bare`], followed by the
+/// data-free value check the render path would otherwise run — today, for
+/// `ScaleSpec::Band`, [`BandPadding::layout`](crate::scale::discrete::BandPadding::layout).
+///
+/// Raises a `ValueError` whose message is the refusal's **clause alone** —
+/// naming no call, channel or key, since this function has none of those to
+/// give: its caller wraps the clause in the override's own voice,
+/// `Chart.override(<path>=...) <clause>`. Three clause shapes:
+///
+/// - a [`BandPaddingError`](crate::scale::discrete::BandPaddingError) gives
+///   [`reason`](crate::scale::discrete::BandPaddingError::reason), e.g.
+///   `must be a number in [0, 1]; received 1.5`;
+/// - a serde error (an unknown key, or a value of the wrong wire type) gives
+///   serde's own text, with no `"scale: "` prefix, e.g.
+///   `invalid type: string "a", expected f64`;
+/// - an object `json.dumps` cannot encode gives a `ValueError` — never the
+///   raw `TypeError` `json.dumps` itself raises — worded
+///   `cannot be encoded as a scale value: <python error text>`.
+#[pyfunction]
+pub fn validate_scale_values(py: Python, scale: &Bound<'_, PyDict>) -> PyResult<()> {
+    let spec = deserialize_scale_value_bare(py, Some(scale.as_any())).map_err(|e| {
+        if e.is_instance_of::<PyTypeError>(py) {
+            PyValueError::new_err(format!("cannot be encoded as a scale value: {}", e.value(py)))
+        } else {
+            e
+        }
+    })?;
+    if let Some(ScaleSpec::Band { padding, align, .. }) = spec {
+        padding.layout(align).map_err(|err| PyValueError::new_err(err.reason()))?;
+    }
+    Ok(())
 }
 
 /// Validate a raw scale dict against the SAME gate `EncodingSpec(field,
@@ -468,15 +534,14 @@ mod tests {
             ScaleSpec::Utc { common: maximal_common(), nice: true },
             ScaleSpec::Band {
                 domain: Some(vec!["a".to_string()]),
-                padding: 0.1,
-                padding_inner: Some(0.1),
-                padding_outer: Some(0.2),
+                padding: crate::scale::discrete::BandPadding::new(Some(0.1), Some(0.1), Some(0.2))
+                    .expect("in-bounds band padding"),
                 align: 0.5,
                 range: Some(vec![0.0, 1.0]),
             },
             ScaleSpec::Point {
                 domain: Some(vec!["a".to_string()]),
-                padding: 0.5,
+                padding: Some(0.5),
                 align: 0.5,
                 reverse: true,
                 range: Some(vec![0.0, 1.0]),
@@ -573,17 +638,19 @@ mod tests {
 
     /// The gate's serde-alias blind spot (this file's module doc) stays
     /// theoretical: no source file of this module, where `ScaleSpec` and the
-    /// `ContinuousScaleCommon` it flattens are declared, carries a
-    /// `#[serde(alias = ...)]` attribute.
+    /// `ContinuousScaleCommon` it flattens are declared, and not
+    /// `scale/discrete.rs`, where the `BandPadding` that `ScaleSpec::Band`
+    /// flattens is declared, carries a `#[serde(alias = ...)]` attribute.
     #[test]
     fn no_scale_spec_field_carries_a_serde_alias() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/spec/encoding");
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let dir = src.join("spec/encoding");
         let mut scanned = Vec::new();
         let mut hits = Vec::new();
-        for entry in
-            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-        {
-            let path = entry.unwrap().path();
+        let module_files =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        let flattened_elsewhere = std::iter::once(src.join("scale/discrete.rs"));
+        for path in module_files.map(|entry| entry.unwrap().path()).chain(flattened_elsewhere) {
             if path.extension().is_some_and(|ext| ext == "rs") {
                 let text = std::fs::read_to_string(&path).unwrap();
                 hits.extend(
@@ -597,6 +664,10 @@ mod tests {
         assert!(
             scanned.iter().any(|f| f == "mod.rs"),
             "the scan must reach ScaleSpec's file: {scanned:?}"
+        );
+        assert!(
+            scanned.iter().any(|f| f == "discrete.rs"),
+            "the scan must reach BandPadding's file: {scanned:?}"
         );
         assert!(
             hits.is_empty(),
@@ -1063,6 +1134,103 @@ mod tests {
             validate_scale_dict(py, &d).unwrap_or_else(|e| {
                 panic!("expected a datetime-bearing temporal domain to validate, got {e}")
             });
+        });
+    }
+
+    // ── `validate_scale_values` (#157) ──────────────────────────────────────
+
+    /// A malformed `padding` masked by in-bounds explicit `paddingInner`/
+    /// `paddingOuter` is still refused — `BandPadding::validate` checks every
+    /// set side regardless of masking — with the clause alone, exactly
+    /// `BandPaddingError::reason`'s text and nothing else: no `"scale: "`
+    /// prefix, no mention of the channel, the call or `band`.
+    #[test]
+    fn validate_scale_values_refuses_band_padding_bounds_naming_the_clause_alone() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "band").unwrap();
+            d.set_item("padding", 1.5).unwrap();
+            d.set_item("paddingInner", 0.2).unwrap();
+            d.set_item("paddingOuter", 0.2).unwrap();
+            let err = validate_scale_values(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = err.value(py).to_string();
+            assert_eq!(msg, "must be a number in [0, 1]; received 1.5");
+        });
+    }
+
+    /// A serde type-mismatch clause carries no `"scale: "` prefix — the
+    /// un-prefixed twin of `deserialize_scale_value`, not the prefixed one
+    /// `validate_scale_dict` uses.
+    #[test]
+    fn validate_scale_values_serde_clause_has_no_scale_prefix() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "linear").unwrap();
+            d.set_item("padding", "a").unwrap();
+            let err = validate_scale_values(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = err.value(py).to_string();
+            assert_eq!(msg, "invalid type: string \"a\", expected f64");
+        });
+    }
+
+    /// An unknown key (here, `paddingInner` on `point`, which does not have
+    /// one) refuses with the gate's own "unknown key ... accepted: ..."
+    /// clause, un-prefixed, exactly like `scale_gate_typo_key_refused_names_real_key_among_accepted`
+    /// but through `validate_scale_values` and without `"scale: "`.
+    #[test]
+    fn validate_scale_values_refuses_unknown_key_naming_accepted_set() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "point").unwrap();
+            d.set_item("paddingInner", 1.5).unwrap();
+            let err = validate_scale_values(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = err.value(py).to_string();
+            assert_eq!(
+                msg,
+                "unknown key 'paddingInner' for type 'point'; accepted: align, domain, padding, range, reverse"
+            );
+        });
+    }
+
+    /// An object `json.dumps` cannot encode raises a `ValueError` naming the
+    /// Python encoder's own text — never the raw `TypeError` `json.dumps`
+    /// itself produces (REFUSE MALFORMED: no raw `TypeError` escapes a
+    /// public call).
+    #[test]
+    fn validate_scale_values_dumps_failure_raises_value_error_not_type_error() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "linear").unwrap();
+            let unencodable = py.import("builtins").unwrap().getattr("object").unwrap().call0().unwrap();
+            d.set_item("domain", unencodable).unwrap();
+            let err = validate_scale_values(py, &d).unwrap_err();
+            assert!(
+                err.is_instance_of::<PyValueError>(py),
+                "expected ValueError, got {err:?}"
+            );
+            assert!(!err.is_instance_of::<PyTypeError>(py));
+            let msg = err.value(py).to_string();
+            assert_eq!(
+                msg,
+                "cannot be encoded as a scale value: Object of type object is not JSON serializable"
+            );
+        });
+    }
+
+    /// A valid band fragment (in-bounds `padding`/`align`) passes with no
+    /// error.
+    #[test]
+    fn validate_scale_values_accepts_a_valid_band_fragment() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "band").unwrap();
+            d.set_item("padding", 0.2).unwrap();
+            d.set_item("align", 0.5).unwrap();
+            validate_scale_values(py, &d)
+                .unwrap_or_else(|e| panic!("expected a valid band fragment to pass, got {e}"));
         });
     }
 }

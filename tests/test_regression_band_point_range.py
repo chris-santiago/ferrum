@@ -234,40 +234,37 @@ def test_band_scale_without_range_omits_range_key():
 # ---------------------------------------------------------------------------
 
 BAND_RANGE = [40.0, 260.0]
-# domain of 4 categories over BAND_RANGE under BandScale's default padding
-# (0.1, applied to both padding_inner and padding_outer -- batch-C T5, d3 band
-# model, explicit padding now real). Placement follows d3's upstream
-# lead-based formula (band(i) = start + i*step, whole gap after each band),
-# which batch-C T5's S3 repair unified the render path and the BandScale
-# compute facade onto (the shared model in
-# crates/ferrum-core/src/scale/discrete.rs) -- bands can no longer escape
-# the range. T5's first cut had ported the *old* facade's formula, which
-# centered each band in its padded slot and was itself not true d3; the S3
-# repair changed both the render path and the facade's own output
-# (BandScale.scale() values moved too) onto the corrected shared model, not
-# just the render side: denom = n - p_in + 2*p_out = 4 - 0.1 + 0.2 = 4.1,
-# step = (260 - 40) / 4.1 = 53.65853658536586, start = range[0] + p_out *
-# step = 45.36585365853659,
+# domain of 4 categories over BAND_RANGE: every BandScale() built below sets
+# no padding argument at all, so #157 inherits the auto-inferred categorical
+# layout (no inner/outer padding), not the pre-#157 hidden 0.1 default.
+# Placement follows d3's upstream lead-based formula (band(i) = start +
+# i*step, whole gap after each band -- the shared model in
+# crates/ferrum-core/src/scale/discrete.rs that both the render path and the
+# BandScale compute facade use) -- bands can no longer escape the range.
+# With padding_inner = padding_outer = 0: denom = n = 4,
+# step = (260 - 40) / 4 = 55.0, start = range[0] + p_out * step = 40.0,
 # lead(i) = start + i * step (the band's leading/low edge), bandwidth =
-# |step| * (1 - p_in) = 48.29268292682927, center(i) = lead(i) +
-# bandwidth / 2 * sign(step). Before batch-C T5, BandScale(padding=0.1) was
-# silently inert on the render path and these constants pinned the unpadded
-# symmetric model (step = extent / n, centers at range[0] + step * (i + 0.5)).
-BAND_STEP = 53.65853658536586
-# Slot origin under the padded model (start = range[0] + padding_outer *
-# step); derived from BAND_STEP rather than pinned as a second literal so it
-# cannot silently drift out of sync with it.
-BAND_START = BAND_RANGE[0] + 0.1 * BAND_STEP
-BAND_CENTERS = [69.51219512195122, 123.17073170731709, 176.82926829268294, 230.4878048780488]
+# |step| * (1 - p_in) = 55.0, center(i) = lead(i) + bandwidth / 2 * sign(step).
+# Before #157, BandScale() carried a hidden padding=0.1 and these constants
+# pinned that padded model (denom = 4.1, step ~= 53.6585, center(i)
+# offset by padding_outer*step); an explicit `padding=0.1` still renders
+# exactly that way and is unaffected by this change.
+BAND_STEP = 55.0
+# Slot origin (start = range[0] + padding_outer * step); derived from
+# BAND_STEP rather than pinned as a second literal so it cannot silently
+# drift out of sync with it. padding_outer = 0 (unpadded, #157), so this
+# equals BAND_RANGE[0] exactly.
+BAND_START = BAND_RANGE[0] + 0.0 * BAND_STEP
+BAND_CENTERS = [67.5, 122.5, 177.5, 232.5]
 
 # Heatmap cell width for a 2-category BandScale over BAND_RANGE, same shared
-# d3 model as BAND_STEP above (batch-C T6: a mark_rect cell is now the drawn
-# band, not extent / n_categories): denom = n - p_in + 2*p_out
-# = 2 - 0.1 + 0.2 = 2.1, step = (260 - 40) / 2.1 = 104.76190476190476,
-# width = |step| * (1 - p_in) = 104.76190476190476 * 0.9. Written as an
-# expression over BAND_RANGE (the BAND_START precedent above) rather than a
-# bare literal, so it cannot silently drift out of sync with BAND_RANGE.
-HEATMAP_CELL_WIDTH = abs(BAND_RANGE[1] - BAND_RANGE[0]) / 2.1 * 0.9
+# d3 model as BAND_STEP above (a mark_rect cell is the drawn band, not
+# extent / n_categories), unpadded (#157): denom = n = 2,
+# step = (260 - 40) / 2 = 110.0, width = |step| * (1 - p_in) = 110.0. Written
+# as an expression over BAND_RANGE (the BAND_START precedent above) rather
+# than a bare literal, so it cannot silently drift out of sync with
+# BAND_RANGE. Before #157 the hidden 0.1 default gave ~94.2857.
+HEATMAP_CELL_WIDTH = abs(BAND_RANGE[1] - BAND_RANGE[0]) / 2.0
 _TOL = 0.5
 
 
@@ -354,14 +351,13 @@ def test_ordinal_y_range_constrains_bar_heights_and_tick_labels():
     # offset. Two checks avoid both false negatives (raw offset vs. center)
     # and false positives (too-loose a tolerance could pass by accident):
     # (a) each label falls within its own band interval -- the offset
-    # (~3.67px) is far smaller than the half-step (26.83px), so this can't
+    # (~3.67px) is far smaller than the half-step (27.5px), so this can't
     # pass under panel-uniform placement by coincidence; and (b) the
     # label-minus-center delta is uniform across all four labels, which
     # locks in true band-center alignment without hardcoding the font
     # metric as an exact oracle. Band intervals are anchored at BAND_START
-    # (the padded slot origin), not BAND_RANGE[0] -- the outer-padding inset
-    # (padding_outer * step = 5.37px) shifts every slot's low edge off the
-    # range boundary under the real d3 model.
+    # (the slot origin), which equals BAND_RANGE[0] exactly under #157's
+    # unpadded model (padding_outer = 0, so no inset off the range boundary).
     deltas = []
     for i, label in enumerate(["a", "b", "c", "d"]):
         actual = _axis_tick_label_pos(svg, label, coord="y")

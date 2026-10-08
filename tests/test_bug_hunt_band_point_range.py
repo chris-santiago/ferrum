@@ -214,16 +214,27 @@ def test_point_scale_infinite_range_rejected():
 
 
 def test_band_scale_nan_padding_rejected():
-    """Non-finite padding_inner/align are rejected with a legible ValueError.
+    """Non-finite padding/align are rejected with a legible ValueError naming
+    the argument the caller actually passed: one validated value owns every
+    refusal, so a malformed ``padding`` is named as ``padding``, not as the
+    ``padding_inner`` side it would otherwise fall back to.
 
-    Contract pin for the `!pi.is_finite()` / `!align.is_finite()` guards in
-    scale/band.rs::new.
+    Contract pin for the ``BandPadding`` validation in ``scale/discrete.rs``,
+    read through ``scale/band.rs::new``.
     """
-    with pytest.raises(ValueError, match="padding_inner"):
+    with pytest.raises(
+        ValueError,
+        match=r"^BandScale\(padding=\.\.\.\) must be a number in \[0, 1\]; received NaN$",
+    ):
         fr.BandScale(domain=["a"], padding=float("nan"))
-    with pytest.raises(ValueError, match="align"):
+    with pytest.raises(
+        ValueError, match=r"^BandScale\(align=\.\.\.\) must be a number in \[0, 1\]; received NaN$"
+    ):
         fr.BandScale(domain=["a"], align=float("nan"))
-    with pytest.raises(ValueError, match="padding_outer"):
+    with pytest.raises(
+        ValueError,
+        match=r"^BandScale\(padding_outer=\.\.\.\) must be a finite number >= 0; received -0\.5$",
+    ):
         fr.BandScale(domain=["a"], padding_inner=0.1, padding_outer=-0.5)
 
 
@@ -232,18 +243,32 @@ def test_point_scale_invalid_padding_align_rejected():
 
     Contract pin for the guards in scale/point.rs::new.
     """
-    with pytest.raises(ValueError, match="padding"):
+    with pytest.raises(
+        ValueError,
+        match=r"^PointScale\(padding=\.\.\.\) must be a finite number >= 0; received -1$",
+    ):
         fr.PointScale(domain=["a"], padding=-1.0)
-    with pytest.raises(ValueError, match="padding"):
+    with pytest.raises(
+        ValueError,
+        match=r"^PointScale\(padding=\.\.\.\) must be a finite number >= 0; received inf$",
+    ):
         fr.PointScale(domain=["a"], padding=float("inf"))
-    with pytest.raises(ValueError, match="align"):
+    with pytest.raises(
+        ValueError,
+        match=r"^PointScale\(align=\.\.\.\) must be a number in \[0, 1\]; received 1\.5$",
+    ):
         fr.PointScale(domain=["a"], align=1.5)
 
 
-def test_band_scale_padding_inner_boundary_one_rejected():
-    """padding_inner == 1.0 (zero bandwidth) is outside the documented [0, 1)."""
-    with pytest.raises(ValueError, match="padding_inner"):
-        fr.BandScale(domain=["a", "b"], padding_inner=1.0)
+def test_band_scale_padding_inner_boundary_one_accepted():
+    """padding_inner == 1.0 (zero bandwidth) is d3's own closed [0, 1] bound.
+
+    This is a sibling pin to ``test_band_scale_accepts_padding_inner_one`` in
+    ``test_bug_hunt_scale_stat.py``: it was rejected by a stricter-than-d3
+    ``[0, 1)`` check before #157.
+    """
+    s = fr.BandScale(domain=["a", "b"], padding_inner=1.0)
+    assert s.padding_inner == 1.0
 
 
 def test_band_scale_bandwidth_non_negative_with_inverted_range():
@@ -331,21 +356,34 @@ def test_inverted_explicit_range_bars_within_range_and_labels_reversed():
         )
         assert float(a["width"]) > 0.0, f"bar has non-positive width: {a!r}"
     # Reversed range → 'a' takes the RIGHTMOST band center, 'd' the leftmost.
-    # Under BandScale's default padding (0.1 both sides -- batch-C T5, d3 band
-    # model, explicit padding now real, placement per d3's upstream
-    # lead-based formula that T5's S3 repair unified the render path and the
-    # BandScale compute facade onto) over range=[260, 40]: extent = -220,
-    # denom = 4.1, step = -53.65853658536586, start = 260 + 0.1*step =
-    # 254.6341463414634, lead(0) = start, bandwidth = |step|*(1-0.1) =
-    # 48.29268292682927, and 'a' (i=0) sits at lead(0) + bandwidth/2*sign(step)
-    # = 254.6341463414634 - 24.146341463414635 = 230.48780487804876. Before
-    # batch-C T5 padding was inert and 'a' pinned the unpadded symmetric
-    # center (232.5).
+    # This BandScale() sets no padding argument at all, so #157 inherits the
+    # auto-inferred layout (no inner/outer padding) over range=[260, 40]:
+    # extent = -220, denom = 4 (n, unpadded), step = -55.0, start = 260
+    # (padding_outer=0, so no offset), lead(0) = start, bandwidth = |step| =
+    # 55.0, and 'a' (i=0) sits at lead(0) + bandwidth/2*sign(step) =
+    # 260 - 27.5 = 232.5 -- the plain unpadded symmetric center. Before #157
+    # the hidden 0.1 default gave 230.488 here; an explicit `padding=0.1`
+    # still gives that value and is unaffected by this change.
+    a_pos = _axis_tick_label_pos(svg, "a", coord="x")
+    d_pos = _axis_tick_label_pos(svg, "d", coord="x")
+    assert a_pos > d_pos, f"inverted range must reverse label pixel order: a={a_pos}, d={d_pos}"
+    assert a_pos == pytest.approx(232.5, abs=0.5), (
+        f"'a' center under [260,40] should be ~232.5 (unpadded, #157), got {a_pos}"
+    )
+
+
+def test_inverted_explicit_range_with_explicit_padding_0_1_is_a_d3_control():
+    """The explicit-`padding=0.1` sibling of the test above: an explicit
+    padding keeps d3's exact (padded) band math over an inverted range,
+    unaffected by #157 -- still 230.488, not the unpadded 232.5.
+    """
+    svg = _band_bar_svg([260.0, 40.0], padding=0.1)
+    _assert_finite_svg(svg)
     a_pos = _axis_tick_label_pos(svg, "a", coord="x")
     d_pos = _axis_tick_label_pos(svg, "d", coord="x")
     assert a_pos > d_pos, f"inverted range must reverse label pixel order: a={a_pos}, d={d_pos}"
     assert a_pos == pytest.approx(230.48780487804876, abs=0.5), (
-        f"'a' center under [260,40] should be ~230.488, got {a_pos}"
+        f"'a' center under [260,40] with padding=0.1 should be ~230.488, got {a_pos}"
     )
 
 
@@ -585,17 +623,61 @@ def test_band_scale_on_x_and_y_simultaneously_heatmap():
         ),
     )
     assert len(cells) == 4, f"expected 4 heatmap cells, got {len(cells)}"
-    # batch-C T6: a cell is the drawn band, not extent / n. Default
-    # padding_inner=0.1, padding_outer=0.1 on both axes, n=2 categories:
-    # denom = n - padding_inner + 2*padding_outer = 2 - 0.1 + 0.2 = 2.1
-    # x: step = 220/2.1 = 104.761904..., width = step * (1 - padding_inner) = 94.285714...
-    # y: step = 160/2.1 = 76.190476...,  height = step * (1 - padding_inner) = 68.571428...
+    # A cell is the drawn band, not extent / n. Both BandScale()
+    # calls here set no padding argument, so #157 inherits the auto-inferred
+    # layout (no inner/outer padding) on both axes, n=2 categories:
+    # x: step = 220/2 = 110.0, width = step (padding_inner=0) = 110.0
+    # y: step = 160/2 = 80.0,  height = step (padding_inner=0) = 80.0
+    # Before #157 the hidden 0.1 default gave 94.2857/68.5714 here.
+    for a in cells:
+        assert float(a["width"]) == pytest.approx(110.0, abs=0.5), (
+            f"cell width should be the drawn band 220/2 = 110.0 (unpadded, #157), got {a['width']}"
+        )
+        assert float(a["height"]) == pytest.approx(80.0, abs=0.5), (
+            f"cell height should be the drawn band 160/2 = 80.0 (unpadded, #157), got {a['height']}"
+        )
+
+
+def test_band_scale_on_x_and_y_simultaneously_heatmap_explicit_padding_0_1_is_a_d3_control():
+    """The explicit-`padding=0.1` sibling of the test above: both axes keep
+    d3's exact (padded) band math, unaffected by #157 -- still
+    94.2857/68.5714, not the unpadded 110.0/80.0.
+    """
+    df = pl.DataFrame(
+        {
+            "row": ["a", "a", "b", "b"],
+            "col": ["x", "y", "x", "y"],
+            "val": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    svg = (
+        fr.Chart(df)
+        .mark_rect()
+        .encode(
+            x=fr.X("row", scale=fr.BandScale(domain=["a", "b"], range=[40.0, 260.0], padding=0.1)),
+            y=fr.Y("col", scale=fr.BandScale(domain=["x", "y"], range=[30.0, 190.0], padding=0.1)),
+            color="val",
+        )
+        .properties(width=600, height=400)
+        .to_svg()
+    )
+    _assert_finite_svg(svg)
+    cells = _svg_elements(
+        svg,
+        "rect",
+        lambda a: (
+            bool(a.get("fill"))
+            and a["fill"] != _THEME_BACKGROUND
+            and not a["fill"].startswith("url(")
+        ),
+    )
+    assert len(cells) == 4, f"expected 4 heatmap cells, got {len(cells)}"
     for a in cells:
         assert float(a["width"]) == pytest.approx(94.285714, abs=0.5), (
-            f"cell width should be the drawn band 220/2.1*0.9 = 94.2857..., got {a['width']}"
+            f"cell width with padding=0.1 should be 220/2.1*0.9 = 94.2857..., got {a['width']}"
         )
         assert float(a["height"]) == pytest.approx(68.571429, abs=0.5), (
-            f"cell height should be the drawn band 160/2.1*0.9 = 68.5714..., got {a['height']}"
+            f"cell height with padding=0.1 should be 160/2.1*0.9 = 68.5714..., got {a['height']}"
         )
 
 

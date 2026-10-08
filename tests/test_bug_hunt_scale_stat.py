@@ -1606,10 +1606,22 @@ def test_pow_scale_rejects_negative_exponent():
         fr.PowScale(domain=[0.0, 10.0], range=[0.0, 1.0], exponent=-2.0)
 
 
-def test_band_scale_rejects_padding_inner_one():
-    """BandScale must reject padding_inner >= 1.0."""
+def test_band_scale_accepts_padding_inner_one():
+    """BandScale accepts padding_inner == 1.0 (d3's own inclusive bound, #157).
+
+    ``padding_inner`` is valid in the closed interval [0, 1]: 1.0 is the
+    zero-bandwidth boundary, not out of range. This used to be rejected by a
+    stricter-than-d3 ``[0, 1)`` check; the sibling boundary rejection lives in
+    ``test_band_scale_rejects_padding_inner_above_one`` below.
+    """
+    s = fr.BandScale(domain=["a", "b"], padding_inner=1.0)
+    assert s.padding_inner == 1.0
+
+
+def test_band_scale_rejects_padding_inner_above_one():
+    """BandScale must still reject padding_inner > 1.0."""
     with pytest.raises(ValueError, match="padding_inner"):
-        fr.BandScale(domain=["a", "b"], padding_inner=1.0)
+        fr.BandScale(domain=["a", "b"], padding_inner=1.5)
 
 
 def test_band_scale_rejects_nan_align():

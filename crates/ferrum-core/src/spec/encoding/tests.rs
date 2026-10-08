@@ -405,11 +405,9 @@ fn scale_spec_band_defaults() {
     let json = r#"{"type":"band"}"#;
     let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
     match parsed {
-        ScaleSpec::Band { padding, align, padding_inner, padding_outer, range, .. } => {
-            assert_eq!(padding, 0.1);
+        ScaleSpec::Band { padding, align, range, .. } => {
+            assert_eq!(padding, crate::scale::discrete::BandPadding::default());
             assert_eq!(align, 0.5);
-            assert_eq!(padding_inner, None);
-            assert_eq!(padding_outer, None);
             assert_eq!(range, None);
         }
         _ => panic!("expected Band variant"),
@@ -422,7 +420,7 @@ fn scale_spec_point_defaults() {
     let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
     match parsed {
         ScaleSpec::Point { padding, align, reverse, range, .. } => {
-            assert_eq!(padding, 0.5);
+            assert_eq!(padding, None);
             assert_eq!(align, 0.5);
             assert!(!reverse);
             assert_eq!(range, None);
@@ -437,9 +435,8 @@ fn scale_spec_point_defaults() {
 fn scale_spec_band_range_round_trip() {
     let spec = ScaleSpec::Band {
         domain: None,
-        padding: default_band_padding(),
-        padding_inner: None,
-        padding_outer: None,
+        padding: crate::scale::discrete::BandPadding::new(Some(0.1), None, None)
+            .expect("in-bounds band padding"),
         align: default_band_align(),
         range: Some(vec![40.0, 260.0]),
     };
@@ -455,9 +452,8 @@ fn scale_spec_band_range_round_trip() {
 fn scale_spec_band_range_absent_omits_key() {
     let spec = ScaleSpec::Band {
         domain: None,
-        padding: default_band_padding(),
-        padding_inner: None,
-        padding_outer: None,
+        padding: crate::scale::discrete::BandPadding::new(Some(0.1), None, None)
+            .expect("in-bounds band padding"),
         align: default_band_align(),
         range: None,
     };
@@ -471,7 +467,7 @@ fn scale_spec_band_range_absent_omits_key() {
 fn scale_spec_point_range_round_trip() {
     let spec = ScaleSpec::Point {
         domain: None,
-        padding: default_point_padding(),
+        padding: Some(0.5),
         align: default_band_align(),
         reverse: false,
         range: Some(vec![40.0, 260.0]),
@@ -488,7 +484,7 @@ fn scale_spec_point_range_round_trip() {
 fn scale_spec_point_range_absent_omits_key() {
     let spec = ScaleSpec::Point {
         domain: None,
-        padding: default_point_padding(),
+        padding: None,
         align: default_band_align(),
         reverse: false,
         range: None,
@@ -647,9 +643,10 @@ fn scale_spec_band_with_padding_inner_outer() {
     let json = r#"{"type":"band","paddingInner":0.2,"paddingOuter":0.1,"align":0.3}"#;
     let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
     match parsed {
-        ScaleSpec::Band { padding_inner, padding_outer, align, .. } => {
-            assert_eq!(padding_inner, Some(0.2));
-            assert_eq!(padding_outer, Some(0.1));
+        ScaleSpec::Band { padding, align, .. } => {
+            assert_eq!(padding.padding(), None);
+            assert_eq!(padding.inner(), Some(0.2));
+            assert_eq!(padding.outer(), Some(0.1));
             assert_eq!(align, 0.3);
         }
         _ => panic!("expected Band variant"),

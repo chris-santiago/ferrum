@@ -510,6 +510,13 @@ class TestOverrideRegistryParity:
 
         Asserted on what ``build_payload`` actually EMITS (the production
         fold, snake→wire alias included), not on the alias map read back.
+
+        Probed with ``0`` rather than ``None``: a ``None`` scale-override
+        leaf is a deliberate no-op (the chart's own value stands rather
+        than being erased), so it folds nothing for ANY leaf and would make
+        this generic reachability probe KeyError on
+        ``payload.encoding["x"]``. ``0`` is not special-cased for anything
+        this registry resolves.
         """
         wire_union = set()
         for scale_type in oa._SCALE_TYPE_TAGS:
@@ -517,7 +524,7 @@ class TestOverrideRegistryParity:
 
         emitted = set()
         for leaf in oa._scale_leaves():
-            payload = oa.build_payload({f"x_scale_{leaf}": None})
+            payload = oa.build_payload({f"x_scale_{leaf}": 0})
             emitted.update(payload.encoding["x"]["scale"])
 
         assert emitted - {"type"} <= wire_union
@@ -728,6 +735,20 @@ class TestOverrideBuildPayload:
         payload = oa.build_payload({"x_scale_domain": [0, 10]})
         assert payload.encoding == {"x": {"scale": {"domain": [0, 10]}}}
         assert payload.chart_config == {}
+
+    def test_encoding_paths_records_the_path_the_caller_wrote(self):
+        """#157's provenance field: the WIRE key maps back to the exact
+        flat override path, snake_case or wire-spelled alike.
+        """
+        payload = oa.build_payload({"x_scale_padding_inner": 0.3})
+        assert payload.encoding_paths == {"x": {"paddingInner": "x_scale_padding_inner"}}
+
+        payload = oa.build_payload({"x_scale_paddingInner": 0.3})
+        assert payload.encoding_paths == {"x": {"paddingInner": "x_scale_paddingInner"}}
+
+    def test_encoding_paths_empty_when_no_scale_override(self):
+        payload = oa.build_payload({"x_axis_label_angle": -45})
+        assert payload.encoding_paths == {}
 
     def test_coord_piece_shape(self):
         payload = oa.build_payload({"coord_clip": False})
@@ -965,6 +986,64 @@ class TestOverrideRenderEncodingScale:
         assert "100" not in baseline
 
 
+class TestOverrideScaleValueRefusalNamesThePath:
+    """#157: a malformed override SCALE VALUE refuses naming the call and
+    the exact flat override path, for any leaf -- not only band padding.
+    """
+
+    def test_unencodable_domain_value_refuses_as_valueerror_naming_the_path(self, base_chart):
+        """A value ``json.dumps`` cannot encode must raise a named
+        ``ValueError`` (``FerrumOverrideError``), never a raw ``TypeError``.
+        """
+        with pytest.raises(
+            FerrumOverrideError,
+            match=(
+                r"^Chart\.override\(y_scale_domain=\.\.\.\) "
+                r"cannot be encoded as a scale value: "
+                r"Object of type object is not JSON serializable$"
+            ),
+        ):
+            base_chart.override(y_scale_domain=object()).to_svg()
+
+    def test_non_padding_leaf_wrong_type_refuses_naming_the_path(self, base_chart):
+        """The fix is not band-padding-specific: any wire leaf's malformed
+        value is named, e.g. ``reverse`` (a boolean field) given a string.
+        """
+        with pytest.raises(
+            FerrumOverrideError,
+            match=(
+                r"^Chart\.override\(y_scale_reverse=\.\.\.\) "
+                r'invalid type: string "a", expected a boolean$'
+            ),
+        ):
+            base_chart.override(y_scale_reverse="a").to_svg()
+
+    def test_malformed_temporal_domain_element_refuses_naming_the_path(self):
+        """A malformed temporal domain element reaches its OWN conversion
+        failure (``_convert_temporal_domain_elements``, run by
+        ``_scale_to_dict``) before the merged scale dict is ever built --
+        that failure must still be named by the override path, not left to
+        surface as the unnamed ``TimeScale`` conversion error.
+        """
+        tmp = pl.DataFrame({"t": ["2020-01-01", "2021-01-01"], "v": [1.0, 2.0]}).with_columns(
+            pl.col("t").str.to_datetime()
+        )
+        chart = (
+            fm.Chart(tmp)
+            .mark_point()
+            .encode(x=fm.X("t", scale=fm.TimeScale(domain=[0.0, 100.0])), y="v")
+        )
+        with pytest.raises(
+            FerrumOverrideError,
+            match=(
+                r"^Chart\.override\(x_scale_domain=\.\.\.\) "
+                r"Cannot parse TimeScale domain value 'garbage' as an ISO-8601 date or "
+                r"datetime\. Use 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS\[\.ffffff\]\[.HH:MM\]'\.$"
+            ),
+        ):
+            chart.override(x_scale_domain=["garbage", "2020-01-10"]).to_svg()
+
+
 class TestOverrideRenderMarkStyle:
     def test_mark_corner_radius_rounds_bars(self, bar_chart):
         root = _svg_root(bar_chart.override(mark_corner_radius=6))
@@ -1059,3 +1138,221 @@ class TestOverrideRenderNoOpStability:
         baseline = bar_chart.to_svg()
         assert bar_chart.to_svg() == baseline
         assert bar_chart.override().to_svg() == baseline
+
+
+# ---------------------------------------------------------------------------
+# A None scale-override leaf is no override, for EVERY <channel>_scale_<leaf>,
+# not only the three band-padding ones (#157). One probe chart per WIRE leaf
+# in oa._scale_leaves() (aliases fold to the same wire key and behave
+# identically, so padding_inner/paddingInner, padding_outer/paddingOuter,
+# domain_mid/domainMid and domain_param/domainParam share one row).
+# ---------------------------------------------------------------------------
+
+import json
+
+_df4 = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
+
+
+def _scale_dict(chart: "fm.Chart", channel: str) -> dict:
+    """Return *chart*'s resolved wire scale dict for *channel*."""
+    return json.loads(chart.to_spec().to_json())["encoding"][channel]["scale"]
+
+
+#: wire_leaf -> (probe chart with the leaf's own value already set, the
+#: channel the leaf lives on, a different valid value for that leaf under
+#: the same scale type).
+_SCALE_LEAF_NONE_NOOP_PROBES: dict[str, tuple["fm.Chart", str, object]] = {
+    "type": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.LogScale(domain=[1.0, 100.0]))),
+        "y",
+        "sqrt",
+    ),
+    "domain": (
+        fm.Chart(_df4)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale=fm.BandScale(domain=["d", "c", "b", "a"])), y="val"),
+        "x",
+        ["a", "b", "c", "d"],
+    ),
+    "range": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.LinearScale(range=[0.0, 200.0]))),
+        "y",
+        [10.0, 300.0],
+    ),
+    "padding": (
+        fm.Chart(_df4).mark_bar().encode(x=fm.X("cat", scale=fm.BandScale(padding=0.2)), y="val"),
+        "x",
+        0.1,
+    ),
+    "paddingInner": (
+        fm.Chart(_df4)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale=fm.BandScale(padding_inner=0.2)), y="val"),
+        "x",
+        0.1,
+    ),
+    "paddingOuter": (
+        fm.Chart(_df4)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale=fm.BandScale(padding_outer=0.2)), y="val"),
+        "x",
+        0.1,
+    ),
+    "align": (
+        fm.Chart(_df4).mark_bar().encode(x=fm.X("cat", scale=fm.BandScale(align=0.2)), y="val"),
+        "x",
+        0.1,
+    ),
+    "reverse": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.PointScale(reverse=True)), y="val"),
+        "x",
+        False,
+    ),
+    "nice": (
+        fm.Chart(_df4).mark_point().encode(x="cat", y=fm.Y("val", scale=fm.LinearScale(nice=True))),
+        "y",
+        False,
+    ),
+    "zero": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(
+            x="cat", y=fm.Y("val", scale={"type": "linear", "domain": [0.0, 10.0], "zero": False})
+        ),
+        "y",
+        True,
+    ),
+    "clamp": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.LinearScale(clamp=True))),
+        "y",
+        False,
+    ),
+    "base": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.LogScale(base=2.0, domain=[1.0, 100.0]))),
+        "y",
+        10.0,
+    ),
+    "constant": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.SymlogScale(constant=1.0, domain=[0.0, 100.0]))),
+        "y",
+        2.0,
+    ),
+    "exponent": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale=fm.PowScale(exponent=2.0, domain=[0.0, 100.0]))),
+        "y",
+        3.0,
+    ),
+    "scheme": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(
+            x="cat", y="val", color=fm.Color("val", scale=fm.SequentialScale(scheme="viridis"))
+        ),
+        "color",
+        "plasma",
+    ),
+    "stops": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(
+            x="cat",
+            y="val",
+            color=fm.Color(
+                "val", scale={"type": "sequential", "stops": [[0.0, "#ff0000"], [1.0, "#00ff00"]]}
+            ),
+        ),
+        "color",
+        [[0.0, "#000000"], [1.0, "#ffffff"]],
+    ),
+    "domainMid": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y="val", color=fm.Color("val", scale=fm.DivergingScale(domain_mid=5.0))),
+        "color",
+        10.0,
+    ),
+    "domainParam": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(x="cat", y=fm.Y("val", scale={"type": "linear", "domainParam": "p1"})),
+        "y",
+        "p2",
+    ),
+    "bins": (
+        fm.Chart(_df4)
+        .mark_point()
+        .encode(
+            x="cat",
+            y="val",
+            color=fm.Color("val", scale=fm.BinOrdinalScale(bins=[0.0, 10.0, 20.0, 30.0])),
+        ),
+        "color",
+        [0.0, 5.0, 15.0, 25.0, 35.0],
+    ),
+}
+
+#: Every snake_case alias folds to a wire key already covered above, so the
+#: probe table's wire-key coverage is what must equal every WIRE key
+#: oa._scale_leaves() advertises (the aliases are a spelling of those same
+#: wire keys, not additional ones).
+_SCALE_LEAF_WIRE_KEYS = {oa._SCALE_LEAF_WIRE_ALIASES.get(leaf, leaf) for leaf in oa._scale_leaves()}
+
+
+class TestOverrideScaleNoneIsNoOverride:
+    """A None <channel>_scale_<leaf> override is no override, for every leaf
+    the registry advertises -- not only band/point padding.
+    """
+
+    def test_probe_table_covers_every_wire_leaf(self):
+        assert set(_SCALE_LEAF_NONE_NOOP_PROBES) == _SCALE_LEAF_WIRE_KEYS
+
+    @pytest.mark.parametrize("leaf", sorted(_SCALE_LEAF_NONE_NOOP_PROBES))
+    def test_none_override_leaves_the_chart_value_standing(self, leaf):
+        """Checked at both the render and the wire level: a few leaves
+        (``domainParam``, ``align`` with no padding set, ``clamp``,
+        ``nice``, ``zero``) move no pixel either way, so the render alone
+        cannot tell "the chart's own value survived" from "both sides lost
+        it the same way". The resolved scale dict can: it must still carry
+        the chart's own value for this wire key, unchanged by the override.
+        """
+        chart, channel, _alt_value = _SCALE_LEAF_NONE_NOOP_PROBES[leaf]
+        baseline_svg = chart.to_svg()
+        baseline_scale = _scale_dict(chart, channel)
+        overridden = chart.override(**{f"{channel}_scale_{leaf}": None})
+        assert overridden.to_svg() == baseline_svg
+        assert _scale_dict(overridden, channel) == baseline_scale
+
+    @pytest.mark.parametrize("leaf", sorted(_SCALE_LEAF_NONE_NOOP_PROBES))
+    def test_a_later_none_override_reverts_to_the_chart_value(self, leaf):
+        """``.override(leaf=v).override(leaf=None)``: the later ``None``
+        replaces ``v`` in the STORED override dict -- asserted directly on
+        ``chart._overrides`` below, since :func:`merge_overrides` only
+        special-cases mark-style paths and must store the later ``None``
+        like any other value, not silently keep ``v``. The payload then
+        drops the stored ``None``, so the chart's own value stands at both
+        the render and the wire level, not ``v`` (the same two-level check
+        as the single-override test above, for the same reason: several
+        leaves move no pixel for either ``v`` or the chart's own value).
+        """
+        chart, channel, alt_value = _SCALE_LEAF_NONE_NOOP_PROBES[leaf]
+        baseline_svg = chart.to_svg()
+        baseline_scale = _scale_dict(chart, channel)
+        path = f"{channel}_scale_{leaf}"
+        overridden = chart.override(**{path: alt_value}).override(**{path: None})
+        assert overridden._overrides[path] is None
+        assert overridden.to_svg() == baseline_svg
+        assert _scale_dict(overridden, channel) == baseline_scale

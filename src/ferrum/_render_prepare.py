@@ -234,8 +234,9 @@ def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
     if n == 0:
         return {}
     # NOTE: (i+0.5)/n is a band-center approximation that ignores the Rust band
-    # scale's padding_inner/outer (default 0.1), so the annotation lands in the
-    # correct band/order but is not pixel-aligned to the bar center.
+    # scale's padding_inner/outer (unset unless the caller sets them, #157), so
+    # the annotation lands in the correct band/order but is not pixel-aligned
+    # to the bar center.
     return {str(v): (i + 0.5) / n for i, v in enumerate(domain)}
 
 

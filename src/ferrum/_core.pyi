@@ -353,16 +353,31 @@ class SqrtScale:
     def __eq__(self, other: object) -> bool: ...
 
 class BandScale:
+    """Discrete band scale for bar charts.
+
+    ``padding``, ``padding_inner`` and ``padding_outer`` are each ``None``
+    until the caller sets them. With none set, bands lay out exactly as the
+    auto-inferred categorical axis does (no inner or outer padding), not
+    Vega-Lite's 0.1 convention. An unset side falls back to ``padding``,
+    then to 0 (d3's own behavior), so ``padding_inner=0.2`` alone leaves
+    outer padding at 0, not 0.1. The getters mirror this: ``padding`` returns
+    the user-set value or ``None``; ``padding_inner``/``padding_outer``
+    return ``side ?? padding``, or ``None`` when neither is set. An explicit
+    ``0.0`` is distinct from ``None`` in equality and ``repr()``, even though
+    both resolve to the same rendered geometry.
+    """
+
     domain: list[str]
     range: Optional[list[float]]
-    padding_inner: float
-    padding_outer: float
+    padding: Optional[float]
+    padding_inner: Optional[float]
+    padding_outer: Optional[float]
     align: float
     def __init__(
         self,
         *,
         domain: Optional[Sequence[str]] = None,
-        padding: float = 0.1,
+        padding: Optional[float] = None,
         padding_inner: Optional[float] = None,
         padding_outer: Optional[float] = None,
         align: float = 0.5,
@@ -376,6 +391,16 @@ class BandScale:
     def __eq__(self, other: object) -> bool: ...
 
 class PointScale:
+    """Discrete point scale for dot plots.
+
+    ``padding`` defaults to ``None`` in the constructor; the 0.5 fallback
+    lives only in Rust's serde default, read when unset. The ``padding``
+    getter always returns the resolved float (0.5 when unset), never
+    ``None``. Equality and ``repr()`` see the raw, unresolved value, so
+    ``PointScale() != PointScale(padding=0.5)`` and ``repr(PointScale())``
+    prints ``padding=None``, even though both render identically.
+    """
+
     domain: list[str]
     range: Optional[list[float]]
     padding: float
@@ -385,7 +410,7 @@ class PointScale:
         self,
         *,
         domain: Optional[Sequence[str]] = None,
-        padding: float = 0.5,
+        padding: Optional[float] = None,
         align: float = 0.5,
         reverse: bool = False,
         range: Optional[Sequence[float]] = None,
@@ -1089,6 +1114,14 @@ def scale_temporal_type_tags() -> list[str]: ...
 # dict valid?" without constructing a throwaway EncodingSpec for the side
 # effect of its exception.
 def validate_scale_dict(scale: dict) -> None: ...
+
+# #157: the data-free value checks the render path would otherwise run
+# (today, band-padding bounds via ``BandPadding::layout``), callable for
+# validation only. Raises ``ValueError`` whose message is the bare clause --
+# no ``"scale: "`` prefix, no channel, no call name -- so a caller can name
+# the call and the path itself (``Chart.override``'s per-leaf refusal does
+# exactly this). Returns None on a valid scale dict.
+def validate_scale_values(scale: dict) -> None: ...
 
 # Wave-4 task 9 (#193): the ``bins=`` vocabulary gate — the same parser
 # ``Bin(bins=)``, ``Bin2D(bins_x=)`` and ``Kde(count_scale=)`` construct
