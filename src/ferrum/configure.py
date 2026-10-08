@@ -10,6 +10,7 @@ from typing import Any
 from ferrum._configure_mixin import _MISSING, _post_init_warning_stacklevel, _resolve_band_alias
 from ferrum._title_sentinel import _UNSET, TitleParam, is_unspecified, serialize_title
 from ferrum._validate import (
+    coerce_bool_value,
     validate_choice,
     validate_color_value,
     coerce_fraction_value,
@@ -742,26 +743,28 @@ class PaddingConfig:
         Bottom padding in pixels.
     left : float, optional
         Left padding in pixels.
-    auto : bool, default False
-        Opt-in, per-side auto-expand (D10, spec §4.7): a side still at its
-        own default here (`None`) is expanded, when `auto=True`, to keep a
-        continuous axis's edge-tick label or axis title from clipping past
-        the rendered viewport edge. A side you *do* set is never touched by
-        `auto` — an explicit value always wins on its own side. Does not
-        affect ordinal/nominal axis labels (which never overhang the plot
-        edge) or annotations; a y-axis capped tight enough via `max_band`
-        can still leave its own label or title outside the canvas on that
-        axis. A title wider than the viewport itself can never be
-        recentered into view, so `auto` disables itself entirely on that
-        axis, tick-label rescue included, instead of reserving margin that
-        cannot help.
+    auto : bool, optional
+        Per-side auto-expand (D10, spec §4.7): a side still at its own
+        default here (`None`) is expanded, when auto-expand is in effect,
+        to keep a continuous axis's edge-tick label or axis title from
+        clipping past the rendered viewport edge. A side you *do* set is
+        never touched by `auto` — an explicit value always wins on its own
+        side. Leaving `auto` unset (`None`, the default) keeps ferrum's
+        built-in default, which is on; pass `False` to turn it off. Does
+        not affect ordinal/nominal axis labels (which never overhang the
+        plot edge) or annotations; a y-axis capped tight enough via
+        `max_band` can still leave its own label or title outside the
+        canvas on that axis. A title wider than the viewport itself can
+        never be recentered into view, so auto-expand disables itself
+        entirely on that axis, tick-label rescue included, instead of
+        reserving margin that cannot help.
     """
 
     top: float | None = None
     right: float | None = None
     bottom: float | None = None
     left: float | None = None
-    auto: bool = False
+    auto: bool | None = None
 
     def __post_init__(self) -> None:
         # Validate at construction time (NF-B5/B6/B7): each side must be a
@@ -769,6 +772,11 @@ class PaddingConfig:
         for side in ("top", "right", "bottom", "left"):
             value = coerce_pixel_value(f"padding.{side}", getattr(self, side))
             object.__setattr__(self, side, value)
+        # `auto` is reached through three doors (this class, `configure_padding`,
+        # and `.override(padding_auto=...)`); each voices its own refusal.
+        # `None` means unset -- ferrum's built-in default stands -- and is
+        # never coerced; `coerce_bool_value` passes it through unchanged.
+        object.__setattr__(self, "auto", coerce_bool_value("padding.auto", self.auto))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""

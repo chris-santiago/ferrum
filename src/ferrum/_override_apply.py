@@ -69,7 +69,7 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 from ferrum._layer import is_unset
-from ferrum._validate import coerce_pixel_value
+from ferrum._validate import coerce_bool_value, coerce_pixel_value
 from ferrum.configure import (
     AxisConfig,
     ColorConfig,
@@ -207,8 +207,9 @@ class OverridePayload:
 _DEPRECATED_AXIS_LEAVES = frozenset({"x", "y"})
 
 # Non-pixel PaddingConfig leaves: excluded from the numeric pixel-contract
-# guard below. ``auto`` is a bool, not a pixel value, and must pass through
-# ``.override(padding_auto=...)`` untouched.
+# guard below. ``auto`` is a bool, not a pixel value, so ``.override(padding_auto=...)``
+# is validated separately, in this door's own voice (see the ``coerce_bool_value``
+# call in ``validate`` below).
 _PADDING_NON_NUMERIC_LEAVES = frozenset({"auto"})
 
 
@@ -629,8 +630,8 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     ``bottom``/``left``): they must be finite, non-negative pixel values per
     spec §4.7's pixel contract (:func:`ferrum._validate.coerce_pixel_value`,
     the same predicate ``PaddingConfig.__post_init__`` runs). ``padding_auto``
-    (a bool leaf) is not part of the pixel contract and passes through
-    unvalidated here.
+    (a bool leaf) is validated the same way with its bool-valued sibling,
+    :func:`ferrum._validate.coerce_bool_value`, voiced as this override path.
 
     Parameters
     ----------
@@ -650,7 +651,8 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     FerrumOverrideError
         When any path does not resolve.
     ValueError
-        When a padding side value violates the pixel contract.
+        When a padding side value violates the pixel contract, or
+        ``padding_auto`` is set to something other than a bool.
     """
     resolved_paths: dict[str, ResolvedPath] = {}
     for path, value in overrides.items():
@@ -679,6 +681,8 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
             and resolved.location.leaf in _PADDING_NUMERIC_LEAVES
         ):
             coerce_pixel_value(f"override {path!r}", value)
+        elif resolved.location.target_key == "padding" and resolved.location.leaf == "auto":
+            coerce_bool_value(f"override {path!r}", value)
 
         resolved_paths[path] = resolved
     return resolved_paths
@@ -737,23 +741,20 @@ def _chart_config_wire_fragment(config_cls: type | None, leaves: dict[str, Any])
     leaf can serialize to more than one wire key — ``label_format`` resolves
     a preset and emits ``label_format_type`` alongside it — and taking only
     the named leaves would drop the companion and mis-classify the format.
-
-    The empty-construction baseline is subtracted for the mirror-image
-    reason. ``to_dict()`` emits every non-``None`` field, including the
-    class's own DEFAULTS, so an instance carries keys the caller never named:
-    ``PaddingConfig`` declares ``auto: bool = False``, so
-    ``PaddingConfig(left=70).to_dict()`` is ``{"auto": False, "left": 70.0}``.
-    Merging that fragment would inject an unsolicited ``auto`` onto the wire.
-    Building the section from one combined construction call also retires
-    the kwarg-order hazard the single-leaf version had to reason about
+    ``to_dict()`` on its own is enough, with no baseline to subtract: every
+    ``ferrum.configure`` dataclass field defaults to ``None`` (or, for the
+    handful that don't -- e.g. ``AxisConfig.x``/``y`` -- is popped back out
+    before ``to_dict()`` returns; see the structural test in
+    ``tests/test_padding_auto_default.py`` that pins every section's empty
+    ``to_dict()`` as ``{}``), so a default-constructed instance never emits
+    a key the caller did not name, and the fragment can only contain keys
+    the named leaves themselves produced. Building
+    the section from one combined construction call also retires the
+    kwarg-order hazard a single-leaf version would have to reason about
     separately: ``override(padding_auto=True, padding_left=70)`` and the
     reversed spelling both become one ``PaddingConfig(auto=True, left=70)``
     call regardless of which key the caller wrote first, so there is no
-    order for the two spellings to disagree on. Dropping any key the section
-    did not name that a default-constructed instance also emits keeps
-    derived companions (absent from the baseline) and drops injected
-    defaults (present in it), so a fragment can only contain keys the named
-    leaves themselves produced.
+    order for the two spellings to disagree on.
 
     ``config_cls is None`` (encoding-scale, mark and coord prefixes, whose
     leaves are not owned by a ``ferrum.configure`` dataclass) keeps the raw
@@ -762,9 +763,7 @@ def _chart_config_wire_fragment(config_cls: type | None, leaves: dict[str, Any])
     """
     if config_cls is None:
         return dict(leaves)
-    fragment = config_cls(**leaves).to_dict()
-    baseline = config_cls().to_dict()
-    return {k: v for k, v in fragment.items() if k in leaves or k not in baseline}
+    return config_cls(**leaves).to_dict()
 
 
 def build_payload(overrides: dict[str, Any]) -> OverridePayload:

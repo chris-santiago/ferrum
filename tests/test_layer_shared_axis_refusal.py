@@ -354,11 +354,22 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 # byte-identical on every route: the fix narrows a CONTINUOUS-axis union, and
 # must not touch the ordinal union's own, already-correct, "skip a layer
 # column the ladder cannot enumerate" rule one function over.
+#
+# 2026-10-08 (#135): the "categorical_bar_temporal_line" `fm.layer` hash moved
+# from `2446a242cabf896b` to `7d09607e9078e349` -- this fixture's temporal
+# line layer gets `padding.auto`'s edge-tick rescue now that the Rust
+# built-in default is `True`, and `fm.layer(...)` renders with no
+# `configure_padding` call to opt out. The `+` and `interactive` hashes for
+# the same fixture, and both hashes for "integer_category_ordinal_union",
+# did not move (confirmed by direct regeneration): `auto`'s correction is
+# measurably different only for this one route/fixture pair at this exact
+# viewport. Unrelated to the continuous-axis-union predicate this class
+# guards; still must not move again on its own.
 # ---------------------------------------------------------------------------
 
 _WAVE5_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
-        "fm.layer": "2446a242cabf896b",
+        "fm.layer": "7d09607e9078e349",
         "+": "dddad057de646ff7",
         "interactive": "3248f9cb42c3bc79",
     },

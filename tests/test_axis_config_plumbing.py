@@ -837,19 +837,22 @@ class TestOverrideMatchesItsTypedEquivalent:
         [("padding_auto", "padding_left"), ("padding_left", "padding_auto")],
         ids=["auto_first", "left_first"],
     )
-    def test_a_leaf_fragment_carries_no_sibling_defaults(self, order):
-        """`to_dict()` emits a class's non-None DEFAULTS too, so a one-leaf
-        instance carries keys the caller never named.
+    def test_combined_leaf_construction_is_kwarg_order_independent(self, order):
+        """Both override-kwarg orders for one section build ONE combined
+        ``PaddingConfig(...)`` call, so they agree with each other and with
+        the typed equivalent regardless of which key the caller wrote first.
 
-        `PaddingConfig` is the one config class with such a default
-        (`auto: bool = False`), so `PaddingConfig(left=70).to_dict()` is
-        `{"auto": False, "left": 70.0}`. Merging that whole fragment injected
-        an unsolicited `auto` AND let it overwrite an explicit sibling leaf in
-        kwarg order — the two spellings below disagreed with each other and
-        with the typed equivalent. Latent only because `PaddingConfigSpec.auto`
-        had no Rust consumer at the time this test was written (Task 9 gave
-        it one), which is exactly when a payload-level divergence becomes a
-        rendering one.
+        ``#135`` retired the baseline-subtraction ``_chart_config_wire_fragment``
+        used to need: ``PaddingConfig.auto`` defaulted to ``False`` (the one
+        config-class default ``to_dict()`` ever emitted unsolicited --
+        see ``tests/test_padding_auto_default.py``'s structural empty-``to_dict()``
+        pin), so a one-leaf-at-a-time build of ``{"padding_left": 70.0}``
+        would have carried an unsolicited ``"auto": False``, and the two
+        kwarg orders below would additionally have disagreed on which
+        leaf's ``auto`` won. ``auto`` is now ``bool | None = None`` like
+        every other optional leaf, so there is no unsolicited default left
+        to subtract -- this pins that the combined-construction order
+        independence still holds on its own.
         """
         from ferrum._override_apply import build_payload
 

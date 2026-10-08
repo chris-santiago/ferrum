@@ -32,11 +32,16 @@ from typing import Any
 def merge_configure_layers(layers: Any) -> dict:
     """Merge a list of ``Configure`` objects into one config dict.
 
-    Uses the same deep-merge semantics as
-    ``_RenderMixin._resolve_chart_config``: each layer contributes its
-    ``.to_dict()``; nested dict values are shallow-merged so later layers win
-    key-by-key, and non-dict values are replaced outright.  Later layers in the
-    list override earlier ones.
+    Each layer contributes its ``.to_dict()``; nested dict values are
+    shallow-merged so later layers win key-by-key, and non-dict values are
+    replaced outright.  Later layers in the list override earlier ones.
+
+    This is the single implementation of that merge: ``_RenderMixin._resolve_chart_config``
+    (the per-chart render path) and the composite-chrome path
+    (:func:`chrome_kwargs` via ``composition.py``'s ``_composite_chrome_kwargs``)
+    both call this function rather than each keeping its own copy of the
+    loop, so a later `configure_padding(...)` layer's value for any key,
+    `auto` included, is honored identically by both paths.
 
     Returns an empty dict when *layers* is falsy (no configure layers set).
     """

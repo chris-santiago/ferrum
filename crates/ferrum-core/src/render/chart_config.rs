@@ -770,7 +770,9 @@ pub struct PaddingConfigSpec {
     /// (D10, spec §4.7, F-L07-08). Consumed by `theme.padding.padding_auto`
     /// → `layout::compute_layout` — see `ThemePadding::padding_auto`'s own
     /// doc for the reader list. An explicit side always wins over auto on
-    /// that side. See `chart_config_manifest.json`.
+    /// that side. `None` (the caller never mentioned `auto`) leaves the
+    /// Rust built-in default (`true`, #135) in place — there is no theme
+    /// key for it. See `chart_config_manifest.json`.
     pub auto: Option<bool>,
 }
 

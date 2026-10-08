@@ -717,7 +717,7 @@
   },
   "PaddingConfigSpec.auto": {
     "honored": true,
-    "reason": "apply_chart_config_to_theme -> theme.padding.padding_auto -> layout::compute_layout's auto_padding_for_edge_ticks then auto_padding_for_axis_titles, composed sequentially and summed, then capped against the viewport via cap_auto_contribution (Task 9, D10, spec-review cycles 2 and 6): expands a side with no explicit override to contain a continuous axis's edge-tick-label overhang and/or recenter an overflowing axis title, render/config_apply/mod.rs + layout/mod.rs. Opt-in (default false) end to end."
+    "reason": "apply_chart_config_to_theme -> theme.padding.padding_auto -> layout::compute_layout's settle_auto_padding, which solves auto_padding_for_edge_ticks then auto_padding_for_axis_titles against a measured chrome credit and caps the result against the viewport (D10): expands a side with no explicit override to contain a continuous axis's edge-tick-label overhang and/or recenter an overflowing axis title, render/config_apply/mod.rs + layout/mod.rs. Built-in default true end to end (#135) — there is no theme key for this value, so the wire's optional auto only overrides it when the caller sets it; an unmentioned auto leaves the rescue on."
   },
   "PaddingConfigSpec.bottom": {
     "honored": true,

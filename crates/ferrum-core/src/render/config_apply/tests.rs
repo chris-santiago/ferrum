@@ -305,9 +305,14 @@ mod chart_config_application_tests {
 
     #[test]
     fn apply_chart_config_padding_auto_does_not_block_explicit_sides() {
-        // auto=true (opt-in; `False` is the Python default) must NOT block
-        // explicit side values.
+        // An explicit wire `auto: true` must NOT block explicit side
+        // values, and it must actually flip `padding_auto` itself — started
+        // from an auto-OFF theme so this fails if the `if let Some(auto) =
+        // pad.auto { theme.padding.padding_auto = auto; }` line is ever
+        // deleted (starting from the built-in auto-on default would pass
+        // either way).
         let mut theme = ThemeInputs::default();
+        theme.padding.padding_auto = false;
         let config = ChartConfig {
             padding: Some(PaddingConfigSpec {
                 top: Some(5.0),
@@ -323,11 +328,84 @@ mod chart_config_application_tests {
         assert!(theme.padding.padding_right.is_none());
         assert!(theme.padding.padding_bottom.is_none());
         assert!(theme.padding.padding_left.is_none());
-        // The one line this function actually adds to this block
-        // (render/mod.rs's `if let Some(auto) = pad.auto { theme.padding
-        // .padding_auto = auto; }`) — the plumbing this test exists for was
-        // previously covered only end to end from Python.
-        assert!(theme.padding.padding_auto);
+        assert!(theme.padding.padding_auto, "auto: true must turn padding_auto on");
+    }
+
+    /// #135: an explicit wire `auto: false` turns the built-in default off,
+    /// the same as it would have before the default flip.
+    #[test]
+    fn apply_chart_config_padding_auto_false_turns_off_the_built_in_default() {
+        let mut theme = ThemeInputs::default();
+        assert!(
+            theme.padding.padding_auto,
+            "fixture assumption: the built-in default must start on"
+        );
+        let config = ChartConfig {
+            padding: Some(PaddingConfigSpec {
+                auto: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_theme(&mut theme, &config);
+        assert!(!theme.padding.padding_auto);
+    }
+
+    /// #135: a `ChartConfig` whose `padding` block never mentions `auto`
+    /// (either no padding block at all, or one with `auto: None`) leaves
+    /// the built-in default (`true`) in place — there is no theme key to
+    /// fall back to and no guard that resets it.
+    #[test]
+    fn apply_chart_config_padding_omitting_auto_leaves_the_built_in_default_on() {
+        let mut theme_no_block = ThemeInputs::default();
+        apply_chart_config_to_theme(&mut theme_no_block, &ChartConfig::default());
+        assert!(theme_no_block.padding.padding_auto);
+
+        let mut theme_auto_none = ThemeInputs::default();
+        let config = ChartConfig {
+            padding: Some(PaddingConfigSpec {
+                left: Some(5.0),
+                auto: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_theme(&mut theme_auto_none, &config);
+        assert_eq!(theme_auto_none.padding.padding_left, Some(5.0));
+        assert!(theme_auto_none.padding.padding_auto);
+    }
+
+    /// #135, on the wire this time rather than a hand-built `PaddingConfigSpec`:
+    /// a `padding` block with no `auto` key at all, and one with an explicit
+    /// JSON `null`, both deserialize `auto` to `None` under `serde(default)`
+    /// and leave the built-in default on. The inverse `"auto": false` case
+    /// turns it off, so this cannot pass by never actually reading the field.
+    #[test]
+    fn apply_chart_config_padding_wire_json_leaves_auto_on_when_absent_or_null() {
+        let no_key: ChartConfig = serde_json::from_value(serde_json::json!({
+            "padding": { "left": 5.0 }
+        }))
+        .expect("a padding block without auto must still deserialize");
+        let mut theme = ThemeInputs::default();
+        apply_chart_config_to_theme(&mut theme, &no_key);
+        assert_eq!(theme.padding.padding_left, Some(5.0));
+        assert!(theme.padding.padding_auto, "auto absent from the wire must stay on");
+
+        let explicit_null: ChartConfig = serde_json::from_value(serde_json::json!({
+            "padding": { "auto": null }
+        }))
+        .expect("an explicit JSON null for auto must still deserialize");
+        let mut theme = ThemeInputs::default();
+        apply_chart_config_to_theme(&mut theme, &explicit_null);
+        assert!(theme.padding.padding_auto, "auto: null on the wire must stay on");
+
+        let explicit_false: ChartConfig = serde_json::from_value(serde_json::json!({
+            "padding": { "auto": false }
+        }))
+        .expect("an explicit JSON false for auto must still deserialize");
+        let mut theme = ThemeInputs::default();
+        apply_chart_config_to_theme(&mut theme, &explicit_false);
+        assert!(!theme.padding.padding_auto, "auto: false on the wire must turn it off");
     }
 
     #[test]

@@ -2540,20 +2540,18 @@ def test_configure_grid_band_colors_serialization():
 # ---------------------------------------------------------------------------
 
 
-def test_padding_auto_default_false():
-    """PaddingConfig defaults to auto=False (opt-in, spec §4.7, D10).
+def test_padding_auto_default_unset():
+    """PaddingConfig defaults `auto` to `None` (unset), not a bool (#135).
 
-    Targets configure.py PaddingConfig default: auto=False. auto never had
-    a polarity decision recorded before it became a real (non-no-op)
-    consumer; defaulting it True would have silently expanded margins for
-    every existing PaddingConfig()/configure_padding() caller.
+    Targets configure.py PaddingConfig default: `auto: bool | None = None`.
+    The Rust built-in default (`ThemePadding::default().padding_auto`) is
+    the single owner, so an unmentioned `auto` must never reach the wire —
+    unlike a bool default, which `_to_dict_omit_none` would always emit.
     """
     cfg = PaddingConfig()
-    assert cfg.auto is False
+    assert cfg.auto is None
     d = cfg.to_dict()
-    # auto=False should be in the dict since it's not None (bool is never
-    # omitted by _to_dict_omit_none).
-    assert d["auto"] is False
+    assert "auto" not in d
 
 
 def test_padding_explicit_sides_renders():

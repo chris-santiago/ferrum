@@ -427,14 +427,9 @@ class _RenderMixin:
 
     def _resolve_chart_config(self) -> dict:
         """Merge _configure layers and annotations into a single dict for the Rust binding."""
-        merged: dict = {}
-        for cfg in self._configure:
-            d = cfg.to_dict()
-            for key, val in d.items():
-                if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
-                    merged[key] = {**merged[key], **val}
-                else:
-                    merged[key] = val
+        from ferrum._chrome import merge_configure_layers
+
+        merged = merge_configure_layers(self._configure)
         # GH #74: configure_legend(orient="none") joins the SAME suppression
         # mechanism Color(legend=None) uses (encoding.<channel>.legend.disabled
         # on the Rust side) -- there is no LegendOrient::None variant. Derived

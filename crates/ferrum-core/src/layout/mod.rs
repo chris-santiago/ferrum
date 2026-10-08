@@ -345,8 +345,13 @@ pub struct ThemePadding {
     /// elementwise-max merge was unsound; see the composition note on
     /// `compute_layout`'s own padding step and each reader's own doc for
     /// why); a side the caller DID set is never touched (explicit always
-    /// wins — spec §4.7). Default `false`, so default output is
-    /// byte-identical.
+    /// wins — spec §4.7). Built-in default `true` (#135):
+    /// a chart that never mentions padding still gets the rescue, so it is
+    /// byte-identical to today only for the charts that don't exercise it
+    /// (no continuous axis ending in a long tick label or an overflowing
+    /// axis title). There is no theme key for this field — it is a Rust
+    /// built-in default, not a theme default — so `fm.compute_layout`
+    /// (which uses `ThemeInputs::default()`) also runs with auto on.
     pub padding_auto: bool,
     pub column_padding: f64,
     pub row_padding: f64,
@@ -362,7 +367,10 @@ impl Default for ThemePadding {
             padding_right: None,
             padding_bottom: None,
             padding_left: None,
-            padding_auto: false,
+            // #135: the single owner of the `padding.auto` default.
+            // Built-in, not a theme key — `true` so a chart that never
+            // mentions padding still gets the edge-padding rescue.
+            padding_auto: true,
             column_padding: 12.0,
             row_padding: 12.0,
             axis_title_padding: 8.0,
@@ -768,7 +776,7 @@ fn reserve_legends(
     inner: Rect,
     theme: &ThemeInputs,
     legend_entries: &[LegendEntry],
-    legend_title: Option<String>,
+    legend_title: Option<&str>,
     colorbar: Option<&ColorbarInput>,
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
@@ -805,7 +813,7 @@ fn reserve_legends(
             theme.legend.legend_columns,
             theme.padding.column_padding,
             color_entries,
-            legend_title.as_deref(),
+            legend_title,
             color_colorbar,
             metrics,
             legend_overrides,
@@ -857,6 +865,105 @@ fn reserve_legends(
         aux_legends,
         inner_after_legend,
         legend_dropped,
+    )
+}
+
+/// Stages 2b+3 together: the chart-level title band, then the color legend
+/// plus any aux (size/shape) blocks, off `inner`. One function with two
+/// callers — the real layout and the chrome measurement below — so a probe
+/// of "what these two stages reserve" can never drift from what they
+/// actually reserve: both run the identical sequence against the identical
+/// stages ([`reserve_chart_title`], [`reserve_legends`]).
+#[allow(clippy::too_many_arguments)]
+fn reserve_title_and_legends(
+    inner: Rect,
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    legend_entries: &[LegendEntry],
+    legend_title: Option<&str>,
+    colorbar: Option<&ColorbarInput>,
+    metrics: &dyn TextMetrics,
+    legend_overrides: &legend::LegendOverrides,
+    aux_legend_inputs: &[legend::AuxLegendInput],
+    seam: CompositeLayoutSeam,
+) -> (Option<ChartTitleLayout>, Option<LegendLayout>, Vec<LegendLayout>, Rect, u32) {
+    let (chart_title_layout, inner) = if seam.suppress_chart_title {
+        (None, inner)
+    } else {
+        reserve_chart_title(inner, spec, theme, metrics)
+    };
+    let (legend_layout, aux_legends, inner_after_legend, legend_dropped) = reserve_legends(
+        inner,
+        theme,
+        legend_entries,
+        legend_title,
+        colorbar,
+        metrics,
+        legend_overrides,
+        aux_legend_inputs,
+        seam.legend,
+    );
+    (
+        chart_title_layout,
+        legend_layout,
+        aux_legends,
+        inner_after_legend,
+        legend_dropped,
+    )
+}
+
+/// One secondary y-axis's own band width (secondary-y-axis, GH #52): its
+/// label band plus title gutter, clamped to its own `min_band`/`max_band`
+/// overrides. Extracted out of [`reserve_axis_bands`]'s per-axis map so
+/// [`chrome_reserved_at`] (#135) can total the same per-axis widths
+/// independent of the padding inset, before `reserve_axis_bands` itself
+/// ever runs, and the two stages agree because they call this exact same
+/// function.
+///
+/// Drawn gate (#97/#182, same discipline as the primary y band): secondary
+/// y-axes have no `.axis(show=False)`-style suppression toggle anywhere in
+/// `AxesInput` — the panel loop always emits every `axes.secondary_y` entry
+/// ("Independent of axes.show_y" — that toggle only suppresses the
+/// primary/left axis). `visible: true` is therefore correct for both the
+/// label band and the title gutter under every Cartesian coord, not a
+/// placeholder; if a per-secondary-axis show toggle is ever added, thread it
+/// through here. `Axis(labels=False)` on a secondary axis IS already
+/// honored — `compute_y_label_band_width` reads `a.show_labels` directly off
+/// this `AxisInput`.
+///
+/// Named residual (#182): under a PROJECTED coord (`Polar`/`Geo`)
+/// `render::scene_build` suppresses secondary y-axes along with the
+/// primaries, so these bands are reserved for nothing. The primaries close
+/// via `axes.show_x`/`show_y` (which `render::prepare::build_axes` folds the
+/// coord into); the secondary slots cannot, because the coord fact is not
+/// per-axis and the honest fix is for the #52 slot plan to produce NO
+/// secondary axes under a projected coord — its three index-correlated
+/// vectors (inputs/scales/tick_counts) must be emptied together, which is
+/// that plan's call, not this reservation's. Reachable only by combining
+/// `CoordPolar`/`CoordGeo` with an independent-y layer.
+fn secondary_y_axis_band_width(
+    a: &AxisInput,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+) -> f64 {
+    let label_font_size = a
+        .overrides
+        .labels
+        .font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let label_band =
+        axis::compute_y_label_band_width(a, label_font_size, metrics, a.tick_size(theme), true);
+    let title_gutter = axis::compute_y_title_width(
+        a,
+        theme.typography.title_font_size,
+        theme.padding.axis_title_padding,
+        metrics,
+        true,
+    );
+    clamp_axis_band(
+        label_band + title_gutter,
+        a.overrides.placement.min_band,
+        a.overrides.placement.max_band,
     )
 }
 
@@ -984,55 +1091,7 @@ fn reserve_axis_bands(
     let secondary_y_bands: Vec<f64> = axes
         .secondary_y
         .iter()
-        .map(|a| {
-            let label_font_size = a
-                .overrides
-                .labels
-                .font_size
-                .unwrap_or(theme.typography.label_font_size);
-            // Drawn gate (#97/#182, same discipline as the primary y band
-            // above): secondary y-axes have no `.axis(show=False)`-style
-            // suppression toggle anywhere in `AxesInput` — the panel loop
-            // always emits every `axes.secondary_y` entry ("Independent of
-            // axes.show_y" — that toggle only suppresses the primary/left
-            // axis). `visible: true` is therefore correct for both the label
-            // band and the title gutter under every Cartesian coord, not a
-            // placeholder; if a per-secondary-axis show toggle is ever added,
-            // thread it through here. `Axis(labels=False)` on a secondary axis
-            // IS already honored — `compute_y_label_band_width` reads
-            // `a.show_labels` directly off this `AxisInput`.
-            //
-            // Named residual (#182): under a PROJECTED coord (`Polar`/`Geo`)
-            // `render::scene_build` suppresses secondary y-axes along with the
-            // primaries, so these bands are reserved for nothing. The primaries
-            // close via `axes.show_x`/`show_y` (which
-            // `render::prepare::build_axes` folds the coord into); the secondary
-            // slots cannot, because the coord fact is not per-axis and the
-            // honest fix is for the #52 slot plan to produce NO secondary axes
-            // under a projected coord — its three index-correlated vectors
-            // (inputs/scales/tick_counts) must be emptied together, which is
-            // that plan's call, not this reservation's. Reachable only by
-            // combining `CoordPolar`/`CoordGeo` with an independent-y layer.
-            let label_band = axis::compute_y_label_band_width(
-                a,
-                label_font_size,
-                metrics,
-                a.tick_size(theme),
-                true,
-            );
-            let title_gutter = axis::compute_y_title_width(
-                a,
-                theme.typography.title_font_size,
-                theme.padding.axis_title_padding,
-                metrics,
-                true,
-            );
-            clamp_axis_band(
-                label_band + title_gutter,
-                a.overrides.placement.min_band,
-                a.overrides.placement.max_band,
-            )
-        })
+        .map(|a| secondary_y_axis_band_width(a, theme, metrics))
         .collect();
     let secondary_y_total: f64 = secondary_y_bands.iter().sum();
 
@@ -1202,6 +1261,72 @@ fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMet
     )
 }
 
+/// Chrome that already reserves real space on a padding side BEFORE
+/// `padding.auto`'s own tick/title corrections run: the chart-title band,
+/// the color/aux legend gutter (every orient, including an aux block the
+/// color legend itself doesn't reach — see [`reserve_title_and_legends`]),
+/// and the secondary-y bands (always the right side — see
+/// [`secondary_y_axis_band_width`]'s own doc). [`auto_padding_for_edge_ticks`]
+/// and [`auto_padding_for_axis_titles`] fold this into their cushion/
+/// baseline-center math so a correction never pads MORE than a label's or
+/// title's own overhang past everything already reserved.
+///
+/// Measured, not estimated: runs [`reserve_title_and_legends`] against the
+/// padded rect `inset` actually produces, and reads the per-side gap
+/// between that rect and what is left afterward. Because legend/aux/
+/// colorbar reservation can itself depend on how much room is left (every
+/// categorical strip is capped at half of whichever rect it is carved
+/// from), the measurement is only exact at the `inset` that produced it —
+/// see [`settle_auto_padding`], which calls this in a loop until the
+/// credited chrome and the measured chrome agree.
+#[allow(clippy::too_many_arguments)]
+fn chrome_reserved_at(
+    inset: Inset,
+    viewport: Viewport,
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    axes: &AxesInput,
+    legend_entries: &[LegendEntry],
+    legend_title: Option<&str>,
+    colorbar: Option<&ColorbarInput>,
+    metrics: &dyn TextMetrics,
+    legend_overrides: &legend::LegendOverrides,
+    aux_legend_inputs: &[legend::AuxLegendInput],
+    seam: CompositeLayoutSeam,
+) -> Inset {
+    let padded = viewport.into_rect().shrink(inset);
+    let (_, _, _, after, _) = reserve_title_and_legends(
+        padded,
+        spec,
+        theme,
+        legend_entries,
+        legend_title,
+        colorbar,
+        metrics,
+        legend_overrides,
+        aux_legend_inputs,
+        seam,
+    );
+    let secondary_y_total: f64 = axes
+        .secondary_y
+        .iter()
+        .map(|a| secondary_y_axis_band_width(a, theme, metrics))
+        .sum();
+    // Clamped at 0 per side: a carve can advance an edge past the padded
+    // rect while clamping the OTHER dimension to 0 (a colorbar or aux
+    // block wider/taller than the rect it is carved from — see
+    // `layout_colorbar`'s and `layout_aux_legends`' own `.max(0.0)`
+    // floors), which would otherwise make this side's delta negative. A
+    // negative credit is never a real reservation, and the fixed point in
+    // `settle_auto_padding` depends on every credit being >= 0.
+    Inset {
+        top: (after.y - padded.y).max(0.0),
+        right: ((padded.x + padded.w) - (after.x + after.w)).max(0.0) + secondary_y_total,
+        bottom: ((padded.y + padded.h) - (after.y + after.h)).max(0.0),
+        left: (after.x - padded.x).max(0.0),
+    }
+}
+
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
 /// per side, to contain a CONTINUOUS axis's first/last tick-label OVERHANG
 /// past the plot's own edge. (Axis TITLE overflow is a separate, sibling
@@ -1239,18 +1364,20 @@ fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMet
 /// CASCADE-chosen (not override-declared) rotation is not visible here
 /// (the cascade runs downstream, inside `reserve_axis_bands`/
 /// `layout_x_axis`), so this may occasionally over-pad a chart the cascade
-/// ends up rotating anyway — safe-direction, never under-pads. Right-side
-/// x overhang ignores `secondary_y` bands and the y-vertical corrections
-/// ignore an `x`-axis drawn `orient="top"` — both documented, safe-
-/// direction gaps (may occasionally over-pad in those combinations, never
-/// under-pads) rather than attempts at pixel-exact reservation, matching
-/// this module's established "over-reservation is acceptable, under-
-/// reservation is the bug" tradeoff (see `reserve_axis_bands`'s own doc).
+/// ends up rotating anyway — safe-direction, never under-pads.
+///
+/// `chrome` is whatever the chart title, a legend on the same side (left,
+/// right or top), or the secondary-y bands already reserve on that side
+/// (see [`chrome_reserved_at`]), folded into each cushion below exactly
+/// like `y_gutter` is: it is space the plot's edge has already moved
+/// behind, so the overhang this function corrects for is already that
+/// much smaller. `chrome.bottom` is unused here: there is no bottom
+/// correction to adjust (see below).
 fn auto_padding_for_edge_ticks(
-    spec: &crate::spec::chart::ChartSpec,
     theme: &ThemeInputs,
     axes: &AxesInput,
     metrics: &dyn TextMetrics,
+    chrome: Inset,
 ) -> Inset {
     // The non-auto fallback for each side — mirrors `compute_layout`'s own
     // `inset` computation exactly (an explicit side stays exactly this;
@@ -1281,8 +1408,10 @@ fn auto_padding_for_edge_ticks(
             (Some(first), Some(last)) => {
                 let half_first = metrics.measure_width(first, x_label_font_size) / 2.0;
                 let half_last = metrics.measure_width(last, x_label_font_size) / 2.0;
-                let left_cushion = base_left + if y_on_right { 0.0 } else { y_gutter };
-                let right_cushion = base_right + if y_on_right { y_gutter } else { 0.0 };
+                let left_cushion =
+                    base_left + chrome.left + if y_on_right { 0.0 } else { y_gutter };
+                let right_cushion =
+                    base_right + chrome.right + if y_on_right { y_gutter } else { 0.0 };
                 (
                     (half_first - left_cushion).max(0.0),
                     (half_last - right_cushion).max(0.0),
@@ -1301,9 +1430,12 @@ fn auto_padding_for_edge_ticks(
     // realistic combination, so a bottom correction would never fire —
     // computing it would need this function to duplicate
     // `estimate_x_label_band`'s slot-width estimate for no practical
-    // benefit. The top cushion (`base_top + the chart title band`, if any)
-    // has no such guaranteed floor when there's no chart title, so it can
-    // genuinely need a correction.
+    // benefit (and so a bottom legend cannot create an over-correction
+    // this function guards against, because there is no correction here
+    // to over-apply). The top cushion has no such guaranteed floor when
+    // there's no chart title and no top-side chrome, so it can genuinely
+    // need a correction. `chrome.top` already covers the chart-title band
+    // (see `chrome_reserved_at`), so it is not added again here.
     let y_flat = axes.y.overrides.labels.angle.is_none_or(|a| a == 0.0);
     let y_continuous = axes.y.tick_projection.is_some();
     let extra_top = if axes.show_y
@@ -1313,7 +1445,7 @@ fn auto_padding_for_edge_ticks(
         && !axes.y.tick_labels.is_empty()
     {
         let half_line = metrics.line_height(y_label_font_size) / 2.0;
-        let top_cushion = base_top + chart_title_band_height(spec, theme, metrics);
+        let top_cushion = base_top + chrome.top;
         (half_line - top_cushion).max(0.0)
     } else {
         0.0
@@ -1488,13 +1620,13 @@ fn axis_title_infeasibility(
 /// baseline-center estimate, and the x-axis's own clamped band (its label
 /// band plus title gutter, via the same `clamp_axis_band` `reserve_axis_bands`
 /// applies) for the y-title's top/bottom baseline-center estimate. Both
-/// estimates ignore the legend gutter and secondary-y bands (documented,
-/// disclosed gap: ignoring a real
-/// right-side legend or secondary-y band makes `baseline_center` LARGER
-/// than the true plot center, which asks the solver for MORE right
-/// padding than actually needed and can push the title further past its
-/// LEFT edge than intended — an over-correction risk on the title's
-/// opposite side, not the under-correction this doc previously claimed).
+/// estimates fold in `chrome` (see [`chrome_reserved_at`]): the chart-title
+/// band, the legend gutter and the secondary-y bands, on whichever side
+/// they actually land. Ignoring a real right-side legend or secondary-y
+/// band would make `baseline_center` LARGER than the true plot center,
+/// asking the solver for MORE right padding than actually needed and
+/// pushing the title further past its LEFT edge than intended — an
+/// over-correction risk on the title's opposite side.
 /// `auto_padding_for_edge_ticks`'s own `orient="top"` gap does NOT apply
 /// here: this function's y-title estimate computes `x_on_top` and folds
 /// the x-band into `plot_y`/`plot_h` on both orientations (see the
@@ -1512,23 +1644,24 @@ fn axis_title_infeasibility(
 /// zeroes the same-axis tick-pass contribution before `base` ever reaches
 /// here.
 fn auto_padding_for_axis_titles(
-    spec: &crate::spec::chart::ChartSpec,
     theme: &ThemeInputs,
     viewport: Viewport,
     axes: &AxesInput,
     metrics: &dyn TextMetrics,
     base: Inset,
+    chrome: Inset,
 ) -> Inset {
     let (base_left, base_right, base_top, base_bottom) =
         (base.left, base.right, base.top, base.bottom);
 
     let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
     let y_gutter = clamped_y_gutter(theme, axes, metrics);
-    let plot_w = (viewport.width - base_left - base_right - y_gutter).max(0.0);
+    let plot_w =
+        (viewport.width - base_left - base_right - chrome.left - chrome.right - y_gutter).max(0.0);
 
     let (extra_left, extra_right) = match title_half_extent(&axes.x, axes.show_x, theme, metrics) {
         Some(half_w) => {
-            let plot_x = base_left + if y_on_right { 0.0 } else { y_gutter };
+            let plot_x = base_left + chrome.left + if y_on_right { 0.0 } else { y_gutter };
             let baseline_center = plot_x + plot_w / 2.0;
             recentering_padding(baseline_center, half_w, viewport.width)
         }
@@ -1562,11 +1695,15 @@ fn auto_padding_for_axis_titles(
                 axes.x.overrides.placement.min_band,
                 axes.x.overrides.placement.max_band,
             );
-            let chart_title_h = chart_title_band_height(spec, theme, metrics);
             let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
-            let plot_y = base_top + chart_title_h + if x_on_top { x_band } else { 0.0 };
-            let plot_h =
-                (viewport.height - base_top - base_bottom - chart_title_h - x_band).max(0.0);
+            let plot_y = base_top + chrome.top + if x_on_top { x_band } else { 0.0 };
+            let plot_h = (viewport.height
+                - base_top
+                - base_bottom
+                - chrome.top
+                - chrome.bottom
+                - x_band)
+                .max(0.0);
             let baseline_center = plot_y + plot_h / 2.0;
             recentering_padding(baseline_center, half_h, viewport.height)
         }
@@ -1579,6 +1716,248 @@ fn auto_padding_for_axis_titles(
         bottom: extra_bottom,
         left: extra_left,
     }
+}
+
+/// Resolves one side's final padding inset: the caller's explicit value if
+/// set, else `base` plus whatever `padding.auto` contributed on that side.
+/// Shared by `compute_layout`'s own inset and by `settle_auto_padding`'s
+/// per-iteration probe, so the two can never land on two different insets
+/// for what is supposed to be the same value.
+fn resolve_padding_inset(theme: &ThemeInputs, base: Inset, extra: Inset) -> Inset {
+    Inset {
+        top: theme.padding.padding_top.unwrap_or(base.top + extra.top),
+        right: theme
+            .padding
+            .padding_right
+            .unwrap_or(base.right + extra.right),
+        bottom: theme
+            .padding
+            .padding_bottom
+            .unwrap_or(base.bottom + extra.bottom),
+        left: theme.padding.padding_left.unwrap_or(base.left + extra.left),
+    }
+}
+
+/// One solve of the tick-then-title composition against a fixed `chrome`
+/// credit — see `settle_auto_padding`'s own doc for why `chrome` is a
+/// parameter here rather than computed inside.
+///
+/// The tick pass is solved first, against the untouched `base`, and its
+/// own guarantee is monotone under later additions on either side; the
+/// title pass is solved LAST, against the tick-adjusted base
+/// (`auto_padding_for_axis_titles`'s `base` parameter), so its recentering
+/// solve sees the geometry the tick pass actually leaves behind and is the
+/// final word nothing downstream perturbs. Merging two independently-
+/// against-the-untouched-base solutions by elementwise max — composing
+/// SEQUENTIALLY instead — was unsound specifically because the title
+/// solver is a function of the DIFFERENCE between its two sides
+/// (`recentering_padding`), not an independent per-side minimum like the
+/// tick pass: a tick-only expansion on one side silently moved the center
+/// the title pass had solved for, re-clipping a title auto claims to
+/// protect.
+///
+/// Per-axis infeasibility (#139(2)) is decided FIRST, via
+/// `axis_title_infeasibility` — a pure function of title measurement and
+/// `viewport` alone, independent of the tick pass — and the tick pass's
+/// own same-axis contribution is zeroed before the title pass ever solves
+/// against it. When a title's own recentering is INFEASIBLE (the title is
+/// wider than the viewport itself, the documented genuine residual), its
+/// own contribution is `(0.0, 0.0)`, but the tick pass's contribution on
+/// that SAME axis is not: being asymmetric by construction, it still
+/// shifts the plot's (and title's) center, and the title pass has no way
+/// to counteract a shift it declined to solve for — and, left unsuppressed
+/// until AFTER the title pass runs, it also leaks into the OTHER axis's
+/// own title solve (a continuous x-tick correction moves `plot_w`, which
+/// moves the x-axis label band, which moves the y-title's own baseline
+/// center). Measured live (pre-fix): a same-axis tick correction alone
+/// turned a 9.51px title clip into a 26.53px one — `auto=true` strictly
+/// worse than `auto=false`, the exact regression `cap_auto_contribution`'s
+/// best-effort contract forbids. Suppressing that axis's tick contribution
+/// BEFORE the title pass solves — instead of after, against geometry the
+/// solve has already consumed — restores `auto=false`'s exact geometry on
+/// that axis and stops the leak into a sibling axis's own solve.
+///
+/// An explicit side's own extra is zeroed before `cap_auto_contribution`
+/// too (#139(3)): `compute_layout`'s final inset
+/// (`theme.padding.padding_<side>.unwrap_or(...)`) discards `extra`
+/// entirely on an explicit side, so a real but doomed-to-be-discarded
+/// extra must not compete for `cap_auto_contribution`'s shared budget —
+/// doing so would throttle the OTHER (auto) side for a contribution that
+/// was never going to ship.
+fn auto_padding_extra(
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    axes: &AxesInput,
+    metrics: &dyn TextMetrics,
+    base: Inset,
+    chrome: Inset,
+) -> Inset {
+    let (x_infeasible, y_infeasible) = axis_title_infeasibility(theme, viewport, axes, metrics);
+    let ticks = auto_padding_for_edge_ticks(theme, axes, metrics, chrome);
+    let ticks = Inset {
+        top: if y_infeasible { 0.0 } else { ticks.top },
+        right: if x_infeasible { 0.0 } else { ticks.right },
+        bottom: if y_infeasible { 0.0 } else { ticks.bottom },
+        left: if x_infeasible { 0.0 } else { ticks.left },
+    };
+    let base_after_ticks = Inset {
+        top: base.top + ticks.top,
+        right: base.right + ticks.right,
+        bottom: base.bottom + ticks.bottom,
+        left: base.left + ticks.left,
+    };
+    let titles = auto_padding_for_axis_titles(
+        theme,
+        viewport,
+        axes,
+        metrics,
+        base_after_ticks,
+        chrome,
+    );
+    let combined = Inset {
+        top: if theme.padding.padding_top.is_some() {
+            0.0
+        } else {
+            ticks.top + titles.top
+        },
+        right: if theme.padding.padding_right.is_some() {
+            0.0
+        } else {
+            ticks.right + titles.right
+        },
+        bottom: if theme.padding.padding_bottom.is_some() {
+            0.0
+        } else {
+            ticks.bottom + titles.bottom
+        },
+        left: if theme.padding.padding_left.is_some() {
+            0.0
+        } else {
+            ticks.left + titles.left
+        },
+    };
+    let (left, right) = cap_auto_contribution(
+        base.left,
+        base.right,
+        combined.left,
+        combined.right,
+        viewport.width,
+    );
+    let (top, bottom) = cap_auto_contribution(
+        base.top,
+        base.bottom,
+        combined.top,
+        combined.bottom,
+        viewport.height,
+    );
+    Inset {
+        top,
+        right,
+        bottom,
+        left,
+    }
+}
+
+/// Bounded pass limit for `settle_auto_padding`'s fixed point: enough
+/// iterations for the capped-legend contraction to converge well past
+/// float precision, with a hard stop for any non-contractive layout.
+const AUTO_PADDING_MAX_PASSES: u32 = 64;
+
+/// Convergence tolerance for `settle_auto_padding`: comfortably below
+/// `render::FLOAT_PRECISION`'s own rounding, so it never surfaces in
+/// rendered output.
+const AUTO_PADDING_EPS: f64 = 1e-6;
+
+/// Finds a self-consistent `padding.auto` credit. The legend gutter, the
+/// chart-title band and the secondary-y bands that `chrome_reserved_at`
+/// measures are themselves a function of how much padding `padding.auto`
+/// ends up adding, because every categorical legend strip caps its own
+/// width or height at half of whatever rect it is carved from. A single
+/// probe at one fixed rect can over-credit — crediting more than the
+/// final, narrower rect will actually reserve, which clips a label or
+/// title past the viewport edge — so this solves it as a fixed point
+/// instead: credit a candidate, solve `padding.auto` against it, measure
+/// what the resulting padded rect actually reserves, and accept only when
+/// the two agree within `AUTO_PADDING_EPS`.
+///
+/// Starts from `credit = { right: secondary_total }`, the one term that
+/// never depends on the rect, and iterates up to `AUTO_PADDING_MAX_PASSES`
+/// times. Every pass whose measurement covers its own credit on all four
+/// sides (`reserved >= credit - AUTO_PADDING_EPS`) is remembered; the
+/// first pass always qualifies, since its credit is nonnegative and
+/// secondary-only. If the bound is reached without converging — a
+/// non-contractive corner, such as an aux legend block wider than the
+/// inner rect it is carved from — the last covering pass is returned, so
+/// this never credits more than some real reservation at some inset
+/// actually measured. The ordinary, uncapped case (the overwhelming
+/// majority of charts) converges in exactly two passes: pass 1 credits
+/// the secondary bands only and measures the true chrome; pass 2 solves
+/// against the true chrome and measures the same value back.
+#[allow(clippy::too_many_arguments)]
+fn settle_auto_padding(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    axes: &AxesInput,
+    metrics: &dyn TextMetrics,
+    base: Inset,
+    legend_entries: &[LegendEntry],
+    legend_title: Option<&str>,
+    colorbar: Option<&ColorbarInput>,
+    legend_overrides: &legend::LegendOverrides,
+    aux_legend_inputs: &[legend::AuxLegendInput],
+    seam: CompositeLayoutSeam,
+) -> Inset {
+    let secondary_total: f64 = axes
+        .secondary_y
+        .iter()
+        .map(|a| secondary_y_axis_band_width(a, theme, metrics))
+        .sum();
+    let mut credit = Inset {
+        right: secondary_total,
+        ..Inset::default()
+    };
+    let mut covering_extra = Inset::default();
+    let mut have_covering = false;
+    for _ in 0..AUTO_PADDING_MAX_PASSES {
+        let extra = auto_padding_extra(theme, viewport, axes, metrics, base, credit);
+        let inset = resolve_padding_inset(theme, base, extra);
+        let reserved = chrome_reserved_at(
+            inset,
+            viewport,
+            spec,
+            theme,
+            axes,
+            legend_entries,
+            legend_title,
+            colorbar,
+            metrics,
+            legend_overrides,
+            aux_legend_inputs,
+            seam,
+        );
+        let covers = reserved.top >= credit.top - AUTO_PADDING_EPS
+            && reserved.right >= credit.right - AUTO_PADDING_EPS
+            && reserved.bottom >= credit.bottom - AUTO_PADDING_EPS
+            && reserved.left >= credit.left - AUTO_PADDING_EPS;
+        if covers {
+            covering_extra = extra;
+            have_covering = true;
+        }
+        let converged = (reserved.top - credit.top).abs() <= AUTO_PADDING_EPS
+            && (reserved.right - credit.right).abs() <= AUTO_PADDING_EPS
+            && (reserved.bottom - credit.bottom).abs() <= AUTO_PADDING_EPS
+            && (reserved.left - credit.left).abs() <= AUTO_PADDING_EPS;
+        if converged {
+            return extra;
+        }
+        credit = reserved;
+    }
+    debug_assert!(
+        have_covering,
+        "pass 1's secondary-only credit must always be covered by its own measurement"
+    );
+    covering_extra
 }
 
 /// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
@@ -2102,131 +2481,34 @@ pub fn compute_layout(
     // 2. Apply outer padding. `padding.auto` (D10, spec §4.7, F-L07-08)
     // expands a side with no explicit override to also contain (a) a
     // continuous axis's edge-tick-label overhang, and (b) an axis title
-    // that would otherwise clip past the viewport edge — composed
-    // SEQUENTIALLY, not merged by elementwise max: the tick pass is solved first, against the untouched
-    // base, and its own guarantee is monotone under later additions on
-    // either side; the title pass is solved LAST, against the
-    // tick-adjusted base (`auto_padding_for_axis_titles`'s `base`
-    // parameter), so its recentering solve sees the geometry the tick pass
-    // actually leaves behind and is the final word nothing downstream
-    // perturbs. Merging two independently-against-the-untouched-base
-    // solutions by max was unsound specifically because the title solver
-    // is a function of the DIFFERENCE between its two sides
-    // (`recentering_padding`), not an independent per-side minimum like
-    // the tick pass — a tick-only expansion on one side silently moved the
-    // center the title pass had solved for, re-clipping a title auto
-    // claims to protect. The combined per-side total is then capped
-    // against the viewport (`cap_auto_contribution`): auto is
-    // best-effort and must never convert a chart that renders at
-    // `auto=false` into a `PaddingExceedsViewport` refusal, or report a
-    // padding value the caller never set. Computed once, only when
-    // requested, so a non-auto chart's inset is unchanged.
-    //
-    // Per-axis infeasibility (#139(2)) is decided FIRST, via
-    // `axis_title_infeasibility` — a pure function of title measurement and
-    // `viewport` alone, independent of the tick pass — and the tick pass's
-    // own same-axis contribution is zeroed before the title pass ever
-    // solves against it. When a title's own recentering is INFEASIBLE (the
-    // title is wider than the viewport itself, the documented genuine
-    // residual), its own contribution is `(0.0, 0.0)`, but the tick pass's
-    // contribution on that SAME axis is not: being asymmetric by
-    // construction, it still shifts the plot's (and title's) center, and
-    // the title pass has no way to counteract a shift it declined to solve
-    // for — and, left unsuppressed until AFTER the title pass runs, it also
-    // leaks into the OTHER axis's own title solve (a continuous x-tick
-    // correction moves `plot_w`, which moves the x-axis label band, which
-    // moves the y-title's own baseline center). Measured live: a same-axis
-    // tick correction alone turned a 9.51px title clip into a 26.53px one —
-    // auto=true strictly worse than auto=false, the exact regression
-    // `cap_auto_contribution`'s best-effort contract forbids. Suppressing
-    // that axis's tick contribution BEFORE the title pass solves — instead
-    // of after, against geometry the solve has already consumed — restores
-    // auto=false's exact geometry on that axis and stops the leak into a
-    // sibling axis's own solve.
-    //
-    // An explicit side's own extra is zeroed before `cap_auto_contribution`
-    // too (#139(3)): the final inset below
-    // (`theme.padding.padding_<side>.unwrap_or(...)`) discards `extra`
-    // entirely on an explicit side, so a real but doomed-to-be-discarded
-    // extra must not compete for `cap_auto_contribution`'s shared budget —
-    // doing so throttled the OTHER (auto) side for a contribution that was
-    // never going to ship.
+    // that would otherwise clip past the viewport edge, plus whatever a
+    // legend, the chart title band, or the secondary-y bands already
+    // reserve on that side. `auto_padding_extra`'s own doc has the
+    // tick-then-title composition rationale; `settle_auto_padding`'s own
+    // doc has the fixed-point rationale for the chrome credit the two
+    // passes solve against. The extra is a bounded fixed-point solve, run
+    // only when requested, so a non-auto chart's inset is unchanged.
     let viewport_rect = viewport.into_rect();
     let base = base_padding_insets(theme);
     let extra = if theme.padding.padding_auto {
-        let (x_infeasible, y_infeasible) = axis_title_infeasibility(theme, viewport, axes, metrics);
-        let ticks = auto_padding_for_edge_ticks(spec, theme, axes, metrics);
-        let ticks = Inset {
-            top: if y_infeasible { 0.0 } else { ticks.top },
-            right: if x_infeasible { 0.0 } else { ticks.right },
-            bottom: if y_infeasible { 0.0 } else { ticks.bottom },
-            left: if x_infeasible { 0.0 } else { ticks.left },
-        };
-        let base_after_ticks = Inset {
-            top: base.top + ticks.top,
-            right: base.right + ticks.right,
-            bottom: base.bottom + ticks.bottom,
-            left: base.left + ticks.left,
-        };
-        let titles =
-            auto_padding_for_axis_titles(spec, theme, viewport, axes, metrics, base_after_ticks);
-        let combined = Inset {
-            top: if theme.padding.padding_top.is_some() {
-                0.0
-            } else {
-                ticks.top + titles.top
-            },
-            right: if theme.padding.padding_right.is_some() {
-                0.0
-            } else {
-                ticks.right + titles.right
-            },
-            bottom: if theme.padding.padding_bottom.is_some() {
-                0.0
-            } else {
-                ticks.bottom + titles.bottom
-            },
-            left: if theme.padding.padding_left.is_some() {
-                0.0
-            } else {
-                ticks.left + titles.left
-            },
-        };
-        let (left, right) = cap_auto_contribution(
-            base.left,
-            base.right,
-            combined.left,
-            combined.right,
-            viewport.width,
-        );
-        let (top, bottom) = cap_auto_contribution(
-            base.top,
-            base.bottom,
-            combined.top,
-            combined.bottom,
-            viewport.height,
-        );
-        Inset {
-            top,
-            right,
-            bottom,
-            left,
-        }
+        settle_auto_padding(
+            spec,
+            theme,
+            viewport,
+            axes,
+            metrics,
+            base,
+            legend_entries,
+            legend_title.as_deref(),
+            colorbar,
+            legend_overrides,
+            aux_legend_inputs,
+            seam,
+        )
     } else {
         Inset::default()
     };
-    let inset = Inset {
-        top: theme.padding.padding_top.unwrap_or(base.top + extra.top),
-        right: theme
-            .padding
-            .padding_right
-            .unwrap_or(base.right + extra.right),
-        bottom: theme
-            .padding
-            .padding_bottom
-            .unwrap_or(base.bottom + extra.bottom),
-        left: theme.padding.padding_left.unwrap_or(base.left + extra.left),
-    };
+    let inset = resolve_padding_inset(theme, base, extra);
     let inner = viewport_rect.shrink(inset);
     // Captured before the chrome reservations below shadow `inner`: this is
     // the blank-margin boundary `LayoutResult::padded_region` promises.
@@ -2263,31 +2545,27 @@ pub fn compute_layout(
         });
     }
 
-    // 2b. Reserve chart-level title band (Themes-T2.5a; Schwabish SB1 adds subtitle).
-    // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
-    //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
-    // A composite that will clear this leaf's title (GH #89A) reserves nothing
-    // and lays out no title — the same state a title-less chart is in, so the
-    // band cannot become a gutter nothing is ever drawn in.
-    let (chart_title_layout, inner) = if seam.suppress_chart_title {
-        (None, inner)
-    } else {
-        reserve_chart_title(inner, spec, theme, metrics)
-    };
-
-    // 3 + 3b. Reserve the color legend strip (categorical or colorbar) plus any
-    //    stacked size/shape aux blocks. Both consume the same legend gutter.
-    let (legend_layout, aux_legends, inner_after_legend, legend_dropped) = reserve_legends(
-        inner,
-        theme,
-        legend_entries,
-        legend_title,
-        colorbar,
-        metrics,
-        legend_overrides,
-        aux_legend_inputs,
-        seam.legend,
-    );
+    // 2b + 3 + 3b. Reserve the chart-level title band (Schwabish SB1 adds
+    // subtitle; band height ≈ title_font_size * 1.4 +
+    // (subtitle_font_size * 1.4 if subtitle) + title_offset; a composite
+    // that will clear this leaf's title, GH #89A, reserves nothing and
+    // lays out no title, so the band cannot become a gutter nothing is
+    // ever drawn in), then the color legend strip (categorical or
+    // colorbar) plus any stacked size/shape aux blocks, both off the same
+    // gutter.
+    let (chart_title_layout, legend_layout, aux_legends, inner_after_legend, legend_dropped) =
+        reserve_title_and_legends(
+            inner,
+            spec,
+            theme,
+            legend_entries,
+            legend_title.as_deref(),
+            colorbar,
+            metrics,
+            legend_overrides,
+            aux_legend_inputs,
+            seam,
+        );
 
     // 4 + 5. Reserve the x/y axis margin bands, yielding the plot region. The
     //    `x_label_band` is also needed for the inter-row facet gutter below;
@@ -2604,6 +2882,21 @@ mod tests {
 
     fn default_theme_inputs() -> ThemeInputs {
         ThemeInputs::default()
+    }
+
+    /// `ThemeInputs::default()`'s auto-off control (#135: the built-in
+    /// default flipped `padding_auto` to `true`). A test that demonstrates
+    /// the `padding.auto` rescue by contrasting an auto-off baseline against
+    /// an explicit auto-on render needs its baseline to actually be off, or
+    /// the contrast goes vacuous now that `ThemeInputs::default()` is on.
+    fn theme_inputs_with_padding_auto_off() -> ThemeInputs {
+        ThemeInputs {
+            padding: ThemePadding {
+                padding_auto: false,
+                ..ThemeInputs::default().padding
+            },
+            ..ThemeInputs::default()
+        }
     }
 
     #[test]
@@ -3871,6 +4164,22 @@ mod tests {
 
     // ── padding.auto (D10, spec §4.7, F-L07-08) ─────────────────────────────
 
+    /// #135: the Rust built-in default is the single owner of
+    /// `padding.auto`, and it is `true` — a chart that never mentions
+    /// padding still gets the edge-padding rescue. There is no theme key
+    /// for it (the field lives directly on `ThemeInputs::default()`).
+    #[test]
+    fn theme_padding_default_has_auto_on() {
+        assert!(
+            ThemeInputs::default().padding.padding_auto,
+            "padding.auto's built-in default must be true (#135)",
+        );
+        assert!(
+            ThemePadding::default().padding_auto,
+            "ThemePadding::default() must also carry auto on directly",
+        );
+    }
+
     /// A continuous x-axis (`tick_projection: Some`) whose last tick's label
     /// is a long number, at a narrow viewport with default (16px) padding.
     fn continuous_x_axes_with_long_last_label() -> AxesInput {
@@ -3917,7 +4226,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let extra = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(
             (extra.right - 14.0).abs() < 1e-9,
             "extra.right = {}",
@@ -3978,7 +4287,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let extra = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(
             (extra.left - 54.0).abs() < 1e-9,
             "extra.left = {} (expected 54.0 = 80 - 26; the pre-fix unclamped \
@@ -4006,7 +4315,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         let baseline = compute_layout(
             &spec,
@@ -4093,7 +4402,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         // Baseline (auto=false, the flat 16px default): the fixture must
         // actually clip, or this test proves nothing about the fix.
@@ -4185,7 +4494,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         let without_auto = compute_layout(
             &spec,
@@ -4323,7 +4632,8 @@ mod tests {
             height: 200.0,
         };
         let base = base_padding_insets(&theme);
-        let extra = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, base);
+        let extra =
+            auto_padding_for_axis_titles(&theme, viewport, &axes, &m, base, Inset::default());
         assert!(
             (extra.right - 6.0).abs() < 1e-9,
             "extra.right = {}",
@@ -4358,7 +4668,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         let baseline = compute_layout(
             &spec,
@@ -4466,7 +4776,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
         let auto_theme = ThemeInputs {
             padding: ThemePadding {
                 padding_auto: true,
@@ -4544,7 +4854,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         // Fixture assumption: the title really is infeasible at this width
         // (unlike the 700px sibling fixture, where it is feasible).
@@ -4557,7 +4867,7 @@ mod tests {
         );
         // And the tick pass genuinely wants left padding here — this test
         // would be vacuous if the fixture stopped exercising the tick pass.
-        let ticks_alone = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let ticks_alone = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(
             ticks_alone.left > 0.0,
             "fixture assumption broken: the tick pass should still fire"
@@ -4665,7 +4975,7 @@ mod tests {
         let spec = minimal_chart_spec();
         let mut axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
         axes.y.title.set(Some("a tall y title".to_string()));
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
         let viewport = Viewport {
             width: 270.0,
             height: 300.0,
@@ -4679,7 +4989,7 @@ mod tests {
         // still reserves real left padding — the same combination
         // `padding_auto_never_worsens_an_infeasible_title_when_a_tick_correction_also_fires`
         // pins for the SAME-axis case; this is its cross-axis sibling.
-        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(ticks.left > 0.0, "fixture must exercise the tick pass");
         let x_half_w = m.measure_width(&"a".repeat(66), theme.typography.title_font_size) / 2.0;
         assert!(
@@ -4705,7 +5015,7 @@ mod tests {
         // ticks.top/bottom are asserted zero above, solving against the raw
         // `base` here is equivalent to solving against the suppressed one.
         let titles_against_suppressed =
-            auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, base);
+            auto_padding_for_axis_titles(&theme, viewport, &axes, &m, base, Inset::default());
 
         // The pre-fix order: titles solved against the base with the FULL,
         // unsuppressed x-tick contribution folded in.
@@ -4716,12 +5026,12 @@ mod tests {
             left: base.left + ticks.left,
         };
         let titles_against_unsuppressed = auto_padding_for_axis_titles(
-            &spec,
             &theme,
             viewport,
             &axes,
             &m,
             base_after_unsuppressed_ticks,
+            Inset::default(),
         );
 
         assert_ne!(
@@ -4841,7 +5151,7 @@ mod tests {
         // Fixture assumptions: both sides want real extra, and together
         // they exceed the viewport's budget (the cap must actually fire, or
         // this test is vacuous).
-        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(
             ticks.left > 0.0 && ticks.right > 0.0,
             "fixture must want both sides: left={}, right={}",
@@ -4927,7 +5237,7 @@ mod tests {
         // Fixture assumptions: both sides want real extra, and together
         // they exceed the viewport's budget (the cap must actually fire, or
         // this test is vacuous).
-        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(
             ticks.left > 0.0 && ticks.right > 0.0,
             "fixture must want both sides: left={}, right={}",
@@ -5077,7 +5387,7 @@ mod tests {
             width: 400.0,
             height: 80.0,
         };
-        let ticks = auto_padding_for_edge_ticks(&minimal_chart_spec(), &theme, &axes, &m);
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
         assert!(ticks.top > 0.0, "fixture must exercise the y-tick pass: {ticks:?}");
 
         let layout = auto_layout(&theme, viewport, &axes, &m);
@@ -5106,11 +5416,18 @@ mod tests {
         };
         let spec = minimal_chart_spec();
         let base = base_padding_insets(&theme);
-        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
-        let titles = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, Inset {
-            top: base.top + ticks.top,
-            ..base
-        });
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
+        let titles = auto_padding_for_axis_titles(
+            &theme,
+            viewport,
+            &axes,
+            &m,
+            Inset {
+                top: base.top + ticks.top,
+                ..base
+            },
+            Inset::default(),
+        );
         let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
         assert!(
             ticks.top > 0.0 && titles.bottom > 0.0 && titles.bottom <= budget,
@@ -5152,11 +5469,18 @@ mod tests {
         };
         let spec = minimal_chart_spec();
         let base = base_padding_insets(&theme);
-        let ticks = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
-        let titles = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, Inset {
-            top: base.top + ticks.top,
-            ..base
-        });
+        let ticks = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default());
+        let titles = auto_padding_for_axis_titles(
+            &theme,
+            viewport,
+            &axes,
+            &m,
+            Inset {
+                top: base.top + ticks.top,
+                ..base
+            },
+            Inset::default(),
+        );
         let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
         assert!(
             ticks.top > 0.0 && ticks.top <= budget && titles.bottom > 0.0 && titles.top == 0.0,
@@ -5223,7 +5547,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
         let auto_theme = ThemeInputs {
             padding: ThemePadding {
                 padding_auto: true,
@@ -5303,7 +5627,7 @@ mod tests {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
-        let theme = default_theme_inputs();
+        let theme = theme_inputs_with_padding_auto_off();
 
         compute_layout(
             &spec,
@@ -5351,6 +5675,1244 @@ mod tests {
         );
     }
 
+    /// The right-side x-tick overhang correction subtracts whatever a
+    /// right-side legend already reserves (via [`chrome_reserved_at`])
+    /// before deciding how much MORE padding the label's own overhang
+    /// needs: on this fixture (a 200px chart), `padding.auto` reserves
+    /// exactly the right edge the legend's own gutter already gave it —
+    /// 0px of excess — while still keeping the label inside the viewport.
+    #[test]
+    fn padding_auto_right_legend_adds_zero_excess_padding() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+
+        let auto_off = theme_inputs_with_padding_auto_off();
+        let auto_on = default_theme_inputs();
+
+        let without_auto = compute_layout(
+            &spec,
+            &auto_off,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("legend-right layout should succeed");
+        let with_auto = compute_layout(
+            &spec,
+            &auto_on,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("legend-right layout should still succeed under padding.auto");
+
+        let last_tick_gap = |r: &LayoutResult| {
+            let x_axis = r
+                .axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present");
+            let t = x_axis.ticks.last().expect("x axis has ticks");
+            let half_w = m.measure_width(&t.label, auto_off.typography.label_font_size) / 2.0;
+            r.viewport.w - (t.position + half_w)
+        };
+        assert!(
+            last_tick_gap(&without_auto) >= 0.0,
+            "fixture assumption: the legend's own gutter must already keep \
+             the last x-tick label inside the viewport with padding.auto off, \
+             or this test is not isolating what it measures",
+        );
+        assert!(
+            last_tick_gap(&with_auto) >= 0.0,
+            "the #135 rescue: a long last x-tick label must stay inside the \
+             viewport with a right-side legend present",
+        );
+
+        let plot_right_edge =
+            |r: &LayoutResult| r.panels[0].plot_area.x + r.panels[0].plot_area.w;
+        let without_auto_edge = plot_right_edge(&without_auto);
+        let with_auto_edge = plot_right_edge(&with_auto);
+        assert!(
+            (without_auto_edge - 94.0).abs() < 1e-9,
+            "without_auto_edge = {without_auto_edge}",
+        );
+        assert_eq!(
+            with_auto_edge, without_auto_edge,
+            "padding.auto must reserve exactly 0px beyond what the \
+             legend's own gutter already provided for this label (with_auto \
+             = {with_auto_edge}, without_auto = {without_auto_edge})",
+        );
+    }
+
+    /// The secondary-y sibling of the legend test above: the same chrome
+    /// credit, against a secondary-y axis's own band instead of a legend
+    /// gutter. `padding.auto` adds exactly 0px beyond what the secondary-y
+    /// band already reserved.
+    #[test]
+    fn padding_auto_secondary_y_adds_zero_excess_padding() {
+        let spec = minimal_chart_spec();
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.secondary_y = n_secondary_axes(1);
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+
+        let auto_off = theme_inputs_with_padding_auto_off();
+        let auto_on = default_theme_inputs();
+
+        let without_auto = compute_layout(
+            &spec,
+            &auto_off,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("secondary-y layout should succeed");
+        let with_auto = compute_layout(
+            &spec,
+            &auto_on,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("secondary-y layout should still succeed under padding.auto");
+
+        let last_tick_gap = |r: &LayoutResult| {
+            let x_axis = r
+                .axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present");
+            let t = x_axis.ticks.last().expect("x axis has ticks");
+            let half_w = m.measure_width(&t.label, auto_off.typography.label_font_size) / 2.0;
+            r.viewport.w - (t.position + half_w)
+        };
+        assert!(
+            last_tick_gap(&without_auto) >= 0.0,
+            "fixture assumption: the secondary-y band must already keep the \
+             last x-tick label inside the viewport with padding.auto off, \
+             or this test is not isolating what it measures",
+        );
+        assert!(
+            last_tick_gap(&with_auto) >= 0.0,
+            "the #135 rescue: a long last x-tick label must stay inside the \
+             viewport with a secondary-y axis present",
+        );
+
+        let plot_right_edge =
+            |r: &LayoutResult| r.panels[0].plot_area.x + r.panels[0].plot_area.w;
+        let without_auto_edge = plot_right_edge(&without_auto);
+        let with_auto_edge = plot_right_edge(&with_auto);
+        assert!(
+            (without_auto_edge - 124.4).abs() < 1e-9,
+            "without_auto_edge = {without_auto_edge}",
+        );
+        assert_eq!(
+            with_auto_edge, without_auto_edge,
+            "padding.auto must reserve exactly 0px beyond what the \
+             secondary-y band already provided for this label (with_auto = \
+             {with_auto_edge}, without_auto = {without_auto_edge})",
+        );
+    }
+
+    /// A legend on the BOTTOM (not the right) must leave the right-side
+    /// x-tick correction exactly as it behaves with no legend at all —
+    /// [`chrome_reserved_at`] only ever credits a side the legend actually
+    /// occupies, so a bottom legend contributes nothing to `chrome.right`.
+    /// Pinned against the same 170 the no-legend sibling
+    /// (`padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport`)
+    /// computes for this exact fixture.
+    #[test]
+    fn padding_auto_right_side_unaffected_by_a_legend_on_another_side() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let mut theme = default_theme_inputs();
+        theme.legend.legend_orient = LegendOrient::Bottom;
+
+        let with_bottom_legend = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("bottom-legend layout should succeed");
+
+        let plot_right_edge = with_bottom_legend.panels[0].plot_area.x
+            + with_bottom_legend.panels[0].plot_area.w;
+        assert!(
+            (plot_right_edge - 170.0).abs() < 1e-9,
+            "a legend on the bottom must not change the right-side tick \
+             correction at all (plot_right_edge = {plot_right_edge}, \
+             expected the same 170 the no-legend fixture produces)",
+        );
+    }
+
+    /// When the last label's own overhang exceeds EVEN the legend's
+    /// gutter, `padding.auto` pads exactly the remainder — not the full
+    /// overhang (over-correcting past the gutter) and not zero
+    /// (under-correcting, clipping past the gutter). Uses a realistic
+    /// (600px) viewport so the legend strip's own half-viewport safety cap
+    /// (`carve_legend_strip`) never engages — seeing the uncapped case is
+    /// the point of this test; the capped case gets its own sibling,
+    /// `padding_auto_settles_a_capped_legend_to_its_fixed_point`.
+    #[test]
+    fn padding_auto_pads_exactly_the_remainder_past_the_legend_gutter() {
+        let spec = minimal_chart_spec();
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels[1] = "9".repeat(23);
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let theme = default_theme_inputs();
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("legend-right layout with an oversized label should still succeed");
+
+        let x_axis = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let last_tick = x_axis.ticks.last().expect("x axis has ticks");
+        let half_w = m.measure_width(&last_tick.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            (half_w - 115.0).abs() < 1e-9,
+            "fixture assumption: this label's half-width must exceed the \
+             legend gutter (half_w = {half_w})",
+        );
+        assert!(
+            last_tick.position + half_w <= with_auto.viewport.w + 1e-9,
+            "the label must stay inside the viewport even though its \
+             overhang exceeds the legend's own gutter (position {} + \
+             half-width {} vs viewport width {})",
+            last_tick.position,
+            half_w,
+            with_auto.viewport.w,
+        );
+        let plot_right_edge =
+            with_auto.panels[0].plot_area.x + with_auto.panels[0].plot_area.w;
+        assert!(
+            (plot_right_edge - 485.0).abs() < 1e-9,
+            "plot_right_edge = {plot_right_edge} (expected 485: padding.auto \
+             pads only the 9px remainder past the legend's own 90px gutter, \
+             not the full 115px overhang)",
+        );
+        assert!(
+            (last_tick.position + half_w - with_auto.viewport.w).abs() < 1e-9,
+            "the remainder correction should land the label's edge exactly \
+             on the viewport boundary, not with extra slack beyond it",
+        );
+    }
+
+    /// A chart with no legend and no secondary-y axis is byte-identical to
+    /// what `padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport`
+    /// already pins — `chrome_reserved_at` must contribute nothing when
+    /// there is nothing on the right to credit.
+    #[test]
+    fn padding_auto_with_no_legend_or_secondary_y_is_unchanged() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("layout should succeed");
+        let plot_right_edge =
+            with_auto.panels[0].plot_area.x + with_auto.panels[0].plot_area.w;
+        assert!(
+            (plot_right_edge - 170.0).abs() < 1e-9,
+            "plot_right_edge = {plot_right_edge}, expected 170 (unchanged \
+             from the no-chrome case)",
+        );
+    }
+
+    /// An explicit right padding still wins over `padding.auto` entirely —
+    /// `chrome_reserved_at`'s contribution never enters the picture on an
+    /// explicit side, mirroring
+    /// `compute_layout_zeroes_an_explicit_right_sides_extra_before_the_cap`
+    /// but with a legend present, to pin that the chrome plumbing does not
+    /// disturb the #139(3) explicit-side-zeroing rule.
+    #[test]
+    fn padding_auto_with_a_legend_still_honors_explicit_right_padding() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let mut theme = default_theme_inputs();
+        theme.padding.padding_right = Some(50.0);
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("layout should succeed");
+
+        // The padding stage's own output (before legend/axis-band
+        // reservation) must be exactly the caller's explicit value — proof
+        // that `padding.auto`'s chrome-aware correction never competed for
+        // this side at all, exactly as `theme.padding.padding_right` being
+        // `Some` already zeroes `combined.right` before `cap_auto_contribution`.
+        let padded_right_inset =
+            viewport.width - with_auto.padded_region.w - with_auto.padded_region.x;
+        assert!(
+            (padded_right_inset - 50.0).abs() < 1e-9,
+            "the explicit padding_right=50 must be honored exactly, \
+             unaffected by the legend's chrome (padded_right_inset = \
+             {padded_right_inset})",
+        );
+    }
+
+    fn continuous_x_axes_with_long_first_label() -> AxesInput {
+        let mut x = axis_input(
+            AxisOrient::Bottom,
+            None,
+            vec!["zzzzzzzzz".into(), "0".into()],
+            None,
+        );
+        x.tick_projection = Some(TickProjection {
+            padding_frac: 0.0,
+            major: vec![0.0, 1.0],
+            minor: vec![],
+        });
+        let y = axis_input(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        AxesInput {
+            x,
+            y,
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        }
+    }
+
+    /// A left-side legend's own gutter already covers a long first x-tick
+    /// label's overhang on this fixture (uncapped): the left plot edge is
+    /// identical with `padding.auto` on and off, and the label stays
+    /// inside the viewport either way.
+    #[test]
+    fn padding_auto_left_legend_adds_zero_excess_padding() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_first_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let mut auto_off = theme_inputs_with_padding_auto_off();
+        auto_off.legend.legend_orient = LegendOrient::Left;
+        let mut auto_on = default_theme_inputs();
+        auto_on.legend.legend_orient = LegendOrient::Left;
+
+        let without_auto = compute_layout(
+            &spec,
+            &auto_off,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("left-legend layout should succeed");
+        let with_auto = compute_layout(
+            &spec,
+            &auto_on,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("left-legend layout should still succeed under padding.auto");
+
+        let first_tick_gap = |r: &LayoutResult| {
+            let x_axis = r
+                .axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present");
+            let t = x_axis.ticks.first().expect("x axis has ticks");
+            let half_w = m.measure_width(&t.label, auto_off.typography.label_font_size) / 2.0;
+            t.position - half_w
+        };
+        assert!(
+            first_tick_gap(&without_auto) >= 0.0,
+            "fixture assumption: the legend's own gutter must already keep \
+             the first x-tick label inside the viewport with padding.auto off",
+        );
+        assert!(
+            first_tick_gap(&with_auto) >= 0.0,
+            "the long first x-tick label must stay inside the viewport \
+             with a left-side legend present",
+        );
+        let plot_left_edge = |r: &LayoutResult| r.panels[0].plot_area.x;
+        let without_auto_edge = plot_left_edge(&without_auto);
+        let with_auto_edge = plot_left_edge(&with_auto);
+        assert!(
+            (without_auto_edge - 132.0).abs() < 1e-9,
+            "without_auto_edge = {without_auto_edge}",
+        );
+        assert_eq!(
+            with_auto_edge, without_auto_edge,
+            "padding.auto must reserve exactly 0px beyond what the legend's \
+             own gutter already provided on the left (with_auto = \
+             {with_auto_edge}, without_auto = {without_auto_edge})",
+        );
+    }
+
+    /// The top-side sibling of the legend tests above: a continuous y axis
+    /// whose topmost tick label overhangs, with a top-side legend already
+    /// covering the overhang (uncapped). The top plot edge is identical
+    /// with `padding.auto` on and off.
+    #[test]
+    fn padding_auto_top_legend_adds_zero_excess_padding() {
+        let (axes, mut theme_on, m) = vertical_padding_fixture(&"a".repeat(6));
+        theme_on.legend.legend_orient = LegendOrient::Top;
+        let viewport = Viewport {
+            width: 400.0,
+            height: 300.0,
+        };
+        let spec = minimal_chart_spec();
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let mut theme_off = theme_inputs_with_padding_auto_off();
+        theme_off.padding.padding = theme_on.padding.padding;
+        theme_off.typography.label_font_size = theme_on.typography.label_font_size;
+        theme_off.legend.legend_orient = LegendOrient::Top;
+
+        let without_auto = compute_layout(
+            &spec,
+            &theme_off,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("top-legend layout should succeed");
+        let with_auto = compute_layout(
+            &spec,
+            &theme_on,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("top-legend layout should still succeed under padding.auto");
+
+        let without_auto_top = without_auto.panels[0].plot_area.y;
+        let with_auto_top = with_auto.panels[0].plot_area.y;
+        assert!(
+            (without_auto_top - 120.0).abs() < 1e-9,
+            "without_auto_top = {without_auto_top}",
+        );
+        assert_eq!(
+            with_auto_top, without_auto_top,
+            "padding.auto must reserve exactly 0px beyond what the legend's \
+             own gutter already provided on top (with_auto = {with_auto_top}, \
+             without_auto = {without_auto_top})",
+        );
+    }
+
+    /// A bottom-side legend changes how much of the viewport height is
+    /// left for the plot, which shifts where a y-axis title's recentering
+    /// solve places it. The title (28 chars, half-width 140 against a
+    /// 300px/half-150 viewport) sits close enough to the feasibility
+    /// boundary that the shift is real, not a no-op: dropping
+    /// `chrome.bottom` from `plot_h` moves the recentered anchor from
+    /// 156 to 128 (confirmed by mutation), and the measured anchor also
+    /// differs from the same fixture with no legend at all. The title
+    /// stays within the viewport either way.
+    #[test]
+    fn padding_auto_bottom_legend_shifts_the_recentered_y_title() {
+        let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(28));
+        theme.legend.legend_orient = LegendOrient::Bottom;
+        let viewport = Viewport {
+            width: 400.0,
+            height: 300.0,
+        };
+        let spec = minimal_chart_spec();
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+
+        let with_legend = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("bottom-legend layout should succeed");
+        let no_legend = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("no-legend layout should succeed");
+
+        let y_title_anchor_y = |r: &LayoutResult| {
+            r.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Left)
+                .and_then(|a| a.title.as_ref())
+                .expect("y axis has a title")
+                .anchor_y
+        };
+        let with_legend_anchor = y_title_anchor_y(&with_legend);
+        let no_legend_anchor = y_title_anchor_y(&no_legend);
+        assert!(
+            (with_legend_anchor - 156.0).abs() < 1e-9,
+            "with_legend_anchor = {with_legend_anchor}",
+        );
+        assert_ne!(
+            with_legend_anchor, no_legend_anchor,
+            "a bottom legend must change the recentered anchor \
+             (chrome.bottom must reach plot_h/plot_y), not leave it at the \
+             no-legend value {no_legend_anchor}",
+        );
+        let half_h =
+            m.measure_width("a".repeat(28).as_str(), theme.typography.title_font_size) / 2.0;
+        assert!(
+            with_legend_anchor - half_h >= -1e-9
+                && with_legend_anchor + half_h <= viewport.height + 1e-9,
+            "the recentered y title must stay inside the viewport \
+             (anchor {with_legend_anchor}, half {half_h}, height {})",
+            viewport.height,
+        );
+    }
+
+    /// An x-axis title's recentering solve also folds in `chrome`: with a
+    /// right-side legend, and separately with a secondary-y axis, the
+    /// title's recentered anchor stays within the viewport on a fixture
+    /// whose title would otherwise sit flush against the right edge.
+    #[test]
+    fn padding_auto_title_recentering_with_a_right_legend_or_secondary_y() {
+        let spec = minimal_chart_spec();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let half_w = m.measure_width("A Wide X Axis Title", 13.0) / 2.0;
+
+        let axes_legend = axes_with_wide_x_title();
+        let mut theme_legend = default_theme_inputs();
+        theme_legend.legend.legend_orient = LegendOrient::Right;
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let with_legend = compute_layout(
+            &spec,
+            &theme_legend,
+            viewport,
+            &axes_legend,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("right-legend layout should succeed");
+        let legend_anchor_x = with_legend
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .and_then(|a| a.title.as_ref())
+            .expect("x axis has a title")
+            .anchor_x;
+        assert!(
+            (legend_anchor_x - 95.0).abs() < 1e-6,
+            "legend_anchor_x = {legend_anchor_x}",
+        );
+        assert!(
+            legend_anchor_x - half_w >= -1e-6 && legend_anchor_x + half_w <= viewport.width + 1e-6,
+            "the recentered x title must stay inside the viewport with a \
+             right legend (anchor {legend_anchor_x}, half {half_w})",
+        );
+
+        let mut axes_secondary = axes_with_wide_x_title();
+        axes_secondary.secondary_y = n_secondary_axes(1);
+        let with_secondary = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes_secondary,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("secondary-y layout should succeed");
+        let secondary_anchor_x = with_secondary
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .and_then(|a| a.title.as_ref())
+            .expect("x axis has a title")
+            .anchor_x;
+        assert!(
+            (secondary_anchor_x - 95.0).abs() < 1e-6,
+            "secondary_anchor_x = {secondary_anchor_x}",
+        );
+        assert!(
+            secondary_anchor_x - half_w >= -1e-6
+                && secondary_anchor_x + half_w <= viewport.width + 1e-6,
+            "the recentered x title must stay inside the viewport with a \
+             secondary-y axis (anchor {secondary_anchor_x}, half {half_w})",
+        );
+    }
+
+    /// The capped-legend fixture: a legend whose natural strip is wider
+    /// than half of the final, auto-narrowed plot rect, so
+    /// `carve_legend_strip`'s own `inner.w * 0.5` cap applies. A single
+    /// probe at an oversized rect would credit the legend's full natural
+    /// size (90px including its gap) and clip the label by up to 10px;
+    /// the fixed point converges on the self-consistent credit (85px) the
+    /// capped legend actually reserves, landing the label's edge exactly
+    /// on the viewport boundary with no clip and no excess.
+    #[test]
+    fn padding_auto_settles_a_capped_legend_to_its_fixed_point() {
+        let spec = minimal_chart_spec();
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels[1] = "9".repeat(23);
+        let viewport = Viewport {
+            width: 200.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let theme = default_theme_inputs();
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("capped-legend layout should succeed");
+
+        let x_axis = with_auto
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let last_tick = x_axis.ticks.last().expect("x axis has ticks");
+        let half_w = m.measure_width(&last_tick.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            (half_w - 115.0).abs() < 1e-9,
+            "fixture assumption: the label's overhang must exceed the \
+             legend's natural gutter (half_w = {half_w})",
+        );
+        // The capped regime's loop gain is 1/2 (one side of one dimension
+        // depends on the rect at a time — see `settle_auto_padding`'s own
+        // doc), so a converged residual can be amplified by at most
+        // 1 / (1 - 1/2) = 2x `AUTO_PADDING_EPS` relative to the true fixed
+        // point, not just `AUTO_PADDING_EPS` itself. `FIXED_POINT_TOLERANCE`
+        // is a 5x margin on that 2x bound, not an arbitrary loosening.
+        const FIXED_POINT_TOLERANCE: f64 = 10.0 * AUTO_PADDING_EPS;
+        assert!(
+            last_tick.position + half_w <= with_auto.viewport.w + FIXED_POINT_TOLERANCE,
+            "the label must land inside (or exactly on) the viewport edge, \
+             not clip past it (position {} + half-width {} vs viewport \
+             width {})",
+            last_tick.position,
+            half_w,
+            with_auto.viewport.w,
+        );
+        let plot_right_edge = with_auto.panels[0].plot_area.x + with_auto.panels[0].plot_area.w;
+        assert!(
+            (plot_right_edge - 85.0).abs() < FIXED_POINT_TOLERANCE,
+            "plot_right_edge = {plot_right_edge} (expected the fixed point \
+             at 85: the legend's own cap reserves less than its natural \
+             size once padding.auto has narrowed the rect, and the credit \
+             must settle there rather than at the natural, uncapped size)",
+        );
+    }
+
+    /// The height-cap sibling of the capped-legend test above: a Top
+    /// legend forced to a vertical direction (so its natural HEIGHT scales
+    /// with entry count instead of its width) ends up far taller than the
+    /// padded rect, so `carve_legend_strip`'s `inner.h * 0.5` cap applies
+    /// on this axis. The y-tick pass's own top correction (`extra_top`)
+    /// reads `chrome.top`, so the fixed point must settle on the capped
+    /// height the legend actually reserves, not its natural, uncapped one.
+    #[test]
+    fn padding_auto_settles_a_capped_top_legend_to_its_fixed_point() {
+        let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(6));
+        theme.legend.legend_orient = LegendOrient::Top;
+        theme.legend.legend_direction = Some(LegendDirection::Vertical);
+        let entries: Vec<LegendEntry> = (0..5)
+            .map(|i| LegendEntry::new(format!("cat{i}"), SymbolKind::Circle))
+            .collect();
+        let spec = minimal_chart_spec();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 200.0,
+        };
+        const FIXED_POINT_TOLERANCE: f64 = 10.0 * AUTO_PADDING_EPS;
+
+        let with_auto = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("capped top-legend layout should succeed");
+
+        let plot_top_edge = with_auto.panels[0].plot_area.y;
+        assert!(
+            (plot_top_edge - 150.0).abs() < FIXED_POINT_TOLERANCE,
+            "plot_top_edge = {plot_top_edge} (expected the fixed point at \
+             150: the Top legend's own height-cap reserves less than its \
+             natural, 5-entry vertical-stack size once padding.auto has \
+             narrowed the rect, and the credit must settle there rather \
+             than at the natural, uncapped size)",
+        );
+    }
+
+    /// A Left colorbar whose natural width exceeds the ENTIRE padded rect
+    /// (not just half of it): `layout_colorbar`'s Left-orient carve always
+    /// advances `inner.x` by the colorbar's full declared width before
+    /// clamping `inner.w` to 0 (`legend.rs`'s own `.max(0.0)` floor on `w`,
+    /// with no matching clamp on `x`), so the post-carve rect's right edge
+    /// can land to the RIGHT of the padded rect's own right edge. Reading
+    /// that as a plain edge difference makes the RIGHT side's credit
+    /// negative unless clamped. Calls `chrome_reserved_at` directly (the
+    /// precise site of the clamp) so the assertion is not diluted by
+    /// `Rect::shrink`'s own downstream `.max(0.0)` floors, which would
+    /// otherwise mask a negative credit before it reached a visible rect.
+    ///
+    /// The same condition that produces the negative delta (the colorbar's
+    /// declared width exceeding the padded rect) also collapses the real
+    /// plot to zero width downstream, at every viewport tried: `inner.w`
+    /// is `(plot_inner.w - size.width - gutter).max(0.0)`, which is `0`
+    /// whenever `size.width` alone already exceeds `plot_inner.w`, with no
+    /// viewport size escaping it (a larger viewport only grows
+    /// `plot_inner.w`, and once it is large enough that the colorbar no
+    /// longer exceeds it, the credit is no longer negative either). This
+    /// test therefore asserts the collapsed result exactly rather than a
+    /// surviving label.
+    #[test]
+    fn padding_auto_clamps_a_left_colorbar_wider_than_the_padded_rect() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_first_label();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let colorbar = legend::ColorbarInput {
+            stops: vec![(0.0, "#000000".into()), (1.0, "#ffffff".into())],
+            tick_labels: vec!["0".into(), "zzzzzzzzzzzz".into()],
+            domain: Some((0.0, 1.0)),
+        };
+        let mut theme = default_theme_inputs();
+        theme.legend.legend_orient = LegendOrient::Left;
+
+        for (width, height) in [(60.0, 80.0), (80.0, 100.0), (100.0, 150.0), (150.0, 200.0)] {
+            let viewport = Viewport { width, height };
+            let inset = base_padding_insets(&theme);
+            let credit = chrome_reserved_at(
+                inset,
+                viewport,
+                &spec,
+                &theme,
+                &axes,
+                &[],
+                None,
+                Some(&colorbar),
+                &m,
+                &legend::LegendOverrides::default(),
+                &[],
+                CompositeLayoutSeam::default(),
+            );
+            assert!(
+                credit.top >= 0.0 && credit.right >= 0.0 && credit.bottom >= 0.0
+                    && credit.left >= 0.0,
+                "every side of the measured chrome must be >= 0 at \
+                 {width}x{height} (credit = {credit:?}); a negative \
+                 credit is never a real reservation",
+            );
+
+            let layout = compute_layout(
+                &spec,
+                &theme,
+                viewport,
+                &axes,
+                &[],
+                &[],
+                None,
+                Some(&colorbar),
+                &m,
+                &legend::LegendOverrides::default(),
+                &[],
+                CompositeLayoutSeam::default(),
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "an oversized Left colorbar must still terminate and \
+                     render at {width}x{height}, not panic, hang, or \
+                     refuse: {e:?}"
+                )
+            });
+            let plot = layout.panels[0].plot_area;
+            assert_eq!(
+                plot,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                },
+                "fixture assumption: a colorbar wider than the entire \
+                 padded rect must collapse the plot to zero at \
+                 {width}x{height} (plot = {plot:?}); a surviving plot \
+                 would mean the colorbar no longer exceeds the rect, and \
+                 the negative-delta case above is no longer exercised",
+            );
+            assert!(
+                layout.axes.is_empty(),
+                "a collapsed plot must lay out no axes at {width}x{height} \
+                 (axes = {:?})",
+                layout.axes,
+            );
+        }
+    }
+
+    /// A color legend oriented Top or Bottom carves its aux (size/shape)
+    /// overflow on the RIGHT side of the plot — a different side than the
+    /// legend's own orient — so crediting chrome only on the legend's own
+    /// side would miss it. With a Top legend plus a `Size` aux block wide
+    /// enough to overflow the color block, the right edge is identical
+    /// with `padding.auto` on and off: the aux strip is credited too.
+    #[test]
+    fn padding_auto_credits_an_aux_strip_carved_on_a_different_side_than_the_legend() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let aux = vec![legend::AuxLegendInput::Size {
+            title: None,
+            entries: vec![legend::SizeLegendEntry {
+                label: "big".into(),
+                radius: 50.0,
+                color_hex: None,
+            }],
+            symbol: SymbolKind::Circle,
+        }];
+        let mut theme_off = theme_inputs_with_padding_auto_off();
+        theme_off.legend.legend_orient = LegendOrient::Top;
+        let mut theme_on = default_theme_inputs();
+        theme_on.legend.legend_orient = LegendOrient::Top;
+
+        let without_auto = compute_layout(
+            &spec,
+            &theme_off,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &aux,
+            CompositeLayoutSeam::default(),
+        )
+        .expect("top-legend-plus-aux layout should succeed");
+        let with_auto = compute_layout(
+            &spec,
+            &theme_on,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &aux,
+            CompositeLayoutSeam::default(),
+        )
+        .expect("top-legend-plus-aux layout should still succeed under padding.auto");
+
+        let plot_right_edge =
+            |r: &LayoutResult| r.panels[0].plot_area.x + r.panels[0].plot_area.w;
+        let without_auto_edge = plot_right_edge(&without_auto);
+        let with_auto_edge = plot_right_edge(&with_auto);
+        assert!(
+            (without_auto_edge - 426.0).abs() < 1e-9,
+            "without_auto_edge = {without_auto_edge}",
+        );
+        assert_eq!(
+            with_auto_edge, without_auto_edge,
+            "the aux strip's right-side reservation must be credited even \
+             though the legend itself is oriented Top (with_auto = \
+             {with_auto_edge}, without_auto = {without_auto_edge})",
+        );
+    }
+
+    /// `seam.suppress_chart_title` (the overlay non-primary-leaf path)
+    /// means the chart title band is never actually reserved, so the
+    /// chrome measurement for that leaf must credit nothing for it. Uses
+    /// a continuous y axis with a small (2px) padding floor
+    /// (`vertical_padding_fixture`) so the TICK pass's own top correction
+    /// has slack to absorb whatever chrome.top credits: a suppressed
+    /// title must match a no-title chart exactly (`plot_area` identical).
+    /// If `chrome_reserved_at` instead always measured as unsuppressed —
+    /// crediting a title band the real render never draws — the
+    /// suppressed case would reserve LESS of the real top correction (the
+    /// wrongly-credited title eats into `extra_top`'s own budget) while
+    /// still not drawing the title, moving `plot_area` away from the
+    /// no-title baseline. Confirmed by mutation: forcing
+    /// `chrome_reserved_at` to always pass `suppress_chart_title: false`
+    /// changes `suppressed`'s `plot_area.y` from 78.0 to 56.4 against the
+    /// unchanged 78.0 no-title baseline.
+    #[test]
+    fn padding_auto_suppressed_chart_title_credits_nothing() {
+        let (axes, theme, m) = vertical_padding_fixture("y");
+        let spec = minimal_chart_spec();
+        let mut titled_spec = spec.clone();
+        titled_spec.title = Some(crate::spec::title::TitleSpec {
+            text: "A Title".into(),
+            ..Default::default()
+        });
+        let viewport = Viewport {
+            width: 400.0,
+            height: 300.0,
+        };
+        let suppressed_seam = CompositeLayoutSeam {
+            suppress_chart_title: true,
+            ..CompositeLayoutSeam::default()
+        };
+
+        let suppressed = compute_layout(
+            &titled_spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            suppressed_seam,
+        )
+        .expect("suppressed-title layout should succeed");
+        let no_title = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("no-title layout should succeed");
+        let titled_not_suppressed = compute_layout(
+            &titled_spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .expect("titled-not-suppressed layout should succeed");
+
+        assert_eq!(
+            suppressed.panels[0].plot_area, no_title.panels[0].plot_area,
+            "a suppressed chart title must reserve exactly what a chart \
+             with no title at all reserves",
+        );
+        // Also equal to the actually-drawn title, not merely to the
+        // no-title case: with a real (2px) padding floor, the tick pass's
+        // own correction has slack to absorb the title band either way,
+        // so a correctly-credited chrome makes all three paths agree —
+        // the same 0-excess invariant the legend tests above pin. The
+        // discriminating assertion is the one above: a wrongly-credited
+        // suppressed title (chrome_reserved_at ignoring `seam` entirely)
+        // breaks exactly that equality, not this one.
+        assert_eq!(
+            suppressed.panels[0].plot_area, titled_not_suppressed.panels[0].plot_area,
+            "a suppressed title and an actually-drawn title must reserve \
+             the same amount when chrome is credited correctly",
+        );
+    }
+
+    /// An aux legend block far wider than the rect it is carved from
+    /// overflows `layout_aux_legends`' own `(new_inner.w - extra -
+    /// legend_gutter.min(0.0)).max(0.0)` clamp — the same derivation the
+    /// colorbar test above states: once the declared block exceeds what
+    /// the carve has left, the result is `0` regardless of viewport size,
+    /// so a surviving plot cannot be constructed for this premise either.
+    /// This test asserts that collapse exactly, plus that `compute_layout`
+    /// still terminates (`Ok`) within `settle_auto_padding`'s bounded pass
+    /// count rather than panicking or hanging — the overflow itself is
+    /// what is under test here, not a surviving label.
+    #[test]
+    fn padding_auto_terminates_when_an_aux_block_is_wider_than_the_inner_rect() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport {
+            width: 200.0,
+            height: 200.0,
+        };
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let entries = vec![LegendEntry::new("alpha", SymbolKind::Circle)];
+        let aux = vec![legend::AuxLegendInput::Size {
+            title: None,
+            entries: vec![legend::SizeLegendEntry {
+                label: "9".repeat(60),
+                radius: 5.0,
+                color_hex: None,
+            }],
+            symbol: SymbolKind::Circle,
+        }];
+
+        let theme = default_theme_inputs();
+        let result = compute_layout(
+            &spec,
+            &theme,
+            viewport,
+            &axes,
+            &[],
+            &entries,
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &aux,
+            CompositeLayoutSeam::default(),
+        );
+        let layout = result.expect(
+            "an oversized aux block must still terminate and render, not panic or hang",
+        );
+        let plot = layout.panels.first().expect("one panel").plot_area;
+        assert_eq!(
+            plot,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            "fixture assumption: an aux block wider than the rect it is \
+             carved from must collapse the plot to zero (plot = {plot:?}); \
+             a surviving plot would mean the block no longer overflows, \
+             and the overflow case under test is no longer exercised",
+        );
+        assert!(
+            layout.axes.is_empty(),
+            "a collapsed plot must lay out no axes (axes = {:?})",
+            layout.axes,
+        );
+    }
+
     /// Finding 3: `AxisInput.title` is populated independently of the
     /// chart-level show flag (`.axis(x=False)`), so without a matching gate
     /// `auto_padding_for_axis_titles` would expand margins to recenter a
@@ -5372,8 +6934,14 @@ mod tests {
 
         let mut axes_x_hidden = axes_with_wide_x_title();
         axes_x_hidden.show_x = false;
-        let extra_x =
-            auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_x_hidden, &m, base);
+        let extra_x = auto_padding_for_axis_titles(
+            &theme,
+            viewport,
+            &axes_x_hidden,
+            &m,
+            base,
+            Inset::default(),
+        );
         assert_eq!(
             extra_x,
             Inset::default(),
@@ -5392,8 +6960,14 @@ mod tests {
             .set(Some("A Wide Y Axis Title".into()));
         axes_y_hidden.x.title.set(None);
         axes_y_hidden.show_y = false;
-        let extra_y =
-            auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_y_hidden, &m, base);
+        let extra_y = auto_padding_for_axis_titles(
+            &theme,
+            viewport,
+            &axes_y_hidden,
+            &m,
+            base,
+            Inset::default(),
+        );
         assert_eq!(
             extra_y,
             Inset::default(),

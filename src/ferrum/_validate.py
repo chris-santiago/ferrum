@@ -25,6 +25,12 @@ Independent predicates live here:
   shape. ``coerce_bool`` never reads a value for its truthiness: only a
   ``bool`` (or ``numpy.bool_``) passes.
 
+- ``coerce_bool_value`` is ``coerce_bool``'s label-voiced sibling: a
+  pre-composed *label* rather than a ``door``/``param`` pair, and ``None``
+  passed through as unset instead of refused. Its message is
+  ``coerce_pixel_value``'s shape: ``{label} must be True or False; received
+  {value!r}``.
+
 - ``is_none_color_sentinel`` is the single Python definition of the
   paint-clear sentinel test, shared by ``marks/base.py``'s
   ``_is_paint_sentinel`` and ``selection.py``'s ``_color_to_wire_dict`` so
@@ -235,6 +241,23 @@ def validate_optional_vocabulary(
         raise ValueError(f"{door}: unknown {param} '{value}'; expected {'|'.join(accepted)}")
 
 
+def _as_bool(value: Any) -> bool | None:
+    """Return *value* normalized to a builtin ``bool``, or ``None`` if it is not a truth value.
+
+    The one recognition rule shared by :func:`coerce_bool` and
+    :func:`coerce_bool_value`: a ``bool`` or a ``numpy.bool_``, never read
+    for truthiness. ``None`` itself is never a truth value, so it also
+    returns ``None`` here; each caller owns its own refusal message.
+    """
+    if isinstance(value, bool):
+        return value
+    import numpy as np
+
+    if isinstance(value, np.bool_):
+        return value.item()
+    return None
+
+
 def coerce_bool(door: str, param: str, value: Any) -> bool:
     """Return *value* as a builtin ``bool``, refusing anything that is not a truth value.
 
@@ -245,13 +268,29 @@ def coerce_bool(door: str, param: str, value: Any) -> bool:
 
         {door}: {param} must be True or False; got {value!r}
     """
-    if isinstance(value, bool):
-        return value
-    import numpy as np
+    result = _as_bool(value)
+    if result is None:
+        raise ValueError(f"{door}: {param} must be True or False; got {value!r}")
+    return result
 
-    if isinstance(value, np.bool_):
-        return value.item()
-    raise ValueError(f"{door}: {param} must be True or False; got {value!r}")
+
+def coerce_bool_value(label: str, value: Any) -> bool | None:
+    """Return *value* as a builtin ``bool``, or ``None`` when unset, refusing anything else.
+
+    The label-voiced sibling of :func:`coerce_bool`: *label* is a
+    pre-composed description of the field being checked, so each call site
+    keeps its own message convention instead of sharing one hardcoded door
+    name. ``None`` is the caller's unset sentinel and always passes through
+    unchanged, never coerced and never read for truthiness::
+
+        {label} must be True or False; received {value!r}
+    """
+    if value is None:
+        return None
+    result = _as_bool(value)
+    if result is None:
+        raise ValueError(f"{label} must be True or False; received {value!r}")
+    return result
 
 
 def validate_str(door: str, param: str, value: Any) -> None:

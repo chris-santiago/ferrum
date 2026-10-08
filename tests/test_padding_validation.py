@@ -1,5 +1,5 @@
 """Tests for padding configuration validation (NF-B5/B6/B7) and padding.auto
-(F-L07-08, D10).
+(F-L07-08, D10, #135).
 
 Validates that padding values are rejected at the Python boundary when:
 - Negative: typed ValueError at construction
@@ -13,6 +13,13 @@ Also validates the Rust-side consumer added in Task 9 (D10, spec §4.7):
   `.override(padding_auto=...)`).
 - `PaddingExceedsViewport` reports the CALLER's actual value and the
   specific side, not the theme default.
+
+`padding.auto`'s built-in default is `True`, owned solely by Rust
+(`ThemePadding::default()`). Python's `PaddingConfig.auto` /
+`configure_padding(auto=...)` are `bool | None = None`: a chart that never
+mentions `auto` keeps that built-in default. Every test below that compares
+a bare call (no `configure_padding`, or a `configure_padding(...)` call that
+never names `auto`) expects it to match an explicit `auto=True`.
 """
 
 from __future__ import annotations
@@ -279,9 +286,9 @@ class TestPaddingByteIdentity:
         "explicit side values still win over auto on their side").
 
         With all four sides given, there is no unset side for auto to
-        expand, so `auto=True` and `auto=False` (the ``configure_padding``
-        default) must render byte-identically — the untouched-field
-        byte-identity guarantee (claim 3), specialized to padding.auto.
+        expand, so `auto=True` and `auto=False` must render
+        byte-identically — the untouched-field byte-identity guarantee
+        (claim 3), specialized to padding.auto.
 
         Uses ``TestPaddingAutoEdgeTickOverhang._clipping_repro_chart()`` (a
         long-label chart whose ``auto_padding_for_edge_ticks`` contribution
@@ -385,9 +392,10 @@ class TestPaddingAutoEdgeTickOverhang:
         )
 
     def test_configure_padding_auto_true_narrows_plot_past_auto_false(self):
-        """`configure_padding(auto=True)` (opt-in; `auto=False` is the
-        ``configure_padding`` default) reserves real extra right-side
-        margin for this repro; `auto=False` does not."""
+        """`configure_padding(auto=True)` reserves real extra right-side
+        margin for this repro; an explicit `auto=False` does not (#135:
+        `auto` unset is the built-in-default-inheriting default; both
+        explicit values still mean what they say)."""
         base = self._clipping_repro_chart()
         x_auto_false = self._last_x_tick_position(base.configure_padding(auto=False))
         x_auto_true = self._last_x_tick_position(base.configure_padding(auto=True))
@@ -396,31 +404,37 @@ class TestPaddingAutoEdgeTickOverhang:
             f"auto=False position ({x_auto_true} vs {x_auto_false})"
         )
 
-    def test_configure_padding_bare_default_is_auto_false(self):
-        """`configure_padding()`'s own bare default is `auto=False` — opt-in
-        (spec-review cycle 2, finding 3): `auto` never had a polarity
-        decision recorded in D10, and defaulting it on meant every existing
-        `configure_padding(...)` caller silently gained expansion on the
-        sides they never touched. `configure_padding()` with no `auto=`
-        must behave exactly like an explicit `auto=False` call, not
-        `auto=True`."""
+    def test_configure_padding_bare_default_inherits_the_built_in_auto_default(self):
+        """`configure_padding()`'s own bare call never mentions `auto`, so it
+        sends nothing for `auto` on the wire and keeps ferrum's built-in
+        default (#135: on) — it renders like an explicit `auto=True` call,
+        not `auto=False`."""
         base = self._clipping_repro_chart()
-        svg_default = base.configure_padding().properties(width=400, height=200).to_svg()
+        svg_bare = base.configure_padding().properties(width=400, height=200).to_svg()
+        svg_explicit_true = (
+            base.configure_padding(auto=True).properties(width=400, height=200).to_svg()
+        )
         svg_explicit_false = (
             base.configure_padding(auto=False).properties(width=400, height=200).to_svg()
         )
-        assert svg_default == svg_explicit_false
+        assert svg_bare == svg_explicit_true
+        assert svg_bare != svg_explicit_false
 
-    def test_configure_padding_with_only_one_side_never_silently_expands_others(self):
+    def test_configure_padding_with_only_one_side_never_silently_turns_auto_off(self):
         """A caller who sets one side (the common `configure_padding(top=...)`
-        shape) and never mentions `auto` must NOT silently gain expansion on
-        the other three sides — the exact regression finding 3 named."""
+        shape) and never mentions `auto` must keep the built-in auto default
+        ON for the other three sides (#135's no-reset guarantee) — it must
+        NOT render like an explicit `auto=False` call."""
         base = self._clipping_repro_chart()
         svg_one_side = base.configure_padding(top=5).properties(width=400, height=200).to_svg()
+        svg_one_side_explicit_auto_true = (
+            base.configure_padding(top=5, auto=True).properties(width=400, height=200).to_svg()
+        )
         svg_one_side_explicit_no_auto = (
             base.configure_padding(top=5, auto=False).properties(width=400, height=200).to_svg()
         )
-        assert svg_one_side == svg_one_side_explicit_no_auto
+        assert svg_one_side == svg_one_side_explicit_auto_true
+        assert svg_one_side != svg_one_side_explicit_no_auto
 
     def test_override_padding_auto_true_matches_configure_padding_auto_true(self):
         """Both wire spellings — `configure_padding(auto=True)` and the
@@ -450,30 +464,32 @@ class TestPaddingAutoEdgeTickOverhang:
             )
         assert svg_configure == svg_override
 
-    def test_a_chart_never_calling_configure_padding_is_unaffected_by_auto(self):
-        """A chart that never touches ``padding`` at all renders identically
-        to an explicit ``configure_padding(auto=False)`` call:
-        `theme.padding.padding_auto` only ever flips via
-        `apply_chart_config`'s `padding` block, which never runs unless
-        `Configure.padding` is present.
+    def test_a_chart_never_calling_configure_padding_inherits_the_built_in_default(self):
+        """A chart that never touches ``padding`` at all sends NO chart-config
+        padding section, so it renders identically to an explicit
+        ``configure_padding(auto=True)`` call and differently from
+        ``configure_padding(auto=False)`` (#135: the Rust built-in default,
+        `ThemePadding::default().padding_auto`, is now `True`, and it is the
+        only thing that applies when no `Configure.padding` is present).
 
         Pinned on the real clipping-repro fixture (spec-review cycle 6,
         S2 — the original version of this test built the SAME
         short-tick-label chart twice and asserted the two renders were
         equal, which pins render determinism only: it would pass unchanged
-        if `auto` defaulted `True`, if `apply_chart_config` wrote
-        `padding_auto` unconditionally, or if the whole auto mechanism were
-        reverted). This fixture's `auto=True` vs `auto=False` geometry
-        difference is already pinned above, so a regression on either of
-        those fronts shows up here as a byte mismatch instead of silently
-        passing.
+        if `apply_chart_config` wrote `padding_auto` unconditionally, or if
+        the whole auto mechanism were reverted). This fixture's `auto=True`
+        vs `auto=False` geometry difference is already pinned above, so a
+        regression on either of those fronts shows up here as a byte
+        mismatch instead of silently passing.
         """
         base = self._clipping_repro_chart()
         svg_no_config = base.properties(width=400, height=200).to_svg()
+        svg_auto_true = base.configure_padding(auto=True).properties(width=400, height=200).to_svg()
         svg_auto_false = (
             base.configure_padding(auto=False).properties(width=400, height=200).to_svg()
         )
-        assert svg_no_config == svg_auto_false
+        assert svg_no_config == svg_auto_true
+        assert svg_no_config != svg_auto_false
 
 
 class TestPaddingAutoAxisTitleRecentering:
@@ -522,15 +538,18 @@ class TestPaddingAutoAxisTitleRecentering:
             f"overflows the right edge at auto=False ({x_auto_true} vs {x_auto_false})"
         )
 
-    def test_auto_false_default_leaves_the_title_at_its_symmetric_position(self):
-        """`auto`'s opt-in default (`False`) must not itself move the title —
-        only an explicit `auto=True` engages recentering."""
+    def test_bare_chart_inherits_the_built_in_default_and_recenters_the_title(self):
+        """A chart that never calls `configure_padding` keeps ferrum's
+        built-in `auto` default (#135: on), so it renders like an explicit
+        `auto=True` call — recentering the title — and NOT like `auto=False`."""
         base = self._repro_chart()
         svg_no_call = base.properties(width=270, height=200).to_svg()
+        svg_auto_true = base.configure_padding(auto=True).properties(width=270, height=200).to_svg()
         svg_auto_false = (
             base.configure_padding(auto=False).properties(width=270, height=200).to_svg()
         )
-        assert svg_no_call == svg_auto_false
+        assert svg_no_call == svg_auto_true
+        assert svg_no_call != svg_auto_false
 
 
 class TestPaddingAutoHonorsMaxBand:

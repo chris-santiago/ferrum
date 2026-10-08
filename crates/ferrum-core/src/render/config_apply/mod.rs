@@ -507,7 +507,10 @@ fn apply_chart_config_to_theme(theme: &mut ThemeInputs, config: &ChartConfig) {
     // `layout::compute_layout` (D10, spec §4.7, F-L07-08) to expand an UNSET
     // side enough to contain a continuous axis's edge-tick-label overhang
     // and/or recenter an overflowing axis title — see
-    // `ThemePadding::padding_auto`'s own doc for the reader list.
+    // `ThemePadding::padding_auto`'s own doc for the reader list. `pad.auto`
+    // is `None` whenever the caller never set it (#135): the wire only
+    // overrides the built-in default (`true`, `ThemePadding::default`) when
+    // present, so an unmentioned `auto` leaves the rescue on.
     if let Some(ref pad) = config.padding {
         if let Some(top) = pad.top {
             theme.padding.padding_top = Some(top);

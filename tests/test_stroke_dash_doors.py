@@ -144,7 +144,7 @@ def test_inset_pixel_bound_accepts_a_numpy_integer():
 
 def test_padding_accepts_a_numpy_scalar_and_stores_a_float():
     padding = fm.PaddingConfig(top=np.int64(5), left=np.float32(2.0))
-    assert padding.to_dict() == {"top": 5.0, "left": 2.0, "auto": False}
+    assert padding.to_dict() == {"top": 5.0, "left": 2.0}
     assert type(padding.top) is float
     chart = fm.Chart(DF).mark_point().encode(x="x", y="y")
     chart.configure(padding=padding).to_svg()
@@ -175,5 +175,5 @@ def test_int_pixel_and_fraction_values_serialize_as_floats():
         GridConfig(width=2, opacity=1).to_dict(),
         GridAxisConfig(width=2).to_dict(),
     ]
-    assert wires == [{"top": 5.0, "auto": False}, {"width": 2.0, "opacity": 1.0}, {"width": 2.0}]
-    assert all(type(v) is float for w in wires for k, v in w.items() if k != "auto")
+    assert wires == [{"top": 5.0}, {"width": 2.0, "opacity": 1.0}, {"width": 2.0}]
+    assert all(type(v) is float for w in wires for v in w.values())

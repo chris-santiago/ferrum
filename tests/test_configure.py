@@ -366,10 +366,12 @@ class TestPaddingConfig:
 
     def test_default_construction(self):
         cfg = PaddingConfig()
-        # auto is opt-in (spec §4.7, D10): defaulting it True meant every
-        # existing PaddingConfig()/configure_padding() caller silently
-        # gained margin expansion on sides they never touched.
-        assert cfg.auto is False
+        # `auto` is unset by default (#135): the Rust built-in default
+        # (`ThemePadding::default().padding_auto`) is the one owner, and an
+        # unmentioned `auto` must never reach the wire, so a later
+        # `configure_padding(left=5)` cannot silently reset an earlier
+        # `auto=True`.
+        assert cfg.auto is None
         assert cfg.top is None
 
     def test_frozen(self):
@@ -385,6 +387,10 @@ class TestPaddingConfig:
         assert d["auto"] is False
         assert "right" not in d
         assert "bottom" not in d
+
+    def test_default_construction_to_dict_omits_auto(self):
+        """`auto` unset (`None`, the default) never reaches the wire (#135)."""
+        assert PaddingConfig().to_dict() == {}
 
 
 # ---------------------------------------------------------------------------
