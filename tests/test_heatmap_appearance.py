@@ -58,12 +58,14 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 import warnings
 
 import polars as pl
 import pytest
 
 import ferrum as fr
+from tests._svg_rects import svg_elements
 
 
 def _wide_df() -> pl.DataFrame:
@@ -93,6 +95,32 @@ def _heatmap_cell_fills(svg: str) -> list[str]:
 
 def _cell_strokes(svg: str) -> list[str]:
     return re.findall(r'stroke="(#[0-9a-fA-F]+)"', svg)
+
+
+def _bordered_cell_rects(svg: str) -> list[dict[str, str]]:
+    """Return ``heatmap``'s own cell ``<rect>``s: solid-fill rects carrying
+    their own stroke, excluding the colorbar frame (a ``url(...)`` gradient
+    fill, stroked independently of ``_resolve_cell_border``) -- so a
+    per-cell count/stroke/width assertion isn't trivially satisfied by the
+    colorbar frame's own unrelated 0.5px border (``tests/test_clustermap_border.py``'s
+    ``_cell_rects`` convention, mirrored here for heatmap)."""
+    return svg_elements(
+        svg, "rect", lambda a: "stroke" in a and not a.get("fill", "").startswith("url(")
+    )
+
+
+def _theme_axis_color(svg: str) -> str:
+    """Read the theme's resolved axis/label color from this render's own
+    axis chrome, never hard-coded: the axis/tick lines render at
+    ``stroke-width="1"``, distinct from the ``"0.5"`` gridlines, and (in
+    every built-in theme) share the same color as ``"theme:label"``'s
+    resolution (``axis_line_color``/``tick_color``/``label_color`` are one
+    value per built-in theme -- see ``src/ferrum/themes/builtins.py``)."""
+    axis_strokes = {
+        a["stroke"] for a in svg_elements(svg, "line", lambda a: a.get("stroke-width") == "1")
+    }
+    assert len(axis_strokes) == 1, f"expected exactly one axis chrome color, got {axis_strokes}"
+    return axis_strokes.pop()
 
 
 # ---------------------------------------------------------------------------
@@ -446,9 +474,17 @@ def test_heatmap_linecolor_discriminates():
 
 
 def test_heatmap_linewidths_zero_disables_border():
-    """linewidths=0 must omit the stroke entirely, not merely set width 0."""
+    """linewidths=0 must omit the stroke entirely, not merely set width 0.
+
+    linecolor is left unset here (rather than an explicit drawing color)
+    so this pins linewidths=0's own effect without also triggering the
+    inert-pair warning an explicit drawing linecolor would raise (see
+    the dedicated inert-pair tests below).
+    """
     df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
-    chart = fr.heatmap(df, annot=False, linewidths=0, linecolor="#000000")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        chart = fr.heatmap(df, annot=False, linewidths=0)
     spec = json.loads(chart.to_json())
     assert "stroke" not in spec.get("mark_style", {})
 
@@ -463,6 +499,317 @@ def test_heatmap_named_linecolor_renders_expected_stroke(linecolor, expected_hex
     df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
     svg = fr.heatmap(df, annot=False, linewidths=1.0, linecolor=linecolor).to_svg()
     assert expected_hex in _cell_strokes(svg)
+
+
+# ---------------------------------------------------------------------------
+# linewidths=None / linecolor=None -- the declared default (#125). Passing
+# `linewidths=None` explicitly must not reach `if linewidths > 0:` as a raw
+# `TypeError`, and a `None` linecolor with the default linewidths must not
+# write a `stroke: null` rect kwarg that renders no visible border silently,
+# with no typed refusal. `None` on either means "use the shared default",
+# resolved by `ferrum.plots.matrix._resolve_cell_border`, the one helper
+# `heatmap` and `clustermap` both call. The 2x2 fixture below has 4 cells,
+# so every per-cell assertion expects count 4.
+# ---------------------------------------------------------------------------
+
+
+def test_heatmap_none_linewidths_and_linecolor_resolve_to_the_default():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    svg = fr.heatmap(df, annot=False, linewidths=None, linecolor=None).to_svg()
+    cells = _bordered_cell_rects(svg)
+    assert len(cells) == 4
+    assert all(c["stroke"] == "#ffffff" for c in cells)
+    assert all(c["stroke-width"] == "0.5" for c in cells)
+
+
+def test_heatmap_none_linewidths_matches_the_omitted_default():
+    """Passing `linewidths=None, linecolor=None` explicitly renders
+    byte-identical to leaving both unset -- `None` really is "default", not
+    a second, independent code path."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    omitted = fr.heatmap(df, annot=False).to_svg()
+    explicit_none = fr.heatmap(df, annot=False, linewidths=None, linecolor=None).to_svg()
+    assert omitted == explicit_none
+
+
+def test_heatmap_linewidths_none_alone_resolves_to_default_width():
+    """`linewidths=None` passed alone (`linecolor` left at its own default,
+    not even passed) resolves to the 0.5 default width -- pinned per cell,
+    separately from the both-None case above."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        svg = fr.heatmap(df, annot=False, linewidths=None).to_svg()
+    cells = _bordered_cell_rects(svg)
+    assert len(cells) == 4
+    assert all(c["stroke"] == "#ffffff" for c in cells)
+    assert all(c["stroke-width"] == "0.5" for c in cells)
+
+
+def test_heatmap_linecolor_none_with_explicit_width_resolves_to_default_color():
+    """`linecolor=None` combined with an explicit `linewidths` must not
+    write a `stroke: null` rect kwarg that renders no visible border
+    silently: it resolves to the white default, at the caller's explicit
+    width, with no warning (`None` is unset, never inert)."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        svg = fr.heatmap(df, annot=False, linewidths=2.0, linecolor=None).to_svg()
+    cells = _bordered_cell_rects(svg)
+    assert len(cells) == 4
+    assert all(c["stroke"] == "#ffffff" for c in cells)
+    assert all(c["stroke-width"] == "2" for c in cells)
+
+
+# ---------------------------------------------------------------------------
+# linecolor paint sentinels ("none"/"transparent"/"theme:label") -- the same
+# vocabulary `mark_rect(stroke=)` accepts (#125). `_resolve_cell_border`
+# short-circuits `ferrum.marks.base._is_paint_sentinel` before validation,
+# so no refusal it raises can ever contain `stroke=`: "none"/"transparent"
+# clear the border (the same `{}` result `linewidths=0` produces), and
+# "theme:label" is forwarded unchanged for the mark to resolve at render
+# time.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spelling", ["none", "transparent", " NONE ", "Transparent"])
+def test_heatmap_clearing_linecolor_matches_linewidths_zero_and_warns_nothing(spelling):
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    zero = fr.heatmap(df, annot=False, linewidths=0).to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = fr.heatmap(df, annot=False, linecolor=spelling).to_svg()
+    assert svg == zero
+    assert caught == []
+
+
+def test_heatmap_theme_label_linecolor_renders_the_theme_axis_color():
+    """`linecolor="theme:label"` is forwarded unchanged to the mark, which
+    resolves it at render time -- pinned against this same render's own
+    axis chrome (`_theme_axis_color`), never a hard-coded hex."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        svg = fr.heatmap(df, annot=False, linecolor="theme:label").to_svg()
+    expected = _theme_axis_color(svg)
+    cells = _bordered_cell_rects(svg)
+    assert len(cells) == 4
+    assert all(c["stroke"] == expected for c in cells)
+    assert all(c["stroke-width"] == "0.5" for c in cells)
+
+
+# ---------------------------------------------------------------------------
+# Inert pairs -- an explicit drawing value made inert by the other switch's
+# off state warns, naming both arguments (#125). `None` on either side is
+# unset, never inert; two off switches that agree do not warn.
+# ---------------------------------------------------------------------------
+
+
+def test_heatmap_explicit_linewidths_inert_under_clearing_linecolor_warns_exact_text():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.warns(UserWarning) as record:
+        fr.heatmap(df, annot=False, linewidths=2, linecolor="none")
+    assert len(record) == 1
+    assert str(record[0].message) == (
+        "heatmap: linewidths=2.0 has no effect when linecolor='none' draws no "
+        "cell border; it was ignored"
+    )
+
+
+def test_heatmap_explicit_linecolor_inert_under_linewidths_zero_warns_exact_text():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.warns(UserWarning) as record:
+        fr.heatmap(df, annot=False, linewidths=0, linecolor="red")
+    assert len(record) == 1
+    assert str(record[0].message) == (
+        "heatmap: linecolor='red' has no effect when linewidths=0.0 draws no "
+        "cell border; it was ignored"
+    )
+
+
+def test_heatmap_agreeing_off_switches_warn_nothing():
+    """Both off switches agreeing (a clearing `linecolor` with
+    `linewidths=0`) is not a contradiction -- no warning."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fr.heatmap(df, annot=False, linewidths=0, linecolor="none")
+        fr.heatmap(df, annot=False, linewidths=0, linecolor=None)
+
+
+def test_heatmap_theme_label_inert_under_linewidths_zero_warns_exact_text():
+    """`linecolor="theme:label"` is a drawing value (not a clearing
+    sentinel), so it is inert under `linewidths=0` exactly like any other
+    color -- pinned separately from the plain-color inert case above."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.warns(UserWarning) as record:
+        fr.heatmap(df, annot=False, linewidths=0, linecolor="theme:label")
+    assert len(record) == 1
+    assert str(record[0].message) == (
+        "heatmap: linecolor='theme:label' has no effect when linewidths=0.0 "
+        "draws no cell border; it was ignored"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Warning attribution -- every figure-voiced warning in this module must
+# name the user's own call site, not an internal ferrum frame. `heatmap`/
+# `clustermap` are wrapped by `@_figure_entry` (`wrapper` -> `speak_as` ->
+# the figure body), so a fixed `stacklevel` silently drifts whenever that
+# wrapper stack changes. `_resolve_cell_border`'s and
+# `_heatmap_resolve_color_domain`'s warnings all use
+# `ferrum._warn.user_stacklevel()`, which walks the stack instead of
+# counting it; these tests are the negative control that catches a future
+# drift the message-text assertions above cannot.
+# ---------------------------------------------------------------------------
+
+
+def test_heatmap_inert_linewidths_warning_names_the_users_line():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1  # the next line is the call
+        fr.heatmap(df, annot=False, linewidths=2, linecolor="none")
+    matching = [w for w in record if "linewidths=2.0 has no effect" in str(w.message)]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+def test_heatmap_inert_linecolor_warning_names_the_users_line():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1
+        fr.heatmap(df, annot=False, linewidths=0, linecolor="red")
+    matching = [w for w in record if "linecolor='red' has no effect" in str(w.message)]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+def test_heatmap_inverted_domain_warning_names_the_users_line():
+    df = _wide_df()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1
+        fr.heatmap(df, annot=False, vmin=50.0)
+    matching = [w for w in record if "inverted domain" in str(w.message)]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+def test_heatmap_fill_failure_warning_names_the_users_line():
+    df = pl.DataFrame({"a": [float("nan"), float("nan")], "b": [float("nan"), float("nan")]})
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1
+        fr.heatmap(df, annot=False, vmin=-1.0)
+    matching = [w for w in record if "could not be filled" in str(w.message)]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+def test_heatmap_center_outside_domain_warning_names_the_users_line():
+    df = _wide_df()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        line = sys._getframe().f_lineno + 1
+        fr.heatmap(df, annot=False, vmin=-1.0, vmax=3.0, center=50)
+    matching = [w for w in record if "lies outside the effective color" in str(w.message)]
+    assert [(w.filename, w.lineno) for w in matching] == [(__file__, line)]
+
+
+# ---------------------------------------------------------------------------
+# Malformed linewidths=/linecolor= -- refused naming heatmap and the
+# argument, with the exact refusal text, never "stroke" (#125)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bad_linewidths", "expected_message"),
+    [
+        (-1, "heatmap(linewidths=...) must be non-negative; received -1"),
+        (
+            float("nan"),
+            "heatmap(linewidths=...) must be a finite numeric pixel value; received nan",
+        ),
+        (
+            True,
+            "heatmap(linewidths=...) must be a numeric pixel value (int or float), "
+            "not bool; received True",
+        ),
+        (
+            "a",
+            "heatmap(linewidths=...) must be a numeric pixel value (int or float), "
+            "not str; received 'a'",
+        ),
+    ],
+)
+def test_heatmap_malformed_linewidths_refuses_with_exact_text(bad_linewidths, expected_message):
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fr.heatmap(df, annot=False, linewidths=bad_linewidths)
+    assert str(excinfo.value) == expected_message
+
+
+@pytest.mark.parametrize(
+    ("bad_linecolor", "expected_message"),
+    [
+        (
+            "notacolor",
+            "heatmap(linecolor=...)='notacolor' is not a valid color (invalid color "
+            "'notacolor': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+            "rgb()/rgba())",
+        ),
+        (
+            "theme:foo",
+            "heatmap(linecolor=...)='theme:foo' is not a valid color (invalid color "
+            "'theme:foo': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+            "rgb()/rgba())",
+        ),
+        (
+            "Theme:Label",
+            "heatmap(linecolor=...)='Theme:Label' is not a valid color (invalid color "
+            "'Theme:Label': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+            "rgb()/rgba())",
+        ),
+        (
+            " theme:label",
+            "heatmap(linecolor=...)=' theme:label' is not a valid color (invalid color "
+            "'theme:label': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+            "rgb()/rgba())",
+        ),
+    ],
+)
+def test_heatmap_malformed_linecolor_refuses_with_exact_text_not_stroke(
+    bad_linecolor, expected_message
+):
+    """Non-sentinel ``theme:*`` tokens (``"theme:foo"``), and a case or
+    whitespace variant of the sentinel (``"Theme:Label"``, ``" theme:label"``),
+    are malformed colors like any other -- ``_is_paint_sentinel`` matches
+    ``"theme:label"`` by exact string equality, untrimmed and case-sensitive
+    (unlike the ``"none"``/``"transparent"`` pair). Neither message contains
+    "stroke"."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fr.heatmap(df, annot=False, linecolor=bad_linecolor)
+    assert str(excinfo.value) == expected_message
+    assert "stroke" not in expected_message
+
+
+def test_heatmap_non_str_linecolor_refuses_with_exact_text():
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fr.heatmap(df, annot=False, linecolor=3)
+    assert str(excinfo.value) == "heatmap(linecolor=...)=3 must be a color string, not int"
+
+
+def test_heatmap_malformed_linecolor_refuses_even_with_linewidths_zero():
+    """Validation precedes the off-switch check: a malformed `linecolor` is
+    refused even when `linewidths=0` would otherwise make it inert."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    with pytest.raises(ValueError) as excinfo:
+        fr.heatmap(df, annot=False, linewidths=0, linecolor="notacolor")
+    assert str(excinfo.value) == (
+        "heatmap(linecolor=...)='notacolor' is not a valid color (invalid color "
+        "'notacolor': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or "
+        "rgb()/rgba())"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,11 @@ _heatmap_resolve_color_domain — owns the one-sided ``vmin=``/``vmax=`` fill
 policy and every domain-related ``UserWarning`` (fill failure, inverted
 domain, ``center=`` out-of-domain); ``_heatmap_build`` only assembles
 ``scale_kwargs`` from its result.
+
+_resolve_cell_border — the one owner of ``heatmap``/``clustermap``'s shared
+default cell border (width 0.5, color white), the ``None``-means-default
+rule, and the ``linewidths=``/``linecolor=`` validation (#125). Both figure
+functions call it directly and forward its result as ``mark_rect`` kwargs.
 """
 
 from __future__ import annotations
@@ -42,8 +47,16 @@ from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repea
 from ferrum._coerce import to_polars
 from ferrum._core import numeric_columns, secondary_key
 from ferrum._registry import registry_output_columns, registry_secondary_columns
-from ferrum._validate import coerce_finite_real, validate_choice
+from ferrum._validate import (
+    coerce_finite_real,
+    coerce_pixel_value,
+    is_none_color_sentinel,
+    validate_choice,
+    validate_color_value,
+)
+from ferrum._warn import user_stacklevel
 from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks.base import _is_paint_sentinel
 from ferrum.plots._helpers import (
     _field_name,
     _figure_entry,
@@ -419,6 +432,93 @@ def _pairplot_build(
 
 
 # ---------------------------------------------------------------------------
+# Cell border (heatmap / clustermap, #125)
+# ---------------------------------------------------------------------------
+
+#: The one place ``heatmap``/``clustermap``'s default cell border lives.
+#: Nothing else in the package names 0.5 or "white" for this purpose.
+_DEFAULT_BORDER_WIDTH = 0.5
+_DEFAULT_BORDER_COLOR = "white"
+
+
+def _resolve_cell_border(
+    door: str, linewidths: float | None, linecolor: str | None
+) -> dict[str, Any]:
+    """Return ``mark_rect`` stroke kwargs for a heatmap/clustermap cell border.
+
+    The single owner of the shared default (width 0.5, color white), the
+    ``None``-means-default rule, and the validation voice for both
+    ``heatmap`` and ``clustermap`` (#125) — each declares ``linewidths: float
+    | None = None, linecolor: str | None = None`` and calls this helper
+    directly, so the default and its handling live in exactly one place
+    instead of the two figures drifting apart. *door* is the calling
+    figure's own name, so a refusal names it and the argument
+    (``linewidths``/``linecolor``), never ``stroke``.
+
+    ``linewidths`` must pass the pixel contract
+    (:func:`ferrum._validate.coerce_pixel_value`): a finite, non-negative
+    real number (``bool`` excluded). ``linecolor`` accepts the same values
+    ``mark_rect(stroke=)`` does: a color :func:`ferrum.color.to_hex` accepts
+    (:func:`ferrum._validate.validate_color_value`), or a paint sentinel
+    (:func:`ferrum.marks.base._is_paint_sentinel`) -- ``"none"``/``"transparent"``
+    clear the border (the same ``{}`` result ``linewidths=0`` produces) and
+    ``"theme:label"`` is forwarded unchanged for the mark to resolve at
+    render time. No sentinel ever reaches ``to_hex``, so no refusal from this
+    helper can contain ``stroke=``. ``None`` on either passes as "use the
+    default" rather than being validated as malformed.
+
+    When one side explicitly draws no border (a clearing ``linecolor``, or
+    ``linewidths=0``) while the other side was explicitly set to a value
+    that would draw, the drawing value is inert; this emits one
+    ``UserWarning`` naming *door* and both arguments rather than silently
+    discarding it (REFUSE MALFORMED, WARN DEGRADED). ``None`` on either side
+    is unset, never inert, and never warns; two agreeing off switches
+    (``linewidths=0`` with a clearing ``linecolor``) do not warn either.
+
+    Returns ``{"stroke": linecolor, "stroke_width": linewidths}`` once both
+    are resolved to their defaults, when the resolved width is greater than
+    0 and ``linecolor`` does not clear the border; otherwise an empty dict
+    (no border).
+    """
+    import warnings
+
+    from ferrum.color import to_hex
+
+    width = coerce_pixel_value(f"{door}(linewidths=...)", linewidths)
+    is_sentinel = isinstance(linecolor, str) and _is_paint_sentinel(linecolor)
+    if not is_sentinel:
+        validate_color_value(f"{door}(linecolor=...)", linecolor, to_hex, require_str=True)
+    resolved_width = _DEFAULT_BORDER_WIDTH if width is None else width
+
+    # A clearing sentinel ("none"/"transparent") draws no border, the same
+    # exit linewidths=0 takes -- never forward {"stroke": "none", ...} to
+    # the mark. "theme:label" is not clearing: it falls through below and is
+    # forwarded unchanged.
+    clears_border = isinstance(linecolor, str) and is_none_color_sentinel(linecolor)
+    if clears_border:
+        if linewidths is not None and resolved_width > 0:
+            warnings.warn(
+                f"{door}: linewidths={resolved_width!r} has no effect when "
+                f"linecolor={linecolor!r} draws no cell border; it was ignored",
+                UserWarning,
+                stacklevel=user_stacklevel(),
+            )
+        return {}
+
+    resolved_color = _DEFAULT_BORDER_COLOR if linecolor is None else linecolor
+    if resolved_width > 0:
+        return {"stroke": resolved_color, "stroke_width": resolved_width}
+    if linecolor is not None:
+        warnings.warn(
+            f"{door}: linecolor={linecolor!r} has no effect when "
+            f"linewidths={resolved_width!r} draws no cell border; it was ignored",
+            UserWarning,
+            stacklevel=user_stacklevel(),
+        )
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # heatmap
 # ---------------------------------------------------------------------------
 
@@ -431,8 +531,8 @@ def heatmap(
     fmt: str = ".2f",
     scheme: str | None = None,
     cmap: str | None = None,
-    linewidths: float = 0.5,
-    linecolor: str = "white",
+    linewidths: float | None = None,
+    linecolor: str | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     center: float | None = None,
@@ -468,10 +568,23 @@ def heatmap(
         ``None`` (default) defers to the theme's sequential scheme.
     cmap : str or None, optional
         Back-compat alias for ``scheme``.  Pass at most one of the two.
-    linewidths : float, default 0.5
-        Width of the cell border stroke in pixels.  ``0`` disables borders.
-    linecolor : str, default "white"
-        Color of the cell border stroke.
+    linewidths : float or None, default None
+        Width of the cell border stroke in pixels.  ``None`` (default)
+        resolves to 0.5.  ``0`` disables borders.  Must be a finite,
+        non-negative real number; a negative, non-finite, ``bool``, or
+        non-numeric value raises ``ValueError`` naming ``heatmap`` and
+        ``linewidths``.  An explicit value ``> 0`` combined with a
+        border-clearing ``linecolor`` (below) is inert and emits a
+        ``UserWarning`` naming both arguments.
+    linecolor : str or None, default None
+        Color of the cell border stroke.  ``None`` (default) resolves to
+        ``"white"``.  Accepts the same values ``mark_rect(stroke=)`` does: a
+        color ``ferrum.color.to_hex`` accepts, or ``"none"``/``"transparent"``
+        to draw no border (the same result as ``linewidths=0``).  Any other
+        value that is not a color raises ``ValueError`` naming ``heatmap``
+        and ``linecolor``.  An explicit drawing value combined with
+        ``linewidths=0`` is inert and emits a ``UserWarning`` naming both
+        arguments.
     vmin : float or None, optional
         Minimum of the color scale domain.  Overrides ``robust`` when set.
         Must be finite -- ``inf``, ``-inf``, and ``NaN`` raise ``ValueError``
@@ -538,9 +651,11 @@ def heatmap(
     Raises
     ------
     ValueError
-        If ``data`` has no numeric columns, or if ``vmin``/``vmax``/``center``
+        If ``data`` has no numeric columns, if ``vmin``/``vmax``/``center``
         is given a value that is not a real number (``bool`` included) or is
-        non-finite (``inf``, ``-inf``, or ``NaN``).
+        non-finite (``inf``, ``-inf``, or ``NaN``), if ``linewidths`` is not
+        a finite non-negative real number, or if ``linecolor`` is not a
+        color ``ferrum.color.to_hex`` accepts.
 
     Examples
     --------
@@ -560,6 +675,7 @@ def heatmap(
     vmin = coerce_finite_real("heatmap(vmin=...)", vmin)
     vmax = coerce_finite_real("heatmap(vmax=...)", vmax)
     center = coerce_finite_real("heatmap(center=...)", center)
+    rect_kwargs = _resolve_cell_border("heatmap", linewidths, linecolor)
 
     tbl = to_arrow_table(data)
     value_cols, id_col = _matrix_columns(tbl, "heatmap")
@@ -576,8 +692,7 @@ def heatmap(
         annot=annot,
         fmt=fmt,
         cmap=resolve_cmap_alias(scheme=scheme, cmap=cmap, where="heatmap"),
-        linewidths=linewidths,
-        linecolor=linecolor,
+        rect_kwargs=rect_kwargs,
         vmin=vmin,
         vmax=vmax,
         center=center,
@@ -697,7 +812,7 @@ def _heatmap_resolve_color_domain(
                     "single uniform color, not a reversed ramp -- every cell "
                     "renders the same color.",
                     UserWarning,
-                    stacklevel=4,
+                    stacklevel=user_stacklevel(),
                 )
         else:
             warnings.warn(
@@ -705,7 +820,7 @@ def _heatmap_resolve_color_domain(
                 "could not be filled from the data extent (the heatmap's numeric "
                 "columns have no finite values); the color-domain override is dropped.",
                 UserWarning,
-                stacklevel=4,
+                stacklevel=user_stacklevel(),
             )
             vmin = vmax = None
 
@@ -720,7 +835,7 @@ def _heatmap_resolve_color_domain(
                 f"domain [{effective[0]}, {effective[1]}]; the diverging color "
                 "ramp collapses to a one-sided compressed ramp instead of centering.",
                 UserWarning,
-                stacklevel=4,
+                stacklevel=user_stacklevel(),
             )
 
     return vmin, vmax
@@ -735,8 +850,7 @@ def _heatmap_build(
     annot: bool,
     fmt: str,
     cmap: str | None,
-    linewidths: float,
-    linecolor: str,
+    rect_kwargs: dict[str, Any],
     vmin: float | None,
     vmax: float | None,
     center: float | None,
@@ -823,10 +937,6 @@ def _heatmap_build(
         var_name="column",
         value_name="value",
     )
-    rect_kwargs: dict = {}
-    if linewidths > 0:
-        rect_kwargs["stroke"] = linecolor
-        rect_kwargs["stroke_width"] = linewidths
 
     from ferrum.encoding import Color, X, Y
 
@@ -967,6 +1077,8 @@ def clustermap(
     metric: str = "euclidean",
     scheme: str | None = None,
     cmap: str | None = None,
+    linewidths: float | None = None,
+    linecolor: str | None = None,
     z_score: Any = None,
     standard_scale: Any = None,
     figsize: Any = None,
@@ -1006,6 +1118,25 @@ def clustermap(
         due to its perceptual uniformity across a wide luminance range.
     cmap : str or None, optional
         Back-compat alias for ``scheme``.  Pass at most one of the two.
+    linewidths : float or None, default None
+        Width of the center heatmap's cell border stroke in pixels, same
+        knob and default as ``heatmap``'s ``linewidths``.  ``None``
+        (default) resolves to 0.5.  ``0`` disables borders.  Must be a
+        finite, non-negative real number; a negative, non-finite, ``bool``,
+        or non-numeric value raises ``ValueError`` naming ``clustermap`` and
+        ``linewidths``.  An explicit value ``> 0`` combined with a
+        border-clearing ``linecolor`` (below) is inert and emits a
+        ``UserWarning`` naming both arguments.
+    linecolor : str or None, default None
+        Color of the center heatmap's cell border stroke, same knob and
+        default as ``heatmap``'s ``linecolor``.  ``None`` (default) resolves
+        to ``"white"``.  Accepts the same values ``mark_rect(stroke=)``
+        does: a color ``ferrum.color.to_hex`` accepts, or
+        ``"none"``/``"transparent"`` to draw no border (the same result as
+        ``linewidths=0``).  Any other value that is not a color raises
+        ``ValueError`` naming ``clustermap`` and ``linecolor``.  An explicit
+        drawing value combined with ``linewidths=0`` is inert and emits a
+        ``UserWarning`` naming both arguments.
     z_score : {0, 1, None}, optional
         Standardise data along rows (``0``) or columns (``1``) before
         clustering; forwarded to ``Linkage``.
@@ -1046,7 +1177,9 @@ def clustermap(
     Raises
     ------
     ValueError
-        If ``data`` has no numeric columns.
+        If ``data`` has no numeric columns, if ``linewidths`` is not a
+        finite non-negative real number, or if ``linecolor`` is not a color
+        ``ferrum.color.to_hex`` accepts.
 
     Examples
     --------
@@ -1058,6 +1191,8 @@ def clustermap(
     >>> fm.clustermap(corr_df, cmap="viridis")
     """
     from ferrum._coerce import to_arrow_table
+
+    rect_kwargs = _resolve_cell_border("clustermap", linewidths, linecolor)
 
     tbl = to_arrow_table(data)
     value_cols, id_col = _matrix_columns(tbl, "clustermap")
@@ -1083,6 +1218,7 @@ def clustermap(
         metric=metric,
         scheme=scheme,
         cmap=cmap,
+        rect_kwargs=rect_kwargs,
         z_score=z_score,
         standard_scale=standard_scale,
         figsize=figsize,
@@ -1106,6 +1242,7 @@ def _clustermap_build(
     metric: str,
     scheme: str | None,
     cmap: str | None,
+    rect_kwargs: dict[str, Any],
     z_score: str | None,
     standard_scale: str | None,
     figsize: Any,
@@ -1217,7 +1354,7 @@ def _clustermap_build(
             ),
             unpivot,
         )
-        .mark_rect()
+        .mark_rect(**rect_kwargs)
         .encode(**center_enc)
     )
 
