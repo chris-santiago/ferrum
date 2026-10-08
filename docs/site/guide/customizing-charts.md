@@ -241,11 +241,14 @@ chart.configure_grid(
 
 ### `.configure_padding()`
 
-Controls plot-area margins. `auto` is opt-in (default `False`); pass `auto=True` to expand a side left unset here when a continuous axis's edge-tick label or axis title would otherwise clip past the rendered viewport edge. A side you set explicitly is never touched by `auto`. It does not cover ordinal/nominal axis labels (which never overhang the plot edge) or annotations, and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. Nor does it help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included.
+Controls plot-area margins. `auto` is on by default: a side left unset here expands when a continuous axis's edge-tick label or axis title would otherwise clip past the rendered viewport edge, by only as much as the label overhangs past any legend, chart title or secondary-y band already on that side. Pass `auto=False` to turn it off; leaving `auto` out (`None`) keeps whatever an earlier `configure_padding` call or the built-in default set. A side you set explicitly is never touched by `auto`. It does not cover ordinal/nominal axis labels (which never overhang the plot edge) or annotations, and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. Nor does it help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included.
 
 ```python
 # All four sides are set here, so auto has nothing left to expand.
-chart.configure_padding(top=20, right=40, bottom=60, left=60, auto=True)
+chart.configure_padding(top=20, right=40, bottom=60, left=60)
+
+# Turn the automatic expansion off to get exactly the theme's flat padding.
+chart.configure_padding(auto=False)
 ```
 
 ### `.configure_color()`

@@ -346,7 +346,7 @@ chart.configure_grid(x=False, y=True, dash=[4, 4], color="#ddd")
 
 ## PaddingConfig
 
-Controls plot-area margins. `auto` is opt-in (default `False`). When `auto=True`, a side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis title from clipping past the rendered viewport edge — it does not cover annotations or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. It also does not help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included. Use `PaddingConfig` to supply exact margins, optionally combined with `auto=True` for the sides you don't set.
+Controls plot-area margins. `auto` is on by default (`None` leaves it to the built-in default, which is on; `False` turns it off). While it is on, a side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis title from clipping past the rendered viewport edge. It does not cover annotations or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. It also does not help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included. The expansion is net of any legend, chart title or secondary-y band already on that side. Use `PaddingConfig` to supply exact margins; `auto` still applies to the sides you don't set unless you pass `auto=False`.
 
 ```python
 from ferrum import PaddingConfig
@@ -355,8 +355,7 @@ PaddingConfig(
     top=20.0,
     right=40.0,
     bottom=60.0,
-    left=80.0,
-    auto=True,    # all four sides are set here, so auto has nothing left to expand
+    left=80.0,    # all four sides are set, so auto has nothing left to expand
 )
 ```
 
@@ -368,15 +367,13 @@ PaddingConfig(
 | `right` | `float | None` | `None` | Right margin in pixels |
 | `bottom` | `float | None` | `None` | Bottom margin in pixels |
 | `left` | `float | None` | `None` | Left margin in pixels |
-| `auto` | `bool` | `False` | Opt-in: expand an unset side to fit continuous-axis tick labels/titles |
+| `auto` | `bool | None` | `None` | Expand an unset side to fit continuous-axis tick labels/titles. `None` keeps the built-in default (on); `True`/`False` set it. Any other value raises `ValueError` |
 
 ### Notes
 
-- A side you set explicitly is never touched by `auto` — explicit values are always
-  used exactly, on every side, regardless of `auto`. `auto` only ever expands a side
-  left at its default (`None`).
-- When `auto=False` (the default), unset sides fall back to the flat theme padding;
-  labels or titles may clip.
+- A side you set explicitly is never touched by `auto`: explicit values are always used exactly, on every side, regardless of `auto`. `auto` only ever expands a side left at its default (`None`).
+- When `auto=False`, unset sides fall back to the flat theme padding; labels or titles may clip.
+- Leaving `auto` unset never turns it off: `configure_padding(auto=True)` followed by `configure_padding(left=5)` keeps `auto` on.
 
 ### Example: minimal axes with tight padding
 
