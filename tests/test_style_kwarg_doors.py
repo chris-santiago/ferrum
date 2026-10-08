@@ -773,19 +773,35 @@ def test_the_size_branchs_reason_and_refusal_report_the_same_outcome() -> None:
     therefore never report a different outcome for the same `mark` and
     `size` -- covering both ways a constant size refuses: a mark that
     draws none at all (`area`) and a value outside the positive range
-    (`point`, `-1.0`). The third case pins the other side of that single
-    gate: a value the size rule accepts is never refused as a size-rule
-    violation, even when `honored` (deliberately empty here) omits
-    `size` for an unrelated reason -- it falls through to the generic
-    not-honored refusal instead.
+    (`point`, `-1.0`). Both sides are pinned to their exact text (not mere
+    containment): were `RenderError::size_rule_reason` to return `None` for
+    `MarkSizeOutOfRange`, `_untaken_key` would fall through to the generic
+    not-honored reason ("keyword argument 'size' is not honored by
+    mark_point"), whose own clause ("is not honored by mark_point") is
+    *also* a substring of that same generic refusal's rendered text -- so a
+    mere containment check cannot tell the two apart. The third case pins
+    the other side of that single gate: a value the size rule accepts is
+    never refused as a size-rule violation, even when `honored`
+    (deliberately empty here) omits `size` for an unrelated reason -- it
+    falls through to the generic not-honored refusal instead.
     """
     from ferrum.marks.base import _untaken_key
 
-    for mark, size in [("area", 3.0), ("point", -1.0)]:
+    cases = {
+        ("area", 3.0): (
+            "has no effect on mark_area; received 3",
+            "relplot(size=...) has no effect on mark_area; received 3.",
+        ),
+        ("point", -1.0): (
+            "must be a positive number; received -1",
+            "relplot(size=...) must be a positive number; received -1",
+        ),
+    }
+    for (mark, size), (clause, full_refusal) in cases.items():
         untaken = _untaken_key("relplot", mark, "size", size, frozenset())
         assert untaken is not None
-        clause = untaken.reason.removeprefix("keyword argument 'size' ")
-        assert clause in str(untaken.refusal), (mark, size, untaken.reason, str(untaken.refusal))
+        assert untaken.reason == f"keyword argument 'size' {clause}", (mark, size, untaken.reason)
+        assert str(untaken.refusal) == full_refusal, (mark, size, str(untaken.refusal))
 
     accepted = _untaken_key("relplot", "point", "size", 5.0, frozenset())
     assert accepted is not None

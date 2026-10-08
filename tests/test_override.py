@@ -58,6 +58,24 @@ class TestOverride:
         c = base_chart.override(x_axis_label_angle=-45).override(x_axis_label_angle=0)
         assert c._overrides["x_axis_label_angle"] == 0
 
+    def test_a_later_none_replaces_the_earlier_value_on_a_non_mark_path(self, base_chart):
+        """``merge_overrides`` keeps the earlier value on a later ``None``
+        only for ``mark_<leaf>`` paths; on every other path a later
+        ``None`` replaces the earlier value like any other value, landing
+        on the owning dataclass's own default (``AxisConfig.label_angle``),
+        so the chart renders identically to one that was never overridden."""
+        c = base_chart.override(x_axis_label_angle=-45).override(x_axis_label_angle=None)
+        assert c._overrides["x_axis_label_angle"] is None
+        assert c.to_svg() == base_chart.to_svg()
+
+    def test_a_later_none_replaces_the_earlier_value_on_a_second_non_mark_path(self, base_chart):
+        """Same rule, a different non-mark target (``ColorConfig.scheme``),
+        so the pin does not rest on one dataclass's field happening to
+        default to ``None``."""
+        c = base_chart.override(color_scheme="viridis").override(color_scheme=None)
+        assert c._overrides["color_scheme"] is None
+        assert c.to_svg() == base_chart.to_svg()
+
     def test_does_not_mutate_original(self, base_chart):
         _ = base_chart.override(x_axis_label_angle=-45)
         assert base_chart._overrides == {}
