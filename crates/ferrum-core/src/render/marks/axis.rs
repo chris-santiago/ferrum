@@ -220,6 +220,12 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         // text pivots at its horizontal centre, so half the label swings into the plot.
         // Switch to an edge anchor and remove the font-size baseline drop (the rotation
         // itself carries the text away from the axis) for the rotated case.
+        //
+        // SYNC: `crate::layout::axis::drawn_x_labels` (via
+        // `rotated_x_label_horizontal_extent`) mirrors the Bottom/Top pivot x, the
+        // anchor chosen here and by `label_flush` below, and the rotation about the
+        // pivot, to measure how far the drawn labels reach past the plot for
+        // `padding.auto`. Change them together.
         if tick.label_angle != 0.0 {
             match axis.orient {
                 AxisOrient::Bottom => {

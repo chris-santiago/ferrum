@@ -11,7 +11,7 @@ earlier `auto=True` to off.
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+import re
 
 import numpy as np
 import polars as pl
@@ -37,28 +37,32 @@ def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def _monthly_date_chart():
-    """18 months of flat-labeled "%b %Y" dates ending "Jul 2021".
+def _auto_sensitive_chart():
+    """A 180x200 scatter over x in 0..1e6 ticked only at its ends, so its
+    two currency labels stay flat and the last one ("$1,000,000") overhangs
+    the right canvas edge with auto off.
 
-    Used only as the auto-sensitive fixture for the None-is-unset tests
-    below: `padding.auto` measurably changes this chart's render at
-    width=900 (the `configure_padding()`/`.override()` None-vs-unset tests
-    need that to be mutation-sensitive), but at that width its last label
-    does not overhang the canvas. This fixture makes no clipping or rescue
-    claim of its own -- see `test_integer_and_currency_label_format_on_0_to_1e6_is_rescued`
-    below for the #135 rescue case.
+    The auto-sensitive fixture for the None-is-unset tests below:
+    `padding.auto` changes a render only when a drawn label or title really
+    overhangs (a chart whose labels already fit renders the same either
+    way, so it could not tell `None` from `False`).
+    `test_the_auto_sensitive_fixture_really_is_auto_sensitive` pins that.
     """
-    df = pl.DataFrame(
-        {
-            "date": pl.date_range(date(2020, 1, 1), date(2021, 7, 1), "1mo", eager=True),
-            "val": list(range(19)),
-        }
-    )
+    df = pl.DataFrame({"x": [0.0, 1_000_000.0], "y": [0.0, 1.0]})
     return (
         fm.Chart(df)
-        .mark_line()
-        .encode(x=fm.X("date:T", axis=fm.Axis(label_format="%b %Y")), y="val:Q")
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .configure(axis_x=AxisConfig(label_format="currency", tick_values=[0, 1_000_000]))
+        .properties(width=180, height=200)
     )
+
+
+def test_the_auto_sensitive_fixture_really_is_auto_sensitive():
+    chart = _auto_sensitive_chart()
+    svg_on = chart.configure_padding(auto=True).to_svg()
+    svg_off = chart.configure_padding(auto=False).to_svg()
+    assert svg_on != svg_off
 
 
 def _widen_svg_canvas(svg: str, viewport_width: float, viewport_height: float, extra: float) -> str:
@@ -146,8 +150,8 @@ def _assert_overhang_then_rescue(
 @pytest.mark.parametrize(
     "label_format, expected_margin_false, expected_margin_default, auto_false_hash",
     [
-        ("integer", -1, 9, "5e4712f904b6a6d9"),
-        ("currency", -4, 9, "98ffb74f4ae488f2"),
+        ("integer", -1, 4, "5e4712f904b6a6d9"),
+        ("currency", -4, 5, "98ffb74f4ae488f2"),
     ],
 )
 def test_integer_and_currency_label_format_on_0_to_1e6_is_rescued(
@@ -274,11 +278,11 @@ class TestPaddingConfigAutoShape:
 
     def test_configure_padding_auto_none_is_unset(self):
         """`configure_padding(auto=None)` must render the SAME as never
-        calling `configure_padding` at all. Pinned on the monthly-date
+        calling `configure_padding` at all. Pinned on the auto-sensitive
         fixture, where `auto` actually changes the render -- a 2-point
         scatter would pass this even if `None` were silently coerced to
         `False` on this door."""
-        base = _monthly_date_chart().properties(width=900, height=200)
+        base = _auto_sensitive_chart()
         svg_none = base.configure_padding(auto=None).to_svg()
         svg_no_call = base.to_svg()
         assert svg_none == svg_no_call
@@ -326,11 +330,11 @@ class TestPaddingConfigAutoShape:
 class TestOverridePaddingAuto:
     @staticmethod
     def _chart():
-        """The monthly-date fixture, where `auto` actually changes the
+        """The auto-sensitive fixture, where `auto` actually changes the
         render -- a chart `auto` has no visible effect on would pass every
         test below even if `None` were silently turned into `False` on
         either door."""
-        return _monthly_date_chart().properties(width=900, height=200)
+        return _auto_sensitive_chart()
 
     def test_override_none_is_unset_and_matches_no_config(self):
         chart = self._chart()
@@ -463,3 +467,165 @@ def test_compute_layout_inherits_the_built_in_auto_default():
         "auto=True and auto=False must render differently for this "
         "title-recentering fixture through the full Chart API"
     )
+
+
+# ---------------------------------------------------------------------------
+# Case: auto-rotated, culled x labels that already fit the canvas leave the
+# chart exactly as auto=False draws it -- padding.auto reserves only the
+# margin the DRAWN labels need, not the flat half-width of a label the
+# collision cascade rotated or culled.
+# ---------------------------------------------------------------------------
+
+
+_X_TICK_LABEL = re.compile(
+    r'<text [^>]*font-size="11" text-anchor="end" transform="rotate\((-?[\d.]+) [^"]*"[^>]*>([^<]*)</text>'
+)
+
+
+_TEXT = re.compile(r"<text ([^>]*)>([^<]*)</text>")
+
+
+def _drawn_x_tick_labels(svg: str) -> list[tuple[str, str, str]]:
+    """The x tick labels *svg* draws, in order, as ``(text, font-size,
+    rotation)``. An x label is centred when flat, or carries a rotate
+    transform; the y tick labels are end-anchored with no transform."""
+    drawn = []
+    for attrs, text in _TEXT.findall(svg):
+        if not text.startswith("$"):
+            continue
+        rotate = re.search(r'transform="rotate\((-?[\d.]+) ', attrs)
+        if 'text-anchor="middle"' not in attrs and rotate is None:
+            continue
+        size = re.search(r'font-size="([\d.]+)"', attrs)
+        drawn.append((text, size.group(1) if size else "", rotate.group(1) if rotate else "0"))
+    return drawn
+
+
+class TestRotatedLabelsThatFitAreUntouched:
+    WIDTH, HEIGHT = 180, 200
+
+    @classmethod
+    def _chart(cls):
+        df = pl.DataFrame({"x": [0.0, 5e5, 1e6], "y": [0.0, 1.0, 2.0]})
+        return (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y")
+            .properties(width=cls.WIDTH, height=cls.HEIGHT)
+            .configure_axis(label_format="currency")
+        )
+
+    def test_default_is_byte_identical_to_auto_false(self):
+        chart = self._chart()
+        svg_default = chart.to_svg()
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+        # Fixture assumptions: the cascade rotated the x labels to -90 and
+        # culled to every third tick (the long "$1,000,000" is not drawn),
+        # and the drawn labels fit the canvas with auto off.
+        assert _X_TICK_LABEL.findall(svg_auto_false) == [
+            ("-90", "$0"),
+            ("-90", "$300,000"),
+            ("-90", "$600,000"),
+            ("-90", "$900,000"),
+        ]
+        assert _last_x_tick_overhang_margin(svg_auto_false, self.WIDTH, self.HEIGHT) >= 0
+        assert _sha16(svg_default) == _sha16(svg_auto_false)
+
+    @pytest.mark.parametrize(
+        "width",
+        [
+            165,  # 160-169: -90, cull stride flips
+            200,  # 195-209
+            310,  # 305-319
+            590,  # 585-599: -90 / -60
+            697,  # 690-704: -60 / -45
+        ],
+    )
+    def test_cascade_width_bands_keep_auto_false(self, width):
+        """One real-font width per cascade band where the old flat
+        half-width extra flipped the label count or angle: the drawn labels
+        fit with auto off, so the default is byte-identical to
+        `auto=False`."""
+        chart = self._chart().properties(width=width)
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+        assert _last_x_tick_overhang_margin(svg_auto_false, width, self.HEIGHT) >= 0
+        assert _sha16(chart.to_svg()) == _sha16(svg_auto_false)
+
+    def test_flat_band_default_ticks_draw_the_same_labels_as_auto_false(self):
+        """The 725-739 cascade band on this class's chart itself (x at 0,
+        5e5 and 1e6, default ticks, currency): at 730px the cascade draws every label flat
+        at a shrunk font size. The last label's ADVANCE reaches a fraction
+        of a pixel past the canvas (its ink stays inside), so the default
+        rescues it and differs from `auto=False`, but it must draw exactly
+        the same labels, at the same angles and font sizes."""
+        width = 730
+        chart = self._chart().properties(width=width)
+        svg_default = chart.to_svg()
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+        drawn_off = _drawn_x_tick_labels(svg_auto_false)
+        assert len(drawn_off) > 10, drawn_off
+        assert svg_default != svg_auto_false
+        assert _drawn_x_tick_labels(svg_default) == drawn_off
+
+    def test_flat_band_label_whose_ink_overhangs_is_rescued(self):
+        """The 725-739 flat band, on a chart whose flat last label's INK
+        (not just its advance) overhangs with auto off: the ends-only
+        currency chart at 730px. The default must end it inside the canvas,
+        so removing the rescue, or granting too small an extra, fails."""
+        width = 730
+        chart = (
+            self._chart()
+            .properties(width=width)
+            .configure(axis_x=AxisConfig(tick_values=[0, 1_000_000]))
+        )
+        svg_default = chart.to_svg()
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+        assert _X_TICK_LABEL.findall(svg_auto_false) == []  # flat labels
+        margins = _assert_overhang_then_rescue(svg_auto_false, svg_default, width, self.HEIGHT)
+        # Pinned exactly: the last tick moves 1:1 with the right extra, so a
+        # half-sized extra would land near +2, not +5.
+        assert margins == (-1, 5)
+
+    def test_a_flat_label_that_overhangs_is_still_rescued(self):
+        """Vacuity control: the same chart ticked only at its ends keeps
+        its two labels flat, the flat "$1,000,000" does overhang with auto
+        off, and the default moves it back inside, so the identity above is
+        not an inert `padding.auto`."""
+        chart = self._chart().configure(axis_x=AxisConfig(tick_values=[0, 1_000_000]))
+        svg_default = chart.to_svg()
+        svg_auto_false = chart.configure_padding(auto=False).to_svg()
+        _assert_overhang_then_rescue(svg_auto_false, svg_default, self.WIDTH, self.HEIGHT)
+        assert svg_default != svg_auto_false
+
+
+# ---------------------------------------------------------------------------
+# Case: padding.auto never blanks a cramped chart that auto=False draws. An
+# extra whose plot collapses (rotated labels' band eating the height) does
+# not count as a rescue, so auto adds nothing there.
+# ---------------------------------------------------------------------------
+
+
+_CLIP_RECT = re.compile(
+    r'<clipPath id="[^"]*"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/>'
+)
+
+
+def test_a_cramped_chart_is_never_blanked_by_the_default():
+    """320x150, a long numeric first label (`,.12f` of -1234.56789) at a
+    tick placed by `values=`: with auto off the plot is 241x12 and draws
+    both points. The extra that would contain the label rotates it into a
+    band taller than the chart, collapsing the plot. The default must not
+    accept that: it draws both points in auto=False's plot rect."""
+    lo = -1234.56789
+    df = pl.DataFrame({"x": [lo, 0.0], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.12f", values=[lo, 0.0])), y="y:Q")
+        .properties(width=320, height=150)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert svg_auto_false.count("<circle") == 2
+    assert svg_default.count("<circle") == 2
+    assert _CLIP_RECT.findall(svg_default)[:1] == _CLIP_RECT.findall(svg_auto_false)[:1]

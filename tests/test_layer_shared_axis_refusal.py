@@ -365,11 +365,17 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 # measurably different only for this one route/fixture pair at this exact
 # viewport. Unrelated to the continuous-axis-union predicate this class
 # guards; still must not move again on its own.
+#
+# 2026-10-08 (#135 follow-up): the same `fm.layer` hash moved back to
+# `2446a242cabf896b`, the pre-#135 bytes, and it now equals this fixture's
+# `configure_padding(auto=False)` render. `padding.auto` reserves only what
+# the drawn x labels need: the temporal layer's labels are drawn rotated
+# -90 and fit, so the flat half-width it charged before was never needed.
 # ---------------------------------------------------------------------------
 
 _WAVE5_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
-        "fm.layer": "7d09607e9078e349",
+        "fm.layer": "2446a242cabf896b",
         "+": "dddad057de646ff7",
         "interactive": "3248f9cb42c3bc79",
     },

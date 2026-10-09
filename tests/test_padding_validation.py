@@ -330,7 +330,9 @@ class TestPaddingByteIdentity:
         right_edge_auto_true = self._right_gridline_x2(svg_partial_auto_true)
         right_edge_auto_false = self._right_gridline_x2(svg_partial_auto_false)
         assert right_edge_auto_false == pytest.approx(384.0, abs=1e-6)
-        assert right_edge_auto_true == pytest.approx(342.502, abs=1e-3), (
+        # The rescue reserves the drawn label's reach past the plot edge,
+        # less the 8 px the scale's padding insets the edge tick by.
+        assert right_edge_auto_true == pytest.approx(350.502, abs=1e-3), (
             "leaving the right side unset should let `auto` narrow the "
             f"plot's right edge to reserve its tick-overhang cushion "
             f"({right_edge_auto_true} vs {right_edge_auto_false})"
@@ -748,7 +750,9 @@ class TestPaddingAutoTitleAndTickComposition:
         short_tick_auto_false = self._first_x_tick_x(short_auto_false, 280, 200)
         short_tick_auto_true = self._first_x_tick_x(short_auto_true, 280, 200)
         assert short_tick_auto_false == pytest.approx(34.0, abs=1e-6)
-        assert short_tick_auto_true == pytest.approx(68.027, abs=1e-3), (
+        # Less the 8 px padding inset of the edge tick (the title center
+        # below moves half of that).
+        assert short_tick_auto_true == pytest.approx(60.027, abs=1e-3), (
             "the tick pass must still fire on this short-title fixture "
             f"({short_tick_auto_true} vs {short_tick_auto_false})"
         )
@@ -756,7 +760,7 @@ class TestPaddingAutoTitleAndTickComposition:
         short_title_auto_false = self._title_x(short_auto_false, 280, 200, self.SHORT_TITLE)
         short_title_auto_true = self._title_x(short_auto_true, 280, 200, self.SHORT_TITLE)
         assert short_title_auto_false == pytest.approx(145.0, abs=1e-6)
-        assert short_title_auto_true == pytest.approx(162.014, abs=1e-3), (
+        assert short_title_auto_true == pytest.approx(158.014, abs=1e-3), (
             "the title pass must still recenter this short (feasible) "
             f"title too ({short_title_auto_true} vs {short_title_auto_false})"
         )

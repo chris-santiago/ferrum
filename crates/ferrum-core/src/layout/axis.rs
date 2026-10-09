@@ -1311,6 +1311,7 @@ pub struct AxisTitleLayout {
     pub angle: f64,
 }
 
+use super::panel::TextAnchor;
 use super::text_metrics::TextMetrics;
 
 /// Vertical extent (px below the axis line) occupied by an x-axis tick label
@@ -1373,6 +1374,117 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
     let sin_abs = rad.sin().abs();
     let cos_abs = rad.cos().abs();
     cos_abs * label_w + sin_abs * line_h
+}
+
+/// How far an x-axis tick label reaches LEFT and RIGHT of its pivot
+/// (`(left, right)`, px, both measured outward from the pivot), when drawn
+/// with `anchor` and rotated by `angle` degrees about that pivot.
+///
+/// The label's unrotated box spans `[x0, x1]` horizontally (`anchor`
+/// decides where the pivot sits on the text: `Start` = `[0, w]`, `Middle` =
+/// `[-w/2, w/2]`, `End` = `[-w, 0]`) and `[-line_h, line_h]` vertically: a
+/// [`TextMetrics`] has no ascent or descent, so both use the line height,
+/// the same conservative proxy [`rotated_x_label_footprint`] uses for the
+/// text's thickness. Rotating the box's corners gives
+/// `x' = x·cos(angle) - y·sin(angle)`, whose extremes are the reach here.
+/// At `angle == 0` the vertical term vanishes and this is the exact flat
+/// reach (`w/2` each side for `Middle`).
+///
+/// SYNC: mirrors the tick-label placement in `render/marks/axis.rs`'s
+/// `build_axis` for `Bottom`/`Top`: the pivot is `x = tick.position`, a flat
+/// label is `Middle`-anchored (or `Start`/`End` at a `label_flush` edge), a
+/// rotated `Bottom` label is `End`-anchored and a rotated `Top` label is
+/// `Start`-anchored, and SVG rotates about the pivot. [`drawn_x_labels`]
+/// picks the anchor the same way. Change them together, or `padding.auto`
+/// measures labels where the renderer does not draw them.
+pub(super) fn rotated_x_label_horizontal_extent(
+    angle: f64,
+    anchor: TextAnchor,
+    label_w: f64,
+    line_h: f64,
+) -> (f64, f64) {
+    let (x0, x1) = match anchor {
+        TextAnchor::Start => (0.0, label_w),
+        TextAnchor::Middle => (-label_w / 2.0, label_w / 2.0),
+        TextAnchor::End => (-label_w, 0.0),
+    };
+    let rad = angle.to_radians();
+    let cos = rad.cos();
+    let vertical_reach = line_h * rad.sin().abs();
+    let (a, b) = (x0 * cos, x1 * cos);
+    (vertical_reach - a.min(b), a.max(b) + vertical_reach)
+}
+
+/// One tick label an x axis draws: its tick's index in `AxisLayout::ticks`,
+/// the tick's pixel, and how far its ink reaches left and right (canvas x),
+/// as [`drawn_x_labels`] reads them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DrawnXLabel {
+    pub(super) index: usize,
+    pub(super) tick: f64,
+    pub(super) left_ink: f64,
+    pub(super) right_ink: f64,
+}
+
+/// Every tick label one laid-out x axis (`Bottom` or `Top`) draws, with
+/// its ink extent; empty when the axis draws no label text (a y axis,
+/// `show_labels == false`, or every tick culled or blank).
+///
+/// Reads the labels the axis actually draws: culled and blank ticks are
+/// skipped, a label is measured at its own (possibly cascade-shrunk) font
+/// size, a wrapped label at its widest line, and at its drawn angle and
+/// anchor via [`rotated_x_label_horizontal_extent`] (see its SYNC note for
+/// the renderer placement both mirror). `default_font_size` is the theme's
+/// label size, the renderer's last fallback after the tick's and the
+/// axis's own sizes.
+pub(super) fn drawn_x_labels(
+    axis: &AxisLayout,
+    default_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Vec<DrawnXLabel> {
+    let anchor_for_angle = match axis.orient {
+        AxisOrient::Bottom => TextAnchor::End,
+        AxisOrient::Top => TextAnchor::Start,
+        AxisOrient::Left | AxisOrient::Right => return Vec::new(),
+    };
+    if !axis.show_labels {
+        return Vec::new();
+    }
+    // `label_flush` re-anchors the first and last NON-CULLED ticks, blank
+    // or not, exactly as the renderer does.
+    let flush = axis.label_flush.unwrap_or(false);
+    let flush_first = flush.then(|| axis.ticks.iter().position(|t| !t.culled)).flatten();
+    let flush_last = flush.then(|| axis.ticks.iter().rposition(|t| !t.culled)).flatten();
+    let axis_font_size = axis.label_font_size.unwrap_or(default_font_size);
+    axis.ticks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !t.culled && !t.label.is_empty())
+        .map(|(i, t)| {
+            let anchor = if t.label_angle != 0.0 {
+                anchor_for_angle
+            } else if Some(i) == flush_first {
+                TextAnchor::Start
+            } else if Some(i) == flush_last {
+                TextAnchor::End
+            } else {
+                TextAnchor::Middle
+            };
+            let font_size = t.label_font_size.unwrap_or(axis_font_size);
+            let (left, right) = rotated_x_label_horizontal_extent(
+                t.label_angle,
+                anchor,
+                measure_multiline_width(&t.label, font_size, metrics),
+                metrics.line_height(font_size),
+            );
+            DrawnXLabel {
+                index: i,
+                tick: t.position,
+                left_ink: t.position - left,
+                right_ink: t.position + right,
+            }
+        })
+        .collect()
 }
 
 /// The four measurement inputs [`estimate_x_label_band`] and [`layout_x_axis`]
