@@ -346,7 +346,7 @@ chart.configure_grid(x=False, y=True, dash=[4, 4], color="#ddd")
 
 ## PaddingConfig
 
-Controls plot-area margins. `auto` is on by default (`None` leaves it to the built-in default, which is on; `False` turns it off). While it is on, a side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis title from clipping past the rendered viewport edge. It does not cover annotations or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. It also does not help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included. The expansion is net of any legend, chart title or secondary-y band already on that side. Use `PaddingConfig` to supply exact margins; `auto` still applies to the sides you don't set unless you pass `auto=False`.
+Controls plot-area margins. `auto` is on by default. `None` keeps whatever an earlier `configure_padding` call or a composite parent set, and falls back to the built-in default (on) only when none did; `False` turns it off and `True` turns it on. While it is on, a side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis title from clipping past the rendered viewport edge. It does not cover annotations or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis capped tight enough via `max_band` can still leave its own label or title outside the canvas on that axis. It also does not help a title wider than the viewport itself: that axis can never be recentered into view, so `auto` disables itself entirely on that axis, tick-label rescue included. The expansion is net of any legend, chart title or secondary-y band already on that side. Use `PaddingConfig` to supply exact margins; `auto` still applies to the sides you don't set unless you pass `auto=False`.
 
 ```python
 from ferrum import PaddingConfig
@@ -367,7 +367,7 @@ PaddingConfig(
 | `right` | `float | None` | `None` | Right margin in pixels |
 | `bottom` | `float | None` | `None` | Bottom margin in pixels |
 | `left` | `float | None` | `None` | Left margin in pixels |
-| `auto` | `bool | None` | `None` | Expand an unset side to fit continuous-axis tick labels/titles. `None` keeps the built-in default (on); `True`/`False` set it. Any other value raises `ValueError` |
+| `auto` | `bool | None` | `None` | Expand an unset side to fit continuous-axis tick labels/titles. `None` keeps an earlier layer's or composite parent's value, else the built-in default (on); `True`/`False` set it. Any other value raises `ValueError` |
 
 ### Notes
 
