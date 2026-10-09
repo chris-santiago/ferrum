@@ -749,15 +749,17 @@ class PaddingConfig:
         to keep a continuous axis's edge-tick label or axis title from
         clipping past the rendered viewport edge. A side you *do* set is
         never touched by `auto` — an explicit value always wins on its own
-        side. Leaving `auto` unset (`None`, the default) keeps ferrum's
-        built-in default, which is on; pass `False` to turn it off. Does
-        not affect ordinal/nominal axis labels (which never overhang the
-        plot edge) or annotations; a y-axis capped tight enough via
-        `max_band` can still leave its own label or title outside the
-        canvas on that axis. A title wider than the viewport itself can
-        never be recentered into view, so auto-expand disables itself
-        entirely on that axis, tick-label rescue included, instead of
-        reserving margin that cannot help.
+        side. Leaving `auto` unset (`None`, the default) keeps whatever an
+        earlier `configure_padding` layer, or a composite parent, already
+        set; only when nothing upstream ever set it does ferrum's built-in
+        default (on) apply. Pass `False` to turn it off. Does not affect
+        ordinal/nominal axis labels (which never overhang the plot edge) or
+        annotations; a y-axis capped tight enough via `max_band` can still
+        leave its own label or title outside the canvas on that axis. A
+        title wider than the viewport itself can never be recentered into
+        view, so auto-expand disables itself entirely on that axis,
+        tick-label rescue included, instead of reserving margin that
+        cannot help.
     """
 
     top: float | None = None
@@ -774,8 +776,10 @@ class PaddingConfig:
             object.__setattr__(self, side, value)
         # `auto` is reached through three doors (this class, `configure_padding`,
         # and `.override(padding_auto=...)`); each voices its own refusal.
-        # `None` means unset -- ferrum's built-in default stands -- and is
-        # never coerced; `coerce_bool_value` passes it through unchanged.
+        # `None` means unset -- the earlier layer's or composite parent's
+        # value stands, falling back to ferrum's built-in default only when
+        # none was ever set -- and is never coerced; `coerce_bool_value`
+        # passes it through unchanged.
         object.__setattr__(self, "auto", coerce_bool_value("padding.auto", self.auto))
 
     def to_dict(self) -> dict[str, Any]:

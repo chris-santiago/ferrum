@@ -233,10 +233,13 @@ def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
     n = len(domain)
     if n == 0:
         return {}
-    # NOTE: (i+0.5)/n is a band-center approximation that ignores the Rust band
-    # scale's padding_inner/outer (unset unless the caller sets them, #157), so
-    # the annotation lands in the correct band/order but is not pixel-aligned
-    # to the bar center.
+    # NOTE: (i+0.5)/n is exact when the axis is a band scale at its unset
+    # (default) padding, an ordinal scale with no padding set, or a point
+    # scale at its default padding -- each places category i's center at
+    # that fraction of the plot width. It drifts whenever the axis sets an
+    # explicit padding away from those defaults, an explicit range, sort=,
+    # domain=, or reverse=: the annotation still lands in the correct
+    # band/order, but is not pixel-aligned to the bar center.
     return {str(v): (i + 0.5) / n for i, v in enumerate(domain)}
 
 

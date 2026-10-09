@@ -65,9 +65,10 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, fields
 from enum import Enum
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
 
+from ferrum._entry import EntryRefusal
 from ferrum._layer import is_unset
 from ferrum._validate import coerce_bool_value, coerce_pixel_value
 from ferrum.configure import (
@@ -86,7 +87,7 @@ from ferrum.coord import (
 )
 from ferrum.encoding import _channel_class_map
 from ferrum.exceptions import _OverrideRefusal
-from ferrum.marks.base import _VALID_MARK_KWARGS
+from ferrum.marks.base import _VALID_MARK_KWARGS, _voiced
 
 
 class Target(Enum):
@@ -208,8 +209,8 @@ _DEPRECATED_AXIS_LEAVES = frozenset({"x", "y"})
 
 # Non-pixel PaddingConfig leaves: excluded from the numeric pixel-contract
 # guard below. ``auto`` is a bool, not a pixel value, so ``.override(padding_auto=...)``
-# is validated separately, in this door's own voice (see the ``coerce_bool_value``
-# call in ``validate`` below).
+# is validated separately, through the ``coerce_bool_value`` call in ``validate``
+# below, voiced as ``Chart.override`` (see ``_refuse_as_override``).
 _PADDING_NON_NUMERIC_LEAVES = frozenset({"auto"})
 
 
@@ -613,6 +614,25 @@ def _suggestion(path: str) -> str:
     return ""
 
 
+def _refuse_as_override(check: Callable[[str], Any]) -> None:
+    """Run *check*, voiced as ``Chart.override``, raising :class:`_OverrideRefusal` on refusal.
+
+    *check* is a :mod:`ferrum._validate` predicate already composed with its
+    own label by the caller (e.g. ``lambda voice: coerce_pixel_value(f"{voice}"
+    "(padding_top=...)", value)``), run through :func:`ferrum.marks.base._voiced`
+    so a malformed value refuses in the same voice every other mark/scale
+    leaf refuses in and re-voices through the same mechanism
+    (:func:`ferrum._entry.voiced_as`). ``_voiced`` itself raises a plain
+    :class:`~ferrum._entry.EntryRefusal`; this converts it to
+    :class:`~ferrum.exceptions._OverrideRefusal` so the raised type matches
+    every other ``.override`` refusal (``isinstance(err, FerrumOverrideError)``).
+    """
+    try:
+        _voiced("Chart.override", check)
+    except EntryRefusal as err:
+        raise _OverrideRefusal(err.message_for, err.entry) from None
+
+
 def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     """Validate a whole override dict, raising on the first unresolvable path.
 
@@ -631,7 +651,11 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     spec §4.7's pixel contract (:func:`ferrum._validate.coerce_pixel_value`,
     the same predicate ``PaddingConfig.__post_init__`` runs). ``padding_auto``
     (a bool leaf) is validated the same way with its bool-valued sibling,
-    :func:`ferrum._validate.coerce_bool_value`, voiced as this override path.
+    :func:`ferrum._validate.coerce_bool_value`. Both run through
+    :func:`_refuse_as_override`, so a malformed value raises
+    :class:`~ferrum.exceptions.FerrumOverrideError` reading
+    ``Chart.override(padding_top=...) must be ...`` -- the same voice, and
+    the same re-voiceable type, every other ``.override`` leaf refuses with.
 
     Parameters
     ----------
@@ -649,10 +673,9 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     Raises
     ------
     FerrumOverrideError
-        When any path does not resolve.
-    ValueError
-        When a padding side value violates the pixel contract, or
-        ``padding_auto`` is set to something other than a bool.
+        When any path does not resolve, a padding side value violates the
+        pixel contract, or ``padding_auto`` is set to something other than
+        a bool.
     """
     resolved_paths: dict[str, ResolvedPath] = {}
     for path, value in overrides.items():
@@ -680,9 +703,9 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
             resolved.location.target_key == "padding"
             and resolved.location.leaf in _PADDING_NUMERIC_LEAVES
         ):
-            coerce_pixel_value(f"override {path!r}", value)
+            _refuse_as_override(lambda voice: coerce_pixel_value(f"{voice}({path}=...)", value))
         elif resolved.location.target_key == "padding" and resolved.location.leaf == "auto":
-            coerce_bool_value(f"override {path!r}", value)
+            _refuse_as_override(lambda voice: coerce_bool_value(f"{voice}({path}=...)", value))
 
         resolved_paths[path] = resolved
     return resolved_paths

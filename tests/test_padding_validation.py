@@ -130,17 +130,50 @@ class TestChartLevelPaddingValidation:
             fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(top=-10)
 
     def test_chart_with_override_negative_padding_raises(self):
-        """A chart with override negative padding raises ValueError (override path validation)."""
+        """A chart with override negative padding raises FerrumOverrideError
+        in the Chart.override voice (override path validation)."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        # .override(padding_top=-10) should raise ValueError during validation
-        with pytest.raises(ValueError, match="padding_top.*non-negative"):
+        with pytest.raises(
+            fr.FerrumOverrideError,
+            match=r"^Chart\.override\(padding_top=\.\.\.\) must be non-negative; received -10$",
+        ):
             fr.Chart(df).mark_point().encode(x="x", y="y").override(padding_top=-10).to_svg()
 
     def test_chart_with_override_non_numeric_padding_raises(self):
-        """A chart with override non-numeric padding raises ValueError."""
+        """A chart with override non-numeric padding raises FerrumOverrideError."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        with pytest.raises(ValueError, match="padding_right.*numeric pixel value"):
+        with pytest.raises(
+            fr.FerrumOverrideError,
+            match=(
+                r"^Chart\.override\(padding_right=\.\.\.\) must be a numeric pixel value "
+                r"\(int or float\), not str; received '10px'$"
+            ),
+        ):
             fr.Chart(df).mark_point().encode(x="x", y="y").override(padding_right="10px").to_svg()
+
+    @pytest.mark.parametrize("side", ["top", "right", "bottom", "left"])
+    @pytest.mark.parametrize(
+        ("bad", "clause"),
+        [
+            (-1, "must be non-negative; received -1"),
+            ("a", "must be a numeric pixel value (int or float), not str; received 'a'"),
+            (float("nan"), "must be a finite numeric pixel value; received nan"),
+            (float("inf"), "must be a finite numeric pixel value; received inf"),
+            (True, "must be a numeric pixel value (int or float), not bool; received True"),
+        ],
+        ids=["negative", "non-numeric-str", "nan", "inf", "bool"],
+    )
+    def test_chart_with_override_bad_padding_value_raises_on_every_side(self, side, bad, clause):
+        """``.override(padding_<side>=...)`` raises ``FerrumOverrideError`` in
+        the ``Chart.override`` voice for every value the pixel contract (spec
+        §4.7) refuses, on every side -- not only ``top``."""
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+        chart = fr.Chart(df).mark_point().encode(x="x", y="y").override(**{f"padding_{side}": bad})
+        with pytest.raises(
+            fr.FerrumOverrideError,
+            match=rf"^Chart\.override\(padding_{side}=\.\.\.\) {re.escape(clause)}$",
+        ):
+            chart.to_svg()
 
     def test_chart_with_configure_padding_nan_raises_typed_valueerror(self):
         """configure_padding(top=nan) raises a typed pixel-contract ValueError,
@@ -156,20 +189,26 @@ class TestChartLevelPaddingValidation:
             fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(top=float("inf"))
 
     def test_chart_with_override_nan_padding_raises_typed_valueerror(self):
-        """.override(padding_top=nan).to_svg() raises a typed pixel-contract
-        ValueError naming the override path, not the opaque wire-serializer
-        error (``chart_config: expected value at line 1 column 21``) that
-        NaN/inf produced before this predicate covered finiteness."""
+        """.override(padding_top=nan).to_svg() raises a typed FerrumOverrideError
+        naming Chart.override, not the opaque wire-serializer error
+        (``chart_config: expected value at line 1 column 21``) that NaN/inf
+        produced before this predicate covered finiteness."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        with pytest.raises(ValueError, match="padding_top.*finite numeric pixel value"):
+        with pytest.raises(
+            fr.FerrumOverrideError,
+            match=r"^Chart\.override\(padding_top=\.\.\.\) must be a finite numeric pixel value; received nan$",
+        ):
             fr.Chart(df).mark_point().encode(x="x", y="y").override(
                 padding_top=float("nan")
             ).to_svg()
 
     def test_chart_with_override_inf_padding_raises_typed_valueerror(self):
-        """.override(padding_top=inf).to_svg() raises a typed pixel-contract ValueError."""
+        """.override(padding_top=inf).to_svg() raises a typed FerrumOverrideError."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        with pytest.raises(ValueError, match="padding_top.*finite numeric pixel value"):
+        with pytest.raises(
+            fr.FerrumOverrideError,
+            match=r"^Chart\.override\(padding_top=\.\.\.\) must be a finite numeric pixel value; received inf$",
+        ):
             fr.Chart(df).mark_point().encode(x="x", y="y").override(
                 padding_top=float("inf")
             ).to_svg()

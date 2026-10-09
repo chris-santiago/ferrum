@@ -243,6 +243,20 @@ class TestConfigureLayerCascadeNeverSilentlyResetsAuto:
         plain_off = base.configure_padding(auto=False).to_svg()
         assert chained_then_off == plain_off
 
+    def test_auto_false_then_a_later_call_setting_only_a_side_stays_off(self):
+        """`configure_padding(auto=False).configure_padding(left=5)` must
+        render the SAME as the single combined call
+        `configure_padding(auto=False, left=5)` -- the second call, which
+        never mentions `auto`, must not turn it back on. The symmetric
+        case to ``test_auto_true_then_a_later_call_setting_only_a_side_keeps_auto_on``
+        above, with the starting value flipped."""
+        base = self._repro_chart().properties(width=400, height=200)
+        chained = base.configure_padding(auto=False).configure_padding(left=5).to_svg()
+        combined = base.configure_padding(auto=False, left=5).to_svg()
+        turned_on = base.configure_padding(auto=False).configure_padding(left=5, auto=True).to_svg()
+        assert chained == combined
+        assert chained != turned_on
+
 
 # ---------------------------------------------------------------------------
 # Case: a composite root's `auto=True` cascades into a leaf that sets its
@@ -258,6 +272,23 @@ def test_composite_root_auto_true_cascades_into_a_leaf_that_sets_its_own_sides()
 
     injected_leaf = root._inject_parent_config(root.charts[0])
     assert injected_leaf._resolve_chart_config()["padding"] == {"auto": True, "left": 5.0}
+
+
+# ---------------------------------------------------------------------------
+# Case: a composite root's `auto=False` cascades into a leaf whose own
+# padding layer leaves `auto` unset (`None`) -- the leaf must not silently
+# fall back to the built-in default (on); the parent's `False` stands.
+# ---------------------------------------------------------------------------
+
+
+def test_composite_root_auto_false_cascades_into_a_leaf_with_auto_unset():
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    leaf = fm.Chart(df).mark_point().encode(x="x", y="y").configure_padding(left=5)
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    root = (leaf | other).configure_padding(auto=False)
+
+    injected_leaf = root._inject_parent_config(root.charts[0])
+    assert injected_leaf._resolve_chart_config()["padding"] == {"auto": False, "left": 5.0}
 
 
 # ---------------------------------------------------------------------------
@@ -309,14 +340,18 @@ class TestPaddingConfigAutoShape:
             chart.configure_padding(auto=bad)
 
     @pytest.mark.parametrize("bad", ["yes", 1, 0])
-    def test_override_refuses_in_the_override_doors_own_voice(self, bad):
-        """`.override(padding_auto=...)` names the override path, not
-        `PaddingConfig` or `configure_padding` -- the caller never wrote
-        either of those. The override is validated at render time."""
+    def test_override_refuses_in_the_chart_override_voice(self, bad):
+        """`.override(padding_auto=...)` names `Chart.override`, the public
+        call, not `PaddingConfig` or `configure_padding` -- the caller
+        never wrote either of those. The override is validated at render
+        time, and the raised type is `FerrumOverrideError` (re-voiceable by
+        a figure that wraps `.override` on the caller's behalf), not a
+        plain `ValueError`."""
         df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y").override(padding_auto=bad)
         with pytest.raises(
-            ValueError, match=r"^override 'padding_auto' must be True or False; received"
+            fm.FerrumOverrideError,
+            match=rf"^Chart\.override\(padding_auto=\.\.\.\) must be True or False; received {bad!r}$",
         ):
             chart.to_svg()
 
@@ -357,6 +392,19 @@ class TestOverridePaddingAuto:
             svg_override_false = chart.override(padding_auto=False).to_svg()
         svg_configure_false = chart.configure_padding(auto=False).to_svg()
         assert svg_override_false == svg_configure_false
+
+    @pytest.mark.parametrize("value", [np.bool_(True), np.bool_(False)])
+    def test_override_numpy_bool_is_byte_equal_to_the_plain_bool_configure_padding(self, value):
+        """`numpy.bool_` is accepted on the override door too (`_as_bool`'s
+        recognition rule, shared by `coerce_bool_value`), and renders
+        byte-identically to the plain-`bool` `configure_padding(auto=...)`
+        call on the auto-sensitive fixture, where `auto` actually moves
+        pixels."""
+        chart = self._chart()
+        with pytest.warns(DeprecationWarning, match="padding_auto"):
+            svg_override_numpy_bool = chart.override(padding_auto=value).to_svg()
+        svg_configure_plain_bool = chart.configure_padding(auto=bool(value)).to_svg()
+        assert svg_override_numpy_bool == svg_configure_plain_bool
 
 
 # ---------------------------------------------------------------------------

@@ -321,8 +321,8 @@ def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> flo
     raises from, reported as ``not NoneType``.
 
     *label* is a pre-composed description of the field being checked (e.g.
-    ``"padding.top"`` or ``"override 'padding_top'"``) so each call site keeps
-    its own message convention; this function owns only the check itself,
+    ``"padding.top"`` or ``"Chart.override(padding_top=...)"``) so each call
+    site keeps its own message convention; this function owns only the check itself,
     which two independent entry points — ``PaddingConfig.__post_init__`` and
     the ``Chart.override`` padding guard — otherwise had to keep in sync by
     hand.

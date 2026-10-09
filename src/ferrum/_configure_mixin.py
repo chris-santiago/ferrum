@@ -586,12 +586,14 @@ class ConfigureMixin:
             past the rendered viewport edge. A side you *do* set is never
             touched by `auto` — an explicit value always wins on its own
             side. Leaving `auto` unset (`None`, the default) keeps
-            ferrum's built-in default, which is on; pass `False` to turn
-            it off. Does not affect ordinal/nominal axis labels (which
-            never overhang the plot edge) or annotations; a y-axis capped
-            tight enough via `max_band` can still leave its own label or
-            title outside the canvas on that axis. A title wider than the
-            viewport itself can never be recentered into view, so
+            whatever an earlier `configure_padding` layer, or a composite
+            parent, already set; only when nothing upstream ever set it
+            does ferrum's built-in default (on) apply. Pass `False` to
+            turn it off. Does not affect ordinal/nominal axis labels
+            (which never overhang the plot edge) or annotations; a y-axis
+            capped tight enough via `max_band` can still leave its own
+            label or title outside the canvas on that axis. A title wider
+            than the viewport itself can never be recentered into view, so
             auto-expand disables itself entirely on that axis, tick-label
             rescue included, instead of reserving margin that cannot help.
 

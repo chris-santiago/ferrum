@@ -21,6 +21,7 @@ from ferrum.configure import (
 )
 from ferrum.annotation.container import Annotate
 from ferrum.annotation.primitives import AnnotationText
+from ferrum._entry import voiced_as
 from ferrum.exceptions import FerrumOverrideError
 from ferrum.marks.base import _VALID_MARK_KWARGS
 from ferrum.structural import BreakAxis, Inset, SecondaryY
@@ -1043,6 +1044,46 @@ class TestOverrideScaleValueRefusalNamesThePath:
         ):
             chart.override(x_scale_domain=["garbage", "2020-01-10"]).to_svg()
 
+    def test_malformed_scale_type_alone_refuses_naming_x_scale_type(self, base_chart):
+        with pytest.raises(
+            FerrumOverrideError,
+            match=r"^Chart\.override\(x_scale_type=\.\.\.\) unknown variant `bogus`",
+        ):
+            base_chart.override(x_scale_type="bogus").to_svg()
+
+    def test_malformed_scale_type_with_another_scale_override_still_names_x_scale_type(
+        self, base_chart
+    ):
+        """A second scale override in the same call (``x_scale_padding``)
+        must not steer the refusal onto the wrong leaf -- the type's own
+        refusal is probed before any other key, so it keeps naming
+        ``x_scale_type`` rather than ``x_scale_padding``."""
+        with pytest.raises(
+            FerrumOverrideError,
+            match=r"^Chart\.override\(x_scale_type=\.\.\.\) unknown variant `bogus`",
+        ):
+            base_chart.override(x_scale_type="bogus", x_scale_padding=0.2).to_svg()
+
+    def test_non_string_scale_type_refuses_naming_x_scale_type(self, base_chart):
+        with pytest.raises(
+            FerrumOverrideError,
+            match=r"^Chart\.override\(x_scale_type=\.\.\.\) invalid type: integer",
+        ):
+            base_chart.override(x_scale_type=3).to_svg()
+
+    @pytest.mark.parametrize(
+        "domain",
+        [[True, False], [object(), object()]],
+        ids=["bools", "objects"],
+    )
+    def test_time_scale_domain_of_bools_or_objects_refuses_naming_x_scale_domain(self, domain):
+        dates = pl.DataFrame({"t": ["2020-01-01", "2021-01-01"], "v": [1.0, 2.0]}).with_columns(
+            pl.col("t").str.to_datetime()
+        )
+        chart = fm.Chart(dates).mark_point().encode(x=fm.X("t", scale=fm.TimeScale()), y="v")
+        with pytest.raises(FerrumOverrideError, match=r"^Chart\.override\(x_scale_domain=\.\.\.\)"):
+            chart.override(x_scale_domain=domain).to_svg()
+
 
 class TestOverrideRenderMarkStyle:
     def test_mark_corner_radius_rounds_bars(self, bar_chart):
@@ -1356,3 +1397,74 @@ class TestOverrideScaleNoneIsNoOverride:
         assert overridden._overrides[path] is None
         assert overridden.to_svg() == baseline_svg
         assert _scale_dict(overridden, channel) == baseline_scale
+
+
+# ---------------------------------------------------------------------------
+# Every `.override` refusal, whichever leaf family it comes from, is the one
+# documented class and re-voices through the same mechanism.
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideRefusalIsFerrumOverrideErrorAcrossLeafFamilies:
+    @pytest.mark.parametrize(
+        ("overrides", "text_prefix"),
+        [
+            (
+                {"padding_auto": "yes"},
+                "Chart.override(padding_auto=...) must be True or False",
+            ),
+            ({"padding_top": -1}, "Chart.override(padding_top=...) must be non-negative"),
+            ({"x_scale_type": "bogus"}, "Chart.override(x_scale_type=...) unknown variant"),
+            (
+                {"mark_size": "big"},
+                "Chart.override(size=...) must be a real number",
+            ),
+        ],
+        ids=["padding-auto", "padding-side", "scale-leaf", "mark-leaf"],
+    )
+    def test_isinstance_ferrum_override_error(self, base_chart, overrides, text_prefix):
+        """Each family case must reach ITS OWN refusal path, not a shared
+        fallback (e.g. the unknown-path refusal) -- the assertion on
+        *text_prefix* is what proves that; isinstance alone cannot
+        distinguish which door actually refused."""
+        with pytest.raises(FerrumOverrideError) as excinfo:
+            base_chart.override(**overrides).to_svg()
+        assert isinstance(excinfo.value, FerrumOverrideError)
+        assert str(excinfo.value).startswith(text_prefix)
+
+    def test_coord_leaf_refusal_is_ferrum_override_error(self):
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y")
+            .coord(fm.CoordPolar(theta="x"))
+            .override(coord_ratio=1)
+        )
+        with pytest.raises(FerrumOverrideError) as excinfo:
+            chart.to_svg()
+        assert isinstance(excinfo.value, FerrumOverrideError)
+        assert str(excinfo.value).startswith("Chart.override: coord_* override")
+
+
+class TestOverridePaddingRefusalIsReVoiceable:
+    """A figure that renders a padding override on the caller's behalf
+    re-voices the refusal as itself, exactly as every other leaf family's
+    override refusal does."""
+
+    def test_a_figure_re_voices_the_padding_auto_refusal(self, base_chart):
+        chart = base_chart.override(padding_auto="yes")
+        with pytest.raises(FerrumOverrideError) as excinfo:
+            with voiced_as("roc_chart"):
+                chart.to_spec()
+        assert (
+            str(excinfo.value)
+            == "roc_chart(padding_auto=...) must be True or False; received 'yes'"
+        )
+
+    def test_a_figure_re_voices_the_padding_side_refusal(self, base_chart):
+        chart = base_chart.override(padding_top=-1)
+        with pytest.raises(FerrumOverrideError) as excinfo:
+            with voiced_as("roc_chart"):
+                chart.to_spec()
+        assert str(excinfo.value) == "roc_chart(padding_top=...) must be non-negative; received -1"
