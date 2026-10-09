@@ -393,17 +393,17 @@ class BandScale:
 class PointScale:
     """Discrete point scale for dot plots.
 
-    ``padding`` defaults to ``None`` in the constructor; the 0.5 fallback
-    lives only in Rust's serde default, read when unset. The ``padding``
-    getter always returns the resolved float (0.5 when unset), never
-    ``None``. Equality and ``repr()`` see the raw, unresolved value, so
+    ``padding`` defaults to ``None`` in the constructor, and the ``padding``
+    getter returns it as passed: ``None`` when unset, like every sibling
+    scale's getter. The renderer owns the default for an unset padding (half
+    a step at each end). Equality and ``repr()`` see the same value, so
     ``PointScale() != PointScale(padding=0.5)`` and ``repr(PointScale())``
     prints ``padding=None``, even though both render identically.
     """
 
     domain: list[str]
     range: Optional[list[float]]
-    padding: float
+    padding: Optional[float]
     align: float
     reverse: bool
     def __init__(
@@ -1115,13 +1115,41 @@ def scale_temporal_type_tags() -> list[str]: ...
 # effect of its exception.
 def validate_scale_dict(scale: dict) -> None: ...
 
-# #157: the data-free value checks the render path would otherwise run
-# (today, band-padding bounds via ``BandPadding::layout``), callable for
+# #157: the data-free value bounds the scale classes enforce at
+# construction, through the same Rust predicates and so the same clause text:
+# band padding (d3's bounds) and ``align`` in [0, 1]; point ``padding`` finite
+# and >= 0 and ``align`` in [0, 1]; ordinal ``padding`` in [0, 1]. Callable for
 # validation only. Raises ``ValueError`` whose message is the bare clause --
-# no ``"scale: "`` prefix, no channel, no call name -- so a caller can name
-# the call and the path itself (``Chart.override``'s per-leaf refusal does
-# exactly this). Returns None on a valid scale dict.
+# no ``"scale: "`` prefix, no channel, no call name, no key -- so a caller
+# names the call and the path itself, one key at a time (``Chart.override``'s
+# per-leaf refusal does exactly this). Returns None on a valid scale dict.
 def validate_scale_values(scale: dict) -> None: ...
+
+# The padding-family keys (``padding``, ``paddingInner``, ``paddingOuter``,
+# ``align``) a scale type accepts: the keys ``translate_scale_switch``
+# translates by meaning. Published so a caller selecting a scale's padding
+# family reads this set instead of restating it. Raises ValueError for an
+# unknown tag, like ``scale_accepted_keys``.
+def scale_padding_keys(scale_type: str) -> list[str]: ...
+
+# A channel's scale dict carried across a switch from ``old_type`` to
+# ``new_type``, and the keys the switch drops: the one owner of what a
+# scale-type switch keeps. The padding-family keys the old type accepts
+# (``padding``, ``paddingInner``, ``paddingOuter``, ``align``) are translated
+# by meaning (an ordinal inner gap becomes ``paddingInner``, a point's end
+# padding becomes ``paddingOuter``, a band's inner or outer side becomes
+# ordinal or point ``padding``) and dropped when the new type gives them no
+# meaning; a ``None`` value is unset and writes no key. Every other key the
+# old type accepts survives only when the new type accepts it too. A key the
+# old type does not accept (``"type"`` included) passes through for the scale
+# gate to judge, unless the switch writes a key of that name, which raises
+# ValueError naming the key. ``dropped`` lists, in ``base`` order, every key
+# of ``base`` whose value the switch does not write onto the new scale, so a
+# caller can validate exactly those under the old type. Carried values are
+# never checked: a malformed one is left for ``validate_scale_values``. The
+# same type returns a copy of ``base`` and drops nothing. Raises ValueError
+# for an unknown tag on either side, like ``scale_accepted_keys``.
+def translate_scale_switch(old_type: str, new_type: str, base: dict) -> tuple[dict, list[str]]: ...
 
 # Wave-4 task 9 (#193): the ``bins=`` vocabulary gate — the same parser
 # ``Bin(bins=)``, ``Bin2D(bins_x=)`` and ``Kde(count_scale=)`` construct

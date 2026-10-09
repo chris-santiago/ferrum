@@ -111,6 +111,42 @@ pub(crate) const DEFAULT_ALIGN: f64 = 0.5;
 /// carries a point scale's padding only when the user set one.
 pub(crate) const DEFAULT_POINT_PADDING: f64 = 0.5;
 
+/// d3's bound on a band or point scale's `align`: a number in `[0, 1]`.
+///
+/// The one definition of the bound, shared by the `BandScale` and
+/// `PointScale` constructors and by `validate_scale_values`. The error is the
+/// refusal's clause alone (`must be a number in [0, 1]; received 1.5`); each
+/// door words it around its own name.
+pub(crate) fn check_align(align: f64) -> Result<(), String> {
+    if align.is_finite() && (0.0..=1.0).contains(&align) {
+        Ok(())
+    } else {
+        Err(format!("must be a number in [0, 1]; received {align}"))
+    }
+}
+
+/// d3's bound on a point scale's end `padding`: a finite number `>= 0`.
+/// Shared by the `PointScale` constructor and `validate_scale_values`; the
+/// error is the clause alone, as for [`check_align`].
+pub(crate) fn check_point_padding(padding: f64) -> Result<(), String> {
+    if padding.is_finite() && padding >= 0.0 {
+        Ok(())
+    } else {
+        Err(format!("must be a finite number >= 0; received {padding}"))
+    }
+}
+
+/// The bound on an ordinal scale's inner `padding`: a number in `[0, 1]`.
+/// Shared by the `OrdinalScale` constructor and `validate_scale_values`; the
+/// error is the clause alone, as for [`check_align`].
+pub(crate) fn check_ordinal_padding(padding: f64) -> Result<(), String> {
+    if padding.is_finite() && (0.0..=1.0).contains(&padding) {
+        Ok(())
+    } else {
+        Err(format!("must be in [0, 1]; got {padding}"))
+    }
+}
+
 /// Which d3 model a discrete scale's pixel geometry follows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DiscreteModel {
@@ -246,6 +282,16 @@ pub(crate) enum BandPaddingKey {
 }
 
 impl BandPaddingKey {
+    /// d3's precedence for the inner side: `paddingInner`, else `padding`.
+    /// The one statement of it, read by [`BandPadding::inner`] and by a type
+    /// switch that carries a band's inner gap to an ordinal scale.
+    const INNER_PRECEDENCE: [BandPaddingKey; 2] = [BandPaddingKey::Inner, BandPaddingKey::Padding];
+
+    /// d3's precedence for the outer side: `paddingOuter`, else `padding`.
+    /// Read by [`BandPadding::outer`] and by a type switch that carries a
+    /// band's outer padding to a point scale's end padding.
+    const OUTER_PRECEDENCE: [BandPaddingKey; 2] = [BandPaddingKey::Outer, BandPaddingKey::Padding];
+
     /// The argument's name on the `BandScale` constructor.
     pub(crate) fn argument(self) -> &'static str {
         match self {
@@ -319,8 +365,9 @@ impl BandPaddingError {
 /// - **Validation** ([`BandPaddingKey::accepts`]). Every set value is
 ///   checked, including a `padding` that explicit inner and outer values
 ///   override, so a malformed argument is refused even when it moves nothing.
-/// - **Resolution** ([`layout`](Self::layout)), which validates first, so no
-///   unvalidated value can become geometry.
+/// - **Resolution** ([`layout`](Self::layout)), the one way to turn this
+///   value into geometry. It validates first, so no unvalidated value can
+///   become geometry: there is no unchecked resolve for a caller to reach.
 ///
 /// Deserialized without validation: a scale dict's malformed padding is
 /// refused at render, where the refusal can name the channel.
@@ -374,12 +421,21 @@ impl BandPadding {
     /// The inner padding the user's arguments state: `padding_inner`, else
     /// `padding`, else `None` (inherits the auto-inferred layout's 0).
     pub(crate) fn inner(&self) -> Option<f64> {
-        self.inner.or(self.padding)
+        self.first_set(BandPaddingKey::INNER_PRECEDENCE)
     }
 
     /// The outer padding the user's arguments state; mirrors [`inner`](Self::inner).
     pub(crate) fn outer(&self) -> Option<f64> {
-        self.outer.or(self.padding)
+        self.first_set(BandPaddingKey::OUTER_PRECEDENCE)
+    }
+
+    /// The first value set among `precedence`, or `None`.
+    fn first_set(&self, precedence: [BandPaddingKey; 2]) -> Option<f64> {
+        precedence.into_iter().find_map(|key| match key {
+            BandPaddingKey::Padding => self.padding,
+            BandPaddingKey::Inner => self.inner,
+            BandPaddingKey::Outer => self.outer,
+        })
     }
 
     /// The `padding_inner` argument exactly as passed, for the wire and repr.
@@ -395,20 +451,119 @@ impl BandPadding {
     /// The band layout this padding resolves to at `align`, after validating
     /// every set value. An unset side is 0, so an all-unset value yields
     /// [`DiscreteLayout::UNPADDED`] bit-for-bit at the default align.
+    ///
+    /// The only way out of a `BandPadding` into geometry: every caller, the
+    /// `BandScale` constructor included, goes through this validation.
     pub(crate) fn layout(&self, align: f64) -> Result<DiscreteLayout, BandPaddingError> {
         self.validate()?;
-        Ok(self.resolve(align))
+        Ok(DiscreteLayout::band(self.inner().unwrap_or(0.0), self.outer().unwrap_or(0.0), align))
+    }
+}
+
+/// What a scale type's padding-family keys (`padding`, `paddingInner`,
+/// `paddingOuter`, `align`) mean, for translating them across a scale-type
+/// switch.
+///
+/// `padding` alone has four meanings across the scale types, so a switch
+/// that carried it by name would silently reinterpret it. A switch instead
+/// reads what the old type's keys meant and writes the new type's keys that
+/// mean the same thing ([`switch_carries`](Self::switch_carries)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaddingMeaning {
+    /// `ordinal`: `padding` is the inner gap between bands; there is no outer
+    /// padding and no `align`.
+    OrdinalInner,
+    /// `band`: d3's `padding` shorthand plus `paddingInner`, `paddingOuter`
+    /// and `align` ([`BandPadding`]).
+    Band,
+    /// `point`: `padding` is the end padding before the first and after the
+    /// last point, plus `align`.
+    Point,
+    /// A continuous scale: `padding` is a fraction of the pixel span held at
+    /// each end.
+    SpanFraction,
+    /// A scale type with no padding-family key.
+    Unpadded,
+}
+
+/// One padding-family key a type switch writes on the new scale, and the old
+/// scale's keys it reads. The first of `from` the user set wins; when none is
+/// set, the key is not written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaddingCarry {
+    /// The new scale's wire key.
+    pub(crate) to: &'static str,
+    /// The old scale's wire keys, in precedence order.
+    pub(crate) from: Vec<&'static str>,
+}
+
+impl PaddingCarry {
+    fn same(key: &'static str) -> Self {
+        PaddingCarry { to: key, from: vec![key] }
     }
 
-    /// [`layout`](Self::layout) without the validation: the band layout this
-    /// padding resolves to at `align`, trusting every set value is already
-    /// in bounds. The one place the unset-side-falls-back-to-0 rule is
-    /// written, so every caller — the validating [`layout`](Self::layout)
-    /// and a caller holding padding it already validated itself (e.g.
-    /// `BandScale::new`, via [`BandPadding::new`](Self::new)) — resolves
-    /// through the same formula.
-    pub(crate) fn resolve(&self, align: f64) -> DiscreteLayout {
-        DiscreteLayout::band(self.inner().unwrap_or(0.0), self.outer().unwrap_or(0.0), align)
+    fn band_side(to: &'static str, precedence: [BandPaddingKey; 2]) -> Self {
+        PaddingCarry { to, from: precedence.map(BandPaddingKey::wire_key).to_vec() }
+    }
+}
+
+impl PaddingMeaning {
+    /// The padding-family wire keys this meaning gives a scale.
+    pub(crate) fn keys(self) -> &'static [&'static str] {
+        match self {
+            PaddingMeaning::OrdinalInner | PaddingMeaning::SpanFraction => &["padding"],
+            PaddingMeaning::Band => &["padding", "paddingInner", "paddingOuter", "align"],
+            PaddingMeaning::Point => &["padding", "align"],
+            PaddingMeaning::Unpadded => &[],
+        }
+    }
+
+    /// The keys a switch from a scale with this meaning to one with `to`
+    /// writes, each with the old keys it reads. A value with no meaning under
+    /// the new type has no carry, so it is dropped:
+    ///
+    /// | From → To | Carried |
+    /// |---|---|
+    /// | same meaning | every key, unchanged |
+    /// | ordinal → band | `padding` → `paddingInner` |
+    /// | point → band | `padding` → `paddingOuter`; `align` → `align` |
+    /// | band → ordinal | the inner side (`paddingInner`, else `padding`) → `padding` |
+    /// | band → point | the outer side (`paddingOuter`, else `padding`) → `padding`; `align` → `align` |
+    /// | ordinal ↔ point | nothing: ordinal has no end padding, point no inner gap |
+    /// | continuous ↔ discrete | nothing: a span fraction is not a step fraction |
+    /// | to or from a type with no padding | nothing |
+    ///
+    /// The band sides read [`BandPadding`]'s own precedence, so a switch from
+    /// band carries exactly what [`BandPadding::inner`] and
+    /// [`BandPadding::outer`] report. Values are carried, never checked here:
+    /// one that is out of bounds for the new type is refused by that type's
+    /// own validation.
+    pub(crate) fn switch_carries(self, to: PaddingMeaning) -> Vec<PaddingCarry> {
+        use PaddingMeaning::{Band, OrdinalInner, Point, SpanFraction, Unpadded};
+        match (self, to) {
+            (OrdinalInner, OrdinalInner)
+            | (Band, Band)
+            | (Point, Point)
+            | (SpanFraction, SpanFraction)
+            | (Unpadded, Unpadded) => self.keys().iter().copied().map(PaddingCarry::same).collect(),
+            (OrdinalInner, Band) => {
+                vec![PaddingCarry { to: BandPaddingKey::Inner.wire_key(), from: vec!["padding"] }]
+            }
+            (Point, Band) => vec![
+                PaddingCarry { to: BandPaddingKey::Outer.wire_key(), from: vec!["padding"] },
+                PaddingCarry::same("align"),
+            ],
+            (Band, OrdinalInner) => vec![PaddingCarry::band_side("padding", BandPaddingKey::INNER_PRECEDENCE)],
+            (Band, Point) => vec![
+                PaddingCarry::band_side("padding", BandPaddingKey::OUTER_PRECEDENCE),
+                PaddingCarry::same("align"),
+            ],
+            (OrdinalInner, Point) | (Point, OrdinalInner) => Vec::new(),
+            (SpanFraction, OrdinalInner | Band | Point) | (OrdinalInner | Band | Point, SpanFraction) => {
+                Vec::new()
+            }
+            (Unpadded, _) | (_, Unpadded) => Vec::new(),
+        }
     }
 }
 
@@ -978,6 +1133,97 @@ mod tests {
             names,
             [("padding", "padding"), ("padding_inner", "paddingInner"), ("padding_outer", "paddingOuter")]
         );
+    }
+
+    // ── type-switch translation ──────────────────────────────────────────────
+
+    fn carries(from: PaddingMeaning, to: PaddingMeaning) -> Vec<(&'static str, Vec<&'static str>)> {
+        from.switch_carries(to).into_iter().map(|c| (c.to, c.from)).collect()
+    }
+
+    /// The pairs that translate: each writes the new type's key that means
+    /// what the old type's key meant.
+    #[test]
+    fn switch_translates_padding_by_meaning() {
+        use PaddingMeaning::{Band, OrdinalInner, Point};
+        assert_eq!(carries(OrdinalInner, Band), [("paddingInner", vec!["padding"])]);
+        assert_eq!(carries(Point, Band), [("paddingOuter", vec!["padding"]), ("align", vec!["align"])]);
+        assert_eq!(carries(Band, OrdinalInner), [("padding", vec!["paddingInner", "padding"])]);
+        assert_eq!(carries(Band, Point), [("padding", vec!["paddingOuter", "padding"]), ("align", vec!["align"])]);
+    }
+
+    /// The pairs with no shared meaning carry nothing, so their padding
+    /// family is dropped.
+    #[test]
+    fn switch_drops_padding_with_no_meaning_under_the_new_type() {
+        use PaddingMeaning::{Band, OrdinalInner, Point, SpanFraction, Unpadded};
+        let mut dropped = vec![(OrdinalInner, Point), (Point, OrdinalInner)];
+        for discrete in [OrdinalInner, Band, Point] {
+            dropped.extend([(SpanFraction, discrete), (discrete, SpanFraction)]);
+        }
+        for padded in [OrdinalInner, Band, Point, SpanFraction] {
+            dropped.extend([(Unpadded, padded), (padded, Unpadded)]);
+        }
+        for (from, to) in dropped {
+            assert_eq!(carries(from, to), [], "{from:?} -> {to:?}");
+        }
+    }
+
+    /// A switch between two types of the same meaning (linear → log) carries
+    /// every key of that meaning unchanged.
+    #[test]
+    fn switch_within_one_meaning_carries_every_key_unchanged() {
+        use PaddingMeaning::{Band, OrdinalInner, Point, SpanFraction, Unpadded};
+        for meaning in [OrdinalInner, Band, Point, SpanFraction, Unpadded] {
+            let expected: Vec<_> = meaning.keys().iter().map(|&k| (k, vec![k])).collect();
+            assert_eq!(carries(meaning, meaning), expected, "{meaning:?}");
+        }
+        assert_eq!(carries(SpanFraction, SpanFraction), [("padding", vec!["padding"])]);
+    }
+
+    /// A switch from band reads the same precedence `BandPadding` resolves
+    /// by: over every set/unset combination, the first set source of the
+    /// carry to ordinal is `inner()`, and of the carry to point is `outer()`.
+    #[test]
+    fn switch_from_band_reads_band_paddings_own_precedence() {
+        for padding in [None, Some(0.1)] {
+            for inner in [None, Some(0.2)] {
+                for outer in [None, Some(0.3)] {
+                    let band = BandPadding::new(padding, inner, outer).unwrap();
+                    let read = |key: &str| match key {
+                        "padding" => padding,
+                        "paddingInner" => inner,
+                        "paddingOuter" => outer,
+                        other => panic!("unexpected source {other}"),
+                    };
+                    let first_set =
+                        |to: PaddingMeaning| carries(PaddingMeaning::Band, to)[0].1.iter().find_map(|k| read(k));
+                    assert_eq!(first_set(PaddingMeaning::OrdinalInner), band.inner(), "{band:?}");
+                    assert_eq!(first_set(PaddingMeaning::Point), band.outer(), "{band:?}");
+                }
+            }
+        }
+    }
+
+    /// The shared bound predicates refuse non-finite values, which a scale
+    /// dict cannot carry (JSON has no NaN or infinity) but the class doors
+    /// can, and accept their closed edges.
+    #[test]
+    fn bound_predicates_refuse_non_finite_and_accept_edges() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(check_align(bad).is_err(), "{bad}");
+            assert!(check_point_padding(bad).is_err(), "{bad}");
+            assert!(check_ordinal_padding(bad).is_err(), "{bad}");
+        }
+        assert_eq!(check_align(f64::NAN).unwrap_err(), "must be a number in [0, 1]; received NaN");
+        assert_eq!(check_point_padding(f64::INFINITY).unwrap_err(), "must be a finite number >= 0; received inf");
+        assert_eq!(check_ordinal_padding(f64::NAN).unwrap_err(), "must be in [0, 1]; got NaN");
+        for ok in [0.0, 1.0] {
+            assert_eq!(check_align(ok), Ok(()));
+            assert_eq!(check_ordinal_padding(ok), Ok(()));
+        }
+        assert_eq!(check_point_padding(0.0), Ok(()));
+        assert_eq!(check_point_padding(1.0e6), Ok(()));
     }
 
     /// A deserialized value is not validated until it resolves, and resolving

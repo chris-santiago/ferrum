@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
-use super::discrete::{BandPadding, BandPaddingError, DiscreteGeometry, DiscreteLayout};
+use super::discrete::{check_align, BandPadding, BandPaddingError, DiscreteGeometry, DiscreteLayout};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,11 +163,7 @@ impl BandScale {
             PyValueError::new_err(format!("BandScale({}=...) {}", e.key().argument(), e.reason()))
         };
         let padding = BandPadding::new(padding, padding_inner, padding_outer).map_err(refuse)?;
-        if !align.is_finite() || !(0.0..=1.0).contains(&align) {
-            return Err(PyValueError::new_err(format!(
-                "BandScale(align=...) must be a number in [0, 1]; received {align}"
-            )));
-        }
+        check_align(align).map_err(|clause| PyValueError::new_err(format!("BandScale(align=...) {clause}")))?;
         let r = match range {
             Some(v) => {
                 validate_band_point_range(&v)?;
@@ -175,11 +171,7 @@ impl BandScale {
             }
             None => None,
         };
-        // `padding` is already validated above (`BandPadding::new`), so this
-        // resolves through `BandPadding::resolve` directly rather than
-        // `BandPadding::layout`, whose own `self.validate()` would only
-        // re-check values this constructor has already checked.
-        let layout = padding.resolve(align);
+        let layout = padding.layout(align).map_err(refuse)?;
         Ok(BandScale {
             data: BandScaleData { domain: domain.unwrap_or_default(), padding, layout },
             range: r,
@@ -433,6 +425,21 @@ mod tests {
         let p1 = mk(1.0).scale_str("a", 0.0, 100.0);
         assert!((p0 - 0.0).abs() < 1e-9, "align=0 lead; got {p0}");
         assert!((p1 - 50.0).abs() < 1e-9, "align=1 lead must shift by the leftover; got {p1}");
+    }
+
+    /// The constructor threads `align` into the layout it resolves: with
+    /// `domain=["a"]`, `padding_inner=0.5` over `[0, 100]` the denominator
+    /// clamp leaves 50 px over, so `align=0` puts the band's lead at 0 and
+    /// `align=1` at 50. The getter and the wire report the align passed.
+    #[test]
+    fn constructor_threads_align_into_its_layout() {
+        for (align, lead) in [(0.0, 0.0), (1.0, 50.0)] {
+            let s = BandScale::new(Some(vec!["a".to_string()]), None, Some(0.5), None, align, Some(vec![0.0, 100.0]))
+                .expect("valid BandScale");
+            assert_eq!(s.scale("a"), lead, "align={align}");
+            assert_eq!(s.align(), align);
+            assert_eq!(wire(&s)["align"], serde_json::json!(align));
+        }
     }
 
     // ── unset padding, the constructor door and the wire (#157) ─────────────

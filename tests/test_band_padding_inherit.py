@@ -123,15 +123,25 @@ def test_override_type_switch_on_point_scale_with_explicit_padding_carries_it():
     """`.override(x_scale_type="band")` on `PointScale(padding=0.5)` carries
     the user-set 0.5 across the switch: the switch is not flattened to the
     unpadded inherit just because it changes kind.
+
+    A point's end padding carries by MEANING, not by key name -- it
+    becomes the band's `paddingOuter` (the d3-equivalent outer inset), not
+    `padding` (both-sides shorthand), so `paddingInner` stays unset. The
+    measured bar width (89.862px) is `BandScale(padding_outer=0.5)`'s own
+    width; a merge that instead carried the value under the shared key
+    name `padding` (both-sides shorthand) would read `BandScale(padding=
+    0.5)`'s narrower 49.923px.
     """
     unpadded = _bar_chart(fm.X("cat", scale=fm.PointScale())).override(x_scale_type="band")
     carried = _bar_chart(fm.X("cat", scale=fm.PointScale(padding=0.5))).override(
         x_scale_type="band"
     )
-    assert _x_scale_dict(carried)["padding"] == 0.5
-    # The carried padding=0.5 narrows the band from the unpadded 112.327px
-    # to 49.923px -- not merely "some other width".
-    assert _bar_widths(carried.to_svg())[0] == pytest.approx(49.923, abs=1e-3)
+    assert _x_scale_dict(carried)["paddingOuter"] == 0.5
+    assert "padding" not in _x_scale_dict(carried)
+    assert "paddingInner" not in _x_scale_dict(carried)
+    # The carried paddingOuter=0.5 narrows the band from the unpadded
+    # 112.327px to 89.862px -- not merely "some other width".
+    assert _bar_widths(carried.to_svg())[0] == pytest.approx(89.862, abs=1e-3)
     assert _bar_widths(unpadded.to_svg())[0] == pytest.approx(_AUTO_BAR_WIDTH, abs=1e-3)
 
 
@@ -272,15 +282,19 @@ class TestGettersEqualityRepr:
 
     def test_point_scale_unset_vs_explicit_default_disclosed(self):
         """`PointScale()` and `PointScale(padding=0.5)` resolve to the same
-        rendered geometry (the 0.5 default lives only in Rust's serde
-        default) but are NOT equal, and `repr()` shows the raw unresolved
+        rendered geometry (the renderer owns the 0.5 default for an unset
+        padding) but are NOT equal, and `repr()` shows the raw unresolved
         value -- disclosed in the `_core.pyi` stub docstring.
+
+        The `padding` getter returns `None` when unset, like every sibling
+        scale's getter (`BandPadding`'s getters included) -- it does not
+        resolve to the renderer's 0.5 default.
         """
         assert fm.PointScale() != fm.PointScale(padding=0.5)
         assert "padding=None" in repr(fm.PointScale())
         assert "padding=0.5" in repr(fm.PointScale(padding=0.5))
-        # The getter, unlike BandScale's, always resolves to a concrete float.
-        assert fm.PointScale().padding == 0.5
+        assert fm.PointScale().padding is None
+        assert fm.PointScale(padding=0.0).padding == 0.0
 
 
 # ---------------------------------------------------------------------------

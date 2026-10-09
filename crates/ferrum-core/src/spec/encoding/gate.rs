@@ -2,7 +2,8 @@
 //! impls (the `remote = "Self"` wrapper that runs `validate_scale_spec_keys`
 //! before the derived deserialize), the accepted-key tables,
 //! `scale_accepted_keys`/`validate_scale_dict` (the two Python-visible gate
-//! pyfunctions), and the raw-dict temporal-domain conversion
+//! pyfunctions), `translate_scale_switch` (what a scale-type switch keeps,
+//! read off the same accepted-key table), and the raw-dict temporal-domain conversion
 //! (`convert_raw_dict_temporal_domain`) that `deserialize_scale_value` runs
 //! ahead of it.
 //!
@@ -48,6 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use super::sort::{SortOp, SortOrder};
 use super::ScaleSpec;
+use crate::scale::discrete::{check_align, check_ordinal_padding, check_point_padding, PaddingMeaning};
 
 // ── Wire-key gate: schema-derived accepted-key sets (F-L04-07, batch-C task 4) ──
 //
@@ -196,9 +198,135 @@ fn accepted_keys_for_scale_type(scale_type: &str) -> Option<Vec<&'static str>> {
 /// assertion, not left to a message-substring check.
 #[pyfunction]
 pub fn scale_accepted_keys(scale_type: &str) -> PyResult<Vec<String>> {
-    accepted_keys_for_scale_type(scale_type)
-        .map(|keys| keys.into_iter().map(str::to_string).collect())
-        .ok_or_else(|| PyValueError::new_err(format!("unknown scale type '{scale_type}'")))
+    Ok(known_scale_type_keys(scale_type)?.into_iter().map(str::to_string).collect())
+}
+
+/// [`accepted_keys_for_scale_type`], refusing an unknown tag with the
+/// `ValueError` both Python-visible readers of the table raise.
+fn known_scale_type_keys(scale_type: &str) -> PyResult<Vec<&'static str>> {
+    accepted_keys_for_scale_type(scale_type).ok_or_else(|| unknown_scale_type(scale_type))
+}
+
+fn unknown_scale_type(scale_type: &str) -> PyErr {
+    PyValueError::new_err(format!("unknown scale type '{scale_type}'"))
+}
+
+/// The padding-family keys (`padding`, `paddingInner`, `paddingOuter`,
+/// `align`) a `ScaleSpec` `"type"` tag accepts: the keys
+/// [`translate_scale_switch`] translates by meaning rather than by name.
+/// Published so a caller selecting a scale's padding family reads the set
+/// instead of restating it. Raises the same `ValueError` as
+/// [`scale_accepted_keys`] for an unknown tag.
+#[pyfunction]
+pub fn scale_padding_keys(scale_type: &str) -> PyResult<Vec<&'static str>> {
+    let (_, meaning) = switch_side(scale_type)?;
+    Ok(meaning.keys().to_vec())
+}
+
+/// One side of a scale-type switch: the tag's accepted keys and what its
+/// padding-family keys mean, refusing an unknown tag.
+fn switch_side(scale_type: &str) -> PyResult<(Vec<&'static str>, PaddingMeaning)> {
+    let keys = known_scale_type_keys(scale_type)?;
+    let meaning = padding_meaning_for_scale_type(scale_type).ok_or_else(|| unknown_scale_type(scale_type))?;
+    Ok((keys, meaning))
+}
+
+/// What a `ScaleSpec` `"type"` tag's padding-family keys mean, or `None` for
+/// an unknown tag. Beside [`accepted_keys_for_scale_type`] because the two
+/// must agree: a meaning's [`keys`](PaddingMeaning::keys) are exactly the
+/// padding-family keys the tag accepts (pinned by
+/// `padding_meaning_keys_match_each_types_accepted_keys`).
+fn padding_meaning_for_scale_type(scale_type: &str) -> Option<PaddingMeaning> {
+    let meaning = match scale_type {
+        "linear" | "log" | "time" | "symlog" | "pow" | "sqrt" | "utc" => PaddingMeaning::SpanFraction,
+        "ordinal" => PaddingMeaning::OrdinalInner,
+        "band" => PaddingMeaning::Band,
+        "point" => PaddingMeaning::Point,
+        "sequential" | "diverging" | "quantize" | "quantile" | "threshold" | "bin-ordinal" => {
+            PaddingMeaning::Unpadded
+        }
+        _ => return None,
+    };
+    Some(meaning)
+}
+
+/// A channel's scale dict, carried across a switch from `old_type` to
+/// `new_type`, and the keys the switch drops: the one owner of what a
+/// scale-type switch keeps.
+///
+/// - The padding-family keys the old type accepts (`padding`,
+///   `paddingInner`, `paddingOuter`, `align`) are translated by meaning
+///   ([`PaddingMeaning::switch_carries`]): an ordinal inner gap becomes a
+///   band inner gap, a point's end padding becomes band outer padding, and a
+///   value with no meaning under the new type is dropped. A key whose value
+///   is `None` is unset, so it is carried by nothing.
+/// - Every other key the old type accepts survives when the new type also
+///   accepts it, and is dropped otherwise.
+/// - A key the old type does not accept (including `"type"`) passes through
+///   untouched, for the scale gate to judge, unless the switch writes a key
+///   of the same name: then the old scale states that key in a type that
+///   rejects it, and this refuses with a `ValueError` naming the key rather
+///   than let the translation overwrite it.
+///
+/// The second element, `dropped`, lists in `base` order every key of `base`
+/// whose value the switch does not write onto the new scale: the keys the
+/// new type does not accept, the padding-family keys no carry reads (a
+/// continuous span fraction switched to a discrete type, an ordinal gap
+/// switched to point, a band's outer side and `align` switched to ordinal),
+/// and a band source that loses on precedence or is `None`. A caller that
+/// must validate every dropped value probes exactly these under the old
+/// type, without restating the translation rule.
+///
+/// Carried values are never checked or coerced here: a value malformed under
+/// the new type reaches [`validate_scale_values`] and the scale gate as the
+/// user wrote it. Returns a new dict and never mutates `base`; the same type
+/// returns a copy of `base` and drops nothing. Raises the same `ValueError`
+/// as [`scale_accepted_keys`] for an unknown tag on either side.
+#[pyfunction]
+pub fn translate_scale_switch<'py>(
+    py: Python<'py>,
+    old_type: &str,
+    new_type: &str,
+    base: &Bound<'py, PyDict>,
+) -> PyResult<(Bound<'py, PyDict>, Vec<String>)> {
+    let (accepted_old, old_meaning) = switch_side(old_type)?;
+    let (accepted_new, new_meaning) = switch_side(new_type)?;
+    if old_type == new_type {
+        return Ok((base.copy()?, Vec::new()));
+    }
+    let carries = old_meaning.switch_carries(new_meaning);
+    let out = PyDict::new(py);
+    let mut removed = Vec::new();
+    for (key, value) in base.iter() {
+        let Ok(name) = key.extract::<String>() else {
+            out.set_item(key, value)?;
+            continue;
+        };
+        if !accepted_old.contains(&name.as_str()) {
+            if carries.iter().any(|carry| carry.to == name) {
+                return Err(PyValueError::new_err(format!(
+                    "a '{old_type}' scale does not accept '{name}', which its switch to '{new_type}' writes"
+                )));
+            }
+            out.set_item(key, value)?;
+        } else if old_meaning.keys().contains(&name.as_str()) || !accepted_new.contains(&name.as_str()) {
+            removed.push(name);
+        } else {
+            out.set_item(key, value)?;
+        }
+    }
+    let mut carried_from = Vec::new();
+    for carry in carries {
+        for source in carry.from {
+            if let Some(value) = base.get_item(source)?.filter(|v| !v.is_none()) {
+                out.set_item(carry.to, value)?;
+                carried_from.push(source);
+                break;
+            }
+        }
+    }
+    let dropped = removed.into_iter().filter(|name| !carried_from.contains(&name.as_str())).collect();
+    Ok((out, dropped))
 }
 
 /// Python-visible mirror of [`ScaleSpec::TAGS`] (`#159`): the complete,
@@ -434,17 +562,29 @@ fn deserialize_scale_value_bare(
 /// Validate one override-door scale value (#157): the same conversion +
 /// deserialize chokepoint [`deserialize_scale_value`] runs, via its
 /// un-prefixed twin [`deserialize_scale_value_bare`], followed by the
-/// data-free value check the render path would otherwise run — today, for
-/// `ScaleSpec::Band`, [`BandPadding::layout`](crate::scale::discrete::BandPadding::layout).
+/// data-free bounds the scale classes enforce at construction, through the
+/// same predicates and so the same clause text:
+///
+/// - `band`: padding through [`BandPadding::layout`](crate::scale::discrete::BandPadding::layout),
+///   then `align` through [`check_align`];
+/// - `point`: a set `padding` through [`check_point_padding`], then `align`
+///   through [`check_align`];
+/// - `ordinal`: `padding` through [`check_ordinal_padding`].
+///
+/// Every other type has no value bound checked here.
 ///
 /// Raises a `ValueError` whose message is the refusal's **clause alone** —
 /// naming no call, channel or key, since this function has none of those to
 /// give: its caller wraps the clause in the override's own voice,
 /// `Chart.override(<path>=...) <clause>`. Three clause shapes:
 ///
-/// - a [`BandPaddingError`](crate::scale::discrete::BandPaddingError) gives
-///   [`reason`](crate::scale::discrete::BandPaddingError::reason), e.g.
-///   `must be a number in [0, 1]; received 1.5`;
+/// - an out-of-bounds value gives the class door's clause after its argument
+///   name: [`reason`](crate::scale::discrete::BandPaddingError::reason) for
+///   band padding, e.g. `must be a number in [0, 1]; received 1.5`, and the
+///   [`check_align`]/[`check_point_padding`]/[`check_ordinal_padding`]
+///   clause otherwise (ordinal: `must be in [0, 1]; got 1.5`). The clause
+///   does not name the key, so a caller naming the key validates one key at
+///   a time;
 /// - a serde error (an unknown key, or a value of the wrong wire type) gives
 ///   serde's own text, with no `"scale: "` prefix, e.g.
 ///   `invalid type: string "a", expected f64`;
@@ -460,8 +600,21 @@ pub fn validate_scale_values(py: Python, scale: &Bound<'_, PyDict>) -> PyResult<
             e
         }
     })?;
-    if let Some(ScaleSpec::Band { padding, align, .. }) = spec {
-        padding.layout(align).map_err(|err| PyValueError::new_err(err.reason()))?;
+    match spec {
+        Some(ScaleSpec::Band { padding, align, .. }) => {
+            padding.layout(align).map_err(|err| PyValueError::new_err(err.reason()))?;
+            check_align(align).map_err(PyValueError::new_err)?;
+        }
+        Some(ScaleSpec::Point { padding, align, .. }) => {
+            if let Some(padding) = padding {
+                check_point_padding(padding).map_err(PyValueError::new_err)?;
+            }
+            check_align(align).map_err(PyValueError::new_err)?;
+        }
+        Some(ScaleSpec::Ordinal { padding, .. }) => {
+            check_ordinal_padding(padding).map_err(PyValueError::new_err)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1231,6 +1384,402 @@ mod tests {
             d.set_item("align", 0.5).unwrap();
             validate_scale_values(py, &d)
                 .unwrap_or_else(|e| panic!("expected a valid band fragment to pass, got {e}"));
+        });
+    }
+
+    // ── translate_scale_switch: the type-switch owner ───────────────────────
+
+    /// A value in a test scale dict.
+    #[derive(Clone, Copy)]
+    enum V {
+        Num(f64),
+        Str(&'static str),
+        Bool(bool),
+        None,
+    }
+
+    fn scale_dict<'py>(py: Python<'py>, scale_type: &str, items: &[(&str, V)]) -> Bound<'py, PyDict> {
+        let d = PyDict::new(py);
+        d.set_item("type", scale_type).unwrap();
+        for &(key, value) in items {
+            match value {
+                V::Num(n) => d.set_item(key, n),
+                V::Str(text) => d.set_item(key, text),
+                V::Bool(b) => d.set_item(key, b),
+                V::None => d.set_item(key, py.None()),
+            }
+            .unwrap();
+        }
+        d
+    }
+
+    /// The dict a switch returns, as sorted `(key, repr(value))` pairs.
+    fn switched(old: &str, new: &str, items: &[(&str, V)]) -> Vec<(String, String)> {
+        attach(|py| {
+            let (out, _) = translate_scale_switch(py, old, new, &scale_dict(py, old, items)).unwrap();
+            let mut pairs: Vec<(String, String)> = out
+                .iter()
+                .map(|(k, v)| (k.extract().unwrap(), v.repr().unwrap().to_string()))
+                .collect();
+            pairs.sort();
+            pairs
+        })
+    }
+
+    fn pairs(scale_type: &str, items: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = items.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect();
+        out.push(("type".to_string(), format!("'{scale_type}'")));
+        out.sort();
+        out
+    }
+
+    const PADDING_FAMILY: [&str; 4] = ["padding", "paddingInner", "paddingOuter", "align"];
+
+    /// Each padding meaning's keys are exactly the padding-family keys its
+    /// tag accepts, for every tag: the meaning table and the accepted-key
+    /// table cannot disagree about which keys a switch translates.
+    #[test]
+    fn padding_meaning_keys_match_each_types_accepted_keys() {
+        for tag in ScaleSpec::TAGS {
+            let meaning = padding_meaning_for_scale_type(tag).unwrap_or_else(|| panic!("no meaning for '{tag}'"));
+            let accepted = accepted_keys_for_scale_type(tag).unwrap();
+            let mut expected: Vec<&str> = PADDING_FAMILY.into_iter().filter(|k| accepted.contains(k)).collect();
+            let mut actual = meaning.keys().to_vec();
+            expected.sort_unstable();
+            actual.sort_unstable();
+            assert_eq!(actual, expected, "tag '{tag}'");
+        }
+    }
+
+    /// ordinal → band: the ordinal inner gap becomes the band inner gap, and
+    /// the band's outer padding stays unset.
+    #[test]
+    fn switch_ordinal_to_band_carries_padding_to_padding_inner() {
+        assert_eq!(
+            switched("ordinal", "band", &[("padding", V::Num(0.3)), ("domain", V::Str("d"))]),
+            pairs("ordinal", &[("paddingInner", "0.3"), ("domain", "'d'")])
+        );
+        assert_eq!(switched("ordinal", "band", &[("padding", V::Num(0.0))]), pairs("ordinal", &[("paddingInner", "0.0")]));
+    }
+
+    /// ordinal → point: ordinal has no end padding, so nothing is carried and
+    /// the point default applies.
+    #[test]
+    fn switch_ordinal_to_point_drops_padding() {
+        assert_eq!(switched("ordinal", "point", &[("padding", V::Num(0.3))]), pairs("ordinal", &[]));
+    }
+
+    /// point → band: the end padding becomes band outer padding, `align`
+    /// carries, and `reverse` (which band does not accept) is dropped as any
+    /// non-family key is.
+    #[test]
+    fn switch_point_to_band_carries_padding_to_padding_outer_and_align() {
+        assert_eq!(
+            switched("point", "band", &[("padding", V::Num(2.0)), ("align", V::Num(0.3)), ("reverse", V::Bool(true))]),
+            pairs("point", &[("paddingOuter", "2.0"), ("align", "0.3")])
+        );
+    }
+
+    /// point → ordinal: neither the end padding nor `align` means anything
+    /// on an ordinal scale.
+    #[test]
+    fn switch_point_to_ordinal_drops_padding_and_align() {
+        assert_eq!(
+            switched("point", "ordinal", &[("padding", V::Num(2.0)), ("align", V::Num(0.3))]),
+            pairs("point", &[])
+        );
+    }
+
+    /// band → ordinal: the band's inner side (`paddingInner`, else `padding`)
+    /// becomes the ordinal gap; the outer side and `align` are dropped.
+    #[test]
+    fn switch_band_to_ordinal_carries_the_inner_side() {
+        let all = [
+            ("padding", V::Num(0.4)),
+            ("paddingInner", V::Num(0.2)),
+            ("paddingOuter", V::Num(0.3)),
+            ("align", V::Num(0.1)),
+        ];
+        assert_eq!(switched("band", "ordinal", &all), pairs("band", &[("padding", "0.2")]));
+        assert_eq!(switched("band", "ordinal", &[("padding", V::Num(0.4))]), pairs("band", &[("padding", "0.4")]));
+        assert_eq!(switched("band", "ordinal", &[("paddingOuter", V::Num(0.3))]), pairs("band", &[]));
+    }
+
+    /// band → point: the band's outer side (`paddingOuter`, else `padding`)
+    /// becomes the point end padding, and `align` carries.
+    #[test]
+    fn switch_band_to_point_carries_the_outer_side_and_align() {
+        let all = [
+            ("padding", V::Num(0.4)),
+            ("paddingInner", V::Num(0.2)),
+            ("paddingOuter", V::Num(0.3)),
+            ("align", V::Num(0.1)),
+        ];
+        assert_eq!(switched("band", "point", &all), pairs("band", &[("padding", "0.3"), ("align", "0.1")]));
+        assert_eq!(
+            switched("band", "point", &[("padding", V::Num(0.4)), ("paddingInner", V::Num(0.2))]),
+            pairs("band", &[("padding", "0.4")])
+        );
+    }
+
+    /// continuous ↔ discrete: a span fraction and a step fraction share a
+    /// key name but no meaning, so the padding family is dropped both ways;
+    /// every other key keeps the accepted-key rule (`domain` is accepted by
+    /// both sides and kept, `nice` and `reverse` are dropped where the new
+    /// type has no such key).
+    #[test]
+    fn switch_between_continuous_and_discrete_drops_padding() {
+        let continuous = ["linear", "log", "time", "symlog", "pow", "sqrt", "utc"];
+        let discrete = ["ordinal", "band", "point"];
+        for c in continuous {
+            for d in discrete {
+                let out = switched(c, d, &[("padding", V::Num(0.05)), ("domain", V::Str("x"))]);
+                assert_eq!(out, pairs(c, &[("domain", "'x'")]), "{c} -> {d}");
+                let family: Vec<(&str, V)> = PADDING_FAMILY.iter().map(|&k| (k, V::Num(0.2))).collect();
+                let accepted = accepted_keys_for_scale_type(d).unwrap();
+                let items: Vec<(&str, V)> = family.into_iter().filter(|(k, _)| accepted.contains(k)).collect();
+                assert_eq!(switched(d, c, &items), pairs(d, &[]), "{d} -> {c}");
+            }
+        }
+        assert_eq!(switched("linear", "band", &[("nice", V::Bool(true))]), pairs("linear", &[]));
+        assert_eq!(switched("point", "linear", &[("reverse", V::Bool(true))]), pairs("point", &[("reverse", "True")]));
+    }
+
+    /// continuous → continuous: the span fraction means the same thing, so
+    /// `padding` carries unchanged; a key the new type lacks (`zero` on log)
+    /// is still dropped.
+    #[test]
+    fn switch_within_continuous_keeps_padding() {
+        assert_eq!(
+            switched("linear", "log", &[("padding", V::Num(0.05)), ("nice", V::Bool(true)), ("zero", V::Bool(true))]),
+            pairs("linear", &[("padding", "0.05"), ("nice", "True")])
+        );
+    }
+
+    /// The same type returns the dict unchanged, `None` values included.
+    #[test]
+    fn switch_to_the_same_type_is_unchanged() {
+        let items = [("padding", V::Num(0.4)), ("paddingInner", V::None), ("align", V::Num(0.1))];
+        assert_eq!(
+            switched("band", "band", &items),
+            pairs("band", &[("padding", "0.4"), ("paddingInner", "None"), ("align", "0.1")])
+        );
+    }
+
+    /// An absent or `None` key is unset: it writes no key, and a `None`
+    /// higher in the precedence falls through to the next source.
+    #[test]
+    fn switch_writes_no_key_for_an_unset_value() {
+        assert_eq!(switched("ordinal", "band", &[("padding", V::None)]), pairs("ordinal", &[]));
+        assert_eq!(switched("point", "band", &[]), pairs("point", &[]));
+        assert_eq!(
+            switched("band", "ordinal", &[("paddingInner", V::None), ("padding", V::Num(0.4))]),
+            pairs("band", &[("padding", "0.4")])
+        );
+        assert_eq!(switched("band", "point", &[("paddingOuter", V::None), ("align", V::None)]), pairs("band", &[]));
+    }
+
+    /// A carried value is neither checked nor coerced: one out of bounds for
+    /// the new type arrives as written, and `validate_scale_values` refuses it
+    /// under the new type.
+    #[test]
+    fn switch_leaves_a_malformed_carried_value_for_validation_to_refuse() {
+        attach(|py| {
+            let base = scale_dict(py, "ordinal", &[("padding", V::Num(2.0))]);
+            let (out, _) = translate_scale_switch(py, "ordinal", "band", &base).unwrap();
+            assert_eq!(out.get_item("paddingInner").unwrap().unwrap().extract::<f64>().unwrap(), 2.0);
+            out.set_item("type", "band").unwrap();
+            let err = validate_scale_values(py, &out).expect_err("paddingInner 2 is outside [0, 1]");
+            assert_eq!(err.value(py).to_string(), "must be a number in [0, 1]; received 2");
+        });
+        assert_eq!(
+            switched("point", "band", &[("padding", V::Str("wide"))]),
+            pairs("point", &[("paddingOuter", "'wide'")])
+        );
+    }
+
+    /// A key the old type does not accept passes through untouched, for the
+    /// scale gate to judge.
+    #[test]
+    fn switch_passes_a_key_the_old_type_does_not_accept_through() {
+        assert_eq!(
+            switched("ordinal", "band", &[("clammp", V::Bool(true))]),
+            pairs("ordinal", &[("clammp", "True")])
+        );
+    }
+
+    /// An unknown tag on either side refuses with the same `ValueError`
+    /// `scale_accepted_keys` raises.
+    #[test]
+    fn switch_refuses_an_unknown_type() {
+        attach(|py| {
+            let base = scale_dict(py, "band", &[]);
+            for (old, new) in [("bogus", "band"), ("band", "bogus"), ("bogus", "bogus")] {
+                let err = translate_scale_switch(py, old, new, &base).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py), "{err:?}");
+                assert_eq!(err.value(py).to_string(), "unknown scale type 'bogus'");
+            }
+        });
+    }
+
+    /// The keys a switch reports dropped, in `base` order.
+    fn dropped(old: &str, new: &str, items: &[(&str, V)]) -> Vec<String> {
+        attach(|py| translate_scale_switch(py, old, new, &scale_dict(py, old, items)).unwrap().1)
+    }
+
+    /// `dropped` names every key whose value the switch does not write: the
+    /// padding family no carry reads, a band source that loses on precedence
+    /// or is `None`, and every key the new type does not accept. A carried
+    /// source, a surviving key and `"type"` are never listed.
+    #[test]
+    fn switch_reports_every_key_whose_value_it_drops() {
+        let wide = V::Str("wide");
+        for new in ["band", "point", "ordinal"] {
+            assert_eq!(dropped("linear", new, &[("padding", wide), ("domain", V::Str("x"))]), ["padding"], "linear -> {new}");
+        }
+        assert_eq!(dropped("ordinal", "point", &[("padding", wide)]), ["padding"]);
+        assert_eq!(dropped("point", "ordinal", &[("padding", wide), ("align", wide), ("reverse", V::Bool(true))]), [
+            "padding", "align", "reverse"
+        ]);
+        let band = [("padding", V::Num(0.4)), ("paddingInner", V::Num(0.2)), ("paddingOuter", V::Num(0.3)), ("align", wide)];
+        assert_eq!(dropped("band", "ordinal", &band), ["padding", "paddingOuter", "align"]);
+        assert_eq!(dropped("band", "point", &band), ["padding", "paddingInner"]);
+        assert_eq!(dropped("band", "ordinal", &[("padding", V::Num(0.4))]), Vec::<String>::new());
+        assert_eq!(dropped("band", "ordinal", &[("paddingInner", V::None), ("padding", V::Num(0.4))]), ["paddingInner"]);
+        assert_eq!(dropped("ordinal", "band", &[("padding", V::Num(0.3)), ("domain", V::Str("d"))]), Vec::<String>::new());
+        assert_eq!(dropped("log", "band", &[("base", V::Num(2.0)), ("nice", V::Bool(true)), ("domain", V::Str("d"))]), [
+            "base", "nice"
+        ]);
+        assert_eq!(dropped("linear", "log", &[("padding", V::Num(0.05)), ("zero", V::Bool(true))]), ["zero"]);
+        assert_eq!(dropped("band", "band", &band), Vec::<String>::new());
+        assert_eq!(dropped("ordinal", "band", &[("clammp", V::Bool(true))]), Vec::<String>::new());
+    }
+
+    /// A key the old type does not accept passes through, unless the switch
+    /// writes a key of that name: the old scale is malformed, and the switch
+    /// refuses naming the key instead of overwriting it.
+    #[test]
+    fn switch_refuses_an_unaccepted_key_its_translation_would_overwrite() {
+        attach(|py| {
+            for (old, new, key) in [("ordinal", "band", "paddingInner"), ("point", "band", "paddingOuter")] {
+                let base = scale_dict(py, old, &[("padding", V::Num(0.3)), (key, V::Num(0.9))]);
+                let err = translate_scale_switch(py, old, new, &base).unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py), "{err:?}");
+                assert_eq!(
+                    err.value(py).to_string(),
+                    format!("a '{old}' scale does not accept '{key}', which its switch to '{new}' writes")
+                );
+            }
+            // The refusal is about the key's name, not whether a value was carried.
+            let base = scale_dict(py, "ordinal", &[("paddingInner", V::Num(0.9))]);
+            assert!(translate_scale_switch(py, "ordinal", "band", &base).is_err());
+            // A non-colliding unaccepted key still passes through.
+            let base = scale_dict(py, "ordinal", &[("paddingOuter", V::Num(0.9))]);
+            let (out, dropped) = translate_scale_switch(py, "ordinal", "band", &base).unwrap();
+            assert_eq!(out.get_item("paddingOuter").unwrap().unwrap().extract::<f64>().unwrap(), 0.9);
+            assert!(dropped.is_empty());
+        });
+    }
+
+    // ── `validate_scale_values`: point, ordinal and band align bounds ───────
+
+    /// The clause `validate_scale_values` refuses `{"type": scale_type, key:
+    /// value}` with, or `None` when it accepts it.
+    fn values_clause(scale_type: &str, key: &str, value: f64) -> Option<String> {
+        attach(|py| {
+            let d = scale_dict(py, scale_type, &[(key, V::Num(value))]);
+            validate_scale_values(py, &d).err().map(|e| e.value(py).to_string())
+        })
+    }
+
+    /// The message the scale class's constructor refuses `argument=value`
+    /// with, called through the Python type as a user would.
+    fn class_door_message<T: pyo3::PyTypeInfo>(argument: &str, value: f64) -> String {
+        attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("domain", vec!["a", "b"]).unwrap();
+            kwargs.set_item(argument, value).unwrap();
+            let err = py.get_type::<T>().call((), Some(&kwargs)).expect_err("out-of-bounds argument");
+            assert!(err.is_instance_of::<PyValueError>(py), "{err:?}");
+            err.value(py).to_string()
+        })
+    }
+
+    /// Every bound `validate_scale_values` checks refuses with exactly the
+    /// clause the class door words around its own argument name, because both
+    /// run the same predicate.
+    #[test]
+    fn validate_scale_values_clause_equals_the_class_doors() {
+        use crate::scale::band::BandScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use crate::scale::point::PointScale;
+        let cases: [(&str, &str, &str, f64, String); 7] = [
+            ("point", "padding", "padding", -1.0, class_door_message::<PointScale>("padding", -1.0)),
+            ("point", "align", "align", 1.5, class_door_message::<PointScale>("align", 1.5)),
+            ("point", "align", "align", -0.1, class_door_message::<PointScale>("align", -0.1)),
+            ("band", "align", "align", 5.0, class_door_message::<BandScale>("align", 5.0)),
+            ("band", "paddingInner", "padding_inner", 1.5, class_door_message::<BandScale>("padding_inner", 1.5)),
+            ("ordinal", "padding", "padding", 1.5, class_door_message::<OrdinalScale>("padding", 1.5)),
+            ("ordinal", "padding", "padding", -0.1, class_door_message::<OrdinalScale>("padding", -0.1)),
+        ];
+        for (scale_type, key, argument, value, class_message) in cases {
+            let clause = values_clause(scale_type, key, value).unwrap_or_else(|| panic!("{scale_type} {key}={value}"));
+            let class_prefix = match scale_type {
+                "point" => format!("PointScale({argument}=...) "),
+                "band" => format!("BandScale({argument}=...) "),
+                _ => format!("{argument} "),
+            };
+            assert_eq!(class_message, format!("{class_prefix}{clause}"), "{scale_type} {key}={value}");
+        }
+    }
+
+    /// The exact clauses, so a reworded predicate shows up here.
+    #[test]
+    fn validate_scale_values_refuses_point_ordinal_and_band_align_bounds() {
+        assert_eq!(values_clause("point", "padding", -1.0).unwrap(), "must be a finite number >= 0; received -1");
+        assert_eq!(values_clause("point", "align", 1.5).unwrap(), "must be a number in [0, 1]; received 1.5");
+        assert_eq!(values_clause("band", "align", 5.0).unwrap(), "must be a number in [0, 1]; received 5");
+        assert_eq!(values_clause("band", "align", -0.5).unwrap(), "must be a number in [0, 1]; received -0.5");
+        assert_eq!(values_clause("ordinal", "padding", 1.5).unwrap(), "must be in [0, 1]; got 1.5");
+        assert_eq!(values_clause("ordinal", "padding", -0.1).unwrap(), "must be in [0, 1]; got -0.1");
+    }
+
+    /// The bounds' valid edges pass: 0 and 1 for `align` and ordinal
+    /// `padding`, 0 and a large value for point `padding` and band
+    /// `paddingOuter`, and a point scale with no `padding` at all.
+    #[test]
+    fn validate_scale_values_accepts_the_valid_edges() {
+        let valid = [
+            ("point", "padding", 0.0),
+            ("point", "padding", 1.0e6),
+            ("point", "align", 0.0),
+            ("point", "align", 1.0),
+            ("band", "align", 0.0),
+            ("band", "align", 1.0),
+            ("band", "paddingOuter", 1.0e6),
+            ("band", "paddingInner", 1.0),
+            ("ordinal", "padding", 0.0),
+            ("ordinal", "padding", 1.0),
+        ];
+        for (scale_type, key, value) in valid {
+            assert_eq!(values_clause(scale_type, key, value), None, "{scale_type} {key}={value}");
+        }
+        attach(|py| validate_scale_values(py, &scale_dict(py, "point", &[])).unwrap());
+    }
+
+    /// `scale_padding_keys` publishes exactly each type's translated keys,
+    /// and refuses an unknown tag like `scale_accepted_keys`.
+    #[test]
+    fn scale_padding_keys_publishes_each_types_padding_family() {
+        assert_eq!(scale_padding_keys("band").unwrap(), ["padding", "paddingInner", "paddingOuter", "align"]);
+        assert_eq!(scale_padding_keys("point").unwrap(), ["padding", "align"]);
+        assert_eq!(scale_padding_keys("ordinal").unwrap(), ["padding"]);
+        assert_eq!(scale_padding_keys("linear").unwrap(), ["padding"]);
+        assert!(scale_padding_keys("sequential").unwrap().is_empty());
+        attach(|py| {
+            let err = scale_padding_keys("bogus").unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert_eq!(err.value(py).to_string(), "unknown scale type 'bogus'");
         });
     }
 }

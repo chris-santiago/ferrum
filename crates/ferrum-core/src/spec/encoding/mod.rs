@@ -18,8 +18,8 @@ pub(crate) mod sort;
 mod tests;
 
 pub use gate::{
-    scale_accepted_keys, scale_temporal_type_tags, scale_type_tags, sort_accepted_vocabulary,
-    validate_scale_dict, validate_scale_values,
+    scale_accepted_keys, scale_padding_keys, scale_temporal_type_tags, scale_type_tags,
+    sort_accepted_vocabulary, translate_scale_switch, validate_scale_dict, validate_scale_values,
 };
 use gate::deserialize_scale_value;
 

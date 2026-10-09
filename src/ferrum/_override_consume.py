@@ -30,14 +30,50 @@ from typing import Any, NoReturn
 
 from ferrum._core import (  # type: ignore[attr-defined]
     scale_accepted_keys as _scale_accepted_keys,
+    scale_padding_keys as _scale_padding_keys,
+    translate_scale_switch as _translate_scale_switch,
     validate_scale_dict as _validate_scale_dict,
     validate_scale_values as _validate_scale_values,
 )
-from ferrum._override_apply import OverridePayload
+from ferrum._override_apply import _SCALE_TYPE_TAGS, OverridePayload
 from ferrum._entry import EntryRefusal
 from ferrum._layer import merge_style
 from ferrum.exceptions import _OverrideRefusal
 from ferrum.marks.base import resolve_layer_style
+
+
+def _refuse_old_type_padding_value(old_type: str, key: str, value: Any) -> None:
+    """Refuse *value* under *old_type*'s own bound for padding-family *key*.
+
+    The one place :func:`merge_encoding_scale`'s padding-family check
+    voices a refusal, naming both the scale and the key the user wrote:
+    ``scale: <key> <clause>``, e.g. ``scale: padding must be in [0, 1];
+    got 1.5``.
+
+    *value* is probed under the real shape gate
+    (``ferrum._core.validate_scale_dict``) FIRST. A wrong-type value (a
+    string where a number belongs) is refused there, in that gate's own
+    ``"scale: "``-prefixed clause -- unwrapped and un-keyed, since that
+    clause names no key at all, unlike the bound clause this helper wraps
+    below. This is what makes a shape-malformed value read identically
+    whether this check reaches it (because the switch carries its key
+    under a new name) or the existing dropped-key probe does (because the
+    switch drops it), and identically with or without the override in play
+    (the ``tests/test_override_scale_merge.py`` ``_DROPPED_BUCKET_CASES``
+    rule).
+
+    Only a value that passes shape but fails *old_type*'s own BOUND
+    (``ferrum._core.validate_scale_values``, whose own clause is bare -- no
+    call, channel or key, by that function's contract) reaches the
+    ``except`` below, where the key name is added -- nothing else would
+    ever name it, since a carried value's key is renamed before it
+    reaches any downstream gate.
+    """
+    _validate_scale_dict({"type": old_type, key: value})
+    try:
+        _validate_scale_values({"type": old_type, key: value})
+    except ValueError as err:
+        raise ValueError(f"scale: {key} {err}") from None
 
 
 def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
@@ -54,23 +90,57 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
     - When the effective ``type`` is unchanged — or the channel carries no
       ``scale=`` at all, which reaches here as ``{}`` — nothing is filtered and
       every base-scale key still applies.
-    - When the type IS changing, each base-scale key is validated exactly once
-      and only the keys the new type also accepts survive.  A key the OLD type
-      never accepted, and a key the switch is about to drop, are both probed
-      under the old type through the real wire gate
-      (``ferrum._core.validate_scale_dict``), so they refuse with the identical
-      message that base scale raises standalone.  The switch may neither
-      launder a bad key into silence nor promote one into effect because the
-      new type happens to declare a same-named field.
-    - A key BOTH types accept is deliberately NOT value-validated here: its
-      value must reach the new type's own downstream gate untouched (a string
-      ``domain`` is illegal under ``linear`` and legal under ``band``).
-    - A non-``str`` or unknown override ``type`` skips filtering entirely, so
-      the gate's own "unknown variant" / type error surfaces instead of a PyO3
-      argument-coercion error naming ``scale_accepted_keys``'s parameter.
+    - When the type IS changing, each base-scale key is validated exactly once.
+      A key the OLD type never accepted is probed under the old type through
+      the real wire gate (``ferrum._core.validate_scale_dict``), so it refuses
+      with the identical message that base scale raises standalone. The
+      padding-family keys (``padding``, ``paddingInner``, ``paddingOuter``,
+      ``align``) are translated by meaning onto the new type -- an ordinal
+      inner gap becomes a band inner gap, a point's end padding becomes a
+      band outer padding, and so on -- by ``ferrum._core.translate_scale_switch``,
+      the one Rust owner of that meaning table. Every other key
+      the new type doesn't accept is dropped, same as a padding-family key
+      with no meaning under the new type. A dropped key's value is probed
+      under the old type the same way an unknown-to-old-type key is, so a
+      value the switch is about to discard still refuses if it was already
+      malformed.
+    - Every padding-family key present on the base scale (``ferrum._core.
+      scale_padding_keys(old_type)``, so this restates no pair rule of its
+      own) is also value-checked under the OLD type, through
+      :func:`_refuse_old_type_padding_value`, before the merge returns --
+      whether the switch carries that key's value under a new name or drops
+      it. The translation preserves bounds by construction (each carry
+      target's bound equals its source's), so a carried value is malformed
+      after the switch exactly when it was already malformed under the
+      old type, in the key the user wrote. This
+      is the one check for BOTH a carried value (nothing else ever checks
+      it -- it reaches the new type's own field under a different key name,
+      so the new type's downstream gate sees a key the user never wrote) and
+      a dropped padding-family value's BOUNDS specifically (the dropped-key
+      probe above only checks shape, via ``validate_scale_dict``). Two
+      refusal voices exist by design: a BOUND failure names the scale and
+      the key the user wrote (``scale: <key> <clause>``) -- caught only by
+      this check, and only when the override switches the scale's type;
+      without the override, the same value reaches ``to_spec()``
+      unchecked. A wrong-type value is caught by the existing shape probe
+      first instead and keeps THAT probe's own ``scale: invalid type ...``
+      text, which names no key; this value reads identically whether this
+      check or the dropped-key probe catches it, and identically with or
+      without the override in play.
+    - A key BOTH types accept, and survives the translation untouched, is
+      deliberately NOT value-validated here: its value must reach the new
+      type's own downstream gate untouched (a string ``domain`` is illegal
+      under ``linear`` and legal under ``band``).
+    - A non-``str`` type, or one no ``ferrum._core.scale_type_tags()`` entry
+      names, skips filtering entirely, so the gate's own "unknown variant" /
+      type error surfaces instead of a PyO3 argument-coercion error naming
+      ``scale_accepted_keys``'s parameter -- checked against the published
+      tag list rather than by catching ``translate_scale_switch``'s own
+      ``ValueError``, so a genuine Rust refusal (e.g. the collision case in
+      its docstring) can never be laundered into this fall-through.
 
     ``base_scale`` is never mutated.  ``tests/test_override_scale_merge.py``
-    pins each of these rules (introduced in b6ed6e6d).
+    pins each of these rules.
     """
     old_type = base_scale.get("type")
     new_type = scale_overrides.get("type", old_type)
@@ -98,31 +168,40 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
             {"type": old_type, **{k: base_scale[k] for k in unknown_under_old}},
         )
 
-    accepted_new: set[str] | None
-    if isinstance(new_type, str):
-        try:
-            accepted_new = set(_scale_accepted_keys(new_type))
-        except ValueError:
-            # Unknown new type: fall through unfiltered so the gate's own
-            # "unknown variant" error surfaces.
-            accepted_new = None
-    else:
-        # Non-string type: don't hand it to the &str-typed
-        # scale_accepted_keys, whose argument error is not this gate's voice.
-        accepted_new = None
-    if accepted_new is not None:
-        drop = accepted_old - accepted_new
-        # Bucket 2: keys the filter below is about to drop. They never reach
-        # new_type's downstream gate, so nobody validates their VALUE if this
-        # probe doesn't. Bucket 3 (accepted by both) is the survivors, checked
-        # downstream under new_type.
-        dropped_present = {k for k in base_scale if k != "type" and k in drop}
-        if dropped_present:
-            _validate_scale_dict(
-                {"type": old_type, **{k: base_scale[k] for k in dropped_present}},
-            )
-        base_scale = {k: v for k, v in base_scale.items() if k not in drop}
-    return {**base_scale, **scale_overrides}
+    # Non-string type, or one no real ScaleSpec tag names: don't hand it to
+    # the &str-typed translate_scale_switch, whose own "unknown variant"
+    # ValueError is not this gate's voice to catch -- checking against the
+    # published tag list up front means a ValueError translate_scale_switch
+    # DOES raise (its collision refusal) always propagates, never falls
+    # through here as if it meant "unknown type".
+    if not isinstance(new_type, str) or new_type not in _SCALE_TYPE_TAGS:
+        return {**base_scale, **scale_overrides}
+    translated, dropped = _translate_scale_switch(old_type, new_type, base_scale)
+
+    # Bucket 2: keys the translation above drops (the keys the new type does
+    # not accept, and padding-family keys no carry reads). They never reach
+    # new_type's downstream gate, so nobody validates their SHAPE if this
+    # probe doesn't. Bucket 3 (survivors) is checked downstream, under
+    # new_type.
+    if dropped:
+        _validate_scale_dict(
+            {"type": old_type, **{k: base_scale[k] for k in dropped}},
+        )
+
+    # Padding-family BOUNDS (and, for a carried key, shape too -- nothing
+    # else ever checks a carried value): see the docstring and
+    # _refuse_old_type_padding_value. Runs after the dropped-key shape
+    # probe above, so a key that probe already refuses (e.g. a
+    # shape-malformed `align`) keeps that probe's voice; this adds only the
+    # cases it doesn't cover -- a bound failure as "scale: <key> <clause>",
+    # a wrong-type value through the same shape probe's own
+    # "scale: invalid type ..." text (naming no key).
+    for key in _scale_padding_keys(old_type):
+        value = base_scale.get(key)
+        if value is not None:
+            _refuse_old_type_padding_value(old_type, key, value)
+
+    return {**translated, **scale_overrides}
 
 
 def refuse_malformed_scale_overrides(
@@ -131,10 +210,12 @@ def refuse_malformed_scale_overrides(
     """Refuse a malformed OVERRIDE scale value, naming the override path.
 
     Rust owns every verdict: ``ferrum._core.validate_scale_values`` runs the
-    same data-free checks the render path would otherwise run (today, band-
-    padding bounds) and raises a bare clause with no call, channel or key in
-    it. This function adds only provenance -- it routes each override wire
-    key's value to that gate one at a time and, on refusal, names the flat
+    same data-free checks the render path would otherwise run -- band
+    padding bounds, point ``padding`` (finite >= 0) and ``align`` (``[0,
+    1]``), and ordinal ``padding`` (``[0, 1]``) --
+    and raises a bare clause with no call, channel or key in it. This
+    function adds only provenance -- it routes each override wire key's
+    value to that gate one at a time and, on refusal, names the flat
     override path the caller actually wrote (``x_scale_padding``, not
     ``padding``). It holds no bound, no vocabulary and no default of its own.
 

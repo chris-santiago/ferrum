@@ -1,9 +1,9 @@
 """Regression tests for the ``Chart.override(<channel>_scale_*=...)`` cascade.
 
-Split out of ``tests/test_scale_dict_gate.py`` (design review, 2026-09-04): that
-module covers the raw-dict scale key GATE, a wire-boundary feature; these cover
-``Chart.override``'s scale-leaf merge, which is override-cascade behavior that
-merely *interacts* with the gate. Per the repo's test-file convention (stated in
+``tests/test_scale_dict_gate.py`` covers the raw-dict scale key GATE, a
+wire-boundary feature; this module covers ``Chart.override``'s scale-leaf
+merge, which is override-cascade behavior that merely *interacts* with the
+gate. Per the repo's test-file convention (stated in
 ``tests/marks/test_boxen_palette.py``'s module docstring), the two belong in separate
 modules -- and this one sits next to ``tests/test_override.py``, where the rest
 of the override surface, including the per-leaf render sweep that guards the
@@ -37,6 +37,7 @@ never the helper directly. Its contract, in the order the sections below pin it:
 from __future__ import annotations
 
 import json
+import re
 
 import polars as pl
 import pytest
@@ -88,8 +89,8 @@ def test_override_type_switch_linear_to_log_drops_stale_zero_key(
 @pytest.mark.parametrize("mark_name, _x", _TYPE_SWITCH_MARKS, ids=_TYPE_SWITCH_MARK_IDS)
 def test_override_type_switch_log_to_linear_drops_stale_base_key(mark_name: str, _x: str) -> None:
     """The reverse-direction switch: ``fm.LogScale()`` (carries ``base``)
-    overridden to ``linear`` must drop ``base`` — the sibling repro from
-    the quality review, proving the fix is not accidentally one-directional.
+    overridden to ``linear`` must drop ``base`` — the sibling case to the
+    previous test, proving the drop is not accidentally one-directional.
     """
     chart = _chart_with_y_scale(mark_name, fm.LogScale()).override(y_scale_type="linear")
     scale = json.loads(chart.to_spec().to_json())["encoding"]["y"]["scale"]
@@ -240,7 +241,7 @@ def test_override_mixed_family_type_switch_on_color_channel_renders() -> None:
 
 def test_bar_override_y_scale_domain_matches_explicit_zero_false_not_zero_true() -> None:
     """DELIBERATE BEHAVIOR CHANGE (round 2's override-merge/zero-anchor
-    reorder; flag for a T8 changelog callout): before the reorder, a bar's
+    reorder): before the reorder, a bar's
     ``.override(y_scale_domain=[...])`` got the zero-anchor injected FIRST
     onto an empty scale (``{"type": "linear", "zero": True}``), then had
     ``domain`` merged on top, producing ``{"type": "linear", "zero": True,
@@ -251,10 +252,9 @@ def test_bar_override_y_scale_domain_matches_explicit_zero_false_not_zero_true()
     correctly suppressed — matching the pre-existing, documented rule that
     a channel-level ``scale={"domain": ...}`` already suppresses the
     zero-anchor (``tests/test_bar_zero.py::test_bar_explicit_domain_no_zero``).
-    Sharper than a tick-label assertion (per the spec reviewer's addendum):
-    equality with the explicit ``zero: False`` spelling AND inequality
-    with the explicit ``zero: True`` spelling, over the exact repro pair
-    the spec reviewer independently confirmed.
+    Asserts the sharper pair, not just a tick-label check: equality with
+    the explicit ``zero: False`` spelling AND inequality with the
+    explicit ``zero: True`` spelling, over the exact repro pair below.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [50.0, 120.0, 90.0]})
     svg_override = (
@@ -287,7 +287,7 @@ def test_bar_override_y_scale_domain_matches_explicit_zero_false_not_zero_true()
 
 
 def test_override_type_switch_typo_base_key_still_refuses() -> None:
-    """Case B (spec review cycle 4, finding 1): ``clammp`` (a typo of
+    """Case B: ``clammp`` (a typo of
     ``clamp``) is not a real field of ``linear`` OR ``log``, so a
     type-changing override must refuse it exactly as the no-override
     control (case A) does, rather than letting it vanish silently the way
@@ -320,7 +320,7 @@ def test_override_type_switch_typo_base_key_still_refuses() -> None:
 
 
 def test_override_type_switch_key_invalid_for_old_type_is_not_promoted() -> None:
-    """Case C (spec review cycle 4, finding 1, "sharper"): ``nice`` is not
+    """Case C: ``nice`` is not
     a ``band`` field, so ``{"type": "band", "nice": True}`` refuses with no
     override at all (case A control, asserted first). ``nice`` IS a real
     ``log`` field, though, so before round 5's old-type-validity check, a
@@ -355,10 +355,10 @@ def test_override_type_switch_key_invalid_for_old_type_is_not_promoted() -> None
 # 5. Round 5: non-string override-type value must not leak a PyO3
 # argument-coercion error through an explicit base scale
 #
-# Shared with section 6's old-type parametrization below (round 7,
-# rust-quality cycle-6 finding 7): one list of malformed "type" values
-# feeds both the override slot (this section) and the base slot (section 6),
-# so the two positions cannot drift apart the way round 6's two
+# Shared with section 6's old-type parametrization below (round 7): one
+# list of malformed "type" values feeds both the override slot (this
+# section) and the base slot (section 6), so the two positions cannot
+# drift apart the way round 6's two
 # independently hand-typed lists did (``float:1.5`` was override-only-
 # absent, ``none:None`` was missing from both).
 # ---------------------------------------------------------------------------
@@ -422,9 +422,9 @@ def test_override_nonstring_type_same_error_class_with_and_without_base_scale(
     """The same malformed ``<channel>_scale_type=`` value, with vs. without
     an explicit base scale on the channel, must land in the SAME downstream
     error path — not diverge into the PyO3 argument-coercion error on one
-    side (explicit base) and the real gate's own message on the other (no
-    base), which is exactly the class/no-base inconsistency the round-4
-    rust-quality review found and this round's ``isinstance`` guard closes.
+    side (explicit base) and the real gate's own message on the other
+    (no base), which is exactly the class/no-base inconsistency this
+    round's ``isinstance`` guard closes.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
 
@@ -673,6 +673,16 @@ _DROPPED_BUCKET_CASES = [
     pytest.param({"type": "linear", "zero": "yes"}, "band", id="linear_zero-to-band"),
     pytest.param({"type": "log", "base": "ten"}, "band", id="log_base-to-band"),
     pytest.param({"type": "band", "align": "left"}, "linear", id="band_align-to-linear"),
+    # A padding-family value with no meaning under the new type is dropped
+    # the same way as any other dropped key, and must still refuse under
+    # the OLD type's value bounds before it is discarded -- a continuous
+    # span fraction switched to a discrete type, and a discrete inner gap
+    # switched to a type with no
+    # end-padding slot (ordinal has none; point's own end padding, named
+    # ``padding`` too, is a different field the switch does not read from
+    # here).
+    pytest.param({"type": "linear", "padding": "wide"}, "band", id="linear_padding-to-band"),
+    pytest.param({"type": "ordinal", "padding": "wide"}, "point", id="ordinal_padding-to-point"),
 ]
 
 
@@ -733,3 +743,463 @@ def test_override_type_switch_surviving_key_untouched_by_dropped_bucket_probe() 
     assert scale["type"] == "band"
     assert scale["domain"] == ["a", "b", "c"]
     assert "<svg" in chart.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# 9. The padding-family meaning table a type-changing override reads
+# (``ferrum._core.translate_scale_switch``), on every pair that table
+# covers. ``merge_encoding_scale`` is only the consumer -- the pairs
+# themselves are owned in Rust
+# (``scale/discrete.rs``'s ``PaddingMeaning``) and probed directly in the
+# Rust test suite; these assert the Python-visible effect end to end,
+# through ``Chart.to_spec()``.
+# ---------------------------------------------------------------------------
+
+
+def _scale_dict(chart: "fm.Chart", channel: str = "x") -> dict:
+    return json.loads(chart.to_spec().to_json())["encoding"][channel]["scale"]
+
+
+_PADDING_PAIR_MATRIX = [
+    # (id, field, base_scale dict, new_type, present {key: value}, absent [keys])
+    # `field` is the numeric column "val" when `new_type` is continuous
+    # (needs a numeric domain to render at all) and the categorical column
+    # "cat" otherwise.
+    pytest.param(
+        "cat",
+        {"type": "ordinal", "padding": 0.3},
+        "band",
+        {"paddingInner": 0.3},
+        ["padding", "paddingOuter"],
+        id="ordinal_padding-to-band",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "ordinal", "padding": 0.3},
+        "point",
+        {},
+        ["padding"],
+        id="ordinal_padding-to-point",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "point", "padding": 0.4, "align": 0.0},
+        "band",
+        {"paddingOuter": 0.4, "align": 0.0},
+        ["padding", "paddingInner"],
+        id="point_padding_align-to-band",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "band", "paddingInner": 0.3, "paddingOuter": 0.2, "align": 0.1},
+        "ordinal",
+        # BandPaddingKey::INNER_PRECEDENCE: paddingInner wins over padding.
+        {"padding": 0.3},
+        ["paddingInner", "paddingOuter", "align"],
+        id="band_inner_outer_align-to-ordinal",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "band", "paddingInner": 0.3, "paddingOuter": 0.2, "align": 0.1},
+        "point",
+        # BandPaddingKey::OUTER_PRECEDENCE: paddingOuter wins over padding.
+        {"padding": 0.2, "align": 0.1},
+        ["paddingInner", "paddingOuter"],
+        id="band_inner_outer_align-to-point",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "band", "padding": 0.4},
+        "ordinal",
+        {"padding": 0.4},
+        [],
+        id="band_shorthand_padding-to-ordinal",
+    ),
+    pytest.param(
+        "cat",
+        {"type": "band", "padding": 0.4},
+        "point",
+        {"padding": 0.4},
+        ["paddingInner", "paddingOuter"],
+        id="band_shorthand_padding-to-point",
+    ),
+    pytest.param(
+        "val",
+        {"type": "linear", "padding": 0.1},
+        "band",
+        {},
+        ["padding"],
+        id="linear_padding-to-band_continuous_to_discrete_drops",
+    ),
+    pytest.param(
+        "val",
+        {"type": "band", "paddingInner": 0.3, "paddingOuter": 0.2},
+        "linear",
+        {},
+        ["padding", "paddingInner", "paddingOuter"],
+        id="band-to-linear_discrete_to_continuous_drops",
+    ),
+]
+
+
+@pytest.mark.parametrize("field, base_scale, new_type, present, absent", _PADDING_PAIR_MATRIX)
+def test_padding_pair_matrix_translates_by_meaning(
+    field: str, base_scale: dict, new_type: str, present: dict, absent: list
+) -> None:
+    """``.override(x_scale_type=...)`` over an explicit padding-family base
+    carries each pair exactly as the padding-family meaning table states,
+    through the real render path (not a direct call to
+    ``translate_scale_switch``), AND
+    renders the identical SVG as the equivalent TARGET scale declared
+    directly with ``present`` as its own padding-family kwargs.
+
+    The comparison chart declares the SAME keys (``present``) directly, so
+    this proves the MERGE produced the right translated values -- a merge
+    bug that drops or rekeys a value cannot pass it, since the comparison
+    chart's dict would then differ from the switched chart's translated
+    one. It does not independently prove the RENDERER honors those keys: a
+    renderer that ignored ``paddingInner``/``paddingOuter``/``align``
+    entirely would ignore them on both sides of this comparison alike and
+    still match. Renderer coverage of those keys is assumed to live in
+    other test files (e.g. ``tests/test_band_padding_inherit.py``'s
+    measured bar-width assertions).
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X(field, scale=base_scale), y="val")
+        .override(x_scale_type=new_type)
+    )
+    scale = _scale_dict(chart)
+    assert scale["type"] == new_type
+    for key, value in present.items():
+        assert scale[key] == value, f"expected {key}={value}, got {scale.get(key)!r}"
+    for key in absent:
+        assert key not in scale, f"expected {key} to be dropped, found {scale[key]!r}"
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    equivalent = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X(field, scale={"type": new_type, **present}), y="val")
+    )
+    assert svg == equivalent.to_svg(), (
+        "the switched chart's rendered geometry must match the target scale "
+        "declared directly with the SAME padding-family values"
+    )
+
+
+def test_ordinal_scale_plain_to_band_byte_identical_to_unpadded_band() -> None:
+    """``fm.OrdinalScale(domain=[...])``'s wire-default ``padding`` of 0.0
+    (the class door always serializes it, unlike the bare ``{"type":
+    "ordinal"}`` dict door, which omits a key nobody set) carries to
+    ``paddingInner`` 0.0, which renders byte-identical to an explicit plain
+    (unpadded) band. Uses the class, not the dict door: the dict door has
+    no ``padding`` key at all, so it exercises nothing to carry.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    switched = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.OrdinalScale(domain=["a", "b", "c"])), y="val")
+        .override(x_scale_type="band")
+    )
+    scale = _scale_dict(switched)
+    assert scale["paddingInner"] == 0.0
+    plain_band = fm.Chart(df).mark_point().encode(x=fm.X("cat", scale={"type": "band"}), y="val")
+    assert switched.to_svg() == plain_band.to_svg()
+
+
+def test_point_scale_unbounded_padding_carries_to_band_outer_and_renders() -> None:
+    """``PointScale(padding=2)``: point's own bound is "finite >= 0", so 2
+    is legal there. Carried to band's ``paddingOuter`` (also unbounded
+    above), it is legal there too and must render, not refuse it. A merge
+    that only dropped keys the new type doesn't accept would instead
+    carry this value onto band's own ``padding`` field (the same key
+    name, but a different meaning: band's both-sides shorthand, bounded
+    to ``[0, 1]``, not point's unbounded outer-only inset) and refuse it
+    there as an out-of-range band padding the user never set directly.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.PointScale(padding=2.0)), y="val")
+        .override(x_scale_type="band")
+    )
+    scale = _scale_dict(chart)
+    assert scale["paddingOuter"] == 2.0
+    assert "padding" not in scale
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    equivalent = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.BandScale(padding_outer=2.0)), y="val")
+    )
+    assert svg == equivalent.to_svg(), (
+        "must render identically to BandScale(padding_outer=2.0) declared directly"
+    )
+
+
+def test_point_scale_unbounded_padding_drops_on_switch_to_ordinal() -> None:
+    """The sibling of the case above: ``PointScale(padding=2)`` switched to
+    ``ordinal`` instead drops the value (ordinal has no end-padding slot),
+    rather than carrying an out-of-[0,1]-range value into ordinal's own
+    ``padding`` field.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.PointScale(padding=2.0)), y="val")
+        .override(x_scale_type="ordinal")
+    )
+    scale = _scale_dict(chart)
+    assert scale["padding"] == 0.0
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    equivalent = fm.Chart(df).mark_point().encode(x=fm.X("cat", scale={"type": "ordinal"}), y="val")
+    assert svg == equivalent.to_svg(), "must render identically to plain {'type': 'ordinal'}"
+
+
+def test_ordinal_scale_plain_to_point_renders_at_the_default() -> None:
+    """``fm.OrdinalScale(domain=[...])``'s own ``padding`` (0.0, always
+    serialized by the class door -- unlike the bare ``{"type": "ordinal"}``
+    dict door, which has no ``padding`` key to carry or drop in the first
+    place) has no meaning under ``point`` and is dropped, rather than
+    reinterpreted as point's end padding -- so a switch to ``point`` renders
+    at point's own 0.5 default, not at ordinal's 0.0 (which would put
+    points flush with the range ends).
+
+    A merge that only drops keys the new type doesn't accept would
+    instead keep ``padding`` by coincidence of key-name equality (both
+    ordinal and point have a field literally named ``padding``), carrying
+    0.0 unchanged and rendering points flush with the range ends, NOT at
+    the 0.5 default -- a real behavior difference the bare-dict version of
+    this test (with no ``padding`` key present at all) could not exercise.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    switched = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=fm.OrdinalScale(domain=["a", "b", "c"])), y="val")
+        .override(x_scale_type="point")
+    )
+    explicit_default = (
+        fm.Chart(df).mark_point().encode(x=fm.X("cat", scale=fm.PointScale()), y="val")
+    )
+    assert "padding" not in _scale_dict(switched)
+    assert switched.to_svg() == explicit_default.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# 10. The merge is one function reached from three call sites: the
+# chart-level channel build, the per-layer channel-object build, and the
+# per-layer bare-string-channel build. A single ``fm.Chart(...).layer(
+# fm.Layer(...))`` + chart-level ``.override(x_scale_type=...)`` exercises
+# the chart-level channel (this chart's own bare-string ``x="cat"``) and the
+# layer-channel-object door (the appended ``Layer``'s ``fm.X(...,
+# scale=...)``) in one render; the override cascades to both (``
+# _build_layers_list``'s own contract).
+# ---------------------------------------------------------------------------
+
+
+def test_padding_translation_reaches_layer_channel_object_door() -> None:
+    """The appended layer's own ``fm.X(..., scale=PointScale(padding=0.5))``
+    translates through the SAME ``.override(x_scale_type="band")`` as the
+    host chart's bare-string ``x`` channel (which carries no scale at all,
+    and so is left untouched by the translation, consistently with the
+    plain chart-channel door)."""
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    host = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x="cat", y="val")
+        .layer(
+            fm.Layer(
+                mark="point",
+                encoding={"x": fm.X("cat", scale=fm.PointScale(padding=0.5)), "y": "val"},
+            )
+        )
+        .override(x_scale_type="band")
+    )
+    spec = json.loads(host.to_spec().to_json())
+    layer_scales = [layer["encoding"]["x"]["scale"] for layer in spec["layers"]]
+    assert layer_scales[0] == {"type": "band", "align": 0.5}
+    assert layer_scales[1]["paddingOuter"] == 0.5
+    assert "padding" not in layer_scales[1]
+    equivalent = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale=fm.BandScale()), y="val")
+        .layer(
+            fm.Layer(
+                mark="point",
+                encoding={"x": fm.X("cat", scale=fm.BandScale(padding_outer=0.5)), "y": "val"},
+            )
+        )
+    )
+    # The two layers' x scales legitimately differ (unpadded band vs.
+    # paddingOuter=0.5), which is exactly what this test is pinning, so the
+    # layer-1-off-axis warning that difference triggers is expected here,
+    # not a signal of a merge bug.
+    with pytest.warns(UserWarning, match="its x scale differs"):
+        svg = host.to_svg()
+    with pytest.warns(UserWarning, match="its x scale differs"):
+        equivalent_svg = equivalent.to_svg()
+    assert svg == equivalent_svg, (
+        "must render identically to the two layers' target scales declared directly"
+    )
+
+
+def test_padding_translation_reaches_layer_string_channel_door() -> None:
+    """A layer whose own channel is the bare-string shorthand
+    (``encoding={"x": "cat"}``, the per-layer bare-string-channel build)
+    carries NO scale of its own -- its merge reaches ``merge_encoding_scale`` as
+    ``base_scale={"field": "cat"}``, with no ``"type"`` key to switch FROM,
+    so it short-circuits exactly like the chart-level no-scale door
+    (section 1's ``test_override_type_switch_on_auto_axis``). The override's
+    OWN leaves (``x_scale_type`` and the carried-looking ``x_scale_padding``,
+    which is really just an override leaf here, not a translated value)
+    still apply, unaffected by the padding-family translation having
+    nothing to translate.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    host = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x="cat", y="val")
+        .layer(fm.Layer(mark="line", encoding={"x": "cat", "y": "val"}))
+        .override(x_scale_type="band", x_scale_padding_outer=0.5)
+    )
+    spec = json.loads(host.to_spec().to_json())
+    layer_scales = [layer["encoding"]["x"]["scale"] for layer in spec["layers"]]
+    assert layer_scales[0]["type"] == "band"
+    assert layer_scales[0]["paddingOuter"] == 0.5
+    assert layer_scales[1] == layer_scales[0]
+    equivalent = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale=fm.BandScale(padding_outer=0.5)), y="val")
+        .layer(
+            fm.Layer(
+                mark="line",
+                encoding={"x": fm.X("cat", scale=fm.BandScale(padding_outer=0.5)), "y": "val"},
+            )
+        )
+    )
+    assert host.to_svg() == equivalent.to_svg(), (
+        "must render identically to both layers' target scale declared directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. A malformed padding-family value must refuse at ``to_spec()``,
+# BEFORE render, whether the switch carries it under a new key name
+# (nothing else ever checks a carried value -- it reaches the new type's
+# own field under a key the user never wrote) or drops it with only a
+# shape check. The translation preserves bounds by construction, so
+# checking under the OLD type, in the key the user wrote, covers both.
+#
+# Two refusal voices exist, by design. A BOUND failure names the scale
+# and the key in one place, ``scale: <key> <clause>``. A wrong-type value
+# goes through the existing shape probe first and keeps THAT probe's own
+# ``"scale: invalid type ..."`` text, which names no key at all. Messages
+# are pinned in full, anchored, not matched as a loose substring.
+# ---------------------------------------------------------------------------
+
+_MALFORMED_PADDING_TO_SPEC_REFUSALS = [
+    pytest.param(
+        {"type": "ordinal", "padding": 1.5},
+        "band",
+        "scale: padding must be in [0, 1]; got 1.5",
+        id="ordinal_padding_1.5-to-band_carried_bounds",
+    ),
+    pytest.param(
+        {"type": "point", "padding": -1.0},
+        "band",
+        "scale: padding must be a finite number >= 0; received -1",
+        id="point_padding_neg1-to-band_carried_bounds",
+    ),
+    pytest.param(
+        {"type": "band", "paddingInner": 1.5},
+        "ordinal",
+        "scale: paddingInner must be a number in [0, 1]; received 1.5",
+        id="band_paddingInner_1.5-to-ordinal_carried_bounds",
+    ),
+    pytest.param(
+        {"type": "band", "paddingOuter": -1.0},
+        "point",
+        "scale: paddingOuter must be a finite number >= 0; received -1",
+        id="band_paddingOuter_neg1-to-point_carried_bounds",
+    ),
+    pytest.param(
+        {"type": "band", "align": 5.0},
+        "ordinal",
+        "scale: align must be a number in [0, 1]; received 5",
+        id="band_align_5-to-ordinal_dropped_bounds",
+    ),
+    pytest.param(
+        {"type": "ordinal", "padding": "wide"},
+        "band",
+        'scale: invalid type: string "wide", expected f64',
+        id="ordinal_padding_wide-to-band_carried_wrong_type",
+    ),
+]
+
+
+@pytest.mark.parametrize("base_scale, new_type, message", _MALFORMED_PADDING_TO_SPEC_REFUSALS)
+def test_malformed_padding_value_refuses_at_to_spec_not_render(
+    base_scale: dict, new_type: str, message: str
+) -> None:
+    """Each malformed value here is caught at ``to_spec()``, before render.
+    The five BOUND rows refuse naming both the scale and the key the user
+    wrote (``scale: <key> <clause>``); the sixth, wrong-type row refuses
+    through the existing shape probe's own ``scale: invalid type ...``
+    text, which names no key.
+
+    A merge that never value-checks a padding-family key under its own
+    type splits the five bound rows two ways:
+
+    - ``ordinal_padding_1.5-to-band`` and ``point_padding_neg1-to-band``
+      (both carried onto band's own ``paddingInner``/``paddingOuter``)
+      would still refuse, but only at ``to_svg()``, under BAND's own
+      render-time bound check, naming the CARRIED key (``band scale on x:
+      paddingInner must be a number in [0, 1]; received 1.5``) -- a key
+      the user never wrote.
+    - ``band_paddingInner_1.5-to-ordinal``, ``band_paddingOuter_neg1-to-
+      point`` and ``band_align_5-to-ordinal`` would render completely
+      silently (``to_svg()`` succeeding): ordinal and point have no
+      render-time bound check on their own padding dict door.
+
+    ``ordinal_padding_wide-to-band`` is a different kind of row: a
+    shape-malformed value like this one is already caught by the
+    existing shape probe standalone, with the identical ``scale: invalid
+    type: string "wide", expected f64`` text, so no bound check is needed
+    to refuse it. This row instead pins that the bound check runs AFTER
+    that shape probe, not in its place: if the shape probe were skipped,
+    the wrong-type value would go through the bound check's wrapper
+    instead and come out KEYED, as ``scale: padding invalid type: string
+    "wide", expected f64`` -- which differs from the shape gate's own
+    un-keyed text, so the same value would read differently depending on
+    whether the switch carried it or dropped it.
+
+    Every row here refuses at ``to_spec()``; the five bound rows name the
+    key the user actually wrote, and the wrong-type row keeps the shape
+    probe's own un-keyed text.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("cat", scale=base_scale), y="val")
+        .override(x_scale_type=new_type)
+    )
+    # Refused at to_spec() itself -- before render, not merely before
+    # to_svg() returns a string. The full message is pinned, anchored, so
+    # a stray prefix or suffix (e.g. a missing/extra "scale: " or key name)
+    # fails the test instead of slipping past a loose substring match.
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
+        chart.to_spec()

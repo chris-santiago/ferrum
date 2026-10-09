@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
-use super::discrete::{DiscreteLayout, DEFAULT_POINT_PADDING};
+use super::discrete::{check_align, check_point_padding, DiscreteLayout, DEFAULT_POINT_PADDING};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,12 +57,13 @@ impl PointScaleData {
 /// domain : list[str], optional
 ///     Ordered list of category labels. When ``None``, the renderer derives
 ///     the domain from data.
-/// padding : float, default 0.5
+/// padding : float, optional
 ///     Outer padding expressed as a fraction of step size:
 ///     ``step = extent / (n - 1 + 2 * padding)``. ``0.0`` puts the first and
-///     last categories exactly on the range endpoints; the default ``0.5``
-///     holds half a step at each end, which places the points on the same
-///     pixels an unpadded band scale centers its bands at.
+///     last categories exactly on the range endpoints. When ``None`` (the
+///     default) the renderer holds half a step at each end, which places the
+///     points on the same pixels an unpadded band scale centers its bands at.
+///     Must be a finite number >= 0.
 /// align : float, default 0.5
 ///     Where the points sit within any *leftover* space, in ``[0.0, 1.0]``.
 ///
@@ -120,16 +121,11 @@ impl PointScale {
         reverse: bool,
         range: Option<Vec<f64>>,
     ) -> PyResult<Self> {
-        if let Some(padding) = padding.filter(|p| !p.is_finite() || *p < 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "PointScale(padding=...) must be a finite number >= 0; received {padding}"
-            )));
+        if let Some(padding) = padding {
+            check_point_padding(padding)
+                .map_err(|clause| PyValueError::new_err(format!("PointScale(padding=...) {clause}")))?;
         }
-        if !align.is_finite() || !(0.0..=1.0).contains(&align) {
-            return Err(PyValueError::new_err(format!(
-                "PointScale(align=...) must be a number in [0, 1]; received {align}"
-            )));
-        }
+        check_align(align).map_err(|clause| PyValueError::new_err(format!("PointScale(align=...) {clause}")))?;
         let r = match range {
             Some(v) => {
                 validate_band_point_range(&v)?;
@@ -174,9 +170,10 @@ impl PointScale {
         self.range.map(|r| r.to_vec())
     }
 
-    /// Outer padding as a fraction of step size.
+    /// Outer padding as a fraction of step size, as passed, or ``None`` when
+    /// unset (the renderer then holds half a step at each end).
     #[getter]
-    fn padding(&self) -> f64 { self.data.resolved_padding() }
+    fn padding(&self) -> Option<f64> { self.data.padding }
 
     /// Alignment within leftover space.
     #[getter]
@@ -405,7 +402,7 @@ mod tests {
         let unset = PointScale::new(None, None, 0.5, false, None).unwrap();
         let json = serde_json::to_value(unset.to_scale_spec()).unwrap();
         assert!(json.get("padding").is_none(), "{json}");
-        assert_eq!(unset.padding(), DEFAULT_POINT_PADDING);
+        assert_eq!(unset.padding(), None);
         let explicit = PointScale::new(None, Some(0.5), 0.5, false, None).unwrap();
         assert_eq!(serde_json::to_value(explicit.to_scale_spec()).unwrap()["padding"], serde_json::json!(0.5));
         assert_ne!(unset, explicit);
@@ -413,6 +410,16 @@ mod tests {
         let unset = PointScale::new(domain.clone(), None, 0.5, false, None).unwrap();
         let explicit = PointScale::new(domain, Some(0.5), 0.5, false, None).unwrap();
         assert_eq!(["a", "b", "c"].map(|c| unset.scale(c)), ["a", "b", "c"].map(|c| explicit.scale(c)));
+    }
+
+    /// The getter reports the padding as passed, `None` when unset, like
+    /// every sibling scale's getter; an explicit 0 is accepted and kept.
+    #[test]
+    fn padding_getter_reports_the_value_passed_or_none() {
+        let get = |padding: Option<f64>| PointScale::new(None, padding, 0.5, false, None).unwrap().padding();
+        assert_eq!(get(None), None);
+        assert_eq!(get(Some(0.0)), Some(0.0));
+        assert_eq!(get(Some(0.7)), Some(0.7));
     }
 
     /// The constructor's refusals name `PointScale` and the argument passed.
@@ -433,6 +440,10 @@ mod tests {
             assert_eq!(
                 refusal(Some(f64::INFINITY), 0.5),
                 "PointScale(padding=...) must be a finite number >= 0; received inf"
+            );
+            assert_eq!(
+                refusal(Some(f64::NAN), 0.5),
+                "PointScale(padding=...) must be a finite number >= 0; received NaN"
             );
             assert_eq!(refusal(None, 2.0), "PointScale(align=...) must be a number in [0, 1]; received 2");
             assert_eq!(refusal(None, f64::NAN), "PointScale(align=...) must be a number in [0, 1]; received NaN");

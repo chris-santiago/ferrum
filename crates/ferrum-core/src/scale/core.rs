@@ -16,6 +16,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::{Py, PyAny, PyResult, Python};
 
+use super::discrete::check_ordinal_padding;
 use crate::spec::encoding::{encode_serde_value_for_py, ContinuousScaleCommon, ScaleSpec};
 
 /// Named-field input to [`continuous_common`] (rust-design review S2,
@@ -210,11 +211,7 @@ pub(crate) fn validate_ordinal_domain(domain: &[String], padding: f64) -> PyResu
     if domain.is_empty() {
         return Err(PyValueError::new_err("domain must be non-empty"));
     }
-    if !padding.is_finite() || !(0.0..=1.0).contains(&padding) {
-        return Err(PyValueError::new_err(format!(
-            "padding must be in [0, 1]; got {padding}"
-        )));
-    }
+    check_ordinal_padding(padding).map_err(|clause| PyValueError::new_err(format!("padding {clause}")))?;
     let mut seen = std::collections::HashSet::new();
     for c in domain {
         if !seen.insert(c.as_str()) {

@@ -31,6 +31,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `refuse_malformed_scale_overrides` can ask Rust "is this one override
     // value valid?" and name the call itself.
     m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_values, m)?)?;
+    // The one owner of what a scale-type switch keeps: padding-family keys
+    // translated by meaning, every other key kept or dropped by the accepted
+    // key table, for `_override_consume.py`'s override-scale merge.
+    m.add_function(wrap_pyfunction!(spec::encoding::translate_scale_switch, m)?)?;
+    // The padding-family keys a scale type accepts, so a caller selecting
+    // them reads this set instead of restating it.
+    m.add_function(wrap_pyfunction!(spec::encoding::scale_padding_keys, m)?)?;
     // The sort-field-object vocabulary (`parse_sort_field_object`/
     // `EncodingSpec::new` enforce), published so
     // every sort-accepting Python channel (`X`/`Y`/`Facet`/...) validates
