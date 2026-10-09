@@ -148,3 +148,108 @@ def test_flipped_axis_orient_names_user_written_channel():
         "axis orient 'left' is invalid for the y axis "
         "(expected 'top' or 'bottom' — under CoordFlip, y renders as the horizontal axis)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. A `scale=` dict's own malformed value must name the channel the user
+#    wrote, not the resolved (post-flip) one: band padding and an explicit
+#    domain/range shape, flipped vs. unflipped pairs, plus the two
+#    exemptions that must stay untouched -- the chart-level `configure_axis`
+#    domain-config backstop (a physical-slot door, unaffected by CoordFlip)
+#    and an `.override(...)` scale value (already Python-voiced by the
+#    override path's own flat key, never touching this fix).
+# ---------------------------------------------------------------------------
+
+
+def test_flipped_band_dict_padding_names_user_written_channel():
+    """Flipped mark_bar with a malformed band `scale=` dict on x= must name
+    'x' (what the user wrote), not 'y' (the resolved physical slot CoordFlip
+    swaps it into)."""
+    df = pl.DataFrame({"cat": ["a", "b"], "val": [1.0, 2.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("cat", scale={"type": "band", "padding": 5}), y="val")
+        .coord(fm.CoordFlip())
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+
+    assert str(exc_info.value) == "band scale on x: padding must be a number in [0, 1]; received 5"
+
+
+def test_unflipped_band_dict_padding_names_literal_channel():
+    """Unflipped control: the same malformed band dict on x= must still name
+    'x' without CoordFlip in the picture -- the un-flip only changes
+    flipped-chart text."""
+    df = pl.DataFrame({"cat": ["a", "b"], "val": [1.0, 2.0]})
+    chart = fm.Chart(df).mark_bar().encode(x=fm.X("cat", scale={"type": "band", "padding": 5}), y="val")
+
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+
+    assert str(exc_info.value) == "band scale on x: padding must be a number in [0, 1]; received 5"
+
+
+def test_flipped_linear_dict_domain_names_user_written_channel_in_scale_vocabulary():
+    """Flipped mark_point with a malformed linear `scale=` dict on y= must
+    name 'y' (what the user wrote) in scale vocabulary ('y scale: ...'), not
+    the chart-level configure_axis backstop's 'axis scale-domain config'
+    wording -- this is a scale the caller wrote, not a config layer."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y=fm.Y("y", scale={"type": "linear", "domain": [5.0]}))
+        .coord(fm.CoordFlip())
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+
+    assert str(exc_info.value) == "y scale: domain must have length 2; got 1"
+
+
+def test_flipped_configure_axis_y_domain_error_names_physical_axis():
+    """Under CoordFlip, the chart-level `configure(axis_y=...)` domain-config
+    backstop must keep naming the physical 'y' axis -- `axis_y` is
+    resolved-slot vocabulary the user typed directly, never remapped under
+    flip, unlike a `scale=` dict's own channel (the two tests above).
+
+    `CoordFlip` swaps the encoding itself (`x` <-> `y`), so the `LogScale` is
+    authored on `x=` here: after the swap it is what the RESOLVED y slot
+    carries, which is the slot `axis_y=` always configures -- the same
+    error this log scale raises unflipped (`fm.LogScale(domain_min=0.0)`
+    naming 'y' in `tests/test_axis_config_plumbing.py`)."""
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "c": [1013.0, 2117.0, 3311.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("c", scale=fm.LogScale(clamp=True)), y="a")
+        .coord(fm.CoordFlip())
+        .configure(axis_y=fm.AxisConfig(domain_min=0.0))
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+
+    assert str(exc_info.value) == "y axis scale-domain config: log scale domain must not contain 0"
+
+
+def test_flipped_override_scale_padding_refusal_is_unaffected_by_r3_fix():
+    """An `.override(x_scale_padding=...)` band-padding refusal is already
+    Python-voiced by the flat override path the caller wrote (`x_scale_
+    padding`, not a resolved/physical slot), so it must be completely
+    unaffected by CoordFlip -- it is validated and raised before the
+    `CoordFlip` encoding swap ever runs, so it never reaches the Rust
+    `InvalidBandPadding` channel this fix corrects."""
+    df = pl.DataFrame({"cat": ["a", "b"], "val": [1.0, 2.0]})
+    chart = fm.Chart(df).mark_bar().encode(x="cat", y="val").coord(fm.CoordFlip())
+
+    with pytest.raises(ValueError) as exc_info:
+        chart.override(x_scale_type="band", x_scale_padding=5).to_svg()
+
+    assert str(exc_info.value) == (
+        "Chart.override(x_scale_padding=...) must be a number in [0, 1]; received 5"
+    )

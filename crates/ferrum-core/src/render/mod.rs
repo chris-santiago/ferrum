@@ -219,6 +219,23 @@ impl FormatSurface {
     }
 }
 
+/// The public entry a [`RenderError::InvalidScaleDomainConfig`] refusal
+/// names: a `domain`/`range` the caller wrote directly on a scale (a class
+/// or a raw `scale=` dict), or `configure_axis`'s chart-level domain config
+/// (`domain_min`/`domain_max`/`zero`/`nice`, and the per-axis spellings)
+/// resolved against the scale's own data domain. `Display` speaks in each
+/// surface's own vocabulary: `Scale` names the scale the caller wrote,
+/// `AxisConfig` keeps the existing axis-config wording, since that refusal
+/// is about a chart-level config layer rather than the scale itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleDomainSurface {
+    /// `LinearScale(domain=[5.0])` or `{"type": "linear", "domain": [5.0]}`.
+    Scale,
+    /// `configure_axis(domain_min=, domain_max=, ...)` and its per-axis
+    /// spellings (`axis_x`/`axis_y`/`axis_y2`).
+    AxisConfig,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
@@ -350,13 +367,39 @@ pub enum RenderError {
     /// the render-side backstop for a raw-dict `chart_config` that never went
     /// through it, mirroring how `scale_resolve::color` quotes the same
     /// sentence for a raw-dict discretizing scale.
-    InvalidScaleDomainConfig { channel: String, reason: String },
+    ///
+    /// `surface` picks the `Display` wording (see [`ScaleDomainSurface`]):
+    /// `validate_explicit_continuous_shape` (a `scale=` dict/class's own
+    /// malformed `domain`/`range`) constructs `Scale`; `apply_axis_domain_config`
+    /// (the chart-level config layer) constructs `AxisConfig`, keeping the
+    /// axis wording this refusal always had, since it is the config layer that
+    /// is malformed, not the scale the caller wrote. `channel` is the RESOLVED
+    /// (post-`CoordFlip`) token for the `Scale` surface; `coord_flipped` un-flips
+    /// it back to what the user wrote. The `AxisConfig` surface always resolves
+    /// `false` — `axis_x`/`axis_y`/`axis_y2` are resolved-slot vocabulary the
+    /// user typed directly, never remapped under flip.
+    InvalidScaleDomainConfig {
+        channel: String,
+        reason: String,
+        surface: ScaleDomainSurface,
+        coord_flipped: bool,
+    },
     /// A band scale's `padding`/`paddingInner`/`paddingOuter` outside d3's
     /// bounds. The `BandScale` constructor refuses the same values at the
     /// call; this is the refusal for a scale dict (or an override type
     /// switch), which reaches Rust unvalidated. `channel` follows
-    /// `InvalidScaleDomainConfig`'s convention.
-    InvalidBandPadding { channel: String, error: crate::scale::discrete::BandPaddingError },
+    /// `InvalidScaleDomainConfig`'s convention; so does `coord_flipped` — the
+    /// RESOLVED (post-`CoordFlip`) token un-flipped back to what the user
+    /// wrote. Constructed `false` at `scale_resolve::positional::
+    /// build_from_scale_spec`'s `ScaleSpec::Band` arm; corrected to the real
+    /// flip flag by the one caller that has it in hand
+    /// (`scale_resolve::positional::build_axis_scale`'s `map_err` around its
+    /// `build_from_scale_spec` call).
+    InvalidBandPadding {
+        channel: String,
+        error: crate::scale::discrete::BandPaddingError,
+        coord_flipped: bool,
+    },
     /// An `interpolate=` mark kwarg named a curve method outside the accepted
     /// vocabulary (spec §6.1). `value` is the rejected string; the accepted set
     /// in the message comes from
@@ -971,8 +1014,6 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::HtmlBundleAssembly(_)
         | RenderError::UnsupportedChannelCombination { .. }
         | RenderError::InvalidFormatSpec { .. }
-        | RenderError::InvalidScaleDomainConfig { .. }
-        | RenderError::InvalidBandPadding { .. }
         | RenderError::UnknownInterpolate { .. }
         | RenderError::UnknownStrokeCap { .. }
         | RenderError::UnknownStrokeJoin { .. }
@@ -991,6 +1032,25 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // from `spec.coord` exactly as the `EncodingTypeMismatch` beside it
         // does), so this boundary must leave it alone rather than overwrite it.
         | RenderError::LayerMissingPositionalChannel { .. }
+        // Carries `coord_flipped`. The `Scale`-surface construction
+        // (`scale_resolve::positional::validate_explicit_continuous_shape`)
+        // is constructed `false` and corrected to the real flip flag by the
+        // one caller that has it in hand
+        // (`scale_resolve::positional::build_axis_scale`'s `map_err` around
+        // its `build_from_scale_spec` call, the one place every error this
+        // returns is a `scale=` dict's own refusal) — same discipline as
+        // `LayerUnknownColumn`/`LayerMissingPositionalChannel` above, so this
+        // boundary must leave it alone rather than overwrite it. The sibling
+        // `AxisConfig`-surface construction inside `apply_axis_domain_config`
+        // (the config-path backstop) resolves `false` directly and is never
+        // corrected, like the chart-level `TimeFormatOnNonTemporalScale`
+        // surface above.
+        | RenderError::InvalidScaleDomainConfig { .. }
+        // Carries `coord_flipped`, constructed `false` at
+        // `scale_resolve::positional::build_from_scale_spec`'s
+        // `ScaleSpec::Band` arm and corrected by the same caller and
+        // discipline as `InvalidScaleDomainConfig` directly above.
+        | RenderError::InvalidBandPadding { .. }
         // #126: carries no channel token at all — a color string, not a
         // positional channel.
         | RenderError::ColorRangeParseFailure { .. }
@@ -1160,16 +1220,24 @@ impl std::fmt::Display for RenderError {
                     )
                 }
             }
-            Self::InvalidScaleDomainConfig { channel, reason } => write!(
-                f,
-                "{channel} axis scale-domain config: {reason}"
-            ),
-            Self::InvalidBandPadding { channel, error } => write!(
-                f,
-                "band scale on {channel}: {} {}",
-                error.key().wire_key(),
-                error.reason()
-            ),
+            Self::InvalidScaleDomainConfig { channel, reason, surface, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                match surface {
+                    ScaleDomainSurface::Scale => write!(f, "{channel} scale: {reason}"),
+                    ScaleDomainSurface::AxisConfig => {
+                        write!(f, "{channel} axis scale-domain config: {reason}")
+                    }
+                }
+            }
+            Self::InvalidBandPadding { channel, error, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(
+                    f,
+                    "band scale on {channel}: {} {}",
+                    error.key().wire_key(),
+                    error.reason()
+                )
+            }
             Self::UnknownInterpolate { value } => {
                 use crate::transform::vocabulary::Vocabulary;
                 f.write_str(&marks::curve::Interpolate::refusal("interpolate", value))

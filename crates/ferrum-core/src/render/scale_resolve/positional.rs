@@ -15,7 +15,7 @@ use crate::scale::time::TimeScale;
 use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::DataType as SpecDataType;
 
-use crate::render::{RenderError, RenderWarning};
+use crate::render::{RenderError, RenderWarning, ScaleDomainSurface};
 
 use super::domain::{
     apply_sort_to_domain, layered_caller_scale, locate_field, numeric_domain_union,
@@ -302,7 +302,35 @@ pub(in crate::render) fn build_axis_scale(
                 Ok((lo, hi))
             }
         };
-        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, &data_extent, warnings);
+        // `channel` here is the RESOLVED (post-`CoordFlip`) token
+        // `build_from_scale_spec` validated against, same as every other
+        // reader of `coord_flipped` in this function. A malformed `scale=`
+        // dict/class is the one refusal this call can raise that names a
+        // channel the USER wrote (band padding, an explicit domain/range
+        // shape) rather than a resolved/physical one, so it is the one
+        // refusal corrected here rather than left to read the resolved
+        // token. Every other error this call can return (`UnknownColumn`,
+        // `EmptyDomain`, ...) passes through unchanged. The
+        // `InvalidScaleDomainConfig` arm matches only the `Scale` surface —
+        // this call never produces the `AxisConfig` surface today, and
+        // matching on it explicitly means a future caller that did route an
+        // `AxisConfig` error through here could not have it un-flipped by
+        // mistake; it would fall to the `other` arm unchanged instead.
+        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, &data_extent, warnings)
+            .map_err(|error| match error {
+                RenderError::InvalidBandPadding { channel, error: e, .. } => {
+                    RenderError::InvalidBandPadding { channel, error: e, coord_flipped }
+                }
+                RenderError::InvalidScaleDomainConfig { channel, reason, surface: ScaleDomainSurface::Scale, .. } => {
+                    RenderError::InvalidScaleDomainConfig {
+                        channel,
+                        reason,
+                        surface: ScaleDomainSurface::Scale,
+                        coord_flipped,
+                    }
+                }
+                other => other,
+            });
     }
 
     let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
@@ -619,6 +647,7 @@ pub(in crate::render) fn build_from_scale_spec(
             let layout = padding.layout(*align).map_err(|error| RenderError::InvalidBandPadding {
                 channel: channel.to_string(),
                 error,
+                coord_flipped: false,
             })?;
             let mut d = match domain {
                 Some(d) => d.clone(),
@@ -790,6 +819,8 @@ fn validate_explicit_continuous_shape(
             return Err(RenderError::InvalidScaleDomainConfig {
                 channel: channel.to_string(),
                 reason: format!("domain must have length 2; got {}", d.len()),
+                surface: ScaleDomainSurface::Scale,
+                coord_flipped: false,
             });
         }
     }
@@ -798,6 +829,8 @@ fn validate_explicit_continuous_shape(
             return Err(RenderError::InvalidScaleDomainConfig {
                 channel: channel.to_string(),
                 reason: format!("range must have length 2; got {}", r.len()),
+                surface: ScaleDomainSurface::Scale,
+                coord_flipped: false,
             });
         }
     }
@@ -1158,6 +1191,8 @@ pub(in crate::render) fn apply_axis_domain_config(
         return Err(RenderError::InvalidScaleDomainConfig {
             channel: channel.to_string(),
             reason: crate::scale::core::DEGENERATE_DOMAIN_MESSAGE.to_string(),
+            surface: ScaleDomainSurface::AxisConfig,
+            coord_flipped: false,
         });
     }
     let (new_lo, new_hi) = if reversed { (d_hi, d_lo) } else { (d_lo, d_hi) };
@@ -1166,6 +1201,8 @@ pub(in crate::render) fn apply_axis_domain_config(
         .map_err(|reason| RenderError::InvalidScaleDomainConfig {
             channel: channel.to_string(),
             reason: reason.to_string(),
+            surface: ScaleDomainSurface::AxisConfig,
+            coord_flipped: false,
         })?;
     scale.set_data_domain(new_lo, new_hi);
     Ok(())
@@ -1758,6 +1795,49 @@ mod tests {
         }
     }
 
+    /// Under `CoordFlip`, a `scale=` dict's malformed band padding must name
+    /// the channel the USER wrote (`x`), not the RESOLVED physical slot
+    /// `build_axis_scale` actually validates against (`y`, since the flip
+    /// swaps positional channels before this runs). Goes through the real
+    /// `build_axis_scale` entry point, not `build_from_scale_spec` directly,
+    /// so the `coord_flipped` this reads is the one `resolve_scales` would
+    /// compute from `spec.coord`, not a hand-set test double.
+    #[test]
+    fn band_dict_malformed_padding_under_coord_flip_names_user_written_channel() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use std::collections::HashMap;
+
+        let cats: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let batch = category_batch("cat", &cats);
+        let enc = EncodingSpec {
+            field: "cat".into(),
+            type_: None,
+            scale: Some(serde_json::from_str::<ScaleSpec>(r#"{"type":"band","padding":1.5}"#).unwrap()),
+            ..Default::default()
+        };
+        let mut spec = minimal_point_chart_spec();
+        spec.coord = Some(CoordKind::Flip);
+        let outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let mut warnings = Vec::new();
+        let err = super::build_axis_scale(
+            "y",
+            &enc,
+            None,
+            super::PositionalFields { x: None, y: Some("cat") },
+            &batch,
+            &outputs,
+            (0.0, 500.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidBandPadding { .. }), "{err:?}");
+        assert_eq!(err.to_string(), "band scale on x: padding must be a number in [0, 1]; received 1.5");
+    }
+
     // ── explicitness gates: degenerate inputs (ported from
     // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
 
@@ -1965,7 +2045,75 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "x axis scale-domain config: domain must have length 2; got 1"
+            "x scale: domain must have length 2; got 1"
+        );
+    }
+
+    /// Under `CoordFlip`, the same shape refusal must name the channel the
+    /// USER wrote (`y`), not the RESOLVED physical slot (`x`) this call
+    /// validates against, and must speak in scale vocabulary ("y scale: ..."),
+    /// not the chart-level config backstop's "axis scale-domain config"
+    /// wording — that wording is for `configure_axis`, which this is not.
+    #[test]
+    fn linear_domain_shape_under_coord_flip_names_user_written_channel_in_scale_vocabulary() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use std::collections::HashMap;
+
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let enc = EncodingSpec {
+            field: "v".into(),
+            type_: None,
+            scale: Some(ScaleSpec::Linear {
+                common: reverse_common(Some(vec![5.0]), None, false),
+                nice: false,
+                zero: false,
+                system_injected: false,
+            }),
+            ..Default::default()
+        };
+        let mut spec = minimal_point_chart_spec();
+        spec.coord = Some(CoordKind::Flip);
+        let outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let mut warnings = Vec::new();
+        let err = super::build_axis_scale(
+            "x",
+            &enc,
+            None,
+            super::PositionalFields { x: Some("v"), y: None },
+            &batch,
+            &outputs,
+            (0.0, 500.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidScaleDomainConfig { .. }), "{err:?}");
+        assert_eq!(err.to_string(), "y scale: domain must have length 2; got 1");
+    }
+
+    /// The chart-level `configure_axis` domain-config backstop is a
+    /// different door from the `scale=` dict shape check above and must
+    /// keep its existing wording and physical-slot `channel` regardless of
+    /// `CoordFlip` — `apply_axis_domain_config` takes no flip context at
+    /// all, by design (its callers always pass the resolved axis-config
+    /// slot, which `axis_x`/`axis_y`/`axis_y2` already name directly).
+    #[test]
+    fn axis_domain_config_degenerate_domain_keeps_axis_config_wording() {
+        use crate::scale::linear::LinearScale;
+
+        let mut scale = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0], vec![0.0, 400.0], false, false,
+        ));
+        let cfg = super::AxisDomainConfig { min: Some(5.0), max: Some(5.0), nice: None, zero: None };
+        let mut warnings = Vec::new();
+        let err = super::apply_axis_domain_config(&mut scale, &cfg, "y", false, &mut warnings).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidScaleDomainConfig { .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            format!("y axis scale-domain config: {}", crate::scale::core::DEGENERATE_DOMAIN_MESSAGE)
         );
     }
 
