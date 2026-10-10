@@ -115,6 +115,7 @@ pub fn compute_layout(
         show_x: !cartesian_axes_suppressed,
         show_y: !cartesian_axes_suppressed,
         secondary_y: Vec::new(),
+        panels: Vec::new(),
     };
     // Bottom of the grid/domain precedence chain (D4, spec §4.3), same as the
     // full `render_svg`/interactive orchestration: every axis that expressed

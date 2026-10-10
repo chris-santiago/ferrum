@@ -279,7 +279,18 @@ fn padding_meaning_for_scale_type(scale_type: &str) -> Option<PaddingMeaning> {
 ///
 /// Carried values are never checked or coerced here: a value malformed under
 /// the new type reaches [`validate_scale_values`] and the scale gate as the
-/// user wrote it. Returns a new dict and never mutates `base`; the same type
+/// user wrote it.
+///
+/// Every carry preserves bounds: the key a carry writes accepts every value
+/// the key it reads accepts under the old type. Ordinal `padding`, band
+/// `paddingInner` and band `padding` are all in `[0, 1]`; point `padding` and
+/// band `paddingOuter` are both finite and `>= 0`, and band `padding`'s
+/// `[0, 1]` lies inside that; `align` is in `[0, 1]` on band and point alike.
+/// So a carried value that passes the old type's bound check also passes the
+/// new key's, which is why checking a switched scale's padding values under
+/// the old type is enough to catch every out-of-bounds one, carried or
+/// dropped. A carry added to [`PaddingMeaning::switch_carries`] must keep
+/// this, or the new key's own check must run on what it carries. Returns a new dict and never mutates `base`; the same type
 /// returns a copy of `base` and drops nothing. Raises the same `ValueError`
 /// as [`scale_accepted_keys`] for an unknown tag on either side.
 #[pyfunction]
@@ -1577,6 +1588,47 @@ mod tests {
             pairs("band", &[("padding", "0.4")])
         );
         assert_eq!(switched("band", "point", &[("paddingOuter", V::None), ("align", V::None)]), pairs("band", &[]));
+    }
+
+    /// Every carry preserves bounds: across every switch between the
+    /// discrete types, a padding-family value the old type accepts is, once
+    /// carried, accepted by the new type. Each key is sampled at and beyond
+    /// its bounds, so the population holds both carried values and values
+    /// the old type refuses.
+    #[test]
+    fn every_carry_keeps_a_value_the_old_type_accepts_acceptable() {
+        let discrete = ["ordinal", "band", "point"];
+        let samples = [-0.5, 0.0, 0.5, 1.0, 1.5, 4.0];
+        let (mut carried, mut refused_by_old) = (0, 0);
+        attach(|py| {
+            for old in discrete {
+                for new in discrete.into_iter().filter(|&t| t != old) {
+                    let keys = padding_meaning_for_scale_type(old).unwrap().keys();
+                    for &key in keys {
+                        for value in samples {
+                            let base = scale_dict(py, old, &[(key, V::Num(value))]);
+                            if validate_scale_values(py, &base).is_err() {
+                                refused_by_old += 1;
+                                continue;
+                            }
+                            let (out, dropped) = translate_scale_switch(py, old, new, &base).unwrap();
+                            if dropped.iter().any(|k| k == key) {
+                                continue;
+                            }
+                            carried += 1;
+                            out.set_item("type", new).unwrap();
+                            if let Err(err) = validate_scale_values(py, &out) {
+                                panic!(
+                                    "{old} {key}={value} is accepted, but carried to {new} it is refused: {}",
+                                    err.value(py)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(carried > 0 && refused_by_old > 0, "carried {carried}, refused by the old type {refused_by_old}");
     }
 
     /// A carried value is neither checked nor coerced: one out of bounds for

@@ -198,18 +198,7 @@ pub fn build_scene(
     // base data, or the named `data_source` output it reads. A panel's layer
     // batches are these filtered to its facet; a swarm's packing bound reads
     // them whole, so every facet panel packs at the same diameter.
-    let chart_layer_batches: Vec<RecordBatch> = prep
-        .layers
-        .iter()
-        .map(|layer| match &layer.data_source {
-            None => prep.final_batch().clone(),
-            Some(name) => prep
-                .transform_outputs
-                .get(name)
-                .expect("layer.data_source validated by prepare_render_inputs")
-                .clone(),
-        })
-        .collect();
+    let chart_layer_batches = chart_layer_batches(prep);
 
     // The swarm each layer is placed by: one packing per swarm for the whole
     // chart, shared by every layer it feeds in every panel ([`position::chart_swarms`]'s
@@ -267,17 +256,8 @@ pub fn build_scene(
             ));
         }
 
-        // Facet filter: filter the merged batch on col (and row in grid mode).
-        let panel_batch = if let Some(key) = &panel.facet_key {
-            let col_filtered = filter_batch_by_facet(prep.final_batch(), &key.field, &key.value)?;
-            if let Some(rk) = &panel.row_facet_key {
-                filter_batch_by_facet(&col_filtered, &rk.field, &rk.value)?
-            } else {
-                col_filtered
-            }
-        } else {
-            prep.final_batch().clone()
-        };
+        let facet_keys = (panel.facet_key.as_ref(), panel.row_facet_key.as_ref());
+        let panel_batch = panel_batch(prep, facet_keys)?;
         // #118 exemption table item (c): a panel with no rows for its own
         // facet combination (an incomplete factorial design, an empty
         // category after a chart-level filter, …) is a legitimate, common
@@ -292,27 +272,9 @@ pub fn build_scene(
         }
         any_panel_resolved = true;
 
-        // Layer batch resolution
-        let layer_batches: Vec<RecordBatch> = prep
-            .layers
-            .iter()
-            .zip(&chart_layer_batches)
-            .map(|(layer, src)| match &layer.data_source {
-                None => Ok(panel_batch.clone()),
-                Some(_) => {
-                    if let Some(key) = &panel.facet_key {
-                        let col_filtered = filter_batch_by_facet(src, &key.field, &key.value)?;
-                        if let Some(rk) = &panel.row_facet_key {
-                            filter_batch_by_facet(&col_filtered, &rk.field, &rk.value)
-                        } else {
-                            Ok(col_filtered)
-                        }
-                    } else {
-                        Ok(src.clone())
-                    }
-                }
-            })
-            .collect::<Result<Vec<_>, RenderError>>()?;
+        let layer_batches =
+            panel_layer_batches(prep, &chart_layer_batches, &panel_batch, facet_keys)?;
+
 
         // GH #70: this panel's displacement from the reference (panel 0)
         // plot-area origin, threaded into `resolve_panel_scales` so an
@@ -327,7 +289,7 @@ pub fn build_scene(
         // `resolve_panel_scales` seam, so the prepare provisional pass and this
         // per-panel pass cannot drift on what scales get built or on remembering
         // to re-apply the color config.
-        let (rendering_spec_for_panel, scales) = resolve_panel_scales(
+        let (_, scales) = resolve_panel_scales(
             &panel_resolve_ctx,
             panel,
             &panel_batch,
@@ -376,7 +338,6 @@ pub fn build_scene(
         // Independent-axis rebuild (MOD-09): owns the per-panel layouts so the
         // effective references below stay valid for the rest of the block.
         let panel_axes = resolve_panel_axes(
-            &rendering_spec_for_panel,
             spec,
             &scales,
             prep,
@@ -384,7 +345,8 @@ pub fn build_scene(
             panel_idx,
             theme,
             &facet_metrics,
-        )?;
+            layout.x_label_band_budget.unwrap_or(f64::INFINITY),
+        );
 
         // Resolve the effective per-panel axis references: use the freshly-built
         // independent layout when available, otherwise the global shared one.
@@ -830,6 +792,165 @@ pub(in crate::render) struct PanelResolveCtx<'a> {
     pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
 }
 
+/// Each layer's whole-chart batch: the chart's final batch, or the named
+/// transform output a layer reads from.
+fn chart_layer_batches(prep: &PreparedInputs) -> Vec<RecordBatch> {
+    prep.layers
+        .iter()
+        .map(|layer| match &layer.data_source {
+            None => prep.final_batch().clone(),
+            Some(name) => prep
+                .transform_outputs
+                .get(name)
+                .expect("layer.data_source validated by prepare_render_inputs")
+                .clone(),
+        })
+        .collect()
+}
+
+/// A facet panel's `(column key, row key)`; both `None` for an unfaceted
+/// chart, the row key `None` in wrap mode.
+type FacetKeys<'a> = (Option<&'a crate::layout::FacetKey>, Option<&'a crate::layout::FacetKey>);
+
+/// `batch` filtered to one facet panel's rows: on the column key, then the
+/// row key in grid mode; unfiltered for an unfaceted chart.
+fn filter_to_panel(batch: &RecordBatch, (key, row_key): FacetKeys) -> Result<RecordBatch, RenderError> {
+    let Some(key) = key else {
+        return Ok(batch.clone());
+    };
+    let col_filtered = filter_batch_by_facet(batch, &key.field, &key.value)?;
+    match row_key {
+        Some(rk) => filter_batch_by_facet(&col_filtered, &rk.field, &rk.value),
+        None => Ok(col_filtered),
+    }
+}
+
+/// The chart's final batch filtered to one facet panel.
+fn panel_batch(prep: &PreparedInputs, keys: FacetKeys) -> Result<RecordBatch, RenderError> {
+    filter_to_panel(prep.final_batch(), keys)
+}
+
+/// Each layer's batch for one facet panel: `panel_batch` for a layer on the
+/// chart's data, its own transform output filtered to the panel otherwise.
+fn panel_layer_batches(
+    prep: &PreparedInputs,
+    chart_layer_batches: &[RecordBatch],
+    panel_batch: &RecordBatch,
+    keys: FacetKeys,
+) -> Result<Vec<RecordBatch>, RenderError> {
+    prep.layers
+        .iter()
+        .zip(chart_layer_batches)
+        .map(|(layer, src)| match &layer.data_source {
+            None => Ok(panel_batch.clone()),
+            Some(_) => filter_to_panel(src, keys),
+        })
+        .collect()
+}
+
+/// The axis input an independent facet panel draws on one channel: `base`
+/// (the chart's axis input, carrying every override) with the tick labels,
+/// their projection and the band placement re-derived from that panel's own
+/// resolved `scale`, through the same [`build_axis_tick_inputs`] the shared
+/// axis uses. The tick count follows the chart's own axis, so every panel
+/// gets a similar label density; the encoding's label format applies
+/// immediately; independent panels draw no minor ticks.
+///
+/// `scale` must be resolved over the placeholder `(0, 1)` pixel range the
+/// prepare pass uses: [`build_axis_tick_inputs`] reads the scale inset as a
+/// fraction of that unit span, and layout re-applies it to the panel, the way
+/// the panel's marks are inset.
+///
+/// [`build_axis_tick_inputs`]: super::prepare::build_axis_tick_inputs
+fn independent_axis_input(
+    base: &crate::layout::AxisInput,
+    scale: &scale_resolve::ScaleKind,
+    encoding: Option<&crate::spec::encoding::EncodingSpec>,
+    is_y: bool,
+    coord_flipped: bool,
+) -> Result<crate::layout::AxisInput, RenderError> {
+    let (format, format_type) = super::prepare::resolve_axis_label_format(encoding);
+    let (labels, projection, _threaded) = super::prepare::build_axis_tick_inputs(
+        scale,
+        base.tick_labels.len().max(1),
+        super::prepare::TickFormatMode::Immediate {
+            format: format.as_deref(),
+            format_type: format_type.as_deref(),
+        },
+        is_y,
+        Vec::new(),
+    )
+    .map_err(|e| super::with_coord_flipped(e, coord_flipped))?;
+    let mut input = base.clone();
+    input.tick_labels = labels;
+    input.tick_projection = projection;
+    input.categorical_placement = scale.categorical_placement();
+    Ok(input)
+}
+
+/// For a faceted chart whose x or y scale resolves independently per panel,
+/// the axis inputs each panel draws, by panel index (facet group order, the
+/// order layout lays the panels out in); empty when no channel is
+/// independent. Only the panels the grid keeps are resolved
+/// ([`crate::layout::FacetMode::kept_panel_count`]); a panel a grid drops
+/// draws nothing.
+/// The one place those inputs are decided: layout lays each
+/// panel's axes out and reserves its bands from them, and
+/// [`resolve_panel_axes`] draws them.
+///
+/// Each panel's scales are resolved through the same [`resolve_panel_scales`]
+/// seam the panel render uses, over the placeholder `(0, 1)` pixel range the
+/// prepare pass resolves the chart's own axes over, so the tick labels, their
+/// domain fractions and the scale inset are in the form layout projects onto
+/// the panel ([`independent_axis_input`]). A panel with no rows draws nothing
+/// and gets no inputs. Scale warnings are not kept here; the panel render
+/// reports them.
+pub(in crate::render) fn independent_panel_axis_inputs(
+    ctx: &PanelResolveCtx,
+    facet_groups: &[crate::layout::FacetGroup],
+) -> Result<Vec<crate::layout::PanelAxisInputs>, RenderError> {
+    let Some(facet) = ctx.spec.facet.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let x_independent = facet.resolve.x == ResolveMode::Independent;
+    let y_independent = facet.resolve.y == ResolveMode::Independent;
+    if !x_independent && !y_independent {
+        return Ok(Vec::new());
+    }
+    let prep = ctx.prep;
+    let chart_layer_batches = chart_layer_batches(prep);
+    let kept = facet.mode.kept_panel_count(facet_groups.len() as u32) as usize;
+    facet_groups
+        .iter()
+        .take(kept)
+        .map(|group| {
+            let keys = (Some(&group.key), group.row_key.as_ref());
+            let batch = panel_batch(prep, keys)?;
+            if batch.num_rows() == 0 {
+                return Ok(crate::layout::PanelAxisInputs::default());
+            }
+            let layer_batches = panel_layer_batches(prep, &chart_layer_batches, &batch, keys)?;
+            let placeholder = crate::layout::PanelLayout {
+                plot_area: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+                facet_key: Some(group.key.clone()),
+                row_facet_key: group.row_key.clone(),
+                ..crate::layout::PanelLayout::default()
+            };
+            let mut discarded = Vec::new();
+            let (rendering, scales) =
+                resolve_panel_scales(ctx, &placeholder, &batch, &layer_batches, &mut discarded, (0.0, 0.0))?;
+            let encoding = &rendering.encoding;
+            let x = x_independent
+                .then(|| independent_axis_input(&prep.axes.x, &scales.x, encoding.x.as_ref(), false, prep.coord_flipped))
+                .transpose()?;
+            let y = y_independent
+                .then(|| independent_axis_input(&prep.axes.y, &scales.y, encoding.y.as_ref(), true, prep.coord_flipped))
+                .transpose()?;
+            Ok(crate::layout::PanelAxisInputs { x, y })
+        })
+        .collect()
+}
+
 /// The single per-panel scale-build seam: merge the layer-0 encoding onto the
 /// chart encoding, substitute reactive `domainParam` references into concrete
 /// domains (D6: a named variable's static numeric-array value becomes the
@@ -1101,22 +1222,15 @@ struct PanelAxes {
     y_independent: bool,
 }
 
-/// Rebuild the per-panel independent axes (MOD-09 extraction of the inline
-/// independent-axis block). Pure extraction — same tick-input derivation through
-/// the shared [`build_axis_tick_inputs`] helper (SPINE-07), same `Immediate`
-/// format mode, same empty minor vec (independent panels do not rebuild minor
-/// ticks), same `layout_x_axis`/`layout_y_axis` calls. A non-independent channel
-/// yields `None`, so the caller keeps the global layout for it.
-///
-/// Errors (#133) when `build_axis_tick_inputs` refuses a time-typed format on
-/// a non-temporal resolved scale — the third surface the issue's "both paths"
-/// phrasing did not name. `rendering_spec_for_panel.encoding` is the layer-0
-/// (post-`CoordFlip`) encoding, the same shape `build_axis_input`'s two PATCH
-/// chains correct for, so this fn's caller applies the identical R3
-/// `coord_flipped` correction from `prep.coord_flipped`.
+/// Lay out the per-panel independent axes (MOD-09) over the panel's real rect,
+/// from the axis inputs [`independent_panel_axis_inputs`] resolved for this
+/// panel (carried on `prep.axes.panels`). A non-independent channel yields
+/// `None`, so the caller keeps the global layout for it. A time-typed format
+/// on a non-temporal independent scale (#133) is refused when those inputs
+/// are resolved, before layout. `x_band_budget` is the bound layout laid
+/// the x axes' labels out within ([`LayoutResult::x_label_band_budget`]).
 #[allow(clippy::too_many_arguments)]
 fn resolve_panel_axes(
-    rendering_spec_for_panel: &ChartSpec,
     spec: &ChartSpec,
     scales: &scale_resolve::ResolvedScales,
     prep: &PreparedInputs,
@@ -1124,7 +1238,8 @@ fn resolve_panel_axes(
     panel_idx: usize,
     theme: &ThemeInputs,
     facet_metrics: &super::font::FontdueMetrics,
-) -> Result<PanelAxes, RenderError> {
+    x_band_budget: f64,
+) -> PanelAxes {
     // Independent-axis override: when the facet spec requests independent
     // resolution for x or y, rebuild that channel's AxisLayout from the
     // per-panel scales. Shared channels keep the global layout as-is.
@@ -1139,59 +1254,21 @@ fn resolve_panel_axes(
         .map(|f| f.resolve.y == ResolveMode::Independent)
         .unwrap_or(false);
 
-    // Re-derive raw format specs from the merged rendering encoding so that
-    // independent-axis label formatting uses the same precedence logic as
-    // the shared path (Axis(label_format=) > encoding.format > none).
-    // `resolve_axis_label_format` is the canonical single source of truth
-    // for this precedence — calling it here avoids duplicating the logic
-    // and ensures both paths stay in sync.
-    let (x_fmt_spec, x_fmt_type) =
-        super::prepare::resolve_axis_label_format(rendering_spec_for_panel.encoding.x.as_ref());
-    let (y_fmt_spec, y_fmt_type) =
-        super::prepare::resolve_axis_label_format(rendering_spec_for_panel.encoding.y.as_ref());
-
+    // The panel's own axis inputs are the ones layout laid the panel out
+    // with and reserved its bands for (`prep.axes.panels`, resolved once by
+    // `independent_panel_axis_inputs`). Only the band placement is taken
+    // from this panel's real scale: an explicit Band/Point range is
+    // chart-absolute, re-anchored onto each panel (GH #70) just as the
+    // panel's marks are.
     let independent_x = if x_independent {
-        // Use the global tick count as the hint so per-panel independent axes
-        // produce a similar label density to what the layout engine chose globally.
-        let x_tick_count = prep.axes.x.tick_labels.len().max(1);
-        let mut x_input = prep.axes.x.clone();
-        // Re-derive the per-panel labels + projection through the SAME
-        // `build_axis_tick_inputs` helper the global axis path uses, so the
-        // tick_labels → non-ordinal-y reverse → format → projection sequence
-        // lives in one place. `Immediate` mode applies the encoding-level label
-        // format to the fresh per-panel raw labels right away (the per-panel
-        // layout is built directly below, bypassing `apply_label_format_to_axis`).
-        // Independent panels keep `minor: Vec::new()` (no per-panel minor-tick
-        // rebuild), passed as the empty minor vec.
-        let (new_x_labels, x_projection, _threaded) = super::prepare::build_axis_tick_inputs(
-            &scales.x,
-            x_tick_count,
-            super::prepare::TickFormatMode::Immediate {
-                format: x_fmt_spec.as_deref(),
-                format_type: x_fmt_type.as_deref(),
-            },
-            false,
-            Vec::new(),
-        )
-        .map_err(|e| super::with_coord_flipped(e, prep.coord_flipped))?;
-        x_input.tick_labels = new_x_labels;
-        x_input.tick_projection = x_projection;
-        // Re-derive the band placement from THIS panel's scale (F-L04-03): a
-        // categorical facet axis places its labels at the scale's band centers,
-        // matching the marks. `None` for continuous scales.
+        let mut x_input = prep.axes.x_for_panel(panel_idx).clone();
         x_input.categorical_placement = scales.x.categorical_placement();
-        // `#146`/spec §4.3: the context carries the theme's own gap policy,
-        // exactly as the three `layout::compute_layout` call sites do. This
-        // site used to hardcode the compile-time default, which made
-        // `Theme(cull_threshold=)` and `Theme(cull_labels=)` entirely inert on
-        // an independent-x facet axis while the shared-axis paths honored them.
-        // `LabelBandCtx::for_axis` is the ONE production derivation of the
-        // panel's font size, gap, tick size and metrics, so this site cannot
-        // drift from the three `layout::compute_layout` sites by re-deriving
-        // them differently. It is a single obvious home, not an enforced
-        // invariant: the struct's fields are `pub`, so a hand-assembled context
-        // with a hardcoded gap is still spellable.
-        let ctx = crate::layout::LabelBandCtx::for_axis(&x_input, theme, facet_metrics);
+        // `#146`/spec §4.3: `LabelBandCtx::for_axis` is the one production
+        // derivation of the panel's font size, gap policy, tick size and
+        // metrics, so this site honors `Theme(cull_threshold=)` and
+        // `Theme(cull_labels=)` exactly as the shared-axis layout does.
+        let ctx = crate::layout::LabelBandCtx::for_axis(&x_input, theme, facet_metrics)
+            .with_band_budget(x_band_budget);
         let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
             &x_input,
             panel.plot_area,
@@ -1206,28 +1283,7 @@ fn resolve_panel_axes(
     };
 
     let independent_y = if y_independent {
-        let y_tick_count = prep.axes.y.tick_labels.len().max(1);
-        let mut y_input = prep.axes.y.clone();
-        // Same `build_axis_tick_inputs` helper as the global/x path. `is_y =
-        // true` carries the non-ordinal-y label/fraction reversal (high values
-        // at the top of the inverted y pixel range) and the projection's
-        // reversed fractions, in lockstep — so the carrier stays index-aligned
-        // with the reversed labels. `Immediate` format mode; empty minor vec.
-        let (new_y_labels, y_projection, _threaded) = super::prepare::build_axis_tick_inputs(
-            &scales.y,
-            y_tick_count,
-            super::prepare::TickFormatMode::Immediate {
-                format: y_fmt_spec.as_deref(),
-                format_type: y_fmt_type.as_deref(),
-            },
-            true,
-            Vec::new(),
-        )
-        .map_err(|e| super::with_coord_flipped(e, prep.coord_flipped))?;
-        y_input.tick_labels = new_y_labels;
-        y_input.tick_projection = y_projection;
-        // Same band-placement carrier as the x path above, from THIS panel's
-        // y scale (F-L04-03).
+        let mut y_input = prep.axes.y_for_panel(panel_idx).clone();
         y_input.categorical_placement = scales.y.categorical_placement();
         let y_label_fs = y_input
             .overrides
@@ -1249,12 +1305,12 @@ fn resolve_panel_axes(
         None
     };
 
-    Ok(PanelAxes {
+    PanelAxes {
         independent_x,
         independent_y,
         x_independent,
         y_independent,
-    })
+    }
 }
 
 /// Routed axis + grid scene nodes for one panel (MOD-09).
@@ -4410,6 +4466,7 @@ mod tests {
             secondary_y_axes: Vec::new(),
             plot_region: Rect::ZERO,
             padded_region: Rect::ZERO,
+            x_label_band_budget: None,
         }
     }
 

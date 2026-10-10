@@ -923,9 +923,49 @@ pub struct AxesInput {
     /// chart has no independent-y layer, so layout reserves no extra band and
     /// emits no extra axis — byte-identical to the pre-#52 shared path.
     pub secondary_y: Vec<AxisInput>,
+    /// For a faceted chart whose x or y scale resolves independently per
+    /// panel: by panel index, the axis inputs each panel actually draws,
+    /// resolved from that panel's own scale (see [`PanelAxisInputs`]). Empty
+    /// when no channel is independent, so every panel draws `x` and `y`.
+    pub panels: Vec<PanelAxisInputs>,
+}
+
+/// One facet panel's own axis inputs, for a channel whose scale resolves
+/// independently per panel; `None` for a shared channel (the panel draws the
+/// chart's `x` or `y`) and for a panel that draws nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PanelAxisInputs {
+    pub x: Option<AxisInput>,
+    pub y: Option<AxisInput>,
 }
 
 impl AxesInput {
+    /// The x axis input panel `panel_index` draws: its own when its x scale
+    /// is independent, else the chart's.
+    pub fn x_for_panel(&self, panel_index: usize) -> &AxisInput {
+        self.panels.get(panel_index).and_then(|p| p.x.as_ref()).unwrap_or(&self.x)
+    }
+
+    /// The y axis input panel `panel_index` draws: its own when its y scale
+    /// is independent, else the chart's.
+    pub fn y_for_panel(&self, panel_index: usize) -> &AxisInput {
+        self.panels.get(panel_index).and_then(|p| p.y.as_ref()).unwrap_or(&self.y)
+    }
+
+    /// Every x axis input some panel draws: the panels' own when x is
+    /// independent, else just `x`. The band each axis reserves is the largest
+    /// any of them needs.
+    pub(crate) fn drawn_x_inputs(&self) -> Vec<&AxisInput> {
+        let own: Vec<&AxisInput> = self.panels.iter().filter_map(|p| p.x.as_ref()).collect();
+        if own.is_empty() { vec![&self.x] } else { own }
+    }
+
+    /// The y twin of [`drawn_x_inputs`](Self::drawn_x_inputs).
+    pub(crate) fn drawn_y_inputs(&self) -> Vec<&AxisInput> {
+        let own: Vec<&AxisInput> = self.panels.iter().filter_map(|p| p.y.as_ref()).collect();
+        if own.is_empty() { vec![&self.y] } else { own }
+    }
+
     /// Fold the two theme-defaulted show toggles (`grid`, `domain`) into every
     /// axis's own override slot, so from here on the per-axis value is the
     /// FINAL answer and no consumer needs a second, theme-level gate.
@@ -951,8 +991,14 @@ impl AxesInput {
     /// so a dual-axis chart never gains a second, misaligned set of horizontal
     /// lines from the theme default.
     pub(crate) fn apply_show_defaults(&mut self, theme: &super::ThemeInputs) {
+        let per_panel = self
+            .panels
+            .iter_mut()
+            .flat_map(|p| [p.x.as_mut(), p.y.as_mut()])
+            .flatten();
         let primary = [&mut self.x, &mut self.y]
             .into_iter()
+            .chain(per_panel)
             .map(|axis| (axis, theme.grid.grid));
         let secondary = self.secondary_y.iter_mut().map(|axis| (axis, false));
         for (axis, grid_default) in primary.chain(secondary) {
@@ -1322,21 +1368,16 @@ use super::text_metrics::TextMetrics;
 ///
 /// At -90 this collapses to `tick_size + label_pad + font_size + max_label_w`
 /// (sin=1, cos=0); at angle 0 it collapses to `tick_size + label_pad + line_h`
-/// (sin=0, cos=1) — the SAME quantity `estimate_x_label_band`'s flat branch and
-/// `layout_x_axis`'s title placement compute directly (#97, spec §4.1). The
-/// formula is continuous in `angle`: callers no longer need to special-case
-/// `angle == 0`, they can call this unconditionally.
+/// (sin=0, cos=1) — the SAME quantity `drawn_x_label_band`'s flat branch
+/// computes for one line (#97, spec §4.1). The formula is continuous in
+/// `angle`: callers no longer need to special-case `angle == 0`, they can
+/// call this unconditionally.
 ///
-/// SYNC: render (`render/marks/axis.rs`), every branch of
-/// `estimate_x_label_band` (flat, wrapped, and rotated all now honor
-/// `tick_size + label_pad_eff`), and the title placement in `layout_x_axis`
-/// all depend on this for the **flat (single-line) and rotated cases**.
-/// Change those together or the x-axis title will overlap (or float above)
-/// the rotated labels. The **wrapped (S1, multi-line) case is the
-/// exception**: `estimate_x_label_band` reserves `max_lines` line heights,
-/// but `layout_x_axis`'s title placement still assumes one — a pre-existing
-/// (not introduced by #97) band/title asymmetry for wrapped x labels,
-/// deliberately left as-is; see the title-placement site's own comment.
+/// SYNC: render (`render/marks/axis.rs`) and [`drawn_x_label_band`] depend on
+/// this. `drawn_x_label_band` is the one band owner: `estimate_x_label_band`
+/// reserves from it and `layout_x_axis` places the x title from it, so the
+/// reserved band and the title placement agree for flat, wrapped and rotated
+/// labels.
 fn rotated_x_label_extent(
     angle: f64,
     max_label_w: f64,
@@ -1519,6 +1560,10 @@ pub struct LabelBandCtx<'m> {
     /// Text measurement, which must be the SAME implementation on both sides:
     /// facet panels measure through their own metrics instance.
     pub metrics: &'m dyn TextMetrics,
+    /// The tallest x label band the axis may draw, inclusive (see
+    /// [`lay_out_x_tick_labels`]); `f64::INFINITY`, the default, when the
+    /// band never bounds the labels.
+    pub band_budget: f64,
 }
 
 impl<'m> LabelBandCtx<'m> {
@@ -1560,46 +1605,36 @@ impl<'m> LabelBandCtx<'m> {
             label_gap,
             tick_size,
             metrics,
+            band_budget: f64::INFINITY,
         }
+    }
+
+    /// This context with the x label band bounded by `band_budget` (see
+    /// [`lay_out_x_tick_labels`]).
+    pub fn with_band_budget(self, band_budget: f64) -> Self {
+        Self { band_budget, ..self }
     }
 }
 
-/// Estimate the vertical space (in pixels) needed below the x-axis to
-/// accommodate tick labels, accounting for how the collision cascade is likely
-/// to resolve. Called by the layout orchestrator **before** the plot rect is
-/// finalized, so it uses worst-case inputs (longest label, estimated slot
-/// width). Over-reservation is acceptable; under-reservation causes clipping.
+/// The vertical space (in pixels) the x axis's tick labels need beside the
+/// axis line, for an axis laid out across a panel `panel_w` wide. Called by
+/// `reserve_axis_bands` **before** the plot rect is finalized, with the
+/// width the panel will have.
 ///
-/// The four inputs it shares with [`layout_x_axis`] — label font size, gap
-/// policy, tick size, metrics — arrive as one [`LabelBandCtx`], so a call site
-/// hands both functions the same value by default instead of assembling each
-/// separately. Not enforced: a caller can still build two different contexts
-/// (the fields are `pub`), so this makes agreement the path of least resistance
-/// rather than an invariant.
+/// It reserves exactly what the axis draws: the labels come from
+/// [`lay_out_x_tick_labels`], the same decision [`layout_x_axis`] lays the
+/// axis out from (same tick pixels, same per-tick budget, the whole
+/// collision cascade including the font shrink, wrapping, culling, elision
+/// and `label_overlap`, or an explicit `label_angle`), so the band and the
+/// drawn labels cannot disagree on the angle, the font or which labels draw.
+/// The four inputs it shares with [`layout_x_axis`] (label font size, gap
+/// policy, tick size, metrics) arrive as one [`LabelBandCtx`].
 ///
-/// `label_gap`'s pixel gap (spec §4.6, D9) shrinks every
-/// stage's fit budget by that many pixels — SYNC'd with
-/// `cascade_collision_recovery`'s identical treatment; see that function's
-/// doc for why the gap has to move with the fit test itself rather than
-/// only floor a stride once collision was already detected by pure overlap.
-/// The policy's cull MODE is deliberately not read here: S4 (cull) and S5
-/// (elide) reserve the same full -90° extent, so the band is the same
-/// whichever of them the real cascade lands on. Taking the whole policy
-/// rather than a bare gap keeps this predictor's signature SYNC'd with the
-/// cascade it mirrors.
-///
-/// Algorithm (mirrors the cascade order in `cascade_collision_recovery`):
-/// 0. If `show_labels` is false, return `0.0` — no text draws, so no band
-///    (drawn gate, see doc below).
-/// 1. If `label_angle_override` is set, use that angle directly.
-/// 2. If all labels fit flat, return `tick_size + label_pad_eff + line_height`
-///    (#97, spec §4.1 — the always-on standoff, not a bare `line_height`).
-/// 3. If wrapping resolves collision (all labels wrap successfully), return
-///    `tick_size + label_pad_eff + max_lines * line_height`.
-/// 4. Try each angle in `ANGLE_CASCADE`; first that passes returns the full
-///    geometric extent of the rotated label (see the SYNC comment below).
-/// 5. Fallback: vertical labels (-90°, S4/S5 scenarios) reserve the full extent
-///    at sin=1, cos=0.
+/// The band, from the drawn (non-culled) labels:
+/// - rotated: the full geometric extent of the widest drawn label at the
+///   drawn angle ([`rotated_x_label_extent`]);
+/// - flat or wrapped: `tick_size + label_pad_eff + lines * line_height`,
+///   `lines` being the most lines any drawn label wraps to (1 when flat).
 ///
 /// SYNC: every branch mirrors the label geometry in
 /// `crate::render::marks::axis::build_axis`. A flat label's baseline sits at
@@ -1609,84 +1644,85 @@ impl<'m> LabelBandCtx<'m> {
 /// about that pivot. In both cases the full extent from the axis line (`r.y`)
 /// down to the label's lowest point is `tick_size + label_pad +
 /// sin(|angle|)·(font_size + max_label_w) + cos(|angle|)·descent`, which
-/// collapses at `angle = 0` to `tick_size + label_pad + descent` — the band
-/// below uses `line_h` for the cos/descent term (instead of a bare descent) to
-/// match the existing code and keep a small safety margin, so the flat and
-/// wrapped branches reserve `tick_size + label_pad_eff + n·line_h` (#97, spec
-/// §4.1). `label_padding` is honored absolutely (not as a delta from the 2.0
-/// default) in every non-empty branch. Changing this formula requires changing
-/// the render geometry (or the title placement in `layout_x_axis`) to match, or
-/// the x-axis title will overlap the labels.
+/// collapses at `angle = 0` to `tick_size + label_pad + descent`. The band uses
+/// `line_h` at the axis's label font size for the descent term (a small safety
+/// margin, kept for a cascade-shrunk font too), so the flat and wrapped
+/// branches reserve `tick_size + label_pad_eff + n·line_h` (#97, spec §4.1).
+/// `label_padding` is honored absolutely (not as a delta from the 2.0
+/// default) and clamped at 0 like the renderer's L-2 guard. Changing this
+/// formula requires changing the render geometry to match; the title
+/// placement in `layout_x_axis` reads the same [`drawn_x_label_band`].
 ///
-/// **Drawn gate (`show_labels: bool`, spec §4.1 amended 2026-08-27, x-side
-/// extension; widened by `#182`, which closes `#94`):** mirrors
-/// `compute_y_label_band_width`'s gate exactly — a band exists only for an axis
-/// that actually DRAWS its labels, and an axis that draws none reserves `0.0`
-/// whatever the cascade would have chosen. `axes.show_x` (`.axis(x=False)`, and
-/// a `Polar`/`Geo` coord that replaces the Cartesian axes outright) already
-/// short-circuits the caller in `reserve_axis_bands` to `0.0` before this
-/// function is invoked, so the knob that reaches here is
-/// `fm.Axis(labels=False)` (`AxisInput.show_labels`): a SHOWN x axis whose
-/// labels never draw (`render/marks/axis.rs`'s tick loop: `if axis.show_labels
-/// && !tick.culled`). Before this gate it reserved the pre-#97 `line_h +
-/// padding_delta` (flat/wrapped) or the full rotated extent (S2–S4) for text
-/// that never renders. Its title is unaffected, so `Axis(labels=False)`
-/// collapses the label band alone.
+/// **Drawn gate (spec §4.1 amended 2026-08-27, `#182`, which closes `#94`):**
+/// mirrors `compute_y_label_band_width`'s gate: an axis that draws no labels
+/// (`fm.Axis(labels=False)`, `AxisInput.show_labels`) reserves `0.0`.
+/// `axes.show_x` (`.axis(x=False)`, a `Polar`/`Geo` coord) already
+/// short-circuits the caller in `reserve_axis_bands` before this is invoked.
 ///
-/// The empty-label branch below deliberately keeps its own `line_h +
-/// padding_delta` rather than folding into this gate: an x axis with zero tick
-/// labels but `show_labels: true` still draws its tick marks, and that corner
-/// is out of `#182`'s scope (see this task's report).
+/// An axis with no tick labels at all but `show_labels: true` keeps its own
+/// `line_h + padding_delta`: it still draws its tick marks, and JointChart
+/// marginals and ClusterMap dendrograms rely on that gutter (spec §4.1, §7).
 pub(crate) fn estimate_x_label_band(
-    labels: &[String],
-    label_angle_override: Option<f64>,
-    estimated_slot_w: f64,
-    label_padding: Option<f64>,
-    show_labels: bool,
+    input: &AxisInput,
+    panel_w: f64,
     ctx: &LabelBandCtx<'_>,
 ) -> f64 {
+    x_label_band_without_ticks(input, ctx).unwrap_or_else(|| {
+        let (ticks, _) = lay_out_x_tick_labels(input, 0.0, panel_w, ctx);
+        drawn_x_label_band(&ticks, input, ctx)
+    })
+}
+
+/// The x label band of an axis that lays out no tick labels, the two early
+/// branches of [`estimate_x_label_band`]: `0.0` for an axis whose labels are
+/// off, and `line_h + padding_delta` for one with no tick labels at all;
+/// `None` for an axis whose drawn labels decide the band
+/// ([`drawn_x_label_band`]). [`layout_x_axis`] places the x title from the
+/// same value, except for a labels-off axis (see there).
+fn x_label_band_without_ticks(input: &AxisInput, ctx: &LabelBandCtx<'_>) -> Option<f64> {
+    if !input.show_labels() {
+        return Some(0.0);
+    }
+    if input.tick_labels.is_empty() {
+        let line_h = ctx.metrics.line_height(ctx.label_font_size);
+        return Some(line_h + input.overrides.labels.padding.map(|lp| lp - 2.0).unwrap_or(0.0));
+    }
+    None
+}
+
+/// The pitch between the lines of a wrapped x tick label, as a multiple of
+/// its font size: the renderer steps each line by this, and
+/// [`drawn_x_label_band`] reserves it per line after the first.
+pub(crate) const X_LABEL_LINE_PITCH_EM: f64 = 1.2;
+
+/// The band the drawn (non-culled) labels in `ticks` need below the axis
+/// line ([`estimate_x_label_band`] states the geometry): a rotated label's
+/// full extent for the widest drawn label at the drawn angle; for flat (or
+/// wrapped) labels, the standoff plus one line height at the axis's label
+/// font (kept when the cascade shrinks the font, a small margin) and one
+/// [`X_LABEL_LINE_PITCH_EM`] step at the drawn font per further line, which
+/// is where the renderer puts them; and the tick marks alone when no label
+/// is drawn.
+fn drawn_x_label_band(ticks: &[TickLayout], input: &AxisInput, ctx: &LabelBandCtx<'_>) -> f64 {
     let LabelBandCtx {
         label_font_size,
-        label_gap,
         tick_size,
         metrics,
+        ..
     } = *ctx;
     let line_h = metrics.line_height(label_font_size);
-    let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
-
-    // #182 (closes #94): an axis whose labels never draw reserves no band, at
-    // any angle the cascade below would have chosen. `fm.Axis(labels=False)` is
-    // the knob that reaches here (`.axis(x=False)` and a projected coord
-    // short-circuit the caller); before this gate the flat/wrapped branches
-    // reserved `line_h + padding_delta` and the rotated ones the full extent,
-    // for text the renderer never emits.
-    if !show_labels {
-        return 0.0;
-    }
-
-    // Empty label set: byte-identical to pre-#97 behavior — no tick_size/label_pad
-    // standoff is reserved when there are no labels to draw. JointChart marginals
-    // and ClusterMap dendrograms (axis(show=False)) rely on this to gain no new
-    // gutter (spec §4.1, §7).
-    if labels.is_empty() {
-        return line_h + padding_delta;
-    }
-
-    // Clamp to match the renderer (`render/marks/axis.rs` L-2 guard: `.max(0.0)`).
-    // A negative label_padding must not under-reserve the band — the renderer
-    // clamps it to 0, so the layout must too or band < render extent.
-    let label_pad_eff = label_padding.unwrap_or(2.0).max(0.0);
-
-    let max_label_w = labels
-        .iter()
-        .map(|s| metrics.measure_width(s, label_font_size))
-        .fold(0.0_f64, f64::max);
-
-    // If the caller has set label_angle_override, skip the cascade entirely
-    // and compute the margin for that specific angle.
-    if let Some(angle) = label_angle_override {
-        // SYNC (see `rotated_x_label_extent`): full geometric extent of the
-        // rotated label below the axis line, shared with the title placement.
+    let label_pad_eff = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
+    let drawn = || ticks.iter().filter(|t| !t.culled);
+    let Some(first) = drawn().next() else {
+        return tick_size;
+    };
+    let angle = first.label_angle;
+    if angle != 0.0 {
+        let max_label_w = drawn()
+            .map(|t| {
+                metrics.measure_width(&t.label, t.label_font_size.unwrap_or(label_font_size))
+            })
+            .fold(0.0_f64, f64::max);
         return rotated_x_label_extent(
             angle,
             max_label_w,
@@ -1696,81 +1732,9 @@ pub(crate) fn estimate_x_label_band(
             label_pad_eff,
         );
     }
-
-    // The requested gap must shrink this predictor's
-    // budget exactly as it shrinks `cascade_collision_recovery`'s — a
-    // positive gap can force the REAL cascade past flat/wrap/a
-    // shallow rotation even when raw overlap would have been fine, and the
-    // predictor must reach the same conclusion or it under-reserves the
-    // band (clipping risk). At `gap_px == 0` this is a no-op.
-    let cull_gap = label_gap.gap();
-    let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
-
-    // S0 — flat (#97, spec §4.1): the same `tick_size + label_pad_eff` standoff
-    // the renderer draws below the axis line, plus one line of text. Labels are
-    // known to draw here — the drawn gate above already returned for an axis
-    // whose labels don't.
-    if max_label_w <= threshold {
-        return tick_size + label_pad_eff + line_h;
-    }
-
-    // S1 — wrapping: attempt to wrap all labels and count max lines.
-    {
-        let wrapped: Vec<Option<String>> = labels
-            .iter()
-            .map(|l| wrap_label(l, threshold, label_font_size, metrics))
-            .collect();
-        let all_wrap_ok = wrapped.iter().all(|w| w.is_some());
-        if all_wrap_ok {
-            let wrapped_labels: Vec<String> = wrapped.into_iter().flatten().collect();
-            let all_fit = wrapped_labels
-                .iter()
-                .all(|w| measure_multiline_width(w, label_font_size, metrics) <= threshold);
-            if all_fit {
-                let max_lines = wrapped_labels
-                    .iter()
-                    .map(|w| w.split('\n').count())
-                    .max()
-                    .unwrap_or(1);
-                return tick_size + label_pad_eff + max_lines as f64 * line_h;
-            }
-        }
-    }
-
-    // S2/S3 — rotation: find the first angle in the cascade that resolves
-    // collision (same logic as `cascade_collision_recovery` S3; SYNC'd
-    // sibling — the fit test must move with that function's, or the
-    // estimator and the real cascade disagree on which angle wins). Budget
-    // is `estimated_slot_w - cull_gap`, matching S3's `s3_budget` exactly
-    // (no `LABEL_OVERLAP_TOLERANCE` here either, mirroring that stage).
-    let s3_budget = estimated_slot_w - cull_gap;
-    for &angle in &ANGLE_CASCADE[1..] {
-        if rotated_x_label_footprint(angle, max_label_w, line_h) <= s3_budget {
-            // SYNC (see `rotated_x_label_extent`): full geometric extent of the
-            // rotated label, shared with the title placement.
-            return rotated_x_label_extent(
-                angle,
-                max_label_w,
-                label_font_size,
-                line_h,
-                tick_size,
-                label_pad_eff,
-            );
-        }
-    }
-
-    // S4/S5 fallback: vertical labels (-90°). The helper at -90 gives sin=1,
-    // cos=0, so the extent collapses to
-    // `tick_size + label_pad_eff + font_size + max_label_w`
-    // (SYNC with the rotated render geometry above).
-    rotated_x_label_extent(
-        -90.0,
-        max_label_w,
-        label_font_size,
-        line_h,
-        tick_size,
-        label_pad_eff,
-    )
+    let font_size = first.label_font_size.unwrap_or(label_font_size);
+    let lines = drawn().map(|t| t.label.split('\n').count()).max().unwrap_or(1);
+    tick_size + label_pad_eff + line_h + (lines - 1) as f64 * X_LABEL_LINE_PITCH_EM * font_size
 }
 
 /// Horizontal extent (px away from the y-axis line) occupied by a y-axis tick
@@ -3181,41 +3145,37 @@ fn cascade_collision_recovery(
     }
 }
 
-/// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
-/// Tick positions are uniformly spaced across `panel_area.w` (spec SS14.3 step 7a).
-/// Collision policy: graduated cascade (wrap -> shrink -> rotate -> cull -> elide).
-///
-/// Takes the same [`LabelBandCtx`] as [`estimate_x_label_band`], which reserved
-/// the gutter this lays out into — see that type's doc for why the two must not
-/// be handed the four measurement inputs separately.
-pub fn layout_x_axis(
+/// The tick labels one x axis draws across a panel spanning `panel_x` to
+/// `panel_x + panel_w`: each tick's pixel and the label the collision cascade
+/// (or an explicit `label_angle`) resolves for it, with its angle, font size,
+/// text and cull state. The one place that decision is made:
+/// [`layout_x_axis`] lays the axis out from it, and
+/// [`estimate_x_label_band`] reserves the gutter for exactly what it draws.
+pub(super) fn lay_out_x_tick_labels(
     input: &AxisInput,
-    panel_area: Rect,
-    panel_index: usize,
-    title_font_size: f64,
-    axis_title_padding: f64,
+    panel_x: f64,
+    panel_w: f64,
     ctx: &LabelBandCtx<'_>,
-) -> (AxisLayout, Option<AxisLabelWarning>) {
+) -> (Vec<TickLayout>, Option<AxisLabelWarning>) {
     let LabelBandCtx {
         label_font_size,
         label_gap,
-        tick_size,
         metrics,
+        ..
     } = *ctx;
-    input.debug_assert_placement_invariants();
     let n = input.tick_labels.len();
-    let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
+    let slot_w = if n > 0 { panel_w / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
-    // is `panel_area.x + (i + 0.5)*slot_w` via `Axis1D::uniform_center`.
+    // is `panel_x + (i + 0.5)*slot_w` via `Axis1D::uniform_center`.
     let slot_axis = Axis1D {
-        lo: panel_area.x,
-        hi: panel_area.x + panel_area.w,
+        lo: panel_x,
+        hi: panel_x + panel_w,
     };
 
     // Continuous axes: place each tick at its scale-projected pixel; categorical
     // axes (no projected fractions) keep the uniform-slot center. The closure
     // resolves a tick's position by index against whichever placement applies.
-    let projected = project_tick_positions(input, (panel_area.x, panel_area.x + panel_area.w));
+    let projected = project_tick_positions(input, (slot_axis.lo, slot_axis.hi));
     // Categorical axes (F-L04-03, GH #67): place each tick at the scale's own
     // band center — the same pixel its mark gets — so labels and grid lines
     // agree with the marks. `slot_axis` is bit-for-bit the pixel interval
@@ -3299,6 +3259,143 @@ pub fn layout_x_axis(
         };
         (ticks, warning)
     };
+    if drawn_x_label_band(&ticks, input, ctx) <= ctx.band_budget {
+        return (ticks, warning);
+    }
+    fit_x_labels_to_band_budget(input, cascade_slot_w, ctx, &tick_position)
+}
+
+/// The x tick labels for an axis whose labels, as the cascade (or an
+/// explicit `label_angle`) lays them out, would need a band at least
+/// `ctx.band_budget` tall, which would leave the panel too short to draw.
+///
+/// Culls further by stride, the way the cascade's own cull stage does (every
+/// `stride`-th label kept, starting from the first), widest presentation
+/// budget first: the smallest stride whose survivors the cascade's stages
+/// (flat, wrap, font shrink, rotate) can lay out within `stride` slots, or
+/// the explicit angle at that stride, and whose drawn band is within the
+/// budget, wins. A budget below the least band any drawn label needs
+/// (`tick + pad + min(font size, line height)`: at angle θ a label reaches
+/// `sin θ·(font size + width) + cos θ·line height` past the standoff, which
+/// is concave in θ, so its least is at 0° or 90°) draws no label at once. Fewer labels open a wider per-label budget, so the
+/// survivors can sit flatter and the band shrinks.
+///
+/// When no stride gets under the budget, not even a single label, the axis
+/// draws its tick marks and no labels: a chart that still draws a plot keeps
+/// its data, and a label band it cannot hold is never drawn into the next
+/// row or past the canvas. Drawing no label at all is reported as every
+/// label culled.
+fn fit_x_labels_to_band_budget(
+    input: &AxisInput,
+    slot_w: f64,
+    ctx: &LabelBandCtx<'_>,
+    tick_position: &dyn Fn(usize) -> f64,
+) -> (Vec<TickLayout>, Option<AxisLabelWarning>) {
+    let LabelBandCtx {
+        label_font_size,
+        label_gap,
+        metrics,
+        ..
+    } = *ctx;
+    let labels = &input.tick_labels;
+    let n = labels.len();
+    let label_pad_eff = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
+    let least_label_band =
+        ctx.tick_size + label_pad_eff + label_font_size.min(metrics.line_height(label_font_size));
+    let ticks_for = |visible: &[bool], survivor: &[TickLayout]| -> Vec<TickLayout> {
+        let mut survivors = survivor.iter();
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| match visible[i].then(|| survivors.next()).flatten() {
+                Some(s) => TickLayout {
+                    position: tick_position(i),
+                    ..s.clone()
+                },
+                None => TickLayout {
+                    position: tick_position(i),
+                    label: label.clone(),
+                    label_angle: 0.0,
+                    elided: false,
+                    culled: true,
+                    label_font_size: None,
+                    is_major: true,
+                },
+            })
+            .collect()
+    };
+    if ctx.band_budget < least_label_band {
+        return (ticks_for(&vec![false; n], &[]), None);
+    }
+    for stride in 2..=n {
+        let visible: Vec<bool> = (0..n).map(|i| i % stride == 0).collect();
+        let survivor_labels: Vec<String> = labels
+            .iter()
+            .zip(&visible)
+            .filter(|(_, v)| **v)
+            .map(|(l, _)| l.clone())
+            .collect();
+        let budget_w = stride as f64 * slot_w;
+        let (survivors, warning) = if let Some(angle) = input.overrides.labels.angle {
+            let cos_factor = angle.to_radians().cos().abs();
+            stamp_override_angle_with_elide(
+                &survivor_labels,
+                angle,
+                cos_factor,
+                budget_w,
+                label_font_size,
+                metrics,
+                |_| 0.0,
+            )
+        } else {
+            let Some(p) = resolve_presentation(&survivor_labels, budget_w, label_font_size, label_gap, metrics)
+            else {
+                continue;
+            };
+            let survivors = p
+                .labels
+                .into_iter()
+                .map(|label| TickLayout {
+                    position: 0.0,
+                    label,
+                    label_angle: p.angle,
+                    elided: false,
+                    culled: false,
+                    label_font_size: p.font_size,
+                    is_major: true,
+                })
+                .collect();
+            (survivors, None)
+        };
+        if drawn_x_label_band(&survivors, input, ctx) <= ctx.band_budget {
+            return (ticks_for(&visible, &survivors), warning);
+        }
+    }
+    (ticks_for(&vec![false; n], &[]), None)
+}
+
+/// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
+/// Tick positions are uniformly spaced across `panel_area.w` (spec SS14.3 step 7a).
+/// Collision policy: graduated cascade (wrap -> shrink -> rotate -> cull -> elide).
+///
+/// Takes the same [`LabelBandCtx`] as [`estimate_x_label_band`], which reserved
+/// the gutter this lays out into — see that type's doc for why the two must not
+/// be handed the four measurement inputs separately.
+pub fn layout_x_axis(
+    input: &AxisInput,
+    panel_area: Rect,
+    panel_index: usize,
+    title_font_size: f64,
+    axis_title_padding: f64,
+    ctx: &LabelBandCtx<'_>,
+) -> (AxisLayout, Option<AxisLabelWarning>) {
+    let LabelBandCtx {
+        label_font_size,
+        metrics,
+        ..
+    } = *ctx;
+    input.debug_assert_placement_invariants();
+    let (ticks, warning) = lay_out_x_tick_labels(input, panel_area.x, panel_area.w, ctx);
 
     // Orient: Bottom (default) places the axis at the panel's bottom edge; Top
     // at the top edge. Any other orient is rejected upstream (`prepare.rs`
@@ -3330,75 +3427,24 @@ pub fn layout_x_axis(
 
     let title = input.title.get().as_ref().map(|text| {
         let title_h = metrics.line_height(effective_title_font_size);
-        // The vertical drop from the axis line to the labels' lowest point,
-        // shared with `estimate_x_label_band` via `rotated_x_label_extent` so the
-        // reserved band and the title placement cannot drift for the flat
-        // (single-line) and rotated cases (#97, spec §4.1). `rotated_x_label_extent`
-        // is continuous in `angle` (it collapses to `tick_size + label_pad_eff +
-        // line_h` at 0), so flat and rotated labels go through the SAME call —
-        // no more flat-only special case.
-        // Clamp matches the renderer's L-2 guard so band >= render extent.
-        //
-        // KNOWN ASYMMETRY (pre-existing, not introduced by #97, #94 family):
-        // for WRAPPED x labels (S1), `estimate_x_label_band` reserves
-        // `tick_size + label_pad_eff + max_lines·line_h`, but this site always
-        // computes a SINGLE-line extent (`rotated_x_label_extent` at θ=0, or
-        // the labels-off bare `line_h` below) — it has no `max_lines` term.
-        // Band and title drift by `(max_lines - 1)·line_h` whenever x labels
-        // wrap to more than one line. The gap's MAGNITUDE is unchanged from
-        // pre-#97 only when `label_padding` is unset or exactly `2.0`
-        // (`padding_delta == 0.0`); otherwise it shrinks by exactly
-        // `padding_delta`. The shrink happens entirely on the LABELS-DRAWN
-        // path, not the gated labels-off one: when labels draw, the band
-        // trades its old `+ padding_delta` term for `+ tick_size +
-        // label_pad_eff` (a net `+(tick_size + label_pad_eff - padding_delta)`
-        // shift), while the title — which never carried `padding_delta`,
-        // pre- or post-batch — gains `tick_size + label_pad_eff` outright; the
-        // two shifts differ by exactly `padding_delta`, which is where the gap
-        // shrinks. The gated labels-off fallback (both band and title) is
-        // untouched from pre-#97 on both sides, so THAT path is where the gap
-        // does NOT move. Fixing the underlying wrapped-title placement is out
-        // of scope for #97/spec §4.1 (it would move any golden with wrapped x
-        // labels plus an x title) — tracked as row WRAP-1 in
-        // `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`
-        // (added 2026-08-28), not fixed here.
-        let label_pad = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
-        let line_h = metrics.line_height(label_font_size);
-        // Widest final (possibly-elided) label that will actually render — skip
-        // culled ticks since they draw no label.
-        let max_label_w = ticks
-            .iter()
-            .filter(|t| !t.culled)
-            .map(|t| metrics.measure_width(&t.label, label_font_size))
-            .fold(0.0_f64, f64::max);
-        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side
-        // extension): mirrors `layout_y_axis`'s title-placement gate (the
-        // comment above its own `compute_y_label_band_width` call) — a
-        // titled x axis can still have `input.show_labels == false`
-        // (`fm.Axis(labels=False)`, a title with no drawn tick labels), and
-        // this site does NOT go through `estimate_x_label_band` (it calls
-        // `rotated_x_label_extent` directly), so the S0/S1 gate added there
-        // does not automatically cover it. At θ=0 with labels off, this
-        // returns the pre-#97 flat-only special-case value bare `line_h`
-        // (`git show HEAD`'s `label_extent = metrics.line_height(label_font_size)`,
-        // NOT `line_h + padding_delta` — title placement never included
-        // `padding_delta`, even pre-batch, unlike the band), so the title
-        // stays flush against the gated `estimate_x_label_band` reservation
-        // instead of drifting 6px past it. A rotated axis with no drawn
-        // labels is unaffected — pre-#97 rotated title placement already
-        // included the full standoff regardless of label visibility, the
-        // same reasoning that limits every other #97 gate to θ=0. See #94.
-        let label_extent = if resolved_angle == 0.0 && !input.show_labels() {
-            line_h
+        // The vertical drop from the axis line to the labels' lowest point:
+        // the band `estimate_x_label_band` reserves, from the same owners
+        // (`x_label_band_without_ticks` for an axis with no tick labels,
+        // `drawn_x_label_band` otherwise), so the title sits below every
+        // drawn label line, flat, wrapped or rotated, below the tick marks
+        // alone when every label is culled, and where the reserved band ends
+        // when there are no tick labels. The one exception is #94's
+        // labels-off axis (`fm.Axis(labels=False)`): it reserves no label
+        // band, but its title keeps one label line's offset when flat and
+        // the extent of its undrawn labels when rotated.
+        let label_extent = if !input.show_labels() {
+            if resolved_angle == 0.0 {
+                metrics.line_height(label_font_size)
+            } else {
+                drawn_x_label_band(&ticks, input, ctx)
+            }
         } else {
-            rotated_x_label_extent(
-                resolved_angle,
-                max_label_w,
-                label_font_size,
-                line_h,
-                tick_size,
-                label_pad,
-            )
+            x_label_band_without_ticks(input, ctx).unwrap_or_else(|| drawn_x_label_band(&ticks, input, ctx))
         };
         // Title sits beyond the tick labels, on the same side as the axis. For a
         // Top axis the band extends upward (subtract); for Bottom, downward (add).
@@ -3435,6 +3481,25 @@ pub fn layout_x_axis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`estimate_x_label_band`] for a scale-less (uniform-slot) x axis with
+    /// `labels`, an optional explicit `angle` and `label_padding`, and its
+    /// labels shown or not, across a panel `slot_w` wide per label: the
+    /// per-tick budget the cascade judges is exactly `slot_w`.
+    fn estimate_band(
+        labels: &[String],
+        angle: Option<f64>,
+        slot_w: f64,
+        label_padding: Option<f64>,
+        show_labels: bool,
+        ctx: &LabelBandCtx<'_>,
+    ) -> f64 {
+        let mut input = axis_input(AxisOrient::Bottom, None, labels.to_vec(), angle);
+        input.overrides.labels.padding = label_padding;
+        input.overrides.labels.show = Some(show_labels);
+        estimate_x_label_band(&input, slot_w * labels.len().max(1) as f64, ctx)
+    }
+
     use crate::scale::discrete::DiscreteLayout;
 
     /// The pre-`#146` `cull_threshold: u32` argument, as the policy it maps
@@ -3712,7 +3777,7 @@ mod tests {
         let m = mock(10.0); // 10 px/char
         let labels = vec!["ab".into(), "cd".into()]; // 20 px each
                                                      // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             100.0,
@@ -3737,7 +3802,7 @@ mod tests {
         // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
         let labels = vec!["aa_bb_cc".into()];
         // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             50.0,
@@ -3760,7 +3825,7 @@ mod tests {
         // 12-char label, no break points → 120 px, cannot wrap.
         let labels = vec!["abcdefghijkl".into()];
         let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             slot,
@@ -3782,7 +3847,7 @@ mod tests {
         let m = mock(10.0);
         let labels = vec!["abc".into()];
         // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             Some(-45.0),
             100.0,
@@ -4251,7 +4316,7 @@ mod tests {
             &LabelBandCtx::new(font_size, legacy_gap(8), tick_size, &m),
         );
 
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &input.tick_labels,
             None,
             100.0,
@@ -6110,23 +6175,13 @@ mod tests {
         assert!(result.font_size.is_none());
     }
 
-    /// Estimator-sync check (`estimate_x_label_band` must not
-    /// UNDER-reserve for whatever presentation the real cascade picks
-    /// post-cull — a cascade/estimator mismatch here is a seam that has bitten
-    /// this code before). The estimator has no notion of culling: whenever S0-S3 fail at
-    /// its (pre-layout) `estimated_slot_w`, it always reserves the FULL
-    /// vertical (-90°) extent as a conservative fallback, regardless of
-    /// what S4 later decides. That fallback (`tick_size + label_pad_eff +
-    /// font_size + max_label_w`) is provably >= any less-degraded
-    /// presentation's actual need for a non-degenerate (nonzero-width)
-    /// label set — flat only needs `tick_size + label_pad_eff + line_h`,
-    /// and `font_size + max_label_w > line_h` for any label wider than a
-    /// sliver — so over-reservation, not under-reservation, is the only
-    /// possible drift when the real cascade later resolves to Flat.
-    /// Verified directly against the exact fixture that now
-    /// culls-to-flat above.
+    /// The band estimate reserves what the cascade draws, culling included:
+    /// at this fixture the real cascade culls to every other label and draws
+    /// the survivors flat (see the pin above), so the band is exactly the
+    /// flat band, not the full -90° extent a cascade-blind estimate would
+    /// reserve for labels that never rotate.
     #[test]
-    fn estimate_x_label_band_over_reserves_for_culled_to_flat_survivors() {
+    fn estimate_x_label_band_reserves_the_flat_band_for_culled_to_flat_survivors() {
         let labels: Vec<String> = vec![
             "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7",
         ]
@@ -6138,19 +6193,13 @@ mod tests {
         let tick_size = 4.0;
         let label_pad_eff = 2.0;
 
-        // The real cascade, at this fixture, resolves Culled { stride: 2 }
-        // at angle 0.0 (flat) — see the pin above.
         let cascade_result =
             cascade_collision_recovery(&labels, 12.0, label_font_size, legacy_gap(8), None, &m);
         assert_eq!(cascade_result.angle, 0.0);
+        assert!(cascade_result.visible.iter().any(|v| !v), "fixture assumption: culled");
 
-        // The actual space flat rendering needs.
-        let line_h = m.line_height(label_font_size);
-        let actual_flat_need = tick_size + label_pad_eff + line_h;
-
-        // The estimator's prediction, called with the SAME inputs (pre-layout,
-        // before it can know culling will happen).
-        let estimated = estimate_x_label_band(
+        let flat_need = tick_size + label_pad_eff + m.line_height(label_font_size);
+        let estimated = estimate_band(
             &labels,
             None,
             12.0,
@@ -6159,8 +6208,8 @@ mod tests {
             &LabelBandCtx::new(label_font_size, legacy_gap(8), tick_size, &m),
         );
         assert!(
-            estimated >= actual_flat_need,
-            "estimator ({estimated}) must not under-reserve relative to the actual flat need ({actual_flat_need})"
+            (estimated - flat_need).abs() < 1e-9,
+            "the estimate ({estimated}) is the flat band the culled survivors draw ({flat_need})"
         );
     }
 
@@ -6341,7 +6390,7 @@ mod tests {
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             100.0,
@@ -6371,7 +6420,7 @@ mod tests {
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             100.0,
@@ -6403,7 +6452,7 @@ mod tests {
 
         // Flat case (same fixture as `estimate_flat_labels`).
         let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
-        let flat_off = estimate_x_label_band(
+        let flat_off = estimate_band(
             &flat_labels,
             None,
             100.0,
@@ -6413,7 +6462,7 @@ mod tests {
         );
         assert_eq!(flat_off, 0.0, "labels-off flat band reserves nothing");
         // Contrast: labels drawn DOES reserve the #97 standoff for the same input.
-        let flat_on = estimate_x_label_band(
+        let flat_on = estimate_band(
             &flat_labels,
             None,
             100.0,
@@ -6431,7 +6480,7 @@ mod tests {
         // could even make negative.
         for padding in [Some(40.0), Some(-100.0)] {
             assert_eq!(
-                estimate_x_label_band(
+                estimate_band(
                     &flat_labels,
                     None,
                     100.0,
@@ -6447,7 +6496,7 @@ mod tests {
         // Rotated: an explicit angle override used to bypass the gate entirely
         // and reserve the full `rotated_x_label_extent`.
         assert_eq!(
-            estimate_x_label_band(
+            estimate_band(
                 &flat_labels,
                 Some(-45.0),
                 100.0,
@@ -6459,7 +6508,7 @@ mod tests {
             "#182 widened the gate past flat/wrapped: a rotated labels-off axis reserves nothing"
         );
         assert!(
-            estimate_x_label_band(
+            estimate_band(
                 &flat_labels,
                 Some(-45.0),
                 100.0,
@@ -6479,7 +6528,7 @@ mod tests {
         ];
         let m6 = mock(6.0);
         let line_h6 = m6.line_height(11.0);
-        let wrapped_off = estimate_x_label_band(
+        let wrapped_off = estimate_band(
             &wrapped_labels,
             None,
             100.0,
@@ -6488,7 +6537,7 @@ mod tests {
             &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m6),
         );
         assert_eq!(wrapped_off, 0.0, "labels-off wrapped band reserves nothing");
-        let wrapped_on = estimate_x_label_band(
+        let wrapped_on = estimate_band(
             &wrapped_labels,
             None,
             100.0,
@@ -6524,7 +6573,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             80.0,
@@ -6554,7 +6603,7 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             Some(-90.0),
             80.0,
@@ -6579,7 +6628,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             Some(-45.0),
             200.0,
@@ -6603,7 +6652,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &[],
             None,
             100.0,
@@ -6627,7 +6676,7 @@ mod tests {
             line_h_factor: 1.2,
         };
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             10.0,
@@ -6673,7 +6722,7 @@ mod tests {
         let line_h = m.line_height(font_size);
         let max_label_w = 100.0; // 10 chars * 10px
 
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             80.0,
@@ -6709,7 +6758,7 @@ mod tests {
         };
         let font_size = 11.0;
         let tick_size = 4.0;
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             10.0,
@@ -6734,7 +6783,7 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band_ts0 = estimate_x_label_band(
+        let band_ts0 = estimate_band(
             &labels,
             None,
             100.0,
@@ -6742,7 +6791,7 @@ mod tests {
             true,
             &LabelBandCtx::new(11.0, legacy_gap(0), 0.0, &m),
         );
-        let band_ts8 = estimate_x_label_band(
+        let band_ts8 = estimate_band(
             &labels,
             None,
             100.0,
@@ -6776,7 +6825,7 @@ mod tests {
         ];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band_default = estimate_x_label_band(
+        let band_default = estimate_band(
             &labels,
             None,
             80.0,
@@ -6784,7 +6833,7 @@ mod tests {
             true,
             &LabelBandCtx::new(11.0, legacy_gap(0), tick_size, &m),
         );
-        let band_wider = estimate_x_label_band(
+        let band_wider = estimate_band(
             &labels,
             None,
             80.0,
@@ -6829,7 +6878,7 @@ mod tests {
         let true_extent =
             tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
 
-        let band = estimate_x_label_band(
+        let band = estimate_band(
             &labels,
             None,
             80.0,
@@ -7370,7 +7419,7 @@ mod tests {
             measure: |_, _| 80.0,
             line_h_factor: 1.2,
         };
-        estimate_x_label_band(
+        estimate_band(
             &labels,
             None,
             40.0,
@@ -7796,5 +7845,220 @@ mod tests {
             (height_diff - gutter_diff).abs() < 1e-9,
             "the plot-region shrink must equal the gutter's growth exactly"
         );
+    }
+
+    // ── the x label band budget ──────────────────────────────────────────────
+
+    /// Twelve 60px labels on a 360px axis: the cascade rotates them to -90
+    /// (each slot is 30px), a band of `tick + pad + font + 60`.
+    fn twelve_long_labels() -> AxisInput {
+        let labels = (0..12).map(|i| format!("{i:06}")).collect();
+        axis_input(AxisOrient::Bottom, Some("title".into()), labels, None)
+    }
+
+    fn band_of(ticks: &[TickLayout], input: &AxisInput, ctx: &LabelBandCtx<'_>) -> f64 {
+        drawn_x_label_band(ticks, input, ctx)
+    }
+
+    /// Under a budget the labels already fit, nothing changes: the same
+    /// ticks as with no budget at all.
+    #[test]
+    fn a_band_budget_the_labels_fit_changes_nothing() {
+        let m = mock(10.0);
+        let input = twelve_long_labels();
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let (free, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx);
+        let band = band_of(&free, &input, &ctx);
+        assert!(free.iter().all(|t| !t.culled && t.label_angle == -90.0), "fixture assumption");
+        let (bounded, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx.with_band_budget(band + 0.5));
+        assert_eq!(bounded, free);
+    }
+
+    /// Under a budget the rotated band breaks, the cascade culls by stride
+    /// until the survivors fit, smallest stride first. Stride 2 gives each
+    /// survivor a 60px slot, too narrow (with the overlap tolerance) for a
+    /// flat 60px label, so they rotate to -30 (band about 53), still over a
+    /// 25px budget. Stride 3 gives 90px slots: every third label draws flat,
+    /// a band of `tick + pad + line_h` (19.2).
+    #[test]
+    fn a_band_budget_culls_by_stride_until_the_labels_fit() {
+        let m = mock(10.0);
+        let input = twelve_long_labels();
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m).with_band_budget(25.0);
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx);
+        let culled: Vec<bool> = ticks.iter().map(|t| t.culled).collect();
+        assert_eq!(culled, (0..12).map(|i| i % 3 != 0).collect::<Vec<_>>(), "every third label kept");
+        assert!(ticks.iter().filter(|t| !t.culled).all(|t| t.label_angle == 0.0), "survivors flat");
+        let band = band_of(&ticks, &input, &ctx);
+        assert!((band - (4.0 + 2.0 + m.line_height(11.0))).abs() < 1e-9 && band < 25.0);
+    }
+
+    /// When not even one label fits the budget, the axis draws its tick
+    /// marks and no labels: every label culled, a band of the tick length
+    /// alone, and the title sits just below the ticks.
+    #[test]
+    fn a_band_budget_no_label_fits_draws_tick_marks_only() {
+        let m = mock(10.0);
+        let input = twelve_long_labels();
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m).with_band_budget(10.0);
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx);
+        assert!(ticks.iter().all(|t| t.culled), "no label drawn");
+        assert_eq!(band_of(&ticks, &input, &ctx), 4.0, "the band is the ticks alone");
+        let panel = Rect { x: 0.0, y: 0.0, w: 360.0, h: 100.0 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 13.0, 4.0, &ctx);
+        let title = axis.title.expect("title");
+        let want = 100.0 + 4.0 + 4.0 + m.line_height(13.0) / 2.0;
+        assert!((title.anchor_y - want).abs() < 1e-9, "title just below the ticks: {} vs {want}", title.anchor_y);
+    }
+
+    /// The budget is inclusive: a budget exactly the band the labels draw
+    /// keeps them as drawn with no budget at all.
+    #[test]
+    fn a_band_budget_equal_to_the_drawn_band_changes_nothing() {
+        let m = mock(10.0);
+        let input = twelve_long_labels();
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let (free, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx);
+        let band = band_of(&free, &input, &ctx);
+        let (bounded, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx.with_band_budget(band));
+        assert_eq!(bounded, free);
+    }
+
+    /// Twelve labels pinned at -90: `"."` (1px) at even indices, `"....."`
+    /// (5px) at odd ones. At -90 a label's band is `tick + pad + font +
+    /// width`, so the `"."` labels need less than the flat band
+    /// (`tick + pad + line_h`) would.
+    fn dotted_labels_at_minus_90() -> AxisInput {
+        let labels = (0..12).map(|i| if i % 2 == 0 { "." } else { "....." }.to_string()).collect();
+        let mut input = axis_input(AxisOrient::Bottom, None, labels, None);
+        input.overrides.labels.angle = Some(-90.0);
+        input
+    }
+
+    /// No drawn presentation has a band below `tick + pad + min(font,
+    /// line_h)`: a budget just under it draws tick marks only. At exactly
+    /// the band a stride's survivors draw at -90 (the `"."` labels, below
+    /// the flat band), they are drawn.
+    #[test]
+    fn a_band_budget_under_the_least_label_band_draws_tick_marks_only() {
+        let m = mock(1.0);
+        let input = dotted_labels_at_minus_90();
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let least = 4.0 + 2.0 + 11.0_f64.min(m.line_height(11.0));
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx.with_band_budget(least - 1e-9));
+        assert!(ticks.iter().all(|t| t.culled), "no label drawn under the least band");
+
+        let mut dots = input.clone();
+        dots.tick_labels = vec![".".to_string(); 6];
+        let (dots_free, _) = lay_out_x_tick_labels(&dots, 0.0, 360.0, &ctx);
+        let dot_band = band_of(&dots_free, &dots, &ctx);
+        assert!(
+            dot_band >= least && dot_band < 4.0 + 2.0 + m.line_height(11.0),
+            "fixture assumption: a `.` at -90 draws below the flat band ({dot_band})",
+        );
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, 360.0, &ctx.with_band_budget(dot_band));
+        let culled: Vec<bool> = ticks.iter().map(|t| t.culled).collect();
+        assert_eq!(culled, (0..12).map(|i| i % 2 != 0).collect::<Vec<_>>(), "every `.` drawn");
+        assert!(ticks.iter().filter(|t| !t.culled).all(|t| t.label_angle == -90.0));
+        assert!((band_of(&ticks, &input, &ctx) - dot_band).abs() < 1e-9);
+    }
+
+    /// The x title is placed from the band the drawn labels need, so a title
+    /// below (or, on a top axis, above) labels wrapped onto several lines
+    /// clears the last line by exactly the title padding: no overlap and no
+    /// blank strip. Three `_`-separated labels, swept over panel widths,
+    /// draw flat on one line when wide and wrap onto several when narrower
+    /// (rotated widths are left to the rotated-title tests).
+    #[test]
+    fn the_x_title_clears_every_wrapped_label_line_by_its_padding() {
+        let m = mock(7.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let labels: Vec<String> = (0..3).map(|i| format!("cat{i:02}_wwwwwwww_{i}")).collect();
+        let (title_fs, title_pad) = (13.0, 4.0);
+        let mut wrapped = 0;
+        for orient in [AxisOrient::Bottom, AxisOrient::Top] {
+            for width in (100..=700).step_by(10).map(f64::from) {
+                let input = axis_input(orient, Some("Short".into()), labels.clone(), None);
+                let panel = Rect { x: 0.0, y: 100.0, w: width, h: 200.0 };
+                let (axis, _) = layout_x_axis(&input, panel, 0, title_fs, title_pad, &ctx);
+                if axis.ticks.iter().any(|t| !t.culled && t.label_angle != 0.0) {
+                    continue;
+                }
+                let lines = axis.ticks.iter().filter(|t| !t.culled).map(|t| t.label.split('\n').count()).max().unwrap_or(1);
+                wrapped += usize::from(lines > 1);
+                let label_reach = 4.0 + 2.0 + lines as f64 * m.line_height(11.0);
+                let title = axis.title.expect("title");
+                let half = m.line_height(title_fs) / 2.0;
+                let gap = match orient {
+                    AxisOrient::Top => (panel.y - label_reach) - (title.anchor_y + half),
+                    _ => (title.anchor_y - half) - (panel.y + panel.h + label_reach),
+                };
+                assert!(
+                    (gap - title_pad).abs() < 1e-9,
+                    "{orient:?} at {width}px, {lines} line(s): the title clears the labels by {gap}, not {title_pad}",
+                );
+            }
+        }
+        assert!(wrapped > 0, "the sweep must reach wrapped labels");
+    }
+
+    /// An axis that draws no labels keeps its title offset: one label line
+    /// below the axis when flat, and the extent of its (undrawn) labels at an
+    /// explicit angle, as before the title was placed from the drawn band.
+    #[test]
+    fn a_labels_off_x_title_keeps_its_offset() {
+        let m = mock(7.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let labels: Vec<String> = vec!["alpha".into(), "beta".into(), "gamma".into()];
+        let panel = Rect { x: 0.0, y: 100.0, w: 600.0, h: 200.0 };
+        for angle in [None, Some(-45.0)] {
+            let mut input = axis_input(AxisOrient::Bottom, Some("Title".into()), labels.clone(), None);
+            input.overrides.labels.show = Some(false);
+            input.overrides.labels.angle = angle;
+            let (axis, _) = layout_x_axis(&input, panel, 0, 13.0, 4.0, &ctx);
+            let title = axis.title.expect("title");
+            let line_h = m.line_height(11.0);
+            let extent = match angle {
+                None => line_h,
+                Some(a) => {
+                    let w = labels.iter().map(|l| m.measure_width(l, 11.0)).fold(0.0, f64::max);
+                    rotated_x_label_extent(a, w, 11.0, line_h, 4.0, 2.0)
+                }
+            };
+            let want = panel.y + panel.h + extent + 4.0 + m.line_height(13.0) / 2.0;
+            assert!((title.anchor_y - want).abs() < 1e-9, "{angle:?}: title at {}, want {want}", title.anchor_y);
+        }
+    }
+
+
+    /// A titled axis with no tick labels places its title where the band it
+    /// reserves ends, on bottom and top axes and with an explicit
+    /// `label_padding`: the band is one label line plus the padding's delta
+    /// from 2px, and the title clears it by the title padding.
+    #[test]
+    fn a_title_over_no_tick_labels_sits_where_the_reserved_band_ends() {
+        let m = mock(7.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let panel = Rect { x: 0.0, y: 100.0, w: 400.0, h: 200.0 };
+        for orient in [AxisOrient::Bottom, AxisOrient::Top] {
+            for padding in [None, Some(6.0)] {
+                let mut input = axis_input(orient, Some("Title".into()), Vec::new(), None);
+                input.overrides.labels.padding = padding;
+                let band = estimate_x_label_band(&input, panel.w, &ctx);
+                assert_eq!(band, m.line_height(11.0) + padding.map_or(0.0, |p| p - 2.0), "the one-line gutter");
+                let (axis, _) = layout_x_axis(&input, panel, 0, 13.0, 4.0, &ctx);
+                let title = axis.title.expect("title");
+                let offset = band + 4.0 + m.line_height(13.0) / 2.0;
+                let want = match orient {
+                    AxisOrient::Top => panel.y - offset,
+                    _ => panel.y + panel.h + offset,
+                };
+                assert!(
+                    (title.anchor_y - want).abs() < 1e-9,
+                    "{orient:?} with padding {padding:?}: title at {}, the band ends at {want}",
+                    title.anchor_y,
+                );
+            }
+        }
     }
 }

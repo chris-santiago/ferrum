@@ -1133,7 +1133,7 @@ impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidViewport { width, height } =>
-                write!(f, "invalid viewport: width={width}, height={height} (both must be > 0)"),
+                write!(f, "invalid viewport: width={width}, height={height} (both must be finite and > 0)"),
             Self::EmptyBatch =>
                 write!(f, "input batch is empty (num_rows == 0)"),
             Self::UnknownColumn { name } =>
@@ -3035,6 +3035,20 @@ fn prepare_and_layout(
     let applied =
         config_apply::apply_chart_config_pipeline(&mut prep, theme, chart_config, &mut warnings)?;
 
+    // An independent-x/y facet panel draws its own axis, from its own scale:
+    // resolve those axis inputs now, so layout reserves each axis band for
+    // what the panels draw.
+    prep.axes.panels = scene_build::independent_panel_axis_inputs(
+        &scene_build::PanelResolveCtx {
+            spec,
+            prep: &prep,
+            theme: &applied.effective_theme,
+            chart_config,
+            leaf_scales,
+        },
+        &prep.facet_groups,
+    )?;
+
     let metrics = font::FontdueMetrics::new();
     // Composite → layout seam: everything a composite parent imposes on this
     // leaf's layout, threaded through the same `leaf_scales` context the
@@ -3091,7 +3105,7 @@ pub fn render_svg(
     config: &config::RenderConfig,
     chart_config: &ChartConfig,
 ) -> Result<RenderOutput<String>, RenderError> {
-    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+    if !viewport.is_drawable() {
         return Err(RenderError::InvalidViewport {
             width: viewport.width,
             height: viewport.height,
@@ -3147,7 +3161,7 @@ pub fn render_scene_json(
     config: &config::RenderConfig,
     chart_config: &ChartConfig,
 ) -> Result<(String, Vec<u8>, Vec<RenderWarning>), RenderError> {
-    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+    if !viewport.is_drawable() {
         return Err(RenderError::InvalidViewport {
             width: viewport.width,
             height: viewport.height,
@@ -3877,6 +3891,37 @@ mod orchestration_tests {
             &ChartConfig::default(),
         );
         assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
+    }
+
+    /// A NaN or infinite width or height is refused like a zero one, with
+    /// `padding.auto` on (the default) and off, and the message names the
+    /// value and what a viewport must be.
+    #[test]
+    fn render_svg_refuses_a_non_finite_viewport() {
+        let (spec, batch) = scatter_3();
+        for auto in [true, false] {
+            let mut theme = ThemeInputs::default();
+            theme.padding.padding_auto = auto;
+            for (width, height) in [
+                (f64::NAN, 100.0),
+                (100.0, f64::NAN),
+                (f64::INFINITY, 100.0),
+                (100.0, f64::INFINITY),
+                (f64::NEG_INFINITY, 100.0),
+            ] {
+                let err = render_svg(
+                    &spec,
+                    &batch,
+                    &theme,
+                    Viewport { width, height },
+                    &config::RenderConfig::default(),
+                    &ChartConfig::default(),
+                )
+                .unwrap_err();
+                assert!(matches!(err, RenderError::InvalidViewport { .. }), "{width}x{height}: {err:?}");
+                assert!(format!("{err}").contains("both must be finite and > 0"), "{err}");
+            }
+        }
     }
 
     // ── NF-B1 residual: malformed-spec refusal, per surface (Task 4, D8) ────
@@ -5183,6 +5228,925 @@ mod orchestration_tests {
             .count()
     }
 
+    // ── independent facet axes: the bands hold what the panels draw ────────
+
+    use crate::layout::TextMetrics as _;
+    use prepare::PreparedInputs;
+
+    /// A two-panel bar chart, faceted by `panel` with `x_resolve` and
+    /// `y_resolve`, where each panel has its own `per_panel` categories
+    /// (`"A-category-00"` …, `"B-category-00{b_suffix}"` …) and its own y
+    /// range (panel A 1..=n, panel B around 100,000), so the chart's own axes
+    /// (built over the union) differ from the axes each independent panel
+    /// draws.
+    fn faceted_with_own_categories(
+        per_panel: usize,
+        b_suffix: &str,
+        x_resolve: crate::layout::ResolveMode,
+        y_resolve: crate::layout::ResolveMode,
+    ) -> (ChartSpec, RecordBatch) {
+        let mut x_vals: Vec<String> = Vec::new();
+        let mut y_vals: Vec<f64> = Vec::new();
+        let mut panels: Vec<String> = Vec::new();
+        for (panel, base) in [("A", 0.0), ("B", 100_000.0)] {
+            for i in 0..per_panel {
+                let suffix = if panel == "B" { b_suffix } else { "" };
+                x_vals.push(format!("{panel}-category-{i:02}{suffix}"));
+                y_vals.push(base + 1.0 + i as f64 * 0.5);
+                panels.push(panel.to_string());
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("panel", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(x_vals)),
+                Arc::new(Float64Array::from(y_vals)),
+                Arc::new(StringArray::from(panels)),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "panel".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve { x: x_resolve, y: y_resolve },
+            }),
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    /// What one rendered panel's axes draw: the x tick labels as
+    /// `(text, angle, font size)` and the y tick labels' texts and font size,
+    /// read off the scene (titles and strip text excluded).
+    struct DrawnPanelLabels {
+        x: Vec<(String, f64, f64)>,
+        y: Vec<(String, f64)>,
+    }
+
+    fn drawn_panel_labels(panel: &ferrum_scene::Panel) -> DrawnPanelLabels {
+        let mut drawn = DrawnPanelLabels { x: Vec::new(), y: Vec::new() };
+        for node in &panel.axes {
+            if let ferrum_scene::SceneNode::Text { content, style, .. } = node {
+                if content.contains("-category-") {
+                    drawn.x.push((content.clone(), style.angle, style.font_size));
+                } else if content != "cat" && content != "val" {
+                    drawn.y.push((content.clone(), style.font_size));
+                }
+            }
+        }
+        drawn
+    }
+
+    /// Lays `spec` out and builds its scene, returning the layout, the
+    /// panels' drawn labels and the theme the chart rendered with.
+    fn layout_and_drawn_labels(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+    ) -> (crate::layout::LayoutResult, Vec<DrawnPanelLabels>, ThemeInputs, PreparedInputs) {
+        let viewport = Viewport { width: 900.0, height: 400.0 };
+        let chart_config = ChartConfig::default();
+        let po = prepare_and_layout(spec, batch, &ThemeInputs::default(), viewport, &chart_config, None)
+            .expect("layout should succeed");
+        let mut warnings = Vec::new();
+        let scene = scene_build::build_scene(
+            spec,
+            &po.prep,
+            &po.layout,
+            &po.applied.effective_theme,
+            &config::RenderConfig::default(),
+            &mut warnings,
+            &chart_config,
+            None,
+        )
+        .expect("scene should build");
+        let drawn = scene.panels.iter().map(drawn_panel_labels).collect();
+        (po.layout, drawn, po.applied.effective_theme, po.prep)
+    }
+
+    /// The x label band the panels' drawn labels need, read off the scene:
+    /// a rotated label's full extent at its drawn angle, or the standoff
+    /// plus one line.
+    fn drawn_x_band(drawn: &[DrawnPanelLabels], theme: &ThemeInputs) -> f64 {
+        let m = font::FontdueMetrics::new();
+        let fs = theme.typography.label_font_size;
+        let line_h = m.line_height(fs);
+        let tick = theme.sizes.tick_size;
+        drawn
+            .iter()
+            .map(|p| {
+                let angle = p.x.first().map_or(0.0, |l| l.1);
+                if angle == 0.0 {
+                    return tick + 2.0 + line_h;
+                }
+                let w = p.x.iter().map(|(t, _, f)| m.measure_width(t, *f)).fold(0.0, f64::max);
+                let (sin, cos) = angle.to_radians().sin_cos();
+                tick + 2.0 + sin.abs() * (fs + w) + cos.abs() * line_h
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// The x label band the layout reserved under the plot: the padded
+    /// region's bottom less the plot region's, less the x title gutter.
+    fn reserved_x_band(layout: &crate::layout::LayoutResult, prep: &PreparedInputs, theme: &ThemeInputs) -> f64 {
+        let m = font::FontdueMetrics::new();
+        let gutter = crate::layout::axis::compute_x_title_width(
+            &prep.axes.x,
+            theme.typography.title_font_size,
+            theme.padding.axis_title_padding,
+            &m,
+            true,
+        );
+        let (padded, plot) = (layout.padded_region, layout.plot_region);
+        (padded.y + padded.h) - (plot.y + plot.h) - gutter
+    }
+
+    /// The angle of the first drawn tick's label on the chart's own (union)
+    /// x axis, laid out at the panels' width.
+    fn chart_axis_presentation(layout: &crate::layout::LayoutResult, prep: &PreparedInputs, theme: &ThemeInputs) -> f64 {
+        let m = font::FontdueMetrics::new();
+        let rect = layout.panels[0].plot_area;
+        let ctx = crate::layout::LabelBandCtx::for_axis(&prep.axes.x, theme, &m);
+        let (axis, _) = crate::layout::axis::layout_x_axis(&prep.axes.x, rect, 0, 13.0, 4.0, &ctx);
+        axis.ticks.iter().find(|t| !t.culled).map_or(0.0, |t| t.label_angle)
+    }
+
+    /// Independent x: the chart's own axis, over both panels' eight
+    /// categories, rotates at the panel width, but each panel draws only its
+    /// own four categories, flat. The reserved x band must be the flat band
+    /// the panels draw, not the rotated one the chart's own axis would.
+    #[test]
+    fn independent_x_panels_drawn_flat_reserve_the_flat_band() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let (spec, batch) = faceted_with_own_categories(4, "", Independent, Shared);
+        let (layout, drawn, theme, prep) = layout_and_drawn_labels(&spec, &batch);
+        assert!(
+            chart_axis_presentation(&layout, &prep, &theme) != 0.0,
+            "fixture assumption: the chart's own x axis rotates at the panel width",
+        );
+        assert_eq!(drawn.len(), 2);
+        for p in &drawn {
+            assert_eq!(p.x.len(), 4, "each panel draws its own four categories");
+            assert!(p.x.iter().all(|l| l.1 == 0.0), "fixture assumption: the panels draw flat ({:?})", p.x);
+        }
+        let reserved = reserved_x_band(&layout, &prep, &theme);
+        let want = drawn_x_band(&drawn, &theme);
+        assert!(
+            (reserved - want).abs() < 1e-6,
+            "the reserved x band ({reserved}) is the panels' drawn band ({want})",
+        );
+        for (i, p) in drawn.iter().enumerate() {
+            let laid_out: Vec<(String, f64)> = layout
+                .axes
+                .iter()
+                .filter(|a| a.panel_index == i && a.orient == crate::layout::AxisOrient::Bottom)
+                .flat_map(|a| a.ticks.iter().filter(|t| !t.culled))
+                .map(|t| (t.label.clone(), t.label_angle))
+                .collect();
+            let rendered: Vec<(String, f64)> = p.x.iter().map(|(t, a, _)| (t.clone(), *a)).collect();
+            assert_eq!(laid_out, rendered, "panel {i}: the layout lays out the axis the panel draws");
+        }
+    }
+
+    /// The control: with nine categories per panel the panels' own labels
+    /// rotate too, and the band is the panels' drawn rotation, sized by the
+    /// widest label any panel draws: panel B's longer names, not panel A's.
+    #[test]
+    fn independent_x_panels_drawn_rotated_reserve_their_rotated_band() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let (spec, batch) = faceted_with_own_categories(9, "-and-more", Independent, Shared);
+        let (layout, drawn, theme, prep) = layout_and_drawn_labels(&spec, &batch);
+        assert!(
+            drawn.iter().all(|p| p.x.iter().all(|l| l.1 != 0.0)),
+            "fixture assumption: the panels draw rotated labels",
+        );
+        let per_panel: Vec<f64> =
+            drawn.iter().map(|p| drawn_x_band(std::slice::from_ref(p), &theme)).collect();
+        assert!(per_panel[1] > per_panel[0], "fixture assumption: panel B needs the taller band ({per_panel:?})");
+        let reserved = reserved_x_band(&layout, &prep, &theme);
+        let want = drawn_x_band(&drawn, &theme);
+        assert!(
+            (reserved - want).abs() < 1e-6,
+            "the reserved x band ({reserved}) is the panels' drawn rotated band ({want})",
+        );
+    }
+
+    /// Independent y alone: the y band (left of the plot, less the y title
+    /// gutter) is the widest y label any panel draws (panel B's
+    /// `100,00x.x`, wider than any of the chart's own union labels).
+    #[test]
+    fn independent_y_panels_reserve_the_widest_drawn_y_label() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let (spec, batch) = faceted_with_own_categories(4, "", Shared, Independent);
+        let (layout, drawn, theme, prep) = layout_and_drawn_labels(&spec, &batch);
+        let m = font::FontdueMetrics::new();
+        let widest = |labels: &mut dyn Iterator<Item = (&str, f64)>| {
+            labels.map(|(t, f)| m.measure_width(t, f)).fold(0.0, f64::max)
+        };
+        let drawn_y_w = drawn
+            .iter()
+            .map(|p| widest(&mut p.y.iter().map(|(t, f)| (t.as_str(), *f))))
+            .fold(0.0, f64::max);
+        let fs = theme.typography.label_font_size;
+        let chart_y_w = widest(&mut prep.axes.y.tick_labels.iter().map(|t| (t.as_str(), fs)));
+        assert!(
+            drawn_y_w > chart_y_w,
+            "fixture assumption: a panel draws a y label wider than the chart's own ({drawn_y_w} vs {chart_y_w})",
+        );
+        let y_gutter = crate::layout::axis::compute_y_title_width(
+            &prep.axes.y,
+            theme.typography.title_font_size,
+            theme.padding.axis_title_padding,
+            &m,
+            true,
+        );
+        let reserved_y = layout.plot_region.x - layout.padded_region.x - y_gutter;
+        let want_y = theme.sizes.tick_size + 2.0 + drawn_y_w;
+        assert!(
+            (reserved_y - want_y).abs() < 1e-6,
+            "the reserved y band ({reserved_y}) holds the widest y label a panel draws ({want_y})",
+        );
+    }
+
+    /// An independent-x facet panel's ticks sit on the marks at the same
+    /// values, as a shared panel's do: with x at 0, 5 and 10 in both panels,
+    /// the ticks labeled 0 and 10 are at the circles for x = 0 and x = 10,
+    /// including the scale's inset from the panel edge.
+    #[test]
+    fn independent_x_facet_ticks_sit_on_their_marks() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("p", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0, 0.0, 5.0, 10.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            ],
+        )
+        .unwrap();
+        for x_resolve in [Shared, Independent] {
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                    ..Default::default()
+                },
+                facet: Some(crate::layout::FacetSpec {
+                    field: "p".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve { x: x_resolve, y: Shared },
+                }),
+                ..Default::default()
+            };
+            let po = prepare_and_layout(
+                &spec,
+                &batch,
+                &ThemeInputs::default(),
+                Viewport { width: 600.0, height: 300.0 },
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("layout should succeed");
+            let mut warnings = Vec::new();
+            let scene = scene_build::build_scene(
+                &spec,
+                &po.prep,
+                &po.layout,
+                &po.applied.effective_theme,
+                &config::RenderConfig::default(),
+                &mut warnings,
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("scene should build");
+            for panel in &scene.panels {
+                let (lo, hi) = (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w);
+                let tick = |label: &str| {
+                    panel.axes.iter().find_map(|n| match n {
+                        ferrum_scene::SceneNode::Text { x, content, style, .. }
+                            if content == label && style.angle == 0.0 && *x >= lo - 20.0 && *x <= hi + 20.0 =>
+                        {
+                            Some(*x)
+                        }
+                        _ => None,
+                    })
+                };
+                let mark_xs: Vec<f64> = panel
+                    .marks
+                    .iter()
+                    .flat_map(|b| b.nodes.iter())
+                    .filter_map(|n| match n {
+                        ferrum_scene::SceneNode::Circle { cx, .. } => Some(*cx),
+                        _ => None,
+                    })
+                    .collect();
+                let (min_x, max_x) = mark_xs
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x)));
+                let (t0, t10) = (tick("0").expect("tick 0"), tick("10").expect("tick 10"));
+                assert!(
+                    (t0 - min_x).abs() < 1e-3 && (t10 - max_x).abs() < 1e-3,
+                    "{x_resolve:?}: ticks 0 and 10 at ({t0}, {t10}), marks at ({min_x}, {max_x})",
+                );
+            }
+        }
+    }
+
+    /// The y twin: an independent-y facet panel's ticks sit on the marks at
+    /// the same values, as a shared panel's do. With y at 0, 5 and 10 in both
+    /// panels, the ticks labeled 0 and 10 are level with the circles at
+    /// y = 0 and y = 10 (the baseline sits a third of the font size below the
+    /// tick).
+    #[test]
+    fn independent_y_facet_ticks_sit_on_their_marks() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("p", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0, 0.0, 5.0, 10.0])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            ],
+        )
+        .unwrap();
+        for y_resolve in [Shared, Independent] {
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                    ..Default::default()
+                },
+                facet: Some(crate::layout::FacetSpec {
+                    field: "p".into(),
+                    row: None,
+                    title: None,
+                    row_title: None,
+                    sort: None,
+                    row_sort: None,
+                    mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                    spacing: None,
+                    resolve: crate::layout::facet::FacetResolve { x: Shared, y: y_resolve },
+                }),
+                ..Default::default()
+            };
+            let theme = ThemeInputs::default();
+            let po = prepare_and_layout(
+                &spec,
+                &batch,
+                &theme,
+                Viewport { width: 600.0, height: 300.0 },
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("layout should succeed");
+            let mut warnings = Vec::new();
+            let scene = scene_build::build_scene(
+                &spec,
+                &po.prep,
+                &po.layout,
+                &po.applied.effective_theme,
+                &config::RenderConfig::default(),
+                &mut warnings,
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("scene should build");
+            let baseline_drop = po.applied.effective_theme.typography.label_font_size / 3.0;
+            for panel in &scene.panels {
+                let tick = |label: &str| {
+                    panel.axes.iter().find_map(|n| match n {
+                        ferrum_scene::SceneNode::Text { y, content, style, .. }
+                            if content == label && style.anchor == ferrum_scene::TextAnchor::End =>
+                        {
+                            Some(*y - baseline_drop)
+                        }
+                        _ => None,
+                    })
+                };
+                let mark_ys: Vec<f64> = panel
+                    .marks
+                    .iter()
+                    .flat_map(|b| b.nodes.iter())
+                    .filter_map(|n| match n {
+                        ferrum_scene::SceneNode::Circle { cy, .. } => Some(*cy),
+                        _ => None,
+                    })
+                    .collect();
+                let (top, bottom) = mark_ys
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &y| (a.min(y), b.max(y)));
+                let (t0, t10) = (tick("0").expect("tick 0"), tick("10").expect("tick 10"));
+                assert!(
+                    (t0 - bottom).abs() < 1e-3 && (t10 - top).abs() < 1e-3,
+                    "{y_resolve:?}: ticks 0 and 10 at ({t0}, {t10}), marks at ({bottom}, {top})",
+                );
+            }
+        }
+    }
+    /// A 1x2 facet grid keeps the first two of three groups and drops the
+    /// third. Under an independent y the dropped group's labels never draw,
+    /// so they reserve nothing: the third group's y values run to a billion
+    /// (the widest labels), and the y band is the one the same chart draws
+    /// from the first two groups alone.
+    #[test]
+    fn a_dropped_facet_panel_reserves_no_y_band() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let batch = |groups: &[&str]| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("p", DataType::Utf8, false),
+            ]));
+            let (mut x, mut y, mut p) = (Vec::new(), Vec::new(), Vec::new());
+            for g in groups {
+                let top = if *g == "C" { 1.0e9 } else { 10.0 };
+                for (i, v) in [0.0, top / 2.0, top].into_iter().enumerate() {
+                    x.push(i as f64);
+                    y.push(v);
+                    p.push(*g);
+                }
+            }
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(x)),
+                    Arc::new(Float64Array::from(y)),
+                    Arc::new(StringArray::from(p)),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "p".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                mode: crate::layout::FacetMode::Grid { nrows: 1, ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve { x: Shared, y: Independent },
+            }),
+            ..Default::default()
+        };
+        let lay_out = |groups: &[&str]| {
+            prepare_and_layout(
+                &spec,
+                &batch(groups),
+                &ThemeInputs::default(),
+                Viewport { width: 600.0, height: 300.0 },
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("layout should succeed")
+            .layout
+        };
+        let three = lay_out(&["A", "B", "C"]);
+        let two = lay_out(&["A", "B"]);
+        assert_eq!(three.panels.len(), 2, "fixture assumption: the grid drops the third group");
+        assert_eq!(three.plot_region, two.plot_region);
+        assert_eq!(three.panels[0].plot_area, two.panels[0].plot_area);
+    }
+
+    /// The wrapped-label title repro: three categories `cat00_ww0`,
+    /// `cat01_ww1`, `cat02_ww2` and a long x title, real fonts, on 120-720px
+    /// wide charts 100, 160 and 250px tall. Where the labels draw flat, they
+    /// wrap at `_` onto two lines on the narrower charts, and the title
+    /// clears the last label line by exactly the axis title padding, with
+    /// auto on and off: never drawn over the second line, and no blank
+    /// strip under the labels.
+    #[test]
+    fn a_title_under_wrapped_category_labels_clears_every_line() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let cats: Vec<String> = (0..3).map(|i| format!("cat{i:02}_ww{i}")).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats.iter().map(String::as_str).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: Some(crate::spec::encoding::DataType::Nominal),
+                    title: Some("A fairly long x axis title for the chart".into()),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let m = font::FontdueMetrics::new();
+        let (mut wrapped, mut single) = (0, 0);
+        for (auto, height) in [true, false].into_iter().flat_map(|a| [100.0, 160.0, 250.0].map(move |h| (a, h))) {
+            for width in (120..=720).step_by(40) {
+                let mut theme = ThemeInputs::default();
+                theme.padding.padding_auto = auto;
+                let po = prepare_and_layout(
+                    &spec,
+                    &batch,
+                    &theme,
+                    Viewport { width: f64::from(width), height },
+                    &ChartConfig::default(),
+                    None,
+                )
+                .expect("layout should succeed");
+                let t = &po.applied.effective_theme;
+                let axis = po
+                    .layout
+                    .axes
+                    .iter()
+                    .find(|a| a.orient == crate::layout::AxisOrient::Bottom)
+                    .expect("x axis");
+                if axis.ticks.iter().all(|tk| tk.culled) || axis.ticks.iter().any(|tk| !tk.culled && tk.label_angle != 0.0) {
+                    continue;
+                }
+                let lines = axis.ticks.iter().filter(|tk| !tk.culled).map(|tk| tk.label.split('\n').count()).max().unwrap_or(1);
+                wrapped += usize::from(lines > 1);
+                single += usize::from(lines == 1);
+                let drawn_fs = axis
+                    .ticks
+                    .iter()
+                    .find(|tk| !tk.culled)
+                    .and_then(|tk| tk.label_font_size)
+                    .unwrap_or(t.typography.label_font_size);
+                let label_bottom = axis.axis_line.y
+                    + t.sizes.tick_size
+                    + 2.0
+                    + m.line_height(t.typography.label_font_size)
+                    + (lines - 1) as f64 * 1.2 * drawn_fs;
+                let title = axis.title.as_ref().expect("x title");
+                let title_top = title.anchor_y - m.line_height(t.typography.title_font_size) / 2.0;
+                assert!(
+                    (title_top - label_bottom - t.padding.axis_title_padding).abs() < 1e-9,
+                    "auto {auto} at {width}px, {lines} line(s): the title sits {} past the labels, not {}",
+                    title_top - label_bottom,
+                    t.padding.axis_title_padding,
+                );
+            }
+        }
+        assert!(wrapped > 0 && single > 0, "the repro must draw wrapped and one-line labels ({wrapped}, {single})");
+    }
+
+    /// The wrapped lines the scene draws sit where the layout reserves them,
+    /// on bottom and top axes: the `cat00_ww0` repro (three categories, a
+    /// long title, real fonts) wraps its labels onto two lines, and the title
+    /// baseline sits exactly as far past the last drawn line's baseline
+    /// (beyond the axis) as on a one-line chart, plus the cascade's font
+    /// shrink below a bottom axis (whose first line keeps the axis font's
+    /// line height). On a top axis the lines are drawn as separate lines
+    /// stacked away from the axis, not as one text.
+    #[test]
+    fn wrapped_label_lines_sit_where_the_layout_reserves_them() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let chart = |cats: Vec<String>, orient: Option<&str>| {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(cats.iter().map(String::as_str).collect::<Vec<_>>())),
+                    Arc::new(Float64Array::from((0..cats.len()).map(|i| i as f64).collect::<Vec<_>>())),
+                ],
+            )
+            .unwrap();
+            let spec = ChartSpec {
+                mark: Mark::Point,
+                encoding: Encoding {
+                    x: Some(EncodingSpec {
+                        field: "x".into(),
+                        type_: Some(crate::spec::encoding::DataType::Nominal),
+                        title: Some("A fairly long x axis title for the chart".into()),
+                        axis: orient.map(|o| Box::new(AxisStyleSpec { orient: Some(o.into()), ..Default::default() })),
+                        ..Default::default()
+                    }),
+                    y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            (spec, batch)
+        };
+        // (label baselines, title baseline) beyond the axis, from the scene.
+        let drawn = |spec: &ChartSpec, batch: &RecordBatch, width: f64| {
+            let theme = ThemeInputs::default();
+            let po = prepare_and_layout(spec, batch, &theme, Viewport { width, height: 250.0 }, &ChartConfig::default(), None)
+                .expect("layout should succeed");
+            let mut warnings = Vec::new();
+            let scene = scene_build::build_scene(
+                spec,
+                &po.prep,
+                &po.layout,
+                &po.applied.effective_theme,
+                &config::RenderConfig::default(),
+                &mut warnings,
+                &ChartConfig::default(),
+                None,
+            )
+            .expect("scene should build");
+            let panel = &scene.panels[0];
+            let mut labels = Vec::new();
+            let mut title = None;
+            for n in panel.axes.iter() {
+                if let ferrum_scene::SceneNode::Text { y, content, style, .. } = n {
+                    if content.starts_with("A fairly long") {
+                        title = Some(*y);
+                    } else if content.starts_with('c') || content.starts_with("ww") {
+                        labels.push((content.clone(), *y, style.angle, style.font_size));
+                    }
+                }
+            }
+            (labels, title.expect("x title in the scene"))
+        };
+        let one_line = (0..3).map(|i| format!("c{i}")).collect::<Vec<_>>();
+        let wrapped = (0..3).map(|i| format!("cat{i:02}_ww{i}")).collect::<Vec<_>>();
+        for orient in [None, Some("top")] {
+            let (spec, batch) = chart(one_line.clone(), orient);
+            let (labels, title) = drawn(&spec, &batch, 400.0);
+            let (reference, reference_fs) = ((title - labels[0].1).abs(), labels[0].3);
+            let mut reached = 0;
+            for width in (120..=320).step_by(20) {
+                let (spec, batch) = chart(wrapped.clone(), orient);
+                let (labels, title) = drawn(&spec, &batch, f64::from(width));
+                if labels.is_empty() || labels.iter().any(|l| l.2 != 0.0) || labels.iter().any(|l| l.0.contains('\n')) {
+                    assert!(!labels.iter().any(|l| l.0.contains('\n')), "{orient:?} at {width}px: a line break drawn inside one text");
+                    continue;
+                }
+                let ys: Vec<f64> = labels.iter().map(|l| l.1).collect();
+                let lines = ys.iter().map(|y| (y * 1000.0).round() as i64).collect::<std::collections::BTreeSet<_>>().len();
+                if lines < 2 {
+                    continue;
+                }
+                reached += 1;
+                let last = if orient.is_some() { ys.iter().copied().fold(f64::INFINITY, f64::min) } else { ys.iter().copied().fold(f64::NEG_INFINITY, f64::max) };
+                let want = if orient.is_some() { reference } else { reference + (reference_fs - labels[0].3) };
+                assert!(
+                    ((title - last).abs() - want).abs() < 1e-9,
+                    "{orient:?} at {width}px, {lines} lines at font {}: the title sits {} past the last line, want {want}",
+                    labels[0].3,
+                    (title - last).abs(),
+                );
+            }
+            assert!(reached > 0, "{orient:?}: the sweep must draw wrapped labels");
+        }
+    }
+
+
+    /// A cramped 2×2 facet grid: panels A, B and C with `first`, `first + 1`
+    /// and `first + 2` of their own seven-character categories on a shared
+    /// (or independent) x axis, y independent, 780x220. Rotated, enough
+    /// labels need a band that, held in the plot's bottom band and in the row
+    /// gutter, leaves no panel height.
+    fn cramped_facet_grid(x_resolve: crate::layout::ResolveMode, first: usize) -> (ChartSpec, RecordBatch) {
+        let mut cats: Vec<String> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        let mut panels: Vec<String> = Vec::new();
+        for (k, p) in ["A", "B", "C"].into_iter().enumerate() {
+            for i in 0..(first + k) {
+                cats.push(format!("{p}xxxx{i:02}"));
+                vals.push(10f64.powi(2 * k as i32) * (1.0 + i as f64 * 0.37));
+                panels.push(p.to_string());
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("p", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vals)),
+                Arc::new(StringArray::from(panels)),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "p".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve {
+                    x: x_resolve,
+                    y: crate::layout::ResolveMode::Independent,
+                },
+            }),
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    /// The cramped 2×2 grid draws a plot in every panel: the twelve shared
+    /// labels (3, 4 and 5 per panel), and independent panels with 8, 9 and
+    /// 10 labels of their own, would each need a band that leaves no panel
+    /// height, so the label cascade culls and re-presents them within the
+    /// band the panels leave room for, the independent panels' axes in the
+    /// render as well as in layout. A control with 3, 4 and 5 independent
+    /// labels per panel fits without a budget. Every case's bottom band and
+    /// row gutter hold exactly the band the drawn labels need, so no label
+    /// reaches the next row.
+    #[test]
+    fn a_cramped_facet_grid_keeps_a_plot_and_holds_its_drawn_labels() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        for (x_resolve, first, budgeted) in [(Shared, 3, true), (Independent, 8, true), (Independent, 3, false)] {
+            let (spec, batch) = cramped_facet_grid(x_resolve, first);
+            let viewport = Viewport { width: 780.0, height: 220.0 };
+            let chart_config = ChartConfig::default();
+            let po = prepare_and_layout(&spec, &batch, &ThemeInputs::default(), viewport, &chart_config, None)
+                .expect("layout should succeed");
+            let theme = po.applied.effective_theme.clone();
+            let mut warnings = Vec::new();
+            let scene = scene_build::build_scene(
+                &spec,
+                &po.prep,
+                &po.layout,
+                &theme,
+                &config::RenderConfig::default(),
+                &mut warnings,
+                &chart_config,
+                None,
+            )
+            .expect("scene should build");
+            let layout = &po.layout;
+            assert_eq!(layout.panels.len(), 3);
+            for p in &layout.panels {
+                assert!(
+                    p.plot_area.h > crate::layout::MIN_PANEL_DIM,
+                    "{x_resolve:?} {first}: every panel draws a plot ({:?})",
+                    p.plot_area,
+                );
+            }
+            assert_eq!(scene.panels.len(), 3, "{x_resolve:?}: every panel renders");
+            let m = font::FontdueMetrics::new();
+            let fs = theme.typography.label_font_size;
+            let line_h = m.line_height(fs);
+            let tick = theme.sizes.tick_size;
+            let x_labels = |p: &ferrum_scene::Panel| -> Vec<(String, f64, f64)> {
+                p.axes
+                    .iter()
+                    .filter_map(|n| match n {
+                        ferrum_scene::SceneNode::Text { content, style, .. } if content.contains("xxxx") => {
+                            Some((content.clone(), style.angle, style.font_size))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let band_of = |labels: &[(String, f64, f64)]| -> f64 {
+                let Some(first) = labels.first() else {
+                    return tick;
+                };
+                if first.1 == 0.0 {
+                    let lines = labels.iter().map(|l| l.0.split('\n').count()).max().unwrap_or(1);
+                    return tick + 2.0 + line_h + (lines - 1) as f64 * 1.2 * first.2;
+                }
+                let w = labels.iter().map(|(t, _, f)| m.measure_width(t, *f)).fold(0.0, f64::max);
+                let (sin, cos) = first.1.to_radians().sin_cos();
+                tick + 2.0 + sin.abs() * (fs + w) + cos.abs() * line_h
+            };
+            let drawn = scene.panels.iter().map(|p| band_of(&x_labels(p))).fold(f64::NEG_INFINITY, f64::max);
+            let drawn_count: usize = scene.panels.iter().map(|p| x_labels(p).len()).sum();
+            let axis_count: usize = layout
+                .axes
+                .iter()
+                .filter(|a| a.orient == crate::layout::AxisOrient::Bottom)
+                .map(|a| a.ticks.len())
+                .sum();
+            if budgeted {
+                assert!(layout.x_label_band_budget.is_some(), "{x_resolve:?}: laid out within a band budget");
+                assert!(drawn_count < axis_count, "{x_resolve:?}: the cascade culled labels to fit");
+            } else {
+                assert!(
+                    layout.x_label_band_budget.is_none() && drawn_count == axis_count,
+                    "each independent panel's own categories fit without a budget",
+                );
+            }
+            let gutter = crate::layout::axis::compute_x_title_width(
+                &po.prep.axes.x,
+                theme.typography.title_font_size,
+                theme.padding.axis_title_padding,
+                &m,
+                true,
+            );
+            let (padded, plot) = (layout.padded_region, layout.plot_region);
+            let reserved = (padded.y + padded.h) - (plot.y + plot.h) - gutter;
+            assert!((reserved - drawn).abs() < 1e-6, "{x_resolve:?}: bottom band {reserved} vs drawn {drawn}");
+            let top = layout.panels.iter().find(|p| p.row == 0).expect("row 0").plot_area;
+            let below = layout.panels.iter().find(|p| p.row == 1).expect("row 1").plot_area;
+            let strip = top.y - layout.plot_region.y;
+            let row_gutter = below.y - strip - (top.y + top.h) - theme.padding.row_padding;
+            assert!(
+                (row_gutter - drawn).abs() < 1e-6,
+                "{x_resolve:?}: the row gutter {row_gutter} holds the drawn band {drawn}",
+            );
+        }
+    }
+
+    /// Independent x and y together: the x band holds the panels' flat
+    /// labels as above, and the y band (left of the plot, less the y title
+    /// gutter) is the widest y label any panel draws (panel B's
+    /// `100,00x.x`, wider than any of the chart's own union labels), not the
+    /// chart's own y axis's widest.
+    #[test]
+    fn independent_x_and_y_panels_reserve_the_bands_they_draw() {
+        use crate::layout::ResolveMode::Independent;
+        let (spec, batch) = faceted_with_own_categories(4, "", Independent, Independent);
+        let (layout, drawn, theme, prep) = layout_and_drawn_labels(&spec, &batch);
+        let m = font::FontdueMetrics::new();
+        let reserved_x = reserved_x_band(&layout, &prep, &theme);
+        let want_x = drawn_x_band(&drawn, &theme);
+        assert!((reserved_x - want_x).abs() < 1e-6, "x band {reserved_x} vs drawn {want_x}");
+        let widest = |labels: &mut dyn Iterator<Item = (&str, f64)>| {
+            labels.map(|(t, f)| m.measure_width(t, f)).fold(0.0, f64::max)
+        };
+        let drawn_y_w = drawn
+            .iter()
+            .map(|p| widest(&mut p.y.iter().map(|(t, f)| (t.as_str(), *f))))
+            .fold(0.0, f64::max);
+        let fs = theme.typography.label_font_size;
+        let chart_y_w = widest(&mut prep.axes.y.tick_labels.iter().map(|t| (t.as_str(), fs)));
+        assert!(
+            drawn_y_w > chart_y_w,
+            "fixture assumption: a panel draws a y label wider than the chart's own ({drawn_y_w} vs {chart_y_w})",
+        );
+        let y_gutter = crate::layout::axis::compute_y_title_width(
+            &prep.axes.y,
+            theme.typography.title_font_size,
+            theme.padding.axis_title_padding,
+            &m,
+            true,
+        );
+        let reserved_y = layout.plot_region.x - layout.padded_region.x - y_gutter;
+        let want_y = theme.sizes.tick_size + 2.0 + drawn_y_w;
+        assert!(
+            (reserved_y - want_y).abs() < 1e-6,
+            "the reserved y band ({reserved_y}) holds the widest y label a panel draws ({want_y})",
+        );
+    }
+
     /// Render `spec`/`batch` under a theme whose label-gap policy is `policy`.
     fn render_with_label_gap(
         spec: &ChartSpec,
@@ -5266,12 +6230,16 @@ mod orchestration_tests {
 
     /// `#146` / spec §4.4, criterion 5 — the previously unspellable state.
     /// "Require a gap of N px AND never drop a label" must be observably
-    /// distinct from BOTH legacy spellings on the same chart.
+    /// distinct from BOTH legacy spellings on the same chart. Eight
+    /// categories per panel fit flat with no gap, so the 60px gap is what
+    /// drives the never-cull axis off flat (to -90, every label kept) and
+    /// the may-cull one to dropping labels: the three draw different labels.
     #[test]
     fn render_svg_gap_without_culling_differs_from_both_legacy_spellings() {
         use crate::layout::{LabelGapPolicy, ResolveMode};
 
-        let (spec, batch) = dense_faceted_categorical(24, ResolveMode::Independent);
+        let n = 8;
+        let (spec, batch) = dense_faceted_categorical(n, ResolveMode::Independent);
         let no_gap = render_with_label_gap(&spec, &batch, LabelGapPolicy::from_cull_threshold(0));
         let gap_cull =
             render_with_label_gap(&spec, &batch, LabelGapPolicy::from_cull_threshold(60));
@@ -5280,15 +6248,24 @@ mod orchestration_tests {
             &batch,
             LabelGapPolicy::from_cull_threshold(60).with_overrides(None, Some(false)),
         );
-
+        let rotated_labels = |svg: &str| {
+            svg.split("<text ")
+                .filter(|t| t.contains("rotate(-90") && t.contains(">Cat"))
+                .count()
+        };
         assert_eq!(
             count_cat_labels(&gap_no_cull),
-            24,
+            n,
             "a policy that forbids culling must keep every label"
         );
         assert!(
-            count_cat_labels(&gap_cull) < 24,
+            count_cat_labels(&gap_cull) < n,
             "the legacy gap-60 spelling must still drop labels"
+        );
+        assert!(
+            rotated_labels(&no_gap) == 0 && rotated_labels(&gap_no_cull) == 2 * n,
+            "the gap drives the never-cull axis off flat: no gap draws flat \
+             labels, the gap rotates them"
         );
         assert_ne!(
             gap_no_cull, no_gap,

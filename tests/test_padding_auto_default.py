@@ -150,8 +150,8 @@ def _assert_overhang_then_rescue(
 @pytest.mark.parametrize(
     "label_format, expected_margin_false, expected_margin_default, auto_false_hash",
     [
-        ("integer", -1, 4, "5e4712f904b6a6d9"),
-        ("currency", -4, 5, "98ffb74f4ae488f2"),
+        ("integer", -1, 4, "ffaa50727bf3dfd3"),
+        ("currency", -4, 5, "545e9b2676ed1df4"),
     ],
 )
 def test_integer_and_currency_label_format_on_0_to_1e6_is_rescued(
@@ -501,7 +501,7 @@ def test_compute_layout_inherits_the_built_in_auto_default():
     # pinned in
     # tests/test_padding_validation.py::TestPaddingAutoAxisTitleRecentering
     # to discriminate auto=True from auto=False via real font metrics.
-    control_df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+    control_df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 1.0]})
     control_title = "A moderately long horizontal axis title here"
     control_chart = (
         fm.Chart(control_df)
@@ -647,9 +647,13 @@ class TestRotatedLabelsThatFitAreUntouched:
 
 
 # ---------------------------------------------------------------------------
-# Case: padding.auto never blanks a cramped chart that auto=False draws. An
-# extra whose plot collapses (rotated labels' band eating the height) does
-# not count as a rescue, so auto adds nothing there.
+# Case: padding.auto never spends more than half of the auto=False plot, in
+# either dimension, AND never ships a pass that draws FEWER x tick labels
+# than auto=False draws. A rescue that fits within that half, keeping every
+# label auto=False draws, is applied in full. One that would need more than
+# half, or that would have to drop a label to fit, is declined entirely, so
+# the default renders exactly like auto=False -- not a smaller or sparser
+# plot that still clips.
 # ---------------------------------------------------------------------------
 
 
@@ -657,23 +661,124 @@ _CLIP_RECT = re.compile(
     r'<clipPath id="[^"]*"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/>'
 )
 
+_FLAT_NUMERIC_X_TICK_LABEL = re.compile(
+    r'<text (?![^>]*transform=)[^>]*text-anchor="middle"[^>]*>(-?[\d,]+\.\d+)</text>'
+)
 
-def test_a_cramped_chart_is_never_blanked_by_the_default():
-    """320x150, a long numeric first label (`,.12f` of -1234.56789) at a
-    tick placed by `values=`: with auto off the plot is 241x12 and draws
-    both points. The extra that would contain the label rotates it into a
-    band taller than the chart, collapsing the plot. The default must not
-    accept that: it draws both points in auto=False's plot rect."""
-    lo = -1234.56789
-    df = pl.DataFrame({"x": [lo, 0.0], "y": [0.0, 1.0]})
+
+def test_a_rescue_within_half_the_plot_is_applied():
+    """192x200, a `,.8f`-formatted last label (1234.56789): auto=False draws
+    both flat labels ("0.00000000" and "1,234.56789000", already at the
+    shrunk 9.02pt font) in a 113.056x124.961 plot, but the last one
+    overhangs the canvas by 8px of real rendered ink. Narrowing the plot to
+    98.975x124.961 -- still 87.5% of the auto=False width, well above half
+    in both dimensions -- pulls it back onto the canvas (6px to spare)
+    without dropping either label, so the default applies the rescue in
+    full: same two flat labels, same font, narrower plot, no overhanging
+    ink."""
+    lo = -float("1.23456789e3")
+    df = pl.DataFrame({"x": [0.0, -lo], "y": [0.0, 1.0]})
     chart = (
         fm.Chart(df)
         .mark_point()
-        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.12f", values=[lo, 0.0])), y="y:Q")
-        .properties(width=320, height=150)
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.8f", values=[0.0, -lo])), y="y:Q")
+        .properties(width=192, height=200)
     )
     svg_auto_false = chart.configure_padding(auto=False).to_svg()
     svg_default = chart.to_svg()
     assert svg_auto_false.count("<circle") == 2
     assert svg_default.count("<circle") == 2
-    assert _CLIP_RECT.findall(svg_default)[:1] == _CLIP_RECT.findall(svg_auto_false)[:1]
+    drawn_off = _FLAT_NUMERIC_X_TICK_LABEL.findall(svg_auto_false)
+    drawn_default = _FLAT_NUMERIC_X_TICK_LABEL.findall(svg_default)
+    assert drawn_off == ["0.00000000", "1,234.56789000"]
+    assert drawn_default == drawn_off
+    clip_off = _CLIP_RECT.findall(svg_auto_false)
+    clip_default = _CLIP_RECT.findall(svg_default)
+    assert clip_off == [("62.944", "16", "113.056", "124.961")]
+    assert clip_default == [("62.944", "16", "98.975", "124.961")]
+    off_w, off_h = (float(v) for v in clip_off[0][2:4])
+    default_w, default_h = (float(v) for v in clip_default[0][2:4])
+    assert default_w >= off_w / 2
+    assert default_h >= off_h / 2
+    assert svg_default != svg_auto_false
+    assert _last_x_tick_overhang_margin(svg_auto_false, 192, 200) == -8
+    assert _last_x_tick_overhang_margin(svg_default, 192, 200) == 6
+
+
+def test_a_rescue_that_would_cull_a_label_is_declined():
+    """270x200, x=[0,1,2,3] with the title "A moderately long horizontal
+    axis title here": auto=False draws all 8 of its rotated -90 x tick
+    labels (0 through 2.8), clipped to a real 191.056x110.056 plot, and the
+    title's ink overhangs the canvas by a measured 8px -- the in-test
+    liveness control, since that overhang is exactly what auto would
+    rescue. A build without the never-fewer-labels rule takes that rescue:
+    it redraws the axis with 6 flat labels (0, 0.6, 1.2, 1.8, 2.4, 3) in
+    place of the 8 rotated ones, opening a 151.999x124.961 plot and pulling
+    the title's overhang back to +11px. The default renders byte-identically to
+    auto=False instead: the same eight labels, un-dropped, in the same clip
+    rect, with the title's overhang left unrescued."""
+    control_df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+    chart = (
+        fm.Chart(control_df)
+        .mark_point()
+        .encode(x=fm.X("x", title="A moderately long horizontal axis title here"), y="y")
+        .properties(width=270, height=200)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert svg_auto_false.count("<circle") == 4
+    assert svg_default.count("<circle") == 4
+    assert _last_x_tick_overhang_margin(svg_auto_false, 270, 200) == -8
+    assert _last_x_tick_overhang_margin(svg_default, 270, 200) == -8
+    drawn_off = _X_TICK_LABEL.findall(svg_auto_false)
+    assert drawn_off == [
+        ("-90", "0"),
+        ("-90", "0.4"),
+        ("-90", "0.8"),
+        ("-90", "1.2"),
+        ("-90", "1.6"),
+        ("-90", "2"),
+        ("-90", "2.4"),
+        ("-90", "2.8"),
+    ]
+    assert _X_TICK_LABEL.findall(svg_default) == drawn_off
+    clip_off = _CLIP_RECT.findall(svg_auto_false)
+    assert clip_off == [("62.944", "16", "191.056", "110.056")]
+    assert _CLIP_RECT.findall(svg_default) == clip_off
+    assert svg_default == svg_auto_false
+
+
+def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
+    """128x200, a `,.8f`-formatted last label (1234.56789) under
+    `label_overlap="true"`: auto=False genuinely overhangs the canvas, by
+    17px of real rendered ink (not an estimate) past its right edge -- the
+    liveness control that proves there is a rescue to decline. The would-be
+    rescue opens a 23.513x124.961 plot, 47.9% of the auto=False width
+    (49.056) -- under half, so auto adds nothing: the default renders
+    byte-identically to auto=False rather than a smaller plot that still
+    overhangs. The overhanging label ("1,234.56789000") is drawn, unchanged,
+    in both renders."""
+    lo = -float("1.23456789e3")
+    df = pl.DataFrame({"x": [0.0, -lo], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(
+            x=fm.X(
+                "x:Q",
+                axis=fm.Axis(label_format=",.8f", values=[0.0, -lo], label_overlap="true"),
+            ),
+            y="y:Q",
+        )
+        .properties(width=128, height=200)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert svg_auto_false.count("<circle") == 2
+    assert svg_default.count("<circle") == 2
+    assert _last_x_tick_overhang_margin(svg_auto_false, 128, 200) == -17
+    assert "1,234.56789000" in svg_auto_false
+    clip_off = _CLIP_RECT.findall(svg_auto_false)
+    assert clip_off == [("62.944", "16", "49.056", "124.961")]
+    assert _CLIP_RECT.findall(svg_default) == clip_off
+    assert svg_default == svg_auto_false

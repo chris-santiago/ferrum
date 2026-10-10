@@ -40,14 +40,15 @@ import ferrum as fm
 # Byte-identity pins (ungrouped path must be untouched by the groupby refactor)
 # ---------------------------------------------------------------------------
 #
-# These hashes were captured from the SAME fixture and chart shape against
-# the pre-refactor `apply()` (single global fit, no `apply_one_group`/
-# `apply_grouped` split) before `regression_data.rs`/`loess_data.rs` were
-# touched for M3a. A change to the ungrouped fit math, grid generation, or
-# schema would move these hashes.
+# These MD5s are this build's bytes for the ungrouped fixture and chart
+# shape below -- a snapshot pin, not a claim of provenance against any
+# earlier build. A change to the ungrouped fit math, grid generation, or
+# schema moves these hashes; `TestUngroupedReproducesTheLine` below pins the
+# property itself (the fixture is exactly `y = 2x`) independently of the
+# hash, by inverting the rendered points through the chart's own scales.
 _UNGROUPED_FIXTURE = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 2.0, 4.0, 6.0]})
-_REGRESSION_UNGROUPED_MD5 = "4bfa2a2c429abe3479cb747781624080"
-_LOESS_UNGROUPED_MD5 = "8320296207e02c10e4e34e5a8fc4cfff"
+_REGRESSION_UNGROUPED_MD5 = "1504928d6bf52f905c1e5ebc02254da9"
+_LOESS_UNGROUPED_MD5 = "b465ca2ad358656102958dbc4487a35e"
 
 # Captured from the SAME fixture and chart shape against the pre-M3b
 # `impute.rs` (single global fill, no per-group partitioning) before this
@@ -127,6 +128,49 @@ class TestUngroupedByteIdentical:
             "ungrouped transform_loess output moved — the groupby refactor "
             "must be byte-identical when groupby is unset"
         )
+
+
+class TestUngroupedReproducesTheLine:
+    """`_UNGROUPED_FIXTURE` is exactly `y = 2x`, so the ungrouped fit's
+    rendered points, inverted back to data space through the chart's own
+    `LinearScale.invert()`, must lie on that line — a property check
+    independent of the byte pins above, which only catch a moved hash, not
+    whether the hash itself is still the right line. LOESS on collinear
+    points reproduces the same line.
+    """
+
+    @pytest.mark.parametrize(
+        "transform, field_names",
+        [
+            (
+                fm.transform_regression("x", "y", method="linear", as_=("rx", "ry")),
+                ("rx", "ry"),
+            ),
+            (
+                fm.transform_loess("x", "y", bandwidth=0.5, as_=("lx", "ly")),
+                ("lx", "ly"),
+            ),
+        ],
+        ids=["regression", "loess"],
+    )
+    def test_ungrouped_fit_lies_on_y_equals_2x(self, transform, field_names):
+        xscale = fm.LinearScale(domain=(-0.5, 3.5), range=(0.0, 400.0))
+        yscale = fm.LinearScale(domain=(-1.0, 7.0), range=(0.0, 300.0))
+        x_field, y_field = field_names
+        chart = (
+            fm.Chart(_UNGROUPED_FIXTURE, width=400, height=300)
+            .transform(transform)
+            .mark_line()
+            .encode(x=fm.X(x_field, scale=xscale), y=fm.Y(y_field, scale=yscale))
+        )
+        svg = chart.to_svg()
+        polylines = _polyline_points(svg)
+        assert len(polylines) == 1
+        points = polylines[0]
+        assert len(points) > 10
+        for px, py in points:
+            x, y = xscale.invert(px), yscale.invert(py)
+            assert y == pytest.approx(2 * x, abs=1e-3)
 
 
 class TestSinCosRepro:

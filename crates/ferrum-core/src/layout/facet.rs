@@ -144,6 +144,19 @@ pub enum FacetMode {
     Grid { nrows: u32, ncols: u32 },
 }
 
+impl FacetMode {
+    /// How many of `n_panels` panels the grid lays out: all of them in wrap
+    /// mode, at most `nrows * ncols` in grid mode (the rest are dropped). The
+    /// one statement of the cap, read by [`FacetGrid`] and by everything that
+    /// must agree with it on which panels draw.
+    pub(crate) fn kept_panel_count(&self, n_panels: u32) -> u32 {
+        match *self {
+            FacetMode::Wrap { .. } => n_panels,
+            FacetMode::Grid { nrows, ncols } => n_panels.min(nrows.max(1) * ncols.max(1)),
+        }
+    }
+}
+
 /// Caller-supplied per-panel input. `n_rows` is informational only — Phase 6
 /// does not use it for layout decisions but Phase 7+ may.
 ///
@@ -219,11 +232,7 @@ impl FacetGrid {
             FacetMode::Wrap { ncols } => ncols,
             FacetMode::Grid { ncols, .. } => ncols,
         };
-        let cap = match self.mode {
-            FacetMode::Wrap { .. } => self.n_panels,
-            FacetMode::Grid { nrows, ncols } => self.n_panels.min(nrows * ncols),
-        };
-        (0..cap)
+        (0..self.mode.kept_panel_count(self.n_panels))
             .map(|i| (i / ncols, i % ncols))
             .collect()
     }
@@ -260,13 +269,7 @@ impl FacetGrid {
 
     /// In grid mode, returns max(0, n_panels - nrows*ncols). Always 0 in wrap mode.
     pub fn dropped_count(&self) -> u32 {
-        match self.mode {
-            FacetMode::Grid { nrows, ncols } => {
-                let cap = nrows * ncols;
-                if self.n_panels > cap { self.n_panels - cap } else { 0 }
-            }
-            FacetMode::Wrap { .. } => 0,
-        }
+        self.n_panels - self.mode.kept_panel_count(self.n_panels)
     }
 }
 
@@ -500,6 +503,19 @@ mod tests {
         let grid = FacetGrid::compute_grid(2, 3, 8, origin, 0.0, 0.0);
         assert_eq!(grid.panel_positions().len(), 6);
         assert_eq!(grid.dropped_count(), 2);
+    }
+
+    /// Wrap mode keeps every panel; grid mode keeps at most `nrows * ncols`,
+    /// the same count `panel_positions` lays out.
+    #[test]
+    fn kept_panel_count_is_the_grid_cap() {
+        assert_eq!(FacetMode::Wrap { ncols: 2 }.kept_panel_count(5), 5);
+        assert_eq!(FacetMode::Grid { nrows: 1, ncols: 2 }.kept_panel_count(3), 2);
+        assert_eq!(FacetMode::Grid { nrows: 2, ncols: 3 }.kept_panel_count(4), 4);
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(1, 2, 3, origin, 0.0, 0.0);
+        assert_eq!(grid.panel_positions().len(), 2);
+        assert_eq!(grid.dropped_count(), 1);
     }
 
     #[test]

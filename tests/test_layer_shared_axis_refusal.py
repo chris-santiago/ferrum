@@ -350,32 +350,26 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Wave-5 must-render controls (`test_layer_ordinal_domain_union.py`), pinned
-# byte-identical on every route: the fix narrows a CONTINUOUS-axis union, and
-# must not touch the ordinal union's own, already-correct, "skip a layer
-# column the ladder cannot enumerate" rule one function over.
+# Must-render controls (`test_layer_ordinal_domain_union.py`): a continuous-
+# axis union is a separate rule from the ordinal union's own, already-
+# correct "skip a layer column the ladder cannot enumerate" rule one
+# function over, and must not touch it.
 #
-# 2026-10-08 (#135): the "categorical_bar_temporal_line" `fm.layer` hash moved
-# from `2446a242cabf896b` to `7d09607e9078e349` -- this fixture's temporal
-# line layer gets `padding.auto`'s edge-tick rescue now that the Rust
-# built-in default is `True`, and `fm.layer(...)` renders with no
-# `configure_padding` call to opt out. The `+` and `interactive` hashes for
-# the same fixture, and both hashes for "integer_category_ordinal_union",
-# did not move (confirmed by direct regeneration): `auto`'s correction is
-# measurably different only for this one route/fixture pair at this exact
-# viewport. Unrelated to the continuous-axis-union predicate this class
-# guards; still must not move again on its own.
-#
-# 2026-10-08 (#135 follow-up): the same `fm.layer` hash moved back to
-# `2446a242cabf896b`, the pre-#135 bytes, and it now equals this fixture's
-# `configure_padding(auto=False)` render. `padding.auto` reserves only what
-# the drawn x labels need: the temporal layer's labels are drawn rotated
-# -90 and fit, so the flat half-width it charged before was never needed.
+# Each hash below pins one route's rendered bytes. For
+# "categorical_bar_temporal_line", the `fm.layer` route renders with
+# `padding.auto`'s default: the hidden temporal line layer's x band is
+# reserved for exactly the labels the axis draws (rotated -90, fitting),
+# not for labels a collision cascade culls, and the merged panel's height
+# reflects that. The `+` and `interactive` routes for the same fixture, and
+# both routes for "integer_category_ordinal_union", render unaffected by
+# that reservation. These hashes guard the ordinal-union rule against the
+# continuous-axis predicate; they are unrelated to it, and must not move on
+# their own.
 # ---------------------------------------------------------------------------
 
-_WAVE5_CONTROL_HASHES = {
+_ORDINAL_UNION_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
-        "fm.layer": "2446a242cabf896b",
+        "fm.layer": "88e542e4ab5ec225",
         "+": "dddad057de646ff7",
         "interactive": "3248f9cb42c3bc79",
     },
@@ -419,7 +413,7 @@ def test_categorical_x_bar_plus_temporal_x_line_is_byte_identical(route: str) ->
     line = fm.Chart(stamps).mark_line().encode(x=fm.X("when", type_="T"), y="v2")
     assert (
         _control_hash(route, bar, line)
-        == _WAVE5_CONTROL_HASHES["categorical_bar_temporal_line"][route]
+        == _ORDINAL_UNION_CONTROL_HASHES["categorical_bar_temporal_line"][route]
     )
 
 
@@ -434,5 +428,5 @@ def test_integer_category_columns_under_the_ordinal_union_is_byte_identical(rout
     point = fm.Chart(numeric).mark_point().encode(x="n", y="v2")
     assert (
         _control_hash(route, bar, point)
-        == _WAVE5_CONTROL_HASHES["integer_category_ordinal_union"][route]
+        == _ORDINAL_UNION_CONTROL_HASHES["integer_category_ordinal_union"][route]
     )

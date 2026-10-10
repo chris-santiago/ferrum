@@ -347,8 +347,9 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         }
         if axis.show_labels && !tick.culled {
             let lines: Vec<&str> = tick.label.split('\n').collect();
-            if lines.len() == 1 || axis.orient != AxisOrient::Bottom {
-                // Single-line label, or non-Bottom orient (no multi-line for those).
+            let horizontal = matches!(axis.orient, AxisOrient::Bottom | AxisOrient::Top);
+            if lines.len() == 1 || !horizontal {
+                // Single-line label, or a vertical axis (no multi-line for those).
                 nodes.push(AxisTickNode {
                     node: SceneNode::Text {
                         x: label_x,
@@ -369,12 +370,20 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                     anchor: tick.position,
                 });
             } else {
-                // Multi-line label (Bottom orient only): emit one text node per
-                // line, each carrying the SAME tick anchor — every line moves
-                // and hides together with the tick it labels.
-                let line_height = effective_font_size * 1.2;
+                // Multi-line label (Bottom or Top orient): emit one text node
+                // per line, each carrying the SAME tick anchor — every line
+                // moves and hides together with the tick it labels. Lines step
+                // away from the axis by the pitch the layout reserves
+                // (`layout::axis::X_LABEL_LINE_PITCH_EM`): downward from the
+                // first line below a bottom axis, upward to the last line
+                // above a top one.
+                let line_height = effective_font_size * crate::layout::axis::X_LABEL_LINE_PITCH_EM;
+                let last = lines.len() - 1;
                 for (line_idx, line) in lines.iter().enumerate() {
-                    let line_y = label_y + (line_idx as f64) * line_height;
+                    let line_y = match axis.orient {
+                        AxisOrient::Top => label_y - ((last - line_idx) as f64) * line_height,
+                        _ => label_y + (line_idx as f64) * line_height,
+                    };
                     nodes.push(AxisTickNode {
                         node: SceneNode::Text {
                             x: label_x,

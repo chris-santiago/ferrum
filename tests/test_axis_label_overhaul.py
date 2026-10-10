@@ -10,11 +10,13 @@ Covers:
 
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
 
 import polars as pl
 
 import ferrum as fm
+from tests._snapshots import decode_png_rgba, rasterize_svg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -247,13 +249,21 @@ def _text_nodes(svg: str) -> list[tuple[str, str, str | None, float | None]]:
     return nodes
 
 
-def _rotated_bar_svg(label_angle: int | None) -> str:
-    df = pl.DataFrame({"category": _ROT_CATEGORIES, "value": [10, 20, 15, 25, 30, 18]})
+def _rotated_bar_svg(
+    label_angle: int | None,
+    *,
+    categories: list[str] = _ROT_CATEGORIES,
+    width: int = 600,
+    height: int = 320,
+) -> str:
+    df = pl.DataFrame(
+        {"category": categories, "value": [10, 20, 15, 25, 30, 18][: len(categories)]}
+    )
     chart = (
         fm.Chart(df)
         .mark_bar()
         .encode(x="category:N", y="value:Q")
-        .properties(width=600, height=320)
+        .properties(width=width, height=height)
     )
     if label_angle is not None:
         chart = chart.configure_axis(label_angle=label_angle)
@@ -315,19 +325,78 @@ def test_rotated_x_labels_do_not_disturb_y_axis_title() -> None:
     )
 
 
+def _has_blank_row_between(svg: str, y_a: float, y_b: float) -> bool:
+    """True if *svg*'s own rasterized canvas has at least one scanline, in
+    the row range spanning baselines *y_a* and *y_b* (either order), with no
+    rendered ink in any column.
+
+    A lower text line's descenders and an upper line's ascent both sit
+    strictly inside the span between their own baselines, so a genuine
+    vertical gap between two stacked lines always leaves at least one fully
+    blank row inside that span; two lines whose ink touches or overlaps
+    leave none. This reads the real rasterized glyph ink -- the same
+    `resvg_py` raster `test_padding_auto_default.py` uses for its overhang
+    margins -- rather than an estimated font metric, so it also accounts
+    for an end-anchored rotated label's ink dropping well below its pivot.
+    """
+    rows, _width, height = decode_png_rgba(rasterize_svg(svg))
+    background = rows[0][0]
+    lo = max(0, math.floor(min(y_a, y_b)))
+    hi = min(height - 1, math.ceil(max(y_a, y_b)))
+    for y in range(lo, hi + 1):
+        if not any(px != background and px[3] != 0 for px in rows[y]):
+            return True
+    return False
+
+
+# Longer than `_ROT_CATEGORIES`: four underscore-joined words each, so the
+# flat rendering wraps onto several lines (not just two) and the -45 rotated
+# rendering's end-anchored diagonal sweep drops well past the flat band --
+# deep enough that a title placed at the flat band's height would ride into
+# it. `_ROT_CATEGORIES` is too short for that: its rotated ink ends above
+# where its own flat labels wrap to, so a title using the flat position
+# never reaches it either.
+_TITLE_CLEARANCE_CATEGORIES = [
+    "configuration_one_alpha_bravo",
+    "configuration_two_alpha_bravo",
+    "configuration_three_alpha_bravo",
+    "configuration_four_alpha_bravo",
+    "configuration_five_alpha_bravo",
+    "configuration_six_alpha_bravo",
+]
+_TITLE_CLEARANCE_WORDS = {
+    word for category in _TITLE_CLEARANCE_CATEGORIES for word in category.split("_")
+} | set(_TITLE_CLEARANCE_CATEGORIES)
+
+
 def test_x_axis_title_clears_rotated_labels() -> None:
     """Regression (Bug 2): the x-axis title must clear the rotated labels.
 
-    The title was positioned from a flat label height, so its y was independent
-    of the label angle and it overlapped rotated labels. Two invariants now hold:
+    The title was positioned from a flat label height, so its y was
+    independent of the label angle and it overlapped rotated labels. Three
+    invariants now hold:
 
     1. The title sits below every rotated label's pivot.
-    2. Rotating the labels pushes the title strictly lower than the same chart
-       with flat labels — placement is angle-aware. Under the bug both titles
-       used the flat height, so this delta would be ~0.
+    2. The rotated title's y does not sit above the flat title's y. The two
+       are placed by the same panel-bottom-plus-title-metrics formula, so in
+       a correct render they land at the identical y; a title derived from a
+       flat (single-line) label height instead of the true rotated extent
+       would place the rotated title higher, at a smaller y than the flat
+       title.
+    3. The title's rendered ink never touches the last drawn x-tick-label
+       line's rendered ink -- for the flat rendering (whose multi-word
+       category names wrap onto several lines) and for the rotated one
+       (whose end-anchored -45 labels drop well below their shared pivot)
+       alike.
     """
-    flat_nodes = _text_nodes(_rotated_bar_svg(label_angle=None))
-    rot_nodes = _text_nodes(_rotated_bar_svg(label_angle=-45))
+    flat_svg = _rotated_bar_svg(
+        label_angle=None, categories=_TITLE_CLEARANCE_CATEGORIES, width=800, height=400
+    )
+    rot_svg = _rotated_bar_svg(
+        label_angle=-45, categories=_TITLE_CLEARANCE_CATEGORIES, width=800, height=400
+    )
+    flat_nodes = _text_nodes(flat_svg)
+    rot_nodes = _text_nodes(rot_svg)
 
     def _x_title_y(nodes: list[tuple[str, str, str | None, float | None]]) -> float:
         return next(
@@ -336,12 +405,21 @@ def test_x_axis_title_clears_rotated_labels() -> None:
             if content == "category" and "rotate(" not in transform and y is not None
         )
 
+    def _last_tick_label_line_y(
+        nodes: list[tuple[str, str, str | None, float | None]],
+    ) -> float:
+        return max(
+            y
+            for (content, _transform, _a, y) in nodes
+            if content in _TITLE_CLEARANCE_WORDS and y is not None
+        )
+
     flat_title_y = _x_title_y(flat_nodes)
     rot_title_y = _x_title_y(rot_nodes)
     rot_pivots = [
         y
         for (content, transform, _a, y) in rot_nodes
-        if "rotate(" in transform and content in _ROT_CATEGORIES and y is not None
+        if "rotate(" in transform and content in _TITLE_CLEARANCE_CATEGORIES and y is not None
     ]
 
     assert rot_pivots, "expected rotated x-tick labels at label_angle=-45"
@@ -349,8 +427,27 @@ def test_x_axis_title_clears_rotated_labels() -> None:
     assert rot_title_y > max(rot_pivots), (
         f"x-title.y={rot_title_y} must sit below rotated label pivots (max pivot={max(rot_pivots)})"
     )
-    # (2) Angle-aware: rotation drops the title below where flat labels put it.
-    assert rot_title_y > flat_title_y + 5.0, (
-        f"rotated x-title.y={rot_title_y} must drop below flat x-title.y="
-        f"{flat_title_y}; placement is not angle-aware (Bug 2 reintroduced)"
+    # (2) The rotated title must not sit above the flat title (measured
+    # margin: exactly zero -- both are placed by the same formula).
+    assert rot_title_y >= flat_title_y, (
+        f"rotated x-title.y={rot_title_y} must not sit above the flat "
+        f"x-title.y={flat_title_y}; a title derived from a flat label "
+        f"height would place the rotated title higher"
+    )
+    # (3) The title's rendered ink must not touch the last drawn tick-label
+    # line's rendered ink, flat and rotated alike. Comparing baselines (or a
+    # rotated line's shared pivot) cannot show this: two baselines can sit
+    # far enough apart on paper and still have their painted glyphs touch
+    # once each line's own ascent/descent -- or, for the rotated line, the
+    # real diagonal drop below its pivot -- is accounted for. This checks
+    # the rasterized rows for a real gap instead.
+    flat_last_line_y = _last_tick_label_line_y(flat_nodes)
+    rot_last_line_y = _last_tick_label_line_y(rot_nodes)
+    assert _has_blank_row_between(flat_svg, flat_last_line_y, flat_title_y), (
+        f"flat x-title ink (y={flat_title_y}) must not touch the last wrapped "
+        f"label line's ink (y={flat_last_line_y})"
+    )
+    assert _has_blank_row_between(rot_svg, rot_last_line_y, rot_title_y), (
+        f"rotated x-title ink (y={rot_title_y}) must not touch the last rotated "
+        f"label line's ink, including its drop below the shared pivot (y={rot_last_line_y})"
     )

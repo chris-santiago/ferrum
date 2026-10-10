@@ -567,7 +567,10 @@ class TestPaddingAutoAxisTitleRecentering:
 
     @classmethod
     def _repro_chart(cls):
-        df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+        # x spans 0..10, so the x tick labels stay flat and their count is
+        # the same at auto=True and auto=False -- the title recenter below
+        # must not also change which or how many x labels draw.
+        df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 1.0]})
         return fr.Chart(df).mark_point().encode(x=fr.X("x", title=cls.TITLE), y="y")
 
     def test_auto_true_recenters_the_title_away_from_its_auto_false_position(self):
@@ -826,10 +829,14 @@ class TestPaddingAutoCrossAxisTitleInfeasibility:
     NEEDS_CORRECTION_Y_TITLE = "A moderately long vertical axis title here"
 
     @classmethod
-    def _repro_chart(cls, x_title: str | None = None):
+    def _repro_chart(cls, x_title: str | None = None, x_values=None, y_values=None):
         if x_title is None:
             x_title = cls.INFEASIBLE_X_TITLE
-        df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+        if x_values is None:
+            x_values = [0.0, 1.0, 2.0, 3.0]
+        if y_values is None:
+            y_values = [0.0, 1.0, 2.0, 3.0]
+        df = pl.DataFrame({"x": x_values, "y": y_values})
         return (
             fr.Chart(df)
             .mark_point()
@@ -888,7 +895,7 @@ class TestPaddingAutoCrossAxisTitleInfeasibility:
 
         y_title_auto_false = self._y_title_y(auto_false)
         y_title_auto_true = self._y_title_y(auto_true)
-        assert y_title_auto_false == pytest.approx(96.028, abs=1e-3)
+        assert y_title_auto_false == pytest.approx(103.48, abs=1e-3)
         assert y_title_auto_true == pytest.approx(123.145, abs=1e-3), (
             "the y title is no wider than the viewport (a genuine, feasible "
             "recenter) and must still move under auto=True even though the "
@@ -896,12 +903,15 @@ class TestPaddingAutoCrossAxisTitleInfeasibility:
             f"{y_title_auto_false})"
         )
 
-        # Anti-vacuity control: the SAME fixture (same y title, same
-        # width/height) but with a FEASIBLE x title — its own anchor DOES
-        # move under `auto=True`, proving the equality pin above is x's
-        # genuine infeasibility residual and not `auto` being inert on x
-        # for this fixture/viewport.
-        feasible_base = self._repro_chart(self.FEASIBLE_X_TITLE)
+        # Anti-vacuity control: the SAME y title, width and height, but with
+        # a FEASIBLE x title on a sparser x domain (0..10, not 0..3) so the
+        # x tick labels stay flat and equal in count at auto=True and
+        # auto=False -- its own anchor DOES move under `auto=True`, proving
+        # the equality pin above is x's genuine infeasibility residual and
+        # not `auto` being inert on x for this fixture/viewport.
+        feasible_base = self._repro_chart(
+            self.FEASIBLE_X_TITLE, x_values=[0.0, 10.0], y_values=[0.0, 1.0]
+        )
         feasible_auto_false = feasible_base.configure_padding(auto=False)
         feasible_auto_true = feasible_base.configure_padding(auto=True)
 

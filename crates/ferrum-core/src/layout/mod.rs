@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 pub use self::axis::{
     AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelBandCtx, LabelGapPolicy,
-    LabelOverlap, TickLayout, TickProjection,
+    LabelOverlap, PanelAxisInputs, TickLayout, TickProjection,
 };
 pub(crate) use self::axis::{AxisStyleOverrides, Claimed, LabelFormat};
 pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
@@ -74,6 +74,13 @@ pub struct LayoutResult {
     /// computed. A deserialized value is therefore `Rect::ZERO`.
     #[serde(skip)]
     pub(crate) plot_region: Rect,
+    /// The bound the x axes' label band was laid out within when the labels
+    /// would otherwise leave no panel drawable (see `reserve_axis_bands`);
+    /// `None` when unbounded. A panel axis laid out again outside layout (an
+    /// independent facet panel's, in `render::scene_build`) uses the same
+    /// bound. In-process only, like `plot_region`.
+    #[serde(skip)]
+    pub(crate) x_label_band_budget: Option<f64>,
     /// `viewport` less the theme's padding, BEFORE any chrome band — the box
     /// the chart-title, legend and axis reservations were taken out of.
     ///
@@ -296,7 +303,7 @@ impl std::fmt::Display for LayoutError {
         match self {
             LayoutError::InvalidViewport { width, height } => write!(
                 f,
-                "invalid viewport: width={width}, height={height} (both must be > 0)"
+                "invalid viewport: width={width}, height={height} (both must be finite and > 0)"
             ),
             LayoutError::InvalidFacetSpec(s) => write!(f, "invalid facet spec: {s}"),
             LayoutError::PaddingExceedsViewport {
@@ -967,18 +974,97 @@ fn secondary_y_axis_band_width(
     )
 }
 
+/// The y label band (spec §4.1): the widest any panel's drawn y axis needs
+/// ([`AxesInput::drawn_y_inputs`]: the chart's y axis, or each panel's own
+/// when y resolves independently per panel), each at its own label font size
+/// (a per-axis `label_font_size` drives the drawn size, so it drives the
+/// band too).
+///
+/// Drawn gate (#97, spec §4.1 amended 2026-08-27; widened by #182, which
+/// closes #94): `axes.show_y` answers "is this Cartesian y axis drawn" —
+/// `.axis(y=False)`'s chart-level toggle (JointChart marginals, ClusterMap
+/// dendrograms) AND a projected coord that replaces the Cartesian axes
+/// (`render::prepare::build_axes` folds both into the flag). It does NOT
+/// empty the tick labels, so the reservation asks the flag itself.
+/// `compute_y_label_band_width` also reads `show_labels()` off each input
+/// (`fm.Axis(labels=False)` draws no label text either), so only an axis
+/// that both is shown AND draws its labels reserves a band at all.
+fn y_label_band(axes: &AxesInput, theme: &ThemeInputs, metrics: &dyn TextMetrics) -> f64 {
+    axes.drawn_y_inputs()
+        .into_iter()
+        .map(|y| {
+            axis::compute_y_label_band_width(
+                y,
+                y.overrides.labels.font_size.unwrap_or(theme.typography.label_font_size),
+                metrics,
+                y.tick_size(theme),
+                axes.show_y,
+            )
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// The x label band for panels `panel_w` wide: the tallest any panel's drawn
+/// x axis needs ([`AxesInput::drawn_x_inputs`]: the chart's x axis, or each
+/// panel's own when x resolves independently per panel), each reserved for
+/// the labels it draws ([`axis::estimate_x_label_band`]) within
+/// `band_budget` (see [`LabelBandCtx::band_budget`]).
+fn x_label_band(
+    axes: &AxesInput,
+    panel_w: f64,
+    band_budget: f64,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+) -> f64 {
+    axes.drawn_x_inputs()
+        .into_iter()
+        .map(|x| {
+            let ctx = LabelBandCtx::for_axis(x, theme, metrics).with_band_budget(band_budget);
+            axis::estimate_x_label_band(x, panel_w, &ctx)
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// The tallest x label band that still leaves every panel drawable, when the
+/// band the labels would otherwise draw (`unbounded`) does not; `f64::INFINITY`
+/// when the labels never bound the panels (they fit, or the panels collapse
+/// even with no band at all). `drawable(b)` says whether a band `b` tall
+/// leaves every panel larger than [`MIN_PANEL_DIM`]; it is monotone (a taller
+/// band leaves less of the panel), so the bound is found by bisection between a
+/// band that is drawable (none) and one that is not (`unbounded`).
+fn x_label_band_budget(unbounded: f64, drawable: &dyn Fn(f64) -> bool) -> f64 {
+    if drawable(unbounded) || !drawable(0.0) {
+        return f64::INFINITY;
+    }
+    let (mut lo, mut hi) = (0.0, unbounded);
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if drawable(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// 400 stage 3 — reserve the x/y axis margin bands off `inner_after_legend`,
 /// returning the shrunk plot region, the `x_label_band` (also needed for the
 /// inter-row facet gutter), and the per-secondary-y-axis band widths
 /// (secondary-y-axis, GH #52; empty when `axes.secondary_y` is empty, the
-/// pre-#52 default). Pure extraction of the former inline gutter/band/clamp
-/// block; arithmetic unchanged for the primary x/y bands.
+/// pre-#52 default).
+///
+/// The x label band and its bound come from [`reserve_x_label_band`], over
+/// the panels `geometry` lays out.
+///
+/// Returns the plot region, the x label band, the secondary-y band widths
+/// and the x label band budget (`f64::INFINITY` when unbounded).
 fn reserve_axis_bands(
     inner_after_legend: Rect,
-    axes: &AxesInput,
-    theme: &ThemeInputs,
+    geometry: &PanelGeometry,
     metrics: &dyn TextMetrics,
-) -> (Rect, f64, Vec<f64>) {
+) -> (Rect, f64, Vec<f64>, f64) {
+    let (axes, theme) = (geometry.axes, geometry.theme);
     // Drawn gate (#182, closes #94): the title gutter is reserved only for an
     // axis that draws its title — the same `axes.show_y` answer the label band
     // three lines below already gates on, which also carries the projected-coord
@@ -991,60 +1077,7 @@ fn reserve_axis_bands(
         metrics,
         axes.show_y,
     );
-    // Per-axis label_font_size override must drive the band reservation too (it
-    // already drives the rendered label size in marks/axis.rs); otherwise the
-    // gutter is sized at the theme value but drawn at the override → mis-sized.
-    let y_label_font_size = axes
-        .y
-        .overrides
-        .labels
-        .font_size
-        .unwrap_or(theme.typography.label_font_size);
-    // Drawn gate (#97, spec §4.1 amended 2026-08-27; widened by #182, which
-    // closes #94): `axes.show_y` answers "is this Cartesian y axis drawn" —
-    // `.axis(y=False)`'s chart-level toggle (JointChart marginals, ClusterMap
-    // dendrograms) AND a projected coord that replaces the Cartesian axes
-    // (`render::prepare::build_axes` folds both into the flag). It does NOT
-    // empty `axes.y.tick_labels` — only `layout_y_axis`'s emission is skipped —
-    // so the reservation has to ask the flag itself. `compute_y_label_band_width`
-    // also reads `axes.y.show_labels()` directly off the passed `AxisInput`
-    // (`fm.Axis(labels=False)` on an otherwise-shown axis draws no label text
-    // either), so only an axis that both is shown AND draws its labels reserves
-    // a band at all.
-    let y_label_band = axis::compute_y_label_band_width(
-        &axes.y,
-        y_label_font_size,
-        metrics,
-        axes.y.tick_size(theme),
-        axes.show_y,
-    );
-
-    // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
-    // angle the cascade will choose by running a lightweight worst-case check
-    // against an estimated slot width, before the plot rect is finalized.
-    // Over-reservation is preferable to under-reservation (label clipping).
-    let x_label_band = if axes.show_x {
-        let estimated_plot_w = inner_after_legend.w - y_label_band - y_title_gutter;
-        let n_labels = axes.x.tick_labels.len().max(1);
-        let estimated_slot_w = estimated_plot_w / n_labels as f64;
-        // Drawn gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
-        // widened by #182, which closes #94): `axes.show_x` already gates this
-        // whole branch to `0.0` above (`.axis(x=False)`, or a projected coord
-        // with no Cartesian axes at all), so the only remaining knob is
-        // `axes.x.show_labels()` (`fm.Axis(labels=False)` on an otherwise-shown
-        // axis draws no label text either) — mirrors the primary y band's gate
-        // exactly, see `estimate_x_label_band`'s doc.
-        axis::estimate_x_label_band(
-            &axes.x.tick_labels,
-            axes.x.overrides.labels.angle,
-            estimated_slot_w,
-            axes.x.overrides.labels.padding,
-            axes.x.show_labels(),
-            &LabelBandCtx::for_axis(&axes.x, theme, metrics),
-        )
-    } else {
-        0.0
-    };
+    let y_label_band = y_label_band(axes, theme, metrics);
 
     // L-3: use per-axis title_font_size/title_padding overrides for gutter
     // reservation, via the `compute_x_title_width` sibling of `compute_y_title_width`
@@ -1064,11 +1097,6 @@ fn reserve_axis_bands(
     // after the dynamic estimate: `min` reserves at least that much, `max` caps
     // it (labels may clip past the cap — allowed). `None`/unset leaves the
     // dynamic value unchanged, so default output is byte-identical.
-    let x_band = clamp_axis_band(
-        x_label_band + x_title_gutter,
-        axes.x.overrides.placement.min_band,
-        axes.x.overrides.placement.max_band,
-    );
     let y_band = clamp_axis_band(
         y_label_band + y_title_gutter,
         axes.y.overrides.placement.min_band,
@@ -1095,12 +1123,27 @@ fn reserve_axis_bands(
         .collect();
     let secondary_y_total: f64 = secondary_y_bands.iter().sum();
 
+    // The x label band (spec §4.8), for the labels the x axis draws across
+    // the panel it gets. The y bands never depend on the x band, so the
+    // region's width is known before the x band is.
+    let (x_label_band, x_band_budget) = reserve_x_label_band(
+        geometry,
+        inner_after_legend,
+        y_band + secondary_y_total,
+        x_title_gutter,
+        metrics,
+    );
     // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
     // bottom (Bottom orient) but moves to the top for `orient="top"`; y defaults
     // to the left (Left orient) but moves to the right for `orient="right"`. The
     // cross-dimension case is rejected upstream (`prepare.rs`), so only the two
     // valid sides per dimension occur here.
     let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
+    let x_band = clamp_axis_band(
+        x_label_band + x_title_gutter,
+        axes.x.overrides.placement.min_band,
+        axes.x.overrides.placement.max_band,
+    );
     let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
     let plot_region = inner_after_legend.shrink(Inset {
         top: if x_on_top { x_band } else { 0.0 },
@@ -1109,7 +1152,7 @@ fn reserve_axis_bands(
         left: if y_on_right { 0.0 } else { y_band },
     });
 
-    (plot_region, x_label_band, secondary_y_bands)
+    (plot_region, x_label_band, secondary_y_bands, x_band_budget)
 }
 
 /// The four sides' non-auto fallback padding — an explicit side if the
@@ -1179,48 +1222,48 @@ pub(crate) fn estimate_panel_pixel_size(
     )
 }
 
-/// Scales `extra_low`/`extra_high` — an already-computed TOTAL `padding.auto`
-/// contribution for one axis (left/right or top/bottom, after every
-/// auto-padding reader has been combined) — down so applying it can never
-/// convert a chart that renders at `auto=false` into a
-/// `LayoutError::PaddingExceedsViewport` refusal (`recentering_padding`'s feasible branch is intentionally
-/// unbounded in isolation — it solves for whatever shift the title needs,
-/// with no notion of a shared budget — so nothing capped the MERGED total
-/// against the viewport it was being added to; a large enough `extra`
-/// could collapse the inner rect, and the resulting error would then name
-/// a padding value the caller never set, undercutting
-/// [`LayoutError::PaddingExceedsViewport`]'s own "report the caller's
-/// actual value" contract).
+/// The factor in `[0, 1]` that scales one axis's TOTAL `padding.auto`
+/// contribution (`desired`, both sides together, after every auto-padding
+/// reader has been combined) down to what that axis can spend. Both sides
+/// are scaled by the same factor, preserving which side needed more, just
+/// less of it. Two bounds apply, and the tighter wins:
+/// - the plot: `room`, the margin this axis may add before a panel falls
+///   below the share of its `auto=false` size `padding.auto` must leave it
+///   ([`AutoPlotRoom`]). A single label or title that needs more than that
+///   alone was already dropped as infeasible, so what reaches here is
+///   corrections that each fit but together do not.
+/// - the viewport: applying the extra can never convert a chart that
+///   renders at `auto=false` into a `LayoutError::PaddingExceedsViewport`
+///   refusal. `recentering_padding`'s feasible branch is unbounded in
+///   isolation (it solves for whatever shift the title needs, with no
+///   notion of a shared budget), so without this a large enough extra
+///   could collapse the inner rect, and the error would then name a padding
+///   value the caller never set, undercutting
+///   [`LayoutError::PaddingExceedsViewport`]'s own "report the caller's
+///   actual value" contract. The extra must leave [`MIN_PANEL_DIM`] of
+///   `span` past `fixed_low`/`fixed_high`, the axis's
+///   [`base_padding_insets`] (its `auto=false` inset, which auto never
+///   touches). If that floor ALONE already fails, the failure is
+///   pre-existing and auto cannot fix it: the factor is `0.0`, so auto
+///   contributes nothing and the render fails, or doesn't, exactly as it
+///   would without auto, with the same message.
 ///
-/// `fixed_low`/`fixed_high` are the axis's [`base_padding_insets`] — what
-/// this axis's inset would be at `auto=false`, which auto never touches.
-/// If the floor ALONE already fails to leave [`MIN_PANEL_DIM`] of `span`,
-/// that is a pre-existing failure auto did not cause and cannot fix:
-/// returns `(0.0, 0.0)` so auto contributes nothing and the render fails —
-/// or doesn't — exactly as it would without auto, with the same message.
-/// Otherwise scales `extra_low`/`extra_high` down PROPORTIONALLY
-/// (preserving which side needed more, just less of it) so their sum
-/// leaves at least `MIN_PANEL_DIM` of `span` free; when they already fit,
-/// returns them unchanged. This is "best-effort": when the full correction
-/// doesn't fit, auto applies the largest one that does rather than either
-/// refusing or overshooting into a refusal.
-fn cap_auto_contribution(
-    fixed_low: f64,
-    fixed_high: f64,
-    extra_low: f64,
-    extra_high: f64,
-    span: f64,
-) -> (f64, f64) {
-    let budget = span - fixed_low - fixed_high - MIN_PANEL_DIM;
-    if budget <= 0.0 {
-        return (0.0, 0.0);
+/// When `desired` fits both, the factor is exactly `1.0`. A factor below
+/// `1.0` is the settle's continuous relaxation, so the fixed point stays
+/// within the budget while it iterates; it never ships. It marks the axis
+/// ([`AutoPaddingExtra::x_scaled`]), and [`settle_auto_padding`] closes that
+/// axis and settles again, so a shipped extra is either the full correction
+/// or nothing on that axis.
+fn cap_auto_scale(fixed_low: f64, fixed_high: f64, desired: f64, span: f64, room: f64) -> f64 {
+    let viewport_budget = span - fixed_low - fixed_high - MIN_PANEL_DIM;
+    if viewport_budget <= 0.0 {
+        return 0.0;
     }
-    let desired = extra_low + extra_high;
+    let budget = viewport_budget.min(room);
     if desired <= budget {
-        return (extra_low, extra_high);
+        return 1.0;
     }
-    let scale = budget / desired;
-    (extra_low * scale, extra_high * scale)
+    budget / desired
 }
 
 /// The y-axis gutter width `padding.auto` (D10) treats as the "cushion"
@@ -1235,19 +1278,7 @@ fn cap_auto_contribution(
 /// two auto-padding passes can never compute two different notions of "how
 /// much of the left/right margin is already spoken for by the y-axis."
 fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMetrics) -> f64 {
-    let y_label_font_size = axes
-        .y
-        .overrides
-        .labels
-        .font_size
-        .unwrap_or(theme.typography.label_font_size);
-    let raw = axis::compute_y_label_band_width(
-        &axes.y,
-        y_label_font_size,
-        metrics,
-        axes.y.tick_size(theme),
-        axes.show_y,
-    ) + axis::compute_y_title_width(
+    let raw = y_label_band(axes, theme, metrics) + axis::compute_y_title_width(
         &axes.y,
         theme.typography.title_font_size,
         theme.padding.axis_title_padding,
@@ -1307,14 +1338,15 @@ struct LayoutInputs<'a> {
 /// - the limit, a lever below [`MIN_LABEL_LEVER`]: that margin cannot move
 ///   the label (a tick pinned at the far end);
 /// - an infeasible charge, `o / lever` larger than that side can widen
-///   before the label's panel reaches [`MIN_PANEL_DIM`]: no margin on that
-///   side can contain the label, so charging it would only collapse the
-///   plot (or, through [`cap_auto_contribution`], squeeze the other side's
-///   real extra). This is the per-label twin of an infeasible axis title
-///   (see [`auto_padding_extra`]). It judges the label's own panel width
-///   only; a charge that fits there can still collapse the plot another way
+///   before the label's panel falls below the width [`AutoPlotRoom`] says
+///   `padding.auto` must leave it: containing the label would trade the
+///   data area for it (or, through [`cap_auto_scale`], squeeze the other
+///   side's real extra), so it clips as with `auto=false`. This is the
+///   per-label twin of an infeasible axis title (see
+///   [`auto_padding_extra`]). It judges the label's own panel width only; a
+///   charge that fits there can still leave the plot too small another way
 ///   (a narrower plot can rotate the labels into a taller band), which
-///   [`settle_auto_padding`] catches by never accepting a collapsed pass.
+///   [`settle_auto_padding`] catches by never accepting an unusable pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct XLabelOverhang {
     left: f64,
@@ -1343,7 +1375,8 @@ impl XLabelOverhang {
     /// when faceted) past its plot region, on a `viewport_width`-wide
     /// canvas. `wider_left` / `wider_right` are the same plot laid out with
     /// that margin [`LEVER_PROBE_PX`] wider; a tick missing from one (its
-    /// panel collapsed there) has no lever on that side.
+    /// panel collapsed there) has no lever on that side. `room` says how
+    /// narrow each panel may get (see [`MarginResponse`]).
     ///
     /// Written in the cushion form [`auto_padding_for_edge_ticks`] expects:
     /// the plot edge's current distance from the canvas edge plus the
@@ -1354,6 +1387,7 @@ impl XLabelOverhang {
         wider_left: &PlotLayout,
         wider_right: &PlotLayout,
         viewport_width: f64,
+        room: &AutoPlotRoom,
         theme: &ThemeInputs,
         metrics: &dyn TextMetrics,
     ) -> Self {
@@ -1364,10 +1398,11 @@ impl XLabelOverhang {
                 .panels
                 .get(axis.panel_index)
                 .map_or(0.0, |p| p.plot_area.w);
+            let (width_floor, _) = room.floor(axis.panel_index);
             // Widening the left margin moves a tick right (+1), the right
             // margin moves it left (-1).
-            let left = MarginResponse::of(axis, panel_w, wider_left, 1.0);
-            let right = MarginResponse::of(axis, panel_w, wider_right, -1.0);
+            let left = MarginResponse::of(axis, panel_w, width_floor, wider_left, 1.0);
+            let right = MarginResponse::of(axis, panel_w, width_floor, wider_right, -1.0);
             for label in axis::drawn_x_labels(axis, theme.typography.label_font_size, metrics) {
                 if let Some(charge) = left.charge(label.index, label.tick, -label.left_ink) {
                     overhang.left = overhang.left.max(region.x + charge);
@@ -1398,8 +1433,9 @@ struct MarginResponse<'a> {
     /// The counterpart axis's ticks, or `None` when it has none (its panel
     /// collapsed in the wider layout).
     wider_ticks: Option<&'a [TickLayout]>,
-    /// How far the panel can still shrink before it collapses, in pixels
-    /// of this margin (`f64::INFINITY` when the margin does not shrink it).
+    /// How far the panel can still shrink before it falls below
+    /// `width_floor` (or collapses), in pixels of this margin
+    /// (`f64::INFINITY` when the margin does not shrink it).
     room: f64,
     /// The direction this margin moves a tick as it widens: `1.0` for the
     /// left margin, `-1.0` for the right.
@@ -1407,7 +1443,15 @@ struct MarginResponse<'a> {
 }
 
 impl<'a> MarginResponse<'a> {
-    fn of(axis: &AxisLayout, panel_w: f64, wider: &'a PlotLayout, direction: f64) -> Self {
+    /// `panel_w` is the axis's panel width at the measured inset and
+    /// `width_floor` the narrowest [`AutoPlotRoom`] lets that panel get.
+    fn of(
+        axis: &AxisLayout,
+        panel_w: f64,
+        width_floor: f64,
+        wider: &'a PlotLayout,
+        direction: f64,
+    ) -> Self {
         let counterpart = wider
             .axis_layouts
             .iter()
@@ -1418,7 +1462,7 @@ impl<'a> MarginResponse<'a> {
             .map_or(0.0, |p| p.plot_area.w);
         let shrink_per_px = (panel_w - wider_w) / LEVER_PROBE_PX;
         let room = if shrink_per_px > 0.0 {
-            (panel_w - MIN_PANEL_DIM).max(0.0) / shrink_per_px
+            (panel_w - width_floor.max(MIN_PANEL_DIM)).max(0.0) / shrink_per_px
         } else {
             f64::INFINITY
         };
@@ -1461,14 +1505,20 @@ impl<'a> MarginResponse<'a> {
 ///   already reserved.
 /// - `x_overhang`: how far the drawn x tick labels reach past the plot
 ///   region's edges (see [`XLabelOverhang`]).
-/// - `collapsed`: whether the inset leaves a panel too small to draw.
+/// - `unusable`: whether the inset leaves a panel smaller than `room`
+///   lets `padding.auto` leave it, or collapsed, or leaves undrawn an x
+///   tick label `auto=false` draws (see [`AutoPlotRoom`]).
 ///
 /// The first two are only exact at the `inset` that produced them: every
 /// categorical legend strip is capped at half of whichever rect it is
 /// carved from, and the x-axis collision cascade picks its labels, angle
 /// and font size from the plot width. [`settle_auto_padding`] calls this in
 /// a loop until what it credits and what this measures agree.
-fn probe_auto_padding(inset: Inset, inputs: &LayoutInputs) -> AutoPaddingProbe {
+fn probe_auto_padding(
+    inset: Inset,
+    inputs: &LayoutInputs,
+    room: &AutoPlotRoom,
+) -> AutoPaddingProbe {
     let LayoutInputs {
         theme,
         viewport,
@@ -1499,10 +1549,7 @@ fn probe_auto_padding(inset: Inset, inputs: &LayoutInputs) -> AutoPaddingProbe {
         bottom: ((padded.y + padded.h) - (after.y + after.h)).max(0.0),
         left: (after.x - padded.x).max(0.0),
     };
-    let collapsed = plot
-        .panels
-        .iter()
-        .any(|p| p.plot_area.w <= MIN_PANEL_DIM || p.plot_area.h <= MIN_PANEL_DIM);
+    let unusable = !room.leaves_usable(&plot);
     let x_overhang = if charges_x_edge_labels(axes) {
         let wider_left = lay_out_at(
             Inset {
@@ -1525,6 +1572,7 @@ fn probe_auto_padding(inset: Inset, inputs: &LayoutInputs) -> AutoPaddingProbe {
             &wider_left,
             &wider_right,
             viewport.width,
+            room,
             theme,
             metrics,
         )
@@ -1534,7 +1582,7 @@ fn probe_auto_padding(inset: Inset, inputs: &LayoutInputs) -> AutoPaddingProbe {
     AutoPaddingProbe {
         chrome,
         x_overhang,
-        collapsed,
+        unusable,
     }
 }
 
@@ -1583,13 +1631,186 @@ fn charges_x_edge_labels(axes: &AxesInput) -> bool {
 }
 
 /// [`probe_auto_padding`]'s measurements at one candidate inset.
-/// `collapsed` is whether any panel came out at or below [`MIN_PANEL_DIM`]
-/// on either dimension (so nothing in it is drawn).
+/// `unusable` is whether any panel came out at or below [`MIN_PANEL_DIM`]
+/// on either dimension (so nothing in it is drawn), or below the share of
+/// its `auto=false` size [`AutoPlotRoom`] says `padding.auto` must leave.
 #[derive(Debug, Clone, Copy)]
 struct AutoPaddingProbe {
     chrome: Inset,
     x_overhang: XLabelOverhang,
-    collapsed: bool,
+    unusable: bool,
+}
+
+/// How much of the plot `padding.auto` may spend on its margins: every
+/// panel keeps at least [`AUTO_PADDING_MIN_PLOT_SHARE`] of the width and of
+/// the height it has with `auto=false`, so auto takes at most that much of
+/// the `auto=false` plot across both x sides together, and across both y
+/// sides together. A label or title whose rescue would take more is not
+/// rescued: that would trade the data area for it, so auto adds nothing for
+/// it and it clips exactly as with `auto=false`. Rescues on one axis that
+/// each fit but together take more are not rescued either: auto adds
+/// nothing on that axis ([`settle_auto_padding`] closes it), so no rescue
+/// ships at a size that still clips. The chart is never refused or
+/// blanked by this rule, and `auto=false` rendering keeps [`MIN_PANEL_DIM`]
+/// as its only floor.
+///
+/// Measured once per chart from the `auto=false` layout, it is the one rule
+/// every place `padding.auto` judges room reads:
+/// - [`probe_auto_padding`]: an inset that leaves a panel below its floor
+///   (or collapsed), or whose x axes leave undrawn any tick label the
+///   `auto=false` layout draws, is unusable, and [`settle_auto_padding`]
+///   never accepts it: auto moves labels inside the canvas, it never
+///   removes them;
+/// - [`MarginResponse`]: one x label whose charge would push its panel
+///   below its width floor is infeasible and contributes nothing;
+/// - [`axis_title_infeasibility`]: an axis title whose rescue needs more
+///   margin than the axis's budget is infeasible, like one wider than the
+///   viewport;
+/// - [`cap_auto_scale`]: an axis's combined extra is scaled to its budget,
+///   and an axis it scales is closed (its budget 0).
+#[derive(Debug, Clone)]
+struct AutoPlotRoom {
+    /// Per panel, by index: the smallest `(width, height)` auto may leave.
+    floors: Vec<(f64, f64)>,
+    /// The x tick labels the `auto=false` layout draws, across every x
+    /// axis, by (axis, tick) index: auto must leave every one of them drawn.
+    x_labels: Vec<(usize, usize)>,
+    /// The margin auto may add across both x sides together before a panel
+    /// reaches its width floor (`f64::INFINITY` when the margins do not
+    /// narrow any panel).
+    width_budget: f64,
+    /// The same across both y sides, against the height floors.
+    height_budget: f64,
+}
+
+impl AutoPlotRoom {
+    /// Measures the floors and budgets on `inputs` laid out at
+    /// `auto_off_inset`, the inset `auto=false` lays the chart out at. Each
+    /// budget is read off one more layout with that axis's low margin
+    /// [`LEVER_PROBE_PX`] wider: how much a pixel of margin narrows each
+    /// panel (all of it on a plain chart, its share of the region when
+    /// faceted, half of it beside a capped legend), so the budget is the
+    /// margin that takes a panel from its `auto=false` size to its floor.
+    fn of_auto_off(inputs: &LayoutInputs, auto_off_inset: Inset) -> Self {
+        let off = lay_out_at(auto_off_inset, inputs).plot;
+        let wider = lay_out_at(
+            Inset {
+                left: auto_off_inset.left + LEVER_PROBE_PX,
+                ..auto_off_inset
+            },
+            inputs,
+        )
+        .plot;
+        let taller = lay_out_at(
+            Inset {
+                top: auto_off_inset.top + LEVER_PROBE_PX,
+                ..auto_off_inset
+            },
+            inputs,
+        )
+        .plot;
+        let floors: Vec<(f64, f64)> = off
+            .panels
+            .iter()
+            .map(|p| {
+                (
+                    AUTO_PADDING_MIN_PLOT_SHARE * p.plot_area.w,
+                    AUTO_PADDING_MIN_PLOT_SHARE * p.plot_area.h,
+                )
+            })
+            .collect();
+        // The margin that takes each panel from its `auto=false` extent to
+        // its floor, at the measured narrowing per pixel; the first panel
+        // to reach its floor bounds the axis.
+        let budget = |probe: &PlotLayout, extent: fn(&Rect) -> f64| {
+            off.panels
+                .iter()
+                .enumerate()
+                .map(|(i, panel)| {
+                    let now = extent(&panel.plot_area);
+                    let after = probe.panels.get(i).map_or(0.0, |p| extent(&p.plot_area));
+                    let shrink_per_px = (now - after) / LEVER_PROBE_PX;
+                    if shrink_per_px > 0.0 {
+                        (1.0 - AUTO_PADDING_MIN_PLOT_SHARE) * now / shrink_per_px
+                    } else {
+                        f64::INFINITY
+                    }
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let width_budget = budget(&wider, |r| r.w);
+        let height_budget = budget(&taller, |r| r.h);
+        Self {
+            floors,
+            x_labels: drawn_x_tick_labels(&off),
+            width_budget,
+            height_budget,
+        }
+    }
+
+    /// This room with the x axis closed when `x` (its budget 0) and the y
+    /// axis closed when `y`.
+    fn closing(&self, x: bool, y: bool) -> Self {
+        Self {
+            width_budget: if x { 0.0 } else { self.width_budget },
+            height_budget: if y { 0.0 } else { self.height_budget },
+            ..self.clone()
+        }
+    }
+
+    /// Whether the x axis has no room: auto adds nothing left or right, and
+    /// [`auto_padding_extra`] drops that axis's tick and title extra before
+    /// solving the other axis, as for an infeasible title, so the other
+    /// axis is solved against the x margins that ship.
+    fn closes_x(&self) -> bool {
+        self.width_budget <= 0.0
+    }
+
+    /// The same for the y axis.
+    fn closes_y(&self) -> bool {
+        self.height_budget <= 0.0
+    }
+
+    /// Panel `panel_index`'s `(width, height)` floor; `(0.0, 0.0)` for a
+    /// panel the `auto=false` layout did not have.
+    fn floor(&self, panel_index: usize) -> (f64, f64) {
+        self.floors.get(panel_index).copied().unwrap_or((0.0, 0.0))
+    }
+
+    /// Whether every panel `plot` lays out is drawable (above
+    /// [`MIN_PANEL_DIM`] on both dimensions) and at least its floor, within
+    /// [`AUTO_PADDING_EPS`], and its x axes draw at least as many tick
+    /// labels as the `auto=false` layout.
+    fn leaves_usable(&self, plot: &PlotLayout) -> bool {
+        let panels_usable = plot.panels.iter().enumerate().all(|(i, p)| {
+            let (w_floor, h_floor) = self.floor(i);
+            let area = p.plot_area;
+            area.w > MIN_PANEL_DIM
+                && area.h > MIN_PANEL_DIM
+                && area.w >= w_floor - AUTO_PADDING_EPS
+                && area.h >= h_floor - AUTO_PADDING_EPS
+        });
+        panels_usable && !self.loses_x_labels(plot)
+    }
+
+    /// Whether `plot`'s x axes leave undrawn (culled, or absent) any tick
+    /// label the `auto=false` layout draws.
+    fn loses_x_labels(&self, plot: &PlotLayout) -> bool {
+        let drawn: std::collections::HashSet<(usize, usize)> = drawn_x_tick_labels(plot).into_iter().collect();
+        self.x_labels.iter().any(|tick| !drawn.contains(tick))
+    }
+}
+
+/// The tick labels `plot`'s x axes draw (not culled), across every x axis,
+/// as (axis, tick) indices: the same labels on every layout of one chart,
+/// whose tick labels do not depend on the inset.
+fn drawn_x_tick_labels(plot: &PlotLayout) -> Vec<(usize, usize)> {
+    plot.axis_layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top))
+        .flat_map(|(i, a)| a.ticks.iter().enumerate().filter(|(_, t)| !t.culled).map(move |(j, _)| (i, j)))
+        .collect()
 }
 
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
@@ -1676,19 +1897,19 @@ fn auto_padding_for_edge_ticks(
         (0.0, 0.0)
     };
 
-    // Top only: the bottom cushion is `base_bottom + x_label_band +
-    // x_title_gutter`, and a shown, labeled x-axis's OWN band reservation
-    // (`estimate_x_label_band`'s flat branch: at minimum `tick_size +
-    // line_h`) already exceeds a y-label's half-line-height in every
-    // realistic combination, so a bottom correction would never fire —
-    // computing it would need this function to duplicate
-    // `estimate_x_label_band`'s slot-width estimate for no practical
-    // benefit (and so a bottom legend cannot create an over-correction
-    // this function guards against, because there is no correction here
-    // to over-apply). The top cushion has no such guaranteed floor when
-    // there's no chart title and no top-side chrome, so it can genuinely
-    // need a correction. `chrome.top` already covers the chart-title band
-    // (see `probe_auto_padding`), so it is not added again here.
+    // Top only. The bottom cushion is `base_bottom + chrome.bottom`, plus
+    // the x band where the x axis sits at the bottom. That is at least half
+    // a y label line whenever `base_bottom` is (the theme's default padding
+    // exceeds half a line at every default label size), and whenever the
+    // bottom x band draws labels (its band holds a full label line). Not
+    // covered: a theme `padding` below half a label line with no labels on
+    // the bottom band (a tick-only band-budget cull, `orient="top"`, or a
+    // hidden x axis), where the lowest y label can overhang the bottom
+    // edge. Covering it would need the probe to measure the y labels'
+    // vertical overhang the way it measures x's. The top cushion has no
+    // such floor when there's no chart title and no top-side chrome, so it
+    // is corrected here. `chrome.top` already covers the chart-title band
+    // (see `probe_auto_padding`), so it is not added again.
     let y_flat = axes.y.overrides.labels.angle.is_none_or(|a| a == 0.0);
     let y_continuous = axes.y.tick_projection.is_some();
     let extra_top = if axes.show_y
@@ -1801,33 +2022,47 @@ fn title_half_extent(
     Some(metrics.measure_width(text, font_size) / 2.0)
 }
 
-/// Whether x's/y's axis-title recentering is in the genuine residual regime
-/// (title wider than the viewport axis itself, [`recentering_is_feasible`]),
-/// decided from title measurement and `viewport` alone — neither `base` nor
-/// [`auto_padding_for_edge_ticks`]'s own contribution enters this: the same
-/// title text, font size and `viewport` dimension always yield the same
-/// verdict no matter what padding the tick pass wants. `compute_layout`
-/// calls this BEFORE composing the tick pass's contribution, so a same-axis
-/// tick correction can be suppressed on an infeasible axis before it ever
-/// reaches the title solve — not after, once that solve has already run
-/// against the unsuppressed geometry.
+/// Whether x's/y's axis-title rescue is infeasible, in either of two ways:
+/// - the genuine residual: the title is wider than the viewport axis
+///   itself ([`recentering_is_feasible`]), so no padding contains it;
+/// - the rescue costs the plot too much: the recentering margin it needs
+///   (both sides together) is more than `room`'s budget for that axis, so
+///   it would leave a panel below the share of its `auto=false` size
+///   `padding.auto` must keep (see [`AutoPlotRoom`]).
+///
+/// The rescue is solved against `base` and `chrome` alone, without
+/// [`auto_padding_for_edge_ticks`]'s contribution: the same title, chrome
+/// and `auto=false` geometry always yield the same verdict, whatever padding
+/// the tick pass wants. [`auto_padding_extra`] calls this BEFORE composing
+/// the tick pass's contribution, so a same-axis tick correction can be
+/// suppressed on an infeasible axis before it ever reaches the title solve,
+/// not after, once that solve has already run against the unsuppressed
+/// geometry.
 fn axis_title_infeasibility(
-    theme: &ThemeInputs,
-    viewport: Viewport,
-    axes: &AxesInput,
-    metrics: &dyn TextMetrics,
+    inputs: &LayoutInputs,
+    base: Inset,
+    chrome: Inset,
+    room: &AutoPlotRoom,
 ) -> (bool, bool) {
-    let infeasible = |half_extent: Option<f64>, span: f64| {
+    let LayoutInputs {
+        theme,
+        viewport,
+        axes,
+        metrics,
+        ..
+    } = *inputs;
+    let too_wide = |half_extent: Option<f64>, span: f64| {
         half_extent.is_some_and(|half| !recentering_is_feasible(half, span))
     };
-    let x_infeasible = infeasible(
+    let rescue = auto_padding_for_axis_titles(inputs, base, chrome);
+    let x_infeasible = too_wide(
         title_half_extent(&axes.x, axes.show_x, theme, metrics),
         viewport.width,
-    );
-    let y_infeasible = infeasible(
+    ) || rescue.left + rescue.right > room.width_budget;
+    let y_infeasible = too_wide(
         title_half_extent(&axes.y, axes.show_y, theme, metrics),
         viewport.height,
-    );
+    ) || rescue.top + rescue.bottom > room.height_budget;
     (x_infeasible, y_infeasible)
 }
 
@@ -1896,14 +2131,14 @@ fn axis_title_infeasibility(
 /// `compute_layout` does exactly that, before calling this function, and
 /// zeroes the same-axis tick-pass contribution before `base` ever reaches
 /// here.
-fn auto_padding_for_axis_titles(
-    theme: &ThemeInputs,
-    viewport: Viewport,
-    axes: &AxesInput,
-    metrics: &dyn TextMetrics,
-    base: Inset,
-    chrome: Inset,
-) -> Inset {
+fn auto_padding_for_axis_titles(inputs: &LayoutInputs, base: Inset, chrome: Inset) -> Inset {
+    let LayoutInputs {
+        theme,
+        viewport,
+        axes,
+        metrics,
+        ..
+    } = *inputs;
     let (base_left, base_right, base_top, base_bottom) =
         (base.left, base.right, base.top, base.bottom);
 
@@ -1923,25 +2158,19 @@ fn auto_padding_for_axis_titles(
 
     let (extra_top, extra_bottom) = match title_half_extent(&axes.y, axes.show_y, theme, metrics) {
         Some(half_h) => {
-            let n_labels = axes.x.tick_labels.len().max(1);
-            let x_label_band = if axes.show_x {
-                axis::estimate_x_label_band(
-                    &axes.x.tick_labels,
-                    axes.x.overrides.labels.angle,
-                    plot_w / n_labels as f64,
-                    axes.x.overrides.labels.padding,
-                    axes.x.show_labels(),
-                    &LabelBandCtx::for_axis(&axes.x, theme, metrics),
-                )
-            } else {
-                0.0
-            };
             let x_title_gutter = axis::compute_x_title_width(
                 &axes.x,
                 theme.typography.title_font_size,
                 theme.padding.axis_title_padding,
                 metrics,
                 axes.show_x,
+            );
+            let (x_label_band, _) = reserve_x_label_band(
+                &PanelGeometry::of(inputs),
+                viewport.into_rect().shrink(per_side_sum(base, chrome)),
+                y_gutter,
+                x_title_gutter,
+                metrics,
             );
             let x_band = clamp_axis_band(
                 x_label_band + x_title_gutter,
@@ -2010,11 +2239,11 @@ fn resolve_padding_inset(theme: &ThemeInputs, base: Inset, extra: Inset) -> Inse
 /// protect.
 ///
 /// Per-axis infeasibility (#139(2)) is decided FIRST, via
-/// `axis_title_infeasibility` — a pure function of title measurement and
-/// `viewport` alone, independent of the tick pass — and the tick pass's
-/// own same-axis contribution is zeroed before the title pass ever solves
-/// against it. When a title's own recentering is INFEASIBLE (the title is
-/// wider than the viewport itself, the documented genuine residual), its
+/// `axis_title_infeasibility`, independent of the tick pass, and the tick
+/// pass's own same-axis contribution is zeroed before the title pass ever
+/// solves against it. When a title's rescue is INFEASIBLE (the title is
+/// wider than the viewport itself, the documented genuine residual, or its
+/// rescue would take more of the plot than [`AutoPlotRoom`] allows), its
 /// own contribution is `(0.0, 0.0)`, but the tick pass's contribution on
 /// that SAME axis is not: being asymmetric by construction, it still
 /// shifts the plot's (and title's) center, and the title pass has no way
@@ -2024,7 +2253,7 @@ fn resolve_padding_inset(theme: &ThemeInputs, base: Inset, extra: Inset) -> Inse
 /// moves the x-axis label band, which moves the y-title's own baseline
 /// center). Measured live (pre-fix): a same-axis tick correction alone
 /// turned a 9.51px title clip into a 26.53px one — `auto=true` strictly
-/// worse than `auto=false`, the exact regression `cap_auto_contribution`'s
+/// worse than `auto=false`, the exact regression `cap_auto_scale`'s
 /// best-effort contract forbids. Suppressing that axis's tick contribution
 /// BEFORE the title pass solves — instead of after, against geometry the
 /// solve has already consumed — restores `auto=false`'s exact geometry on
@@ -2032,89 +2261,127 @@ fn resolve_padding_inset(theme: &ThemeInputs, base: Inset, extra: Inset) -> Inse
 ///
 /// A single x tick label can be infeasible the same way: when the margin
 /// it would need on a side is more than that side can widen before the
-/// label's panel collapses, it contributes nothing to that side's tick
-/// extra (see [`XLabelOverhang`]), rather than being charged and then
-/// capped, which would collapse the plot or squeeze the other side's extra.
+/// label's panel falls below its [`AutoPlotRoom`] floor, it contributes
+/// nothing to that side's tick extra (see [`XLabelOverhang`]), rather than
+/// being charged and then capped, which would shrink the plot past that
+/// floor or squeeze the other side's extra.
 ///
-/// An explicit side's own extra is zeroed before `cap_auto_contribution`
-/// too (#139(3)): `compute_layout`'s final inset
+/// An explicit side's own extra is zeroed before [`cap_auto_scale`] too
+/// (#139(3)): `compute_layout`'s final inset
 /// (`theme.padding.padding_<side>.unwrap_or(...)`) discards `extra`
 /// entirely on an explicit side, so a real but doomed-to-be-discarded
-/// extra must not compete for `cap_auto_contribution`'s shared budget —
-/// doing so would throttle the OTHER (auto) side for a contribution that
-/// was never going to ship.
+/// extra must not compete for the cap's shared budget, which would throttle
+/// the OTHER (auto) side for a contribution that was never going to ship.
+/// For the same reason an explicit side's tick extra is zeroed before the
+/// title pass solves: the title is recentred on the plot that ships, not on
+/// one narrowed by a tick extra the explicit side discards.
+///
+/// Returns the extra as laid out together with its tick part as shipped:
+/// after the infeasible-title zeroing, the explicit-side zeroing and the
+/// cap's scale, the same three steps the whole extra goes through.
+/// [`settle_auto_padding`] judges whether a pass's labels are contained by
+/// that shipped tick part, so it never counts as granted a tick extra the
+/// layout discards.
 fn auto_padding_extra(
-    theme: &ThemeInputs,
-    viewport: Viewport,
-    axes: &AxesInput,
-    metrics: &dyn TextMetrics,
-    base: Inset,
+    inputs: &LayoutInputs,
     chrome: Inset,
     x_overhang: XLabelOverhang,
-) -> Inset {
-    let (x_infeasible, y_infeasible) = axis_title_infeasibility(theme, viewport, axes, metrics);
-    let ticks = auto_padding_for_edge_ticks(theme, axes, metrics, chrome, x_overhang);
-    let ticks = Inset {
-        top: if y_infeasible { 0.0 } else { ticks.top },
-        right: if x_infeasible { 0.0 } else { ticks.right },
-        bottom: if y_infeasible { 0.0 } else { ticks.bottom },
-        left: if x_infeasible { 0.0 } else { ticks.left },
-    };
-    let base_after_ticks = Inset {
-        top: base.top + ticks.top,
-        right: base.right + ticks.right,
-        bottom: base.bottom + ticks.bottom,
-        left: base.left + ticks.left,
-    };
-    let titles = auto_padding_for_axis_titles(
+    room: &AutoPlotRoom,
+) -> AutoPaddingExtra {
+    let LayoutInputs {
         theme,
         viewport,
         axes,
         metrics,
-        base_after_ticks,
-        chrome,
-    );
-    let combined = Inset {
-        top: if theme.padding.padding_top.is_some() {
-            0.0
-        } else {
-            ticks.top + titles.top
-        },
-        right: if theme.padding.padding_right.is_some() {
-            0.0
-        } else {
-            ticks.right + titles.right
-        },
-        bottom: if theme.padding.padding_bottom.is_some() {
-            0.0
-        } else {
-            ticks.bottom + titles.bottom
-        },
-        left: if theme.padding.padding_left.is_some() {
-            0.0
-        } else {
-            ticks.left + titles.left
-        },
+        ..
+    } = *inputs;
+    let base = base_padding_insets(theme);
+    let (x_infeasible, y_infeasible) = axis_title_infeasibility(inputs, base, chrome, room);
+    let x_dropped = x_infeasible || room.closes_x();
+    let y_dropped = y_infeasible || room.closes_y();
+    let feasible_only = |extra: Inset| Inset {
+        top: if y_dropped { 0.0 } else { extra.top },
+        right: if x_dropped { 0.0 } else { extra.right },
+        bottom: if y_dropped { 0.0 } else { extra.bottom },
+        left: if x_dropped { 0.0 } else { extra.left },
     };
-    let (left, right) = cap_auto_contribution(
+    let padding = &theme.padding;
+    let auto_sides_only = |extra: Inset| Inset {
+        top: if padding.padding_top.is_some() { 0.0 } else { extra.top },
+        right: if padding.padding_right.is_some() { 0.0 } else { extra.right },
+        bottom: if padding.padding_bottom.is_some() { 0.0 } else { extra.bottom },
+        left: if padding.padding_left.is_some() { 0.0 } else { extra.left },
+    };
+    let ticks = auto_sides_only(feasible_only(auto_padding_for_edge_ticks(
+        theme, axes, metrics, chrome, x_overhang,
+    )));
+    let titles = auto_sides_only(feasible_only(auto_padding_for_axis_titles(
+        inputs,
+        per_side_sum(base, ticks),
+        chrome,
+    )));
+    let combined = per_side_sum(ticks, titles);
+    let x_scale = cap_auto_scale(
         base.left,
         base.right,
-        combined.left,
-        combined.right,
+        combined.left + combined.right,
         viewport.width,
+        room.width_budget,
     );
-    let (top, bottom) = cap_auto_contribution(
+    let y_scale = cap_auto_scale(
         base.top,
         base.bottom,
-        combined.top,
-        combined.bottom,
+        combined.top + combined.bottom,
         viewport.height,
+        room.height_budget,
     );
-    Inset {
-        top,
-        right,
-        bottom,
-        left,
+    let capped = |extra: Inset| Inset {
+        top: extra.top * y_scale,
+        right: extra.right * x_scale,
+        bottom: extra.bottom * y_scale,
+        left: extra.left * x_scale,
+    };
+    AutoPaddingExtra {
+        total: capped(combined),
+        ticks: capped(ticks),
+        x_scaled: combined.left + combined.right > 0.0 && x_scale < 1.0,
+        y_scaled: combined.top + combined.bottom > 0.0 && y_scale < 1.0,
+        no_usable_pass: false,
+    }
+}
+
+/// What [`auto_padding_extra`] solves for one candidate credit and
+/// overhang.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct AutoPaddingExtra {
+    /// The extra per side, as laid out.
+    total: Inset,
+    /// The edge-tick part of `total`, as shipped.
+    ticks: Inset,
+    /// Whether [`cap_auto_scale`] scaled the x (left and right) extra down,
+    /// so what the rescues on that axis need together is more than it may
+    /// take ([`settle_auto_padding`] closes such an axis).
+    x_scaled: bool,
+    /// The same for the y (top and bottom) extra.
+    y_scaled: bool,
+    /// Whether this is the no-extra fallback of a settle where no pass was
+    /// usable (each collapsed a panel or left an `auto=false` x label
+    /// undrawn): [`settle_auto_padding`] then judges each axis's rescue on
+    /// its own.
+    no_usable_pass: bool,
+}
+
+impl AutoPaddingExtra {
+    /// The per-side larger of `self` and `other`, scaled on an axis when
+    /// either was.
+    fn per_side_max(self, other: Self) -> Self {
+        Self {
+            total: per_side_max(self.total, other.total),
+            ticks: per_side_max(self.ticks, other.ticks),
+            x_scaled: self.x_scaled || other.x_scaled,
+            y_scaled: self.y_scaled || other.y_scaled,
+            no_usable_pass: self.no_usable_pass || other.no_usable_pass,
+        }
     }
 }
 
@@ -2127,6 +2394,11 @@ const AUTO_PADDING_MAX_PASSES: u32 = 64;
 /// `render::FLOAT_PRECISION`'s own rounding, so it never surfaces in
 /// rendered output.
 const AUTO_PADDING_EPS: f64 = 1e-6;
+
+/// The least share of its `auto=false` width and height every panel keeps
+/// under `padding.auto`: auto never takes more than half of the plot for
+/// its margins (see [`AutoPlotRoom`]).
+const AUTO_PADDING_MIN_PLOT_SHARE: f64 = 0.5;
 
 /// Finds a self-consistent `padding.auto` extra. Two things it solves
 /// against are themselves a function of how much padding `padding.auto`
@@ -2153,11 +2425,17 @@ const AUTO_PADDING_EPS: f64 = 1e-6;
 /// extra), so the first pass lays out the labels exactly as `auto=false`
 /// draws them; labels that already fit there keep that layout, and the
 /// chart is unchanged by `padding.auto`. Iterates up to
-/// `AUTO_PADDING_MAX_PASSES` times. A pass COVERS when its plot does not
-/// collapse (no panel at or below [`MIN_PANEL_DIM`] on either dimension),
-/// its measured chrome covers its credit on all four sides (`reserved >=
-/// credit - AUTO_PADDING_EPS`), and the labels it measured need no more edge
-/// extra than it granted; the last covering pass is remembered. A collapsed
+/// `AUTO_PADDING_MAX_PASSES` times. A pass COVERS when its plot is usable
+/// (no panel collapsed, none below the share of its `auto=false` size
+/// [`AutoPlotRoom`] keeps), its measured chrome covers its credit on all
+/// four sides (`reserved >= credit - AUTO_PADDING_EPS`), and the labels it
+/// measured need no more edge extra than it granted; the last covering pass
+/// is remembered. Both sides of that last comparison are the tick extra as
+/// shipped ([`AutoPaddingExtra::ticks`]): the tick part of the pass's own
+/// extra, and the tick part the same solve gives for the overhang the pass
+/// measured. So a side that ships no tick extra (an explicit side, or the
+/// axis of an infeasible title) is covered whatever its labels do, and a
+/// capped side is judged at the size the cap lets it reach. A collapsed
 /// pass draws no labels, so it would otherwise always look covered, and
 /// accepting it would blank a chart `auto=false` draws. The ordinary case
 /// (no capped legend, labels that keep their presentation) converges in two
@@ -2174,20 +2452,84 @@ const AUTO_PADDING_EPS: f64 = 1e-6;
 /// per-side maximum of the extra each pass's own measurement needed
 /// (solved against the smaller of its credit and its measured chrome), so
 /// every label state any pass measured stays contained, unless that extra
-/// collapses the plot: then the result is no extra at all, and the chart
-/// lays out exactly as with `auto=false`. A pass that settles on a
-/// collapsed plot ends the search the same way. The rule is the one
+/// leaves the plot unusable: then the result is no extra at all, and the
+/// chart lays out exactly as with `auto=false`. A pass that settles on an
+/// unusable plot ends the search the same way. The rule is the one
 /// [`XLabelOverhang`] applies to a single infeasible label: an extra that
-/// cannot help is dropped, and `padding.auto` never blanks a chart
-/// `auto=false` draws.
+/// cannot help without taking more of the plot than [`AutoPlotRoom`]
+/// allows is dropped, and `padding.auto` never blanks a chart `auto=false`
+/// draws.
+///
+/// The settle runs within an [`AutoPlotRoom`] ([`settle_within`]). When the
+/// extra it settles on was scaled down on an axis by [`cap_auto_scale`], the
+/// rescues on that axis together need more than the axis may take, and a
+/// scaled rescue still clips. So that axis is closed (its budget set to 0,
+/// so auto adds nothing on it) and the settle runs again, since what the
+/// other axis needs depends on the plot the first one leaves.
+///
+/// When no pass was usable ([`AutoPaddingExtra::no_usable_pass`]), each
+/// axis is judged on its own, x and y alike: its rescue alone is the settle
+/// with the other axis closed. An axis whose rescue alone ships nothing (it
+/// collapses a panel, leaves an `auto=false` x label undrawn, or is not
+/// needed) is closed, and the settle runs again, so the other axis's valid
+/// rescue still ships. When both rescues are valid alone but fail together,
+/// neither is closed and auto adds nothing.
+///
+/// That repeats until the settled extra asks to close no axis the room
+/// still has open; each repeat closes an axis, so there are at most three
+/// settles of the whole chart ([`AUTO_PADDING_MAX_SETTLES`]), each judging
+/// at most one rescue per open axis alone.
 fn settle_auto_padding(inputs: &LayoutInputs, base: Inset) -> Inset {
+    let mut room = AutoPlotRoom::of_auto_off(
+        inputs,
+        resolve_padding_inset(inputs.theme, base, Inset::default()),
+    );
+    let mut settled = settle_within(inputs, base, &room);
+    for _ in 1..AUTO_PADDING_MAX_SETTLES {
+        let mut close_x = settled.x_scaled && !room.closes_x();
+        let mut close_y = settled.y_scaled && !room.closes_y();
+        if settled.no_usable_pass {
+            let alone = |closing_x, closing_y| settle_within(inputs, base, &room.closing(closing_x, closing_y)).total;
+            if !room.closes_x() {
+                let x = alone(false, true);
+                close_x |= x.left + x.right <= 0.0;
+            }
+            if !room.closes_y() {
+                let y = alone(true, false);
+                close_y |= y.top + y.bottom <= 0.0;
+            }
+        }
+        if !close_x && !close_y {
+            break;
+        }
+        room = room.closing(close_x, close_y);
+        settled = settle_within(inputs, base, &room);
+    }
+    settled.total
+}
+
+/// A bound on the settles [`settle_auto_padding`] runs: the first, and one
+/// more for each axis it closes. Each settle after the first closes an axis
+/// that was still open, so there are at most three.
+const AUTO_PADDING_MAX_SETTLES: u32 = 3;
+
+/// The fixed point [`settle_auto_padding`] describes, within one `room`: the
+/// extra it ships, and whether the cap scaled either axis's extra to reach
+/// it (the converged pass's, the last covering pass's, or, for the no-cover
+/// fallback, whether any need that fed it was scaled on that axis).
+fn settle_within(inputs: &LayoutInputs, base: Inset, room: &AutoPlotRoom) -> AutoPaddingExtra {
     let LayoutInputs {
         theme,
-        viewport,
         axes,
         metrics,
         ..
     } = *inputs;
+    let solve = |credit: Inset, overhang: XLabelOverhang| {
+        auto_padding_extra(inputs, credit, overhang, room)
+    };
+    let probe = |extra: Inset| {
+        probe_auto_padding(resolve_padding_inset(theme, base, extra), inputs, room)
+    };
     let secondary_total: f64 = axes
         .secondary_y
         .iter()
@@ -2199,57 +2541,56 @@ fn settle_auto_padding(inputs: &LayoutInputs, base: Inset) -> Inset {
     };
     let mut overhang = XLabelOverhang::NONE;
     let mut covering_extra = None;
-    let mut most_needed = Inset::default();
+    let mut most_needed = AutoPaddingExtra::default();
     for _ in 0..AUTO_PADDING_MAX_PASSES {
-        let extra = auto_padding_extra(theme, viewport, axes, metrics, base, credit, overhang);
-        let probe = probe_auto_padding(resolve_padding_inset(theme, base, extra), inputs);
-        let reserved = probe.chrome;
-        let granted = auto_padding_for_edge_ticks(theme, axes, metrics, credit, overhang);
-        let needed = auto_padding_for_edge_ticks(theme, axes, metrics, credit, probe.x_overhang);
-        let covers = !probe.collapsed
+        let extra = solve(credit, overhang);
+        let measured = probe(extra.total);
+        let reserved = measured.chrome;
+        let needed = solve(credit, measured.x_overhang).ticks;
+        let covers = !measured.unusable
             && reserved.top >= credit.top - AUTO_PADDING_EPS
             && reserved.right >= credit.right - AUTO_PADDING_EPS
             && reserved.bottom >= credit.bottom - AUTO_PADDING_EPS
             && reserved.left >= credit.left - AUTO_PADDING_EPS
-            && needed.left <= granted.left + AUTO_PADDING_EPS
-            && needed.right <= granted.right + AUTO_PADDING_EPS;
+            && needed.left <= extra.ticks.left + AUTO_PADDING_EPS
+            && needed.right <= extra.ticks.right + AUTO_PADDING_EPS;
         if covers {
             covering_extra = Some(extra);
         }
         let measured_credit = per_side_min(credit, reserved);
-        let this_pass_needs = auto_padding_extra(
-            theme,
-            viewport,
-            axes,
-            metrics,
-            base,
-            measured_credit,
-            probe.x_overhang,
-        );
-        most_needed = per_side_max(most_needed, this_pass_needs);
+        most_needed = most_needed.per_side_max(solve(measured_credit, measured.x_overhang));
         let converged = (reserved.top - credit.top).abs() <= AUTO_PADDING_EPS
             && (reserved.right - credit.right).abs() <= AUTO_PADDING_EPS
             && (reserved.bottom - credit.bottom).abs() <= AUTO_PADDING_EPS
             && (reserved.left - credit.left).abs() <= AUTO_PADDING_EPS
-            && probe.x_overhang.settled_with(overhang);
+            && measured.x_overhang.settled_with(overhang);
         if converged {
-            if !probe.collapsed {
+            if !measured.unusable {
                 return extra;
             }
-            // Settled on a collapse: every later pass would repeat it.
+            // Settled on an unusable plot: every later pass would repeat it.
             break;
         }
         credit = reserved;
-        overhang = probe.x_overhang;
+        overhang = measured.x_overhang;
     }
     match covering_extra {
         Some(extra) => extra,
-        None if !probe_auto_padding(resolve_padding_inset(theme, base, most_needed), inputs)
-            .collapsed =>
-        {
-            most_needed
-        }
-        None => Inset::default(),
+        None if !probe(most_needed.total).unusable => most_needed,
+        None => AutoPaddingExtra {
+            no_usable_pass: true,
+            ..AutoPaddingExtra::default()
+        },
+    }
+}
+
+/// The sum of `a` and `b` on each side.
+fn per_side_sum(a: Inset, b: Inset) -> Inset {
+    Inset {
+        top: a.top + b.top,
+        right: a.right + b.right,
+        bottom: a.bottom + b.bottom,
+        left: a.left + b.left,
     }
 }
 
@@ -2292,8 +2633,17 @@ fn lay_out_plot(
     //    `x_label_band` is also needed for the inter-row facet gutter below;
     //    `secondary_y_bands` (secondary-y-axis, GH #52) is one band width per
     //    `axes.secondary_y` entry, threaded to per-panel placement below.
-    let (natural_plot_region, x_label_band, secondary_y_bands) =
-        reserve_axis_bands(inner_after_legend, axes, theme, metrics);
+    let strip_band = strip_band_size(theme, metrics);
+    let geometry = PanelGeometry {
+        spec,
+        facet_groups,
+        theme,
+        axes,
+        strip_band,
+        seam,
+    };
+    let (natural_plot_region, x_label_band, secondary_y_bands, x_band_budget) =
+        reserve_axis_bands(inner_after_legend, &geometry, metrics);
 
     // 5b. Overlay shared-rect imposition (GH #89A). The ONE point where a
     //     composite parent replaces this leaf's own plot region — placed
@@ -2310,8 +2660,8 @@ fn lay_out_plot(
     let plot_region = seam.plot_region.unwrap_or(natural_plot_region);
 
     // 6 + 7. Split into facet cells, then lay out each panel's strips + axes.
-    //    840: compute the strip band size once and thread it to both stages.
-    let strip_band = strip_band_size(theme, metrics);
+    //    840: the strip band size, computed once above, is threaded to both
+    //    stages.
     let (panel_rects, mut warnings) = split_panels(
         plot_region,
         spec,
@@ -2329,6 +2679,7 @@ fn lay_out_plot(
         metrics,
         strip_band,
         &secondary_y_bands,
+        x_band_budget,
     );
     warnings.extend(panel_warnings);
     PlotLayout {
@@ -2337,7 +2688,205 @@ fn lay_out_plot(
         axis_layouts,
         secondary_y_axes,
         warnings,
+        x_band_budget,
     }
+}
+
+/// `rect` under the chart's `CoordFixed` aspect: the binding dimension
+/// shrunk so `w / h == ratio`, centred. Unchanged for any other coord, a
+/// non-positive ratio, or a collapsed (`Rect::ZERO`) panel. The one owner of
+/// the correction, read by [`layout_panel_axes`] and by
+/// [`PanelGeometry::extent`].
+fn fixed_aspect(rect: Rect, spec: &crate::spec::chart::ChartSpec) -> Rect {
+    let Some(crate::spec::coord::CoordKind::Fixed { ratio, .. }) = &spec.coord else {
+        return rect;
+    };
+    if rect == Rect::ZERO || *ratio <= 0.0 {
+        return rect;
+    }
+    if rect.w / rect.h > *ratio {
+        // Too wide: shrink width.
+        let new_w = rect.h * ratio;
+        Rect {
+            x: rect.x + (rect.w - new_w) / 2.0,
+            w: new_w,
+            ..rect
+        }
+    } else {
+        // Too tall: shrink height.
+        let new_h = rect.w / ratio;
+        Rect {
+            y: rect.y + (rect.h - new_h) / 2.0,
+            h: new_h,
+            ..rect
+        }
+    }
+}
+
+/// What the plot's panels are laid out from, for sizing the x label band
+/// before the panels exist: the facet split, each panel's strip, the
+/// `CoordFixed` aspect and a composite's imposed region, exactly as
+/// [`lay_out_plot`] applies them.
+#[derive(Clone, Copy)]
+struct PanelGeometry<'a> {
+    spec: &'a crate::spec::chart::ChartSpec,
+    facet_groups: &'a [FacetGroup],
+    theme: &'a ThemeInputs,
+    axes: &'a AxesInput,
+    strip_band: f64,
+    seam: CompositeLayoutSeam,
+}
+
+/// The panel sizes [`PanelGeometry::extent`] reports: the narrowest panel's
+/// width before the `CoordFixed` aspect (`pre_aspect_w`) and after it (`w`),
+/// and the shortest panel's height after it (`h`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PanelExtent {
+    pre_aspect_w: f64,
+    w: f64,
+    h: f64,
+}
+
+impl<'a> PanelGeometry<'a> {
+    fn of(inputs: &LayoutInputs<'a>) -> Self {
+        Self {
+            spec: inputs.spec,
+            facet_groups: inputs.facet_groups,
+            theme: inputs.theme,
+            axes: inputs.axes,
+            strip_band: strip_band_size(inputs.theme, inputs.metrics),
+            seam: inputs.seam,
+        }
+    }
+
+    /// The panels' sizes when the plot region is `natural_region` (or the
+    /// region a composite imposes instead) and the x label band is
+    /// `x_label_band` tall (a facet grid's row gutters hold that band): each
+    /// facet panel's strip taken off, then the `CoordFixed` aspect
+    /// ([`fixed_aspect`]). The widths never depend on the band unless the
+    /// aspect binds the width.
+    fn extent(&self, natural_region: Rect, x_label_band: f64) -> PanelExtent {
+        let region = self.seam.plot_region.unwrap_or(natural_region);
+        let cells: Vec<Rect> = if self.spec.facet.is_none() {
+            vec![region]
+        } else {
+            split_panels(
+                region,
+                self.spec,
+                self.facet_groups,
+                self.theme,
+                x_label_band,
+                self.axes.show_x,
+                self.strip_band,
+            )
+            .0
+            .into_iter()
+            .map(|(_, _, cell, _, _)| Rect {
+                h: cell.h - self.strip_band,
+                ..cell
+            })
+            .collect()
+        };
+        if cells.is_empty() {
+            return PanelExtent { pre_aspect_w: region.w, w: region.w, h: region.h };
+        }
+        let mut extent = PanelExtent {
+            pre_aspect_w: f64::INFINITY,
+            w: f64::INFINITY,
+            h: f64::INFINITY,
+        };
+        for cell in cells {
+            let aspect = fixed_aspect(Rect { h: cell.h.max(0.0), ..cell }, self.spec);
+            let h = if aspect.h == cell.h.max(0.0) { cell.h } else { aspect.h };
+            extent.pre_aspect_w = extent.pre_aspect_w.min(cell.w);
+            extent.w = extent.w.min(aspect.w);
+            extent.h = extent.h.min(h);
+        }
+        extent
+    }
+}
+
+/// A bound on the passes [`reserve_x_label_band`]'s `CoordFixed` fixed point
+/// takes. The pass sequence is non-increasing over the finitely many bands a
+/// drawn presentation can have, so it stops long before this; the bound is
+/// defensive only.
+const X_BAND_FIXED_POINT_PASSES: u32 = 32;
+
+/// The x label band, and the bound the x labels are laid out within, for a
+/// plot region taken out of `inner_after_legend` beside `y_bands_w` of y
+/// bands (the primary and any secondary), with the x title's gutter
+/// `x_title_gutter` beside the labels: the one reservation every reader of
+/// the x band makes (`reserve_axis_bands` and the `padding.auto` title pass).
+///
+/// 1. The labels each x axis draws at the panel width ([`x_label_band`]).
+/// 2. When that band leaves no panel drawable, it is bounded
+///    ([`x_label_band_budget`]) and the labels are laid out within the bound.
+/// 3. When the `CoordFixed` aspect binds the width, the panel the axis draws
+///    across is narrower than the region, by an amount that depends on the
+///    band. The band is then the fixed point of `b → band at the panel width
+///    b leaves, laid out within b`, started from the larger of the
+///    unconstrained band and the band at the width it leaves. That start
+///    is bounded the way step 2 bounds the unconstrained band, but against
+///    the panel the aspect leaves: a band that leaves the aspect's panel no
+///    width or height is never started from. Within a bound `b` the drawn
+///    band never exceeds `b`, so the passes never increase and every pass
+///    leaves a drawable panel; they stop at a band the axis draws exactly,
+///    or after [`X_BAND_FIXED_POINT_PASSES`]. The bound returned is that
+///    band (or the bound, if smaller), so every later layout of the x axes
+///    draws exactly what is reserved.
+///
+/// Returns `(0.0, f64::INFINITY)` for an undrawn x axis.
+fn reserve_x_label_band(
+    geometry: &PanelGeometry,
+    inner_after_legend: Rect,
+    y_bands_w: f64,
+    x_title_gutter: f64,
+    metrics: &dyn TextMetrics,
+) -> (f64, f64) {
+    let (axes, theme) = (geometry.axes, geometry.theme);
+    if !axes.show_x {
+        return (0.0, f64::INFINITY);
+    }
+    let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
+    let region_w = (inner_after_legend.w - y_bands_w).max(0.0);
+    let extent = |x_label_band: f64| {
+        let x_band = clamp_axis_band(
+            x_label_band + x_title_gutter,
+            axes.x.overrides.placement.min_band,
+            axes.x.overrides.placement.max_band,
+        );
+        let region = Rect {
+            y: inner_after_legend.y + if x_on_top { x_band } else { 0.0 },
+            w: region_w,
+            h: (inner_after_legend.h - x_band).max(0.0),
+            ..inner_after_legend
+        };
+        geometry.extent(region, x_label_band)
+    };
+    let band = |panel_w: f64, budget: f64| x_label_band(axes, panel_w, budget, theme, metrics);
+    let pre_aspect_w = extent(0.0).pre_aspect_w;
+    let unbounded = band(pre_aspect_w, f64::INFINITY);
+    let cramped = x_label_band_budget(unbounded, &|b| extent(b).h > MIN_PANEL_DIM);
+    let reserved = if cramped.is_finite() { band(pre_aspect_w, cramped) } else { unbounded };
+    let corrected_w = |b: f64| extent(b).w;
+    if corrected_w(reserved) == pre_aspect_w {
+        return (reserved, cramped);
+    }
+    let start = reserved.max(band(corrected_w(reserved), cramped));
+    let drawable = |b: f64| {
+        let e = extent(b);
+        e.w > MIN_PANEL_DIM && e.h > MIN_PANEL_DIM
+    };
+    let bound = cramped.min(x_label_band_budget(start, &drawable));
+    let mut b = start.min(bound);
+    for _ in 0..X_BAND_FIXED_POINT_PASSES {
+        let next = band(corrected_w(b), bound.min(b));
+        if next == b {
+            break;
+        }
+        b = next;
+    }
+    (b, bound.min(b))
 }
 
 /// [`lay_out_plot`]'s products. `warnings` holds the facet stage's
@@ -2349,6 +2898,9 @@ struct PlotLayout {
     axis_layouts: Vec<AxisLayout>,
     secondary_y_axes: Vec<AxisLayout>,
     warnings: Vec<LayoutWarning>,
+    /// The bound on the x label band the x axes were laid out within
+    /// (`f64::INFINITY` when unbounded; see [`reserve_axis_bands`]).
+    x_band_budget: f64,
 }
 
 /// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
@@ -2508,6 +3060,7 @@ fn layout_panel_axes(
     metrics: &dyn TextMetrics,
     strip_band: f64,
     secondary_y_bands: &[f64],
+    x_band_budget: f64,
 ) -> (
     Vec<PanelLayout>,
     Vec<AxisLayout>,
@@ -2644,33 +3197,7 @@ fn layout_panel_axes(
             None
         };
 
-        // CoordFixed: shrink the binding dimension so w/h == ratio, center.
-        if let Some(crate::spec::coord::CoordKind::Fixed { ratio, .. }) = &spec.coord {
-            if rect != Rect::ZERO && *ratio > 0.0 {
-                let current_ratio = rect.w / rect.h;
-                if current_ratio > *ratio {
-                    // Too wide — shrink width.
-                    let new_w = rect.h * ratio;
-                    let dx = (rect.w - new_w) / 2.0;
-                    rect = Rect {
-                        x: rect.x + dx,
-                        y: rect.y,
-                        w: new_w,
-                        h: rect.h,
-                    };
-                } else {
-                    // Too tall — shrink height.
-                    let new_h = rect.w / ratio;
-                    let dy = (rect.h - new_h) / 2.0;
-                    rect = Rect {
-                        x: rect.x,
-                        y: rect.y + dy,
-                        w: rect.w,
-                        h: new_h,
-                    };
-                }
-            }
-        }
+        let rect = fixed_aspect(rect, spec);
 
         panels.push(PanelLayout {
             plot_area: rect,
@@ -2694,11 +3221,11 @@ fn layout_panel_axes(
                 // avoid duplicating the title in every inter-column gutter —
                 // only the leftmost column's title is needed.
                 let y_input = if col > min_col && spec.facet.is_some() {
-                    let mut modified = axes.y.clone();
+                    let mut modified = axes.y_for_panel(panel_index).clone();
                     modified.title.set(None);
                     modified
                 } else {
-                    axes.y.clone()
+                    axes.y_for_panel(panel_index).clone()
                 };
                 let y_label_fs = y_input
                     .overrides
@@ -2788,11 +3315,11 @@ fn layout_panel_axes(
                 // avoid duplicating "Feature value" (or similar) in every
                 // inter-row gutter — only the bottom row's title is needed.
                 let x_input = if row < max_row && spec.facet.is_some() {
-                    let mut modified = axes.x.clone();
+                    let mut modified = axes.x_for_panel(panel_index).clone();
                     modified.title.set(None);
                     modified
                 } else {
-                    axes.x.clone()
+                    axes.x_for_panel(panel_index).clone()
                 };
                 let (x_axis, xwarn) = axis::layout_x_axis(
                     &x_input,
@@ -2800,7 +3327,7 @@ fn layout_panel_axes(
                     panel_index,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
-                    &LabelBandCtx::for_axis(&x_input, theme, metrics),
+                    &LabelBandCtx::for_axis(&x_input, theme, metrics).with_band_budget(x_band_budget),
                 );
                 if let Some(axis::AxisLabelWarning::LabelsElided { count }) = xwarn {
                     warnings.push(LayoutWarning::LabelsElided {
@@ -2846,7 +3373,7 @@ pub fn compute_layout(
     seam: CompositeLayoutSeam,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
-    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+    if !viewport.is_drawable() {
         return Err(LayoutError::InvalidViewport {
             width: viewport.width,
             height: viewport.height,
@@ -2967,6 +3494,7 @@ pub fn compute_layout(
         axis_layouts,
         secondary_y_axes,
         warnings: plot_warnings,
+        x_band_budget,
     } = lay_out_plot(inner_after_legend, spec, theme, axes, facet_groups, metrics, seam);
 
     // Assemble warnings in the original push order: legend overflow first, then
@@ -2991,6 +3519,7 @@ pub fn compute_layout(
         secondary_y_axes,
         plot_region,
         padded_region,
+        x_label_band_budget: x_band_budget.is_finite().then_some(x_band_budget),
     })
 }
 
@@ -3104,6 +3633,7 @@ mod tests {
             secondary_y_axes: vec![],
             plot_region: Rect::ZERO,
             padded_region: Rect::ZERO,
+            x_label_band_budget: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
@@ -3235,6 +3765,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -4412,6 +4943,67 @@ mod tests {
         }
     }
 
+    /// `compute_layout` refuses a NaN or infinite viewport dimension with
+    /// the same typed error as a zero one, with `padding.auto` on and off.
+    #[test]
+    fn compute_layout_refuses_a_non_finite_viewport() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        for auto in [true, false] {
+            let mut theme = default_theme_inputs();
+            theme.padding.padding_auto = auto;
+            for (width, height) in [
+                (f64::NAN, 400.0),
+                (400.0, f64::NAN),
+                (f64::INFINITY, 400.0),
+                (400.0, f64::INFINITY),
+            ] {
+                let err = compute_layout(
+                    &spec,
+                    &theme,
+                    Viewport { width, height },
+                    &axes,
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    &m,
+                    &legend::LegendOverrides::default(),
+                    &[],
+                    CompositeLayoutSeam::default(),
+                )
+                .unwrap_err();
+                assert!(matches!(err, LayoutError::InvalidViewport { .. }), "{width}x{height}: {err:?}");
+            }
+        }
+    }
+
+    /// The close-and-resettle step ends by its own structure: each repeat
+    /// closes an axis that was still open, so it runs at most three settles
+    /// whatever the room's floors and budgets are. Given a NaN or infinite
+    /// viewport directly (past `compute_layout`'s refusal), where every
+    /// budget and floor is non-finite, it still returns.
+    #[test]
+    fn settle_auto_padding_ends_on_a_non_finite_viewport() {
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let axes = continuous_x_axes_with_long_first_and_last_labels();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let base = base_padding_insets(&theme);
+        for (width, height) in [(f64::NAN, 200.0), (200.0, f64::NAN), (f64::INFINITY, 200.0), (200.0, f64::INFINITY)] {
+            let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, Viewport { width, height });
+            let _ = settle_auto_padding(&inputs, base);
+        }
+    }
+
     #[test]
     fn compute_layout_padding_exceeds_viewport_errors() {
         let spec = minimal_chart_spec();
@@ -4564,6 +5156,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -4579,8 +5172,37 @@ mod tests {
     ) -> XLabelOverhang {
         let spec = minimal_chart_spec();
         let legend_overrides = legend::LegendOverrides::default();
-        let inputs = LayoutInputs {
-            spec: &spec,
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, theme, axes, metrics, viewport);
+        let base = base_padding_insets(theme);
+        probe_auto_padding(base, &inputs, &AutoPlotRoom::of_auto_off(&inputs, base)).x_overhang
+    }
+
+    /// The [`AutoPlotRoom`] `settle_auto_padding` measures for a chart
+    /// with no legend or facets, for tests that solve one auto-padding step
+    /// by hand.
+    fn plot_room(
+        theme: &ThemeInputs,
+        axes: &AxesInput,
+        metrics: &dyn TextMetrics,
+        viewport: Viewport,
+    ) -> AutoPlotRoom {
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, theme, axes, metrics, viewport);
+        AutoPlotRoom::of_auto_off(&inputs, base_padding_insets(theme))
+    }
+
+    /// [`LayoutInputs`] for a chart with no legend or facets.
+    fn plain_layout_inputs<'a>(
+        spec: &'a crate::spec::chart::ChartSpec,
+        legend_overrides: &'a legend::LegendOverrides,
+        theme: &'a ThemeInputs,
+        axes: &'a AxesInput,
+        metrics: &'a dyn TextMetrics,
+        viewport: Viewport,
+    ) -> LayoutInputs<'a> {
+        LayoutInputs {
+            spec,
             theme,
             viewport,
             axes,
@@ -4589,11 +5211,10 @@ mod tests {
             legend_title: None,
             colorbar: None,
             metrics,
-            legend_overrides: &legend_overrides,
+            legend_overrides,
             aux_legend_inputs: &[],
             seam: CompositeLayoutSeam::default(),
-        };
-        probe_auto_padding(base_padding_insets(theme), &inputs).x_overhang
+        }
     }
 
     /// Unit-level pin of `auto_padding_for_edge_ticks`'s concrete numbers
@@ -4611,7 +5232,6 @@ mod tests {
             height: 200.0,
         };
         let axes = continuous_x_axes_with_long_last_label();
-        let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -4661,6 +5281,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -4682,7 +5303,6 @@ mod tests {
             height: 200.0,
         };
         let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
-        let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -4714,9 +5334,11 @@ mod tests {
     fn padding_auto_honors_max_band_and_prevents_left_tick_overhang() {
         let spec = minimal_chart_spec();
         let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
+        // Tall enough that the x label band the narrower plot reserves
+        // leaves half the plot's height.
         let viewport = Viewport {
             width: 400.0,
-            height: 200.0,
+            height: 300.0,
         };
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -5013,6 +5635,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -5028,7 +5651,6 @@ mod tests {
     #[test]
     fn auto_padding_for_axis_titles_recenters_a_right_overflowing_x_title() {
         let axes = axes_with_wide_x_title();
-        let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -5040,7 +5662,7 @@ mod tests {
         };
         let base = base_padding_insets(&theme);
         let extra =
-            auto_padding_for_axis_titles(&theme, viewport, &axes, &m, base, Inset::default());
+            auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
         assert!(
             (extra.right - 6.0).abs() < 1e-9,
             "extra.right = {}",
@@ -5050,7 +5672,7 @@ mod tests {
         assert_eq!(extra.top, 0.0);
         assert_eq!(extra.bottom, 0.0);
 
-        let (x_infeasible, y_infeasible) = axis_title_infeasibility(&theme, viewport, &axes, &m);
+        let (x_infeasible, y_infeasible) = axis_title_infeasibility(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default(), &plot_room(&theme, &axes, &m, viewport));
         assert!(
             !x_infeasible,
             "this title fits within the viewport once recentered"
@@ -5340,36 +5962,37 @@ mod tests {
     // ── padding.auto: composition ─────
 
     #[test]
-    fn cap_auto_contribution_passes_through_when_it_already_fits() {
+    fn cap_auto_scale_passes_through_when_it_already_fits() {
         // fixed 16+16=32, extra 10+10=20, span 200: 32+20=52 << 200, no cap.
-        assert_eq!(
-            cap_auto_contribution(16.0, 16.0, 10.0, 10.0, 200.0),
-            (10.0, 10.0)
-        );
+        assert_eq!(cap_auto_scale(16.0, 16.0, 20.0, 200.0, f64::INFINITY), 1.0);
     }
 
     #[test]
-    fn cap_auto_contribution_scales_proportionally_when_over_budget() {
+    fn cap_auto_scale_scales_proportionally_when_over_budget() {
         // fixed 16+16=32, span 100, MIN_PANEL_DIM 1 -> budget = 100-32-1 = 67.
-        // desired 60+30=90 > 67, scale = 67/90; preserves the 2:1 ratio.
-        let (low, high) = cap_auto_contribution(16.0, 16.0, 60.0, 30.0, 100.0);
-        let scale = 67.0 / 90.0;
-        assert!((low - 60.0 * scale).abs() < 1e-9, "low = {low}");
-        assert!((high - 30.0 * scale).abs() < 1e-9, "high = {high}");
-        assert!(
-            (low + high - 67.0).abs() < 1e-9,
-            "sum should exactly consume the budget"
-        );
+        // desired 60+30=90 > 67, scale = 67/90, so the sum consumes the budget.
+        let scale = cap_auto_scale(16.0, 16.0, 90.0, 100.0, f64::INFINITY);
+        assert!((scale - 67.0 / 90.0).abs() < 1e-12, "scale = {scale}");
+        assert!((90.0 * scale - 67.0).abs() < 1e-9, "the sum should exactly consume the budget");
     }
 
     #[test]
-    fn cap_auto_contribution_is_zero_when_the_fixed_floor_alone_overflows() {
+    fn cap_auto_scale_is_zero_when_the_fixed_floor_alone_overflows() {
         // fixed 100+100=200 already >= span 150: pre-existing failure, auto
         // must contribute nothing (not attempt a negative-budget scale).
-        assert_eq!(
-            cap_auto_contribution(100.0, 100.0, 5.0, 5.0, 150.0),
-            (0.0, 0.0)
-        );
+        assert_eq!(cap_auto_scale(100.0, 100.0, 10.0, 150.0, f64::INFINITY), 0.0);
+    }
+
+    /// The plot room is the tighter bound when it is smaller than the
+    /// viewport's: 90px wanted, the viewport allows 167 but the plot room
+    /// 40, so the extra is scaled to 40; 40px, exactly the room, ships
+    /// whole. A plot room of 0 still lets nothing through.
+    #[test]
+    fn cap_auto_scale_honors_the_plot_room_when_it_is_tighter() {
+        let scale = cap_auto_scale(16.0, 16.0, 90.0, 200.0, 40.0);
+        assert!((90.0 * scale - 40.0).abs() < 1e-9, "scaled to the plot room: {}", 90.0 * scale);
+        assert_eq!(cap_auto_scale(16.0, 16.0, 40.0, 200.0, 40.0), 1.0, "exactly the room");
+        assert_eq!(cap_auto_scale(16.0, 16.0, 40.0, 200.0, 0.0), 0.0, "no room");
     }
 
     /// #139(2): `compute_layout` must decide per-axis infeasibility and
@@ -5387,11 +6010,11 @@ mod tests {
     fn compute_layout_solves_titles_against_the_post_suppression_base() {
         let spec = minimal_chart_spec();
         let mut axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
-        axes.y.title.set(Some("a tall y title".to_string()));
+        axes.y.title.set(Some("a".repeat(18)));
         let theme = theme_inputs_with_padding_auto_off();
         let viewport = Viewport {
             width: 270.0,
-            height: 300.0,
+            height: 200.0,
         };
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -5434,7 +6057,7 @@ mod tests {
         // ticks.top/bottom are asserted zero above, solving against the raw
         // `base` here is equivalent to solving against the suppressed one.
         let titles_against_suppressed =
-            auto_padding_for_axis_titles(&theme, viewport, &axes, &m, base, Inset::default());
+            auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
 
         // The pre-fix order: titles solved against the base with the FULL,
         // unsuppressed x-tick contribution folded in.
@@ -5444,14 +6067,7 @@ mod tests {
             bottom: base.bottom + ticks.bottom,
             left: base.left + ticks.left,
         };
-        let titles_against_unsuppressed = auto_padding_for_axis_titles(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            base_after_unsuppressed_ticks,
-            Inset::default(),
-        );
+        let titles_against_unsuppressed = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base_after_unsuppressed_ticks, Inset::default());
 
         assert_ne!(
             titles_against_suppressed.top, titles_against_unsuppressed.top,
@@ -5461,20 +6077,17 @@ mod tests {
 
         // The top/bottom cap must not fire on this fixture, or the "raw
         // base" derivation below (which applies no cap) is wrong: the
-        // top/bottom pair `cap_auto_contribution` receives must pass
-        // through unchanged.
+        // top/bottom total `cap_auto_scale` receives must pass through
+        // unchanged.
         assert_eq!(
-            cap_auto_contribution(
+            cap_auto_scale(
                 base.top,
                 base.bottom,
-                titles_against_suppressed.top,
-                titles_against_suppressed.bottom,
+                titles_against_suppressed.top + titles_against_suppressed.bottom,
                 viewport.height,
+                plot_room(&theme, &axes, &m, viewport).height_budget,
             ),
-            (
-                titles_against_suppressed.top,
-                titles_against_suppressed.bottom
-            ),
+            1.0,
             "fixture assumption: the top/bottom cap must not fire",
         );
 
@@ -5547,15 +6160,16 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
-    /// #139(3): the two `cap_auto_contribution` call sites must receive an
+    /// #139(3): the two `cap_auto_scale` call sites must receive an
     /// explicit side's own extra as ZERO, not the real (but doomed-to-be-
     /// discarded) value the tick pass computed — `compute_layout`'s own
     /// final inset assembly (`theme.padding.padding_left.unwrap_or(...)`)
     /// throws an explicit side's `extra` away entirely regardless. Pre-fix,
-    /// `cap_auto_contribution` shared its scarce budget between that doomed
+    /// `cap_auto_scale` shared its scarce budget between that doomed
     /// extra and the auto (right) side's real one, throttling the auto side
     /// more than necessary for a contribution that was never going to ship.
     #[test]
@@ -5566,9 +6180,10 @@ mod tests {
         theme.padding.padding_auto = true;
         theme.padding.padding_left = Some(5.0);
         // Tall enough that the x label band (reserved as if the 190px
-        // labels rotated to -90) leaves the plot a real height.
+        // labels rotated to -90) leaves the plot a real height, and wide
+        // enough that each label's own extra keeps half the plot.
         let viewport = Viewport {
-            width: 150.0,
+            width: 250.0,
             height: 400.0,
         };
         let m = MockMetrics {
@@ -5577,7 +6192,7 @@ mod tests {
         };
 
         // Fixture assumptions: both sides want real extra, and together
-        // they exceed the viewport's budget (the cap must actually fire, or
+        // they exceed the axis's budget (the cap must actually fire, or
         // this test is vacuous).
         let ticks = auto_padding_for_edge_ticks(
             &theme,
@@ -5593,7 +6208,9 @@ mod tests {
             ticks.right,
         );
         let base = base_padding_insets(&theme);
-        let budget = viewport.width - base.left - base.right - MIN_PANEL_DIM;
+        let room = plot_room(&theme, &axes, &m, viewport);
+        let budget =
+            (viewport.width - base.left - base.right - MIN_PANEL_DIM).min(room.width_budget);
         assert!(
             ticks.left + ticks.right > budget,
             "fixture must exceed budget, or the cap never fires: {} + {} <= {budget}",
@@ -5603,8 +6220,8 @@ mod tests {
 
         // The CORRECT cap input: the explicit left side's extra is zero, so
         // only the right side's real extra competes for the budget.
-        let (_, expected_right) =
-            cap_auto_contribution(base.left, base.right, 0.0, ticks.right, viewport.width);
+        let expected_right = ticks.right
+            * cap_auto_scale(base.left, base.right, ticks.right, viewport.width, room.width_budget);
         assert!(
             (expected_right - ticks.right).abs() < 1e-9,
             "fixture assumption: with the left extra zeroed, the right side \
@@ -5650,7 +6267,7 @@ mod tests {
 
     /// Mirror of `compute_layout_zeroes_an_explicit_sides_extra_before_the_cap`
     /// with the explicit/auto sides swapped: an explicit RIGHT side's own
-    /// extra must be zeroed before `cap_auto_contribution` too, so it cannot
+    /// extra must be zeroed before `cap_auto_scale` too, so it cannot
     /// compete for budget with the auto LEFT side's real contribution.
     #[test]
     fn compute_layout_zeroes_an_explicit_right_sides_extra_before_the_cap() {
@@ -5660,9 +6277,10 @@ mod tests {
         theme.padding.padding_auto = true;
         theme.padding.padding_right = Some(5.0);
         // Tall enough that the x label band (reserved as if the 190px
-        // labels rotated to -90) leaves the plot a real height.
+        // labels rotated to -90) leaves the plot a real height, and wide
+        // enough that each label's own extra keeps half the plot.
         let viewport = Viewport {
-            width: 150.0,
+            width: 250.0,
             height: 400.0,
         };
         let m = MockMetrics {
@@ -5671,7 +6289,7 @@ mod tests {
         };
 
         // Fixture assumptions: both sides want real extra, and together
-        // they exceed the viewport's budget (the cap must actually fire, or
+        // they exceed the axis's budget (the cap must actually fire, or
         // this test is vacuous).
         let ticks = auto_padding_for_edge_ticks(
             &theme,
@@ -5687,7 +6305,9 @@ mod tests {
             ticks.right,
         );
         let base = base_padding_insets(&theme);
-        let budget = viewport.width - base.left - base.right - MIN_PANEL_DIM;
+        let room = plot_room(&theme, &axes, &m, viewport);
+        let budget =
+            (viewport.width - base.left - base.right - MIN_PANEL_DIM).min(room.width_budget);
         assert!(
             ticks.left + ticks.right > budget,
             "fixture must exceed budget, or the cap never fires: {} + {} <= {budget}",
@@ -5697,8 +6317,8 @@ mod tests {
 
         // The CORRECT cap input: the explicit right side's extra is zero, so
         // only the left side's real extra competes for the budget.
-        let (expected_left, _) =
-            cap_auto_contribution(base.left, base.right, ticks.left, 0.0, viewport.width);
+        let expected_left = ticks.left
+            * cap_auto_scale(base.left, base.right, ticks.left, viewport.width, room.width_budget);
         assert!(
             (expected_left - ticks.left).abs() < 1e-9,
             "fixture assumption: with the right extra zeroed, the left side \
@@ -5766,6 +6386,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let mut theme = default_theme_inputs();
         theme.padding.padding_auto = true;
@@ -5813,7 +6434,7 @@ mod tests {
             height: 80.0,
         };
         assert_eq!(
-            axis_title_infeasibility(&theme, viewport, &axes, &m),
+            axis_title_infeasibility(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base_padding_insets(&theme), Inset::default(), &plot_room(&theme, &axes, &m, viewport)),
             (false, true),
             "an untitled x axis is feasible; a y title taller than the viewport is not",
         );
@@ -5853,16 +6474,17 @@ mod tests {
     /// The vertical sibling of
     /// `compute_layout_zeroes_an_explicit_sides_extra_before_the_cap`: an
     /// explicit TOP side's doomed tick extra must not share the top/bottom
-    /// budget with the auto bottom side's title recentering.
+    /// budget with the auto bottom side's title recentering, and the title
+    /// is recentred on the plot that ships (the explicit top discards the
+    /// tick extra, so it does not narrow the plot).
     #[test]
     fn compute_layout_zeroes_an_explicit_tops_extra_before_the_cap() {
         let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(6));
         theme.padding.padding_top = Some(2.0);
         let viewport = Viewport {
             width: 400.0,
-            height: 80.0,
+            height: 100.0,
         };
-        let spec = minimal_chart_spec();
         let base = base_padding_insets(&theme);
         let ticks = auto_padding_for_edge_ticks(
             &theme,
@@ -5871,18 +6493,9 @@ mod tests {
             Inset::default(),
             x_overhang_without_auto(&theme, &axes, &m, viewport),
         );
-        let titles = auto_padding_for_axis_titles(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            Inset {
-                top: base.top + ticks.top,
-                ..base
-            },
-            Inset::default(),
-        );
-        let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
+        let titles = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
+        let budget = (viewport.height - base.top - base.bottom - MIN_PANEL_DIM)
+            .min(plot_room(&theme, &axes, &m, viewport).height_budget);
         assert!(
             ticks.top > 0.0 && titles.bottom > 0.0 && titles.bottom <= budget,
             "fixture must want a doomed top extra and a fitting bottom one: \
@@ -5897,15 +6510,8 @@ mod tests {
 
         // `auto_padding_extra` is where an explicit side's extra is zeroed
         // before the cap, so the cap is judged there.
-        let extra = auto_padding_extra(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            base,
-            Inset::default(),
-            x_overhang_without_auto(&theme, &axes, &m, viewport),
-        );
+        let extra = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), x_overhang_without_auto(&theme, &axes, &m, viewport), &plot_room(&theme, &axes, &m, viewport))
+        .total;
         assert!(
             (extra.bottom - titles.bottom).abs() < 1e-9,
             "the auto bottom extra ({}) must ship uncapped ({}), not throttled \
@@ -5914,9 +6520,7 @@ mod tests {
             titles.bottom,
         );
 
-        // The full layout then drops it: under the 54px x label band, that
-        // bottom extra leaves no plot height, and an extra that collapses
-        // the plot is never shipped, so the chart is laid out as auto=false.
+        // The full layout ships it: the bottom extra keeps half the plot.
         let layout = auto_layout(&theme, viewport, &axes, &m);
         assert!(
             (layout.padded_region.y - 2.0).abs() < 1e-9,
@@ -5925,8 +6529,62 @@ mod tests {
         );
         let bottom_inset = viewport.height - layout.padded_region.y - layout.padded_region.h;
         assert!(
-            (bottom_inset - base.bottom).abs() < 1e-9,
-            "a collapsing extra must not ship: bottom inset {bottom_inset}",
+            (bottom_inset - (base.bottom + titles.bottom)).abs() < 1e-9,
+            "the uncapped bottom extra must ship: bottom inset {bottom_inset}",
+        );
+    }
+
+    /// A tick extra an explicit side discards does not move the title
+    /// solve: with the top explicit, the y tick pass's 22px top extra never
+    /// ships, so the y title is recentred on the plot that does ship, and
+    /// it ends inside the canvas. Solved as if that top extra narrowed the
+    /// plot, the plot's centre would sit 11px lower and the bottom extra
+    /// would be 22px larger, which ships and pushes the title 11px past the
+    /// top edge.
+    #[test]
+    fn an_explicit_sides_discarded_tick_extra_does_not_move_the_title() {
+        let (axes, mut theme, m) = vertical_padding_fixture(&"a".repeat(6));
+        theme.padding.padding_top = Some(2.0);
+        let viewport = Viewport {
+            width: 400.0,
+            height: 100.0,
+        };
+        let base = base_padding_insets(&theme);
+        let ticks = auto_padding_for_edge_ticks(
+            &theme,
+            &axes,
+            &m,
+            Inset::default(),
+            x_overhang_without_auto(&theme, &axes, &m, viewport),
+        );
+        let titles = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
+        let phantom = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset {
+                top: base.top + ticks.top,
+                ..base
+            }, Inset::default());
+        assert!(
+            ticks.top == 22.0 && titles.bottom > 0.0 && phantom.bottom - titles.bottom == ticks.top,
+            "fixture assumption: the discarded tick extra would change the title solve \
+             (ticks {ticks:?}, titles {titles:?}, phantom {phantom:?})",
+        );
+        let layout = auto_layout(&theme, viewport, &axes, &m);
+        let bottom_inset = viewport.height - layout.padded_region.y - layout.padded_region.h;
+        assert!(
+            (bottom_inset - (base.bottom + titles.bottom)).abs() < 1e-9,
+            "the bottom extra is solved on the shipped plot: inset {bottom_inset}, want {}",
+            base.bottom + titles.bottom,
+        );
+        let title = layout
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Left)
+            .and_then(|a| a.title.as_ref())
+            .expect("y title");
+        let half = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+        assert!(
+            title.anchor_y - half >= -1e-9 && title.anchor_y + half <= viewport.height + 1e-9,
+            "the y title ends inside the canvas (anchor {}, half {half})",
+            title.anchor_y,
         );
     }
 
@@ -5939,9 +6597,8 @@ mod tests {
         theme.padding.padding_bottom = Some(2.0);
         let viewport = Viewport {
             width: 400.0,
-            height: 80.0,
+            height: 110.0,
         };
-        let spec = minimal_chart_spec();
         let base = base_padding_insets(&theme);
         let ticks = auto_padding_for_edge_ticks(
             &theme,
@@ -5950,18 +6607,12 @@ mod tests {
             Inset::default(),
             x_overhang_without_auto(&theme, &axes, &m, viewport),
         );
-        let titles = auto_padding_for_axis_titles(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            Inset {
+        let titles = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset {
                 top: base.top + ticks.top,
                 ..base
-            },
-            Inset::default(),
-        );
-        let budget = viewport.height - base.top - base.bottom - MIN_PANEL_DIM;
+            }, Inset::default());
+        let budget = (viewport.height - base.top - base.bottom - MIN_PANEL_DIM)
+            .min(plot_room(&theme, &axes, &m, viewport).height_budget);
         assert!(
             ticks.top > 0.0 && ticks.top <= budget && titles.bottom > 0.0 && titles.top == 0.0,
             "fixture must want a fitting top extra and a doomed bottom one: \
@@ -5975,15 +6626,8 @@ mod tests {
 
         // `auto_padding_extra` is where an explicit side's extra is zeroed
         // before the cap, so the cap is judged there.
-        let extra = auto_padding_extra(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            base,
-            Inset::default(),
-            x_overhang_without_auto(&theme, &axes, &m, viewport),
-        );
+        let extra = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), x_overhang_without_auto(&theme, &axes, &m, viewport), &plot_room(&theme, &axes, &m, viewport))
+        .total;
         assert!(
             (extra.top - ticks.top).abs() < 1e-9,
             "the auto top extra ({}) must ship uncapped ({}), not throttled to \
@@ -5998,11 +6642,10 @@ mod tests {
             (bottom_inset - 2.0).abs() < 1e-9,
             "explicit padding_bottom must survive verbatim: {bottom_inset}",
         );
-        // As in the mirror test, the full layout then drops it: under the
-        // 54px x label band the top extra leaves no plot height.
+        // As in the mirror test, the full layout ships it.
         assert!(
-            (layout.padded_region.y - base.top).abs() < 1e-9,
-            "a collapsing extra must not ship: top inset {}",
+            (layout.padded_region.y - (base.top + ticks.top)).abs() < 1e-9,
+            "the uncapped top extra must ship: top inset {}",
             layout.padded_region.y,
         );
     }
@@ -6565,7 +7208,7 @@ mod tests {
         // reservation) must be exactly the caller's explicit value — proof
         // that `padding.auto`'s chrome-aware correction never competed for
         // this side at all, exactly as `theme.padding.padding_right` being
-        // `Some` already zeroes `combined.right` before `cap_auto_contribution`.
+        // `Some` already zeroes `combined.right` before `cap_auto_scale`.
         let padded_right_inset =
             viewport.width - with_auto.padded_region.w - with_auto.padded_region.x;
         assert!(
@@ -6600,6 +7243,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -6840,7 +7484,10 @@ mod tests {
     /// An x-axis title's recentering solve also folds in `chrome`: with a
     /// right-side legend, and separately with a secondary-y axis, the
     /// title's recentered anchor stays within the viewport on a fixture
-    /// whose title would otherwise sit flush against the right edge.
+    /// whose title would otherwise sit flush against the right edge. Each
+    /// chart is wide enough that the rescue keeps half the plot: the legend
+    /// takes more of a 200px chart than the secondary-y band does, so its
+    /// chart is 250px.
     #[test]
     fn padding_auto_title_recentering_with_a_right_legend_or_secondary_y() {
         let spec = minimal_chart_spec();
@@ -6852,6 +7499,10 @@ mod tests {
             width: 200.0,
             height: 200.0,
         };
+        let legend_viewport = Viewport {
+            width: 250.0,
+            ..viewport
+        };
         let half_w = m.measure_width("A Wide X Axis Title", 13.0) / 2.0;
 
         let axes_legend = axes_with_wide_x_title();
@@ -6861,7 +7512,7 @@ mod tests {
         let with_legend = compute_layout(
             &spec,
             &theme_legend,
-            viewport,
+            legend_viewport,
             &axes_legend,
             &[],
             &entries,
@@ -6885,7 +7536,8 @@ mod tests {
             "legend_anchor_x = {legend_anchor_x}",
         );
         assert!(
-            legend_anchor_x - half_w >= -1e-6 && legend_anchor_x + half_w <= viewport.width + 1e-6,
+            legend_anchor_x - half_w >= -1e-6
+                && legend_anchor_x + half_w <= legend_viewport.width + 1e-6,
             "the recentered x title must stay inside the viewport with a \
              right legend (anchor {legend_anchor_x}, half {half_w})",
         );
@@ -7118,7 +7770,8 @@ mod tests {
                 aux_legend_inputs: &[],
                 seam: CompositeLayoutSeam::default(),
             };
-            let credit = probe_auto_padding(inset, &inputs).chrome;
+            let credit =
+                probe_auto_padding(inset, &inputs, &AutoPlotRoom::of_auto_off(&inputs, inset)).chrome;
             assert!(
                 credit.top >= 0.0 && credit.right >= 0.0 && credit.bottom >= 0.0
                     && credit.left >= 0.0,
@@ -7430,7 +8083,6 @@ mod tests {
     /// `auto_padding_for_edge_ticks`'s own `show_x`/`show_y` gate.
     #[test]
     fn auto_padding_for_axis_titles_is_inert_when_the_axis_is_hidden() {
-        let spec = minimal_chart_spec();
         let theme = default_theme_inputs();
         let m = MockMetrics {
             measure: fixed_width(10.0),
@@ -7444,20 +8096,13 @@ mod tests {
 
         let mut axes_x_hidden = axes_with_wide_x_title();
         axes_x_hidden.show_x = false;
-        let extra_x = auto_padding_for_axis_titles(
-            &theme,
-            viewport,
-            &axes_x_hidden,
-            &m,
-            base,
-            Inset::default(),
-        );
+        let extra_x = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes_x_hidden, &m, viewport), base, Inset::default());
         assert_eq!(
             extra_x,
             Inset::default(),
             "a hidden x-axis's title must not be recentered"
         );
-        let (x_infeasible, _) = axis_title_infeasibility(&theme, viewport, &axes_x_hidden, &m);
+        let (x_infeasible, _) = axis_title_infeasibility(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes_x_hidden, &m, viewport), base, Inset::default(), &plot_room(&theme, &axes_x_hidden, &m, viewport));
         assert!(
             !x_infeasible,
             "a hidden axis's title is not even considered"
@@ -7470,20 +8115,13 @@ mod tests {
             .set(Some("A Wide Y Axis Title".into()));
         axes_y_hidden.x.title.set(None);
         axes_y_hidden.show_y = false;
-        let extra_y = auto_padding_for_axis_titles(
-            &theme,
-            viewport,
-            &axes_y_hidden,
-            &m,
-            base,
-            Inset::default(),
-        );
+        let extra_y = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes_y_hidden, &m, viewport), base, Inset::default());
         assert_eq!(
             extra_y,
             Inset::default(),
             "a hidden y-axis's title must not be recentered"
         );
-        let (_, y_infeasible) = axis_title_infeasibility(&theme, viewport, &axes_y_hidden, &m);
+        let (_, y_infeasible) = axis_title_infeasibility(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes_y_hidden, &m, viewport), base, Inset::default(), &plot_room(&theme, &axes_y_hidden, &m, viewport));
         assert!(
             !y_infeasible,
             "a hidden axis's title is not even considered"
@@ -7928,6 +8566,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let m = MockMetrics {
             measure: fixed_width(8.0),
@@ -8020,6 +8659,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
 
         // Long labels with -45° override: "ABCDEFGHIJ"=100px. Angle override forces
@@ -8045,6 +8685,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
 
         let short_result = compute_layout(
@@ -8118,6 +8759,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let rotated_axes = AxesInput {
             x: axis_input(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
@@ -8125,6 +8767,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
 
         let flat_result = compute_layout(
@@ -8193,6 +8836,7 @@ mod tests {
             show_x: false,
             show_y: false,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let axes_with_x = AxesInput {
             show_x: true,
@@ -8278,6 +8922,7 @@ mod tests {
             show_x: false,
             show_y: false,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let theme = default_theme_inputs();
         let result = compute_layout(
@@ -8756,6 +9401,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         };
         let m = MockMetrics {
             measure: fixed_width(8.0),
@@ -9071,6 +9717,7 @@ mod tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -9475,9 +10122,11 @@ mod tests {
             "the covering pass draws rotated labels that fit ({:?}, ink {lo}..{hi})",
             on_x.ticks,
         );
+        let base = base_padding_insets(&theme);
         let probe = probe_auto_padding(
-            resolve_padding_inset(&theme, base_padding_insets(&theme), extra),
+            resolve_padding_inset(&theme, base, extra),
             &inputs,
+            &AutoPlotRoom::of_auto_off(&inputs, base),
         );
         let needed = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default(), probe.x_overhang);
         assert!(
@@ -9671,21 +10320,23 @@ mod tests {
         );
     }
 
-    /// A run where NO pass covers, and the no-cover fallback would collapse
-    /// the plot. On a 120px chart with a legend and a flat
-    /// (`label_overlap=True`) 140px last label, the passes alternate after
-    /// pass 1: with no extra the label overhangs both edges, and the extra
-    /// that answers it collapses the plot (no label drawn, a capped legend
-    /// reserving less than credited). The fallback, the per-side maximum of
-    /// the two distinct needs measured, collapses the plot too, so auto adds
+    /// A run where NO pass covers, and the no-cover fallback would leave
+    /// the plot unusable. On a 288x150 chart the flat 100px last label
+    /// overhangs the right edge with `auto=false`, by its 50px half-width
+    /// past the plot edge less the 16px padding. The 34px extra that
+    /// contains it narrows the plot until the labels no longer fit flat in
+    /// half its width, so the cascade rotates them, and their band leaves
+    /// the plot under half its 9px `auto=false` height: that pass is
+    /// unusable, and the next one is back at `auto=false`. The fallback,
+    /// the per-side maximum need, is that same 34px extra, so auto adds
     /// nothing and the chart is laid out exactly as `auto=false` lays it.
     #[test]
     fn settle_auto_padding_adds_nothing_when_the_no_cover_fallback_would_collapse() {
         let spec = minimal_chart_spec();
         let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = vec!["0".into(), "5".into(), "9".repeat(14)];
-        axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+        axes.x.tick_labels = vec!["0".into(), "5".into(), "9".repeat(10)];
         if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.0;
             p.major = vec![0.0, 0.5, 1.0];
         }
         axes.y.tick_labels = vec!["0".into(), "5".into()];
@@ -9695,100 +10346,39 @@ mod tests {
         };
         let theme = default_theme_inputs();
         let viewport = Viewport {
-            width: 120.0,
-            height: 300.0,
+            width: 288.0,
+            height: 150.0,
         };
-        let entries = vec![
-            LegendEntry::new("alpha", SymbolKind::Circle),
-            LegendEntry::new("beta-long-entry", SymbolKind::Circle),
-        ];
         let legend_overrides = legend::LegendOverrides::default();
-        let inputs = LayoutInputs {
-            spec: &spec,
-            theme: &theme,
-            viewport,
-            axes: &axes,
-            facet_groups: &[],
-            legend_entries: &entries,
-            legend_title: None,
-            colorbar: None,
-            metrics: &m,
-            legend_overrides: &legend_overrides,
-            aux_legend_inputs: &[],
-            seam: CompositeLayoutSeam::default(),
-        };
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
         let base = base_padding_insets(&theme);
-        let pass_one = probe_auto_padding(base, &inputs);
-        let pass_one_need = auto_padding_extra(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            base,
-            Inset::default(),
-            pass_one.x_overhang,
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let pass_one = probe_auto_padding(base, &inputs, &room);
+        let pass_one_need = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), pass_one.x_overhang, &room)
+        .total;
+        assert_eq!(
+            pass_one_need,
+            Inset {
+                right: 34.0,
+                ..Inset::default()
+            },
+            "fixture assumption: the auto-off label needs 50 - 16 = 34px on the right",
         );
+        let pass_two = probe_auto_padding(resolve_padding_inset(&theme, base, pass_one_need), &inputs, &room);
         assert!(
-            pass_one_need.right > 0.0,
-            "fixture assumption: the auto-off label overhangs ({pass_one_need:?})",
-        );
-        let collapsed = probe_auto_padding(
-            resolve_padding_inset(&theme, base, auto_padding_extra(
-                &theme,
-                viewport,
-                &axes,
-                &m,
-                base,
-                pass_one.chrome,
-                pass_one.x_overhang,
-            )),
-            &inputs,
-        );
-        assert!(
-            collapsed.x_overhang == XLabelOverhang::NONE
-                && collapsed.chrome.right < pass_one.chrome.right,
-            "fixture assumption: pass 2 draws no label and reserves less than \
-             its credit, so it does not cover either ({collapsed:?})",
-        );
-        let later_need = auto_padding_extra(
-            &theme,
-            viewport,
-            &axes,
-            &m,
-            base,
-            per_side_min(collapsed.chrome, pass_one.chrome),
-            pass_one.x_overhang,
-        );
-        let want = per_side_max(pass_one_need, later_need);
-        assert!(
-            probe_auto_padding(resolve_padding_inset(&theme, base, want), &inputs).collapsed,
-            "fixture assumption: the per-side maximum need {want:?} collapses the plot",
+            pass_two.unusable,
+            "fixture assumption: that extra leaves the plot unusable ({pass_two:?})",
         );
         assert_eq!(
             settle_auto_padding(&inputs, base),
             Inset::default(),
-            "a no-cover fallback that collapses the plot must add nothing",
+            "a no-cover fallback that leaves the plot unusable must add nothing",
         );
-        let run = |auto: bool| {
-            let mut t = theme.clone();
-            t.padding.padding_auto = auto;
-            compute_layout(
-                &spec,
-                &t,
-                viewport,
-                &axes,
-                &[],
-                &entries,
-                None,
-                None,
-                &m,
-                &legend::LegendOverrides::default(),
-                &[],
-                CompositeLayoutSeam::default(),
-            )
-            .expect("layout should succeed")
-        };
-        assert_eq!(run(true), run(false), "the default must be the auto=false layout");
+        assert_eq!(
+            layout_with_auto(&theme, true, viewport, &axes, &m),
+            layout_with_auto(&theme, false, viewport, &axes, &m),
+            "the default must be the auto=false layout",
+        );
     }
 
     /// A `label_overlap=True` axis whose long flat label sits just right of
@@ -10100,97 +10690,2080 @@ mod tests {
         );
     }
 
-    /// A pass whose plot collapses never counts as covering. A 560x300 chart
-    /// with a flat 30-character first x label (default cascade): with
-    /// `auto=false` the plot is 502x33 and the label overhangs the left
-    /// edge. The left extra that would contain it narrows the plot until
-    /// the cascade rotates the label to -90, whose 300px band leaves no plot
-    /// height: that collapsed pass draws no label, so it measured no
-    /// overhang and looked covered. No non-collapsing pass covers, so auto
-    /// must add nothing: the default is the `auto=false` layout, not a
-    /// blank chart.
-    #[test]
-    fn padding_auto_never_settles_on_a_collapsed_plot() {
+    /// Three ticks with a long flat first label, on a continuous x axis with
+    /// no scale inset, so each label's budget is half the plot width.
+    fn axes_whose_left_rescue_rotates_the_labels() -> AxesInput {
         let mut axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
         axes.y.overrides.placement.max_band = None;
-        axes.x.tick_labels = vec![format!("-{}", "9".repeat(29)), "0".into()];
+        axes.x.tick_labels = vec![format!("-{}", "9".repeat(11)), "5".into(), "10".into()];
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = vec![0.0, 0.5, 1.0];
+        }
+        axes
+    }
+
+    /// The x tick labels `plot` draws on its first panel, as `(angle,
+    /// culled)` per tick, or `None` when the panel draws no x axis.
+    fn x_presentation(plot: &PlotLayout) -> Option<Vec<(f64, bool)>> {
+        plot.axis_layouts
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .map(|a| a.ticks.iter().map(|t| (t.label_angle, t.culled)).collect())
+    }
+
+    /// A rescue that would cull a label is declined. On a 360x110 chart,
+    /// `auto=false` draws the three labels flat and the 120px first label
+    /// overhangs the left edge. The 18px left extra that contains it
+    /// narrows the plot until the three labels no longer fit flat, rotated
+    /// they would need a band that leaves no plot height, and the cascade's
+    /// band budget would cull the middle label. A pass that leaves undrawn
+    /// a label `auto=false` draws is declined like one that collapses the
+    /// plot, so the chart is the `auto=false` layout: every label it draws,
+    /// by text, is drawn, and the first still clips.
+    #[test]
+    fn a_rescue_that_would_cull_a_label_is_declined() {
+        let axes = axes_whose_left_rescue_rotates_the_labels();
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
         let theme = default_theme_inputs();
         let viewport = Viewport {
-            width: 560.0,
-            height: 300.0,
+            width: 360.0,
+            height: 110.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let presentation = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present")
+                .ticks
+                .iter()
+                .map(|t| (t.label_angle, t.culled))
+                .collect::<Vec<_>>()
         };
         let off = layout_with_auto(&theme, false, viewport, &axes, &m);
-        let plot_off = off.panels[0].plot_area;
-        assert!(
-            plot_off.w > MIN_PANEL_DIM && plot_off.h > MIN_PANEL_DIM,
-            "fixture assumption: auto=false draws a plot ({plot_off:?})",
+        assert_eq!(presentation(&off), vec![(0.0, false); 3], "fixture assumption: flat with auto off");
+        assert!(drawn_x_label_ink(&off, &m, fs).0 < 0.0, "fixture assumption: the first label clips left");
+        let drawn_text = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .filter(|a| a.orient == AxisOrient::Bottom)
+                .flat_map(|a| a.ticks.iter().filter(|t| !t.culled).map(|t| t.label.clone()))
+                .collect::<Vec<_>>()
+        };
+        let base = base_padding_insets(&theme);
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let culling = lay_out_at(Inset { left: base.left + 18.0, ..base }, &inputs).plot;
+        assert_eq!(
+            x_presentation(&culling),
+            Some(vec![(0.0, false), (0.0, true), (0.0, false)]),
+            "fixture assumption: the 18px rescue culls the middle label",
         );
-        let (lo_off, _) = drawn_x_label_ink(&off, &m, theme.typography.label_font_size);
-        assert!(lo_off < 0.0, "fixture assumption: the first label clips left ({lo_off})");
         let on = layout_with_auto(&theme, true, viewport, &axes, &m);
-        let plot_on = on.panels[0].plot_area;
-        assert!(
-            plot_on.w > MIN_PANEL_DIM && plot_on.h > MIN_PANEL_DIM,
-            "the default must not collapse the plot ({plot_on:?})",
-        );
-        assert_eq!(on, off, "with no non-collapsing rescue, auto adds nothing");
+        assert_eq!(drawn_text(&on), axes.x.tick_labels, "every label auto=false draws is drawn");
+        assert_eq!(on, off, "the declined rescue leaves the auto=false layout");
+        assert!(drawn_x_label_ink(&on, &m, fs).0 < 0.0, "the first label still clips");
     }
 
-    /// A run where no pass covers but the no-cover fallback does NOT
-    /// collapse the plot: it ships the per-side maximum of the needs. A
-    /// 133px chart, `padding_frac` 0.2, a flat (`label_overlap=True`) 140px
-    /// last label: the passes never settle and none covers, and the largest
-    /// needs measured (about 35px left, 46.25px right) still leave a plot to
-    /// draw in. The result must be that maximum (so it is not zero, not the
-    /// last pass), and the plot must survive.
+    /// Each axis is judged on its own: when the x rescue would cull a label
+    /// (the chart above, its long first label overhanging the left edge,
+    /// 280-440px wide) and a y title needs a rescue that culls none, x is
+    /// closed and
+    /// the y rescue still ships. The x margins are the `auto=false` ones,
+    /// every label `auto=false` draws is drawn, and the y margins are those
+    /// of the same chart with its x sides explicit at their `auto=false`
+    /// values. The first label's length, the y title's length and the chart
+    /// height are swept; the sweep must reach charts where the y rescue is
+    /// real.
     #[test]
-    fn settle_auto_padding_ships_a_non_collapsing_no_cover_fallback() {
+    fn a_culling_x_rescue_is_dropped_and_the_y_rescue_still_ships() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
         let spec = minimal_chart_spec();
-        let mut axes = continuous_x_axes_with_long_last_label();
-        axes.x.tick_labels = vec!["0".into(), "5".into(), "9".repeat(14)];
-        axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+        let legend_overrides = legend::LegendOverrides::default();
+        let mut shipped = 0;
+        for (first, width, title, height) in (8..=16).step_by(4).flat_map(|f| {
+            (280..=440).step_by(40).flat_map(move |w| {
+                (4..=24).step_by(4).flat_map(move |t| (90..=220).step_by(10).map(move |h| (f, w, t, h)))
+            })
+        }) {
+            {
+                let mut axes = axes_whose_left_rescue_rotates_the_labels();
+                axes.x.tick_labels[0] = format!("-{}", "9".repeat(first));
+                axes.y.title.set(Some("a".repeat(title)));
+                let theme = default_theme_inputs();
+                let viewport = Viewport {
+                    width: f64::from(width),
+                    height: f64::from(height),
+                };
+                let base = base_padding_insets(&theme);
+                let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+                let room = AutoPlotRoom::of_auto_off(&inputs, base);
+                let probe = probe_auto_padding(base, &inputs, &room);
+                let x_rescue = auto_padding_extra(&inputs, probe.chrome, probe.x_overhang, &room).ticks;
+                if x_rescue.left + x_rescue.right <= 0.0 {
+                    continue;
+                }
+                let at_x_rescue = Inset {
+                    left: base.left + x_rescue.left,
+                    right: base.right + x_rescue.right,
+                    ..base
+                };
+                if !room.loses_x_labels(&lay_out_at(at_x_rescue, &inputs).plot) {
+                    continue;
+                }
+                let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+                let mut explicit_x = theme.clone();
+                explicit_x.padding.padding_left = Some(base.left);
+                explicit_x.padding.padding_right = Some(base.right);
+                let want = layout_with_auto(&explicit_x, true, viewport, &axes, &m);
+                assert_eq!(x_margins(&on), x_margins(&off), "{title}-char y title at {height}px: x adds nothing");
+                assert_eq!(y_margins(&on), y_margins(&want), "{title}-char y title at {height}px: the y rescue ships");
+                let drawn = |l: &LayoutResult| {
+                    l.axes
+                        .iter()
+                        .filter(|a| a.orient == AxisOrient::Bottom)
+                        .flat_map(|a| a.ticks.iter().filter(|t| !t.culled).map(|t| t.label.clone()))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(drawn(&on), drawn(&off), "{title}-char y title at {height}px: every label auto=false draws");
+                shipped += usize::from(y_margins(&want) != y_margins(&off));
+            }
+        }
+        assert!(shipped > 0, "the sweep must reach a real y rescue");
+    }
+
+    /// Labels are judged by which ones are drawn, not how many: a pass that
+    /// draws as many labels as `auto=false` but a different subset (the
+    /// cull keeps other ticks) leaves one undrawn, so it is unusable.
+    #[test]
+    fn a_pass_drawing_other_labels_loses_one() {
+        let axes = axes_whose_left_rescue_rotates_the_labels();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let viewport = Viewport {
+            width: 360.0,
+            height: 110.0,
+        };
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let base = base_padding_insets(&theme);
+        let mut room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let mut plot = lay_out_at(base, &inputs).plot;
+        assert_eq!(drawn_x_tick_labels(&plot), vec![(1, 0), (1, 1), (1, 2)], "fixture assumption: three labels drawn on the x axis (index 1)");
+        room.x_labels = vec![(1, 0), (1, 2)];
+        assert!(!room.loses_x_labels(&plot), "a superset keeps every label");
+        plot.axis_layouts[1].ticks[2].culled = true;
+        assert!(room.loses_x_labels(&plot), "as many labels, but the third is undrawn");
+    }
+
+    /// The charts of [`a_failing_rescue_on_one_axis_keeps_the_other`]: an
+    /// x axis whose long first label (`first` nines) overhangs the left edge
+    /// among `labels` ticks, and a y title of `title` characters, on a
+    /// `width` x `height` chart.
+    fn two_rescue_axes(first: usize, labels: usize, title: usize) -> AxesInput {
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        let mut texts: Vec<String> = (0..labels).map(|i| format!("{}", i * 5)).collect();
+        texts[0] = format!("-{}", "9".repeat(first));
+        axes.x.tick_labels = texts;
         if let Some(p) = axes.x.tick_projection.as_mut() {
-            p.padding_frac = 0.2;
+            p.major = (0..labels).map(|i| i as f64 / (labels - 1) as f64).collect();
+        }
+        axes.y.title.set(Some("a".repeat(title)));
+        axes
+    }
+
+    /// Each axis is judged on its own, x and y alike. Where the x rescue
+    /// alone collapses the plot (rotating the labels into a band that leaves
+    /// under half the height) and the y title's rescue alone is valid, x is
+    /// closed and the y rescue ships: the x margins are `auto=false`'s and
+    /// the y margins those of the same chart with explicit x sides. Where the
+    /// y rescue alone culls an x label (a shorter plot whose band budget
+    /// culls) and the x rescue alone is valid, y is closed and the x rescue
+    /// ships: the y margins are `auto=false`'s and the x margins those of the
+    /// same chart with explicit y sides. The sweep must reach both cases.
+    #[test]
+    fn a_failing_rescue_on_one_axis_keeps_the_other() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let (mut x_fails, mut y_fails) = (0, 0);
+        for (first, width, title, height, labels) in [6, 10]
+            .into_iter()
+            .flat_map(|f| [240, 320, 400].map(move |w| (f, w)))
+            .flat_map(|(f, w)| (4..=16).step_by(4).map(move |t| (f, w, t)))
+            .flat_map(|(f, w, t)| (110..=150).step_by(10).map(move |h| (f, w, t, h)))
+            .flat_map(|(f, w, t, h)| [6usize, 10].map(move |n| (f, w, t, h, n)))
+        {
+            let axes = two_rescue_axes(first + 2, labels, title);
+            let theme = default_theme_inputs();
+            let viewport = Viewport {
+                width: f64::from(width),
+                height: f64::from(height),
+            };
+            let base = base_padding_insets(&theme);
+            let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+            let room = AutoPlotRoom::of_auto_off(&inputs, base);
+            let probe = probe_auto_padding(base, &inputs, &room);
+            let need = auto_padding_extra(&inputs, probe.chrome, probe.x_overhang, &room).total;
+            let x_only = Inset { top: 0.0, bottom: 0.0, ..need };
+            let y_only = Inset { left: 0.0, right: 0.0, ..need };
+            if x_only == Inset::default() || y_only == Inset::default() {
+                continue;
+            }
+            let at = |extra: Inset| resolve_padding_inset(&theme, base, extra);
+            let x_unusable = probe_auto_padding(at(x_only), &inputs, &room).unusable;
+            let y_unusable = probe_auto_padding(at(y_only), &inputs, &room).unusable;
+            let x_culls = room.loses_x_labels(&lay_out_at(at(x_only), &inputs).plot);
+            let y_culls = room.loses_x_labels(&lay_out_at(at(y_only), &inputs).plot);
+            let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            if x_unusable && !x_culls && !y_unusable {
+                x_fails += 1;
+                let mut explicit_x = theme.clone();
+                explicit_x.padding.padding_left = Some(base.left);
+                explicit_x.padding.padding_right = Some(base.right);
+                let want = layout_with_auto(&explicit_x, true, viewport, &axes, &m);
+                let case = format!("x collapses: {first}-char first label, {labels} labels, {title}-char y title, {width}x{height}");
+                assert_eq!(x_margins(&on), x_margins(&off), "{case}: x adds nothing");
+                assert_eq!(y_margins(&on), y_margins(&want), "{case}: the y rescue ships");
+            }
+            if y_unusable && y_culls && !x_unusable {
+                y_fails += 1;
+                let mut explicit_y = theme.clone();
+                explicit_y.padding.padding_top = Some(base.top);
+                explicit_y.padding.padding_bottom = Some(base.bottom);
+                let want = layout_with_auto(&explicit_y, true, viewport, &axes, &m);
+                let case = format!("y culls: {first}-char first label, {labels} labels, {title}-char y title, {width}x{height}");
+                assert_eq!(y_margins(&on), y_margins(&off), "{case}: y adds nothing");
+                assert_eq!(x_margins(&on), x_margins(&want), "{case}: the x rescue ships");
+            }
+        }
+        assert!(x_fails > 0 && y_fails > 0, "the sweep must reach both cases (x fails {x_fails}, y fails {y_fails})");
+    }
+
+    /// When the x and the y rescue are each valid alone but together leave
+    /// the plot unusable, neither axis is closed and the chart ships as
+    /// `auto=false`. On a 240x140 chart with an 8-nine first label among 6
+    /// x labels and an 8-character y title, the x rescue alone ships 7.37px
+    /// on the left and the y rescue alone 7.93px on top, but no settle with
+    /// both open has a usable pass.
+    #[test]
+    fn rescues_valid_alone_but_failing_together_ship_auto_off() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let axes = two_rescue_axes(8, 6, 8);
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 240.0,
+            height: 140.0,
+        };
+        let base = base_padding_insets(&theme);
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        assert!(settle_within(&inputs, base, &room).no_usable_pass, "fixture assumption: no usable pass with both open");
+        let x_alone = settle_within(&inputs, base, &room.closing(false, true)).total;
+        let y_alone = settle_within(&inputs, base, &room.closing(true, false)).total;
+        assert!(
+            (x_alone.left - 7.373419818451708).abs() < 1e-9 && x_alone.right == 0.0,
+            "fixture assumption: the x rescue alone is valid ({x_alone:?})",
+        );
+        assert!(
+            (y_alone.top - 7.931535329954585).abs() < 1e-9 && y_alone.bottom == 0.0,
+            "fixture assumption: the y rescue alone is valid ({y_alone:?})",
+        );
+        assert_eq!(settle_auto_padding(&inputs, base), Inset::default());
+        assert_eq!(
+            layout_with_auto(&theme, true, viewport, &axes, &m),
+            layout_with_auto(&theme, false, viewport, &axes, &m),
+            "the chart ships as auto=false",
+        );
+    }
+
+    /// The same rule for an x axis drawn on top: the rescue that would cull
+    /// the middle label is declined, every label `auto=false` draws is
+    /// drawn, and the chart is the `auto=false` layout.
+    #[test]
+    fn a_top_axis_rescue_that_would_cull_a_label_is_declined() {
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        axes.x.orient = AxisOrient::Top;
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 360.0,
+            height: 110.0,
+        };
+        let top_ticks = |axes_out: &[AxisLayout]| {
+            axes_out
+                .iter()
+                .filter(|a| a.orient == AxisOrient::Top)
+                .flat_map(|a| a.ticks.iter().map(|t| (t.label.clone(), t.culled)))
+                .collect::<Vec<_>>()
+        };
+        let base = base_padding_insets(&theme);
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let culling = lay_out_at(Inset { left: base.left + 18.0, ..base }, &inputs).plot;
+        assert!(
+            top_ticks(&culling.axis_layouts).iter().any(|(_, culled)| *culled),
+            "fixture assumption: the 18px rescue culls a label",
+        );
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        assert!(
+            top_ticks(&off.axes).iter().all(|(_, culled)| !culled),
+            "fixture assumption: auto=false draws every label",
+        );
+        assert!(
+            auto_padding_extra(&inputs, Inset::default(), probe_auto_padding(base, &inputs, &AutoPlotRoom::of_auto_off(&inputs, base)).x_overhang, &AutoPlotRoom::of_auto_off(&inputs, base)).total.left > 0.0,
+            "fixture assumption: auto wants a left rescue",
+        );
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(top_ticks(&on.axes), top_ticks(&off.axes), "every label auto=false draws is drawn");
+        assert_eq!(on, off, "the declined rescue leaves the auto=false layout");
+    }
+
+    /// A 388x300 chart with a right legend and 2px padding, the default
+    /// cascade, and an 80px first x label, on which `padding.auto` has no
+    /// fixed point and no pass covers.
+    fn no_cover_fallback_that_ships() -> (ChartSpec, AxesInput, ThemeInputs, Viewport, Vec<LegendEntry>) {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["9".repeat(8), "5".into(), "0".into()];
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.0;
             p.major = vec![0.0, 0.5, 1.0];
         }
         axes.y.tick_labels = vec!["0".into(), "5".into()];
+        let mut theme = default_theme_inputs();
+        theme.padding.padding = 2.0;
+        theme.legend.legend_orient = LegendOrient::Right;
+        let viewport = Viewport {
+            width: 388.0,
+            height: 300.0,
+        };
+        let entries = vec![
+            LegendEntry::new("alpha", SymbolKind::Circle),
+            LegendEntry::new("beta-long-entry", SymbolKind::Circle),
+        ];
+        (minimal_chart_spec(), axes, theme, viewport, entries)
+    }
+
+    /// A run where no pass covers but the no-cover fallback leaves a
+    /// usable plot: it ships the per-side maximum of every pass's need,
+    /// not zero and not the last pass. With the labels at -30 (End
+    /// anchored, so `cos30°·w + sin30°·line_h` left of the tick and
+    /// `sin30°·line_h` right of it), the left need is the 80px first
+    /// label's reach less the 2px padding and the 16px y gutter, and the
+    /// right need the `"0"` label's `13.2·sin30°` reach less the 2px
+    /// padding (see the next test for why the legend gutter does not hold
+    /// it). The plot must survive, and the result must not be a fixed
+    /// point: re-solving at its own measurement gives another extra.
+    #[test]
+    fn settle_auto_padding_ships_a_non_collapsing_no_cover_fallback() {
+        let (spec, axes, theme, viewport, entries) = no_cover_fallback_that_ships();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = LayoutInputs {
+            legend_entries: &entries,
+            ..plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport)
+        };
+        let base = base_padding_insets(&theme);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let (sin, cos) = 30f64.to_radians().sin_cos();
+        let line_h = 1.2 * theme.typography.label_font_size;
+        let want_left = 80.0 * cos + line_h * sin - 2.0 - 16.0;
+        let want_right = line_h * sin - 2.0;
+        let extra = settle_auto_padding(&inputs, base);
+        assert!(
+            (extra.left - want_left).abs() < 1e-9
+                && (extra.right - want_right).abs() < 1e-9
+                && extra.top == 0.0
+                && extra.bottom == 0.0,
+            "the per-side maximum need must ship: {extra:?}, want left {want_left}, right {want_right}",
+        );
+        let shipped = probe_auto_padding(resolve_padding_inset(&theme, base, extra), &inputs, &room);
+        assert!(!shipped.unusable, "the shipped fallback leaves a plot to draw in");
+        let re_solved = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), shipped.chrome, shipped.x_overhang, &room)
+        .total;
+        assert_ne!(re_solved, extra, "fixture assumption: the fallback is not a fixed point");
+    }
+
+    /// The no-cover fallback solves each pass's need against the SMALLER of
+    /// the chrome that pass credited and the chrome it measured, never
+    /// crediting a reservation one of them did not see. Pass 1 credits no
+    /// chrome (nothing is measured yet) and measures the right legend's
+    /// gutter: against that gutter the `"0"` label needs nothing on the
+    /// right, against the smaller (empty) credit it needs its reach past
+    /// the 2px padding, and that is the right extra the fallback ships.
+    #[test]
+    fn no_cover_fallback_solves_each_need_against_the_smaller_credit() {
+        let (spec, axes, theme, viewport, entries) = no_cover_fallback_that_ships();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = LayoutInputs {
+            legend_entries: &entries,
+            ..plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport)
+        };
+        let base = base_padding_insets(&theme);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let pass_one = probe_auto_padding(base, &inputs, &room);
+        let right_need = |credit: Inset| {
+            auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), credit, pass_one.x_overhang, &room)
+                .total
+                .right
+        };
+        assert!(
+            pass_one.chrome.right > 0.0 && right_need(pass_one.chrome) == 0.0,
+            "fixture assumption: pass 1's measured legend gutter alone holds the label ({pass_one:?})",
+        );
+        let want = right_need(per_side_min(Inset::default(), pass_one.chrome));
+        assert!(want > 0.0, "fixture assumption: with no credit the label needs a right extra");
+        let shipped = settle_auto_padding(&inputs, base).right;
+        assert!(
+            (shipped - want).abs() < 1e-9,
+            "the fallback's right extra ({shipped}) must be pass 1's need against the smaller credit ({want})",
+        );
+    }
+
+    // ── padding.auto keeps half the auto=false plot ─────────────────────────
+
+    /// The room is measured against the `auto=false` plot: every floor is
+    /// half that panel's `auto=false` size, and spending an axis's whole
+    /// budget on its low margin leaves the panel exactly at its floor. On a
+    /// plain chart a pixel of margin is a pixel of plot, so each budget is
+    /// half the plot; split into two facet columns, a pixel of margin
+    /// narrows each panel by half a pixel, so the width budget is a whole
+    /// panel width.
+    #[test]
+    fn auto_plot_room_is_half_the_auto_off_plot() {
+        let axes = continuous_x_axes_with_long_last_label();
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
         };
         let theme = default_theme_inputs();
         let viewport = Viewport {
-            width: 133.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let base = base_padding_insets(&theme);
+        let legend_overrides = legend::LegendOverrides::default();
+        let plain_spec = minimal_chart_spec();
+        let faceted = faceted_spec(2);
+        let groups: Vec<FacetGroup> = three_groups().into_iter().take(2).collect();
+        let plain = plain_layout_inputs(&plain_spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let two_columns = LayoutInputs {
+            spec: &faceted,
+            facet_groups: &groups,
+            ..plain
+        };
+        for (inputs, panels_per_row) in [(plain, 1.0), (two_columns, 2.0)] {
+            let off = lay_out_at(base, &inputs).plot;
+            let room = AutoPlotRoom::of_auto_off(&inputs, base);
+            assert_eq!(room.floors.len(), off.panels.len());
+            for (panel, floor) in off.panels.iter().zip(&room.floors) {
+                assert_eq!(*floor, (panel.plot_area.w / 2.0, panel.plot_area.h / 2.0));
+            }
+            let w0 = off.panels[0].plot_area.w;
+            assert!(
+                (room.width_budget - panels_per_row * w0 / 2.0).abs() < 1e-9,
+                "width budget {} for {panels_per_row} panel(s) per row of width {w0}",
+                room.width_budget,
+            );
+            let spent = lay_out_at(
+                Inset {
+                    left: base.left + room.width_budget,
+                    ..base
+                },
+                &inputs,
+            )
+            .plot;
+            for (panel, floor) in spent.panels.iter().zip(&room.floors) {
+                assert!(
+                    (panel.plot_area.w - floor.0).abs() < 1e-9,
+                    "spending the width budget leaves the floor: {} vs {}",
+                    panel.plot_area.w,
+                    floor.0,
+                );
+            }
+            let spent = lay_out_at(
+                Inset {
+                    top: base.top + room.height_budget,
+                    ..base
+                },
+                &inputs,
+            )
+            .plot;
+            for (panel, floor) in spent.panels.iter().zip(&room.floors) {
+                assert!(
+                    (panel.plot_area.h - floor.1).abs() < 1e-9,
+                    "spending the height budget leaves the floor: {} vs {}",
+                    panel.plot_area.h,
+                    floor.1,
+                );
+            }
+        }
+    }
+
+    /// A 220px chart with a wide y gutter (ten-digit y labels) and a
+    /// categorical x axis, so the x title is the only thing auto can pad
+    /// for, titled with `n` characters.
+    fn narrow_chart_with_an_x_title(n: usize) -> AxesInput {
+        let mut axes = axes_with_wide_x_title();
+        axes.x.title.set(Some("a".repeat(n)));
+        axes.y.tick_labels = vec!["0".into(), "1000000000".into()];
+        axes
+    }
+
+    /// An x title whose rescue would take more than half the `auto=false`
+    /// plot width is not rescued: auto adds nothing for it and the chart is
+    /// the `auto=false` layout, its title clipped. One whose rescue keeps
+    /// half the plot is rescued, ending inside the canvas. Every title
+    /// length is derived by sweeping, and the given-up arm includes titles
+    /// narrower than the viewport, which the viewport alone would let auto
+    /// rescue by shrinking the plot to a sliver.
+    #[test]
+    fn padding_auto_gives_up_on_an_x_title_whose_rescue_takes_over_half_the_plot() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 220.0,
+            height: 200.0,
+        };
+        let base = base_padding_insets(&theme);
+        let (mut rescued, mut given_up) = (0, 0);
+        for n in 1..=40 {
+            let axes = narrow_chart_with_an_x_title(n);
+            let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            let rescue = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
+            let need = rescue.left + rescue.right;
+            let half = off.panels[0].plot_area.w / 2.0;
+            if need == 0.0 {
+                assert_eq!(on, off, "a {n}-char title that fits needs nothing");
+            } else if need <= half {
+                rescued += 1;
+                let title = on
+                    .axes
+                    .iter()
+                    .find(|a| a.orient == AxisOrient::Bottom)
+                    .and_then(|a| a.title.as_ref())
+                    .expect("x title");
+                let half_w = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+                assert!(
+                    title.anchor_x - half_w >= -1e-6 && title.anchor_x + half_w <= viewport.width + 1e-6,
+                    "a {n}-char title whose rescue keeps half the plot must end inside the canvas",
+                );
+                assert!(on.panels[0].plot_area.w >= half - 1e-6, "the rescue keeps half the plot");
+            } else {
+                given_up += 1;
+                assert_eq!(on, off, "a {n}-char title whose rescue takes {need}px of a {}px plot", 2.0 * half);
+            }
+        }
+        let viewport_feasible_given_up = (1..=40)
+            .filter(|&n| {
+                let axes = narrow_chart_with_an_x_title(n);
+                let rescue = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
+                let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                rescue.left + rescue.right > off.panels[0].plot_area.w / 2.0
+                    && rescue.left + rescue.right < off.panels[0].plot_area.w - MIN_PANEL_DIM
+            })
+            .count();
+        assert!(
+            rescued > 0 && given_up > 0 && viewport_feasible_given_up > 0,
+            "both arms, and a give-up the viewport alone would have allowed \
+             (rescued {rescued}, given up {given_up}, viewport-feasible {viewport_feasible_given_up})",
+        );
+    }
+
+    /// The vertical twin: a y title whose rescue would take more than half
+    /// the `auto=false` plot height is not rescued, and one whose rescue
+    /// keeps half the height is. The 54px x label band on top pushes the
+    /// plot's centre down, so a long enough y title overflows the bottom;
+    /// the y axis is categorical, so the title is the only thing auto pads
+    /// for vertically.
+    #[test]
+    fn padding_auto_gives_up_on_a_y_title_whose_rescue_takes_over_half_the_plot() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let viewport = Viewport {
+            width: 300.0,
+            height: 120.0,
+        };
+        let (mut rescued, mut given_up) = (0, 0);
+        for n in 1..=25 {
+            let (mut axes, theme, _) = vertical_padding_fixture(&"a".repeat(n));
+            axes.y.tick_projection = None;
+            let base = base_padding_insets(&theme);
+            let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            let rescue = auto_padding_for_axis_titles(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), base, Inset::default());
+            let need = rescue.top + rescue.bottom;
+            let half = off.panels[0].plot_area.h / 2.0;
+            if need == 0.0 {
+                assert_eq!(on, off, "a {n}-char y title that fits needs nothing");
+            } else if need <= half {
+                rescued += 1;
+                let title = on
+                    .axes
+                    .iter()
+                    .find(|a| a.orient == AxisOrient::Left)
+                    .and_then(|a| a.title.as_ref())
+                    .expect("y title");
+                let half_h = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+                assert!(
+                    title.anchor_y - half_h >= -1e-6 && title.anchor_y + half_h <= viewport.height + 1e-6,
+                    "a {n}-char y title whose rescue keeps half the plot must end inside the canvas",
+                );
+                assert!(on.panels[0].plot_area.h >= half - 1e-6, "the rescue keeps half the plot");
+            } else {
+                given_up += 1;
+                assert_eq!(on, off, "a {n}-char y title whose rescue takes {need}px of a {}px plot", 2.0 * half);
+            }
+        }
+        assert!(rescued > 0 && given_up > 0, "both arms (rescued {rescued}, given up {given_up})");
+    }
+
+    /// One edge label whose containing margin would take more than half
+    /// the `auto=false` plot width charges nothing on that side, and the
+    /// chart is the `auto=false` layout; a shorter one is rescued to end on
+    /// the canvas edge. The flat (`label_overlap=True`) last label sits on
+    /// the plot's right edge, so its need is its half-width less the 16px
+    /// padding, and the label length is swept across the boundary.
+    #[test]
+    fn padding_auto_gives_up_on_an_edge_label_whose_charge_takes_over_half_the_plot() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 400.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let (mut rescued, mut given_up) = (0, 0);
+        for chars in 1..=40 {
+            let mut axes = continuous_x_axes_with_long_last_label();
+            axes.x.tick_labels = vec!["0".into(), "9".repeat(chars)];
+            axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+            let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+            let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+            let need = m.measure_width(&"9".repeat(chars), fs) / 2.0 - 16.0;
+            let half = off.panels[0].plot_area.w / 2.0;
+            if need <= 0.0 {
+                assert_eq!(on, off, "a {chars}-char label that fits needs nothing");
+            } else if need <= half {
+                rescued += 1;
+                let (_, hi) = drawn_x_label_ink(&on, &m, fs);
+                assert!((hi - viewport.width).abs() < 1e-6, "a {chars}-char label is rescued to the edge ({hi})");
+            } else {
+                given_up += 1;
+                assert_eq!(on, off, "a {chars}-char label needing {need}px of a {}px plot", 2.0 * half);
+            }
+        }
+        assert!(rescued > 0 && given_up > 0, "both arms (rescued {rescued}, given up {given_up})");
+    }
+
+    /// A label whose charge would take more than half the plot is dropped
+    /// on its own side only: the other side's label still gets its rescue.
+    /// The flat first label needs more left margin than half the plot (but
+    /// less than the whole plot), and the last label a few pixels on the
+    /// right; the default must add nothing on the left and contain the last
+    /// label exactly on the right. The chart is 800px tall: the x label band
+    /// is reserved as if the long label rotated to -90.
+    #[test]
+    fn an_over_half_charge_leaves_the_other_sides_rescue() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["9".repeat(36), "9".repeat(5)];
+        axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 800.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        let plot = off.panels[0].plot_area;
+        let left_need = m.measure_width(&"9".repeat(36), fs) / 2.0 - plot.x;
+        let right_need = m.measure_width(&"9".repeat(5), fs) / 2.0 - 16.0;
+        assert!(
+            left_need > plot.w / 2.0 && left_need < plot.w - MIN_PANEL_DIM && right_need > 0.0,
+            "fixture assumption: the left need ({left_need}) is over half of a {}px plot but fits it, \
+             and the right need ({right_need}) is real",
+            plot.w,
+        );
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(on.padded_region.x, off.padded_region.x, "no left extra for an over-half charge");
+        let (_, hi) = drawn_x_label_ink(&on, &m, fs);
+        assert!((hi - viewport.width).abs() < 1e-9, "the last label is rescued to the edge ({hi})");
+    }
+
+    // ── padding.auto never ships a partial rescue on an axis ─────────────────
+
+    /// What `padding.auto` would add at the `auto=false` layout if no axis
+    /// budget bound it (`(extra, room)`, `room` the chart's real one): the
+    /// rescues each axis needs together, before [`AutoPlotRoom`] judges them.
+    fn unbounded_auto_need(inputs: &LayoutInputs) -> (AutoPaddingExtra, AutoPlotRoom) {
+        let base = base_padding_insets(inputs.theme);
+        let room = AutoPlotRoom::of_auto_off(inputs, base);
+        let off = probe_auto_padding(base, inputs, &room);
+        let unbounded = AutoPlotRoom {
+            width_budget: f64::INFINITY,
+            height_budget: f64::INFINITY,
+            ..room.clone()
+        };
+        (auto_padding_extra(inputs, off.chrome, off.x_overhang, &unbounded), room)
+    }
+
+    /// The title part of an [`AutoPaddingExtra`]: its total less its ticks.
+    fn title_part(extra: &AutoPaddingExtra) -> Inset {
+        Inset {
+            top: extra.total.top - extra.ticks.top,
+            right: extra.total.right - extra.ticks.right,
+            bottom: extra.total.bottom - extra.ticks.bottom,
+            left: extra.total.left - extra.ticks.left,
+        }
+    }
+
+    /// The padded region's left edge and width: what the x margins leave.
+    fn x_margins(layout: &LayoutResult) -> (f64, f64) {
+        (layout.padded_region.x, layout.padded_region.w)
+    }
+
+    /// The padded region's top edge and height: what the y margins leave.
+    fn y_margins(layout: &LayoutResult) -> (f64, f64) {
+        (layout.padded_region.y, layout.padded_region.h)
+    }
+
+    /// Flat first and last x labels whose rescues each fit the width budget
+    /// but together take more: auto adds nothing on x, so the x margins and
+    /// the plot width are `auto=false`'s and both labels clip as they do
+    /// there. Label lengths are swept on a 300px chart.
+    #[test]
+    fn x_label_rescues_over_the_budget_together_add_nothing_on_x() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 800.0,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let mut combined = 0;
+        for first in 1..=30 {
+            for last in 1..=30 {
+                let mut axes = continuous_x_axes_with_long_last_label();
+                axes.x.tick_labels = vec!["9".repeat(first), "9".repeat(last)];
+                axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+                let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+                let (need, room) = unbounded_auto_need(&inputs);
+                let (left, right) = (need.ticks.left, need.ticks.right);
+                if left <= 0.0 || right <= 0.0 || left + right <= room.width_budget {
+                    continue;
+                }
+                combined += 1;
+                let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+                assert_eq!(
+                    x_margins(&on),
+                    x_margins(&off),
+                    "{first}/{last}-char labels needing {left} + {right} of a {} budget",
+                    room.width_budget,
+                );
+                assert_eq!(on.panels[0].plot_area.w, off.panels[0].plot_area.w);
+            }
+        }
+        assert!(combined > 0, "the sweep must reach a combined over-budget pair");
+    }
+
+    /// An x edge-label rescue and an x title rescue that each fit the width
+    /// budget but together take more: auto adds nothing on x. The x title
+    /// and the last label's length are swept on a 300px chart.
+    #[test]
+    fn an_x_label_and_x_title_rescue_over_the_budget_together_add_nothing_on_x() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 400.0,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let mut combined = 0;
+        for title in 1..=40 {
+            for last in 1..=20 {
+                let mut axes = continuous_x_axes_with_long_last_label();
+                axes.x.tick_labels = vec!["0".into(), "9".repeat(last)];
+                axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+                axes.x.title.set(Some("a".repeat(title)));
+                let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+                let (need, room) = unbounded_auto_need(&inputs);
+                let ticks = need.ticks.left + need.ticks.right;
+                let alone = auto_padding_for_axis_titles(&inputs, base_padding_insets(&theme), Inset::default());
+                let titles = title_part(&need);
+                let budget = room.width_budget;
+                if ticks <= 0.0
+                    || titles.left + titles.right <= 0.0
+                    || ticks > budget
+                    || alone.left + alone.right > budget
+                    || need.total.left + need.total.right <= budget
+                {
+                    continue;
+                }
+                combined += 1;
+                let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+                assert_eq!(
+                    x_margins(&on),
+                    x_margins(&off),
+                    "a {title}-char title and {last}-char label together over a {budget} budget",
+                );
+            }
+        }
+        assert!(combined > 0, "the sweep must reach a combined label-and-title case");
+    }
+
+    /// The vertical twin: the top half-line the y labels need and a y title
+    /// rescue that each fit the height budget but together take more add
+    /// nothing on y. The y title and the chart height are swept.
+    #[test]
+    fn a_y_label_and_y_title_rescue_over_the_budget_together_add_nothing_on_y() {
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let mut combined = 0;
+        for title in 1..=30 {
+            for height in (80..=240).step_by(8) {
+                let (axes, theme, m) = vertical_padding_fixture(&"a".repeat(title));
+                let viewport = Viewport {
+                    width: 300.0,
+                    height: f64::from(height),
+                };
+                let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+                let (need, room) = unbounded_auto_need(&inputs);
+                let ticks = need.ticks.top + need.ticks.bottom;
+                let titles = title_part(&need);
+                let alone = auto_padding_for_axis_titles(&inputs, base_padding_insets(&theme), Inset::default());
+                let budget = room.height_budget;
+                if ticks <= 0.0
+                    || titles.top + titles.bottom <= 0.0
+                    || ticks > budget
+                    || alone.top + alone.bottom > budget
+                    || need.total.top + need.total.bottom <= budget
+                {
+                    continue;
+                }
+                combined += 1;
+                let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+                assert_eq!(
+                    y_margins(&on),
+                    y_margins(&off),
+                    "a {title}-char y title at {height}px together over a {budget} budget",
+                );
+            }
+        }
+        assert!(combined > 0, "the sweep must reach a combined y case");
+    }
+
+    /// Closing x lays y out against the plot x actually ships. A 400-500px
+    /// wide, 300-540px tall chart whose two long flat x labels reach past
+    /// both edges (the theme padding is 2px) and together need more than
+    /// the width budget, with a y title auto rescues: its y margins are
+    /// those of the same chart with the x sides explicit at their
+    /// `auto=false` values. The sweep must include charts where the y
+    /// rescue solved alongside the scaled x extra differs (the narrower plot
+    /// rotates the x labels into a taller band without culling one), so the
+    /// y extra really is re-solved.
+    #[test]
+    fn closing_x_re_solves_the_y_rescue_at_the_x_that_ships() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let (mut closed, mut re_solved) = (0, 0);
+        for (edge, width) in (18..=30).flat_map(|e| [400, 450, 500].map(move |w| (e, w))) {
+            for title in [26, 38, 50] {
+                for height in (300..=540).step_by(40) {
+                    let mut theme = default_theme_inputs();
+                    theme.padding.padding_auto = true;
+                    theme.padding.padding = 2.0;
+                    let mut axes = continuous_x_axes_with_long_last_label();
+                    axes.x.tick_labels = vec!["9".repeat(edge), "9".repeat(edge)];
+                    axes.y.title.set(Some("a".repeat(title)));
+                    let viewport = Viewport {
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    };
+                    let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+                    let base = base_padding_insets(&theme);
+                    let room = AutoPlotRoom::of_auto_off(&inputs, base);
+                    let first = settle_within(&inputs, base, &room);
+                    if !first.x_scaled || first.y_scaled {
+                        continue;
+                    }
+                    closed += 1;
+                    let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+                    let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+                    assert_eq!(x_margins(&on), x_margins(&off), "x is closed");
+                    let mut explicit_x = theme.clone();
+                    explicit_x.padding.padding_left = Some(base.left);
+                    explicit_x.padding.padding_right = Some(base.right);
+                    let want = layout_with_auto(&explicit_x, true, viewport, &axes, &m);
+                    assert_eq!(
+                        y_margins(&on),
+                        y_margins(&want),
+                        "{edge}-char edge labels, {title}-char y title at {height}px",
+                    );
+                    let shipped_top = on.padded_region.y - off.padded_region.y;
+                    let shipped_bottom = (off.padded_region.y + off.padded_region.h)
+                        - (on.padded_region.y + on.padded_region.h);
+                    if (first.total.top - shipped_top).abs() > 1e-9
+                        || (first.total.bottom - shipped_bottom).abs() > 1e-9
+                    {
+                        re_solved += 1;
+                    }
+                }
+            }
+        }
+        assert!(closed > 0 && re_solved > 0, "closed {closed}, re-solved {re_solved}");
+    }
+
+    /// The first pass credits no chrome, so beside a one-entry right legend
+    /// it sees the last label's whole reach past the plot as need: more than the
+    /// width budget, and the cap scales it. Once the legend's gutter is
+    /// measured and credited, the label needs only what the gutter does not
+    /// hold, which fits; the settle converges there unscaled, so that full
+    /// rescue ships and x is not closed. The last label's length is swept.
+    #[test]
+    fn an_under_credited_first_pass_does_not_close_a_rescue_that_fits() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let (spec, _, theme, _, _) = no_cover_fallback_that_ships();
+        let entries = vec![LegendEntry::new("legend", SymbolKind::Circle)];
+        let viewport = Viewport {
+            width: 400.0,
             height: 300.0,
         };
         let legend_overrides = legend::LegendOverrides::default();
+        let base = base_padding_insets(&theme);
+        let mut under_credited = 0;
+        for chars in 1..=40 {
+            let mut axes = continuous_x_axes_with_long_last_label();
+            axes.x.tick_labels = vec!["0".into(), "9".repeat(chars)];
+            axes.x.overrides.labels.overlap = Some(LabelOverlap::ShowAll);
+            let inputs = LayoutInputs {
+                legend_entries: &entries,
+                ..plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport)
+            };
+            let room = AutoPlotRoom::of_auto_off(&inputs, base);
+            let off = probe_auto_padding(base, &inputs, &room);
+            let first = auto_padding_extra(&inputs, Inset::default(), off.x_overhang, &room);
+            let credited = auto_padding_extra(&inputs, off.chrome, off.x_overhang, &room);
+            if !first.x_scaled || credited.x_scaled || credited.total.right <= 0.0 || credited.total.left > 0.0 {
+                continue;
+            }
+            under_credited += 1;
+            let shipped = settle_auto_padding(&inputs, base);
+            assert_eq!(
+                (shipped.left, shipped.right),
+                (credited.total.left, credited.total.right),
+                "a {chars}-char last label beside the legend ships its full credited rescue",
+            );
+        }
+        assert!(under_credited > 0, "the sweep must reach an under-credited first pass");
+    }
+
+    /// The no-cover fallback reports the axes its needs were scaled on, so
+    /// it is closed like any settled extra. On the no-cover chart (where no
+    /// pass covers and the per-side maximum of the needs ships), a room whose
+    /// width budget holds the left need and the right need each but not
+    /// both scales those needs, so the settled extra is flagged on x and
+    /// auto ships nothing on x.
+    #[test]
+    fn a_no_cover_fallback_over_the_budget_is_flagged() {
+        let (spec, axes, theme, viewport, entries) = no_cover_fallback_that_ships();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let legend_overrides = legend::LegendOverrides::default();
         let inputs = LayoutInputs {
-            spec: &spec,
-            theme: &theme,
-            viewport,
-            axes: &axes,
-            facet_groups: &[],
-            legend_entries: &[],
-            legend_title: None,
-            colorbar: None,
-            metrics: &m,
-            legend_overrides: &legend_overrides,
-            aux_legend_inputs: &[],
-            seam: CompositeLayoutSeam::default(),
+            legend_entries: &entries,
+            ..plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport)
         };
         let base = base_padding_insets(&theme);
-        let extra = settle_auto_padding(&inputs, base);
-        assert!(
-            (extra.left - 35.0).abs() < 1e-6 && (extra.right - 46.25).abs() < 1e-6,
-            "the per-side maximum need must ship ({extra:?})",
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let fallback = settle_within(&inputs, base, &room);
+        assert!(!fallback.x_scaled, "fixture assumption: the fallback fits the real room ({fallback:?})");
+        let (left, right) = (fallback.total.left, fallback.total.right);
+        assert!(left > 0.0 && right > 0.0, "fixture assumption: the fallback needs both sides");
+        let tight = AutoPlotRoom {
+            width_budget: left.max(right) + (left.min(right) / 2.0),
+            ..room.clone()
+        };
+        let settled = settle_within(&inputs, base, &tight);
+        assert!(settled.x_scaled, "needs over the budget together are flagged ({settled:?})");
+        let closed = settle_within(&inputs, base, &tight.closing(true, false));
+        assert_eq!((closed.total.left, closed.total.right), (0.0, 0.0), "a closed x ships nothing");
+    }
+
+    /// The room judges a candidate's whole plot, in both dimensions,
+    /// whichever margin moved. On a 360x150 chart the 18px left extra that
+    /// contains the long flat first label keeps most of the plot's width,
+    /// but the narrower plot no longer fits the labels flat in half its
+    /// width, so the cascade rotates them to -30 and the x axis draws (and
+    /// reserves) a taller band. That leaves less than half the `auto=false`
+    /// plot height (and more than [`MIN_PANEL_DIM`], so this is not a
+    /// collapse). The candidate is unusable, so auto adds nothing.
+    #[test]
+    fn padding_auto_adds_nothing_when_a_rescue_leaves_under_half_the_plot_height() {
+        let spec = minimal_chart_spec();
+        let axes = axes_whose_left_rescue_rotates_the_labels();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 360.0,
+            height: 150.0,
+        };
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let base = base_padding_insets(&theme);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let auto_off = probe_auto_padding(base, &inputs, &room);
+        let rescue = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), auto_off.x_overhang, &room)
+        .total;
+        assert!((rescue.left - 18.0).abs() < 1e-9, "fixture assumption: the label needs 60 - 42 = 18px ({rescue:?})");
+        let candidate = lay_out_at(resolve_padding_inset(&theme, base, rescue), &inputs).plot;
+        assert_eq!(
+            x_presentation(&candidate).map(|p| p[0]),
+            Some((-30.0, false)),
+            "fixture assumption: the rescue really rotates the labels",
         );
+        let area = candidate.panels[0].plot_area;
+        let (w_floor, h_floor) = room.floor(0);
         assert!(
-            !probe_auto_padding(resolve_padding_inset(&theme, base, extra), &inputs).collapsed,
-            "the shipped fallback leaves a plot to draw in",
+            area.w >= w_floor && area.h < h_floor && area.h > MIN_PANEL_DIM,
+            "fixture assumption: the rescue keeps the width but not half the height ({area:?}, floor {w_floor} x {h_floor})",
         );
+        assert!(probe_auto_padding(resolve_padding_inset(&theme, base, rescue), &inputs, &room).unusable);
+        assert_eq!(
+            layout_with_auto(&theme, true, viewport, &axes, &m),
+            layout_with_auto(&theme, false, viewport, &axes, &m),
+            "a rescue that leaves under half the plot height adds nothing",
+        );
+    }
+
+    // ── padding.auto judges coverage by the tick extra that ships ───────────
+
+    /// An explicit side ships no tick extra whatever its labels do: the
+    /// right side is explicit, and its last label is measured in two states
+    /// (reaching 40px and 70px past the plot edge, as a cascade that
+    /// re-presents the label between passes would measure it). The raw
+    /// tick need on the right differs between them, but what ships is 0 in
+    /// both, so a pass is never judged short on that side.
+    #[test]
+    fn an_explicit_side_ships_no_tick_extra_in_any_label_state() {
+        let axes = continuous_x_axes_with_long_last_label();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let mut theme = default_theme_inputs();
+        theme.padding.padding_right = Some(4.0);
+        let viewport = Viewport {
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut raw = Vec::new();
+        for reach in [40.0, 70.0] {
+            let overhang = XLabelOverhang {
+                left: f64::NEG_INFINITY,
+                right: reach,
+            };
+            raw.push(auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default(), overhang).right);
+            let shipped = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), overhang, &plot_room(&theme, &axes, &m, viewport));
+            assert_eq!(shipped.ticks.right, 0.0, "an explicit side ships no tick extra at reach {reach}");
+            assert_eq!(shipped.total.right, 0.0);
+        }
+        assert!(
+            raw[0] > 0.0 && raw[0] != raw[1],
+            "fixture assumption: the raw need is real and changes with the label state ({raw:?})",
+        );
+    }
+
+    /// The axis of an infeasible title ships no tick extra: the 66-char x
+    /// title is wider than the 300px viewport, so the x ticks' raw right
+    /// need is dropped before it ships.
+    #[test]
+    fn an_infeasible_titles_axis_ships_no_tick_extra() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.title.set(Some("a".repeat(66)));
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 300.0,
+        };
+        let overhang = x_overhang_without_auto(&theme, &axes, &m, viewport);
+        let raw = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default(), overhang);
+        assert!(raw.right > 0.0, "fixture assumption: the raw tick need is real ({raw:?})");
+        let shipped = auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), overhang, &plot_room(&theme, &axes, &m, viewport));
+        assert_eq!((shipped.ticks.left, shipped.ticks.right), (0.0, 0.0));
+    }
+
+    /// A side the viewport cap scales ships its tick extra at the capped
+    /// size, the same for the same labels: with a plot room that does not
+    /// bind (the margins narrow no plot), a 150px chart whose two 190px
+    /// labels want more than the viewport leaves ships each side's raw
+    /// need times one shared factor, so a steady pass compares equal.
+    #[test]
+    fn a_capped_side_ships_its_tick_extra_at_the_capped_size() {
+        let axes = continuous_x_axes_with_long_first_and_last_labels();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 150.0,
+            height: 400.0,
+        };
+        let base = base_padding_insets(&theme);
+        let unbounded = AutoPlotRoom {
+            floors: Vec::new(),
+            x_labels: Vec::new(),
+            width_budget: f64::INFINITY,
+            height_budget: f64::INFINITY,
+        };
+        let overhang = XLabelOverhang {
+            left: 120.0,
+            right: 110.0,
+        };
+        let raw = auto_padding_for_edge_ticks(&theme, &axes, &m, Inset::default(), overhang);
+        let budget = viewport.width - base.left - base.right - MIN_PANEL_DIM;
+        assert!(raw.left + raw.right > budget, "fixture assumption: the cap fires ({raw:?})");
+        let scale = budget / (raw.left + raw.right);
+        let solve = || {
+            auto_padding_extra(&plain_layout_inputs(&minimal_chart_spec(), &legend::LegendOverrides::default(), &theme, &axes, &m, viewport), Inset::default(), overhang, &unbounded)
+        };
+        let shipped = solve();
+        assert!(
+            (shipped.ticks.left - raw.left * scale).abs() < 1e-9
+                && (shipped.ticks.right - raw.right * scale).abs() < 1e-9,
+            "the shipped tick extra is the capped size ({shipped:?}, scale {scale})",
+        );
+        assert_eq!(shipped.ticks, shipped.total, "with no title the tick extra is all of it");
+        assert_eq!(solve(), shipped, "the same labels ship the same capped extra");
+    }
+
+    // ── padding.auto pins: what it measures and what it skips ───────────────
+
+    /// The width a [`MockMetrics`] built on this reports grows with the
+    /// font size (0.6 of it per character), so a cascade font shrink
+    /// changes what a label measures.
+    fn font_scaled_width(text: &str, font_size: f64) -> f64 {
+        text.chars().count() as f64 * font_size * 0.6
+    }
+
+    /// At 330px the cascade draws these five currency labels flat at the
+    /// shrunk font size (`FONT_SHRINK_FACTOR` of 11), with and without
+    /// auto. The flat last label sits on the plot's right edge, so the
+    /// rescue is exactly its SHRUNK half-width past the edge: the right
+    /// inset equals that half-width and the label ends on the canvas edge.
+    /// Measured at the unshrunk size it would be `9·11·0.6/2 = 29.7`.
+    #[test]
+    fn padding_auto_sizes_a_shrunk_font_rescue_by_the_drawn_font() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = ["0", "250,000", "500,000", "750,000", "1,000,000"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.0;
+            p.major = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        }
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 330.0,
+            height: 300.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let shrunk = fs * FONT_SHRINK_FACTOR;
+        let presentation = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present")
+                .ticks
+                .iter()
+                .map(|t| (t.label_angle, t.label_font_size, t.culled))
+                .collect::<Vec<_>>()
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(presentation(&off), vec![(0.0, Some(shrunk), false); 5], "fixture assumption");
+        assert_eq!(presentation(&on), presentation(&off), "the rescue keeps the presentation");
+        assert!(drawn_x_label_ink(&off, &m, fs).1 > viewport.width, "fixture assumption: overhangs");
+        let half_w = font_scaled_width("1,000,000", shrunk) / 2.0;
+        let right_inset = viewport.width - on.padded_region.x - on.padded_region.w;
+        assert!(
+            (right_inset - half_w).abs() < 1e-9,
+            "right inset {right_inset} must be the shrunk half-width {half_w}",
+        );
+        assert!((drawn_x_label_ink(&on, &m, fs).1 - viewport.width).abs() < 1e-9);
+    }
+
+    /// A culled label is not drawn, so it charges nothing: with
+    /// `label_overlap="parity"` the long last label is culled, and the
+    /// default is the `auto=false` layout although that label, drawn, would
+    /// overhang the right edge by far less than half the plot.
+    #[test]
+    fn padding_auto_charges_nothing_for_a_culled_label() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["0".into(), "5".into(), "10".into(), "9".repeat(10)];
+        axes.x.overrides.labels.overlap = Some(LabelOverlap::Parity);
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.0;
+            p.major = vec![0.0, 0.3, 0.6, 1.0];
+        }
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 400.0,
+            height: 300.0,
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        let last = off
+            .axes
+            .iter()
+            .find(|a| a.orient == AxisOrient::Bottom)
+            .and_then(|a| a.ticks.last())
+            .expect("x ticks");
+        let reach = last.position + m.measure_width(&last.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            last.culled && reach > viewport.width,
+            "fixture assumption: the culled last label would overhang if drawn ({last:?}, reach {reach})",
+        );
+        assert_eq!(layout_with_auto(&theme, true, viewport, &axes, &m), off);
+    }
+
+    /// A categorical x axis is not charged for its labels, even ones that
+    /// reach past the canvas: the long first label at an explicit -45 hangs
+    /// down and to the left of its band centre, past the left edge, and the
+    /// default is still the `auto=false` layout.
+    #[test]
+    fn padding_auto_charges_nothing_for_a_categorical_axis_label_past_the_edge() {
+        let mut axes = continuous_x_axes_at_angle(
+            AxisOrient::Bottom,
+            vec!["9".repeat(30), "b".into()],
+            -45.0,
+        );
+        axes.x.tick_projection = None;
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 600.0,
+            height: 600.0,
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        let (lo, _) = drawn_x_label_ink(&off, &m, theme.typography.label_font_size);
+        assert!(lo < 0.0, "fixture assumption: the first label crosses the left edge ({lo})");
+        assert_eq!(layout_with_auto(&theme, true, viewport, &axes, &m), off);
+    }
+
+    // ── drawn_x_labels matches the renderer ─────────────────────────────────
+
+    /// Each x tick label `build_axis` emits for `layout`, as the ink span
+    /// `(left, right)` its pivot, anchor, angle and font size give, measured
+    /// with the extent helper `drawn_x_labels` uses. Lines of one label
+    /// (one tick anchor) merge into one span.
+    fn rendered_x_label_ink(
+        layout: &LayoutResult,
+        theme: &ThemeInputs,
+        m: &dyn TextMetrics,
+    ) -> Vec<(f64, f64)> {
+        let mut spans: Vec<(f64, (f64, f64))> = Vec::new();
+        for axis in layout
+            .axes
+            .iter()
+            .filter(|a| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top))
+        {
+            for tick in crate::render::marks::axis::build_axis(axis, theme, None).data_positioned {
+                let ferrum_scene::SceneNode::Text { x, content, style, .. } = tick.node else {
+                    continue;
+                };
+                let anchor = match style.anchor {
+                    ferrum_scene::TextAnchor::Start => TextAnchor::Start,
+                    ferrum_scene::TextAnchor::Middle => TextAnchor::Middle,
+                    ferrum_scene::TextAnchor::End => TextAnchor::End,
+                };
+                let (left, right) = axis::rotated_x_label_horizontal_extent(
+                    style.angle,
+                    anchor,
+                    m.measure_width(&content, style.font_size),
+                    m.line_height(style.font_size),
+                );
+                let span = (x - left, x + right);
+                match spans.last_mut() {
+                    Some((anchor_px, merged)) if *anchor_px == tick.anchor => {
+                        *merged = (merged.0.min(span.0), merged.1.max(span.1));
+                    }
+                    _ => spans.push((tick.anchor, span)),
+                }
+            }
+        }
+        spans.into_iter().map(|(_, span)| span).collect()
+    }
+
+    /// Where `drawn_x_labels` says each x label's ink reaches is where the
+    /// renderer draws it: for flat labels, rotated `Bottom` labels at -45
+    /// and -90, a rotated `Top` axis, flushed first and last labels, and a
+    /// cascade-shrunk font, every label `build_axis` emits spans exactly
+    /// the canvas range `drawn_x_labels` reports, in the same order.
+    #[test]
+    fn drawn_x_labels_match_the_rendered_label_anchors() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 400.0,
+            height: 400.0,
+        };
+        let labels = || vec!["-999".to_string(), "0".into(), "999999".into()];
+        let angled = |orient, angle| {
+            let mut axes = continuous_x_axes_at_angle(orient, labels(), angle);
+            if let Some(p) = axes.x.tick_projection.as_mut() {
+                p.major = vec![0.0, 0.5, 1.0];
+            }
+            axes
+        };
+        let mut flat = angled(AxisOrient::Bottom, 0.0);
+        flat.x.overrides.labels.angle = None;
+        let mut flush = flat.clone();
+        flush.x.overrides.labels.flush = Some(true);
+        let mut shrunk = continuous_x_axes_with_long_last_label();
+        shrunk.x.tick_labels = ["0", "250,000", "500,000", "750,000", "1,000,000"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(p) = shrunk.x.tick_projection.as_mut() {
+            p.major = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        }
+        let cases = [
+            ("flat", flat, viewport),
+            ("bottom -45", angled(AxisOrient::Bottom, -45.0), viewport),
+            ("bottom -90", angled(AxisOrient::Bottom, -90.0), viewport),
+            ("top -45", angled(AxisOrient::Top, -45.0), viewport),
+            ("flush", flush, viewport),
+            ("shrunk", shrunk, Viewport { width: 330.0, ..viewport }),
+        ];
+        for (name, axes, viewport) in cases {
+            let layout = layout_with_auto(&theme, false, viewport, &axes, &m);
+            let drawn: Vec<(f64, f64)> = layout
+                .axes
+                .iter()
+                .filter(|a| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top))
+                .flat_map(|a| axis::drawn_x_labels(a, theme.typography.label_font_size, &m))
+                .map(|l| (l.left_ink, l.right_ink))
+                .collect();
+            let rendered = rendered_x_label_ink(&layout, &theme, &m);
+            assert!(!drawn.is_empty(), "{name}: fixture draws labels");
+            assert_eq!(drawn.len(), rendered.len(), "{name}: one span per drawn label");
+            for (d, r) in drawn.iter().zip(&rendered) {
+                assert!(
+                    (d.0 - r.0).abs() < 1e-9 && (d.1 - r.1).abs() < 1e-9,
+                    "{name}: drawn_x_labels {d:?} vs rendered {r:?}",
+                );
+            }
+        }
+    }
+
+    // ── the x label band is what the axis draws ─────────────────────────────
+
+    /// The x label band a laid-out `layout` reserves below its plot: the
+    /// padded region's bottom less the plot's, for a chart with no x title
+    /// and no legend.
+    fn reserved_x_label_band(layout: &LayoutResult) -> f64 {
+        let padded = layout.padded_region;
+        let plot = layout.plot_region;
+        (padded.y + padded.h) - (plot.y + plot.h)
+    }
+
+    /// The band the x labels `layout` draws need, read off the drawn ticks
+    /// independently of the estimator: a rotated label's full extent at its
+    /// drawn angle; below the standoff, one line height at the axis font
+    /// and a 1.2em step at the drawn font per further line; or the tick
+    /// marks alone when no label is drawn.
+    fn drawn_x_label_band(layout: &LayoutResult, theme: &ThemeInputs, m: &dyn TextMetrics) -> f64 {
+        let fs = theme.typography.label_font_size;
+        let tick = theme.sizes.tick_size;
+        let line_h = m.line_height(fs);
+        let drawn: Vec<&TickLayout> = layout
+            .axes
+            .iter()
+            .filter(|a| a.orient == AxisOrient::Bottom)
+            .flat_map(|a| a.ticks.iter().filter(|t| !t.culled))
+            .collect();
+        if drawn.is_empty() {
+            return tick;
+        }
+        let angle = drawn.first().map_or(0.0, |t| t.label_angle);
+        if angle != 0.0 {
+            let w = drawn.iter().map(|t| m.measure_width(&t.label, fs)).fold(0.0, f64::max);
+            let (sin, cos) = angle.to_radians().sin_cos();
+            return tick + 2.0 + sin.abs() * (fs + w) + cos.abs() * line_h;
+        }
+        let lines = drawn.iter().map(|t| t.label.split('\n').count()).max().unwrap_or(1);
+        let drawn_fs = drawn[0].label_font_size.unwrap_or(fs);
+        tick + 2.0 + line_h + (lines - 1) as f64 * 1.2 * drawn_fs
+    }
+
+    /// A 272x150 chart whose last x label is `1,234,567,890` (about 86px):
+    /// with `auto=false` the labels draw flat and the long one overhangs the
+    /// right edge. The rescue narrows the plot to 167.5px, where each label
+    /// still has the whole plot width between the two ticks, so the cascade
+    /// keeps them flat. The band must be the flat band (the standoff plus one
+    /// line), not one reserved for a rotation that is never drawn, so the
+    /// rescue holds (the label ends on the canvas edge) and the plot keeps
+    /// its full `auto=false` height.
+    #[test]
+    fn a_flat_rescued_label_reserves_the_flat_band() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["0".into(), "1,234,567,890".into()];
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.padding_frac = 0.0;
+        }
+        axes.y.tick_labels = vec!["0".into(), "999999".into()];
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 272.0,
+            height: 150.0,
+        };
+        let fs = theme.typography.label_font_size;
+        let flat_band = theme.sizes.tick_size + 2.0 + m.line_height(fs);
+        let angles = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present")
+                .ticks
+                .iter()
+                .map(|t| (t.label_angle, t.culled))
+                .collect::<Vec<_>>()
+        };
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        assert_eq!(angles(&off), vec![(0.0, false); 2], "fixture assumption: flat with auto off");
+        assert!(drawn_x_label_ink(&off, &m, fs).1 > viewport.width, "fixture assumption: overhangs");
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        assert_eq!(angles(&on), vec![(0.0, false); 2], "the rescued labels are drawn flat");
+        assert!(
+            (reserved_x_label_band(&on) - flat_band).abs() < 1e-9,
+            "the reserved band ({}) is the flat band ({flat_band})",
+            reserved_x_label_band(&on),
+        );
+        let (lo, hi) = drawn_x_label_ink(&on, &m, fs);
+        assert!(lo >= 0.0 && (hi - viewport.width).abs() < 1e-9, "the rescue holds ({lo}, {hi})");
+        assert!(
+            on.panels[0].plot_area.h > off.panels[0].plot_area.h / 2.0,
+            "the plot keeps more than half its auto=false height ({} vs {})",
+            on.panels[0].plot_area.h,
+            off.panels[0].plot_area.h,
+        );
+    }
+
+    /// Labels that really rotate keep their rotated band: eleven currency
+    /// labels on a 300px chart do not fit flat, wrapped or shrunk, so the
+    /// cascade rotates them, and the band is that rotation's full extent for
+    /// the widest drawn label, larger than the flat band.
+    #[test]
+    fn labels_that_rotate_keep_the_rotated_band() {
+        let axes = currency_x_axes();
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let fs = theme.typography.label_font_size;
+        for auto in [false, true] {
+            let layout = layout_with_auto(
+                &theme,
+                auto,
+                Viewport {
+                    width: 300.0,
+                    height: 300.0,
+                },
+                &axes,
+                &m,
+            );
+            let x = layout
+                .axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .expect("x axis present");
+            let angle = x.ticks.iter().find(|t| !t.culled).map_or(0.0, |t| t.label_angle);
+            assert!(angle != 0.0, "fixture assumption: the labels rotate (auto {auto})");
+            let band = reserved_x_label_band(&layout);
+            assert!(
+                (band - drawn_x_label_band(&layout, &theme, &m)).abs() < 1e-9
+                    && band > theme.sizes.tick_size + 2.0 + m.line_height(fs),
+                "the rotated band ({band}) is the drawn rotation's extent (auto {auto})",
+            );
+        }
+    }
+
+    /// `spec` under `fm.CoordFixed(ratio=ratio)`, or unchanged for `None`.
+    fn with_fixed_aspect(mut spec: ChartSpec, ratio: Option<f64>) -> ChartSpec {
+        spec.coord = ratio.map(|ratio| crate::spec::coord::CoordKind::Fixed {
+            ratio,
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        spec
+    }
+
+    /// Across every width the cascade's presentations span, label sets that
+    /// draw flat, wrapped, shrunk, rotated and culled, `label_overlap`
+    /// policies, one or two facet columns, landscape and portrait charts
+    /// and a `CoordFixed` aspect of 0.5, 1 or 2 (which narrows the panel the
+    /// labels draw across by an amount that depends on the band), with
+    /// `padding.auto` on and off, the reserved x label band is exactly the
+    /// band the drawn labels need, and a chart this tall always draws a
+    /// label. The population must cover flat and rotated presentations, a
+    /// faceted one, and a `CoordFixed` one whose aspect narrows the panel.
+    #[test]
+    fn the_reserved_x_label_band_is_what_the_axis_draws() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let groups: Vec<FacetGroup> = three_groups().into_iter().take(2).collect();
+        let label_sets: Vec<Vec<String>> = vec![
+            vec!["0".into(), "1,234,567,890".into()],
+            vec!["0".into(), "500".into(), "1,000".into(), "1,500".into(), "2,000".into()],
+            vec!["alpha beta".into(), "gamma delta".into(), "epsilon zeta".into()],
+            (0..=10).map(|i| format!("${},000", i * 100)).collect(),
+        ];
+        let (mut flat, mut rotated, mut faceted, mut narrowed) = (0, 0, 0, 0);
+        for labels in &label_sets {
+            for overlap in [None, Some(LabelOverlap::Parity), Some(LabelOverlap::ShowAll)] {
+                let mut axes = continuous_x_axes_with_long_last_label();
+                let k = labels.len();
+                axes.x.tick_labels = labels.clone();
+                axes.x.overrides.labels.overlap = overlap;
+                if let Some(p) = axes.x.tick_projection.as_mut() {
+                    p.major = (0..k).map(|i| i as f64 / (k - 1) as f64).collect();
+                }
+                for (cols, ratio, portrait) in [None, Some(2)]
+                    .into_iter()
+                    .flat_map(|c| [None, Some(0.5), Some(1.0), Some(2.0)].map(move |r| (c, r)))
+                    .flat_map(|(c, r)| [false, true].map(move |p| (c, r, p)))
+                {
+                    if ratio.is_none() && portrait {
+                        continue;
+                    }
+                    let spec = with_fixed_aspect(cols.map_or_else(minimal_chart_spec, faceted_spec), ratio);
+                    let facet_groups: &[FacetGroup] = if cols.is_some() { &groups } else { &[] };
+                    for width in (120..=900).step_by(15) {
+                        let height = if portrait { 1.5 * f64::from(width) } else { 400.0 };
+                        for auto in [false, true] {
+                            let mut t = theme.clone();
+                            t.padding.padding_auto = auto;
+                            let layout = compute_layout(
+                                &spec,
+                                &t,
+                                Viewport {
+                                    width: f64::from(width),
+                                    height,
+                                },
+                                &axes,
+                                facet_groups,
+                                &[],
+                                None,
+                                None,
+                                &m,
+                                &legend::LegendOverrides::default(),
+                                &[],
+                                CompositeLayoutSeam::default(),
+                            )
+                            .expect("layout should succeed");
+                            if layout.axes.iter().all(|a| a.orient != AxisOrient::Bottom) {
+                                continue;
+                            }
+                            let band = reserved_x_label_band(&layout);
+                            let drawn = drawn_x_label_band(&layout, &t, &m);
+                            assert!(
+                                (band - drawn).abs() < 1e-9,
+                                "{labels:?} {overlap:?} cols {cols:?} ratio {ratio:?} portrait {portrait} \
+                                 at {width}px auto {auto}: reserved {band}, drawn {drawn}",
+                            );
+                            let x = layout.axes.iter().find(|a| a.orient == AxisOrient::Bottom);
+                            let first_drawn = x.and_then(|a| a.ticks.iter().find(|t| !t.culled));
+                            assert!(
+                                first_drawn.is_some(),
+                                "{labels:?} {overlap:?} cols {cols:?} ratio {ratio:?} at {width}px auto {auto}: no label drawn",
+                            );
+                            if first_drawn.is_some_and(|t| t.label_angle != 0.0) {
+                                rotated += 1;
+                            } else {
+                                flat += 1;
+                            }
+                            faceted += usize::from(cols.is_some());
+                            narrowed += usize::from(
+                                ratio.is_some() && layout.panels.iter().all(|p| p.plot_area.h > 0.0)
+                                    && layout.panels[0].plot_area.w / layout.panels[0].plot_area.h > ratio.unwrap_or(0.0) - 1e-9
+                                    && layout.panels[0].plot_area.w + 1e-9 < layout.plot_region.w / cols.unwrap_or(1) as f64,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            flat > 0 && rotated > 0 && faceted > 0 && narrowed > 0,
+            "flat {flat}, rotated {rotated}, faceted {faceted}, narrowed {narrowed}",
+        );
+    }
+
+    /// Under a `CoordFixed` aspect that binds the width, sizing the band at
+    /// the width it leaves can alternate: flat labels at the region width
+    /// reserve a short band, the taller plot that leaves is narrower under
+    /// the aspect, the labels rotate there and reserve a tall band, and the
+    /// shorter plot is wide enough again for flat labels. Across a sweep of
+    /// widths and aspects, every chart where that naive sequence cycles
+    /// still reserves exactly the band its axis draws, and draws a label.
+    /// Where the labels instead rotate at the narrower width and stay
+    /// rotated, the axis draws them as it does there with no bound: the band
+    /// is sized for the rotation, never culled down to the flat band.
+    #[test]
+    fn a_coord_fixed_band_that_alternates_settles_on_what_the_axis_draws() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let legend_overrides = legend::LegendOverrides::default();
+        let (mut cycles, mut stays_rotated) = (0, 0);
+        for chars in 3..=5 {
+            let mut axes = continuous_x_axes_with_long_last_label();
+            let labels: Vec<String> = (0..6).map(|i| format!("{i}").repeat(chars)).collect();
+            axes.x.tick_labels = labels;
+            if let Some(p) = axes.x.tick_projection.as_mut() {
+                p.major = (0..6).map(|i| f64::from(i) / 5.0).collect();
+            }
+            for ratio in [0.8, 1.0, 1.25, 2.0] {
+                let spec = with_fixed_aspect(minimal_chart_spec(), Some(ratio));
+                for width in (150..=700).step_by(10) {
+                    for height in (100..=400).step_by(20) {
+                        let viewport = Viewport {
+                            width: f64::from(width),
+                            height: f64::from(height),
+                        };
+                        let layout = compute_layout(
+                            &spec,
+                            &theme,
+                            viewport,
+                            &axes,
+                            &[],
+                            &[],
+                            None,
+                            None,
+                            &m,
+                            &legend_overrides,
+                            &[],
+                            CompositeLayoutSeam::default(),
+                        )
+                        .expect("layout should succeed");
+                        let (padded, plot) = (layout.padded_region, layout.plot_region);
+                        let region_w = padded.x + padded.w - plot.x;
+                        let panel_w = |b: f64| region_w.min((padded.h - b).max(0.0) * ratio);
+                        let band = |w: f64| x_label_band(&axes, w, f64::INFINITY, &theme, &m);
+                        let b1 = band(region_w);
+                        let b2 = band(panel_w(b1));
+                        let b3 = band(panel_w(b2));
+                        if b1 == b2 || panel_w(b1) >= region_w {
+                            continue;
+                        }
+                        if b3 == b2 && b2 > b1 {
+                            stays_rotated += 1;
+                            let panel_w = layout.panels[0].plot_area.w;
+                            assert_eq!(
+                                drawn_x_label_band(&layout, &theme, &m),
+                                band(panel_w),
+                                "{chars}-char labels, ratio {ratio}, {width}x{height}: the labels draw as with no bound",
+                            );
+                            continue;
+                        }
+                        if b3 != b1 {
+                            continue;
+                        }
+                        cycles += 1;
+                        let reserved = reserved_x_label_band(&layout);
+                        let drawn = drawn_x_label_band(&layout, &theme, &m);
+                        assert!(
+                            (reserved - drawn).abs() < 1e-9,
+                            "{chars}-char labels, ratio {ratio}, {width}x{height}: reserved {reserved}, drawn {drawn}",
+                        );
+                        assert!(
+                            layout
+                                .axes
+                                .iter()
+                                .filter(|a| a.orient == AxisOrient::Bottom)
+                                .any(|a| a.ticks.iter().any(|t| !t.culled)),
+                            "{chars}-char labels, ratio {ratio}, {width}x{height}: a label is drawn",
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            cycles > 0 && stays_rotated > 0,
+            "the sweep must reach both populations (alternating {cycles}, staying rotated {stays_rotated})",
+        );
+    }
+
+    /// Under a `CoordFixed` aspect, labels that fit flat across the region
+    /// can rotate at the narrow panel the aspect leaves into a band so tall
+    /// it leaves that panel no height (and so, under the aspect, no width).
+    /// The band is bounded so the panel stays drawable, as a cramped band is
+    /// without an aspect: every chart in the sweep draws a plot and reserves
+    /// the band its axis draws, and the sweep must reach charts whose
+    /// unbounded band at the aspect's width would leave no panel.
+    #[test]
+    fn a_coord_fixed_band_never_leaves_the_panel_undrawable() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = (0..8).map(|i| format!("cxxxxxxxxxx{i:02}")).collect();
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = (0..8).map(|i| f64::from(i) / 7.0).collect();
+        }
+        let spec = with_fixed_aspect(minimal_chart_spec(), Some(2.0));
+        let mut would_collapse = 0;
+        for width in (400..=900).step_by(20) {
+            for height in (110..=200).step_by(10) {
+                let viewport = Viewport {
+                    width: f64::from(width),
+                    height: f64::from(height),
+                };
+                let layout = compute_layout(
+                    &spec,
+                    &theme,
+                    viewport,
+                    &axes,
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    &m,
+                    &legend::LegendOverrides::default(),
+                    &[],
+                    CompositeLayoutSeam::default(),
+                )
+                .expect("layout should succeed");
+                let area = layout.panels[0].plot_area;
+                assert!(
+                    area.w > MIN_PANEL_DIM && area.h > MIN_PANEL_DIM,
+                    "{width}x{height}: the panel is drawn ({area:?})",
+                );
+                let reserved = reserved_x_label_band(&layout);
+                let drawn = drawn_x_label_band(&layout, &theme, &m);
+                assert!((reserved - drawn).abs() < 1e-9, "{width}x{height}: reserved {reserved}, drawn {drawn}");
+                let padded = layout.padded_region;
+                let band = |w: f64| x_label_band(&axes, w, f64::INFINITY, &theme, &m);
+                let region_w = padded.x + padded.w - layout.plot_region.x;
+                let flat = band(region_w);
+                let aspect_w = region_w.min((padded.h - flat).max(0.0) * 2.0);
+                if padded.h - band(aspect_w) <= MIN_PANEL_DIM {
+                    would_collapse += 1;
+                }
+            }
+        }
+        assert!(would_collapse > 0, "the sweep must reach a band that would leave no panel");
+    }
+
+    /// A `CoordFixed` aspect that only shortens the panel (the region is too
+    /// tall for the ratio) leaves the width the labels draw across, so the
+    /// band and its labels are those of the same chart without the aspect.
+    #[test]
+    fn a_coord_fixed_aspect_that_binds_the_height_keeps_the_band() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 900.0,
+        };
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = (0..6).map(|i| format!("{i}").repeat(7)).collect();
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = (0..6).map(|i| f64::from(i) / 5.0).collect();
+        }
+        let lay_out = |spec: &ChartSpec| {
+            compute_layout(
+                spec,
+                &theme,
+                viewport,
+                &axes,
+                &[],
+                &[],
+                None,
+                None,
+                &m,
+                &legend::LegendOverrides::default(),
+                &[],
+                CompositeLayoutSeam::default(),
+            )
+            .expect("layout should succeed")
+        };
+        let plain = lay_out(&minimal_chart_spec());
+        let fixed = lay_out(&with_fixed_aspect(minimal_chart_spec(), Some(1.0)));
+        assert!(
+            fixed.panels[0].plot_area.h < plain.panels[0].plot_area.h - 1.0
+                && fixed.panels[0].plot_area.w == plain.panels[0].plot_area.w,
+            "fixture assumption: the aspect shortens the panel only",
+        );
+        assert_eq!(reserved_x_label_band(&fixed), reserved_x_label_band(&plain));
+        let ticks = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .map(|a| a.ticks.iter().map(|t| (t.label_angle, t.culled)).collect::<Vec<_>>())
+        };
+        assert_eq!(ticks(&fixed), ticks(&plain));
+    }
+
+    /// An axis auto wants nothing on is never flagged as scaled, even on a
+    /// viewport with no room left past the `auto=false` insets (where the
+    /// cap's factor is 0 whatever is wanted): a 20x20 chart whose axes draw
+    /// nothing auto pads for.
+    #[test]
+    fn an_axis_wanting_nothing_is_never_flagged_scaled() {
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let axes = dummy_axes();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 20.0,
+            height: 20.0,
+        };
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base_padding_insets(&theme));
+        let extra = auto_padding_extra(&inputs, Inset::default(), XLabelOverhang::NONE, &room);
+        assert_eq!(extra.total, Inset::default(), "fixture assumption: nothing is wanted");
+        assert!(!extra.x_scaled && !extra.y_scaled, "{extra:?}");
+    }
+
+    /// The `padding.auto` y-title pass recentres the title on the plot the
+    /// layout lays out: on a 2-column facet grid whose x labels draw flat at
+    /// the whole region's width but rotate at each panel's, the band (and
+    /// so the plot's vertical centre) is the one the panels draw. The title
+    /// extra is the recentering against the laid-out plot region's centre.
+    #[test]
+    fn the_y_title_rescue_recentres_on_the_faceted_plot_that_lays_out() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let spec = faceted_spec(2);
+        let groups: Vec<FacetGroup> = three_groups().into_iter().take(2).collect();
+        let legend_overrides = legend::LegendOverrides::default();
+        let base = base_padding_insets(&theme);
+        let mut differs = 0;
+        for title in 10..=30 {
+            for width in (240..=600).step_by(20) {
+                let mut axes = continuous_x_axes_with_long_last_label();
+                axes.x.tick_labels = (0..5).map(|i| format!("{},000", i * 250)).collect();
+                if let Some(p) = axes.x.tick_projection.as_mut() {
+                    p.major = (0..5).map(|i| f64::from(i) / 4.0).collect();
+                }
+                axes.y.title.set(Some("a".repeat(title)));
+                let viewport = Viewport {
+                    width: f64::from(width),
+                    height: 160.0,
+                };
+                let inputs = LayoutInputs {
+                    facet_groups: &groups,
+                    ..plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport)
+                };
+                let laid_out = lay_out_at(base, &inputs).plot;
+                let region = laid_out.plot_region;
+                let half_h = m.measure_width(&"a".repeat(title), theme.typography.title_font_size) / 2.0;
+                let (top, bottom) = recentering_padding(region.y + region.h / 2.0, half_h, viewport.height);
+                let rescue = auto_padding_for_axis_titles(&inputs, base, Inset::default());
+                assert!(
+                    (rescue.top - top).abs() < 1e-9 && (rescue.bottom - bottom).abs() < 1e-9,
+                    "{title}-char y title at {width}px: rescue {rescue:?}, want top {top}, bottom {bottom}",
+                );
+                let cell_w = laid_out.panels[0].plot_area.w;
+                let band_at = |w: f64| x_label_band(&axes, w, f64::INFINITY, &theme, &m);
+                if top + bottom > 0.0 && band_at(region.w) != band_at(cell_w) {
+                    differs += 1;
+                }
+            }
+        }
+        assert!(differs > 0, "the sweep must reach a rescued title whose region and panel bands differ");
+    }
+
+    /// The facet row gutter holds the band the upper row's x labels draw,
+    /// sized at the panel width they are drawn at, including when a
+    /// composite imposes the plot region: a 3-panel, 2-column chart whose
+    /// imposed region is far narrower than its natural one, where the
+    /// labels fit flat at the natural width and rotate at the imposed one.
+    #[test]
+    fn the_facet_row_gutter_holds_the_labels_drawn_at_the_imposed_width() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["0".into(), "250,000".into(), "500,000".into()];
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = vec![0.0, 0.5, 1.0];
+        }
+        let spec = faceted_spec(2);
+        let groups = three_groups();
+        let viewport = Viewport {
+            width: 800.0,
+            height: 500.0,
+        };
+        let lay_out = |plot_region: Option<Rect>| {
+            compute_layout(
+                &spec,
+                &theme,
+                viewport,
+                &axes,
+                &groups,
+                &[],
+                None,
+                None,
+                &m,
+                &legend::LegendOverrides::default(),
+                &[],
+                CompositeLayoutSeam {
+                    plot_region,
+                    ..CompositeLayoutSeam::default()
+                },
+            )
+            .expect("faceted layout should succeed")
+        };
+        let row_gutter = |l: &LayoutResult| {
+            let top = l.panels.iter().find(|p| p.row == 0).expect("row 0").plot_area;
+            let below = l.panels.iter().find(|p| p.row == 1).expect("row 1").plot_area;
+            let strip = strip_band_size(&theme, &m);
+            below.y - strip - (top.y + top.h) - theme.padding.row_padding
+        };
+        let upper_band = |l: &LayoutResult| {
+            let upper = LayoutResult {
+                axes: l
+                    .axes
+                    .iter()
+                    .filter(|a| l.panels.get(a.panel_index).is_some_and(|p| p.row == 0))
+                    .cloned()
+                    .collect(),
+                ..l.clone()
+            };
+            drawn_x_label_band(&upper, &theme, &m)
+        };
+        let angle = |l: &LayoutResult| l.axes.iter().find(|a| a.orient == AxisOrient::Bottom).map(|a| a.ticks[0].label_angle);
+        let natural = lay_out(None);
+        assert_eq!(angle(&natural), Some(0.0), "fixture assumption: flat at the natural width");
+        let imposed = lay_out(Some(Rect {
+            x: 100.0,
+            y: 40.0,
+            w: 160.0,
+            h: 400.0,
+        }));
+        assert!(angle(&imposed).is_some_and(|a| a != 0.0), "fixture assumption: rotated when imposed");
+        for (name, l) in [("natural", &natural), ("imposed", &imposed)] {
+            assert!(
+                (row_gutter(l) - upper_band(l)).abs() < 1e-9,
+                "{name}: the row gutter ({}) holds the upper row's drawn band ({})",
+                row_gutter(l),
+                upper_band(l),
+            );
+        }
     }
 }

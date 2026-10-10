@@ -191,6 +191,12 @@ pub struct Viewport {
 }
 
 impl Viewport {
+    /// Whether both dimensions are finite and positive: the only viewports
+    /// a chart can be laid out in.
+    pub fn is_drawable(&self) -> bool {
+        self.width.is_finite() && self.height.is_finite() && self.width > 0.0 && self.height > 0.0
+    }
+
     pub fn into_rect(self) -> Rect {
         Rect { x: 0.0, y: 0.0, w: self.width, h: self.height }
     }

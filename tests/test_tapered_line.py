@@ -1102,14 +1102,14 @@ def test_to_png_pixel_thickness_matches_the_tapered_widths() -> None:
 
 # ---------------------------------------------------------------------------
 # Vacuity control: an unsized line, dashed or curved under a round cap/join,
-# renders byte-identically whether or not the tapered-outline path exists in
-# the walker, since that path only fires when `widths` is present on the
-# scene node. Pinned as a sha256 of the untapered capture (taken via a
-# file-copy revert of `svg_walk.rs`/`svg.rs`/`mod.rs`/`binding.rs`/
-# `taper.rs`, rebuilt, then restored) rather than the capture itself
-# (fixture file or inline literal): every ferrum SVG embeds a multi-
-# hundred-KB base64 font body, which "byte-equal to the untapered capture"
-# does not need on disk to check.
+# never takes the tapered-outline path, since that path only fires when
+# `widths` is present on the scene node. The SHA256s below are this build's
+# bytes for each chart -- a snapshot pin, not a claim of provenance against
+# any earlier build; a layout change moves them. The vacuity property itself
+# (no per-vertex widths, no filled outline, drawn as a plain stroked line)
+# is asserted structurally in the same tests, so a walker that took the
+# outline path for an unsized line fails on that structural check even once
+# the hash has been re-pinned to match.
 # ---------------------------------------------------------------------------
 
 
@@ -1133,17 +1133,34 @@ def _vacuity_curved_chart() -> fm.Chart:
     )
 
 
-_VACUITY_DASHED_SHA256 = "3b028bba7df8b3da830ada230fb4ff8e1833dfe2d26eb933016ee588e73b29dd"
-_VACUITY_CURVED_ROUND_SHA256 = "5c2ef095759762d842ea6e4eeff56d7381e0c35fed60b7113284b915c5a0b6dc"
+_VACUITY_DASHED_SHA256 = "0e038bd6c009692aa6c2a9bc767ed5f97a6a7d640f6b4a721ccd97c66d82af6c"
+_VACUITY_CURVED_ROUND_SHA256 = "867d550096b1167b8617e5687a5573a8bc2c0b94bdee374148d0c44140cc3b77"
 
 
-def test_unsized_dashed_line_is_byte_identical_to_the_pre_fix_capture() -> None:
-    svg = _vacuity_dashed_chart().to_svg()
+def test_unsized_dashed_line_draws_a_stroked_dash_array_with_no_tapered_outline() -> None:
+    chart = _vacuity_dashed_chart()
+    nodes = _line_nodes_of(chart)
+    assert len(nodes) == 1
+    assert "widths" not in nodes[0]
+
+    svg = chart.to_svg()
+    assert _outline_elements(svg) == []
+    strokes = re.findall(r'<polyline[^>]*stroke-dasharray="6,3"[^>]*/>', svg)
+    assert len(strokes) == 1
     assert hashlib.sha256(svg.encode()).hexdigest() == _VACUITY_DASHED_SHA256
 
 
-def test_unsized_curved_round_cap_join_line_is_byte_identical_to_the_pre_fix_capture() -> None:
-    svg = _vacuity_curved_chart().to_svg()
+def test_unsized_curved_round_cap_join_line_draws_a_stroked_path_with_no_tapered_outline() -> None:
+    chart = _vacuity_curved_chart()
+    nodes = _line_nodes_of(chart)
+    assert len(nodes) == 1
+    assert "widths" not in nodes[0]
+
+    svg = chart.to_svg()
+    assert _outline_elements(svg) == []
+    strokes = re.findall(r'<path[^>]*fill="none"[^>]*/>', svg)
+    assert len(strokes) == 1
+    assert '<g stroke-linecap="round" stroke-linejoin="round">' in svg
     assert hashlib.sha256(svg.encode()).hexdigest() == _VACUITY_CURVED_ROUND_SHA256
 
 

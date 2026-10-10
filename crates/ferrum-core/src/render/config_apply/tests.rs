@@ -152,6 +152,7 @@ mod chart_config_application_tests {
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
+            panels: Vec::new(),
         }
     }
 

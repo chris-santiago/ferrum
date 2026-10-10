@@ -576,7 +576,7 @@ fn render_leaf(
     // `prepare_and_layout` has no viewport guard of its own — `render_svg`/
     // `render_scene_json` each check this before calling it; a composite leaf
     // bypasses those entries, so the check is repeated here.
-    if leaf.viewport.width <= 0.0 || leaf.viewport.height <= 0.0 {
+    if !leaf.viewport.is_drawable() {
         return Err(RenderError::InvalidViewport {
             width: leaf.viewport.width,
             height: leaf.viewport.height,

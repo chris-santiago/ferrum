@@ -1834,6 +1834,7 @@ fn build_axes(
         show_x: spec.axis_x.unwrap_or(true) && !cartesian_axes_suppressed,
         show_y: spec.axis_y.unwrap_or(true) && !cartesian_axes_suppressed,
         secondary_y,
+        panels: Vec::new(),
     };
     Ok(PreparedAxes {
         axes,
