@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 
 class EntryRefusal(ValueError):
@@ -122,3 +122,47 @@ def speak_as(entry: str, build: Callable[..., Any], /, *args: Any, **kwargs: Any
     with voiced_as(entry):
         chart = build(*args, **kwargs)
     return stamp_entry(chart, entry)
+
+
+_Checked = TypeVar("_Checked")
+
+
+def _voiced(entry: str, check: Callable[[str], _Checked]) -> _Checked:
+    """Return ``check(entry)``, its refusal an :class:`EntryRefusal` voiced as *entry*.
+
+    *check* is one call of a pure validator, voiced as its argument (a
+    :mod:`ferrum._validate` check, :func:`ferrum._core.check_mark_size`).
+    The refusal's text for another voice comes from re-calling that same
+    validator with the other voice (:func:`_check_refusal_text`), so a
+    figure function or visualizer that wrote the style re-voices it as
+    itself (:func:`voiced_as`) and a mark method called directly keeps its
+    own. Only *check*'s own ``ValueError`` becomes the refusal. The one
+    owner of this conversion: every door that turns a pure validator's
+    ``ValueError`` into a re-voiceable refusal (``ferrum.marks.base``,
+    ``ferrum._override_apply``) imports it from here rather than each
+    defining its own.
+    """
+    try:
+        return check(entry)
+    except ValueError as err:
+        raise _validator_refusal(entry, check, str(err)) from None
+
+
+def _validator_refusal(entry: str, check: Callable[[str], Any], text: str) -> EntryRefusal:
+    """*check*'s refusal *text*, voiced as *entry* and re-voiceable by re-calling *check*."""
+    return EntryRefusal(lambda voice: _check_refusal_text(check, voice, text), entry)
+
+
+def _check_refusal_text(check: Callable[[str], Any], voice: str, frozen: str) -> str:
+    """The text *check*, a pure validator that refused one voice, refuses *voice* with.
+
+    A pure validator judges the value alone, so it refuses every voice
+    alike. Should *check* accept *voice*, the refusal keeps *frozen*, the
+    text it was raised with, so re-voicing never turns a refusal into a
+    different error.
+    """
+    try:
+        check(voice)
+    except ValueError as err:
+        return str(err)
+    return frozen

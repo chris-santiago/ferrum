@@ -503,6 +503,34 @@ def test_native_scale_true_jitter_default_example_preserves_all_marks():
     assert len(_circle_cx(svg)) == 24
 
 
+def test_native_scale_true_jitter_default_example_padding_auto_extra_is_pinned():
+    """The same chart as `test_native_scale_true_jitter_default_example_preserves_all_marks`:
+    its numeric-category x tick labels draw at the cascade's shrunk 9.02pt
+    font. On this real shrunk-font chart, `padding.auto`'s extra is exactly
+    zero: the default clip rect is byte-identical to `auto=False`'s, both
+    exactly 564.623px wide."""
+    df = pl.DataFrame(
+        {
+            "cat": [2020] * 8 + [2021] * 8 + [2022] * 8,
+            "val": [float(i) for i in range(24)],
+        }
+    )
+    chart = fm.catplot(df, x="cat", y="val", kind="strip", native_scale=True, seed=0)
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert 'font-size="9.02"' in svg_auto_false  # the shrunk-font path
+    clip_off = re.search(
+        r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_auto_false
+    )
+    clip_default = re.search(
+        r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_default
+    )
+    assert clip_off is not None and clip_default is not None
+    assert clip_off.group(1) == "564.623"
+    assert clip_default.group(1) == "564.623"  # the extra: exactly zero
+    assert svg_default == svg_auto_false
+
+
 def test_native_scale_jitter_single_category_falls_back_sanely():
     """Degenerate case: one unique category value has no spacing to derive
     a width from. Must not crash, and must still spread the points a

@@ -1400,12 +1400,24 @@ class TestOverrideScaleNoneIsNoOverride:
 
 
 # ---------------------------------------------------------------------------
-# Every `.override` refusal, whichever leaf family it comes from, is the one
-# documented class and re-voices through the same mechanism.
+# An `.override` refusal from the padding (auto or a numeric side), scale,
+# mark or coord leaf families is the one documented FerrumOverrideError
+# class and re-voices through the same mechanism. Config-section leaves
+# (`axis_*`/`x_axis_*`/`y_axis_*`, `legend_*`, `title_*`, `grid_*`,
+# `color_*`) are NOT covered by this class: they refuse as a plain
+# `ValueError`, from either the config dataclass's own validator (e.g.
+# `LegendConfig.orient`/`GridConfig.color`) or the Rust `chart_config`
+# serde decode (e.g. `axis_label_angle`/`title_font_size`), outside
+# FerrumOverrideError's contract (a known, logged gap).
 # ---------------------------------------------------------------------------
 
 
 class TestOverrideRefusalIsFerrumOverrideErrorAcrossLeafFamilies:
+    """Covers exactly the padding, scale, mark and coord leaf families
+    (the parametrized cases below plus `test_coord_leaf_refusal_...`).
+    Config-section leaves are a separate, currently-ValueError path; see
+    the module comment above this class."""
+
     @pytest.mark.parametrize(
         ("overrides", "text_prefix"),
         [

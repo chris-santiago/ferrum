@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple
 
 from ferrum._core import (
     blend_accepted_values,
@@ -23,7 +23,7 @@ from ferrum._core import (
     stroke_cap_accepted_values,
     stroke_join_accepted_values,
 )
-from ferrum._entry import EntryRefusal
+from ferrum._entry import EntryRefusal, _validator_refusal, _voiced
 from ferrum._layer import (
     _MARKS_DRAWING_CONSTANT_SIZE,
     drawn_style_fields,
@@ -80,28 +80,8 @@ _LINETYPE_MAP: dict[str, list[float]] = {
 }
 
 
-_Checked = TypeVar("_Checked")
-
-
-def _voiced(entry: str, check: Callable[[str], _Checked]) -> _Checked:
-    """Return ``check(entry)``, its refusal an :class:`EntryRefusal` voiced as *entry*.
-
-    *check* is one call of a pure validator, voiced as its argument (a
-    :mod:`ferrum._validate` check, :func:`ferrum._core.check_mark_size`).
-    The refusal's text for another voice re-calls that same validator with
-    the other voice (:func:`_check_refusal_text`), so a figure function or
-    visualizer that wrote the style re-voices it as itself
-    (:func:`ferrum._entry.voiced_as`) and a mark method called directly
-    keeps its own. Only *check*'s own ``ValueError`` becomes the refusal.
-    """
-    try:
-        return check(entry)
-    except ValueError as err:
-        raise _validator_refusal(entry, check, str(err)) from None
-
-
 def _refusal_of(entry: str, check: Callable[[str], Any]) -> EntryRefusal | None:
-    """The refusal :func:`_voiced` raises for *check*, returned rather than raised.
+    """The refusal :func:`ferrum._entry._voiced` raises for *check*, returned rather than raised.
 
     ``None`` when *check* accepts *entry*.
     """
@@ -110,26 +90,6 @@ def _refusal_of(entry: str, check: Callable[[str], Any]) -> EntryRefusal | None:
     except ValueError as err:
         return _validator_refusal(entry, check, str(err))
     return None
-
-
-def _validator_refusal(entry: str, check: Callable[[str], Any], text: str) -> EntryRefusal:
-    """*check*'s refusal *text*, voiced as *entry* and re-voiceable by re-calling *check*."""
-    return EntryRefusal(lambda voice: _check_refusal_text(check, voice, text), entry)
-
-
-def _check_refusal_text(check: Callable[[str], Any], voice: str, frozen: str) -> str:
-    """The text *check*, a pure validator that refused one voice, refuses *voice* with.
-
-    A pure validator judges the value alone, so it refuses every voice
-    alike. Should *check* accept *voice*, the refusal keeps *frozen*, the
-    text it was raised with, so re-voicing never turns a refusal into a
-    different error.
-    """
-    try:
-        check(voice)
-    except ValueError as err:
-        return str(err)
-    return frozen
 
 
 def _stroke_dash_error(context: str, value: Any) -> str:

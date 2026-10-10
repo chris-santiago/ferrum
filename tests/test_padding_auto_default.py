@@ -614,6 +614,11 @@ class TestRotatedLabelsThatFitAreUntouched:
         assert len(drawn_off) > 10, drawn_off
         assert svg_default != svg_auto_false
         assert _drawn_x_tick_labels(svg_default) == drawn_off
+        # The rescue extra, pinned exactly rather than left to the `!=` above.
+        clip_off = _CLIP_RECT.findall(svg_auto_false)
+        clip_default = _CLIP_RECT.findall(svg_default)
+        assert clip_off == [("59.727", "16", "654.273", "124.961")]
+        assert clip_default == [("59.727", "16", "653.876", "124.961")]
 
     def test_flat_band_label_whose_ink_overhangs_is_rescued(self):
         """The 725-739 flat band, on a chart whose flat last label's INK
@@ -782,3 +787,102 @@ def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
     assert clip_off == [("62.944", "16", "49.056", "124.961")]
     assert _CLIP_RECT.findall(svg_default) == clip_off
     assert svg_default == svg_auto_false
+
+
+# ---------------------------------------------------------------------------
+# Case: the 220px x-title rescue/decline boundary, swept by real character
+# count and pinned exactly at each of the four lengths that straddle it.
+#
+# Every assertion below is a deterministic layout fact (clip rect, the
+# title's own `<text x=...>`, the drawn x tick set) read straight off the
+# SVG markup, not a rasterized ink margin: `resvg` has no bundled "Inter"
+# installed, so rasterizing falls back to whatever serif/sans the host
+# happens to have, and the fallback-font margin (not the real, bundled-Inter
+# layout) is what would move with the host. Layout itself always uses the
+# bundled Inter metrics regardless of what any raster backend has installed.
+# ---------------------------------------------------------------------------
+
+
+_PLAIN_X_TICK_TEXT = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _plain_x_tick_labels(svg: str) -> list[tuple[str, str, str]]:
+    """Drawn x tick labels on this section's plain-numeric (non-"$",
+    non-currency) fixture, as ``(text, font-size, rotation)``. Excludes the
+    y axis's own tick labels, which this fixture's y domain (``0..1e9``)
+    always draws at a fixed ``x="60.054"``, outside the x axis's own ticks
+    regardless of the x title."""
+    drawn = []
+    for attrs, text in _TEXT.findall(svg):
+        if not _PLAIN_X_TICK_TEXT.match(text) or 'x="60.054"' in attrs:
+            continue
+        rotate = re.search(r'transform="rotate\((-?[\d.]+) ', attrs)
+        size = re.search(r'font-size="([\d.]+)"', attrs)
+        drawn.append((text, size.group(1) if size else "", rotate.group(1) if rotate else "0"))
+    return drawn
+
+
+_FLAT_SHRUNK_X_TICKS = [
+    ("0", "9.02", "0"),
+    ("0.2", "9.02", "0"),
+    ("0.4", "9.02", "0"),
+    ("0.6", "9.02", "0"),
+    ("0.8", "9.02", "0"),
+    ("1", "9.02", "0"),
+]
+_ROTATED_FULL_SIZE_X_TICKS = [
+    ("0", "11", "-90"),
+    ("0.2", "11", "-90"),
+    ("0.4", "11", "-90"),
+    ("0.6", "11", "-90"),
+    ("0.8", "11", "-90"),
+    ("1", "11", "-90"),
+]
+
+
+@pytest.mark.parametrize(
+    "chars, clip_on, drawn_default, title_x",
+    [
+        (25, ("66.054", "16", "125.397", "110.056"), _ROTATED_FULL_SIZE_X_TICKS, "128.752"),
+        (26, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
+        (27, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
+        (28, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
+    ],
+)
+def test_220px_x_title_boundary_is_pinned_at_real_fonts(chars, clip_on, drawn_default, title_x):
+    """220x200, `y` over a 0..1e9 domain (so the y label band stays wide
+    and fixed regardless of the x title) and an x title of *chars*
+    repeated "a" characters, over `x=[0.0, 1.0]`: `auto=False` always draws
+    the six x ticks ("0"/"0.2"/.../"1") flat and shrunk to the cascade's
+    9.02pt font (`_FLAT_SHRUNK_X_TICKS`), whatever the title's length.
+
+    - 25 chars: `padding.auto` genuinely rescues the title. The plot
+      narrows (clip width 137.946 -> 125.397) and the recentred title's own
+      `<text x=...>` moves from 135.027 to 128.752; the x axis keeps the
+      SAME six labels, but now rotated -90 at the full, unshrunk 11pt font
+      (`_ROTATED_FULL_SIZE_X_TICKS`) rather than flat-and-shrunk.
+    - 26/27/28 chars: `padding.auto` declines, byte-identical to
+      `auto=False` (same clip rect, same flat 9.02pt ticks, same title
+      position). At each of these lengths, the next rescue available would
+      cut the x axis from six ticks (0.2 step) to four (0.3 step), and
+      `padding.auto` never ships fewer x labels than `auto=False` draws.
+    """
+    title = "a" * chars
+    df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1000000000.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", title=title), y="y")
+        .properties(width=220, height=200)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert _plain_x_tick_labels(svg_auto_false) == _FLAT_SHRUNK_X_TICKS
+    assert _plain_x_tick_labels(svg_default) == drawn_default
+    assert _CLIP_RECT.findall(svg_default) == [clip_on]
+    title_match = re.search(
+        rf'<text x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>{title}</text>', svg_default
+    )
+    assert title_match is not None
+    assert title_match.group(1) == title_x
+    assert (svg_default == svg_auto_false) == (chars != 25)

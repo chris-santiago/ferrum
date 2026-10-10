@@ -8,13 +8,20 @@ deprecation warnings.  It runs **last** among presentation sources so override w
 the cascade (spec §7: override > per-channel ``axis=``/``legend=`` > ``configure_*``
 > theme > ``set_default_theme`` > Rust defaults).
 
-There is one function per payload piece: :func:`merge_encoding_scale` (encoding),
-:func:`merge_chart_config`, :func:`apply_mark_style`, :func:`apply_coord`,
-:func:`apply_properties`, plus :func:`emit_deprecations`.  The encoding piece's
-merge used to live in ``_spec_build.py`` beside its one call site, which put the
-override contract's two halves — the leaf registry and the merge gate — in
-modules that could not see each other; a design review traced a live
-override-leaf/wire-key divergence to exactly that separation.
+Six payload pieces are consumed here, called in this order:
+:func:`apply_mark_style`; the encoding piece, which is two functions
+(:func:`merge_encoding_scale`, then :func:`refuse_malformed_scale_overrides`
+— both called from ``_spec_build.py``'s ``_with_override_scale``, with a
+staged validation order inside ``merge_encoding_scale`` itself, see its own
+docstring); and :func:`apply_coord` — all three from inside
+:meth:`Chart.to_spec` — then, once ``to_spec`` returns,
+:func:`merge_chart_config`, :func:`apply_properties` and
+:func:`emit_deprecations` from :meth:`Chart._render_inputs`.  The encoding
+piece's leaf-path registry (:func:`refuse_malformed_scale_overrides`, which
+knows each override's own flat path) and its merge gate
+(:func:`merge_encoding_scale`, which knows the channel's wire keys) share
+this one module, so the override leaves and the wire keys they merge into
+are defined together.
 
 The functions here are pure (no ``Chart`` import, no I/O, no global state) apart from
 :func:`emit_deprecations`, whose sole effect is the documented ``DeprecationWarning``.

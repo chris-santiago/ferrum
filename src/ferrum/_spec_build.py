@@ -64,8 +64,10 @@ def _with_override_scale(d: dict, channel: str, override: OverridePayload | None
     Three refusal layers run in order, named after the value's own origin
     (#157):
 
-    - :func:`~ferrum._override_consume.merge_encoding_scale`'s own probes
-      refuse the CHART's own keys in the gate's voice, as before;
+    - :func:`~ferrum._override_consume.merge_encoding_scale` refuses the
+      CHART's own keys first (its own docstring states each of its internal
+      stages' exact voice: the tag check, the two shape-probe buckets, and
+      the old-type padding-family bounds loop);
     - :func:`~ferrum._override_consume.refuse_malformed_scale_overrides`
       refuses the OVERRIDE's own values, naming the flat override path the
       caller actually wrote (``x_scale_padding``, not ``padding``);

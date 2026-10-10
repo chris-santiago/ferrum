@@ -199,6 +199,34 @@ def test_chart_level_axis_x_date_iso_preset_renders_dates():
     assert any(l.startswith("2020-") for l in date_labels), f"expected 2020 dates: {date_labels}"
 
 
+def test_chart_level_axis_x_date_iso_preset_padding_auto_extra_is_pinned():
+    """The same chart as `test_chart_level_axis_x_date_iso_preset_renders_dates`
+    (`_wide_temporal_df`, chart-level `axis_x=AxisConfig(label_format="date_iso")`,
+    default width): its day-level ISO labels wrap onto two lines at the
+    cascade's shrunk 9.02pt font. `padding.auto`'s extra on this real
+    shrunk-font chart narrows the `auto=False` plot from exactly 566.69px
+    wide to exactly 566.086px wide."""
+    df = _wide_temporal_df()
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="date:T", y="val:Q")
+        .configure(axis_x=AxisConfig(label_format="date_iso"))
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert 'font-size="9.02"' in svg_auto_false  # the shrunk-font path
+    clip_off = re.search(
+        r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_auto_false
+    )
+    clip_default = re.search(
+        r'<rect x="[\d.]+" y="16" width="([\d.]+)" height="[\d.]+"/>', svg_default
+    )
+    assert clip_off is not None and clip_default is not None
+    assert clip_off.group(1) == "566.69"
+    assert clip_default.group(1) == "566.086"
+
+
 def test_chart_level_month_year_preset_renders_month_names():
     svg = (
         fm.Chart(_temporal_df())

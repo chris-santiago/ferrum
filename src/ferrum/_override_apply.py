@@ -68,7 +68,7 @@ from enum import Enum
 from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
 
-from ferrum._entry import EntryRefusal
+from ferrum._entry import EntryRefusal, _voiced
 from ferrum._layer import is_unset
 from ferrum._validate import coerce_bool_value, coerce_pixel_value
 from ferrum.configure import (
@@ -87,7 +87,7 @@ from ferrum.coord import (
 )
 from ferrum.encoding import _channel_class_map
 from ferrum.exceptions import _OverrideRefusal
-from ferrum.marks.base import _VALID_MARK_KWARGS, _voiced
+from ferrum.marks.base import _VALID_MARK_KWARGS
 
 
 class Target(Enum):
@@ -619,7 +619,7 @@ def _refuse_as_override(check: Callable[[str], Any]) -> None:
 
     *check* is a :mod:`ferrum._validate` predicate already composed with its
     own label by the caller (e.g. ``lambda voice: coerce_pixel_value(f"{voice}"
-    "(padding_top=...)", value)``), run through :func:`ferrum.marks.base._voiced`
+    "(padding_top=...)", value)``), run through :func:`ferrum._entry._voiced`
     so a malformed value refuses in the same voice every other mark/scale
     leaf refuses in and re-voices through the same mechanism
     (:func:`ferrum._entry.voiced_as`). ``_voiced`` itself raises a plain
