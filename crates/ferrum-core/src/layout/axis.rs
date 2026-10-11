@@ -2171,7 +2171,7 @@ fn resolve_y_overlap(
 ) -> Option<Vec<bool>> {
     match policy? {
         LabelOverlap::ShowAll | LabelOverlap::Rotate => Some(vec![true; labels.len()]),
-        LabelOverlap::Parity => Some((0..labels.len()).map(|i| i % 2 == 0).collect()),
+        LabelOverlap::Parity => Some(stride_visibility(labels.len(), 2)),
         LabelOverlap::Greedy => {
             let line_h = metrics.line_height(label_font_size);
             let mut visible = Vec::with_capacity(labels.len());
@@ -2840,6 +2840,44 @@ fn merge_survivor_labels(
         .collect()
 }
 
+/// Which of `n` labels a stride cull keeps: every `stride`-th, starting from
+/// the first.
+fn stride_visibility(n: usize, stride: usize) -> Vec<bool> {
+    (0..n).map(|i| i % stride == 0).collect()
+}
+
+/// The x tick labels' cull stage: for each stride in `strides`, in order,
+/// keep every `stride`-th label ([`stride_visibility`]), lay the survivors out
+/// with `present` against the `stride · slot_w` each survivor now spans, and
+/// accept the first presentation that `fits`. Returns the accepted stride,
+/// its visibility mask and its presentation, or `None` when no stride is both
+/// presentable and fitting.
+///
+/// The collision cascade's S4 tries the one stride it sized from the -90°
+/// footprint and accepts it unconditionally; an axis whose drawn band is over
+/// its budget tries every stride from 2 up and accepts the first whose band
+/// is within it. The two differ only in their strides and `fits`.
+fn cull_by_stride<P>(
+    labels: &[String],
+    slot_w: f64,
+    strides: impl IntoIterator<Item = usize>,
+    mut present: impl FnMut(&[String], f64) -> Option<P>,
+    fits: impl Fn(&P) -> bool,
+) -> Option<(usize, Vec<bool>, P)> {
+    strides.into_iter().find_map(|stride| {
+        let visible = stride_visibility(labels.len(), stride);
+        let survivor_labels: Vec<String> = labels
+            .iter()
+            .zip(&visible)
+            .filter(|(_, v)| **v)
+            .map(|(l, _)| l.clone())
+            .collect();
+        present(&survivor_labels, stride as f64 * slot_w)
+            .filter(|p| fits(p))
+            .map(|p| (stride, visible, p))
+    })
+}
+
 /// Run the graduated collision cascade (spec SS4.1). Tries recovery strategies in
 /// order (S0 flat -> S1 wrap -> S2 font shrink -> S3 rotate -> S4 cull -> S5 elide),
 /// returning as soon as one resolves all collisions.
@@ -2912,13 +2950,12 @@ fn cascade_collision_recovery(
         }
         Some(LabelOverlap::Parity) => {
             // Stride-2 decimation: show every other label. Reuses the cascade's
-            // cull primitive with a fixed parity stride (no width measurement).
-            let visible: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            // cull mask with a fixed parity stride (no width measurement).
             return CascadeResult {
                 labels: labels.to_vec(),
                 angle: 0.0,
                 font_size: None,
-                visible,
+                visible: stride_visibility(n, 2),
                 strategy: CascadeStrategy::Culled { stride: 2 },
             };
         }
@@ -2997,8 +3034,6 @@ fn cascade_collision_recovery(
         };
 
         if stride > 1 {
-            let visible: Vec<bool> = (0..n).map(|i| i % stride as usize == 0).collect();
-
             // `stride` was sized against -90°'s footprint alone, the SMALLEST footprint
             // of any presentation — it says nothing about whether a
             // LESS-degraded presentation now fits the wider
@@ -3011,25 +3046,35 @@ fn cascade_collision_recovery(
             // the ORIGINAL, narrower pitch. `resolve_presentation` is
             // guaranteed to return `Some` here: the stride was sized so
             // -90° fits every survivor's (a subset of all N labels')
-            // footprint at `effective_slot_w`, and S3's own loop inside
+            // footprint at `stride · slot_w`, and S3's own loop inside
             // this second call re-tries -90° again — the `None` arm is a
             // defensive fallback only, kept in case of a floating-point
             // boundary surprise, and reproduces the pre-fix outcome
-            // (rotated survivors) if it were ever hit.
-            let effective_slot_w = stride as f64 * slot_w;
-            let survivor_labels: Vec<String> = labels
-                .iter()
-                .zip(&visible)
-                .filter(|(_, v)| **v)
-                .map(|(l, _)| l.clone())
-                .collect();
-            let (final_labels, angle, font_size) = match resolve_presentation(
-                &survivor_labels,
-                effective_slot_w,
-                label_font_size,
-                label_gap,
-                metrics,
-            ) {
+            // (rotated survivors) if it were ever hit. The one stride is
+            // accepted whatever it presents, and `present` never declines,
+            // so the cull always keeps it; the `None` arm below is that same
+            // rotated fallback at the stride's own mask, kept so a declining
+            // presentation step could only ever yield a culled result.
+            let culled = cull_by_stride(
+                labels,
+                slot_w,
+                [stride as usize],
+                |survivors, survivor_w| {
+                    Some(resolve_presentation(
+                        survivors,
+                        survivor_w,
+                        label_font_size,
+                        label_gap,
+                        metrics,
+                    ))
+                },
+                |_| true,
+            );
+            let (visible, presentation) = match culled {
+                Some((_, visible, presentation)) => (visible, presentation),
+                None => (stride_visibility(n, stride as usize), None),
+            };
+            let (final_labels, angle, font_size) = match presentation {
                 Some(presentation) => (
                     merge_survivor_labels(labels, &visible, presentation.labels),
                     presentation.angle,
@@ -3262,96 +3307,47 @@ pub(super) fn lay_out_x_tick_labels(
     if drawn_x_label_band(&ticks, input, ctx) <= ctx.band_budget {
         return (ticks, warning);
     }
-    fit_x_labels_to_band_budget(input, cascade_slot_w, ctx, &tick_position)
-}
 
-/// The x tick labels for an axis whose labels, as the cascade (or an
-/// explicit `label_angle`) lays them out, would need a band at least
-/// `ctx.band_budget` tall, which would leave the panel too short to draw.
-///
-/// Culls further by stride, the way the cascade's own cull stage does (every
-/// `stride`-th label kept, starting from the first), widest presentation
-/// budget first: the smallest stride whose survivors the cascade's stages
-/// (flat, wrap, font shrink, rotate) can lay out within `stride` slots, or
-/// the explicit angle at that stride, and whose drawn band is within the
-/// budget, wins. A budget below the least band any drawn label needs
-/// (`tick + pad + min(font size, line height)`: at angle θ a label reaches
-/// `sin θ·(font size + width) + cos θ·line height` past the standoff, which
-/// is concave in θ, so its least is at 0° or 90°) draws no label at once. Fewer labels open a wider per-label budget, so the
-/// survivors can sit flatter and the band shrinks.
-///
-/// When no stride gets under the budget, not even a single label, the axis
-/// draws its tick marks and no labels: a chart that still draws a plot keeps
-/// its data, and a label band it cannot hold is never drawn into the next
-/// row or past the canvas. Drawing no label at all is reported as every
-/// label culled.
-fn fit_x_labels_to_band_budget(
-    input: &AxisInput,
-    slot_w: f64,
-    ctx: &LabelBandCtx<'_>,
-    tick_position: &dyn Fn(usize) -> f64,
-) -> (Vec<TickLayout>, Option<AxisLabelWarning>) {
-    let LabelBandCtx {
-        label_font_size,
-        label_gap,
-        metrics,
-        ..
-    } = *ctx;
+    // Over budget: the labels as laid out would need a band that leaves the
+    // panel too short to draw. Cull further by stride, smallest stride first,
+    // laying the survivors out the way the unculled axis was (the explicit
+    // angle, or the cascade's flat / wrap / font shrink / rotate stages)
+    // within the `stride` slots each now spans; the first whose drawn band is
+    // within the budget wins. Fewer labels open a wider per-label budget, so
+    // the survivors can sit flatter and the band shrinks.
+    //
+    // A budget below the least band any drawn label needs
+    // (`tick + pad + min(font size, line height)`: at angle θ a label reaches
+    // `sin θ·(font size + width) + cos θ·line height` past the standoff, which
+    // is concave in θ, so its least is at 0° or 90°) draws no label at once.
+    // When no stride gets under the budget, not even a single label, the axis
+    // draws its tick marks and no labels: a chart that still draws a plot
+    // keeps its data, and a label band it cannot hold is never drawn into the
+    // next row or past the canvas. Drawing no label at all is reported as
+    // every label culled.
     let labels = &input.tick_labels;
-    let n = labels.len();
     let label_pad_eff = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
     let least_label_band =
         ctx.tick_size + label_pad_eff + label_font_size.min(metrics.line_height(label_font_size));
-    let ticks_for = |visible: &[bool], survivor: &[TickLayout]| -> Vec<TickLayout> {
-        let mut survivors = survivor.iter();
-        labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| match visible[i].then(|| survivors.next()).flatten() {
-                Some(s) => TickLayout {
-                    position: tick_position(i),
-                    ..s.clone()
-                },
-                None => TickLayout {
-                    position: tick_position(i),
-                    label: label.clone(),
-                    label_angle: 0.0,
-                    elided: false,
-                    culled: true,
-                    label_font_size: None,
-                    is_major: true,
-                },
-            })
-            .collect()
-    };
+    let all_culled = || (expand_survivor_ticks(labels, &vec![false; n], &[], &tick_position), None);
     if ctx.band_budget < least_label_band {
-        return (ticks_for(&vec![false; n], &[]), None);
+        return all_culled();
     }
-    for stride in 2..=n {
-        let visible: Vec<bool> = (0..n).map(|i| i % stride == 0).collect();
-        let survivor_labels: Vec<String> = labels
-            .iter()
-            .zip(&visible)
-            .filter(|(_, v)| **v)
-            .map(|(l, _)| l.clone())
-            .collect();
-        let budget_w = stride as f64 * slot_w;
-        let (survivors, warning) = if let Some(angle) = input.overrides.labels.angle {
+    let present = |survivor_labels: &[String], survivor_w: f64| match input.overrides.labels.angle {
+        Some(angle) => {
             let cos_factor = angle.to_radians().cos().abs();
-            stamp_override_angle_with_elide(
-                &survivor_labels,
+            Some(stamp_override_angle_with_elide(
+                survivor_labels,
                 angle,
                 cos_factor,
-                budget_w,
+                survivor_w,
                 label_font_size,
                 metrics,
                 |_| 0.0,
-            )
-        } else {
-            let Some(p) = resolve_presentation(&survivor_labels, budget_w, label_font_size, label_gap, metrics)
-            else {
-                continue;
-            };
+            ))
+        }
+        None => {
+            let p = resolve_presentation(survivor_labels, survivor_w, label_font_size, label_gap, metrics)?;
             let survivors = p
                 .labels
                 .into_iter()
@@ -3365,13 +3361,49 @@ fn fit_x_labels_to_band_budget(
                     is_major: true,
                 })
                 .collect();
-            (survivors, None)
-        };
-        if drawn_x_label_band(&survivors, input, ctx) <= ctx.band_budget {
-            return (ticks_for(&visible, &survivors), warning);
+            Some((survivors, None))
         }
+    };
+    let fits_budget = |(survivors, _): &(Vec<TickLayout>, Option<AxisLabelWarning>)| {
+        drawn_x_label_band(survivors, input, ctx) <= ctx.band_budget
+    };
+    match cull_by_stride(labels, cascade_slot_w, 2..=n, present, fits_budget) {
+        Some((_, visible, (survivors, warning))) => {
+            (expand_survivor_ticks(labels, &visible, &survivors, &tick_position), warning)
+        }
+        None => all_culled(),
     }
-    (ticks_for(&vec![false; n], &[]), None)
+}
+
+/// One `TickLayout` per tick label, placed at `tick_position`: each visible
+/// tick takes the next laid-out survivor in order; every other tick is a
+/// culled, flat copy of its own label.
+fn expand_survivor_ticks(
+    labels: &[String],
+    visible: &[bool],
+    survivors: &[TickLayout],
+    tick_position: &dyn Fn(usize) -> f64,
+) -> Vec<TickLayout> {
+    let mut survivors = survivors.iter();
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| match visible[i].then(|| survivors.next()).flatten() {
+            Some(s) => TickLayout {
+                position: tick_position(i),
+                ..s.clone()
+            },
+            None => TickLayout {
+                position: tick_position(i),
+                label: label.clone(),
+                label_angle: 0.0,
+                elided: false,
+                culled: true,
+                label_font_size: None,
+                is_major: true,
+            },
+        })
+        .collect()
 }
 
 /// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
