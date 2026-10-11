@@ -318,9 +318,12 @@ impl OrdinalScale {
     /// comparing floats.
     pub(crate) fn categorical_placement(&self) -> CategoricalPlacement {
         if self.range_provenance.is_explicit_pixel() {
-            CategoricalPlacement::Absolute(
-                self.data.domain.iter().map(|c| self.data.scale_str(c)).collect(),
-            )
+            let [lo, hi] = self.range_pair();
+            CategoricalPlacement::Absolute {
+                layout: self.data.layout,
+                categories: self.data.domain.len(),
+                range: (lo, hi),
+            }
         } else {
             CategoricalPlacement::PanelExtent {
                 layout: self.data.layout,
@@ -394,7 +397,9 @@ impl OrdinalScale {
     /// The render-side caller (`scene_build::resolve_panel_scales`) translates
     /// every panel but the reference (panel 0, where `offset == 0.0`) by that
     /// panel's own displacement from panel 0's plot-area origin, so the same
-    /// user-specified extent re-anchors inside each panel's own window. The
+    /// user-specified extent re-anchors inside each panel's own window; layout
+    /// shifts each panel axis's placement by that same displacement
+    /// ([`CategoricalPlacement::translated`]), so ticks and marks agree. The
     /// panel-extent fallback needs no such correction: its
     /// [`categorical_placement`](Self::categorical_placement) carries the model
     /// rather than pixels, and layout resolves it against each panel's own rect.
@@ -621,7 +626,7 @@ mod tests {
     /// the absolute form, so the explicit-range rows pass a deliberately
     /// unrelated interval to prove they are ignored.
     fn centers_over(scale: &OrdinalScale, lo: f64, hi: f64) -> Vec<f64> {
-        scale.categorical_placement().centers(lo, hi).into_owned()
+        scale.categorical_placement().centers(lo, hi)
     }
 
     /// An explicit range reports absolute band centers, one per category in
@@ -638,7 +643,7 @@ mod tests {
         .with_explicit_range(true);
         assert!(matches!(
             scale.categorical_placement(),
-            CategoricalPlacement::Absolute(_)
+            CategoricalPlacement::Absolute { .. }
         ));
         // The panel interval is ignored: an explicit range is chart-absolute.
         let centers = centers_over(&scale, 999.0, 1999.0);
@@ -758,6 +763,52 @@ mod tests {
         .with_explicit_range(true);
         scale.translate_explicit_range(0.0);
         assert_eq!(scale.range_pair(), [40.0, 260.0]);
+    }
+
+    /// A translated explicit placement resolves to exactly the centers the
+    /// translated scale gives its marks, compared with f64 `==`: the offset
+    /// moves the range endpoints before the geometry is resolved, as
+    /// `translate_explicit_range` does, so a padded, unevenly divisible range
+    /// lands on the same bits. Adding the offset to the finished centers would
+    /// not (the last assertion), which is why the placement carries the range.
+    #[test]
+    fn a_translated_explicit_placement_is_the_translated_scale() {
+        let domain: Vec<String> = ["a", "b", "c"].iter().map(|c| c.to_string()).collect();
+        let offset = 247.9;
+        for layout in [DiscreteLayout::band(0.13, 0.07, 0.3), DiscreteLayout::point(0.07, 0.5)] {
+            let mut scale = OrdinalScale::new_internal(domain.clone(), vec![10.1, 110.3], layout)
+                .with_explicit_range(true);
+            let placement = scale.categorical_placement();
+            scale.translate_explicit_range(offset);
+            let translated = placement.translated(offset);
+            assert_eq!(translated, scale.categorical_placement(), "{layout:?}");
+            let marks: Vec<f64> = domain.iter().map(|c| scale.scale_internal(c).unwrap()).collect();
+            assert_eq!(translated.centers(0.0, 1.0), marks, "{layout:?}");
+            let shifted: Vec<f64> = placement.centers(0.0, 1.0).iter().map(|c| c + offset).collect();
+            assert_ne!(shifted, marks, "{layout:?}: fixture assumption: shifting finished centers rounds differently");
+        }
+    }
+
+    /// `translated` leaves a placement alone at offset 0, and leaves a
+    /// panel-extent placement alone at any offset: it resolves against each
+    /// panel's own rect already.
+    #[test]
+    fn translated_is_a_no_op_at_offset_zero_and_for_panel_extent() {
+        let explicit = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![40.0, 260.0],
+            DiscreteLayout::UNPADDED,
+        )
+        .with_explicit_range(true)
+        .categorical_placement();
+        assert_eq!(explicit.translated(0.0), explicit);
+        let extent = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![0.0, 1.0],
+            DiscreteLayout::UNPADDED,
+        )
+        .categorical_placement();
+        assert_eq!(extent.translated(100.0), extent);
     }
 
     // ── OrdinalRangeValue round-trip tests ───────────────────────────────────
@@ -953,7 +1004,11 @@ mod tests {
         // The absolute-pixel placement is live: two bands over [0, 100].
         assert_eq!(
             scale.categorical_placement(),
-            CategoricalPlacement::Absolute(vec![25.0, 75.0])
+            CategoricalPlacement::Absolute {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 2,
+                range: (0.0, 100.0),
+            }
         );
     }
 

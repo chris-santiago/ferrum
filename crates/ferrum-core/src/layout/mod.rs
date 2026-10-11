@@ -74,13 +74,6 @@ pub struct LayoutResult {
     /// computed. A deserialized value is therefore `Rect::ZERO`.
     #[serde(skip)]
     pub(crate) plot_region: Rect,
-    /// The bound the x axes' label band was laid out within when the labels
-    /// would otherwise leave no panel drawable (see `reserve_axis_bands`);
-    /// `None` when unbounded. A panel axis laid out again outside layout (an
-    /// independent facet panel's, in `render::scene_build`) uses the same
-    /// bound. In-process only, like `plot_region`.
-    #[serde(skip)]
-    pub(crate) x_label_band_budget: Option<f64>,
     /// `viewport` less the theme's padding, BEFORE any chrome band — the box
     /// the chart-title, legend and axis reservations were taken out of.
     ///
@@ -2747,7 +2740,6 @@ fn lay_out_plot(
         axis_layouts,
         secondary_y_axes,
         warnings,
-        x_band_budget,
     }
 }
 
@@ -2958,9 +2950,6 @@ struct PlotLayout {
     axis_layouts: Vec<AxisLayout>,
     secondary_y_axes: Vec<AxisLayout>,
     warnings: Vec<LayoutWarning>,
-    /// The bound on the x label band the x axes were laid out within
-    /// (`f64::INFINITY` when unbounded; see [`reserve_axis_bands`]).
-    x_band_budget: f64,
 }
 
 /// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
@@ -3270,6 +3259,15 @@ fn layout_panel_axes(
         });
 
         if rect != Rect::ZERO {
+            // This panel's offset from the reference panel's plot area. An
+            // explicit Band/Point/positional-Ordinal range is chart-absolute,
+            // and each facet panel's mark scales re-anchor it by exactly this
+            // offset (GH #70, `render::scene_build::resolve_panel_scales`), so
+            // every axis below translates its placement's range by the same
+            // amount and its labels land on the panel's marks bit for bit.
+            let reference = panels[0].plot_area;
+            let (dx, dy) = (rect.x - reference.x, rect.y - reference.y);
+
             // Axis suppression: when this y axis is not drawn — `chart.axis(y=False)`,
             // or a projected coord that has no Cartesian axes (see `AxesInput::show_y`) —
             // skip emitting the y axis layout entirely. Since #182 the plot area is
@@ -3277,16 +3275,14 @@ fn layout_panel_axes(
             // neither the label band nor the title gutter for chrome this branch omits,
             // so the omission and the reservation now read the same flag.
             if axes.show_y {
+                let mut y_input = axes.y_for_panel(panel_index).clone();
+                y_input.categorical_placement = y_input.categorical_placement.map(|p| p.translated(dy));
                 // Suppress y-axis title on non-leftmost-column facet panels to
                 // avoid duplicating the title in every inter-column gutter —
                 // only the leftmost column's title is needed.
-                let y_input = if col > min_col && spec.facet.is_some() {
-                    let mut modified = axes.y_for_panel(panel_index).clone();
-                    modified.title.set(None);
-                    modified
-                } else {
-                    axes.y_for_panel(panel_index).clone()
-                };
+                if col > min_col && spec.facet.is_some() {
+                    y_input.title.set(None);
+                }
                 let y_label_fs = y_input
                     .overrides
                     .labels
@@ -3329,6 +3325,7 @@ fn layout_panel_axes(
             for (slot_idx, secondary_input) in axes.secondary_y.iter().enumerate() {
                 let mut sec_input = secondary_input.clone();
                 sec_input.orient = AxisOrient::Right;
+                sec_input.categorical_placement = sec_input.categorical_placement.map(|p| p.translated(dy));
                 let existing_translate = sec_input.overrides.placement.translate.unwrap_or(0.0);
                 sec_input.overrides.placement.translate =
                     Some(cumulative_offset + existing_translate);
@@ -3371,16 +3368,14 @@ fn layout_panel_axes(
             }
 
             if axes.show_x {
+                let mut x_input = axes.x_for_panel(panel_index).clone();
+                x_input.categorical_placement = x_input.categorical_placement.map(|p| p.translated(dx));
                 // Suppress x-axis title on non-bottom-row facet panels to
                 // avoid duplicating "Feature value" (or similar) in every
                 // inter-row gutter — only the bottom row's title is needed.
-                let x_input = if row < max_row && spec.facet.is_some() {
-                    let mut modified = axes.x_for_panel(panel_index).clone();
-                    modified.title.set(None);
-                    modified
-                } else {
-                    axes.x_for_panel(panel_index).clone()
-                };
+                if row < max_row && spec.facet.is_some() {
+                    x_input.title.set(None);
+                }
                 let (x_axis, xwarn) = axis::layout_x_axis(
                     &x_input,
                     rect,
@@ -3554,7 +3549,6 @@ pub fn compute_layout(
         axis_layouts,
         secondary_y_axes,
         warnings: plot_warnings,
-        x_band_budget,
     } = lay_out_plot(inner_after_legend, spec, theme, axes, facet_groups, metrics, seam);
 
     // Assemble warnings in the original push order: legend overflow first, then
@@ -3579,7 +3573,6 @@ pub fn compute_layout(
         secondary_y_axes,
         plot_region,
         padded_region,
-        x_label_band_budget: x_band_budget.is_finite().then_some(x_band_budget),
     })
 }
 
@@ -3693,7 +3686,6 @@ mod tests {
             secondary_y_axes: vec![],
             plot_region: Rect::ZERO,
             padded_region: Rect::ZERO,
-            x_label_band_budget: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();

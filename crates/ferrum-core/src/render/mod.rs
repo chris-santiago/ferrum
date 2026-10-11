@@ -833,7 +833,7 @@ pub enum RenderError {
     /// chart-level `configure_axis(label_format=...)` /
     /// `axis_x`/`axis_y`/`axis_y2` path (`config_apply::apply_label_format_to_axis`),
     /// and the per-panel independent-facet-axis path
-    /// (`scene_build::resolve_panel_axes`, `TickFormatMode::Immediate`) the
+    /// (`scene_build::independent_panel_axis_inputs`, `TickFormatMode::Immediate`) the
     /// issue's "both paths" phrasing did not name. Two field-checked surfaces
     /// reach it too, through the same constructor: the colorbar and the size,
     /// shape and stroke-dash legends
@@ -902,7 +902,7 @@ pub enum RenderError {
     /// already-projected pixels through the Cartesian scale it replaced —
     /// destroying the geometry (measured: every polar wedge destroyed, 11
     /// sentinel occurrences in one repro) while still painting a break
-    /// indicator over Cartesian axes that `resolve_panel_axes`
+    /// indicator over Cartesian axes that `route_panel_axes_and_grid`
     /// (`scene_build.rs`) suppresses under this coord, with zero warnings.
     ///
     /// Adjudicated 2026-09-12: the gate extends from `Polar`-only to also
@@ -913,7 +913,7 @@ pub enum RenderError {
     /// resolved x/y scales. `BreakRemap`'s reverse-map runs through the
     /// Cartesian scale it replaces, so for geo geometry there is no
     /// scale-relative position left for it to correct — the break contract
-    /// cannot be honored for `Geo`, and `resolve_panel_axes` suppresses the
+    /// cannot be honored for `Geo`, and `route_panel_axes_and_grid` suppresses the
     /// very Cartesian axes the break indicator would otherwise annotate.
     /// REFUSE MALFORMED is the sound response here, not silent geometry
     /// loss dressed up as a render.
@@ -5678,6 +5678,531 @@ mod orchestration_tests {
             }
         }
     }
+
+    /// Which channel of [`facet_points`] is categorical, over an explicit
+    /// `BandScale(range=[10, 110])`; the other stays numeric.
+    #[derive(Clone, Copy, Debug)]
+    enum BandedChannel {
+        Neither,
+        X,
+        Y,
+    }
+
+    /// Points over `groups`, three rows each, faceted by `p` in a wrap of
+    /// `ncols` columns. Both channels are titled (`x title`, `y title`) and
+    /// numeric (0, 4.5, 9), except the `banded` channel, which places the
+    /// categories `c0`, `c1`, `c2` over an explicit pixel range.
+    fn facet_points(
+        groups: &[&str],
+        ncols: u32,
+        resolve: crate::layout::facet::FacetResolve,
+        banded: BandedChannel,
+    ) -> (ChartSpec, RecordBatch) {
+        let n = groups.len() * 3;
+        let column = |categorical: bool| -> (DataType, arrow::array::ArrayRef) {
+            if categorical {
+                let cats: Vec<String> = (0..n).map(|i| format!("c{}", i % 3)).collect();
+                (DataType::Utf8, Arc::new(StringArray::from(cats)))
+            } else {
+                let numbers: Vec<f64> = (0..n).map(|i| (i % 3) as f64 * 4.5).collect();
+                (DataType::Float64, Arc::new(Float64Array::from(numbers)))
+            }
+        };
+        let (x_banded, y_banded) = (matches!(banded, BandedChannel::X), matches!(banded, BandedChannel::Y));
+        let ((x_type, x), (y_type, y)) = (column(x_banded), column(y_banded));
+        let p: Vec<&str> = groups.iter().flat_map(|g| [*g; 3]).collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", x_type, false),
+                Field::new("y", y_type, false),
+                Field::new("p", DataType::Utf8, false),
+            ])),
+            vec![x, y, Arc::new(StringArray::from(p))],
+        )
+        .unwrap();
+        let channel = |field: &str, banded: bool| EncodingSpec {
+            field: field.into(),
+            title: Some(format!("{field} title")),
+            scale: banded.then(|| crate::spec::encoding::ScaleSpec::Band {
+                domain: None,
+                padding: crate::scale::discrete::BandPadding::default(),
+                align: 0.5,
+                range: Some(vec![10.0, 110.0]),
+            }),
+            ..Default::default()
+        };
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(channel("x", x_banded)),
+                y: Some(channel("y", y_banded)),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "p".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                mode: crate::layout::FacetMode::Wrap { ncols },
+                spacing: None,
+                resolve,
+            }),
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    /// Lays `spec` out at `width`×`height` and builds its scene.
+    fn facet_scene(spec: &ChartSpec, batch: &RecordBatch, width: f64, height: f64) -> (PipelineOutput, ferrum_scene::SceneGraph) {
+        let chart_config = ChartConfig::default();
+        let po = prepare_and_layout(spec, batch, &ThemeInputs::default(), Viewport { width, height }, &chart_config, None)
+            .expect("layout should succeed");
+        let mut warnings = Vec::new();
+        let scene = scene_build::build_scene(
+            spec,
+            &po.prep,
+            &po.layout,
+            &po.applied.effective_theme,
+            &config::RenderConfig::default(),
+            &mut warnings,
+            &chart_config,
+            None,
+        )
+        .expect("scene should build");
+        (po, scene)
+    }
+
+    /// How many times a scene panel's axes draw the text `content`.
+    fn axis_text_count(panel: &ferrum_scene::Panel, content: &str) -> usize {
+        panel
+            .axes
+            .iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Text { content: c, .. } if c == content))
+            .count()
+    }
+
+    /// The pixel of every tick dash a scene panel's axes draw, ascending:
+    /// the x of each vertical dash (`along_x`) or the y of each horizontal
+    /// one. A dash's endpoints sit on its tick's position exactly; the axis
+    /// domain lines, the only other axis lines, span the plot.
+    fn tick_dashes(panel: &ferrum_scene::Panel, along_x: bool) -> Vec<f64> {
+        let mut out: Vec<f64> = panel
+            .axes
+            .iter()
+            .filter_map(|n| match *n {
+                ferrum_scene::SceneNode::Line { x1, y1, x2, y2, .. } => {
+                    let (at, across, along) = if along_x { (x1, x2, y2 - y1) } else { (y1, y2, x2 - x1) };
+                    (at == across && along.abs() < 20.0).then_some(at)
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out
+    }
+
+    /// The tick positions layout laid out for panel `panel_index`'s x axis
+    /// (`along_x`) or y axis, ascending.
+    fn laid_out_ticks(layout: &crate::layout::LayoutResult, panel_index: usize, along_x: bool) -> Vec<f64> {
+        use crate::layout::AxisOrient::{Bottom, Left};
+        let orient = if along_x { Bottom } else { Left };
+        let mut out: Vec<f64> = layout
+            .axes
+            .iter()
+            .filter(|a| a.panel_index == panel_index && a.orient == orient)
+            .flat_map(|a| a.ticks.iter().map(|t| t.position))
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out
+    }
+
+    /// The distinct centers of a scene panel's points along x or y,
+    /// ascending.
+    fn point_centers(panel: &ferrum_scene::Panel, along_x: bool) -> Vec<f64> {
+        let mut out: Vec<f64> = panel
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match *n {
+                ferrum_scene::SceneNode::Circle { cx, cy, .. } => Some(if along_x { cx } else { cy }),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out.dedup();
+        out
+    }
+
+    /// An independent facet panel draws exactly the axes layout laid out for
+    /// it, so an x title shows only on the bottom row and a y title only on
+    /// the left column, as on shared facets: two of each on a 2×2 grid. In a
+    /// wrap whose last row is short, the upper panel with no panel below it
+    /// (B) draws no x title either. Every panel's tick dashes are the ticks
+    /// layout laid out for it, at the same pixels.
+    #[test]
+    fn independent_facets_draw_the_axes_layout_lays_out() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let four = ["A", "B", "C", "D"];
+        let cases: [(FacetResolve, &[&str], [usize; 2]); 5] = [
+            (FacetResolve { x: Shared, y: Shared }, &four, [2, 2]),
+            (FacetResolve { x: Independent, y: Shared }, &four, [2, 2]),
+            (FacetResolve { x: Shared, y: Independent }, &four, [2, 2]),
+            (FacetResolve { x: Independent, y: Independent }, &four, [2, 2]),
+            (FacetResolve { x: Independent, y: Independent }, &four[..3], [1, 2]),
+        ];
+        for (resolve, groups, [x_titles, y_titles]) in cases {
+            let label = format!("{resolve:?} over {} panels", groups.len());
+            let (spec, batch) = facet_points(groups, 2, resolve, BandedChannel::Neither);
+            let (po, scene) = facet_scene(&spec, &batch, 420.0, 360.0);
+            assert_eq!(scene.panels.len(), groups.len(), "{label}: every panel renders");
+            let titles = |t: &str| -> Vec<usize> { scene.panels.iter().map(|p| axis_text_count(p, t)).collect() };
+            assert_eq!(titles("x title").iter().sum::<usize>(), x_titles, "{label}: x titles {:?}", titles("x title"));
+            assert_eq!(titles("y title").iter().sum::<usize>(), y_titles, "{label}: y titles {:?}", titles("y title"));
+            let bottom_row = po.layout.panels.iter().map(|p| p.row).max();
+            for (i, panel) in scene.panels.iter().enumerate() {
+                let p = &po.layout.panels[i];
+                assert_eq!(axis_text_count(panel, "x title"), usize::from(Some(p.row) == bottom_row), "{label}: panel {i}");
+                assert_eq!(axis_text_count(panel, "y title"), usize::from(p.col == 0), "{label}: panel {i}");
+                for along_x in [true, false] {
+                    assert_eq!(
+                        tick_dashes(panel, along_x),
+                        laid_out_ticks(&po.layout, i, along_x),
+                        "{label}: panel {i} draws the {} ticks layout laid out",
+                        if along_x { "x" } else { "y" },
+                    );
+                }
+            }
+        }
+    }
+
+    /// An explicit `BandScale(range=[10, 110])` or `PointScale(range=[10,
+    /// 110])` is chart-absolute, so each facet panel re-anchors it by its
+    /// offset from the first panel, and the panel's tick dashes sit on its
+    /// points bit for bit (f64 `==`): along x with two columns and along y
+    /// with two rows, whether the channel is independent or shared.
+    #[test]
+    fn explicit_range_facet_ticks_sit_on_their_points_in_every_panel() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let point = crate::spec::encoding::ScaleSpec::Point {
+            domain: None,
+            padding: None,
+            align: 0.5,
+            reverse: false,
+            range: Some(vec![10.0, 110.0]),
+        };
+        let cases = [("band", Independent), ("band", Shared), ("point", Independent), ("point", Shared)];
+        for (scale, resolve) in cases {
+            for (banded, ncols) in [(BandedChannel::X, 2), (BandedChannel::Y, 1)] {
+                let along_x = matches!(banded, BandedChannel::X);
+                let facet_resolve = if along_x {
+                    FacetResolve { x: resolve, y: Shared }
+                } else {
+                    FacetResolve { x: Shared, y: resolve }
+                };
+                let (mut spec, batch) = facet_points(&["A", "B"], ncols, facet_resolve, banded);
+                if scale == "point" {
+                    let channel = if along_x { spec.encoding.x.as_mut() } else { spec.encoding.y.as_mut() };
+                    if let Some(enc) = channel {
+                        enc.scale = Some(point.clone());
+                    }
+                }
+                let (po, scene) = facet_scene(&spec, &batch, 600.0, 600.0);
+                let label = format!("{scale} {resolve:?} {banded:?}");
+                let (first, second) = (po.layout.panels[0].plot_area, po.layout.panels[1].plot_area);
+                let offset = if along_x { second.x - first.x } else { second.y - first.y };
+                assert!(offset > 100.0, "{label}: fixture assumption: the second panel is offset ({offset})");
+                assert_eq!(scene.panels.len(), 2);
+                for (i, panel) in scene.panels.iter().enumerate() {
+                    let points = point_centers(panel, along_x);
+                    assert_eq!(points.len(), 3, "{label}: panel {i} draws three categories");
+                    assert_eq!(tick_dashes(panel, along_x), points, "{label}: panel {i}'s ticks sit on its points");
+                }
+            }
+        }
+    }
+
+    /// The secondary y axis of an `independent_y` layer re-anchors an
+    /// explicit range onto each facet panel as its marks do: with the
+    /// layer's categories over `BandScale(range=[10, 110])` and two facet
+    /// rows, the secondary tick dashes every panel draws sit on that layer's
+    /// own points bit for bit (f64 `==`).
+    #[test]
+    fn an_explicit_range_secondary_y_sits_on_its_points_in_every_facet_panel() {
+        use crate::spec::layer::Layer;
+        let (mut spec, batch) = facet_points(
+            &["A", "B"],
+            1,
+            crate::layout::facet::FacetResolve::default(),
+            BandedChannel::Neither,
+        );
+        let batch = {
+            let cats: Vec<String> = (0..batch.num_rows()).map(|i| format!("c{}", i % 3)).collect();
+            let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+            fields.push(Field::new("cat", DataType::Utf8, false));
+            let mut columns = batch.columns().to_vec();
+            columns.push(Arc::new(StringArray::from(cats)));
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        };
+        let primary = Layer { mark: Mark::Point, ..Default::default() };
+        let secondary = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                y: Some(EncodingSpec {
+                    field: "cat".into(),
+                    scale: Some(crate::spec::encoding::ScaleSpec::Band {
+                        domain: None,
+                        padding: crate::scale::discrete::BandPadding::default(),
+                        align: 0.5,
+                        range: Some(vec![10.0, 110.0]),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            independent_y: true,
+            ..Default::default()
+        };
+        spec.layers = Some(vec![primary, secondary]);
+        let (po, scene) = facet_scene(&spec, &batch, 600.0, 600.0);
+        assert_eq!(scene.panels.len(), 2);
+        let offset = po.layout.panels[1].plot_area.y - po.layout.panels[0].plot_area.y;
+        assert!(offset > 100.0, "fixture assumption: the second panel is offset ({offset})");
+        for (i, panel) in scene.panels.iter().enumerate() {
+            let mut secondary_points: Vec<f64> = panel
+                .marks
+                .iter()
+                .filter(|b| b.y_slot == 1)
+                .flat_map(|b| b.nodes.iter())
+                .filter_map(|n| match *n {
+                    ferrum_scene::SceneNode::Circle { cy, .. } => Some(cy),
+                    _ => None,
+                })
+                .collect();
+            secondary_points.sort_by(f64::total_cmp);
+            secondary_points.dedup();
+            let mut drawn_ticks: Vec<f64> = panel
+                .axes
+                .iter()
+                .filter_map(|n| match n {
+                    ferrum_scene::SceneNode::Group { attrs, children }
+                        if attrs.iter().any(|(k, v)| k == "y_slot" && v == "1") =>
+                    {
+                        Some(children)
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|n| match *n {
+                    ferrum_scene::SceneNode::Line { x1, y1, x2, y2, .. } if y1 == y2 && (x2 - x1).abs() < 20.0 => Some(y1),
+                    _ => None,
+                })
+                .collect();
+            drawn_ticks.sort_by(f64::total_cmp);
+            assert_eq!(secondary_points.len(), 3, "panel {i}: the secondary layer draws three categories");
+            assert_eq!(drawn_ticks, secondary_points, "panel {i}: the drawn secondary ticks sit on the secondary points");
+        }
+    }
+
+    /// A hidden axis stays hidden on independent facets: with
+    /// `axis(x=False)` on an independent x, no panel draws an x tick dash,
+    /// label or title (every axis text sits left of the plot, on the y axis),
+    /// and with `axis(y=False)` on an independent y, no panel draws a y one
+    /// (every axis text sits under the plot).
+    #[test]
+    fn a_hidden_axis_stays_hidden_on_independent_facets() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        for hide_x in [true, false] {
+            let resolve = if hide_x {
+                FacetResolve { x: Independent, y: Shared }
+            } else {
+                FacetResolve { x: Shared, y: Independent }
+            };
+            let (mut spec, batch) = facet_points(&["A", "B", "C", "D"], 2, resolve, BandedChannel::Neither);
+            if hide_x {
+                spec.axis_x = Some(false);
+            } else {
+                spec.axis_y = Some(false);
+            }
+            let (_, scene) = facet_scene(&spec, &batch, 420.0, 360.0);
+            let hidden = if hide_x { "x" } else { "y" };
+            assert_eq!(scene.panels.len(), 4);
+            for (i, panel) in scene.panels.iter().enumerate() {
+                let plot = panel.plot_area;
+                assert!(tick_dashes(panel, hide_x).is_empty(), "{hidden} hidden: panel {i} draws no {hidden} tick dash");
+                let texts: Vec<(f64, f64)> = panel
+                    .axes
+                    .iter()
+                    .filter_map(|n| match *n {
+                        ferrum_scene::SceneNode::Text { x, y, .. } => Some((x, y)),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!texts.is_empty(), "fixture assumption: panel {i} draws its other axis");
+                for (x, y) in texts {
+                    let on_other_axis = if hide_x { x < plot.x } else { y > plot.y + plot.h };
+                    assert!(on_other_axis, "{hidden} hidden: panel {i} draws axis text at ({x}, {y}) off its other axis");
+                }
+            }
+        }
+    }
+
+    /// A facet panel that layout collapses (too small to draw a plot) draws
+    /// no axis, though it has rows, whether its channels are independent or
+    /// shared: layout lays no axis out for it and the scene draws no panel
+    /// for it.
+    #[test]
+    fn a_collapsed_facet_panel_draws_no_axis() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        for resolve in [FacetResolve { x: Independent, y: Independent }, FacetResolve { x: Shared, y: Shared }] {
+            let (spec, batch) = facet_points(&["A", "B", "C", "D"], 2, resolve.clone(), BandedChannel::Neither);
+            let (po, scene) = facet_scene(&spec, &batch, 120.0, 90.0);
+            let collapsed: Vec<usize> = po
+                .layout
+                .warnings
+                .iter()
+                .filter_map(|w| match w {
+                    crate::layout::LayoutWarning::PanelCollapsed { panel_index } => Some(*panel_index),
+                    _ => None,
+                })
+                .collect();
+            assert!(!collapsed.is_empty(), "{resolve:?}: fixture assumption: a panel collapses");
+            for &i in &collapsed {
+                assert!(po.layout.axes.iter().all(|a| a.panel_index != i), "{resolve:?}: panel {i} lays out no axis");
+                assert!(scene.panels.iter().all(|p| p.id != i), "{resolve:?}: panel {i} is not drawn");
+            }
+        }
+    }
+
+    /// An independent y whose panels share one y domain draws, in every
+    /// panel, the axis the shared y draws: each panel's y input carries the
+    /// chart's own tick labels and projection, in the same order. So under
+    /// `label_overlap="parity"`, which keeps every other label counting from
+    /// the first, each panel keeps the same values as the shared chart. The
+    /// tick count is even, so a panel that reversed its labels would keep the
+    /// other half.
+    #[test]
+    fn an_independent_y_over_one_domain_draws_the_shared_y_axis() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let kept_y_labels = |y: crate::layout::ResolveMode| {
+            let (mut spec, batch) = facet_points(&["A", "B"], 2, FacetResolve { x: Shared, y }, BandedChannel::Neither);
+            if let Some(enc) = spec.encoding.y.as_mut() {
+                enc.axis = Some(Box::new(AxisStyleSpec { label_overlap: Some("parity".into()), ..Default::default() }));
+            }
+            let (po, scene) = facet_scene(&spec, &batch, 600.0, 200.0);
+            let kept: Vec<Vec<String>> = scene
+                .panels
+                .iter()
+                .map(|p| {
+                    p.axes
+                        .iter()
+                        .filter_map(|n| match n {
+                            ferrum_scene::SceneNode::Text { content, style, .. }
+                                if style.anchor == ferrum_scene::TextAnchor::End =>
+                            {
+                                Some(content.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            (po, kept)
+        };
+        let (shared, shared_kept) = kept_y_labels(Shared);
+        let (independent, independent_kept) = kept_y_labels(Independent);
+        let labels = &shared.prep.axes.y.tick_labels;
+        assert_eq!(labels.len() % 2, 0, "fixture assumption: an even tick count, so a reversed order keeps others ({labels:?})");
+        assert_eq!(independent.prep.axes.panels.len(), 2);
+        for (i, panel) in independent.prep.axes.panels.iter().enumerate() {
+            let own = panel.y.as_ref().expect("an independent y input per panel");
+            assert_eq!(own.tick_labels, independent.prep.axes.y.tick_labels, "panel {i}: tick labels");
+            assert_eq!(own.tick_projection, independent.prep.axes.y.tick_projection, "panel {i}: tick projection");
+        }
+        let every_other: Vec<String> = labels.iter().step_by(2).cloned().collect();
+        assert_eq!(shared_kept[0], every_other, "fixture assumption: parity keeps every other label");
+        assert_eq!(independent_kept, shared_kept);
+    }
+
+    /// A grid facet (row × column) with one empty combination under an
+    /// independent x renders. The empty panel draws nothing, so it gets no
+    /// axis inputs of its own and reserves nothing: the x band is the
+    /// tallest one the drawn panels need.
+    #[test]
+    fn an_empty_grid_cell_under_an_independent_x_reserves_nothing() {
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let cells = [("A", "r1"), ("B", "r1"), ("A", "r2")];
+        let (mut cats, mut vals, mut cols, mut rows) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (col, row) in cells {
+            for i in 0..4 {
+                cats.push(format!("{col}{row}-category-{i:02}"));
+                vals.push(i as f64);
+                cols.push(col);
+                rows.push(row);
+            }
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("cat", DataType::Utf8, false),
+                Field::new("val", DataType::Float64, false),
+                Field::new("panel", DataType::Utf8, false),
+                Field::new("r", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vals)),
+                Arc::new(StringArray::from(cols)),
+                Arc::new(StringArray::from(rows)),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            facet: Some(crate::layout::FacetSpec {
+                field: "panel".into(),
+                row: Some("r".into()),
+                title: None,
+                row_title: None,
+                sort: None,
+                row_sort: None,
+                mode: crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve { x: Independent, y: Shared },
+            }),
+            ..Default::default()
+        };
+        let (po, scene) = facet_scene(&spec, &batch, 900.0, 400.0);
+        let groups = &po.prep.facet_groups;
+        assert_eq!(groups.len(), 4, "fixture assumption: one panel per row × column pair");
+        let empty = groups
+            .iter()
+            .position(|g| g.key.value == "B" && g.row_key.as_ref().is_some_and(|r| r.value == "r2"))
+            .expect("the empty combination is a panel");
+        for (i, inputs) in po.prep.axes.panels.iter().enumerate() {
+            if i == empty {
+                assert_eq!(*inputs, crate::layout::PanelAxisInputs::default(), "the empty panel has no inputs");
+            } else {
+                assert_eq!(inputs.x.as_ref().map(|x| x.tick_labels.len()), Some(4), "panel {i} has its own x");
+            }
+        }
+        assert_eq!(scene.panels.len(), 3, "the empty panel draws nothing");
+        let drawn: Vec<DrawnPanelLabels> = scene.panels.iter().map(drawn_panel_labels).collect();
+        let theme = &po.applied.effective_theme;
+        let (reserved, want) = (reserved_x_band(&po.layout, &po.prep, theme), drawn_x_band(&drawn, theme));
+        assert!((reserved - want).abs() < 1e-6, "the reserved x band ({reserved}) is the drawn panels' ({want})");
+    }
+
     /// A 1x2 facet grid keeps the first two of three groups and drops the
     /// third. Under an independent y the dropped group's labels never draw,
     /// so they reserve nothing: the third group's y values run to a billion
@@ -6076,13 +6601,9 @@ mod orchestration_tests {
                 .map(|a| a.ticks.len())
                 .sum();
             if budgeted {
-                assert!(layout.x_label_band_budget.is_some(), "{x_resolve:?}: laid out within a band budget");
                 assert!(drawn_count < axis_count, "{x_resolve:?}: the cascade culled labels to fit");
             } else {
-                assert!(
-                    layout.x_label_band_budget.is_none() && drawn_count == axis_count,
-                    "each independent panel's own categories fit without a budget",
-                );
+                assert_eq!(drawn_count, axis_count, "each independent panel's own categories fit without a budget");
             }
             let gutter = crate::layout::axis::compute_x_title_width(
                 &po.prep.axes.x,
@@ -6169,8 +6690,8 @@ mod orchestration_tests {
     /// `#146` / spec §4.3 — THE DEFECT. An independent-x facet axis must honor
     /// `Theme(cull_threshold=)` exactly as the shared-x path does.
     ///
-    /// `scene_build::resolve_panel_axes` rebuilds a per-panel x axis for an
-    /// independent-x facet, and used to pass the compile-time
+    /// An independent-x facet panel's x axis is laid out per panel, and the
+    /// per-panel layout used to pass the compile-time
     /// `DEFAULT_CULL_THRESHOLD` into `layout_x_axis` where every other call
     /// site passes the theme's own value. The theme key was therefore entirely
     /// INERT on that path: a dense axis rendered the same label count at every
@@ -6279,7 +6800,7 @@ mod orchestration_tests {
     }
 
     /// #133, end to end through the real per-panel independent-facet-axis
-    /// surface (`scene_build::resolve_panel_axes`'s `TickFormatMode::Immediate`
+    /// surface (`scene_build::independent_panel_axis_inputs`'s `TickFormatMode::Immediate`
     /// path) — the third surface the issue's "both paths" phrasing did not
     /// name. A faceted chart with `resolve.x = "independent"` and a
     /// time-typed per-channel `x` format on a NON-temporal `x` column must

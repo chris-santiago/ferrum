@@ -97,8 +97,6 @@
 //! The batch's docs task carries the dated reconciliation note in
 //! `ferrum-spec.md`.
 
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 /// d3's default `align` for band and point scales: leftover pixels (when the
@@ -576,8 +574,13 @@ impl PaddingMeaning {
 /// from:
 ///
 /// - **[`Absolute`](Self::Absolute)** — the user supplied `range=`. That range
-///   is chart-absolute by design (#39 phase 2), so the centers are already
-///   resolved when the scale is built and travel to layout as pixels.
+///   is chart-absolute by design (#39 phase 2), so it travels to layout as the
+///   range's own endpoints, already in pixels, together with the model. The
+///   centers are resolved from those endpoints with the arithmetic the scale
+///   uses for its marks, so a facet panel's re-anchored range
+///   ([`translated`](Self::translated)) lands its labels on the panel's marks
+///   bit for bit (GH #70): the offset moves the endpoints, never the finished
+///   centers, which would round differently.
 /// - **[`PanelExtent`](Self::PanelExtent)** — the range is the plot area, which
 ///   is not known when the axis input is built: the provisional scale pass
 ///   resolves against `[0, 1]` (`prepare::prepare_render_inputs`) precisely
@@ -593,10 +596,11 @@ impl PaddingMeaning {
 /// padded no-range `BandScale` drew its bars from this module and its tick
 /// labels from a different model, and the two disagreed by pixels (~4.8px at
 /// `padding = 0.1` over four categories on a 600px canvas).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum CategoricalPlacement {
-    /// Chart-absolute band centers, one per domain category in order.
-    Absolute(Vec<f64>),
+    /// The scale's d3 model and domain size over its chart-absolute pixel
+    /// range, given as the range's first and last endpoints.
+    Absolute { layout: DiscreteLayout, categories: usize, range: (f64, f64) },
     /// The scale's d3 model plus its domain size, to be resolved against the
     /// panel's pixel interval at layout time.
     PanelExtent { layout: DiscreteLayout, categories: usize },
@@ -606,17 +610,15 @@ impl CategoricalPlacement {
     /// The absolute center pixel of every category, in domain order, over the
     /// axis's pixel interval `[lo, hi]`.
     ///
-    /// `lo`/`hi` are ignored by [`Absolute`](Self::Absolute), whose pixels are
-    /// already chart-absolute — borrowed rather than rebuilt, so an
-    /// explicit-range axis allocates nothing here.
-    pub(crate) fn centers(&self, lo: f64, hi: f64) -> Cow<'_, [f64]> {
-        match self {
-            CategoricalPlacement::Absolute(centers) => Cow::Borrowed(centers),
-            CategoricalPlacement::PanelExtent { layout, categories } => {
-                let g = layout.geometry(*categories, lo, hi);
-                Cow::Owned((0..*categories).map(|i| g.position(i)).collect())
-            }
-        }
+    /// `lo`/`hi` are ignored by [`Absolute`](Self::Absolute), which resolves
+    /// over its own chart-absolute range.
+    pub(crate) fn centers(&self, lo: f64, hi: f64) -> Vec<f64> {
+        let (layout, categories, (lo, hi)) = match *self {
+            CategoricalPlacement::Absolute { layout, categories, range } => (layout, categories, range),
+            CategoricalPlacement::PanelExtent { layout, categories } => (layout, categories, (lo, hi)),
+        };
+        let g = layout.geometry(categories, lo, hi);
+        (0..categories).map(|i| g.position(i)).collect()
     }
 
     /// How many centers [`centers`](Self::centers) yields — the scale's domain
@@ -625,8 +627,25 @@ impl CategoricalPlacement {
     /// (`AxisInput::debug_assert_placement_invariants`).
     pub(crate) fn len(&self) -> usize {
         match self {
-            CategoricalPlacement::Absolute(centers) => centers.len(),
-            CategoricalPlacement::PanelExtent { categories, .. } => *categories,
+            CategoricalPlacement::Absolute { categories, .. }
+            | CategoricalPlacement::PanelExtent { categories, .. } => *categories,
+        }
+    }
+
+    /// This placement on a facet panel `offset` pixels from the reference
+    /// panel along the axis: an [`Absolute`](Self::Absolute) range has both
+    /// endpoints shifted by `offset`, as the panel's mark scale is
+    /// (`OrdinalScale::translate_explicit_range`), so the axis and the marks
+    /// resolve the same geometry over the same range. A
+    /// [`PanelExtent`](Self::PanelExtent) placement already resolves against
+    /// each panel's own rect and is returned as is, and so is any placement
+    /// at `offset == 0.0`.
+    pub(crate) fn translated(self, offset: f64) -> Self {
+        match self {
+            CategoricalPlacement::Absolute { layout, categories, range: (lo, hi) } if offset != 0.0 => {
+                CategoricalPlacement::Absolute { layout, categories, range: (lo + offset, hi + offset) }
+            }
+            _ => self,
         }
     }
 }

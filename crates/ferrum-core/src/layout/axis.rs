@@ -670,9 +670,10 @@ pub struct AxisInput {
     /// How a **categorical** axis places its categories: the resolved ordinal
     /// scale's own band geometry, so tick labels and grid lines land on the
     /// pixels the marks land on (spec §7, F-L04-03/GH #67). `Some` for every
-    /// ordinal positional scale — carrying either chart-absolute centers (a
-    /// user-supplied `range=`) or the d3 model to resolve against this panel's
-    /// rect (the panel-extent fallback); see [`CategoricalPlacement`].
+    /// ordinal positional scale — carrying the d3 model with either its
+    /// chart-absolute pixel range (a user-supplied `range=`, re-anchored onto
+    /// each facet panel by layout) or no range, to resolve against this
+    /// panel's rect (the panel-extent fallback); see [`CategoricalPlacement`].
     ///
     /// `None` for continuous axes, which place through
     /// [`tick_projection`](Self::tick_projection), and for the scale-less
@@ -4428,9 +4429,11 @@ mod tests {
     #[test]
     fn x_axis_uses_absolute_placement_when_present() {
         let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
-        input.categorical_placement = Some(CategoricalPlacement::Absolute(vec![
-            67.5, 122.5, 177.5, 232.5,
-        ]));
+        input.categorical_placement = Some(CategoricalPlacement::Absolute {
+            layout: crate::scale::discrete::DiscreteLayout::UNPADDED,
+            categories: 4,
+            range: (40.0, 260.0),
+        });
         let m = MockMetrics {
             measure: fixed_width(4.0),
             line_h_factor: 1.2,
@@ -4519,9 +4522,11 @@ mod tests {
     #[test]
     fn y_axis_uses_absolute_placement_when_present() {
         let mut input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
-        input.categorical_placement = Some(CategoricalPlacement::Absolute(vec![
-            67.5, 122.5, 177.5, 232.5,
-        ]));
+        input.categorical_placement = Some(CategoricalPlacement::Absolute {
+            layout: crate::scale::discrete::DiscreteLayout::UNPADDED,
+            categories: 4,
+            range: (40.0, 260.0),
+        });
         let m = mock(10.0);
         let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();

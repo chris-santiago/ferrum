@@ -1370,10 +1370,16 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
+        let placement = scale.categorical_placement().expect("an ordinal scale has a placement");
         assert_eq!(
-            scale.categorical_placement(),
-            Some(CategoricalPlacement::Absolute(vec![95.0, 205.0]))
+            placement,
+            CategoricalPlacement::Absolute {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 2,
+                range: (40.0, 260.0),
+            }
         );
+        assert_eq!(placement.centers(0.0, 1.0), vec![95.0, 205.0]);
         assert_eq!(scale.bandwidth(), Some(110.0));
     }
 
@@ -1391,10 +1397,16 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
+        let placement = scale.categorical_placement().expect("an ordinal scale has a placement");
         assert_eq!(
-            scale.categorical_placement(),
-            Some(CategoricalPlacement::Absolute(vec![205.0, 95.0]))
+            placement,
+            CategoricalPlacement::Absolute {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 2,
+                range: (260.0, 40.0),
+            }
         );
+        assert_eq!(placement.centers(0.0, 1.0), vec![205.0, 95.0]);
         assert_eq!(scale.bandwidth(), Some(110.0));
     }
 
@@ -1445,10 +1457,16 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
+        let placement = scale.categorical_placement().expect("an ordinal scale has a placement");
         assert_eq!(
-            scale.categorical_placement(),
-            Some(CategoricalPlacement::Absolute(vec![60.0, 160.0]))
+            placement,
+            CategoricalPlacement::Absolute {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 2,
+                range: (10.0, 210.0),
+            }
         );
+        assert_eq!(placement.centers(0.0, 1.0), vec![60.0, 160.0]);
         assert_eq!(scale.bandwidth(), Some(100.0));
     }
 

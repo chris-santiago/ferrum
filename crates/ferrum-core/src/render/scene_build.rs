@@ -146,11 +146,6 @@ pub fn build_scene(
     // panel is empty (no marks, hence no bindings to route anyway).
     let mut resolved_y_slots: Option<scale_resolve::YScaleSlots> = None;
 
-    // Heuristic text metrics for per-panel independent axis layout rebuilds.
-    // Constructed once outside the panel loop; FontdueMetrics has no mutable
-    // state so sharing it across panels is correct.
-    let facet_metrics = super::font::FontdueMetrics::new();
-
     // GH #70: reference plot area for re-anchoring an explicit Band/Point/
     // positional-Ordinal pixel range per facet panel (see
     // `resolve_panel_scales` and `OrdinalScale::translate_explicit_range`).
@@ -231,6 +226,12 @@ pub fn build_scene(
     // empty, exactly as on one that draws.
     let layer_styles = resolve_layer_styles(spec, prep, theme)?;
 
+    // Whether each facet channel resolves its scale per panel, which decides
+    // how a panel's axes are routed (`route_panel_axes_and_grid`).
+    let resolve = spec.facet.as_ref().map(|f| &f.resolve);
+    let x_independent = resolve.is_some_and(|r| r.x == ResolveMode::Independent);
+    let y_independent = resolve.is_some_and(|r| r.y == ResolveMode::Independent);
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel {
@@ -303,22 +304,21 @@ pub fn build_scene(
             resolved_y_slots = Some(scales.y_slots.clone());
         }
 
-        // Per-panel axes — collected from the globally-computed layout.
-        // When a facet channel requests independent scale resolution, the global
-        // axis layout is replaced with a fresh per-panel layout derived from the
-        // per-panel scales resolved above (`resolve_panel_axes`).
+        // Per-panel axes, as layout laid them out: an independent facet
+        // channel's axis from the panel's own inputs, a shared one's from the
+        // chart's, each with its explicit range re-anchored onto the panel.
         let panel_axes_layout: Vec<&crate::layout::AxisLayout> = layout
             .axes
             .iter()
             .filter(|a| a.panel_index == panel_idx)
             .collect();
-        let panel_x_axis_global = panel_axes_layout.iter().copied().find(|a| {
+        let panel_x_axis = panel_axes_layout.iter().copied().find(|a| {
             matches!(
                 a.orient,
                 crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
             )
         });
-        let panel_y_axis_global = panel_axes_layout.iter().copied().find(|a| {
+        let panel_y_axis = panel_axes_layout.iter().copied().find(|a| {
             matches!(
                 a.orient,
                 crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right
@@ -334,26 +334,6 @@ pub fn build_scene(
             .iter()
             .filter(|a| a.panel_index == panel_idx)
             .collect();
-
-        // Independent-axis rebuild (MOD-09): owns the per-panel layouts so the
-        // effective references below stay valid for the rest of the block.
-        let panel_axes = resolve_panel_axes(
-            spec,
-            &scales,
-            prep,
-            panel,
-            panel_idx,
-            theme,
-            &facet_metrics,
-            layout.x_label_band_budget.unwrap_or(f64::INFINITY),
-        );
-
-        // Resolve the effective per-panel axis references: use the freshly-built
-        // independent layout when available, otherwise the global shared one.
-        let panel_x_axis: Option<&AxisLayout> =
-            panel_axes.independent_x.as_ref().or(panel_x_axis_global);
-        let panel_y_axis: Option<&AxisLayout> =
-            panel_axes.independent_y.as_ref().or(panel_y_axis_global);
 
         // Structural features: this panel's axis breaks, plus — on the
         // reference panel only — the chart's inset bodies. Resolved BEFORE the
@@ -423,8 +403,8 @@ pub fn build_scene(
             panel_y_axis,
             &panel_secondary_y,
             &secondary_slots,
-            panel_axes.x_independent,
-            panel_axes.y_independent,
+            x_independent,
+            y_independent,
             theme,
             chart_config,
             &break_remaps,
@@ -895,8 +875,8 @@ fn independent_axis_input(
 /// ([`crate::layout::FacetMode::kept_panel_count`]); a panel a grid drops
 /// draws nothing.
 /// The one place those inputs are decided: layout lays each
-/// panel's axes out and reserves its bands from them, and
-/// [`resolve_panel_axes`] draws them.
+/// panel's axes out from them and reserves its bands for them, and the
+/// panel draws the axes layout laid out.
 ///
 /// Each panel's scales are resolved through the same [`resolve_panel_scales`]
 /// seam the panel render uses, over the placeholder `(0, 1)` pixel range the
@@ -1203,114 +1183,6 @@ fn resolve_layer_y_scale(
     )?;
     y.translate_explicit_ordinal_range(y_offset);
     Ok(y)
-}
-
-/// Per-panel axis layouts for the independent-resolve facet case (MOD-09).
-///
-/// When a facet channel requests [`ResolveMode::Independent`], the x and/or y
-/// axis is rebuilt from this panel's freshly-resolved scales (its pixel range
-/// and tick labels differ per panel). Shared channels keep the global layout, so
-/// the matching field stays `None` and the caller falls back to the global axis.
-///
-/// The struct OWNS the rebuilt layouts so references into them stay valid for the
-/// rest of the panel block; `*_independent` mirror the facet resolve mode so the
-/// caller routes axes the same way the inline code did.
-struct PanelAxes {
-    independent_x: Option<AxisLayout>,
-    independent_y: Option<AxisLayout>,
-    x_independent: bool,
-    y_independent: bool,
-}
-
-/// Lay out the per-panel independent axes (MOD-09) over the panel's real rect,
-/// from the axis inputs [`independent_panel_axis_inputs`] resolved for this
-/// panel (carried on `prep.axes.panels`). A non-independent channel yields
-/// `None`, so the caller keeps the global layout for it. A time-typed format
-/// on a non-temporal independent scale (#133) is refused when those inputs
-/// are resolved, before layout. `x_band_budget` is the bound layout laid
-/// the x axes' labels out within ([`LayoutResult::x_label_band_budget`]).
-#[allow(clippy::too_many_arguments)]
-fn resolve_panel_axes(
-    spec: &ChartSpec,
-    scales: &scale_resolve::ResolvedScales,
-    prep: &PreparedInputs,
-    panel: &crate::layout::PanelLayout,
-    panel_idx: usize,
-    theme: &ThemeInputs,
-    facet_metrics: &super::font::FontdueMetrics,
-    x_band_budget: f64,
-) -> PanelAxes {
-    // Independent-axis override: when the facet spec requests independent
-    // resolution for x or y, rebuild that channel's AxisLayout from the
-    // per-panel scales. Shared channels keep the global layout as-is.
-    let x_independent = spec
-        .facet
-        .as_ref()
-        .map(|f| f.resolve.x == ResolveMode::Independent)
-        .unwrap_or(false);
-    let y_independent = spec
-        .facet
-        .as_ref()
-        .map(|f| f.resolve.y == ResolveMode::Independent)
-        .unwrap_or(false);
-
-    // The panel's own axis inputs are the ones layout laid the panel out
-    // with and reserved its bands for (`prep.axes.panels`, resolved once by
-    // `independent_panel_axis_inputs`). Only the band placement is taken
-    // from this panel's real scale: an explicit Band/Point range is
-    // chart-absolute, re-anchored onto each panel (GH #70) just as the
-    // panel's marks are.
-    let independent_x = if x_independent {
-        let mut x_input = prep.axes.x_for_panel(panel_idx).clone();
-        x_input.categorical_placement = scales.x.categorical_placement();
-        // `#146`/spec §4.3: `LabelBandCtx::for_axis` is the one production
-        // derivation of the panel's font size, gap policy, tick size and
-        // metrics, so this site honors `Theme(cull_threshold=)` and
-        // `Theme(cull_labels=)` exactly as the shared-axis layout does.
-        let ctx = crate::layout::LabelBandCtx::for_axis(&x_input, theme, facet_metrics)
-            .with_band_budget(x_band_budget);
-        let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
-            &x_input,
-            panel.plot_area,
-            panel_idx,
-            theme.typography.title_font_size,
-            theme.padding.axis_title_padding,
-            &ctx,
-        );
-        Some(new_x_layout)
-    } else {
-        None
-    };
-
-    let independent_y = if y_independent {
-        let mut y_input = prep.axes.y_for_panel(panel_idx).clone();
-        y_input.categorical_placement = scales.y.categorical_placement();
-        let y_label_fs = y_input
-            .overrides
-            .labels
-            .font_size
-            .unwrap_or(theme.typography.label_font_size);
-        let (new_y_layout, _warn) = crate::layout::axis::layout_y_axis(
-            &y_input,
-            panel.plot_area,
-            panel_idx,
-            y_label_fs,
-            theme.typography.title_font_size,
-            theme.padding.axis_title_padding,
-            y_input.tick_size(theme),
-            facet_metrics,
-        );
-        Some(new_y_layout)
-    } else {
-        None
-    };
-
-    PanelAxes {
-        independent_x,
-        independent_y,
-        x_independent,
-        y_independent,
-    }
 }
 
 /// Routed axis + grid scene nodes for one panel (MOD-09).
@@ -4466,7 +4338,6 @@ mod tests {
             secondary_y_axes: Vec::new(),
             plot_region: Rect::ZERO,
             padded_region: Rect::ZERO,
-            x_label_band_budget: None,
         }
     }
 
