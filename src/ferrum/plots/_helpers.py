@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
 
 import polars as pl
 
-from ferrum._entry import EntryRefusal, speak_as
+from ferrum._entry import EntryRefusal, _voiced, speak_as
 from ferrum._overrides import _apply_overrides, refuse_malformed_mark
+from ferrum._validate import coerce_positive_pixel_value, coerce_positive_real
 from ferrum._layer import set_style
 from ferrum.color import to_hex
 from ferrum.marks._desugar_helpers import nominal_color_channel
@@ -576,6 +577,52 @@ def _style_kws(entry: str, param: str, mark: str, kws: Any) -> dict:
             lambda voice: f"{voice}({param}=...) must be a dict of mark kwargs; got {kind}", entry
         )
     return set_style(resolve_layer_style(entry, mark, kws))
+
+
+def _checked_figure_size(
+    entry: str, *, height: Any = None, aspect: Any = None
+) -> tuple[float | None, int | float | None]:
+    """Return a figure's user-passed ``height`` and ``aspect``, refusing a malformed one as *entry*.
+
+    ``height`` is a viewport length (finite, positive, ``bool`` refused) and
+    ``aspect`` a finite ratio above zero; ``None`` leaves either unset. The
+    refusal names the argument the caller passed (``displot(aspect=...)``),
+    so it is checked here, at the figure's entry, before any width or height
+    is derived from it.
+    """
+    checked_height = _voiced(
+        entry, lambda voice: coerce_positive_pixel_value(f"{voice}(height=...)", height)
+    )
+    checked_aspect = _voiced(
+        entry, lambda voice: coerce_positive_real(f"{voice}(aspect=...)", aspect)
+    )
+    return checked_height, checked_aspect
+
+
+def _checked_figsize(entry: str, figsize: Any) -> tuple[float, float] | None:
+    """Return a figure's user-passed ``figsize`` as ``(width, height)`` floats, refusing a malformed one as *entry*.
+
+    ``None`` leaves the size unset. Anything else must be a ``(width,
+    height)`` pair of finite, positive pixel lengths; the refusal names
+    ``figsize``, the argument the caller passed.
+    """
+    if figsize is None:
+        return None
+
+    def check(voice: str) -> tuple[float, float]:
+        label = f"{voice}(figsize=...)"
+        try:
+            width, height = figsize
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{label} must be a (width, height) pair; received {figsize!r}"
+            ) from None
+        return (
+            coerce_positive_pixel_value(label, width, required=True),
+            coerce_positive_pixel_value(label, height, required=True),
+        )
+
+    return _voiced(entry, check)
 
 
 def _figure_entry(fn: _F) -> _F:

@@ -87,7 +87,8 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
 _logger = logging.getLogger(__name__)
 
 
-from ferrum._validate import coerce_positive_int
+from ferrum._entry import _voiced
+from ferrum._validate import coerce_positive_int, coerce_viewport_value
 from ferrum._facet import (
     FacetDeclaration,
     _Facet,
@@ -110,6 +111,19 @@ from ferrum.composition import (
     _validate_share_modes,
     _warn_on_layer_conflicts,
 )
+
+
+def _viewport_dimension(entry: str, value: Any, *, param: str) -> Any:
+    """Return a ``width``/``height`` value to store, refusing a malformed one as *entry*.
+
+    The rule is :func:`ferrum._validate.coerce_viewport_value` (``None`` and
+    ``"container"`` unchanged, any other value a finite, positive number
+    stored as a ``float``). The refusal is an
+    :class:`~ferrum._entry.EntryRefusal` reading ``{entry}({param}=...) ...``,
+    so a figure function or composite that sets the size on the caller's
+    behalf re-voices it as itself.
+    """
+    return _voiced(entry, lambda voice: coerce_viewport_value(f"{voice}({param}=...)", value))
 
 
 def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
@@ -1032,11 +1046,12 @@ class Chart(
         NumPy array.  Passed through ``ferrum._coerce.to_arrow_table`` at render
         time.  ``None`` is allowed when composing layered charts that share a
         parent's data.
-    width : int or "container", optional
+    width : int or float or "container", optional
         Chart width in pixels, or ``"container"`` to fill the parent element.
-        Default is ``600``.
-    height : int or "container", optional
-        Chart height in pixels.  Default is ``400``.
+        Default is ``600``. A number must be finite and positive; anything
+        else raises ``ValueError`` naming ``Chart(width=...)``.
+    height : int or float or "container", optional
+        Chart height in pixels.  Default is ``400``. Same rule as ``width``.
     title : str, optional
         Title rendered above the plot area.
     description : str, optional
@@ -1105,8 +1120,8 @@ class Chart(
         self._coord = None
         self._theme = None
         self._layers: Optional[list] = None
-        self._width = width
-        self._height = height
+        self._width = _viewport_dimension("Chart", width, param="width")
+        self._height = _viewport_dimension("Chart", height, param="height")
         # Schwabish SB1 (2026-05-11): accept Title value class or plain str.
         from ferrum.title import Title as _TitleCls
 
@@ -3220,10 +3235,11 @@ class Chart(
 
         Parameters
         ----------
-        width : int or "container" or None, optional
-            Chart width in pixels, or ``"container"`` to fill the parent.
-        height : int or "container" or None, optional
-            Chart height in pixels.
+        width : int or float or "container" or None, optional
+            Chart width in pixels, or ``"container"`` to fill the parent. A
+            number must be finite and positive; it is stored as a ``float``.
+        height : int or float or "container" or None, optional
+            Chart height in pixels, under the same rule as ``width``.
         title : str or None, optional
             Chart title rendered above the plot area.
         subtitle : str or None, optional
@@ -3247,6 +3263,13 @@ class Chart(
         Chart
             New ``Chart`` with the specified properties updated.
 
+        Raises
+        ------
+        ValueError
+            When ``width`` or ``height`` is neither ``"container"`` nor a
+            finite, positive number (a ``bool`` is refused), naming
+            ``Chart.properties(width=...)``.
+
         Examples
         --------
         >>> import ferrum as fm
@@ -3263,9 +3286,9 @@ class Chart(
 
         new = self._clone()
         if width is not None:
-            new._width = width
+            new._width = _viewport_dimension("Chart.properties", width, param="width")
         if height is not None:
-            new._height = height
+            new._height = _viewport_dimension("Chart.properties", height, param="height")
         if title is not None:
             # Schwabish SB1: accept Title value class or plain str.
             new._title = title if isinstance(title, _TitleCls) else _TitleCls(text=str(title))

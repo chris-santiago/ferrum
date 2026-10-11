@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -30,7 +31,7 @@ from ferrum.configure import (
     PaddingConfig,
     TitleConfig,
 )
-from tests._snapshots import decode_png_rgba, rasterize_svg
+from tests._snapshots import _load_resvg, decode_png_rgba, rasterize_svg
 
 
 def _sha16(text: str) -> str:
@@ -653,12 +654,14 @@ class TestRotatedLabelsThatFitAreUntouched:
 
 # ---------------------------------------------------------------------------
 # Case: padding.auto never spends more than half of the auto=False plot, in
-# either dimension, AND never ships a pass that draws FEWER x tick labels
-# than auto=False draws. A rescue that fits within that half, keeping every
-# label auto=False draws, is applied in full. One that would need more than
-# half, or that would have to drop a label to fit, is declined entirely, so
-# the default renders exactly like auto=False -- not a smaller or sparser
-# plot that still clips.
+# either dimension, AND never ships a pass whose x axis loses more of its
+# own generated ticks (a label culled or elided) than auto=False loses on
+# that axis. On a continuous x axis an even stride thinning -- no label
+# elided, the drawn labels exactly every s-th tick, at least 3 of them -- is
+# not a loss. A rescue that passes both is applied in full. One that fails
+# either is declined entirely, so the default renders exactly like
+# auto=False -- not a smaller plot that still clips, or one that drops its
+# labels to fit.
 # ---------------------------------------------------------------------------
 
 
@@ -710,18 +713,58 @@ def test_a_rescue_within_half_the_plot_is_applied():
     assert _last_x_tick_overhang_margin(svg_default, 192, 200) == 6
 
 
-def test_a_rescue_that_would_cull_a_label_is_declined():
+def _flat_x_tick_labels(svg: str) -> list[tuple[str, str]]:
+    """Every flat (centred, unrotated) numeric x tick label *svg* draws, as
+    ``(text, font-size)``. The y tick labels are end-anchored and the axis
+    titles are not numeric, so neither matches."""
+    labels = []
+    for attrs, text in _TEXT.findall(svg):
+        if (
+            'text-anchor="middle"' not in attrs
+            or "transform=" in attrs
+            or not re.fullmatch(r"-?[\d,]+(\.\d+)?", text)
+        ):
+            continue
+        size = re.search(r'font-size="([\d.]+)"', attrs)
+        assert size is not None, f"x tick label {text!r} carries no font-size"
+        labels.append((text, size.group(1)))
+    return labels
+
+
+_INTER = Path(__file__).resolve().parents[1] / "crates/ferrum-core/assets/fonts/Inter-Regular.ttf"
+
+
+def _inter_ink_columns(svg: str, viewport_width: float, viewport_height: float) -> tuple[int, int]:
+    """The leftmost and rightmost columns of *svg*'s ink, in canvas pixels
+    (negative or past the width when it overhangs), rasterized with the
+    bundled Inter the layout measures with, so a title or label's real ink
+    is what is measured, not a host fallback font's. The canvas is widened
+    by its own width on both sides so overhanging ink is painted, not
+    cropped; the background is excluded."""
+    w, h = viewport_width, viewport_height
+    root = f'width="{w:g}" height="{h:g}" viewBox="0 0 {w:g} {h:g}"'
+    assert root in svg
+    widened = svg.replace(
+        root, f'width="{3 * w:g}" height="{h:g}" viewBox="{-w:g} 0 {3 * w:g} {h:g}"', 1
+    )
+    png = _load_resvg().svg_to_bytes(
+        svg_string=widened, font_files=[str(_INTER)], skip_system_fonts=True, dpi=96
+    )
+    rows, _width, _height = decode_png_rgba(bytes(png))
+    background = rows[0][int(w) + 1]
+    columns = [x for row in rows for x, px in enumerate(row) if px[3] != 0 and px != background]
+    return min(columns) - int(w), max(columns) - int(w)
+
+
+def test_a_title_rescue_that_thins_the_x_labels_evenly_ships():
     """270x200, x=[0,1,2,3] with the title "A moderately long horizontal
-    axis title here": auto=False draws all 8 of its rotated -90 x tick
-    labels (0 through 2.8), clipped to a real 191.056x110.056 plot, and the
-    title's ink overhangs the canvas by a measured 8px -- the in-test
-    liveness control, since that overhang is exactly what auto would
-    rescue. A build without the never-fewer-labels rule takes that rescue:
-    it redraws the axis with 6 flat labels (0, 0.6, 1.2, 1.8, 2.4, 3) in
-    place of the 8 rotated ones, opening a 151.999x124.961 plot and pulling
-    the title's overhang back to +11px. The default renders byte-identically to
-    auto=False instead: the same eight labels, un-dropped, in the same clip
-    rect, with the title's overhang left unrescued."""
+    axis title here": auto=False draws 8 rotated -90 x tick labels (every
+    second of the 16 ticks 0, 0.2, ..., 3) in a 191.056x110.056 plot, and the
+    title's ink overhangs the canvas by a measured 8px. The rescue lays the
+    same 16 ticks flat and labels every third (0, 0.6, ..., 3): an even
+    stride thinning of a continuous axis, 6 labels, none elided, so it is
+    not a loss. It ships: a 151.999x124.961 plot (79.6% of the auto=False
+    width) with the title's overhang pulled back to +11px."""
     control_df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
     chart = (
         fm.Chart(control_df)
@@ -733,23 +776,86 @@ def test_a_rescue_that_would_cull_a_label_is_declined():
     svg_default = chart.to_svg()
     assert svg_auto_false.count("<circle") == 4
     assert svg_default.count("<circle") == 4
-    assert _last_x_tick_overhang_margin(svg_auto_false, 270, 200) == -8
-    assert _last_x_tick_overhang_margin(svg_default, 270, 200) == -8
-    drawn_off = _X_TICK_LABEL.findall(svg_auto_false)
-    assert drawn_off == [
-        ("-90", "0"),
-        ("-90", "0.4"),
-        ("-90", "0.8"),
-        ("-90", "1.2"),
-        ("-90", "1.6"),
-        ("-90", "2"),
-        ("-90", "2.4"),
-        ("-90", "2.8"),
+    assert _X_TICK_LABEL.findall(svg_auto_false) == [
+        ("-90", text) for text in ("0", "0.4", "0.8", "1.2", "1.6", "2", "2.4", "2.8")
     ]
-    assert _X_TICK_LABEL.findall(svg_default) == drawn_off
+    assert _X_TICK_LABEL.findall(svg_default) == []
+    assert _flat_x_tick_labels(svg_default) == [
+        (text, "9.02") for text in ("0", "0.6", "1.2", "1.8", "2.4", "3")
+    ]
+    assert "\u2026" not in svg_default
     clip_off = _CLIP_RECT.findall(svg_auto_false)
+    clip_default = _CLIP_RECT.findall(svg_default)
     assert clip_off == [("62.944", "16", "191.056", "110.056")]
-    assert _CLIP_RECT.findall(svg_default) == clip_off
+    assert clip_default == [("62.944", "16", "151.999", "124.961")]
+    assert float(clip_default[0][2]) >= float(clip_off[0][2]) / 2
+    assert _last_x_tick_overhang_margin(svg_auto_false, 270, 200) == -8
+    assert _last_x_tick_overhang_margin(svg_default, 270, 200) == 11
+
+
+def test_a_rescue_that_would_cull_every_x_label_is_declined():
+    """124x150, x=[-1234567.89, 0] ticked at both values with `,.4f`:
+    auto=False draws one x label, "-1,234,567.8900" at -45 degrees, in a
+    45.056x9.756 plot (the second tick's "0.0000" is already culled), its
+    Inter ink reaching x=2 at the canvas's left edge. A rescue here would
+    cull that label too, losing more of its own ticks than auto=False, so
+    the default ships byte-identical to auto=False.
+
+    Liveness: padding.auto does act on this chart's long first label. The
+    same chart at 176x150 keeps both labels with auto=False and is rescued
+    by default, its left inset growing from 62.944 to 66.038 with the same
+    two labels drawn; only the cull at 124x150 stops the rescue."""
+    lo = -1.23456789e6
+    df = pl.DataFrame({"x": [lo, 0.0], "y": [0.0, 1.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.4f", values=[lo, 0.0])), y="y:Q")
+        .properties(width=124, height=150)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert re.findall(
+        r'transform="rotate\((-?[\d.]+) [^"]*"[^>]*>(-1,234,567\.8900)</text>', svg_auto_false
+    ) == [("-45", "-1,234,567.8900")]
+    assert ">0.0000<" not in svg_auto_false
+    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "45.056", "9.756")]
+    assert _inter_ink_columns(svg_auto_false, 124, 150)[0] == 2
+    assert svg_default == svg_auto_false
+
+    wider = chart.properties(width=176)
+    wider_off = wider.configure_padding(auto=False).to_svg()
+    wider_default = wider.to_svg()
+    assert _CLIP_RECT.findall(wider_off) == [("62.944", "16", "97.056", "9.756")]
+    assert _CLIP_RECT.findall(wider_default) == [("66.038", "16", "93.962", "9.756")]
+    for svg in (wider_off, wider_default):
+        assert ">-1,234,567.8900<" in svg
+        assert ">0.0000<" in svg
+
+
+def test_a_rescue_that_thins_the_x_labels_to_two_is_declined():
+    """176x100, x=[0, 1234567.89] ticked at both values with `,.4f`: auto=False
+    draws both flat labels ("0.0000" and "1,234,567.8900") in a 97.056x24.961
+    plot, and the last one overhangs the canvas by a measured 7px. A rescue
+    would keep fewer of its own ticks than auto=False, and an even thinning
+    down to 2 labels is still a loss (an even thinning needs at least 3), so
+    the default ships byte-identical to auto=False, label overhang and all."""
+    hi = 1.23456789e6
+    df = pl.DataFrame({"x": [0.0, hi], "y": [0.0, 1.0], "g": ["a", "b"]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x:Q", axis=fm.Axis(label_format=",.4f", values=[0.0, hi])), y="y:Q")
+        .properties(width=176, height=100)
+    )
+    svg_auto_false = chart.configure_padding(auto=False).to_svg()
+    svg_default = chart.to_svg()
+    assert _flat_x_tick_labels(svg_auto_false) == [
+        ("0.0000", "9.02"),
+        ("1,234,567.8900", "9.02"),
+    ]
+    assert _CLIP_RECT.findall(svg_auto_false) == [("62.944", "16", "97.056", "24.961")]
+    assert _last_x_tick_overhang_margin(svg_auto_false, 176, 100) == -7
     assert svg_default == svg_auto_false
 
 
@@ -790,16 +896,14 @@ def test_a_rescue_that_would_exceed_half_the_plot_is_declined():
 
 
 # ---------------------------------------------------------------------------
-# Case: the 220px x-title rescue/decline boundary, swept by real character
-# count and pinned exactly at each of the four lengths that straddle it.
+# Case: the 220px x-title rescue boundary, swept by real character count
+# and pinned exactly at four lengths.
 #
-# Every assertion below is a deterministic layout fact (clip rect, the
-# title's own `<text x=...>`, the drawn x tick set) read straight off the
-# SVG markup, not a rasterized ink margin: `resvg` has no bundled "Inter"
-# installed, so rasterizing falls back to whatever serif/sans the host
-# happens to have, and the fallback-font margin (not the real, bundled-Inter
-# layout) is what would move with the host. Layout itself always uses the
-# bundled Inter metrics regardless of what any raster backend has installed.
+# The layout facts (clip rect, the title's own `<text x=...>`, the drawn x
+# tick set) are read straight off the SVG markup. The title's ink is
+# measured by rasterizing with the bundled Inter the layout itself measures
+# with (`_inter_ink_columns`), never a host fallback font, whose margins
+# would move with the host.
 # ---------------------------------------------------------------------------
 
 
@@ -830,6 +934,12 @@ _FLAT_SHRUNK_X_TICKS = [
     ("0.8", "9.02", "0"),
     ("1", "9.02", "0"),
 ]
+_FLAT_EVERY_THIRD_X_TICKS = [
+    ("0", "11", "0"),
+    ("0.3", "11", "0"),
+    ("0.6", "11", "0"),
+    ("0.9", "11", "0"),
+]
 _ROTATED_FULL_SIZE_X_TICKS = [
     ("0", "11", "-90"),
     ("0.2", "11", "-90"),
@@ -841,15 +951,17 @@ _ROTATED_FULL_SIZE_X_TICKS = [
 
 
 @pytest.mark.parametrize(
-    "chars, clip_on, drawn_default, title_x",
+    "chars, clip_on, drawn_default, title_x, ink_right_off",
     [
-        (25, ("66.054", "16", "125.397", "110.056"), _ROTATED_FULL_SIZE_X_TICKS, "128.752"),
-        (26, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
-        (27, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
-        (28, ("66.054", "16", "137.946", "124.961"), _FLAT_SHRUNK_X_TICKS, "135.027"),
+        (25, ("66.054", "16", "125.397", "110.056"), _ROTATED_FULL_SIZE_X_TICKS, "128.752", 225),
+        (26, ("66.054", "16", "118.098", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "125.103", 228),
+        (27, ("66.054", "16", "110.798", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "121.453", 232),
+        (28, ("66.054", "16", "103.498", "124.961"), _FLAT_EVERY_THIRD_X_TICKS, "117.803", 236),
     ],
 )
-def test_220px_x_title_boundary_is_pinned_at_real_fonts(chars, clip_on, drawn_default, title_x):
+def test_220px_x_title_boundary_is_pinned_at_real_fonts(
+    chars, clip_on, drawn_default, title_x, ink_right_off
+):
     """220x200, `y` over a 0..1e9 domain (so the y label band stays wide
     and fixed regardless of the x title) and an x title of *chars*
     repeated "a" characters, over `x=[0.0, 1.0]`: `auto=False` always draws
@@ -861,11 +973,16 @@ def test_220px_x_title_boundary_is_pinned_at_real_fonts(chars, clip_on, drawn_de
       `<text x=...>` moves from 135.027 to 128.752; the x axis keeps the
       SAME six labels, but now rotated -90 at the full, unshrunk 11pt font
       (`_ROTATED_FULL_SIZE_X_TICKS`) rather than flat-and-shrunk.
-    - 26/27/28 chars: `padding.auto` declines, byte-identical to
-      `auto=False` (same clip rect, same flat 9.02pt ticks, same title
-      position). At each of these lengths, the next rescue available would
-      cut the x axis from six ticks (0.2 step) to four (0.3 step), and
-      `padding.auto` never ships fewer x labels than `auto=False` draws.
+    - 26/27/28 chars: `padding.auto` rescues the title too. The plot
+      narrows further (clip width 137.946 -> 118.098 / 110.798 / 103.498,
+      each above half the auto=False width), the title recentres (135.027
+      -> 125.103 / 121.453 / 117.803, its Inter ink ending at x=218, inside
+      the 220px canvas, where auto=False's ends at 228 / 232 / 236), and the
+      x axis lays its 11 ticks (0, 0.1, ..., 1) flat at the full 11pt font
+      labelling every third: 0, 0.3, 0.6, 0.9
+      (`_FLAT_EVERY_THIRD_X_TICKS`). That is an even stride thinning of a
+      continuous axis with at least 3 labels and none elided, which is not
+      a loss, so the rescue ships.
     """
     title = "a" * chars
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1000000000.0]})
@@ -885,4 +1002,10 @@ def test_220px_x_title_boundary_is_pinned_at_real_fonts(chars, clip_on, drawn_de
     )
     assert title_match is not None
     assert title_match.group(1) == title_x
-    assert (svg_default == svg_auto_false) == (chars != 25)
+    assert svg_default != svg_auto_false
+    clip_off = _CLIP_RECT.findall(svg_auto_false)
+    assert clip_off == [("66.054", "16", "137.946", "124.961")]
+    assert float(clip_on[2]) >= float(clip_off[0][2]) / 2
+    # The title's real Inter ink: past the canvas with auto off, inside it by default.
+    assert _inter_ink_columns(svg_auto_false, 220, 200)[1] == ink_right_off
+    assert _inter_ink_columns(svg_default, 220, 200)[1] == 218

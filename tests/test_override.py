@@ -1401,20 +1401,23 @@ class TestOverrideScaleNoneIsNoOverride:
 
 # ---------------------------------------------------------------------------
 # An `.override` refusal from the padding (auto or a numeric side), scale,
-# mark or coord leaf families is the one documented FerrumOverrideError
+# mark or viewport (`width`/`height`) leaf families, and a `coord_*` leaf
+# the chart's coord does not take, is the one documented FerrumOverrideError
 # class and re-voices through the same mechanism. Config-section leaves
 # (`axis_*`/`x_axis_*`/`y_axis_*`, `legend_*`, `title_*`, `grid_*`,
 # `color_*`) are NOT covered by this class: they refuse as a plain
 # `ValueError`, from either the config dataclass's own validator (e.g.
 # `LegendConfig.orient`/`GridConfig.color`) or the Rust `chart_config`
 # serde decode (e.g. `axis_label_angle`/`title_font_size`), outside
-# FerrumOverrideError's contract (a known, logged gap).
+# FerrumOverrideError's contract (a known, logged gap). A malformed value
+# for a `coord_*` leaf the coord does take (`coord_clip="yes"`) refuses
+# the same way, from the Rust `coord` decode.
 # ---------------------------------------------------------------------------
 
 
 class TestOverrideRefusalIsFerrumOverrideErrorAcrossLeafFamilies:
-    """Covers exactly the padding, scale, mark and coord leaf families
-    (the parametrized cases below plus `test_coord_leaf_refusal_...`).
+    """Covers exactly the padding, scale, mark, viewport and coord leaf
+    families (the parametrized cases below plus `test_coord_leaf_refusal_...`).
     Config-section leaves are a separate, currently-ValueError path; see
     the module comment above this class."""
 
@@ -1431,8 +1434,12 @@ class TestOverrideRefusalIsFerrumOverrideErrorAcrossLeafFamilies:
                 {"mark_size": "big"},
                 "Chart.override(size=...) must be a real number",
             ),
+            (
+                {"width": float("nan")},
+                "Chart.override(width=...) must be a finite numeric pixel value",
+            ),
         ],
-        ids=["padding-auto", "padding-side", "scale-leaf", "mark-leaf"],
+        ids=["padding-auto", "padding-side", "scale-leaf", "mark-leaf", "viewport"],
     )
     def test_isinstance_ferrum_override_error(self, base_chart, overrides, text_prefix):
         """Each family case must reach ITS OWN refusal path, not a shared

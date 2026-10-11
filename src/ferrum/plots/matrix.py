@@ -58,6 +58,8 @@ from ferrum._warn import user_stacklevel
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks.base import _is_paint_sentinel
 from ferrum.plots._helpers import (
+    _checked_figsize,
+    _checked_figure_size,
     _field_name,
     _figure_entry,
     _finalize_chart,
@@ -283,6 +285,7 @@ def pairplot(
         data = to_polars(data)
         all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
         data = data.drop_nulls(subset=all_vars)
+    height, aspect = _checked_figure_size("pairplot", height=height, aspect=aspect)
 
     return _pairplot_build(
         data,
@@ -1208,6 +1211,7 @@ def clustermap(
     # forms (``"rows"`` / ``"columns"``) remain accepted for back-compat.
     z_score = _normalize_standardize_arg(z_score, param="z_score")
     standard_scale = _normalize_standardize_arg(standard_scale, param="standard_scale")
+    figsize = _checked_figsize("clustermap", figsize)
 
     return _clustermap_build(
         data,
@@ -1564,6 +1568,7 @@ def jointplot(
     """
     validate_choice("jointplot", "kind", kind, _VALID_CENTER_KINDS)
     validate_choice("jointplot", "marginal_kind", marginal_kind, _VALID_MARGINAL_KINDS)
+    height, _ = _checked_figure_size("jointplot", height=height)
 
     return _jointplot_build(
         data,

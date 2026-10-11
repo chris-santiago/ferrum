@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
+from ferrum._entry import voiced_as
 from ferrum._layer import owned_conditional_ids
 from ferrum._overrides import _FIGURE_CHROME_KEYS
 from ferrum._validate import validate_choice
@@ -2157,10 +2158,21 @@ class _ChartLike(ConfigureMixin, _ChartOperatorMixin):
         _ChartLike
             A new instance of the same composition class with updated
             sub-chart properties.
+
+        Raises
+        ------
+        ValueError
+            When a sub-chart refuses a value (a malformed ``width``, say),
+            naming this class: ``HConcatChart.properties(width=...) ...``.
         """
-        result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+        with voiced_as(self._properties_entry()):
+            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
         _copy_configure_layers(self, result)
         return result
+
+    def _properties_entry(self) -> str:
+        """Return the public call a ``properties`` refusal names: ``{class name}.properties``."""
+        return f"{type(self).__name__}.properties"
 
     # ---- Declarative configuration surface ----
 
@@ -2353,7 +2365,9 @@ class _CompositeBase(_ChartLike):
             When ``title=``/``subtitle=``/``caption=`` carries a ``Title``
             field the composite has no slot for, or when ``title=``'s own
             subtitle collides with an explicit ``subtitle=`` in the same
-            call (see :func:`_normalize_composite_title`).
+            call (see :func:`_normalize_composite_title`), or when a child
+            refuses a forwarded value (a malformed ``width``, say), naming
+            this class: ``HConcatChart.properties(width=...) ...``.
         """
         # Separate figure-level chrome from per-child kwargs.
         # Use the shared _FIGURE_CHROME_KEYS constant so the key set stays
@@ -2375,8 +2389,10 @@ class _CompositeBase(_ChartLike):
         figure_caption = _normalize_composite_text(chrome_vals["caption"], slot="caption")
 
         if kwargs:
-            # Forward remaining (non-chrome) kwargs to the appropriate panel(s).
-            result = self._forward_child_properties(kwargs)
+            # Forward remaining (non-chrome) kwargs to the appropriate panel(s),
+            # a child's refusal naming this composite.
+            with voiced_as(self._properties_entry()):
+                result = self._forward_child_properties(kwargs)
         else:
             # Nothing to fan — rebuild preserving charts unchanged.
             result = self._rebuild_with_charts(lambda c: c)
@@ -4164,6 +4180,12 @@ class LayerChart(_ChartLike):
         LayerChart
             A new ``LayerChart`` instance with ``_title`` updated and / or
             per-layer properties applied.
+
+        Raises
+        ------
+        ValueError
+            When a layer refuses a forwarded value (a malformed ``width``,
+            say), naming ``LayerChart.properties(width=...)``.
         """
         # Ingress-normalize title= to the renderer's bare-str contract (H3-4,
         # batch-H close cycle 3); supports_subtitle_slot=False -- see the
@@ -4186,8 +4208,10 @@ class LayerChart(_ChartLike):
             kwargs["caption"] = _normalize_composite_text(kwargs["caption"], slot="caption")
 
         if kwargs:
-            # Fan non-chrome kwargs to every layer.
-            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+            # Fan non-chrome kwargs to every layer, a layer's refusal naming
+            # this chart.
+            with voiced_as(self._properties_entry()):
+                result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
             _copy_configure_layers(self, result)
         else:
             # Nothing to fan — preserve layers unchanged.

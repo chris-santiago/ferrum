@@ -427,15 +427,18 @@ def apply_properties(
     """Return *viewport* with ``payload.properties`` ``width``/``height`` applied.
 
     Property overrides beat ``.properties()`` (spec §8 D5).  Missing keys leave the
-    corresponding viewport dimension unchanged.
+    corresponding viewport dimension unchanged, and so does a ``None``
+    override, which :func:`ferrum._override_apply.build_payload` leaves out.
+    Each present value is the positive ``float`` (or ``"container"``) that
+    ``build_payload`` validated and stored.
     """
     if not payload.properties:
         return viewport
     width, height = viewport
     if "width" in payload.properties:
-        width = float(payload.properties["width"])
+        width = payload.properties["width"]
     if "height" in payload.properties:
-        height = float(payload.properties["height"])
+        height = payload.properties["height"]
     return width, height
 
 

@@ -38,7 +38,12 @@ from ferrum._validate import as_finite_real, coerce_positive_int, validate_choic
 from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
-from ferrum.plots._helpers import _field_name, _figure_entry, _finalize_chart
+from ferrum.plots._helpers import (
+    _checked_figure_size,
+    _field_name,
+    _figure_entry,
+    _finalize_chart,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +323,9 @@ def _apply_facet_sizing(
     When ``row`` is not set, height and aspect are applied directly: the canvas
     is ``height × (height * aspect)``.
 
+    *height* and *aspect* are the caller's, already checked at the figure's
+    entry (:func:`ferrum.plots._helpers._checked_figure_size`).
+
     Returns the chart with ``properties()`` applied, or the chart unchanged when
     neither ``height`` nor ``aspect`` is given and there is no row faceting.
     """
@@ -329,10 +337,14 @@ def _apply_facet_sizing(
         # Using total_h here would make width grow linearly with n_panels, which
         # violates seaborn semantics where aspect governs per-panel width.
         w = per_panel_h * aspect if aspect is not None else None
-        props: dict = {"height": total_h}
+        props: dict = {}
+        # An empty frame has no row levels, so no panel height to total:
+        # leave the height unset and let the chart render as empty.
+        if total_h > 0:
+            props["height"] = total_h
         if w is not None:
             props["width"] = w
-        return chart.properties(**props)
+        return chart.properties(**props) if props else chart
     elif height is not None or aspect is not None:
         h = height if height is not None else 300.0
         w = h * aspect if aspect is not None else h
@@ -621,6 +633,7 @@ def displot(
     # built -- including the overlay case, which used to render a chart
     # missing the mark it was asked for.
     _reject_displot_without_x(kind=kind, x=x, y=y, kde=kde, rug=rug)
+    height, aspect = _checked_figure_size("displot", height=height, aspect=aspect)
 
     return _displot_build(
         data,
@@ -1794,6 +1807,7 @@ def catplot(
     else:
         _refuse_interval_args_on_non_aggregating_kind(kind, ci, n_boot)
         ci_level = None
+    height, aspect = _checked_figure_size("catplot", height=height, aspect=aspect)
 
     return _catplot_build(
         data,
@@ -2403,6 +2417,7 @@ def relplot(
     ...            style="region", kind="line")
     """
     validate_choice("relplot", "kind", kind, _RELPLOT_VALID_KINDS)
+    height, aspect = _checked_figure_size("relplot", height=height, aspect=aspect)
 
     return _relplot_build(
         data,

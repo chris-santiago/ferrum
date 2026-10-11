@@ -66,11 +66,15 @@ import difflib
 from dataclasses import dataclass, fields
 from enum import Enum
 from collections.abc import Callable, Mapping
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 from ferrum._entry import EntryRefusal, _voiced
 from ferrum._layer import is_unset
-from ferrum._validate import coerce_bool_value, coerce_pixel_value
+from ferrum._validate import (
+    coerce_bool_value,
+    coerce_pixel_value,
+    coerce_viewport_value,
+)
 from ferrum.configure import (
     AxisConfig,
     ColorConfig,
@@ -183,7 +187,9 @@ class OverridePayload:
         ``{leaf: value}`` for coord targets, e.g. ``{"clip": False}``.  The
         consumer merges these into the assembled ``coord`` spec.
     properties:
-        A subset of ``{"width": value, "height": value}``.
+        A subset of ``{"width": value, "height": value}``, each value a
+        positive ``float`` or ``"container"`` (see
+        :func:`_viewport_override_value`); a ``None`` override is left out.
     deprecations:
         ``(path, typed_equivalent_descriptor)`` pairs for every override path that
         has a typed equivalent.  The consumer emits one ``DeprecationWarning`` per
@@ -614,8 +620,11 @@ def _suggestion(path: str) -> str:
     return ""
 
 
-def _refuse_as_override(check: Callable[[str], Any]) -> None:
-    """Run *check*, voiced as ``Chart.override``, raising :class:`_OverrideRefusal` on refusal.
+_Checked = TypeVar("_Checked")
+
+
+def _refuse_as_override(check: Callable[[str], _Checked]) -> _Checked:
+    """Return ``check("Chart.override")``, raising :class:`_OverrideRefusal` on refusal.
 
     *check* is a :mod:`ferrum._validate` predicate already composed with its
     own label by the caller (e.g. ``lambda voice: coerce_pixel_value(f"{voice}"
@@ -628,9 +637,23 @@ def _refuse_as_override(check: Callable[[str], Any]) -> None:
     every other ``.override`` refusal (``isinstance(err, FerrumOverrideError)``).
     """
     try:
-        _voiced("Chart.override", check)
+        return _voiced("Chart.override", check)
     except EntryRefusal as err:
         raise _OverrideRefusal(err.message_for, err.entry) from None
+
+
+def _viewport_override_value(path: str, value: Any) -> Any:
+    """Return the ``width``/``height`` override *value* to apply, refusing a malformed one.
+
+    ``None`` is no override and is returned as ``None`` (the caller leaves
+    the dimension out of the payload, as a ``None`` scale leaf is left out).
+    ``"container"`` passes unchanged and any other value must be a finite,
+    positive number, returned as a ``float``: the rule every viewport door
+    asks (:func:`ferrum._validate.coerce_viewport_value`). A refusal is a
+    :class:`~ferrum.exceptions.FerrumOverrideError` reading
+    ``Chart.override(width=...) ...``.
+    """
+    return _refuse_as_override(lambda voice: coerce_viewport_value(f"{voice}({path}=...)", value))
 
 
 def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
@@ -656,6 +679,8 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     :class:`~ferrum.exceptions.FerrumOverrideError` reading
     ``Chart.override(padding_top=...) must be ...`` -- the same voice, and
     the same re-voiceable type, every other ``.override`` leaf refuses with.
+    The ``width``/``height`` leaves are validated against the viewport
+    contract the same way (:func:`_viewport_override_value`).
 
     Parameters
     ----------
@@ -674,8 +699,9 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
     ------
     FerrumOverrideError
         When any path does not resolve, a padding side value violates the
-        pixel contract, or ``padding_auto`` is set to something other than
-        a bool.
+        pixel contract, ``padding_auto`` is set to something other than
+        a bool, or ``width``/``height`` is neither ``"container"`` nor a
+        finite, positive number.
     """
     resolved_paths: dict[str, ResolvedPath] = {}
     for path, value in overrides.items():
@@ -706,6 +732,8 @@ def validate(overrides: dict[str, Any]) -> dict[str, ResolvedPath]:
             _refuse_as_override(lambda voice: coerce_pixel_value(f"{voice}({path}=...)", value))
         elif resolved.location.target_key == "padding" and resolved.location.leaf == "auto":
             _refuse_as_override(lambda voice: coerce_bool_value(f"{voice}({path}=...)", value))
+        elif resolved.target is Target.PROPERTIES:
+            _viewport_override_value(path, value)
 
         resolved_paths[path] = resolved
     return resolved_paths
@@ -874,7 +902,12 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
         elif resolved.target is Target.COORD:
             coord[loc.leaf] = value
         elif resolved.target is Target.PROPERTIES:
-            properties[loc.leaf] = value
+            # Accepted by `validate` above; this returns the stored form, a
+            # numpy scalar or int becoming the `float` the viewport takes. A
+            # None leaf is no override, so the chart's own size stands.
+            viewport_value = _viewport_override_value(path, value)
+            if viewport_value is not None:
+                properties[loc.leaf] = viewport_value
 
         if resolved.typed_equivalent is not None:
             deprecations.append((path, resolved.typed_equivalent))

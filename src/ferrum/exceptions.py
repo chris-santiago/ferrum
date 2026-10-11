@@ -23,8 +23,18 @@ class FerrumOverrideError(ValueError):
     (unknown prefix, or a known prefix with a leaf that is not a valid field of
     its target) raises this error at render time, naming the offending path and
     — when a close match exists — suggesting the nearest valid path. A
-    ``mark_*`` leaf the chart's mark does not take, or a value of the wrong
-    type, raises it too, with the text the style doors refuse it with.
+    ``mark_*`` leaf the chart's mark does not take, and a ``coord_*`` leaf
+    the chart's coord does not take, raise it too.
+
+    A malformed value raises it for these leaf families: ``padding_*`` (a
+    side that is not a finite, non-negative number; ``padding_auto`` that is
+    not a bool), the ``<channel>_scale_*`` leaves, the ``mark_*`` style
+    leaves, and ``width``/``height`` (neither ``"container"`` nor a finite,
+    positive number). A malformed value for a ``coord_*`` leaf, or for a
+    configure-section leaf (``axis_*``, ``x_axis_*``, ``y_axis_*``,
+    ``legend_*``, ``title_*``, ``grid_*``, ``color_*``), raises a plain
+    ``ValueError`` instead, from the section's own validator or from the
+    spec decode.
 
     Examples
     --------

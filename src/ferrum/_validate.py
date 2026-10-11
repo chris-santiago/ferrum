@@ -47,7 +47,14 @@ Independent predicates live here:
   (construction-time validation) and ``_override_apply.validate``'s padding
   guard (the ``Chart.override`` entry point), so both boundaries refuse the
   same values with the same reasoning instead of maintaining two hand-copied
-  isinstance/range checks that can drift.
+  isinstance/range checks that can drift. ``coerce_positive_pixel_value`` is
+  its strictly positive sibling, the viewport contract (a chart's ``width``
+  and ``height``), asked by ``Chart(...)``, ``Chart.properties`` and the
+  ``Chart.override(width=/height=)`` leaves through ``coerce_viewport_value``,
+  which passes ``None`` and ``CONTAINER_SIZE``, the one non-numeric viewport
+  value, through unchanged. Both pixel validators share one body,
+  ``_coerce_bounded_pixel``, as the ``coerce_*_int`` family shares
+  ``_coerce_bounded_int``.
 
 - ``coerce_finite_real`` is their unbounded sibling: a real number whose
   ``float`` is finite, returned in its wire form (builtin ``int``/``float``).
@@ -57,6 +64,9 @@ Independent predicates live here:
   ``coerce_finite_ordered_pair``, the numeric ``mark_*`` style kwargs, dash
   lengths, the conditional numeric literal, and the ``transform_filter`` /
   ``transform_impute`` number literals).
+
+- ``coerce_positive_real`` is ``coerce_finite_real``'s ``> 0`` sibling, for a
+  dimensionless ratio (a figure function's ``aspect``).
 
 - ``coerce_positive_int`` (#238) is the "count contract": a value
   must be an integer (``is_integer_number``: ``bool`` excluded, same
@@ -339,8 +349,56 @@ def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> flo
         If *value* is not numeric, is NaN/±inf, or is negative — or, when
         *required* is set, if *value* is ``None``.
     """
+    return _coerce_bounded_pixel(label, value, required=required, positive=False)
+
+
+#: The one non-numeric viewport value (``width``/``height``): the chart fills
+#: its parent element. Every viewport door passes it through unchanged.
+CONTAINER_SIZE = "container"
+
+
+def coerce_positive_pixel_value(label: str, value: Any, *, required: bool = False) -> float | None:
+    """Return *value* as a ``float`` pixel value, or raise ``ValueError`` unless it is strictly positive.
+
+    The ``> 0`` sibling of :func:`coerce_pixel_value`, for a length that
+    cannot be zero: a chart's viewport ``width``/``height``. Same contract
+    otherwise: a real number (``bool`` excluded, numpy scalars accepted),
+    finite, ``None`` passing as unset unless *required* is set, and *label*
+    a pre-composed field description (e.g. ``"Chart.properties(width=...)"``).
+
+    Returns
+    -------
+    float or None
+        *value* as a ``float``, or ``None`` when unset.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not numeric, is NaN/±inf, or is zero or negative -- or,
+        when *required* is set, if *value* is ``None``.
+    """
+    return _coerce_bounded_pixel(label, value, required=required, positive=True)
+
+
+def coerce_viewport_value(label: str, value: Any) -> float | str | None:
+    """Return a viewport ``width``/``height`` value to store, or raise ``ValueError`` if it is malformed.
+
+    The one width/height rule every viewport door asks: ``None`` (unset) and
+    :data:`CONTAINER_SIZE` pass unchanged; anything else must pass
+    :func:`coerce_positive_pixel_value` and is returned as a ``float``.
+    *label* is the pre-composed door (e.g. ``"Chart.properties(width=...)"``).
+    """
+    if value is None or (isinstance(value, str) and value == CONTAINER_SIZE):
+        return value
+    return coerce_positive_pixel_value(label, value)
+
+
+def _coerce_bounded_pixel(
+    label: str, value: Any, *, required: bool, positive: bool
+) -> float | None:
+    """Shared body of the pixel family: a finite real ``>= 0``, or ``> 0`` when *positive*."""
     if value is None and not required:
-        return
+        return None
     if not is_real_number(value):
         raise ValueError(
             f"{label} must be a numeric pixel value (int or float), "
@@ -348,6 +406,8 @@ def coerce_pixel_value(label: str, value: Any, *, required: bool = False) -> flo
         )
     if not math.isfinite(value):
         raise ValueError(f"{label} must be a finite numeric pixel value; received {value}")
+    if positive and value <= 0:
+        raise ValueError(f"{label} must be positive; received {value}")
     if value < 0:
         raise ValueError(f"{label} must be non-negative; received {value}")
     return float(value)
@@ -440,6 +500,25 @@ def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int
     if as_float is None:
         raise ValueError(f"{label} must be a finite number a float can hold; received {value!r}")
     return operator.index(value) if is_integer_number(value) else as_float
+
+
+def coerce_positive_real(label: str, value: Any, *, required: bool = False) -> int | float | None:
+    """Return *value* in its wire form, or raise ``ValueError`` unless it is a finite real number above zero.
+
+    The ``> 0`` sibling of :func:`coerce_finite_real` (whose refusals it
+    shares), for a dimensionless ratio that cannot be zero or negative: a
+    figure function's ``aspect``. ``None`` passes as unset unless *required*
+    is set.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not a finite real number, or is zero or negative.
+    """
+    checked = coerce_finite_real(label, value, required=required)
+    if checked is not None and checked <= 0:
+        raise ValueError(f"{label} must be positive; received {value!r}")
+    return checked
 
 
 def as_finite_real(value: Any) -> float | None:
