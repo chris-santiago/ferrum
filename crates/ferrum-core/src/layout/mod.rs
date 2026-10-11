@@ -1506,8 +1506,8 @@ impl<'a> MarginResponse<'a> {
 /// - `x_overhang`: how far the drawn x tick labels reach past the plot
 ///   region's edges (see [`XLabelOverhang`]).
 /// - `unusable`: whether the inset leaves a panel smaller than `room`
-///   lets `padding.auto` leave it, or collapsed, or leaves undrawn an x
-///   tick label `auto=false` draws (see [`AutoPlotRoom`]).
+///   lets `padding.auto` leave it, or collapsed, or loses more of an x
+///   axis's own tick labels than `auto=false` does (see [`AutoPlotRoom`]).
 ///
 /// The first two are only exact at the `inset` that produced them: every
 /// categorical legend strip is capped at half of whichever rect it is
@@ -1657,10 +1657,14 @@ struct AutoPaddingProbe {
 /// Measured once per chart from the `auto=false` layout, it is the one rule
 /// every place `padding.auto` judges room reads:
 /// - [`probe_auto_padding`]: an inset that leaves a panel below its floor
-///   (or collapsed), or whose x axes leave undrawn any tick label the
-///   `auto=false` layout draws, is unusable, and [`settle_auto_padding`]
-///   never accepts it: auto moves labels inside the canvas, it never
-///   removes them;
+///   (or collapsed), or whose x axes lose more of their own generated tick
+///   labels (culled or elided) than the `auto=false` layout loses on the
+///   same axis ([`AutoPlotRoom::culls_x_labels`]), is unusable, and
+///   [`settle_auto_padding`] never accepts it. The exception is a
+///   continuous x axis that labels every `s`-th generated tick from the
+///   first, at least [`MIN_EVENLY_THINNED_X_LABELS`] of them and none
+///   elided: a sparser, fully labelled axis is not a loss, even where it
+///   loses more than `auto=false`;
 /// - [`MarginResponse`]: one x label whose charge would push its panel
 ///   below its width floor is infeasible and contributes nothing;
 /// - [`axis_title_infeasibility`]: an axis title whose rescue needs more
@@ -1672,9 +1676,13 @@ struct AutoPaddingProbe {
 struct AutoPlotRoom {
     /// Per panel, by index: the smallest `(width, height)` auto may leave.
     floors: Vec<(f64, f64)>,
-    /// The x tick labels the `auto=false` layout draws, across every x
-    /// axis, by (axis, tick) index: auto must leave every one of them drawn.
-    x_labels: Vec<(usize, usize)>,
+    /// How many of its own tick labels each x axis of the `auto=false`
+    /// layout loses ([`x_label_losses`]), in `axis_layouts` order: a pass's
+    /// x axis may lose no more.
+    x_label_losses: Vec<usize>,
+    /// Whether the x axis is continuous, so an even stride thinning of its
+    /// labels ([`thins_x_labels_evenly`]) is not a loss.
+    x_continuous: bool,
     /// The margin auto may add across both x sides together before a panel
     /// reaches its width floor (`f64::INFINITY` when the margins do not
     /// narrow any panel).
@@ -1742,7 +1750,8 @@ impl AutoPlotRoom {
         let height_budget = budget(&taller, |r| r.h);
         Self {
             floors,
-            x_labels: drawn_x_tick_labels(&off),
+            x_label_losses: x_label_losses(&off),
+            x_continuous: inputs.axes.x.tick_projection.is_some(),
             width_budget,
             height_budget,
         }
@@ -1779,8 +1788,8 @@ impl AutoPlotRoom {
 
     /// Whether every panel `plot` lays out is drawable (above
     /// [`MIN_PANEL_DIM`] on both dimensions) and at least its floor, within
-    /// [`AUTO_PADDING_EPS`], and its x axes draw at least as many tick
-    /// labels as the `auto=false` layout.
+    /// [`AUTO_PADDING_EPS`], and its x axes lose no more of their own tick
+    /// labels than the `auto=false` layout's ([`Self::culls_x_labels`]).
     fn leaves_usable(&self, plot: &PlotLayout) -> bool {
         let panels_usable = plot.panels.iter().enumerate().all(|(i, p)| {
             let (w_floor, h_floor) = self.floor(i);
@@ -1790,27 +1799,75 @@ impl AutoPlotRoom {
                 && area.w >= w_floor - AUTO_PADDING_EPS
                 && area.h >= h_floor - AUTO_PADDING_EPS
         });
-        panels_usable && !self.loses_x_labels(plot)
+        panels_usable && !self.culls_x_labels(plot)
     }
 
-    /// Whether `plot`'s x axes leave undrawn (culled, or absent) any tick
-    /// label the `auto=false` layout draws.
-    fn loses_x_labels(&self, plot: &PlotLayout) -> bool {
-        let drawn: std::collections::HashSet<(usize, usize)> = drawn_x_tick_labels(plot).into_iter().collect();
-        self.x_labels.iter().any(|tick| !drawn.contains(tick))
+    /// Whether `plot` loses more x tick labels than `auto=false` allows: it
+    /// lays out a different number of x axes, or one of its x axes loses
+    /// more of its own tick labels ([`lost_x_tick_labels`]) than the same
+    /// axis of the `auto=false` layout does, unless that axis is continuous
+    /// and thins its labels evenly ([`thins_x_labels_evenly`]). The tick
+    /// labels do not depend on the inset, so every layout of one chart
+    /// generates the same ticks; what a pass can change is which of them it
+    /// labels.
+    fn culls_x_labels(&self, plot: &PlotLayout) -> bool {
+        let axes: Vec<&AxisLayout> = x_axis_layouts(plot).collect();
+        axes.len() != self.x_label_losses.len()
+            || axes.iter().zip(&self.x_label_losses).any(|(axis, &auto_off)| {
+                lost_x_tick_labels(axis) > auto_off && !(self.x_continuous && thins_x_labels_evenly(axis))
+            })
     }
 }
 
-/// The tick labels `plot`'s x axes draw (not culled), across every x axis,
-/// as (axis, tick) indices: the same labels on every layout of one chart,
-/// whose tick labels do not depend on the inset.
-fn drawn_x_tick_labels(plot: &PlotLayout) -> Vec<(usize, usize)> {
+/// The x axes `plot` lays out (`Bottom` or `Top`), in `axis_layouts` order.
+fn x_axis_layouts(plot: &PlotLayout) -> impl Iterator<Item = &AxisLayout> {
     plot.axis_layouts
         .iter()
-        .enumerate()
-        .filter(|(_, a)| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top))
-        .flat_map(|(i, a)| a.ticks.iter().enumerate().filter(|(_, t)| !t.culled).map(move |(j, _)| (i, j)))
-        .collect()
+        .filter(|a| matches!(a.orient, AxisOrient::Bottom | AxisOrient::Top))
+}
+
+/// How many of its own tick labels each x axis of `plot` loses
+/// ([`lost_x_tick_labels`]), in `axis_layouts` order.
+fn x_label_losses(plot: &PlotLayout) -> Vec<usize> {
+    x_axis_layouts(plot).map(lost_x_tick_labels).collect()
+}
+
+/// How many of `axis`'s ticks with a generated label do not draw it as
+/// generated: the label is culled (the tick mark stays) or elided to `"…"`.
+/// An axis that draws no labels (`show_labels == false`) loses none.
+fn lost_x_tick_labels(axis: &AxisLayout) -> usize {
+    if !axis.show_labels {
+        return 0;
+    }
+    axis.ticks
+        .iter()
+        .filter(|t| !t.label.is_empty() && (t.culled || t.elided))
+        .count()
+}
+
+/// The fewest labels an evenly thinned x axis draws for
+/// [`thins_x_labels_evenly`] to count it as a sparser, fully labelled axis;
+/// one thinned to its two ends alone is a loss.
+const MIN_EVENLY_THINNED_X_LABELS: usize = 3;
+
+/// Whether `axis` draws its labels as one even stride thinning of its
+/// generated ticks (those with non-empty label text, the ticks
+/// [`lost_x_tick_labels`] counts): no label is elided, the generated ticks
+/// whose label is drawn are exactly the ones [`axis::stride_visibility`]
+/// keeps for one stride (every `s`-th, from the first), and at least
+/// [`MIN_EVENLY_THINNED_X_LABELS`] labels are drawn. An irregular cull, an
+/// elided label or an axis that draws tick marks only is not one.
+fn thins_x_labels_evenly(axis: &AxisLayout) -> bool {
+    let generated = || axis.ticks.iter().filter(|t| !t.label.is_empty());
+    if generated().any(|t| t.elided) {
+        return false;
+    }
+    let drawn: Vec<bool> = generated().map(|t| !t.culled).collect();
+    let labelled = drawn.iter().filter(|&&d| d).count();
+    let Some(stride) = drawn.iter().skip(1).position(|&d| d).map(|i| i + 1) else {
+        return false;
+    };
+    labelled >= MIN_EVENLY_THINNED_X_LABELS && drawn == axis::stride_visibility(drawn.len(), stride)
 }
 
 /// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
@@ -2365,8 +2422,9 @@ struct AutoPaddingExtra {
     /// The same for the y (top and bottom) extra.
     y_scaled: bool,
     /// Whether this is the no-extra fallback of a settle where no pass was
-    /// usable (each collapsed a panel or left an `auto=false` x label
-    /// undrawn): [`settle_auto_padding`] then judges each axis's rescue on
+    /// usable (each collapsed a panel or lost more of an x axis's own tick
+    /// labels than `auto=false` does, see [`AutoPlotRoom::culls_x_labels`]):
+    /// [`settle_auto_padding`] then judges each axis's rescue on
     /// its own.
     no_usable_pass: bool,
 }
@@ -2470,7 +2528,8 @@ const AUTO_PADDING_MIN_PLOT_SHARE: f64 = 0.5;
 /// When no pass was usable ([`AutoPaddingExtra::no_usable_pass`]), each
 /// axis is judged on its own, x and y alike: its rescue alone is the settle
 /// with the other axis closed. An axis whose rescue alone ships nothing (it
-/// collapses a panel, leaves an `auto=false` x label undrawn, or is not
+/// collapses a panel, loses more of an x axis's own tick labels than
+/// `auto=false` does ([`AutoPlotRoom::culls_x_labels`]), or is not
 /// needed) is closed, and the settle runs again, so the other axis's valid
 /// rescue still ships. When both rescues are valid alone but fail together,
 /// neither is closed and auto adds nothing.
@@ -2892,6 +2951,7 @@ fn reserve_x_label_band(
 /// [`lay_out_plot`]'s products. `warnings` holds the facet stage's
 /// warnings (dropped panels, empty cells) then the per-panel stage's
 /// (collapse, x-label elision), in that push order.
+#[cfg_attr(test, derive(Clone))]
 struct PlotLayout {
     plot_region: Rect,
     panels: Vec<PanelLayout>,
@@ -10716,8 +10776,10 @@ mod tests {
     /// overhangs the left edge. The 18px left extra that contains it
     /// narrows the plot until the three labels no longer fit flat, rotated
     /// they would need a band that leaves no plot height, and the cascade's
-    /// band budget would cull the middle label. A pass that leaves undrawn
-    /// a label `auto=false` draws is declined like one that collapses the
+    /// band budget would cull the middle label. That pass loses one of its
+    /// own ticks where `auto=false` loses none, and its labels (every 2nd
+    /// tick) are fewer than [`MIN_EVENLY_THINNED_X_LABELS`], so it is not an
+    /// even thinning either. It is declined like one that collapses the
     /// plot, so the chart is the `auto=false` layout: every label it draws,
     /// by text, is drawn, and the first still clips.
     #[test]
@@ -10815,7 +10877,7 @@ mod tests {
                     right: base.right + x_rescue.right,
                     ..base
                 };
-                if !room.loses_x_labels(&lay_out_at(at_x_rescue, &inputs).plot) {
+                if !room.culls_x_labels(&lay_out_at(at_x_rescue, &inputs).plot) {
                     continue;
                 }
                 let off = layout_with_auto(&theme, false, viewport, &axes, &m);
@@ -10840,12 +10902,26 @@ mod tests {
         assert!(shipped > 0, "the sweep must reach a real y rescue");
     }
 
-    /// Labels are judged by which ones are drawn, not how many: a pass that
-    /// draws as many labels as `auto=false` but a different subset (the
-    /// cull keeps other ticks) leaves one undrawn, so it is unusable.
-    #[test]
-    fn a_pass_drawing_other_labels_loses_one() {
-        let axes = axes_whose_left_rescue_rotates_the_labels();
+    /// Eleven ticks `0, 0.1, …, 1` on a continuous x axis (`continuous`)
+    /// or a categorical one, as a 700x200 chart lays them out: every label
+    /// drawn flat. Returns the room measured on that `auto=false` layout and
+    /// the layout itself, with the index of its x axis in `axis_layouts`.
+    fn eleven_x_ticks(continuous: bool) -> (AutoPlotRoom, PlotLayout, usize) {
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        axes.x.tick_labels = (0..=10)
+            .map(|i| match i {
+                0 => "0".to_string(),
+                10 => "1".to_string(),
+                i => format!("0.{i}"),
+            })
+            .collect();
+        if continuous {
+            if let Some(p) = axes.x.tick_projection.as_mut() {
+                p.major = (0..=10).map(|i| f64::from(i) / 10.0).collect();
+            }
+        } else {
+            axes.x.tick_projection = None;
+        }
         let m = MockMetrics {
             measure: fixed_width(10.0),
             line_h_factor: 1.2,
@@ -10854,18 +10930,259 @@ mod tests {
         let spec = minimal_chart_spec();
         let legend_overrides = legend::LegendOverrides::default();
         let viewport = Viewport {
-            width: 360.0,
-            height: 110.0,
+            width: 700.0,
+            height: 200.0,
         };
         let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
         let base = base_padding_insets(&theme);
-        let mut room = AutoPlotRoom::of_auto_off(&inputs, base);
-        let mut plot = lay_out_at(base, &inputs).plot;
-        assert_eq!(drawn_x_tick_labels(&plot), vec![(1, 0), (1, 1), (1, 2)], "fixture assumption: three labels drawn on the x axis (index 1)");
-        room.x_labels = vec![(1, 0), (1, 2)];
-        assert!(!room.loses_x_labels(&plot), "a superset keeps every label");
-        plot.axis_layouts[1].ticks[2].culled = true;
-        assert!(room.loses_x_labels(&plot), "as many labels, but the third is undrawn");
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let plot = lay_out_at(base, &inputs).plot;
+        let x = plot
+            .axis_layouts
+            .iter()
+            .position(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let ticks = &plot.axis_layouts[x].ticks;
+        assert!(
+            ticks.len() == 11 && ticks.iter().all(|t| !t.culled && !t.elided),
+            "fixture assumption: eleven x labels, all drawn",
+        );
+        assert_eq!(room.x_label_losses, vec![0], "fixture assumption: auto=false loses no x label");
+        (room, plot, x)
+    }
+
+    /// `plot` with its x axis (`axis_layouts[x]`) labelling only the ticks
+    /// `drawn` keeps, the rest culled.
+    fn labelling(plot: &PlotLayout, x: usize, drawn: impl Fn(usize) -> bool) -> PlotLayout {
+        let mut plot = plot.clone();
+        for (i, t) in plot.axis_layouts[x].ticks.iter_mut().enumerate() {
+            t.culled = !drawn(i);
+        }
+        plot
+    }
+
+    /// A pass is judged by how many of its own ticks it labels, not which:
+    /// where `auto=false` labels every 2nd tick (`0, 0.2, …, 1`), a
+    /// continuous x axis that labels every 3rd (`0, 0.3, 0.6, 0.9`), 4th or
+    /// 5th, none elided and at least three labels drawn, is a sparser,
+    /// fully labelled axis and the pass is usable, as is the same stride.
+    /// Every 10th (two labels), every other tick but one, an elided label
+    /// and tick marks only are losses.
+    #[test]
+    fn an_evenly_thinned_continuous_x_axis_is_not_a_loss() {
+        let (mut room, plot, x) = eleven_x_ticks(true);
+        let auto_off = labelling(&plot, x, |i| i % 2 == 0);
+        room.x_label_losses = x_label_losses(&auto_off);
+        assert_eq!(room.x_label_losses, vec![5], "auto=false labels every 2nd tick");
+        for stride in [2, 3, 4, 5] {
+            let pass = labelling(&plot, x, |i| i % stride == 0);
+            assert!(!room.culls_x_labels(&pass), "every {stride}th tick labelled is usable");
+        }
+        let two_labels = labelling(&plot, x, |i| i % 10 == 0);
+        assert!(room.culls_x_labels(&two_labels), "two labels (every 10th tick) is a loss");
+        let irregular = labelling(&plot, x, |i| i % 3 == 0 && i != 6);
+        assert!(room.culls_x_labels(&irregular), "a stride with one more label culled is a loss");
+        let offset = labelling(&plot, x, |i| i % 3 == 1);
+        assert!(room.culls_x_labels(&offset), "a stride that does not start at the first tick is a loss");
+        let mut elided = labelling(&plot, x, |i| i % 3 == 0);
+        elided.axis_layouts[x].ticks[3].elided = true;
+        assert!(room.culls_x_labels(&elided), "an elided label is a loss");
+        let marks_only = labelling(&plot, x, |_| false);
+        assert!(room.culls_x_labels(&marks_only), "tick marks only is a loss");
+    }
+
+    /// Where `auto=false` labels every tick, a pass that culls one of its own
+    /// ticks, or elides one label to `"…"` while drawing every tick, loses
+    /// it and is unusable; the same layout is usable. An even stride
+    /// thinning of a continuous axis is still not a loss.
+    #[test]
+    fn an_x_axis_that_culls_or_elides_its_own_tick_is_a_loss() {
+        let (room, plot, x) = eleven_x_ticks(true);
+        assert!(!room.culls_x_labels(&plot), "the auto=false layout itself is usable");
+        let culled = labelling(&plot, x, |i| i != 4);
+        assert!(room.culls_x_labels(&culled), "one tick culled is a loss");
+        let mut elided = plot.clone();
+        elided.axis_layouts[x].ticks[1].elided = true;
+        assert!(room.culls_x_labels(&elided), "one label elided is a loss");
+        let thinned = labelling(&plot, x, |i| i % 2 == 0);
+        assert!(!room.culls_x_labels(&thinned), "every 2nd tick labelled is a sparser, fully labelled axis");
+    }
+
+    /// The stride is read over the generated ticks, those with label text:
+    /// a blank-label tick (never a loss) between them does not break an even
+    /// thinning. Where `auto=false` labels every generated tick, a pass that
+    /// labels every 2nd generated tick around a blank one is usable.
+    #[test]
+    fn an_even_thinning_skips_blank_label_ticks() {
+        let (room, plot, x) = eleven_x_ticks(true);
+        let mut pass = plot.clone();
+        let ticks = &mut pass.axis_layouts[x].ticks;
+        ticks[1].label = String::new();
+        let generated: Vec<usize> = (0..ticks.len()).filter(|&i| i != 1).collect();
+        for (k, &i) in generated.iter().enumerate() {
+            ticks[i].culled = k % 2 != 0;
+        }
+        assert_eq!(lost_x_tick_labels(&pass.axis_layouts[x]), 5, "fixture assumption: five generated ticks lose their label");
+        assert!(!room.culls_x_labels(&pass), "every 2nd generated tick labelled is an even thinning");
+    }
+
+    /// A categorical x axis is judged by count alone: where `auto=false`
+    /// labels every 2nd category, a pass at the same stride loses as many
+    /// and is usable, and one at the next stride loses more and is not.
+    #[test]
+    fn a_categorical_x_axis_may_not_thin_further_than_auto_off() {
+        let (mut room, plot, x) = eleven_x_ticks(false);
+        assert!(!room.x_continuous, "fixture assumption: the x axis is categorical");
+        room.x_label_losses = x_label_losses(&labelling(&plot, x, |i| i % 2 == 0));
+        assert!(!room.culls_x_labels(&labelling(&plot, x, |i| i % 2 == 0)), "the same stride is usable");
+        assert!(room.culls_x_labels(&labelling(&plot, x, |i| i % 3 == 0)), "the next stride is a loss");
+    }
+
+    /// A pass that lays out a different number of x axes than `auto=false`
+    /// is unusable. An x axis that draws no labels (`show_labels == false`)
+    /// loses none, however its ticks are flagged.
+    #[test]
+    fn x_axis_count_and_hidden_labels() {
+        let (mut room, plot, x) = eleven_x_ticks(true);
+        let mut no_x_axis = plot.clone();
+        no_x_axis.axis_layouts.remove(x);
+        assert!(room.culls_x_labels(&no_x_axis), "a pass with no x axis is a loss");
+        let mut two_x_axes = plot.clone();
+        two_x_axes.axis_layouts.push(plot.axis_layouts[x].clone());
+        assert!(room.culls_x_labels(&two_x_axes), "a pass with an extra x axis is a loss");
+        let mut hidden = labelling(&plot, x, |_| false);
+        hidden.axis_layouts[x].show_labels = false;
+        hidden.axis_layouts[x].ticks[2].elided = true;
+        assert_eq!(x_label_losses(&hidden), vec![0], "an axis that draws no labels loses none");
+        room.x_continuous = false;
+        assert!(!room.culls_x_labels(&hidden), "so it is usable on any axis");
+    }
+
+    /// An x title rescue whose narrower plot labels every 3rd of the x
+    /// axis's eleven ticks where `auto=false` labels every 2nd ships: on a
+    /// 160x200 chart the 20-character title clips at `auto=false`, and the
+    /// default draws it inside the canvas, labels `0, 0.3, 0.6, 0.9` (none
+    /// elided), and keeps more than half the plot width.
+    #[test]
+    fn a_title_rescue_that_thins_the_x_labels_evenly_ships() {
+        let m = MockMetrics {
+            measure: font_scaled_width,
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let mut axes = axes_whose_left_rescue_rotates_the_labels();
+        axes.x.tick_labels = (0..=10)
+            .map(|i| match i {
+                0 => "0".to_string(),
+                10 => "1".to_string(),
+                i => format!("0.{i}"),
+            })
+            .collect();
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = (0..=10).map(|i| f64::from(i) / 10.0).collect();
+        }
+        axes.x.title.set(Some("a".repeat(20)));
+        let viewport = Viewport {
+            width: 160.0,
+            height: 200.0,
+        };
+        let x_axis = |l: &LayoutResult| l.axes.iter().find(|a| a.orient == AxisOrient::Bottom).expect("x axis present").clone();
+        let title_ink = |l: &LayoutResult| {
+            let title = x_axis(l).title.expect("x title");
+            let half = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+            (title.anchor_x - half, title.anchor_x + half)
+        };
+        let labelled = |l: &LayoutResult| x_axis(l).ticks.iter().map(|t| !t.culled).collect::<Vec<_>>();
+        let off = layout_with_auto(&theme, false, viewport, &axes, &m);
+        assert_eq!(labelled(&off), axis::stride_visibility(11, 2), "fixture assumption: auto=false labels every 2nd tick");
+        assert!(title_ink(&off).1 > viewport.width, "fixture assumption: the title clips at auto=false");
+        let on = layout_with_auto(&theme, true, viewport, &axes, &m);
+        let (lo, hi) = title_ink(&on);
+        assert!(lo >= -1e-6 && hi <= viewport.width + 1e-6, "the title is rescued inside the canvas ({lo}, {hi})");
+        assert_eq!(labelled(&on), axis::stride_visibility(11, 3), "the rescue labels every 3rd tick");
+        let drawn: Vec<String> = x_axis(&on).ticks.iter().filter(|t| !t.culled).map(|t| t.label.clone()).collect();
+        assert_eq!(drawn, ["0", "0.3", "0.6", "0.9"], "every drawn label is drawn as generated");
+        assert!(x_axis(&on).ticks.iter().all(|t| !t.elided), "no label is elided");
+        assert!(
+            on.panels[0].plot_area.w >= off.panels[0].plot_area.w / 2.0,
+            "the rescue keeps half the plot ({} of {})",
+            on.panels[0].plot_area.w,
+            off.panels[0].plot_area.w,
+        );
+    }
+
+    /// The x label band budget is unbounded when no band bounds the panels:
+    /// when even no band leaves them undrawable, as when the band they
+    /// would draw leaves them drawable.
+    #[test]
+    fn the_x_label_band_budget_is_unbounded_when_no_band_is_drawable() {
+        assert_eq!(x_label_band_budget(50.0, &|_| false), f64::INFINITY);
+        assert_eq!(x_label_band_budget(50.0, &|_| true), f64::INFINITY);
+    }
+
+    /// Between a band that leaves the panels drawable (none) and the one the
+    /// labels would draw, which does not, the budget is the tallest drawable
+    /// band, found by bisection.
+    #[test]
+    fn the_x_label_band_budget_bisects_to_the_tallest_drawable_band() {
+        let budget = x_label_band_budget(50.0, &|b| b <= 17.25);
+        assert!(budget <= 17.25 && 17.25 - budget < 1e-9, "budget {budget}");
+    }
+
+    /// A rescue that thins a continuous x axis to its two end labels is
+    /// declined. On a 300x100 chart `auto=false` draws all three `",.4f"`
+    /// labels (`0.0000`, `617,283.9450`, `1,234,567.8900`) and the last one
+    /// overhangs the right edge. The 33px right extra that contains it keeps
+    /// the plot above its floors but narrows it until only every 2nd tick is
+    /// labelled: an even thinning, but to two labels, fewer than
+    /// [`MIN_EVENLY_THINNED_X_LABELS`], and it loses a tick `auto=false`
+    /// draws. So the chart ships as the `auto=false` layout.
+    #[test]
+    fn a_rescue_that_thins_the_x_labels_to_two_is_declined() {
+        let mut axes = continuous_x_axes_with_long_last_label();
+        axes.x.tick_labels = vec!["0.0000".into(), "617,283.9450".into(), "1,234,567.8900".into()];
+        if let Some(p) = axes.x.tick_projection.as_mut() {
+            p.major = vec![0.0, 0.5, 1.0];
+        }
+        let m = MockMetrics {
+            measure: fixed_width(7.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let viewport = Viewport {
+            width: 300.0,
+            height: 100.0,
+        };
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let base = base_padding_insets(&theme);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let labelled = |plot: &PlotLayout| {
+            x_axis_layouts(plot)
+                .next()
+                .map(|a| a.ticks.iter().map(|t| !t.culled && !t.elided).collect::<Vec<_>>())
+        };
+        let auto_off = lay_out_at(base, &inputs).plot;
+        assert_eq!(labelled(&auto_off), Some(vec![true; 3]), "fixture assumption: auto=false draws all three labels");
+        let probe = probe_auto_padding(base, &inputs, &room);
+        let rescue = auto_padding_extra(&inputs, probe.chrome, probe.x_overhang, &room).total;
+        assert!(rescue.right > 0.0, "fixture assumption: the last label needs a right rescue ({rescue:?})");
+        let candidate = lay_out_at(resolve_padding_inset(&theme, base, rescue), &inputs).plot;
+        let area = candidate.panels[0].plot_area;
+        let (w_floor, h_floor) = room.floor(0);
+        assert!(area.w >= w_floor && area.h >= h_floor, "fixture assumption: the rescue keeps both floors ({area:?})");
+        assert_eq!(
+            labelled(&candidate),
+            Some(vec![true, false, true]),
+            "fixture assumption: the rescue labels the two ends only",
+        );
+        assert!(room.culls_x_labels(&candidate), "two labels is a loss");
+        assert_eq!(
+            layout_with_auto(&theme, true, viewport, &axes, &m),
+            layout_with_auto(&theme, false, viewport, &axes, &m),
+            "the chart ships as auto=false",
+        );
     }
 
     /// The charts of [`a_failing_rescue_on_one_axis_keeps_the_other`]: an
@@ -10884,7 +11201,8 @@ mod tests {
         axes
     }
 
-    /// Each axis is judged on its own, x and y alike. Where the x rescue
+    /// Where no pass of the whole chart is usable, each axis is judged on
+    /// its own, x and y alike. Where the x rescue
     /// alone collapses the plot (rotating the labels into a band that leaves
     /// under half the height) and the y title's rescue alone is valid, x is
     /// closed and the y rescue ships: the x margins are `auto=false`'s and
@@ -10928,8 +11246,11 @@ mod tests {
             let at = |extra: Inset| resolve_padding_inset(&theme, base, extra);
             let x_unusable = probe_auto_padding(at(x_only), &inputs, &room).unusable;
             let y_unusable = probe_auto_padding(at(y_only), &inputs, &room).unusable;
-            let x_culls = room.loses_x_labels(&lay_out_at(at(x_only), &inputs).plot);
-            let y_culls = room.loses_x_labels(&lay_out_at(at(y_only), &inputs).plot);
+            let x_culls = room.culls_x_labels(&lay_out_at(at(x_only), &inputs).plot);
+            let y_culls = room.culls_x_labels(&lay_out_at(at(y_only), &inputs).plot);
+            if !settle_within(&inputs, base, &room).no_usable_pass {
+                continue;
+            }
             let off = layout_with_auto(&theme, false, viewport, &axes, &m);
             let on = layout_with_auto(&theme, true, viewport, &axes, &m);
             if x_unusable && !x_culls && !y_unusable {
@@ -11803,6 +12124,94 @@ mod tests {
         );
     }
 
+    /// The width twin: with no budget to scale or decline it, an x title
+    /// rescue that would leave under half the `auto=false` plot width (and
+    /// keeps the height) is unusable, and the settle adds nothing; the same
+    /// room without floors ships it.
+    #[test]
+    fn a_rescue_that_leaves_under_half_the_plot_width_adds_nothing() {
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let base = base_padding_insets(&theme);
+        let mut reached = 0;
+        for (width, n) in (220..=400).step_by(30).flat_map(|w| (1..=50).map(move |n| (w, n))) {
+            let viewport = Viewport {
+                width: f64::from(width),
+                height: 200.0,
+            };
+            let axes = narrow_chart_with_an_x_title(n);
+            let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+            let room = AutoPlotRoom::of_auto_off(&inputs, base);
+            let unbudgeted = AutoPlotRoom {
+                width_budget: f64::INFINITY,
+                height_budget: f64::INFINITY,
+                ..room.clone()
+            };
+            let no_floors = AutoPlotRoom {
+                floors: Vec::new(),
+                ..unbudgeted.clone()
+            };
+            let rescue = settle_within(&inputs, base, &no_floors).total;
+            if rescue == Inset::default() {
+                continue;
+            }
+            let area = lay_out_at(resolve_padding_inset(&theme, base, rescue), &inputs).plot.panels[0].plot_area;
+            let (w_floor, h_floor) = room.floor(0);
+            if !(area.w < w_floor && area.w > MIN_PANEL_DIM && area.h >= h_floor) {
+                continue;
+            }
+            reached += 1;
+            assert_eq!(
+                settle_within(&inputs, base, &unbudgeted).total,
+                Inset::default(),
+                "a {n}-char title whose rescue leaves {} of a {}px plot adds nothing",
+                area.w,
+                2.0 * w_floor,
+            );
+        }
+        assert!(reached > 0, "the sweep must reach a rescue under the width floor and above the height floor");
+    }
+
+    /// `leaves_usable` holds a panel to its width floor on its own: a plot
+    /// whose panel is below its width floor and above its height floor is
+    /// unusable, and the same plot with that floor met is usable.
+    #[test]
+    fn a_panel_under_its_width_floor_alone_is_unusable() {
+        let axes = axes_whose_left_rescue_rotates_the_labels();
+        let m = MockMetrics {
+            measure: fixed_width(10.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let spec = minimal_chart_spec();
+        let legend_overrides = legend::LegendOverrides::default();
+        let viewport = Viewport {
+            width: 360.0,
+            height: 200.0,
+        };
+        let inputs = plain_layout_inputs(&spec, &legend_overrides, &theme, &axes, &m, viewport);
+        let base = base_padding_insets(&theme);
+        let room = AutoPlotRoom::of_auto_off(&inputs, base);
+        let plot = lay_out_at(base, &inputs).plot;
+        let area = plot.panels[0].plot_area;
+        assert!(room.leaves_usable(&plot), "fixture assumption: the auto=false plot is usable");
+        let narrow = AutoPlotRoom {
+            floors: vec![(area.w + 1.0, area.h - 1.0)],
+            ..room.clone()
+        };
+        assert!(!narrow.leaves_usable(&plot), "a panel under its width floor is unusable");
+        let met = AutoPlotRoom {
+            floors: vec![(area.w - 1.0, area.h - 1.0)],
+            ..room
+        };
+        assert!(met.leaves_usable(&plot), "the same panel at its floors is usable");
+    }
+
     // ── padding.auto judges coverage by the tick extra that ships ───────────
 
     /// An explicit side ships no tick extra whatever its labels do: the
@@ -11884,7 +12293,8 @@ mod tests {
         let base = base_padding_insets(&theme);
         let unbounded = AutoPlotRoom {
             floors: Vec::new(),
-            x_labels: Vec::new(),
+            x_label_losses: Vec::new(),
+            x_continuous: true,
             width_budget: f64::INFINITY,
             height_budget: f64::INFINITY,
         };
@@ -12394,6 +12804,78 @@ mod tests {
             flat > 0 && rotated > 0 && faceted > 0 && narrowed > 0,
             "flat {flat}, rotated {rotated}, faceted {faceted}, narrowed {narrowed}",
         );
+    }
+
+    /// The x labels are judged against the panel the secondary y axes leave:
+    /// with none, one and two secondary y axes, at every width of the sweep
+    /// the reserved x label band is the band the axis draws, and for one and
+    /// for two secondary axes the sweep reaches widths where the secondary
+    /// bands change the drawn x label angle against the same chart with
+    /// fewer of them.
+    #[test]
+    fn the_reserved_x_label_band_is_what_the_axis_draws_beside_secondary_y_axes() {
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
+        let theme = default_theme_inputs();
+        let label_sets: Vec<Vec<String>> = vec![
+            vec!["0".into(), "500".into(), "1,000".into(), "1,500".into(), "2,000".into()],
+            (0..=10).map(|i| format!("${},000", i * 100)).collect(),
+        ];
+        let angle = |l: &LayoutResult| {
+            l.axes
+                .iter()
+                .find(|a| a.orient == AxisOrient::Bottom)
+                .and_then(|a| a.ticks.iter().find(|t| !t.culled))
+                .map(|t| t.label_angle)
+        };
+        let drawable = |l: &LayoutResult| l.panels.iter().all(|p| p.plot_area.w > MIN_PANEL_DIM && p.plot_area.h > MIN_PANEL_DIM);
+        // The drawn x label angle of each drawable layout, keyed by
+        // (label set, width, auto, secondary count).
+        let mut angles: std::collections::HashMap<(usize, u32, bool, usize), Option<f64>> = std::collections::HashMap::new();
+        for secondaries in [0, 1, 2] {
+            for (set, labels) in label_sets.iter().enumerate() {
+                let mut axes = continuous_x_axes_with_long_last_label();
+                let k = labels.len();
+                axes.x.tick_labels = labels.clone();
+                if let Some(p) = axes.x.tick_projection.as_mut() {
+                    p.major = (0..k).map(|i| i as f64 / (k - 1) as f64).collect();
+                }
+                let mut beside = axes;
+                beside.secondary_y = n_secondary_axes(secondaries);
+                for width in (120..=900).step_by(5) {
+                    let viewport = Viewport {
+                        width: f64::from(width),
+                        height: 400.0,
+                    };
+                    for auto in [false, true] {
+                        let layout = layout_with_auto(&theme, auto, viewport, &beside, &m);
+                        if !drawable(&layout) {
+                            continue;
+                        }
+                        let band = reserved_x_label_band(&layout);
+                        let drawn = drawn_x_label_band(&layout, &theme, &m);
+                        assert!(
+                            (band - drawn).abs() < 1e-9,
+                            "{secondaries} secondary y, {labels:?} at {width}px auto {auto}: reserved {band}, drawn {drawn}",
+                        );
+                        angles.insert((set, width, auto, secondaries), angle(&layout));
+                    }
+                }
+            }
+        }
+        for secondaries in [1, 2] {
+            let flips = angles
+                .iter()
+                .filter(|(&(set, width, auto, n), a)| {
+                    n == secondaries
+                        && a.is_some()
+                        && angles.get(&(set, width, auto, n - 1)).is_some_and(|fewer| fewer.is_some() && fewer != *a)
+                })
+                .count();
+            assert!(flips > 0, "{secondaries} secondary y: the sweep must reach a width where they change the x label angle");
+        }
     }
 
     /// Under a `CoordFixed` aspect that binds the width, sizing the band at

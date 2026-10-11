@@ -2842,7 +2842,7 @@ fn merge_survivor_labels(
 
 /// Which of `n` labels a stride cull keeps: every `stride`-th, starting from
 /// the first.
-fn stride_visibility(n: usize, stride: usize) -> Vec<bool> {
+pub(super) fn stride_visibility(n: usize, stride: usize) -> Vec<bool> {
     (0..n).map(|i| i % stride == 0).collect()
 }
 
