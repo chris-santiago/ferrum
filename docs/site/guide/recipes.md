@@ -30,7 +30,7 @@ chart = (
 chart
 ```
 
-![Scatter with color and size](img/recipes_01.png)
+![Scatter with color and size](img/recipes_color_size_scatter.png)
 
 ## Histogram with hue overlay
 
@@ -53,7 +53,7 @@ chart = (
 chart
 ```
 
-![Histogram with hue](img/recipes_02.png)
+![Histogram with hue](img/recipes_histogram_hue.png)
 
 ## Per-group KDE
 
@@ -76,7 +76,7 @@ chart = (
 chart
 ```
 
-![Per-group KDE](img/recipes_03.png)
+![Per-group KDE](img/recipes_grouped_kde.png)
 
 Without `groupby`, the density is computed over all rows combined. With `groupby="species"`, each species gets its own KDE curve colored by the `color` encoding.
 
@@ -107,7 +107,7 @@ chart = points + trend
 chart
 ```
 
-![Scatter + per-group smooth](img/recipes_04.png)
+![Scatter + per-group smooth](img/recipes_grouped_smooth.png)
 
 The `+` operator layers both marks on shared axes. The scatter renders the raw points; the smooth renders the fitted curves. Both share the same `color` scale.
 
@@ -138,7 +138,7 @@ chart = points + fit
 chart
 ```
 
-![Scatter + smooth with CI](img/recipes_05.png)
+![Scatter + smooth with CI](img/recipes_smooth_ci.png)
 
 `ci=0.95` produces a layered ribbon (band) + line chart. The ribbon shows the 95% confidence interval around the OLS fit. Use `method="lm"` for linear regression or `method="loess"` for a local smoother.
 
@@ -163,7 +163,7 @@ chart = (
 chart
 ```
 
-![Bar chart with color](img/recipes_06.png)
+![Bar chart with color](img/recipes_bar_color.png)
 
 ## Pairwise scatter grid
 
@@ -191,7 +191,7 @@ chart = fm.RepeatChart(
 chart
 ```
 
-![Pairwise scatter grid](img/recipes_07.png)
+![Pairwise scatter grid](img/recipes_pairwise_grid.png)
 
 Each cell in the grid swaps one field into the x or y encoding. This is the grammar-level equivalent of [`fm.pairplot()`][ferrum.pairplot] — use [`RepeatChart`][ferrum.RepeatChart] when you want full control over the template chart.
 
@@ -227,7 +227,7 @@ chart = points + smooth + rug
 chart
 ```
 
-![Three-layer scatter](img/recipes_08.png)
+![Three-layer scatter](img/recipes_three_layer.png)
 
 Each `+` adds another layer on the same axes. All three layers share the x/y scales and the color palette. The rug ticks along the bottom show the marginal distribution of sepal length per species.
 
@@ -258,7 +258,7 @@ report = (roc | cm) & importances
 report
 ```
 
-![Multi-panel model report](img/recipes_09.png)
+![Multi-panel model report](img/recipes_model_report.png)
 
 The `|` operator places charts side by side; `&` stacks vertically. The result is a single SVG with three panels — same grammar, same theme, one `.save()` call.
 
@@ -289,7 +289,7 @@ chart = (roc_rf | roc_lr).theme(fm.themes.publication)
 chart
 ```
 
-![Two-model ROC comparison](img/recipes_10.png)
+![Two-model ROC comparison](img/recipes_roc_comparison.png)
 
 `.properties(title=...)` adds a title to each panel. `.theme()` applies to the entire composed view. The same pattern works for any diagnostic helper — swap `roc_chart` for `calibration_chart`, `pr_chart`, or `confusion_matrix_chart`.
 
@@ -311,7 +311,7 @@ chart = (
 chart
 ```
 
-![Horizontal bars with CoordFlip](img/recipes_11.png)
+![Horizontal bars with CoordFlip](img/recipes_coord_flip.png)
 
 [`CoordFlip`][ferrum.CoordFlip] swaps the x and y axes at render time — the encoding stays as written, but the visual orientation flips. This is the idiomatic way to produce horizontal bar charts, lollipop charts, or any chart where the categorical axis should run vertically.
 
@@ -348,7 +348,7 @@ chart = scatter + hline + vline + label
 chart
 ```
 
-![Annotations](img/recipes_12.png)
+![Annotations](img/recipes_annotations.png)
 
 The `+` operator layers all marks on the same axes. [`mark_rule`][ferrum.Chart.mark_rule] with only `y` encoded draws a horizontal line spanning the full plot width; with only `x` encoded it draws a vertical line spanning the full height. [`mark_text`][ferrum.Chart.mark_text] places text at the (x, y) position with the string from the `text` encoding channel.
 
@@ -370,7 +370,7 @@ chart = (
 chart
 ```
 
-![Chart sizing](img/recipes_13.png)
+![Chart sizing](img/recipes_sizing.png)
 
 The default size is 640 x 480. Use [`.properties()`][ferrum.Chart.properties] when you need a wider plot for time series, a square plot for scatter matrices, or a compact sparkline.
 
@@ -394,7 +394,7 @@ chart = (
 chart
 ```
 
-![Custom category order](img/recipes_14.png)
+![Custom category order](img/recipes_category_order.png)
 
 The `sort=` parameter on positional channels accepts a list of category values in the desired display order. Without it, categories appear in their natural (alphabetical) order.
 
@@ -420,7 +420,7 @@ chart = (
 chart
 ```
 
-![Time-series line chart](img/recipes_15.png)
+![Time-series line chart](img/recipes_time_series.png)
 
 The `:T` suffix tells ferrum the x-axis is temporal, enabling date-aware tick formatting and axis scaling.
 
@@ -449,7 +449,7 @@ chart = (
 chart
 ```
 
-![Filtered scatter with derived column](img/recipes_16.png)
+![Filtered scatter with derived column](img/recipes_filtered_scatter.png)
 
 `transform_filter` removes rows where x <= 2, `transform_calculate` adds a derived `ratio` column. Both run in Rust before rendering.
 
@@ -475,7 +475,7 @@ grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
 grid
 ```
 
-![ConcatChart wrapping grid](img/recipes_17.png)
+![ConcatChart wrapping grid](img/recipes_concat_wrap.png)
 
 `ConcatChart` arranges 4 charts in a 2-column wrapping grid. Use it when charts share data but show different mark types or encodings.
 
@@ -504,7 +504,7 @@ chart = (
 chart
 ```
 
-![Custom axis and legend](img/recipes_18.png)
+![Custom axis and legend](img/recipes_custom_axis_legend.png)
 
 `Axis(...)` and `Legend(...)` give per-channel control over axis presentation and legend layout without affecting the theme.
 
@@ -535,7 +535,7 @@ chart = (
 chart
 ```
 
-![Power-scaled bubble chart](img/recipes_19.png)
+![Power-scaled bubble chart](img/recipes_power_bubble.png)
 
 `SqrtScale(domain=[0, 1500])` is equivalent to `PowScale(domain=[0, 1500], exponent=0.5)`. It makes bubble area proportional to the data value — without it, large values visually dominate.
 

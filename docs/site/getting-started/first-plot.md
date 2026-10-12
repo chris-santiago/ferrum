@@ -29,7 +29,7 @@ chart = (
 chart
 ```
 
-![Iris scatter plot](img/first-plot_01.png)
+![Iris scatter plot](img/first-plot_iris_scatter.png)
 
 That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a [`Chart`][ferrum.Chart] object — call [`.to_svg()`][ferrum.Chart.to_svg] to render it, [`.save()`][ferrum.Chart.save] to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
 
@@ -62,7 +62,7 @@ chart
 
 `groupby="species"` tells the smoother to fit a separate curve per group rather than one curve through all points. See the [Marks reference](../api/marks.md) for the full parameter list on each mark.
 
-![Scatter with LOESS trend](img/first-plot_02.png)
+![Scatter with LOESS trend](img/first-plot_loess_trend.png)
 
 The `+` operator always layers — both marks share the same axes. The LOESS smooth is computed in Rust; you declared what you wanted, not how to compute it.
 
@@ -87,7 +87,7 @@ chart = (
 chart
 ```
 
-![Boxplot by species](img/first-plot_03.png)
+![Boxplot by species](img/first-plot_boxplot.png)
 
 ## Apply a theme
 
@@ -111,7 +111,7 @@ chart = (
 chart
 ```
 
-![Publication theme](img/first-plot_04.png)
+![Publication theme](img/first-plot_publication_theme.png)
 
 Ferrum ships [twelve built-in themes](../guide/themes.md) in the [`themes`](../api/themes.md) module — from Paper Ink (the warm default) to dark, publication, and editorial styles.
 

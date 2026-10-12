@@ -1,6 +1,12 @@
-"""Generate PNG visuals for all docs concept pages."""
+"""Generate PNG visuals for all docs concept pages.
+
+Usage:
+    unset CONDA_PREFIX && uv run --no-sync python scripts/gen_concept_pngs.py
+"""
 
 import traceback
+from pathlib import Path
+
 import ferrum as fm
 import ferrum.annotation as ann
 import polars as pl
@@ -14,8 +20,8 @@ def save_png(chart, path):
     print(f"  OK: {path} ({len(png_data)} bytes)")
 
 
-BASE = "/Users/chrissantiago/Dropbox/GitHub/ferrum/docs/site/assets/concepts"
-RECIPES = "/Users/chrissantiago/Dropbox/GitHub/ferrum/docs/site/assets/recipes"
+#: Output directory, resolved from this file so the script runs from any working directory.
+BASE = Path(__file__).resolve().parent.parent / "docs" / "site" / "assets" / "concepts"
 
 
 def gen_customizing_cascade():

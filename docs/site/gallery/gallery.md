@@ -72,6 +72,14 @@ The building blocks. Each mark maps directly to a geometric shape.
 
     `fm.Chart(df).mark_text().encode(x="x", y="y", text="label")`
 
+-   **Segment**
+
+    ---
+
+    ![mark_segment](img/mark_segment.png)
+
+    `fm.Chart(df).mark_segment().encode(x="x", y="y", x2="x2", y2="y2")`
+
 </div>
 
 ## Statistical marks
@@ -296,6 +304,22 @@ Multiple marks and charts combined into compound views.
 
     `fm.hconcat(chart_hex, chart_violin)`
 
+-   **Scatter + reference rule**
+
+    ---
+
+    ![comp_scatter_rule](img/comp_scatter_rule.png)
+
+    `fm.Chart(df).mark_point() + fm.Chart(df).mark_rule().encode(y="ref_y")`
+
+-   **Scatter + smooth + rule**
+
+    ---
+
+    ![comp_triple_layer](img/comp_triple_layer.png)
+
+    `fm.Chart(df).mark_point().mark_smooth(ci=0.95) + fm.Chart(df).mark_rule().encode(y="ref_y")`
+
 </div>
 
 ## Figure-level helpers
@@ -361,6 +385,22 @@ One-line entry points for common chart patterns.
     *helper:* `fm.catplot(df, x="group", y="value", kind="strip")`
 
     *grammar:* `fm.Chart(df).mark_point().encode(x="group", y="value")`
+
+-   **catplot (swarm)**
+
+    ---
+
+    ![catplot_swarm](img/catplot_swarm.png)
+
+    `fm.catplot(df, x="group", y="value", kind="swarm")`
+
+-   **catplot (bar)**
+
+    ---
+
+    ![catplot_bar](img/catplot_bar.png)
+
+    `fm.catplot(df, x="quarter", y="sales", hue="region", kind="bar")`
 
 -   **lmplot**
 
@@ -492,6 +532,30 @@ Classification, regression, feature explanation, model selection, and clustering
 
     `fm.importance_chart(model, X_test, y_test)`
 
+-   **Univariate feature ranking**
+
+    ---
+
+    ![rank1d_chart](img/rank1d_chart.png)
+
+    `fm.rank1d_chart(X)`
+
+-   **Pairwise feature ranking**
+
+    ---
+
+    ![rank2d_chart](img/rank2d_chart.png)
+
+    `fm.rank2d_chart(X)`
+
+-   **Parallel coordinates**
+
+    ---
+
+    ![parallel_coordinates_chart](img/parallel_coordinates_chart.png)
+
+    `fm.parallel_coordinates_chart(df, hue="species")`
+
 -   **SHAP beeswarm**
 
     ---
@@ -507,6 +571,14 @@ Classification, regression, feature explanation, model selection, and clustering
     ![shap_bar_chart](img/shap_bar_chart.png)
 
     `fm.shap_bar_chart(model, X, y)`
+
+-   **SHAP waterfall**
+
+    ---
+
+    ![shap_waterfall_chart](img/shap_waterfall_chart.png)
+
+    `fm.shap_waterfall_chart(model, X, y, sample_idx=0)`
 
 -   **Partial dependence**
 

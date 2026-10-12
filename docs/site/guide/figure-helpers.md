@@ -52,7 +52,7 @@ chart = fm.displot(iris, x="sepal_length", kind="hist")
 chart
 ```
 
-![displot histogram](img/figure-helpers_01.png)
+![displot histogram](img/figure-helpers_displot.png)
 
 [`displot`][ferrum.displot] follows seaborn's signature: `x`, `y`, `hue`, `col`, `row` for encoding; `kind` for the geometry; `bins`, `bandwidth`, `bw_adjust`, `multiple`, `kde`, `rug` for the statistical details.
 
@@ -73,7 +73,7 @@ chart = fm.catplot(iris, x="species", y="sepal_length", kind="box")
 chart
 ```
 
-![catplot box](img/figure-helpers_02.png)
+![catplot box](img/figure-helpers_catplot_box.png)
 
 [`catplot`][ferrum.catplot] is the one-call entry point for the boxplot / violin / strip / swarm family. It selects the right composite mark based on `kind=` and applies sensible defaults (jitter for strip plots, dodge for grouped bars, bootstrap CIs for point and bar estimates).
 
@@ -94,7 +94,7 @@ chart = fm.relplot(iris, x="sepal_length", y="petal_length", hue="species", kind
 chart
 ```
 
-![relplot scatter](img/figure-helpers_03.png)
+![relplot scatter](img/figure-helpers_relplot.png)
 
 [`relplot`][ferrum.relplot] follows seaborn's signature: `x`, `y`, `hue`, `size`, `style`, `col`, `row` for encoding; `kind` for the geometry. Use it when you want a quick faceted scatter or line chart without dropping into the grammar.
 
@@ -115,7 +115,7 @@ chart = fm.lmplot(iris, x="sepal_length", y="petal_length")
 chart
 ```
 
-![lmplot](img/figure-helpers_04.png)
+![lmplot](img/figure-helpers_lmplot.png)
 
 [`regplot`][ferrum.regplot] is the single-axes equivalent of [`lmplot`][ferrum.lmplot] — same API for the regression fit (`method=`, `ci=`, `order=`, `scatter=`, `scatter_kws=`, `line_kws=`) but without faceting (`col=` and `row=` are excluded). Use [`regplot`][ferrum.regplot] when you want one regression plot on one set of axes; use [`lmplot`][ferrum.lmplot] when you want the same plot faceted across a categorical variable.
 
@@ -132,7 +132,7 @@ chart = fm.regplot(iris, x="sepal_length", y="petal_length", method="lm", ci=95)
 chart
 ```
 
-![regplot](img/figure-helpers_11.png)
+![regplot](img/figure-helpers_regplot.png)
 
 [`residplot`][ferrum.residplot] plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a [`Chart`][ferrum.Chart].
 
@@ -149,7 +149,7 @@ chart = fm.residplot(iris, x="sepal_length", y="petal_length")
 chart
 ```
 
-![residplot](img/figure-helpers_05.png)
+![residplot](img/figure-helpers_residplot.png)
 
 Pass `lowess=True` to overlay a lowess smoother on the residuals; `robust=True` switches the fit to a robust regression so outliers don't pull the line.
 
@@ -170,7 +170,7 @@ chart = fm.pairplot(iris, vars=["sepal_length", "petal_length"], hue="species")
 chart
 ```
 
-![pairplot](img/figure-helpers_06.png)
+![pairplot](img/figure-helpers_pairplot.png)
 
 For a triangular instead of square layout, pass `corner=True`. To set diagonal cells separately (typically univariate distributions), use `diag_kind="hist"` or `"kde"`.
 
@@ -192,7 +192,7 @@ chart = fm.heatmap(table, annot=True, cmap="blues")
 chart
 ```
 
-![heatmap](img/figure-helpers_07.png)
+![heatmap](img/figure-helpers_heatmap.png)
 
 [`clustermap`][ferrum.clustermap] returns a [`ClusterMapChart`][ferrum.ClusterMapChart] — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
 
@@ -213,7 +213,7 @@ chart = fm.jointplot(iris, x="sepal_length", y="petal_length", kind="scatter", m
 chart
 ```
 
-![jointplot](img/figure-helpers_08.png)
+![jointplot](img/figure-helpers_jointplot.png)
 
 `kind=` controls the center plot (`"scatter"`, `"kde"`, `"hist"`, `"hex"`, `"reg"`); `marginal_kind=` controls both marginals (`"hist"`, `"kde"`, `"rug"`, `"box"`). The marginals share their data axis with the center.
 
@@ -253,7 +253,7 @@ chart = fm.displot(iris, x="sepal_length", kind="hist").properties(title="Sepal 
 chart
 ```
 
-![displot with title](img/figure-helpers_09.png)
+![displot with title](img/figure-helpers_displot_title.png)
 
 Composite marks (boxplot, errorbar, smooth with CI, etc.) have **named sub-layers** you can inspect:
 
@@ -297,7 +297,7 @@ report = fit | distribution
 report
 ```
 
-![lmplot | displot composition](img/figure-helpers_10.png)
+![lmplot | displot composition](img/figure-helpers_composition.png)
 
 The regression fit and the distribution plot are concatenated horizontally with the same `|` operator that works for any two charts.
 

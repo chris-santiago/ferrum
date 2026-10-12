@@ -25,7 +25,7 @@ chart = (
 chart
 ```
 
-![Basic scatter](img/marks-encodings_01.png)
+![Basic scatter](img/marks-encodings_basic_scatter.png)
 
 The three pieces — data, mark, encoding — compose freely. You can change the mark without touching the encoding ([`mark_line()`][ferrum.Chart.mark_line] instead of [`mark_point()`][ferrum.Chart.mark_point]), change the encoding without touching the mark, or compose multiple marks against the same encoding (see [Composition](composition.md)).
 
@@ -124,7 +124,7 @@ chart = (
 chart
 ```
 
-![Explicit encoding](img/marks-encodings_02.png)
+![Explicit encoding](img/marks-encodings_explicit_encoding.png)
 
 ## Position adjustments
 
@@ -148,9 +148,10 @@ chart = (
     .mark_bar(position=fm.Dodge(padding=0.05))
     .encode(x="category:N", y="value:Q", color="group:N")
 )
+chart
 ```
 
-![Dodge grouped bars](img/marks-encodings_08.png)
+![Dodge grouped bars](img/marks-encodings_dodge.png)
 
 ### [`Stack`][ferrum.Stack] — stacked bars/areas
 
@@ -166,9 +167,10 @@ chart = (
     .mark_bar(position=fm.Stack(offset="normalize"))
     .encode(x="category:N", y="value:Q", color="group:N")
 )
+chart
 ```
 
-![Stack stacked bars](img/marks-encodings_09.png)
+![Stack stacked bars](img/marks-encodings_stack.png)
 
 ### [`Jitter`][ferrum.Jitter] — random displacement for overplotting
 
@@ -216,7 +218,7 @@ chart = (
 chart
 ```
 
-![Log scale axis](img/marks-encodings_10.png)
+![Log scale axis](img/marks-encodings_log_scale.png)
 
 ### Axis limits (domain)
 
@@ -240,7 +242,7 @@ chart = (
 chart
 ```
 
-![Axis limits](img/marks-encodings_11.png)
+![Axis limits](img/marks-encodings_axis_limits.png)
 
 ### Reversed axis
 
@@ -275,17 +277,26 @@ The `legend` parameter on appearance channels controls legend rendering.
 Pass `legend=False` or `legend=None` to hide the legend for a channel:
 
 ```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
 chart = (
-    fm.Chart(df)
+    fm.Chart(iris)
     .mark_point()
     .encode(
-        x="x:Q", y="y:Q",
+        x="sepal_length:Q", y="petal_length:Q",
         color=fm.Color("species", legend=False),
     )
 )
+chart
 ```
 
-![Legend suppressed](img/marks-encodings_12.png)
+![Legend suppressed](img/marks-encodings_legend_suppressed.png)
 
 ### Legend title
 
@@ -293,10 +304,10 @@ The legend title defaults to the field name. Override it with the `title=` param
 
 ```python
 chart = (
-    fm.Chart(df)
+    fm.Chart(iris)
     .mark_point()
     .encode(
-        x="x:Q", y="y:Q",
+        x="sepal_length:Q", y="petal_length:Q",
         color=fm.Color("species", title="Iris species"),
     )
 )
@@ -358,7 +369,7 @@ chart = (
 chart
 ```
 
-![Scatter with size](img/marks-encodings_03.png)
+![Scatter with size](img/marks-encodings_size.png)
 
 ### Statistical marks
 
@@ -424,7 +435,7 @@ chart = (
 chart
 ```
 
-![KDE density](img/marks-encodings_04.png)
+![KDE density](img/marks-encodings_kde.png)
 
 Stat marks are described in detail in [Stats in the rendering pipeline](concepts/stats-pipeline.md).
 
@@ -449,7 +460,7 @@ chart = (
 chart
 ```
 
-![Grouped LOESS](img/marks-encodings_05.png)
+![Grouped LOESS](img/marks-encodings_grouped_loess.png)
 
 The `groupby` parameter is available on `mark_smooth`, `mark_density`, and `mark_histogram`. The group column is preserved in the transform output so downstream `color=` encoding maps each group to a distinct visual.
 
@@ -485,7 +496,7 @@ chart = (
 chart
 ```
 
-![Boxplot by species](img/marks-encodings_06.png)
+![Boxplot by species](img/marks-encodings_boxplot.png)
 
 ### Composition marks
 
@@ -695,7 +706,7 @@ combined = points + trend
 combined
 ```
 
-![Points + LOESS trend](img/marks-encodings_07.png)
+![Points + LOESS trend](img/marks-encodings_points_loess.png)
 
 This puts a per-species LOESS overlay on top of a scatter. Same encoding, two marks, one layered chart — the `+` operator on `Chart` produces a layered view that renders both marks against the same axes.
 

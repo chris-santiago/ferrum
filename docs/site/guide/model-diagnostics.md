@@ -30,7 +30,7 @@ roc = fm.roc_chart(model, X_test, y_test)
 roc
 ```
 
-![ROC curve](img/model-diagnostics_01.png)
+![ROC curve](img/model-diagnostics_roc.png)
 
 The same pattern produces a confusion matrix:
 
@@ -48,7 +48,7 @@ cm = fm.confusion_matrix_chart(model, X_test, y_test, normalize="true")
 cm
 ```
 
-![Confusion matrix](img/model-diagnostics_02.png)
+![Confusion matrix](img/model-diagnostics_confusion_matrix.png)
 
 Or feature importances, with the helper handling whichever importance method the estimator exposes (`feature_importances_`, permutation importance, coefficients):
 
@@ -66,7 +66,7 @@ importances = fm.importance_chart(model, X_test, y_test)
 importances
 ```
 
-![Feature importance](img/model-diagnostics_03.png)
+![Feature importance](img/model-diagnostics_importance.png)
 
 ## The full helper menu
 
@@ -108,7 +108,7 @@ report = (roc | cm) & importances
 report
 ```
 
-![Three-panel diagnostic report](img/model-diagnostics_04.png)
+![Three-panel diagnostic report](img/model-diagnostics_report.png)
 
 The `report` value is a regular composed chart — `(roc | cm) & importances` lays the three diagnostics into a 2 × 2 grid (with the importance chart spanning the bottom row), and you can save it, theme it, or further compose it as one artifact. The composition operators are the same `|` and `&` you use for any other charts (see [Composition](composition.md)).
 
@@ -156,7 +156,7 @@ chart = fm.roc_chart(rf, X_test, y_test, compare={"Logistic Regression": lr})
 chart
 ```
 
-![Multi-model ROC comparison](img/model-diagnostics_07.png)
+![Multi-model ROC comparison](img/model-diagnostics_compare.png)
 
 The base model is labeled `"base"` by default; each entry in `compare=` adds a named curve. The resulting chart overlays all models on the same axes with a color legend.
 
@@ -248,7 +248,7 @@ chart = visualizer.show()
 chart
 ```
 
-![ROC via visualizer](img/model-diagnostics_05.png)
+![ROC via visualizer](img/model-diagnostics_visualizer.png)
 
 The full visualizer menu mirrors the helpers:
 
@@ -311,7 +311,7 @@ chart = fm.roc_chart(
 chart
 ```
 
-![ROC with overrides](img/model-diagnostics_06.png)
+![ROC with overrides](img/model-diagnostics_overrides.png)
 
 The same `mark=`, `encode=`, `properties=`, `layers=` pattern works on every diagnostic helper — `confusion_matrix_chart`, `calibration_chart`, `importance_chart`, and all the rest.
 

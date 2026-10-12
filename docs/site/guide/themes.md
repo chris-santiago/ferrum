@@ -35,6 +35,70 @@ All twelve built-in themes applied to the same scatter-with-smooth chart:
 
 ![All 12 ferrum themes](img/theme-grid.png)
 
+### Ferrum's own themes across chart types
+
+The three original Ferrum identities, Paper Ink, Slate Citrus and Arctic Signal, each applied to seven chart types: a multi-series line, a cluster scatter, grouped bars, a correlation heatmap, a box plot, a faceted scatter and a histogram.
+
+#### Paper Ink
+
+<div class="grid cards" markdown>
+
+-   ![Multi-series line, Paper Ink](../gallery/img/line_paper_ink.png)
+
+-   ![Cluster scatter, Paper Ink](../gallery/img/scatter_paper_ink.png)
+
+-   ![Grouped bar, Paper Ink](../gallery/img/bar_paper_ink.png)
+
+-   ![Correlation heatmap, Paper Ink](../gallery/img/heatmap_paper_ink.png)
+
+-   ![Box plot, Paper Ink](../gallery/img/boxplot_paper_ink.png)
+
+-   ![Faceted scatter, Paper Ink](../gallery/img/faceted_paper_ink.png)
+
+-   ![Histogram, Paper Ink](../gallery/img/histogram_paper_ink.png)
+
+</div>
+
+#### Slate Citrus
+
+<div class="grid cards" markdown>
+
+-   ![Multi-series line, Slate Citrus](../gallery/img/line_slate_citrus.png)
+
+-   ![Cluster scatter, Slate Citrus](../gallery/img/scatter_slate_citrus.png)
+
+-   ![Grouped bar, Slate Citrus](../gallery/img/bar_slate_citrus.png)
+
+-   ![Correlation heatmap, Slate Citrus](../gallery/img/heatmap_slate_citrus.png)
+
+-   ![Box plot, Slate Citrus](../gallery/img/boxplot_slate_citrus.png)
+
+-   ![Faceted scatter, Slate Citrus](../gallery/img/faceted_slate_citrus.png)
+
+-   ![Histogram, Slate Citrus](../gallery/img/histogram_slate_citrus.png)
+
+</div>
+
+#### Arctic Signal
+
+<div class="grid cards" markdown>
+
+-   ![Multi-series line, Arctic Signal](../gallery/img/line_arctic_signal.png)
+
+-   ![Cluster scatter, Arctic Signal](../gallery/img/scatter_arctic_signal.png)
+
+-   ![Grouped bar, Arctic Signal](../gallery/img/bar_arctic_signal.png)
+
+-   ![Correlation heatmap, Arctic Signal](../gallery/img/heatmap_arctic_signal.png)
+
+-   ![Box plot, Arctic Signal](../gallery/img/boxplot_arctic_signal.png)
+
+-   ![Faceted scatter, Arctic Signal](../gallery/img/faceted_arctic_signal.png)
+
+-   ![Histogram, Arctic Signal](../gallery/img/histogram_arctic_signal.png)
+
+</div>
+
 ## Applying a theme
 
 Apply a theme to a chart:
@@ -57,7 +121,7 @@ chart = (
 chart
 ```
 
-![Slate Citrus theme](img/themes_01.png)
+![Slate Citrus theme](img/themes_slate_citrus.png)
 
 Switching themes is one method call away; the rest of the chart spec is untouched.
 
@@ -279,7 +343,7 @@ chart
 fm.set_default_theme(fm.themes.default)
 ```
 
-![Dark theme via process default](img/themes_02.png)
+![Dark theme via process default](img/themes_process_default.png)
 
 For process-level configuration defaults (width, height, renderer), see [ferrum.config](../api/config.md).
 
@@ -314,7 +378,7 @@ with fm.theme_context(fm.themes.publication):
 assert fm.get_default_theme() == fm.themes.default
 ```
 
-![Publication theme via context manager](img/themes_03.png)
+![Publication theme via context manager](img/themes_context_manager.png)
 
 The previous default is restored on `__exit__`. This is the right scope for a single section of a notebook, a single figure-rendering function, or a test fixture.
 
@@ -369,7 +433,7 @@ chart = (
 chart
 ```
 
-![Custom brand theme](img/themes_04.png)
+![Custom brand theme](img/themes_custom_brand.png)
 
 You can also derive from a built-in using `.update()`:
 

@@ -45,7 +45,7 @@ layered = points + trend
 layered
 ```
 
-![Layered scatter + trend](img/composition_01.png)
+![Layered scatter + trend](img/composition_layered_trend.png)
 
 Layered charts share axes by construction: both marks are drawn against the same x/y scales, the same color scale, and the same plot region. Each layer keeps its own mark and any layer-specific encoding overrides, but the shared encodings apply uniformly.
 
@@ -87,7 +87,7 @@ side_by_side = scatter | distribution
 side_by_side
 ```
 
-![Horizontal concat](img/composition_02.png)
+![Horizontal concat](img/composition_hconcat.png)
 
 The `&` operator stacks the same two charts vertically:
 
@@ -106,7 +106,7 @@ stacked = scatter & distribution
 stacked
 ```
 
-![Vertical concat](img/composition_03.png)
+![Vertical concat](img/composition_vconcat.png)
 
 You can chain operators to compose deeper trees: `(a | b) & (c | d)` produces a 2 × 2 grid where the two rows have different charts and the left and right columns differ within each row. The operators are left-associative and follow normal Python precedence.
 
@@ -128,7 +128,7 @@ trio = fm.HConcatChart([a, b, c], spacing=24.0)
 trio
 ```
 
-![Three-chart HConcat](img/composition_04.png)
+![Three-chart HConcat](img/composition_hconcat_three.png)
 
 The explicit form is useful when you want to control spacing or pass more than two charts in one call.
 
@@ -152,7 +152,7 @@ row = fm.hconcat(a, b, c, spacing=20.0)
 row
 ```
 
-![fm.hconcat convenience](img/composition_05.png)
+![fm.hconcat convenience](img/composition_hconcat_function.png)
 
 These are equivalent to [`HConcatChart`][ferrum.HConcatChart]`([a, b, c])` / [`VConcatChart`][ferrum.VConcatChart]`([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
 
@@ -175,7 +175,7 @@ combined = (chart_a | chart_b).share_scale(x="shared")
 combined
 ```
 
-![Shared scales](img/composition_08.png)
+![Shared scales](img/composition_shared_scales.png)
 
 `.share_scale()` accepts keyword arguments where each key is a channel name and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
 
@@ -206,7 +206,7 @@ joint = fm.JointChart(center, top=top)
 joint
 ```
 
-![JointChart with marginal](img/composition_06.png)
+![JointChart with marginal](img/composition_jointchart.png)
 
 The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis. A right marginal must be authored to run vertically: pass `orientation="horizontal"` to the marginal's `mark_density`/`mark_histogram` so its density axis points sideways to match the shared y-axis. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal. If you would rather not manage the orientation by hand, use [`jointplot`][ferrum.jointplot] (below), which builds both marginals with the correct orientation for you.
 
@@ -240,7 +240,7 @@ grid = fm.RepeatChart(
 grid
 ```
 
-![RepeatChart 2x2 grid](img/composition_07.png)
+![RepeatChart 2x2 grid](img/composition_repeatchart.png)
 
 This produces a 2 × 2 grid of scatter plots, each cell pairing one row field on the y axis with one column field on the x axis. Pass only `column=` (with a fixed `y` in the template) for a single row of plots; pass only `row=` (with a fixed `x`) for a single column.
 

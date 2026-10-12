@@ -172,6 +172,16 @@ Floating geometry via X2/Y2 encodings plus variable-column-width mosaic layouts.
 
     Bars float from a center axis by precomputing `x0`/`x1` that straddle zero. The `redblue` scheme maps agreement levels from negative (red) to positive (blue); `x`/`x2` encoding places each segment without any stacking transform.
 
+-   **Stacked Revenue Mix**
+
+    ---
+
+    ![showcase_stacked_bar](showcase_img/showcase_stacked_bar.png)
+
+    `fm.Chart(df).mark_bar(position=fm.Stack()).encode(x="quarter", y="share", color=fm.Color("segment", scale=fm.OrdinalScale(domain=segments, range=colors)))`
+
+    `fm.Stack()` accumulates each quarter's segments into one column. An `OrdinalScale` with an explicit `domain` and `range` pins both the stacking order and a four-shade categorical palette.
+
 </div>
 
 ---
@@ -191,6 +201,26 @@ Sequential and diverging continuous-color scales, plus multi-group density layou
     `fm.Chart(df).mark_rect().encode(x="x:O", y="y:O", color=fm.Color("z:Q", scale={"scheme": "viridis"}))`
 
     A quantitative color field automatically resolves to a continuous sequential scale. The `viridis` scheme maps the full `[-1, 1]` domain from dark-purple to bright-yellow; a gradient legend replaces the usual categorical swatches.
+
+-   **Annotated Correlation Heatmap**
+
+    ---
+
+    ![showcase_correlation_heatmap](showcase_img/showcase_correlation_heatmap.png)
+
+    `fm.heatmap(df, cmap="rdbu", center=0, annot=True, fmt=".2f")`
+
+    `center=0` anchors the diverging `rdbu` scheme at zero, so the sign of each correlation reads as hue and its strength as saturation. `annot=True` prints every value in its cell.
+
+-   **Hexbin Density**
+
+    ---
+
+    ![showcase_hexbin](showcase_img/showcase_hexbin.png)
+
+    `fm.Chart(df).mark_hex().encode(x="x", y="y")`
+
+    800 correlated points binned into hexagons. Each cell's color counts the points it holds, so dense regions stay readable where a scatter would overplot.
 
 </div>
 
@@ -221,5 +251,15 @@ Violin and error-band marks that split or stratify by a hue variable.
     `fm.Chart(df).mark_errorband().encode(x="month:Q", y="y:Q", color="model:N")`
 
     `mark_errorband` computes a confidence interval per `(x, color)` group. Two models with different noise levels produce visibly different band widths — Model A narrow, Model B wide — at every x position.
+
+-   **Grouped KDE**
+
+    ---
+
+    ![showcase_ridgeline](showcase_img/showcase_ridgeline.png)
+
+    `fm.Chart(df).mark_density(groupby="group").encode(x="value", color="group")`
+
+    `groupby=` fits one kernel density estimate per condition, so four groups with different centers and spreads overlay on one shared axis.
 
 </div>

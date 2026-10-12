@@ -1,0 +1,1884 @@
+[
+  {
+    "image": "docs/site/assets/concepts/break_axes_basic.png",
+    "pages": [
+      "docs/site/guide/concepts/break-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:break_axes_basic",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/break_axes_comparative.png",
+    "pages": [
+      "docs/site/guide/concepts/break-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:break_axes_comparative",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/break_axes_horizontal.png",
+    "pages": [
+      "docs/site/guide/concepts/break-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:break_axes_horizontal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/customizing_annotations_example.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:customizing_annotations_example",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/customizing_breakaxis.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:customizing_breakaxis",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/customizing_cascade.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:customizing_cascade",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/customizing_inset.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:customizing_inset",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/customizing_secondaryy.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:customizing_secondaryy",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/format_presets_percent.png",
+    "pages": [
+      "docs/site/guide/concepts/format-presets.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:format_presets_percent",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/format_presets_revenue.png",
+    "pages": [
+      "docs/site/guide/concepts/format-presets.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:format_presets_revenue",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/inset_basic.png",
+    "pages": [
+      "docs/site/guide/concepts/inset-panels.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:inset_basic",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/inset_dashboard.png",
+    "pages": [
+      "docs/site/guide/concepts/inset-panels.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:inset_dashboard",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/inset_detail_zoom.png",
+    "pages": [
+      "docs/site/guide/concepts/inset-panels.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:inset_detail_zoom",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/inset_marginal_hist.png",
+    "pages": [
+      "docs/site/guide/concepts/inset-panels.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:inset_marginal_hist",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/override_example.png",
+    "pages": [
+      "docs/site/guide/concepts/override.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:override_example",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/secondary_axes_basic.png",
+    "pages": [
+      "docs/site/guide/concepts/secondary-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:secondary_axes_basic",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/secondary_axes_color_coded.png",
+    "pages": [
+      "docs/site/guide/concepts/secondary-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:secondary_axes_color_coded",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/concepts/secondary_axes_volume.png",
+    "pages": [
+      "docs/site/guide/concepts/secondary-axes.md"
+    ],
+    "generator": "scripts/gen_concept_pngs.py:secondary_axes_volume",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/annotated_outlier.png",
+    "pages": [
+      "docs/site/guide/concepts/annotations.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:annotated_outlier",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/branded_chart.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:branded_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/break_axis_outlier.png",
+    "pages": [
+      "docs/site/guide/concepts/break-axes.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:break_axis_outlier",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/currency_axis.png",
+    "pages": [
+      "docs/site/guide/concepts/configuration.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:currency_axis",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/custom_ticks.png",
+    "pages": [
+      "docs/site/guide/concepts/configuration.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:custom_ticks",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/dual_axis.png",
+    "pages": [
+      "docs/site/guide/concepts/secondary-axes.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:dual_axis",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/legend_bottom.png",
+    "pages": [
+      "docs/site/guide/concepts/configuration.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:legend_bottom",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/minimal_axes.png",
+    "pages": [
+      "docs/site/guide/concepts/configuration.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:minimal_axes",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/publication_ready.png",
+    "pages": [
+      "docs/site/guide/customizing-charts.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:publication_ready",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/assets/recipes/rotated_labels.png",
+    "pages": [
+      "docs/site/guide/concepts/configuration.md"
+    ],
+    "generator": "scripts/render-recipe-pngs.py:rotated_labels",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/alpha_selection_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:alpha_selection_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/bar_arctic_signal.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:bar_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/bar_paper_ink.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:bar_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/bar_slate_citrus.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:bar_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/boxplot_arctic_signal.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:boxplot_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/boxplot_paper_ink.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:boxplot_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/boxplot_slate_citrus.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:boxplot_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/calibration_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "scripts/generate-gallery-diagnostic-pngs.py:calibration_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/catplot_bar.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:catplot_bar",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/catplot_box.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:catplot_box",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/catplot_strip.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:catplot_strip",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/catplot_swarm.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:catplot_swarm",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/catplot_violin.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:catplot_violin",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/class_prediction_error.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:class_prediction_error",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/cluster_diagnostics.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:cluster_diagnostics",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/clustermap.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:clustermap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_boxplot_swarm.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_boxplot_swarm",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_dodge_bar_errorbar.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_dodge_bar_errorbar",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_faceted_smooth.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_faceted_smooth",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_grouped_smooth.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_grouped_smooth",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_hconcat.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_hconcat",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_histogram_density.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_histogram_density",
+    "inspected": "",
+    "verdict": "regression #511: mark_histogram() + mark_density() raises 'stat_kde: column 'value' not found'; the image is a stale render"
+  },
+  {
+    "image": "docs/site/gallery/img/comp_line_ribbon.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_line_ribbon",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_scatter_rule.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_scatter_rule",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_scatter_smooth_ci.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_scatter_smooth_ci",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/comp_triple_layer.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:comp_triple_layer",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/confusion_matrix_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:confusion_matrix_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/cv_scores_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:cv_scores_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/decision_boundary_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:decision_boundary_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/discrimination_threshold.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:discrimination_threshold",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/displot_ecdf.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:displot_ecdf",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/displot_hist.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:displot_hist",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/displot_kde.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:displot_kde",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/faceted_arctic_signal.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:faceted_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/faceted_paper_ink.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:faceted_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/faceted_slate_citrus.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:faceted_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/gain_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:gain_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/heatmap.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:heatmap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/heatmap_arctic_signal.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:heatmap_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/heatmap_paper_ink.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:heatmap_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/heatmap_slate_citrus.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:heatmap_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/histogram_arctic_signal.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:histogram_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/histogram_paper_ink.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:histogram_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/histogram_slate_citrus.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:histogram_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/importance_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:importance_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/intercluster_distance_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:intercluster_distance_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/jointplot.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:jointplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/learning_curve_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:learning_curve_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/lift_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:lift_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/line_arctic_signal.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:line_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/line_paper_ink.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:line_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/line_slate_citrus.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:line_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/lmplot.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:lmplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_area.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_area",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_bar.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_bar",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_boxen.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_boxen",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_boxplot.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_boxplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_contour.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_contour",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_density.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_density",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_errorbar.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_errorbar",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_hex.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_hex",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_histogram.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_histogram",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_line.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_line",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_point.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_point",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_qq.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_qq",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_raster.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_raster",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_rect.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_rect",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_ribbon.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_ribbon",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_rule.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_rule",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_segment.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_segment",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_smooth_ci.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_smooth_ci",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_smooth_lm.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_smooth_lm",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_swarm.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_swarm",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_text.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_text",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_tick.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_tick",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/mark_violin.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_grammar_marks.py:mark_violin",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/pairplot.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:pairplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/parallel_coordinates_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:parallel_coordinates_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/pca_scree_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:pca_scree_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/pdp_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:pdp_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/pr_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "scripts/generate-gallery-diagnostic-pngs.py:pr_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/prediction_error_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:prediction_error_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/rank1d_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:rank1d_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/rank2d_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:rank2d_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/residplot.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:residplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/residuals_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:residuals_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/roc_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "scripts/generate-gallery-diagnostic-pngs.py:roc_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/scatter_arctic_signal.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:scatter_arctic_signal",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/scatter_paper_ink.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:scatter_paper_ink",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/scatter_slate_citrus.png",
+    "pages": [
+      "docs/site/gallery/gallery.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "design-docs/themes/demo_themes.py:scatter_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/shap_bar_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:shap_bar_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/shap_beeswarm_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:shap_beeswarm_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/shap_waterfall_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:shap_waterfall_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/img/validation_curve_chart.png",
+    "pages": [
+      "docs/site/gallery/gallery.md"
+    ],
+    "generator": "design-docs/demos/demo_diagnostics.py:validation_curve_chart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_candlestick.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_candlestick",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_cleveland_dot.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_cleveland_dot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_correlation_heatmap.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_correlation_heatmap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_coxcomb.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_coxcomb",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_diverging_likert.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_diverging_likert",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_dumbbell.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_dumbbell",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_faceted_scatter.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_faceted_scatter",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_gapminder_bubble.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_gapminder_bubble",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_hexbin.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_hexbin",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_highlight_line.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_highlight_line",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_marimekko.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_marimekko",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_per_hue_errorband.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_per_hue_errorband",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_ridgeline.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_ridgeline",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_split_violin.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_split_violin",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_stacked_bar.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_stacked_bar",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_time_series.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_time_series",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_twoby_facet.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_twoby_facet",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/gallery/showcase_img/showcase_viridis_heatmap.png",
+    "pages": [
+      "docs/site/gallery/showcase.md"
+    ],
+    "generator": "scripts/generate-showcase-pngs.py:showcase_viridis_heatmap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/getting-started/img/first-plot_boxplot.png",
+    "pages": [
+      "docs/site/getting-started/first-plot.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:first-plot_boxplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/getting-started/img/first-plot_iris_scatter.png",
+    "pages": [
+      "docs/site/getting-started/first-plot.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:first-plot_iris_scatter",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/getting-started/img/first-plot_loess_trend.png",
+    "pages": [
+      "docs/site/getting-started/first-plot.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:first-plot_loess_trend",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/getting-started/img/first-plot_publication_theme.png",
+    "pages": [
+      "docs/site/getting-started/first-plot.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:first-plot_publication_theme",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_concatchart.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_concatchart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_hconcat.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_hconcat",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_hconcat_function.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_hconcat_function",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_hconcat_three.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_hconcat_three",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_jointchart.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_jointchart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_layerchart.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_layerchart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_layered_trend.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_layered_trend",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_repeatchart.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_repeatchart",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_shared_scales.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_shared_scales",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/composition_vconcat.png",
+    "pages": [
+      "docs/site/guide/composition.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:composition_vconcat",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_catplot_box.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_catplot_box",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_composition.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_composition",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_displot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_displot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_displot_title.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_displot_title",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_heatmap.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_heatmap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_jointplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_jointplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_lmplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_lmplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_pairplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_pairplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_regplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_regplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_relplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_relplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/figure-helpers_residplot.png",
+    "pages": [
+      "docs/site/guide/figure-helpers.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:figure-helpers_residplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_axis_limits.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_axis_limits",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_basic_scatter.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_basic_scatter",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_boxplot.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_boxplot",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_dodge.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_dodge",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_explicit_encoding.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_explicit_encoding",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_grouped_loess.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_grouped_loess",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_kde.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_kde",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_legend_suppressed.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_legend_suppressed",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_log_scale.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_log_scale",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_points_loess.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_points_loess",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_size.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_size",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/marks-encodings_stack.png",
+    "pages": [
+      "docs/site/guide/marks-encodings.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:marks-encodings_stack",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_compare.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_compare",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_confusion_matrix.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_confusion_matrix",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_importance.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_importance",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_overrides.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_overrides",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_report.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_report",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_roc.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_roc",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/model-diagnostics_visualizer.png",
+    "pages": [
+      "docs/site/guide/model-diagnostics.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:model-diagnostics_visualizer",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_annotations.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_annotations",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_bar_color.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_bar_color",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_category_order.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_category_order",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_color_size_scatter.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_color_size_scatter",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_concat_wrap.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_concat_wrap",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_coord_flip.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_coord_flip",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_custom_axis_legend.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_custom_axis_legend",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_filtered_scatter.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_filtered_scatter",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_grouped_kde.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_grouped_kde",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_grouped_smooth.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_grouped_smooth",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_histogram_hue.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_histogram_hue",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_model_report.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_model_report",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_pairwise_grid.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_pairwise_grid",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_power_bubble.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_power_bubble",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_roc_comparison.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_roc_comparison",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_sizing.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_sizing",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_smooth_ci.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_smooth_ci",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_three_layer.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_three_layer",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/recipes_time_series.png",
+    "pages": [
+      "docs/site/guide/recipes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:recipes_time_series",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/theme-grid.png",
+    "pages": [
+      "README.md",
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "scripts/generate-theme-grid.py:theme-grid",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/themes_context_manager.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:themes_context_manager",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/themes_custom_brand.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:themes_custom_brand",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/themes_process_default.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:themes_process_default",
+    "inspected": "",
+    "verdict": ""
+  },
+  {
+    "image": "docs/site/guide/img/themes_slate_citrus.png",
+    "pages": [
+      "docs/site/guide/themes.md"
+    ],
+    "generator": "scripts/generate-guide-pngs.py:themes_slate_citrus",
+    "inspected": "",
+    "verdict": ""
+  }
+]

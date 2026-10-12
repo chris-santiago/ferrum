@@ -1,118 +1,165 @@
-"""Generate PNGs from guide-page code blocks for inline docs images.
+"""Generate the inline PNGs of the guide and getting-started pages from their own code blocks.
 
-Reads each markdown file, extracts python code blocks that produce charts,
-runs them, and saves PNGs.
+Every Python code block on a page is executed in document order in one shared
+namespace, so a continuation block can use names an earlier block defined,
+exactly as a reader running the page top to bottom would.
 
-A code block is treated as a chart block when it ends with a bare identifier
-line (the notebook display idiom, e.g. just ``chart`` on its own line). The
-last such bare identifier in the block names the variable that gets rendered.
-The variable must resolve to an object with a ``to_png`` method; blocks where
-it does not (or where no bare identifier is found) are skipped silently.
+A block renders an image when the page names one for it: the first image
+reference into the page's ``img/`` directory that follows the block, before
+the next Python block, is that block's image. The image file name is the
+block's stable name, so editing, adding or removing another block never
+renames or shifts it. A block with no such reference renders nothing.
 
-All code blocks within a single page share one namespace (executed in document
-order), so continuation snippets that reference variables defined in earlier
-blocks work correctly — exactly as a reader running the page top-to-bottom
-would experience. Blocks from different pages never share state.
+A block that names an image must end its display with a bare identifier line
+(the notebook display idiom, e.g. just ``chart`` on its own line); the last
+such line names the variable rendered with ``to_png()``. A named block that
+raises, has no display line, or displays something without ``to_png`` is a
+failure, and the script exits non-zero after rendering everything else.
 
 Usage:
-    uv run scripts/generate-guide-pngs.py
+    unset CONDA_PREFIX && uv run --no-sync python scripts/generate-guide-pngs.py
 """
 
 from __future__ import annotations
 
 import re
+import sys
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GUIDE_DIR = ROOT / "docs" / "site" / "guide"
-GETTING_STARTED_DIR = ROOT / "docs" / "site" / "getting-started"
+SITE = ROOT / "docs" / "site"
 
+#: Pages whose blocks render their inline images, each into its own ``img/``.
 PAGES = [
-    (GETTING_STARTED_DIR / "first-plot.md", GETTING_STARTED_DIR / "img"),
-    (GUIDE_DIR / "marks-encodings.md", GUIDE_DIR / "img"),
-    (GUIDE_DIR / "composition.md", GUIDE_DIR / "img"),
-    (GUIDE_DIR / "themes.md", GUIDE_DIR / "img"),
-    (GUIDE_DIR / "figure-helpers.md", GUIDE_DIR / "img"),
-    (GUIDE_DIR / "model-diagnostics.md", GUIDE_DIR / "img"),
-    (GUIDE_DIR / "recipes.md", GUIDE_DIR / "img"),
+    SITE / "getting-started" / "first-plot.md",
+    SITE / "guide" / "marks-encodings.md",
+    SITE / "guide" / "composition.md",
+    SITE / "guide" / "themes.md",
+    SITE / "guide" / "figure-helpers.md",
+    SITE / "guide" / "model-diagnostics.md",
+    SITE / "guide" / "recipes.md",
 ]
 
-# Matches a line that is exactly a bare Python identifier (optionally indented).
+#: Directory, relative to the page, that holds the page's block images.
+IMG_DIR = "img"
+
+_FENCE_OPEN_RE = re.compile(r"^```python[ \t]*$")
+_FENCE_CLOSE_RE = re.compile(r"^```[ \t]*$")
+_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(" + IMG_DIR + r"/([^)\s]+\.png)\)")
+# A line that is exactly a bare Python identifier (optionally indented).
 _BARE_IDENT_RE = re.compile(r"^[ \t]*([A-Za-z_]\w*)[ \t]*$", re.MULTILINE)
 
 
-def extract_blocks(md_text: str) -> list[tuple[str, str | None]]:
-    """Extract python code blocks. Returns list of (code, chart_var_name | None).
+@dataclass(frozen=True)
+class Block:
+    """One Python code block of a page.
 
-    The chart variable is the last bare-identifier line in the block. If no
-    such line exists, the second element is None and the block will be skipped.
+    ``image`` is the file name (inside the page's ``img/``) the page names for
+    this block, or ``None`` when the block renders nothing. ``display`` is the
+    last bare-identifier line of the block, or ``None`` when it has none.
     """
-    blocks = []
-    pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
-    for match in pattern.finditer(md_text):
-        code = match.group(1)
-        matches = _BARE_IDENT_RE.findall(code)
-        var_name = matches[-1] if matches else None
-        blocks.append((code, var_name))
+
+    code: str
+    line: int
+    image: str | None
+    display: str | None
+
+
+def extract_blocks(md_text: str) -> list[Block]:
+    """Split a page into its Python blocks, each bound to the image the page names for it."""
+    lines = md_text.splitlines()
+    blocks: list[Block] = []
+    pending: tuple[str, int] | None = None  # (code, 1-based fence line) awaiting its image
+    i = 0
+    while i < len(lines):
+        if _FENCE_OPEN_RE.match(lines[i]):
+            fence_line = i + 1
+            i += 1
+            body: list[str] = []
+            while i < len(lines) and not _FENCE_CLOSE_RE.match(lines[i]):
+                body.append(lines[i])
+                i += 1
+            # A new block ends the previous block's search for an image.
+            if pending is not None:
+                blocks.append(_bind(*pending, image=None))
+            pending = ("\n".join(body) + "\n", fence_line)
+        elif pending is not None and (match := _IMAGE_REF_RE.search(lines[i])):
+            blocks.append(_bind(*pending, image=match.group(1)))
+            pending = None
+        i += 1
+    if pending is not None:
+        blocks.append(_bind(*pending, image=None))
     return blocks
 
 
-def exec_block(code: str, ns: dict) -> None:
-    """Exec a code block into the shared page namespace.
+def _bind(code: str, line: int, *, image: str | None) -> Block:
+    displays = _BARE_IDENT_RE.findall(code)
+    return Block(code=code, line=line, image=image, display=displays[-1] if displays else None)
 
-    Uses plain ``exec`` so that top-level assignments are written into ``ns``
-    (the globals dict) and remain visible to subsequent blocks on the same page.
+
+def render_page(md_path: Path) -> tuple[list[Path], list[str]]:
+    """Execute every block of one page and write the images its blocks name.
+
+    Returns the written image paths and one message per failed named block.
     """
-    compiled = compile(code, "<guide-block>", "exec")
-    exec(compiled, ns)  # noqa: S102
-
-
-def main() -> None:
-    """Run the PNG generator for all guide pages."""
-    total = 0
-    ok = 0
-
-    for md_path, img_dir in PAGES:
-        img_dir.mkdir(parents=True, exist_ok=True)
-        text = md_path.read_text()
-        blocks = extract_blocks(text)
-        page_name = md_path.stem
-
-        print(f"\n{page_name} ({len(blocks)} blocks)")
-        chart_idx = 0
-
-        # One shared namespace per page so continuation blocks can reference
-        # variables defined by earlier blocks, mirroring a top-to-bottom read.
-        page_ns: dict = {}
-
-        for code, var_name in blocks:
-            if var_name is None:
-                continue
-
-            chart_idx += 1
-            total += 1
-            out_name = f"{page_name}_{chart_idx:02d}.png"
-            out_path = img_dir / out_name
-
-            try:
-                exec_block(code, page_ns)
-                chart_obj = page_ns.get(var_name)
-                if chart_obj is None or not hasattr(chart_obj, "to_png"):
-                    # Bare identifier resolved to a non-chart object or is absent; skip silently.
-                    chart_idx -= 1
-                    total -= 1
-                    continue
-                png = chart_obj.to_png()
-                out_path.write_bytes(png)
-                print(f"  [OK]   {out_name} ({len(png)} bytes)")
-                ok += 1
-            except Exception as e:
-                print(f"  [FAIL] {out_name}: {e}")
+    img_dir = md_path.parent / IMG_DIR
+    img_dir.mkdir(parents=True, exist_ok=True)
+    page = md_path.relative_to(SITE)
+    namespace: dict = {}
+    written: list[Path] = []
+    failures: list[str] = []
+    for block in extract_blocks(md_path.read_text()):
+        where = f"{page}:{block.line}"
+        try:
+            exec(compile(block.code, f"<{where}>", "exec"), namespace)  # noqa: S102
+        except Exception as exc:
+            if block.image is not None:
+                failures.append(f"{where} -> {block.image}: {exc!r}")
                 traceback.print_exc()
+            else:
+                print(f"  [WARN] {where} (renders no image) raised {exc!r}")
+            continue
+        if block.image is None:
+            continue
+        chart = namespace.get(block.display) if block.display else None
+        if not hasattr(chart, "to_png"):
+            failures.append(
+                f"{where} -> {block.image}: the block must end with a bare identifier"
+                f" naming a chart (found {block.display!r})"
+            )
+            continue
+        out_path = img_dir / block.image
+        if out_path in written:
+            failures.append(f"{where} -> {block.image}: another block already names this image")
+            continue
+        try:
+            png = chart.to_png()
+        except Exception as exc:
+            failures.append(f"{where} -> {block.image}: {exc!r}")
+            traceback.print_exc()
+            continue
+        out_path.write_bytes(png)
+        written.append(out_path)
+        print(f"  [OK]   {out_path.relative_to(SITE)} ({len(png)} bytes)")
+    return written, failures
 
-    print(f"\n{ok}/{total} PNGs generated successfully.")
+
+def main() -> int:
+    """Render the named blocks of every page; return the process exit status."""
+    failures: list[str] = []
+    total = 0
+    for md_path in PAGES:
+        print(f"\n{md_path.relative_to(SITE)}")
+        written, page_failures = render_page(md_path)
+        total += len(written)
+        failures.extend(page_failures)
+    print(f"\n{total} PNGs written.")
+    for failure in failures:
+        print(f"  [FAIL] {failure}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
