@@ -419,11 +419,11 @@ impl ChartSpec {
     /// Stat transforms applied before rendering, as a list of transform objects.
     ///
     /// Transforms with a Python wrapper class round-trip as that typed object
-    /// (`Bin`, `Kde`, `Aggregate`, ...). The dict-only Phase-12 `Data*`
-    /// transforms (constructed via `transform_*` and carried through the
-    /// `transforms_json` serde path) have no wrapper class, so they render as
-    /// plain dicts via the `_ =>` fallback — the same shape `layers`/`coord`
-    /// already use for class-less spec content (SEAM-02).
+    /// (`Bin`, `Kde`, `Aggregate`, ...). Dict-only transforms have no wrapper class:
+    /// the Phase-12 `Data*` (constructed via `transform_*` and carried through the
+    /// `transforms_json` serde path) and `Branch` render as plain dicts via the
+    /// `_ =>` fallback — the same shape `layers`/`coord` already use for class-less
+    /// spec content (SEAM-02).
     #[getter]
     fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         use crate::transform::core::{for_each_py_transform, TransformSpec};
@@ -623,9 +623,9 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
     let mut out = Vec::with_capacity(list.len());
-    // Only the wrapper-backed transforms can arrive here as typed objects; the
-    // dict-only Phase-12 `Data*` transforms take the `transforms_json` serde
-    // path instead and never reach this coercer (SEAM-02).
+    // Only wrapper-backed transforms arrive here as typed objects; dict-only
+    // transforms like the Phase-12 `Data*` and `Branch` take the `transforms_json`
+    // serde path and never reach this coercer (SEAM-02).
     'next_item: for (i, item) in list.iter().enumerate() {
         macro_rules! try_extract {
             ($($V:ident => $m:ident : $py:ident,)*) => {{

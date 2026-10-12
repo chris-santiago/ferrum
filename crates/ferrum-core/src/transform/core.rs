@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::transform::context::TransformContext;
 
 use crate::transform::aggregate::AggregateSpec;
+use crate::transform::branch::{self, BranchSpec};
 use crate::transform::bin::BinSpec;
 use crate::transform::bin_2d::Bin2DSpec;
 use crate::transform::contour::ContourSpec;
@@ -98,9 +99,14 @@ pub(crate) enum TransformSpec {
     TimeUnit(TimeUnitSpec),
     DataBin(DataBinSpec),
     DataAggregate(DataAggregateSpec),
+    /// A named sub-pipeline over the original batch or a published key
+    /// (`transform::branch`). The one combinator variant: it is not a row of
+    /// [`for_each_transform!`], so every dispatcher spells its arm out.
+    Branch(BranchSpec),
 }
 
-/// Single source of truth for the 41 `TransformSpec` variants. Dispatchers
+/// Single source of truth for the 42 leaf `TransformSpec` variants (every
+/// variant except the `Branch` combinator). Dispatchers
 /// across this module, `spec/chart.rs`, and `lib.rs` define a local `arm!`
 /// macro and invoke `for_each_transform!(arm)`; the macro expands the table
 /// into per-variant arms. Adding a transform means one edit here plus the
@@ -250,6 +256,7 @@ impl TransformSpec {
             ($($V:ident => $m:ident : $py:ident,)*) => {
                 match self {
                     $( Self::$V(s) => crate::transform::$m::apply(s, batch), )*
+                    Self::Branch(_) => self.apply_with_context(batch, &TransformContext::default()),
                 }
             };
         }
@@ -306,6 +313,11 @@ impl TransformSpec {
                     $( Self::$V(s) => crate::transform::$m::apply_with_context(s, batch, ctx), )*
                     Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
                         s, batch, Some(&ctx.named_outputs)),
+                    Self::Branch(s) => {
+                        let mut published =
+                            Published { outputs: ctx.named_outputs.clone(), swarms: HashMap::new() };
+                        run_branch(s, batch, &mut published, ctx).map(|(tail, _)| tail)
+                    }
                     Self::Bin2D(_)
                     | Self::Swarm(_)
                     | Self::Contour(_)
@@ -408,75 +420,120 @@ pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, HashMap<String, Sw
 ///   pipeline pointer — subsequent unnamed transforms see the same chained
 ///   input the named transform did.
 /// - **Unnamed transforms** chain: each consumes the prior unnamed output.
+/// - **`Branch`** runs its own sub-chain, with these same rules, over the
+///   original batch (`input = None`) or the batch published under `input`.
+///   Every named and secondary output inside it is published under its own
+///   key, then the sub-chain tail under the branch's `name`, so that name
+///   wins a collision. It does not advance the chained pipeline pointer.
 ///
 /// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
 /// the original input when no unnamed transforms ran.
 ///
 /// Beside the batches, the routing itself records, per published key, the
 /// last `Swarm` that batch descends from through the chain (a later
-/// transform after it keeps it; a secondary output descends from none).
+/// transform after it keeps it; a secondary output descends from none; a
+/// branch over a published key starts from that key's record).
 /// Swarm placement runs at render time against the panel's resolved scale
 /// (`render::position::apply_swarm`) and reads that record, so the one
 /// routing rule decides both which batch a layer reads and which `Swarm`
 /// places it.
 ///
-/// **Semantics note (Phase 9 finalize):** Earlier the named branch ran on the
-/// ORIGINAL batch (true fan-out from the input). Phase 9's compound desugars
-/// (mark_contour's Kde2D→Contour, clustermap's Linkage→Reorder→Unpivot,
-/// residplot's residuals overlay) need a named transform to consume the
-/// previous unnamed transform's output. Switching the named branch to use
-/// `current` instead of `batch` enables those patterns without breaking
-/// existing first-transform-named usages (where `current == batch` anyway).
+/// A named step reads the chained batch rather than the original input so
+/// compound desugars (mark_contour's Kde2D→Contour, clustermap's
+/// Linkage→Reorder→Unpivot, residplot's residuals overlay) can consume the
+/// previous unnamed transform's output; `Branch` is the route to the
+/// original input.
 pub(crate) fn apply_transforms_named(
     specs: &[TransformSpec],
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<NamedOutputs> {
-    let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
-    let mut swarms: HashMap<String, SwarmSpec> = HashMap::new();
-    let mut current = batch.clone();
-    let mut current_swarm: Option<&SwarmSpec> = None;
-    let publish = |swarms: &mut HashMap<String, SwarmSpec>, key: String, swarm: Option<&SwarmSpec>| match swarm {
-        Some(swarm) => swarms.insert(key, swarm.clone()),
-        None => swarms.remove(&key),
-    };
+    let mut published = Published::default();
+    let (tail, tail_swarm) = run_chain(specs, (batch.clone(), None), batch, &mut published, ctx)?;
+    published.insert(FINAL_OUTPUT_KEY.to_string(), tail, tail_swarm);
+    Ok((published.outputs, published.swarms))
+}
+
+/// Every output published so far in one pipeline run, with the `Swarm`
+/// record each key carries ([`NamedOutputs`]).
+#[derive(Default)]
+struct Published {
+    outputs: HashMap<String, RecordBatch>,
+    swarms: HashMap<String, SwarmSpec>,
+}
+
+impl Published {
+    /// Publish `batch` under `key`, replacing any earlier batch and swarm
+    /// record there.
+    fn insert(&mut self, key: String, batch: RecordBatch, swarm: Option<SwarmSpec>) {
+        match swarm {
+            Some(swarm) => self.swarms.insert(key.clone(), swarm),
+            None => self.swarms.remove(&key),
+        };
+        self.outputs.insert(key, batch);
+    }
+}
+
+/// A chain's tail batch and the `Swarm` whose rows it still is.
+type ChainTail = (RecordBatch, Option<SwarmSpec>);
+
+/// Run `specs` as one chain starting from `start`, publishing named,
+/// secondary and branch outputs into `published`; returns the chain tail.
+/// `source` is the pipeline's original batch, which a `Branch` with no
+/// `input` reads.
+fn run_chain(
+    specs: &[TransformSpec],
+    start: ChainTail,
+    source: &RecordBatch,
+    published: &mut Published,
+    ctx: &TransformContext,
+) -> PyResult<ChainTail> {
+    let (mut current, mut current_swarm) = start;
     for spec in specs {
+        if let TransformSpec::Branch(branch) = spec {
+            let (tail, tail_swarm) = run_branch(branch, source, published, ctx)?;
+            published.insert(branch.name.clone(), tail, tail_swarm);
+            continue;
+        }
         // Each transform sees the named outputs accumulated so far via the
-        // context (Phase 9 finalize: enables Reorder(from='<named_output>')).
+        // context, which `Reorder(from=...)` reads.
         let mut step_ctx = ctx.clone();
-        step_ctx.named_outputs = outputs.clone();
+        step_ctx.named_outputs = published.outputs.clone();
         // The Swarm whose rows this step's output is: this step's own, or
         // the one its chained input already carried.
         let fed = match spec {
-            TransformSpec::Swarm(swarm) => Some(swarm),
-            _ => current_swarm,
+            TransformSpec::Swarm(swarm) => Some(swarm.clone()),
+            _ => current_swarm.clone(),
         };
-        if let Some(name) = spec_name(spec) {
-            // Named: run on the CURRENT chained batch (prior unnamed tail).
-            // Does not advance the chained pipeline pointer.
-            let result = spec.apply_with_context(&current, &step_ctx)?;
-            // Secondary outputs first — explicit `name` (registered below)
-            // wins on key collision.
-            for (key, b) in spec.secondary_outputs(&current, &result)? {
-                publish(&mut swarms, key.clone(), None);
-                outputs.insert(key, b);
-            }
-            publish(&mut swarms, name.to_string(), fed);
-            outputs.insert(name.to_string(), result);
-        } else {
-            // Unnamed: chained.
-            let input = current.clone();
-            current = spec.apply_with_context(&current, &step_ctx)?;
-            current_swarm = fed;
-            for (key, b) in spec.secondary_outputs(&input, &current)? {
-                publish(&mut swarms, key.clone(), None);
-                outputs.insert(key, b);
+        let result = spec.apply_with_context(&current, &step_ctx)?;
+        // Secondary outputs first, so a named step's explicit `name` wins a
+        // key collision.
+        for (key, b) in spec.secondary_outputs(&current, &result)? {
+            published.insert(key, b, None);
+        }
+        match spec_name(spec) {
+            Some(name) => published.insert(name.to_string(), result, fed),
+            None => {
+                current = result;
+                current_swarm = fed;
             }
         }
     }
-    publish(&mut swarms, FINAL_OUTPUT_KEY.to_string(), current_swarm);
-    outputs.insert(FINAL_OUTPUT_KEY.to_string(), current);
-    Ok((outputs, swarms))
+    Ok((current, current_swarm))
+}
+
+/// Run a branch's sub-chain over its input, publishing every output inside
+/// it; returns the sub-chain tail, which the caller publishes under the
+/// branch's `name`.
+fn run_branch(
+    spec: &BranchSpec,
+    source: &RecordBatch,
+    published: &mut Published,
+    ctx: &TransformContext,
+) -> PyResult<ChainTail> {
+    let input = branch::resolve_input(spec, source, &published.outputs)?.clone();
+    let input_swarm = spec.input.as_ref().and_then(|key| published.swarms.get(key)).cloned();
+    run_chain(&spec.transforms, (input, input_swarm), source, published, ctx)
 }
 
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
@@ -484,7 +541,10 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
     // them in the pattern so spec_name reads off the same source of truth.
     macro_rules! arm {
         ($($V:ident => $m:ident : $py:ident,)*) => {
-            match spec { $( TransformSpec::$V(s) => s.name.as_deref(), )* }
+            match spec {
+                $( TransformSpec::$V(s) => s.name.as_deref(), )*
+                TransformSpec::Branch(s) => Some(s.name.as_str()),
+            }
         };
     }
     for_each_transform!(arm)

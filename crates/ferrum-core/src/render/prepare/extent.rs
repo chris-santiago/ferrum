@@ -48,7 +48,8 @@ use arrow::record_batch::RecordBatch;
 /// a partially-specified extent keeps the user axis and pins only the unset one.
 /// `Kde`'s `extent` and `count_scale_extent` are likewise pinned independently —
 /// see the `Kde` arm's own comment. All non-extent-carrying transforms are
-/// passed through unchanged.
+/// passed through unchanged; a `Branch` is rebuilt with its sub-chain pinned
+/// by the same rule.
 pub(crate) fn fix_transform_extents_for_facet(
     transforms: &[crate::transform::core::TransformSpec],
     batch: &RecordBatch,
@@ -206,6 +207,15 @@ pub(crate) fn fix_transform_extents_for_facet(
                     },
                 )
                 .unwrap_or_else(|| t.clone())
+            }
+            // A branch's sub-chain runs per panel too, so its extent-carrying
+            // steps pin against the same whole-frame batch.
+            TransformSpec::Branch(branch) => {
+                TransformSpec::Branch(crate::transform::branch::BranchSpec {
+                    name: branch.name.clone(),
+                    input: branch.input.clone(),
+                    transforms: fix_transform_extents_for_facet(&branch.transforms, batch),
+                })
             }
             _ => t.clone(),
         })
@@ -595,5 +605,40 @@ mod tests {
             covered.difference(&extent_carrying).collect::<Vec<_>>(),
             extent_carrying.difference(&covered).collect::<Vec<_>>(),
         );
+    }
+
+    /// A `Branch` runs per panel like the top-level chain, so the
+    /// extent-carrying steps inside it, nested branches included, pin
+    /// against the whole frame; a branch left unpinned would bin each panel
+    /// over its own span.
+    #[test]
+    fn a_branch_sub_chain_is_pinned_recursively() {
+        use crate::transform::branch::BranchSpec;
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        let bin = TransformSpec::Bin(BinSpec {
+            field: "v".into(),
+            mode: BinMode::Fixed { n: 10 },
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+        });
+        let branch = |name: &str, transforms| {
+            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, transforms })
+        };
+        let spec = branch("outer", vec![bin.clone(), branch("inner", vec![bin])]);
+        let out = fix_transform_extents_for_facet(&[spec], &v_batch());
+        let TransformSpec::Branch(outer) = &out[0] else { panic!("expected the Branch back") };
+        let TransformSpec::Bin(pinned) = &outer.transforms[0] else { panic!("expected a Bin") };
+        assert!(pinned.extent.is_some(), "the branch's own Bin was not pinned");
+        let TransformSpec::Branch(inner) = &outer.transforms[1] else { panic!("expected the nested Branch") };
+        let TransformSpec::Bin(pinned) = &inner.transforms[0] else { panic!("expected a Bin") };
+        assert!(pinned.extent.is_some(), "the nested branch's Bin was not pinned");
+        assert_eq!((outer.name.as_str(), inner.name.as_str()), ("outer", "inner"));
     }
 }

@@ -2135,8 +2135,6 @@ fn collect_param_bindings(
     y_slots: &scale_resolve::YScaleSlots,
     n_panels: usize,
 ) -> Vec<ParamBinding> {
-    use crate::transform::core::TransformSpec;
-
     let mut bindings: Vec<ParamBinding> = Vec::new();
     let panel_count = n_panels.max(1);
 
@@ -2200,21 +2198,17 @@ fn collect_param_bindings(
         }
     }
 
-    // Filter bindings: each filter transform carrying a `param` marker.
-    for transform in &spec.transforms {
-        if let TransformSpec::Filter(filter) = transform {
-            let Some(param) = filter.param.as_ref() else {
-                continue;
-            };
-            for panel in 0..panel_count {
-                bindings.push(ParamBinding {
-                    param: param.clone(),
-                    role: BindingRole::Filter,
-                    panel: Some(panel),
-                    channel: None,
-                    y_slot: 0,
-                });
-            }
+    // Filter bindings: each filter transform carrying a `param` marker,
+    // including those inside a `Branch` sub-chain.
+    for param in filter_params(&spec.transforms) {
+        for panel in 0..panel_count {
+            bindings.push(ParamBinding {
+                param: param.to_owned(),
+                role: BindingRole::Filter,
+                panel: Some(panel),
+                channel: None,
+                y_slot: 0,
+            });
         }
     }
 
@@ -2232,6 +2226,20 @@ fn collect_param_bindings(
     }
 
     bindings
+}
+
+/// The `param` marker of every filter in `transforms`, in chain order,
+/// descending into `Branch` sub-chains.
+fn filter_params(transforms: &[crate::transform::core::TransformSpec]) -> Vec<&str> {
+    use crate::transform::core::TransformSpec;
+    transforms
+        .iter()
+        .flat_map(|transform| match transform {
+            TransformSpec::Filter(filter) => filter.param.as_deref().into_iter().collect(),
+            TransformSpec::Branch(branch) => filter_params(&branch.transforms),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn build_title(
@@ -4192,6 +4200,32 @@ mod tests {
         assert_eq!(b.role, BindingRole::Filter);
         assert_eq!(b.panel, Some(0));
         assert_eq!(b.channel, None);
+    }
+
+    /// A param filter inside a (nested) `Branch` binds like a top-level one.
+    #[test]
+    fn collect_param_bindings_emits_filter_bindings_inside_a_branch() {
+        use crate::transform::branch::BranchSpec;
+        use crate::transform::core::TransformSpec;
+        let filter = |param: &str| {
+            TransformSpec::Filter(crate::transform::filter::FilterSpec {
+                predicate: "true".into(),
+                name: None,
+                param: Some(param.into()),
+            })
+        };
+        let branch = |name: &str, transforms| {
+            TransformSpec::Branch(BranchSpec { name: name.into(), input: None, transforms })
+        };
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        spec.encoding.x = None;
+        spec.transforms =
+            vec![branch("outer", vec![filter("brush"), branch("inner", vec![filter("pick")])])];
+        let bindings =
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
+        let params: Vec<(&str, BindingRole)> =
+            bindings.iter().map(|b| (b.param.as_str(), b.role.clone())).collect();
+        assert_eq!(params, [("brush", BindingRole::Filter), ("pick", BindingRole::Filter)]);
     }
 
     #[test]

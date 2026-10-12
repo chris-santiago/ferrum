@@ -1,6 +1,9 @@
 //! Data transform: Calculate — add a derived column via expression evaluator.
 //!
-//! Evaluates an expression per row and appends the result as a new column.
+//! Evaluates an expression per row. A new `as_field` appends the result as a
+//! column; an existing `as_field` is overwritten in place (same schema
+//! position, the expression's values and dtype), so a batch never holds two
+//! columns of one name.
 
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -42,16 +45,21 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
     // Determine output dtype from the results.
     let (dtype, col): (DataType, ArrayRef) = infer_and_build_column(&spec.expr, &results)?;
 
-    // Build new schema with the additional column.
     let old_schema = batch.schema();
     let mut fields: Vec<Field> = old_schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-    fields.push(Field::new(&spec.as_field, dtype, true));
+    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+    let field = Field::new(&spec.as_field, dtype, true);
+    match old_schema.index_of(&spec.as_field) {
+        Ok(existing) => {
+            fields[existing] = field;
+            columns[existing] = col;
+        }
+        Err(_) => {
+            fields.push(field);
+            columns.push(col);
+        }
+    }
     let new_schema = Arc::new(Schema::new(fields));
-
-    let mut columns: Vec<ArrayRef> = (0..batch.num_columns())
-        .map(|i| batch.column(i).clone())
-        .collect();
-    columns.push(col);
 
     RecordBatch::try_new(new_schema, columns)
         .map_err(|e| PyValueError::new_err(format!("data_calculate: {e}")))
@@ -197,6 +205,49 @@ mod tests {
         let x = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(x.value(0), 1.0);
         assert_eq!(x.value(1), 2.0);
+    }
+
+    fn calc(as_field: &str, expr: &str) -> CalculateSpec {
+        CalculateSpec { as_field: as_field.into(), expr: expr.into(), name: None }
+    }
+
+    /// An existing `as_field` is overwritten at its own schema position, and
+    /// a read by name sees the new values. Appending a second `x` would leave
+    /// the old values first in name lookup.
+    #[test]
+    fn an_existing_column_is_replaced_in_place() {
+        let out = apply(&calc("x", "datum.x * 100"), &make_batch()).unwrap();
+        let schema = out.schema();
+        let names: Vec<&String> = schema.fields().iter().map(|f| f.name()).collect();
+        assert_eq!(names, ["x", "y"], "one column per name, original order");
+        let idx = out.schema().index_of("x").unwrap();
+        let x = out.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(x.values().to_vec(), [100.0, 200.0, 300.0]);
+        assert_eq!(out.column(1), make_batch().column(1), "other columns are untouched");
+    }
+
+    /// The replaced column takes the expression's dtype, not the old one.
+    #[test]
+    fn a_replaced_column_takes_the_expression_dtype() {
+        let out = apply(&calc("y", "datum.x > 1 ? 'big' : 'small'"), &make_batch()).unwrap();
+        assert_eq!(out.num_columns(), 2);
+        assert_eq!(out.schema().field(1).name(), "y");
+        assert_eq!(out.schema().field(1).data_type(), &DataType::Utf8);
+        let y = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((y.value(0), y.value(2)), ("small", "big"));
+    }
+
+    /// A new name appends exactly the batch the append rule always built.
+    #[test]
+    fn a_new_name_appends_the_same_batch_as_before() {
+        let batch = make_batch();
+        let out = apply(&calc("z", "datum.x + datum.y"), &batch).unwrap();
+        let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new("z", DataType::Float64, true));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(Float64Array::from(vec![11.0, 22.0, 33.0])));
+        let expected = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        assert_eq!(out, expected);
     }
 
     // ─── Array-valued results raise, never silently null (rust-quality
