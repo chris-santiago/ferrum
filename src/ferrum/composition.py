@@ -821,11 +821,16 @@ def compute_union_domain(charts, channel: str) -> Optional[dict]:
         _column_unique,
     )
 
+    from ferrum._coerce import to_polars
+
     bindings: list = []
     for chart in charts:
         data = getattr(chart, "_data", None)
         if data is None:
             continue
+        # The field readers below answer from a polars frame; pandas, PyArrow
+        # and LazyFrame data are converted here, once per chart.
+        data = to_polars(data)
         for field in _chart_bindings(chart, channel):
             if field is not None:
                 bindings.append((field, data))

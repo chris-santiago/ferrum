@@ -2,7 +2,7 @@
 bug-hunter agent.
 
 Targets: ``ferrum.structural.SecondaryY`` + ``chart._desugar_secondary_y``
-(the S4 field guard, ``_column_names_for_validation``),
+(the S4 field guard on the base chart's normalized column names),
 ``LayerChart._build_merged`` / ``_y_independent`` routing,
 ``composition._lower_any`` / ``_contains_independent_y_layer`` (nesting
 conflict detection), and ``_spec_build._build_layers_list``'s
@@ -246,8 +246,8 @@ def test_secondary_axis_title_override_renders():
 
 
 # ---------------------------------------------------------------------------
-# Type boundaries — the S4 field guard (_column_names_for_validation,
-# e521955b) across input kinds and non-string field values.
+# Type boundaries — the S4 field guard across input kinds and non-string
+# field values. Every input kind is normalized to polars before the check.
 # ---------------------------------------------------------------------------
 
 
@@ -272,8 +272,7 @@ def test_field_guard_empty_string_field_raises():
 
 
 def test_field_guard_pandas_string_columns_raises_at_add_time():
-    """pandas frames hit the generic `.columns` fallback branch of
-    _column_names_for_validation (all-str column names → guard active)."""
+    """A pandas base frame's bogus SecondaryY field is refused at + time."""
     import pandas as pd
 
     pdf = pd.DataFrame({"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
@@ -282,29 +281,29 @@ def test_field_guard_pandas_string_columns_raises_at_add_time():
         base + SecondaryY("nope")
 
 
-def test_field_guard_pandas_int_columns_skips_check():
-    """pandas frames with non-string column names fail the all-str predicate
-    → guard returns None → check skipped (documented: render-time errors
-    remain). The + must succeed and append the flagged layer."""
+def test_field_guard_pandas_int_columns_raises_at_add_time():
+    """`+ SecondaryY` normalizes the base chart's data to polars first, so a
+    pandas frame with non-string column names is checked against its
+    converted names ('0', '1') like any other frame."""
     import pandas as pd
 
     pdf = pd.DataFrame({0: [1, 2, 3], 1: [1.0, 2.0, 3.0]})
     base = fm.Chart(pdf).mark_point().encode(x="0", y="1")
-    chart = base + SecondaryY("nope")  # guard skipped; must not raise here
-    assert chart._layers[-1].independent_y is True
+    with pytest.raises(ValueError, match=r"'nope'.*not a column.*\['0', '1'\]"):
+        base + SecondaryY("nope")
+    assert (base + SecondaryY("1"))._layers[-1].independent_y is True
 
 
 def test_field_guard_polars_lazyframe_raises_at_add_time():
-    """The pl.LazyFrame branch of _column_names_for_validation
-    (collect_schema().names()) must catch a bogus field at + time."""
+    """A LazyFrame base frame's bogus SecondaryY field is refused at + time."""
     base = fm.Chart(_df().lazy()).mark_point().encode(x="x", y="y")
     with pytest.raises(ValueError, match=r"'nope'.*not a column"):
         base + SecondaryY("nope")
 
 
 def test_field_guard_pyarrow_recordbatch_raises_at_add_time():
-    """The pa.RecordBatch branch (schema.names) — existing tests only cover
-    pa.Table."""
+    """A pyarrow RecordBatch base frame's bogus SecondaryY field is refused
+    at + time."""
     import pyarrow as pa
 
     batch = pa.RecordBatch.from_pydict({"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
@@ -314,8 +313,8 @@ def test_field_guard_pyarrow_recordbatch_raises_at_add_time():
 
 
 def test_dict_of_arrays_guard_skipped_valid_field_renders_end_to_end():
-    """dict-of-arrays has no cheap name listing → guard skipped (returns
-    None); a VALID field must still render through the flat dual-axis path."""
+    """A VALID field on dict-of-arrays data renders through the flat
+    dual-axis path."""
     data = {"x": [1, 2, 3], "y": [1.0, 2.0, 3.0], "z": [10.0, 20.0, 30.0]}
     chart = fm.Chart(data).mark_point().encode(x="x", y="y") + SecondaryY("z")
     svg = chart.to_svg()
@@ -323,13 +322,13 @@ def test_dict_of_arrays_guard_skipped_valid_field_renders_end_to_end():
     assert "z" in _rotated_titles(svg)
 
 
-def test_dict_of_arrays_bogus_field_errors_at_render_not_silently():
-    """Guard skipped for dict data, but the bogus column must still surface a
-    legible error at render time — not a silent no-mark render."""
+def test_dict_of_arrays_bogus_field_raises_at_add_time():
+    """dict data is normalized to polars before the field guard runs, so a
+    bogus column is refused at `+` time, not left to a later render."""
     data = {"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]}
-    chart = fm.Chart(data).mark_point().encode(x="x", y="y") + SecondaryY("nope")
-    with pytest.raises(Exception, match=r"nope"):
-        chart.to_svg()
+    base = fm.Chart(data).mark_point().encode(x="x", y="y")
+    with pytest.raises(ValueError, match=r"'nope'.*not a column"):
+        base + SecondaryY("nope")
 
 
 def test_categorical_x_shared_across_slots():

@@ -88,15 +88,10 @@ def _color_type_kind(enc: ChannelBase, data) -> _ColorTypeKind:
         string; a composite mark's own per-layer encoding never reaches this
         function -- see ``_apply_auto_raster``'s ``_composite_kind`` gate).
     data :
-        The chart's data. **The dtype fallback applies to polars-backed data
-        only; pandas / PyArrow / dict sources stay annotation-only** and yield
-        ``"unknown"`` for an untyped channel rather than a guess. That gate
-        mirrors ``chart._infer_type_from_data``'s own isinstance gate, and it
-        means the "same chart spec works at every data size" promise reads
-        "…if your data is polars" for the untyped color spelling. Giving every
-        frame library one dtype answer (one ``to_arrow_table()`` on this
-        already-slow path, or a shared ``_column_dtype(data, field)`` helper)
-        is a filed follow-up, not this change.
+        The chart's data. The render entry normalizes every input to a
+        ``polars.DataFrame`` first, so an untyped channel resolves by dtype
+        the same way for polars, pandas, PyArrow and dict sources; data that
+        is not a polars frame yields ``"unknown"``.
 
     Returns
     -------
@@ -529,7 +524,7 @@ class _RenderMixin:
 
         from ferrum._core import ChartSpec
 
-        resolved = self._resolve_pending()
+        resolved = self._with_polars_data()._resolve_pending()
         chart = resolved._apply_auto_raster()
         # Chart.override: build the payload once per render (guarded on _overrides so a
         # chart that never calls .override() renders byte-identically). The spec-piece

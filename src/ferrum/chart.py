@@ -248,42 +248,6 @@ def _refuse_data_source_collision(
             )
 
 
-def _column_names_for_validation(data) -> "Optional[list]":
-    """Return *data*'s column names for a cheap boundary check, or ``None``.
-
-    ``Chart._data`` is stored raw (polars/pandas frame, pyarrow
-    ``Table``/``RecordBatch``, dict-of-arrays, list-of-records, ndarray), so
-    name extraction must be type-aware: pyarrow's ``.columns`` yields column
-    OBJECTS, not names. Returns ``None`` for inputs without a cheap name
-    listing — callers should then skip validation rather than materialize
-    an Arrow table just to check a name.
-    """
-    if data is None:
-        return None
-    try:
-        import pyarrow as pa
-
-        if isinstance(data, pa.Table):
-            return list(data.column_names)
-        if isinstance(data, pa.RecordBatch):
-            return list(data.schema.names)
-    except ImportError:
-        pass
-    try:
-        import polars as pl
-
-        if isinstance(data, pl.DataFrame):
-            return list(data.columns)
-        if isinstance(data, pl.LazyFrame):
-            return list(data.collect_schema().names())
-    except ImportError:
-        pass
-    columns = getattr(data, "columns", None)
-    if columns is not None and all(isinstance(c, str) for c in columns):
-        return list(columns)
-    return None
-
-
 def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     """Desugar ``chart + SecondaryY(...)`` into an appended independent-y layer (GH #52).
 
@@ -320,7 +284,10 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
             "LayerChart(chart, other_chart, resolve={'y': 'independent'}) instead."
         )
 
-    resolved = chart._resolve_pending()
+    # The base chart's data is normalized before its pending mark resolves,
+    # so unsupported data is refused ahead of desugar validation and the
+    # field check below reads a polars frame's column names.
+    resolved = chart._with_polars_data()._resolve_pending()
     new = resolved._clone()
     x_encoding = new._encoding.get("x")
     if x_encoding is None:
@@ -331,17 +298,12 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     # SecondaryY reads its field from the base chart's own table (no data
     # merge happens in this desugar), so validate it here with the same
     # boundary-error courtesy as the x-encoding check above instead of
-    # letting a typo surface as a downstream Rust column error. Column
-    # names are extracted type-aware (pyarrow's `.columns` is column
-    # OBJECTS, not names — see the isinstance dispatch used for temporal
-    # inference above); inputs without a cheap name listing (dict-of-arrays,
-    # list-of-records, ndarray) skip the check and keep render-time errors.
-    column_names = _column_names_for_validation(new._data)
-    if column_names is not None and feature.field not in column_names:
+    # letting a typo surface as a downstream Rust column error.
+    if new._data is not None and feature.field not in new._data.columns:
         raise ValueError(
             f"SecondaryY: field {feature.field!r} is not a column of the "
             "base chart's data (SecondaryY draws from the same table as "
-            f"the base chart); available columns: {list(column_names)}"
+            f"the base chart); available columns: {list(new._data.columns)}"
         )
 
     y_kwargs: dict = {}
@@ -370,6 +332,21 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     new._transforms = top_xforms
     new._layers = existing_layers + [secondary_layer]
     return new
+
+
+def _with_polars_operands(lhs: "Chart", rhs: "Chart") -> "tuple[Chart, Chart]":
+    """Normalize both ``+`` operands' data to polars, collecting shared data once.
+
+    When both operands carry the same data object, the right operand reuses
+    the left operand's converted frame, so a shared ``LazyFrame`` is collected
+    once per ``+`` and the identity fast path in ``_shares_data_with`` holds.
+    """
+    lhs_in = lhs._with_polars_data()
+    if rhs._data is lhs._data and lhs_in is not lhs:
+        rhs_in = rhs._clone()
+        rhs_in._data = lhs_in._data
+        return lhs_in, rhs_in
+    return lhs_in, rhs._with_polars_data()
 
 
 def _annotations_from_primitive(primitive: object) -> list:
@@ -1159,6 +1136,26 @@ class Chart(
                 setattr(new, slot, copy.copy(val))
             else:
                 setattr(new, slot, val)
+        return new
+
+    def _with_polars_data(self) -> "Chart":
+        """Return a chart whose data is the canonical ``polars.DataFrame``.
+
+        Every reader downstream of a render or spec entry (auto-raster gate,
+        type inference, ordinal-domain lookup, label maps, desugars) answers
+        from one frame type, and a ``LazyFrame`` is collected once here rather
+        than once per reader. Unsupported data (a ``Path`` or ``str``) raises
+        ``to_polars``'s ``TypeError: Unsupported data type`` here, before any
+        desugar-time validation. Returns *self* when the data is ``None`` or
+        already a ``polars.DataFrame``; otherwise a clone, so the caller's
+        chart is never mutated.
+        """
+        import polars as pl
+
+        if self._data is None or isinstance(self._data, pl.DataFrame):
+            return self
+        new = self._clone()
+        new._data = to_polars(self._data)
         return new
 
     def _append_configure(self, config) -> "Chart":
@@ -2433,9 +2430,10 @@ class Chart(
 
         if not isinstance(other, Chart):
             return NotImplemented
+        lhs_in, rhs_in = _with_polars_operands(self, other)
         # Resolve pending statistical marks before snapshotting encoding dicts.
-        lhs = self._resolve_pending()
-        rhs = other._resolve_pending()
+        lhs = lhs_in._resolve_pending()
+        rhs = rhs_in._resolve_pending()
         new = lhs._clone()
         lhs_layers, lhs_top_xforms = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
@@ -2513,11 +2511,11 @@ class Chart(
         rhs_authored = dict(rhs._encoding)
         # Data merging: when data differs, decide whether to diagonal-concat
         # or route the RHS through a named Identity transform.
-        if not self._shares_data_with(other):
+        if not lhs_in._shares_data_with(rhs_in):
             import polars as pl
 
-            lhs_df = to_polars(self._data)
-            rhs_df = to_polars(other._data)
+            lhs_df = to_polars(lhs_in._data)
+            rhs_df = to_polars(rhs_in._data)
             overlap = set(lhs_df.columns) & set(rhs_df.columns)
 
             if overlap:
@@ -3425,7 +3423,7 @@ class Chart(
         from ferrum import ChartSpec
 
         # Resolve any pending statistical mark desugar (mark called before encode).
-        resolved = self._resolve_pending()
+        resolved = self._with_polars_data()._resolve_pending()
 
         # Chart.override spec-piece payload (encoding scales / mark style / coord).
         # Built on demand for standalone .to_spec() callers; the render path passes
@@ -3670,7 +3668,7 @@ class Chart(
         ``PyLayer`` Rust class. JSON / serialization remains the underlying
         ``ChartSpec`` (delegated via ``__getattr__``).
         """
-        resolved = self._resolve_pending()
+        resolved = self._with_polars_data()._resolve_pending()
         spec = resolved.to_spec()
         if resolved._layers is None:
             return spec
