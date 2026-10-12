@@ -184,7 +184,8 @@ def test_tick_stubs_as_a_true_rug_when_its_channel_is_an_undeclared_numeric():
 # rather than fixing a defect). A declared type_="N"/"O" numeric column
 # partitions mark_line into one polyline per category, exactly as a Utf8
 # column already does; a bare numeric column keeps one polyline and the
-# documented DASH_PALETTE-index contract (ferrum-spec.md:1196-1203).
+# documented DASH_PALETTE-index contract (ferrum-spec.md §3.2, "StrokeDash
+# and the dash palette").
 # ---------------------------------------------------------------------------
 
 #: Witness dtypes for the partitioning face: one signed int, one float, one

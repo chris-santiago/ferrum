@@ -37,7 +37,10 @@ A dated note is any of these units that contains an ISO date (``YYYY-MM-DD``):
 - outside fences and blockquotes, a heading, a table row, a list item (with
   its continuation lines) or a paragraph.
 
-The consolidated line in its exact format is not a note.
+The consolidated line in its exact format is not a note. Nor is a date that
+appears only inside a single-backtick inline code span (a quoted example date
+or a quoted consolidated line shown as a format illustration), for any of the
+non-blockquote kinds and for a blockquote's bare-date fallback.
 
 In the history, a blockquote note stays a byte-identical blockquote. Any other
 unit is written as::
@@ -70,7 +73,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -80,14 +83,7 @@ STUB_PATH = REPO / "src" / "ferrum" / "_core.pyi"
 BASELINE_REV = "5c67fb0f"
 
 # Spec names that are not ferrum callables by design, each with the reason.
-PSEUDO_SIGNATURES: dict[str, str] = {
-    "MyMark.to_primitive_layers": (
-        "Part IV illustrates the custom-mark protocol with a user class; ferrum defines no MyMark"
-    ),
-    "MyStat.apply": (
-        "Part IV illustrates the custom-stat protocol with a user class; ferrum defines no MyStat"
-    ),
-}
+PSEUDO_SIGNATURES: dict[str, str] = {}
 
 # ``(resolved name, parameter)`` pairs whose stated default the signature cannot
 # prove (a sentinel, an unreadable stub default, or a key only ``**kwargs``
@@ -309,10 +305,16 @@ def unmatched_selectors(doc: Document, selectors: list[SectionSelector]) -> list
 
 @dataclass(frozen=True)
 class Finding:
-    """One failing line of a report."""
+    """One failing line of a report.
+
+    ``fatal`` marks a finding that should abort the whole CLI run with exit
+    code 2 (an unmatched ``--section`` selector) rather than fold into the
+    usual exit-1 tally alongside ordinary findings.
+    """
 
     location: str
     message: str
+    fatal: bool = False
 
     def render(self) -> str:
         return f"{self.location}: {self.message}"
@@ -379,6 +381,19 @@ class NoteUnit:
         return (self.kind, None if self.kind == BLOCKQUOTE else self.start, self.text)
 
 
+_INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+
+def _without_inline_code(text: str) -> str:
+    """Drop single-backtick inline code spans, so a quoted date reads as code, not prose.
+
+    A table cell, list item or paragraph that quotes a date-bearing example
+    (``2024-01-01`` as sample data, or a consolidated line shown as a format
+    illustration) is not itself a dated note.
+    """
+    return _INLINE_CODE.sub("", text)
+
+
 def is_consolidated_line(block: Blockquote) -> bool:
     """Return True for a one-line blockquote in the consolidated-line format."""
     return len(block.lines) == 1 and CONSOLIDATED_LINE.match(block.lines[0]) is not None
@@ -407,7 +422,7 @@ def note_form(block: Blockquote) -> str | None:
     form = lead_form(block.lines[0])
     if form is not None:
         return form
-    return NO_LEAD_FORM if ISO_DATE.search(block.text) else None
+    return NO_LEAD_FORM if ISO_DATE.search(_without_inline_code(block.text)) else None
 
 
 def _blockquote_units(doc: Document) -> list[NoteUnit]:
@@ -475,7 +490,7 @@ def _markdown_units(doc: Document) -> list[NoteUnit]:
             ):
                 end += 1
         lines = doc.lines[index:end]
-        if any(ISO_DATE.search(text) for text in lines):
+        if any(ISO_DATE.search(_without_inline_code(text)) for text in lines):
             units.append(NoteUnit(kind, index, lines, kind))
         index = end
     return units
@@ -700,13 +715,21 @@ class SpecSignature:
 
 @dataclass
 class SkipCounts:
-    """Statements the signature check read but did not compare, by reason."""
+    """Statements the signature check read but did not compare, by reason.
+
+    ``used_names``/``used_defaults`` record which ``PSEUDO_SIGNATURES`` /
+    ``UNPROVABLE_DEFAULTS`` keys were actually matched, so an allowlist entry
+    nothing in the spec needs anymore is a finding rather than a silent dead
+    entry.
+    """
 
     example_calls: int = 0
     chained_calls: int = 0
     tagged_fence_statements: int = 0
     allowlisted_names: int = 0
     allowlisted_defaults: int = 0
+    used_names: set[str] = field(default_factory=set)
+    used_defaults: set[tuple[str, str]] = field(default_factory=set)
 
     def render(self) -> str:
         return (
@@ -1183,8 +1206,10 @@ def compare_signature(
     passthrough = inspect.Parameter.VAR_KEYWORD in kinds and not by_name
 
     def unprovable(param: str, message: str) -> None:
-        if (qualname, param) in UNPROVABLE_DEFAULTS:
+        key = (qualname, param)
+        if key in UNPROVABLE_DEFAULTS:
             skips.allowlisted_defaults += 1
+            skips.used_defaults.add(key)
         else:
             findings.append(Finding(location, f"{display}: {message}"))
 
@@ -1254,6 +1279,27 @@ def _resolve_signature(doc: Document, sig: SpecSignature) -> tuple[object, str] 
     return resolved
 
 
+def _unused_allowlist_findings(skips: SkipCounts) -> list[Finding]:
+    """Fail on a ``PSEUDO_SIGNATURES``/``UNPROVABLE_DEFAULTS`` entry nothing in the spec matched.
+
+    Scoped to a whole-spec run (no ``--section``): a section-scoped run
+    legitimately exercises only some entries, so it skips this check rather
+    than flagging every allowlist entry outside its scope as dead.
+    """
+    findings = [
+        Finding("PSEUDO_SIGNATURES", f"{name!r} is unused; delete it or restore the signature")
+        for name in sorted(set(PSEUDO_SIGNATURES) - skips.used_names)
+    ]
+    findings += [
+        Finding(
+            "UNPROVABLE_DEFAULTS",
+            f"{key!r} is unused; delete it or restore the unprovable default",
+        )
+        for key in sorted(set(UNPROVABLE_DEFAULTS) - skips.used_defaults)
+    ]
+    return findings
+
+
 def check_signatures(doc: Document, selectors: list[SectionSelector]) -> tuple[list[Finding], str]:
     """Fail on every stated signature whose parameters or defaults differ from the code."""
     stubs = load_stub_defaults()
@@ -1270,6 +1316,7 @@ def check_signatures(doc: Document, selectors: list[SectionSelector]) -> tuple[l
         if resolved is None:
             if sig.name in PSEUDO_SIGNATURES:
                 skips.allowlisted_names += 1
+                skips.used_names.add(sig.name)
             else:
                 findings.append(
                     Finding(location, f"{sig.name}: does not resolve on ferrum ({sig.origin})")
@@ -1287,6 +1334,8 @@ def check_signatures(doc: Document, selectors: list[SectionSelector]) -> tuple[l
             findings.append(Finding(location, f"{display}: callable has no readable signature"))
             continue
         findings.extend(compare_signature(qualname, stated, shipped, location, display, skips))
+    if not selectors:
+        findings.extend(_unused_allowlist_findings(skips))
     origins = Counter(sig.origin for sig in signatures)
     summary = (
         f"signatures: {len(signatures)} stated ({origins['fence']} fenced, "
@@ -1339,13 +1388,28 @@ def run(
     selectors: list[SectionSelector],
     baseline_rev: str = BASELINE_REV,
 ) -> list[tuple[list[Finding], str]]:
-    """Run ``modes`` and return each mode's findings and summary line."""
+    """Run ``modes`` and return each mode's findings and summary line.
+
+    A ``--section`` selector that matches no heading is a finding, under the
+    summary ``"section selector"`` and each marked ``Finding.fatal``: a typo
+    there must not report a clean run over the empty scope it selected, and
+    ``main()`` reads the ``fatal`` marker (not the summary text) to choose
+    its distinct exit code.
+    """
     spec, spec_findings = load_document(spec_path)
     results: list[tuple[list[Finding], str]] = []
     if spec is None:
         return [(spec_findings, "spec: not checked")]
     if spec_findings:
         results.append((spec_findings, "spec structure"))
+    unmatched = unmatched_selectors(spec, selectors)
+    if unmatched:
+        findings = [
+            Finding(spec.label, f"--section matches no heading: {raw!r}", fatal=True)
+            for raw in unmatched
+        ]
+        results.append((findings, "section selector"))
+        return results
     if "signatures" in modes:
         results.append(check_signatures(spec, selectors))
     if "notes" in modes:
@@ -1383,19 +1447,16 @@ def main(argv: list[str] | None = None) -> int:
     selectors = [SectionSelector(raw) for raw in args.section]
     modes = ["signatures", "notes", "history"] if args.mode == "all" else [args.mode]
 
-    if selectors and args.spec.is_file():
-        spec = parse_document(args.spec.read_text(encoding="utf-8"), _label(args.spec))
-        unmatched = unmatched_selectors(spec, selectors)
-        if unmatched:
-            print(f"--section matches no heading of {spec.label}: {', '.join(unmatched)}")
-            return 2
-
     failed = False
+    fatal = False
     for findings, summary in run(modes, args.spec, args.history, selectors):
         for finding in findings:
             print(finding.render())
+            fatal = fatal or finding.fatal
         print(f"{summary}; {len(findings)} failing")
         failed = failed or bool(findings)
+    if fatal:
+        return 2
     return 1 if failed else 0
 
 

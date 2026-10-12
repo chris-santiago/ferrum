@@ -543,7 +543,8 @@ def test_discrimination_threshold_cv_is_deterministic_with_no_random_state():
     no seed to thread. Two independently-constructed sources over the same
     data with no ``random_state`` supplied at all must sweep to byte-
     identical frames -- restoring the spec's "ignores random_state" claim
-    (``ferrum-spec.md:245``) to truth. Before this fix the splitter was
+    (``ferrum-spec.md`` §3.1, the ``ferrum.ModelSource`` ``random_state``
+    row) to truth. Before this fix the splitter was
     ``KFold(shuffle=True, random_state=self._random_state or 0)``, which was
     deterministic only by accident of the ``or 0`` default, not because the
     method genuinely ignored the seed.

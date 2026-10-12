@@ -3748,7 +3748,7 @@ class Chart(
     def add_selection(self, *selections) -> "Chart":
         """Attach interactive selection(s) to this chart.
 
-        Per ``ferrum-spec.md §3.10`` (L736), the SVG/PNG renderer silently
+        Per ``ferrum-spec.md §3.10``, the SVG/PNG renderer silently
         ignores selections — they are intended for the WASM renderer (Phase 11).
         This method accepts any number of selection objects and returns a new
         ``Chart`` unchanged so that user code building selection-aware charts

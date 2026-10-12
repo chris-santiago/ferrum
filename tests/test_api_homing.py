@@ -9,13 +9,13 @@ These tests assert both the runtime fact (``Grid.__module__``) and the
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 import ferrum as fm
+from tests._script_loader import load_script
 
 _GEN_API = Path(__file__).resolve().parent.parent / "scripts" / "gen_api_pages.py"
 
@@ -23,11 +23,7 @@ _GEN_API = Path(__file__).resolve().parent.parent / "scripts" / "gen_api_pages.p
 @pytest.fixture(scope="module")
 def gen_api() -> ModuleType:
     """Import scripts/gen_api_pages.py as a module (it is a plain script)."""
-    spec = importlib.util.spec_from_file_location("gen_api_pages", _GEN_API)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return load_script("gen_api_pages", _GEN_API)
 
 
 def test_grid_defining_module() -> None:

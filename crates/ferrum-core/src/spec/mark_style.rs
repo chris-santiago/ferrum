@@ -179,7 +179,7 @@ pub struct MarkKwargsSpec {
     // ── Batch H Task 1: arrow / arrow_size (segment) ─────────────────────────
     /// When `true`, `mark_segment` draws a filled triangle arrowhead at each
     /// segment's `(x2, y2)` end, colored by the segment's resolved stroke and
-    /// sized by `arrow_size` (spec §4 H1, `ferrum-spec.md:690`). `None`/unset
+    /// sized by `arrow_size` (spec §4 H1, `ferrum-spec.md §3.3`). `None`/unset
     /// resolves to `false` at `render::draw::resolve_mark_style` — byte-stable,
     /// matching every segment rendered before this field existed. The
     /// triangle geometry is shared with `annotate_arrow`'s unlabelled overlay

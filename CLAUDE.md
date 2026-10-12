@@ -106,7 +106,7 @@ Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.to
 
 - **No matplotlib.** Not as a dependency, not as a dev dependency, not as an optional extra. Ever.
 - **No global mutable state.** No module-level config objects, no module-level theme rebinding. Themes are values passed to `Chart`; per-chart `.theme()` always wins. The single documented exception is `ferrum.set_default_theme()` (phase 8a+), which mutates a per-thread `contextvars.ContextVar` — scope-bounded, automatic-revert when used as a context manager, and overridden by per-chart `.theme()` at render time. Do not introduce other process-scoped mutators.
-- **`ferrum-spec.md` is the API contract.** If implementation diverges, update the spec with a dated note. Never silently drift.
+- **`ferrum-spec.md` is the API contract.** If implementation diverges, amend the contract text in place and append a dated entry under that section's heading in `design-docs/spec-history.md`. Never silently drift.
 - **`cargo test` must pass** before any phase (2+) is marked done. Phase 1 is the only exception.
 - **No seaborn, sklearn, yellowbrick, or scikit-plot imports in `src/ferrum/`.** They exist solely as gallery-audit comparators in isolated PEP 723 envs (see Gallery audit).
 - **No `unsafe` blocks** without clear justification documented in a comment.

@@ -10,38 +10,28 @@ whatever the working directory.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
+from tests._script_loader import load_script
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 
 
-def _load(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # Dataclasses resolve their module through sys.modules while the class body runs.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 @pytest.fixture(scope="module")
 def driver() -> ModuleType:
-    return _load("regen_docs_images", SCRIPTS / "regen_docs_images.py")
+    return load_script("regen_docs_images", SCRIPTS / "regen_docs_images.py")
 
 
 @pytest.fixture(scope="module")
 def guide() -> ModuleType:
-    return _load("generate_guide_pngs", SCRIPTS / "generate-guide-pngs.py")
+    return load_script("generate_guide_pngs", SCRIPTS / "generate-guide-pngs.py")
 
 
 @pytest.fixture(scope="module")
@@ -228,14 +218,14 @@ def test_theme_variants_are_shown_on_the_themes_guide(references) -> None:
 
 
 def test_every_showcase_entry_is_on_the_showcase_page(references) -> None:
-    showcase = _load("generate_showcase_pngs", SCRIPTS / "generate-showcase-pngs.py")
+    showcase = load_script("generate_showcase_pngs", SCRIPTS / "generate-showcase-pngs.py")
     for name, _ in showcase.CHARTS:
         image = f"docs/site/gallery/showcase_img/{name}.png"
         assert references.get(image) == ["docs/site/gallery/showcase.md"], image
 
 
 def test_concept_generator_writes_inside_this_repo() -> None:
-    concepts = _load("gen_concept_pngs", SCRIPTS / "gen_concept_pngs.py")
+    concepts = load_script("gen_concept_pngs", SCRIPTS / "gen_concept_pngs.py")
     assert concepts.BASE == ROOT / "docs" / "site" / "assets" / "concepts"
 
 
@@ -295,7 +285,7 @@ def test_check_mode_prints_the_known_failure(driver: ModuleType, capsys) -> None
 
 
 def test_kept_recipe_sources_render_nothing_and_every_rendered_recipe_is_shown(references) -> None:
-    recipes = _load("render_recipe_pngs", SCRIPTS / "render-recipe-pngs.py")
+    recipes = load_script("render_recipe_pngs", SCRIPTS / "render-recipe-pngs.py")
     rendered = {p.stem for p in recipes.recipes_to_render()}
     all_sources = {p.stem for p in recipes.RECIPE_DIR.glob("*.py")}
     assert set(recipes.KEPT_UNSHOWN) == {"dashboard_inset", "highlight_region"}

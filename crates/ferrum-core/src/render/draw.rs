@@ -376,7 +376,7 @@ pub struct GroupStyle {
 
 /// `mark_segment`-only overrides: whether to draw a filled triangle
 /// arrowhead at each segment's `(x2, y2)` end, and its size (spec §4 H1,
-/// `ferrum-spec.md:690`).
+/// `ferrum-spec.md §3.3`).
 #[derive(Debug, Clone, Default)]
 pub struct SegmentStyle {
     /// `None`/unset resolves to `false` at the draw site (`segment.rs`) —

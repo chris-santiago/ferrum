@@ -8,29 +8,19 @@ their fixture from the real baseline spec at ``BASELINE_REV``.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
+from tests._script_loader import load_script
+
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def _load(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # Dataclasses resolve their module through sys.modules while the class body runs.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.fixture(scope="module")
 def cs() -> ModuleType:
-    return _load("check_spec", ROOT / "scripts" / "check_spec.py")
+    return load_script("check_spec", ROOT / "scripts" / "check_spec.py")
 
 
 def _signatures(cs: ModuleType, body: str) -> tuple[list[str], object]:
@@ -82,7 +72,10 @@ def test_unclosed_parenthesis_fails(cs: ModuleType) -> None:
     assert messages == ["JointChart: parenthesis never closes in its fence"]
 
 
-def test_unresolvable_name_fails_unless_allowlisted(cs: ModuleType) -> None:
+def test_unresolvable_name_fails_unless_allowlisted(
+    cs: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(cs.PSEUDO_SIGNATURES, "MyStat.apply", "a test double, not a real callable")
     messages, _ = _signatures(cs, "```\nNoSuchThing(a)\nMyStat.apply(data)\n```")
     assert messages == ["NoSuchThing: does not resolve on ferrum (fence)"]
 
@@ -104,6 +97,31 @@ def test_unprovable_default_fails_unless_allowlisted(
     assert "1 allowlisted unprovable defaults" in summary
 
 
+def test_unused_pseudo_signature_fails(cs: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(cs.PSEUDO_SIGNATURES, "Nobody.calls_this", "dead entry")
+    messages, _ = _signatures(cs, f"```\n{JOINT}\n```")
+    assert messages == [
+        "'Nobody.calls_this' is unused; delete it or restore the signature",
+    ]
+
+
+def test_unused_unprovable_default_fails(cs: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(cs.UNPROVABLE_DEFAULTS, ("Nobody", "field"), "dead entry")
+    messages, _ = _signatures(cs, f"```\n{JOINT}\n```")
+    assert messages == [
+        "('Nobody', 'field') is unused; delete it or restore the unprovable default",
+    ]
+
+
+def test_unused_allowlist_check_is_skipped_under_a_section_selector(
+    cs: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(cs.PSEUDO_SIGNATURES, "Nobody.calls_this", "dead entry")
+    doc = cs.parse_document(f"### 3.12 Compound Views\n\n```\n{JOINT}\n```\n", "spec.md")
+    findings, _ = cs.check_signatures(doc, [cs.SectionSelector("3.12")])
+    assert [f.message for f in findings] == []
+
+
 def test_unclosed_fence_is_a_finding(cs: ModuleType, tmp_path: Path) -> None:
     path = tmp_path / "spec.md"
     path.write_text("# Spec\n\n```\nChart(data=None)\n")
@@ -119,6 +137,45 @@ def test_missing_files_and_baseline_are_findings(cs: ModuleType, tmp_path: Path)
     results = cs.run(["history"], spec, tmp_path / "h.md", [], baseline_rev="0000000bad")
     messages = [f.message for findings, _ in results for f in findings]
     assert "git cannot read the baseline spec" in messages
+
+
+def test_unmatched_section_selector_is_a_finding_not_an_empty_pass(
+    cs: ModuleType, tmp_path: Path
+) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n\n### 3.1 One\n\n> **Note (2024-01-01).** stale.\n")
+    results = cs.run(["notes"], spec, tmp_path / "h.md", [cs.SectionSelector("9.9")])
+    assert [summary for _, summary in results] == ["section selector"]
+    findings = [f for fs, _ in results for f in fs]
+    assert [f.message for f in findings] == ["--section matches no heading: '9.9'"]
+    assert [f.fatal for f in findings] == [True]
+
+
+def test_ordinary_findings_are_not_fatal(cs: ModuleType) -> None:
+    doc = cs.parse_document(
+        f"### 3.12 Compound Views\n\n```\n{JOINT[:-1]}, bogus=None)\n```\n", "s"
+    )
+    findings, _ = cs.check_signatures(doc, [])
+    assert findings and all(not f.fatal for f in findings)
+
+
+def test_main_exits_2_from_the_fatal_marker_not_the_summary_text(
+    cs: ModuleType, tmp_path: Path
+) -> None:
+    """``main()`` reads ``Finding.fatal``, not the ``"section selector"`` display text."""
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n\n### 3.1 One\n\nNo notes here.\n")
+    assert cs.main(["notes", "--spec", str(spec), "--section", "9.9"]) == 2
+    assert cs.main(["notes", "--spec", str(spec), "--section", "3.1"]) == 0
+
+
+def test_matched_section_selector_runs_normally(cs: ModuleType, tmp_path: Path) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n\n### 3.1 One\n\n> **Note (2024-01-01).** stale.\n")
+    results = cs.run(["notes"], spec, tmp_path / "h.md", [cs.SectionSelector("3.1")])
+    assert [summary for _, summary in results] != ["section selector"]
+    messages = [f.message for findings, _ in results for f in findings]
+    assert any("dated" in m for m in messages)
 
 
 # ── notes ───────────────────────────────────────────────────────────────────
@@ -176,6 +233,35 @@ def test_notes_finds_every_dated_unit(cs: ModuleType) -> None:
     findings, summary = cs.check_notes(doc, [])
     assert len(findings) == 8
     assert "1 consolidated lines" in summary
+
+
+QUOTED_CODE_SPEC = """# Spec
+
+### 3.1 One
+
+A table cell may quote sample data: `2024-01-01` is not a note.
+
+| field | example |
+|---|---|
+| `ts` | `2024-01-01` |
+
+A paragraph may illustrate the consolidated-line format itself, for example
+`> **Consolidated 2026-10-12.** Earlier dated notes...`, without becoming one.
+
+> See the `2024-01-01` fixture above for the shape.
+
+- an item that only quotes `2024-01-01` as code
+
+A mixed paragraph quotes `2024-01-01` as an example but is still dated
+because of this plain 2026-09-10 mention.
+"""
+
+
+def test_quoted_code_dates_do_not_trip_notes(cs: ModuleType) -> None:
+    doc = cs.parse_document(QUOTED_CODE_SPEC, "spec.md")
+    units = cs.dated_units(doc, [])
+    found = [(unit.kind, unit.start + 1) for unit in units]
+    assert found == [("paragraph", 18)]
 
 
 # ── history ─────────────────────────────────────────────────────────────────
