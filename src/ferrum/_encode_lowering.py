@@ -166,8 +166,8 @@ def _rebind_channel(ch: ChannelBase, column: str) -> ChannelBase:
 
     Drops the now-resolved ``bin=``/``aggregate=`` kwargs (both are consumed by
     the transform, never serialized) and recovers the user-facing column name as
-    the axis ``title`` — :func:`ferrum._desugar._apply_remap`'s title-recovery
-    convention, so a binned axis reads ``"tip"`` rather than ``"bin_start"``.  An
+    the axis ``title`` — the one re-pointing rule :func:`ferrum._desugar._apply_remap`
+    also uses, so a binned axis reads ``"tip"`` rather than ``"bin_start"``.  An
     explicit ``title=`` always wins; a non-``str`` field (an unresolved Repeat
     placeholder) recovers nothing.
     """

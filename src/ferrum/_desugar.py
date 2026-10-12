@@ -44,7 +44,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from ferrum._layer import (
-    _FLAT_MARK_METHODS,
     _Layer,
     MarkDesugarResult,
     apply_catch_all_style,
@@ -53,6 +52,7 @@ from ferrum._layer import (
     set_style,
     titled_encoding,
 )
+from ferrum._encode_lowering import _rebind_channel
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks._desugar_helpers import DISC_FLAG_DEFAULTS
@@ -427,12 +427,18 @@ def _merge_desugar_mark_kwargs(
 
 
 def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
-    """Apply a desugar remap to an encoding dict, preserving axis titles.
+    """Apply a desugar remap to an encoding dict, keeping the caller's options.
 
-    Modifies *encoding* in place.  When *orig_encoding* is provided and
-    a remap changes the field name (e.g. ``"tip"`` -> ``"bin_start"``),
-    the original field name is injected as the ``title`` kwarg so axes
-    keep a human-readable label.
+    Modifies *encoding* in place.  When *orig_encoding* is provided and the
+    caller bound the remapped channel, the remapped ``x``/``y`` is rebuilt
+    through :func:`ferrum._encode_lowering._rebind_channel` -- the same
+    re-pointing rule a binned channel's lowering uses -- so every option the
+    caller wrote on that channel (``title``, ``axis``, ``format``, ``scale``,
+    ...) survives; only the now-resolved ``bin``/``aggregate`` kwargs are
+    dropped, and the channel's type is always forced to quantitative since
+    it now points at the transform's numeric output.  When the caller never
+    bound the channel, a fresh quantitative channel is built, stamped with
+    the original field name as its title when the remap changed the field.
 
     Parameters
     ----------
@@ -441,28 +447,27 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
     remap : dict
         Mapping from channel name to new field name (``result.remap``).
     orig_encoding : dict or None, optional
-        The chart's encoding dict *before* the remap, used to recover
-        original field names for title preservation.  ``None`` disables
-        title preservation.
+        The chart's encoding dict *before* the remap, used to recover the
+        caller's channel for rebinding, or (for an unbound channel) the
+        original field name for the title stamp.  ``None`` disables both.
     """
     from ferrum.encoding import X, X2, Y, Y2
 
-    def _orig_field(channel: str) -> str | None:
-        if orig_encoding is None:
-            return None
-        enc = orig_encoding.get(channel)
-        if enc is None:
-            return None
-        return enc.field if isinstance(enc, ChannelBase) else enc
+    def _rebind_positional(
+        column: str, orig: ChannelBase | str | None, cls: type[ChannelBase]
+    ) -> ChannelBase:
+        if isinstance(orig, ChannelBase):
+            return _rebind_channel(orig, column)._with_options(type="Q")
+        field = orig if isinstance(orig, str) else None
+        title = field if (field and column != field) else None
+        return cls(column, type="Q", title=title) if title else cls(column, type="Q")
 
     if "x" in remap:
-        x_field = _orig_field("x")
-        title = x_field if (x_field and remap["x"] != x_field) else None
-        encoding["x"] = X(remap["x"], type="Q", title=title) if title else X(remap["x"], type="Q")
+        x_orig = orig_encoding.get("x") if orig_encoding is not None else None
+        encoding["x"] = _rebind_positional(remap["x"], x_orig, X)
     if "y" in remap:
-        y_field = _orig_field("y")
-        title = y_field if (y_field and remap["y"] != y_field) else None
-        encoding["y"] = Y(remap["y"], type="Q", title=title) if title else Y(remap["y"], type="Q")
+        y_orig = orig_encoding.get("y") if orig_encoding is not None else None
+        encoding["y"] = _rebind_positional(remap["y"], y_orig, Y)
     if "x2" in remap:
         encoding["x2"] = X2(remap["x2"], type="Q")
     if "y2" in remap:
@@ -1252,7 +1257,7 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
     # that built it (spec §4.8).
     _prior_mark = chart._pending_stat_mark.prior_mark
     _prior_layers: list = []
-    if _prior_mark is not None and _prior_mark in _FLAT_MARK_METHODS:
+    if _prior_mark is not None:
         if chart._layers:
             _prior_layers = list(chart._layers)
         else:
@@ -1332,7 +1337,12 @@ def _resolve_pending_as(chart: "Chart", entry: str) -> "Chart":
                 "layer; MarkDesugarResult.data has no defined meaning in "
                 "that combination (a _Layer has no per-layer raw-data slot)."
             )
-        smooth_enc = dict(chart._encoding)
+        # x2/y2 are the prior layer's own span channels (e.g. a prior
+        # mark_segment()/mark_rule()'s own end point): the Smooth transform's
+        # output never has a matching end column, and the fitted line never
+        # draws a span, so they are dropped here rather than carried onto a
+        # layer that cannot resolve them.
+        smooth_enc = {k: v for k, v in chart._encoding.items() if k not in ("x2", "y2")}
         if remap:
             _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding)
         smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)

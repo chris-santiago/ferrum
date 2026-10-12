@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._core import blend_accepted_values
-from ferrum._layer import _FLAT_MARK_METHODS, merge_style
+from ferrum._layer import _PendingMark, merge_style
 from ferrum._validate import validate_choice, validate_optional_vocabulary
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import ORIENT_CHOICES
@@ -109,6 +109,33 @@ def _normalize_orient_to_orientation(func_name: str, kwargs: dict) -> dict:
     new_kwargs = {k: v for k, v in kwargs.items() if k != "orient"}
     new_kwargs["orientation"] = orient_val
     return new_kwargs
+
+
+def _refuse_fitted_mark_after_pending_composite(entry: str, pending: _PendingMark | None) -> None:
+    """Refuse *entry* (``mark_function``/``mark_smooth``) immediately after a
+    pending composite mark on the same chart.
+
+    A chart holds one ``_pending_stat_mark`` slot (``_layer._PendingMark``),
+    so a second composite mark cannot be kept there alongside it. A fitted
+    mark keeps every layer already drawn (unlike a composite mark, which
+    replaces the chart's mark), so this refusal names the ``+`` spelling that
+    gives each composite its own chart, layer, data and style instead --
+    always the ``mark_<kind>()`` method every ``_set_composite_mark`` caller
+    is named for (``pending.kind``), a real ``Chart`` method, never
+    ``pending.entry``: a figure function (``displot()``, ``lmplot()``, ...)
+    that leaves its own pending mark unresolved names no such method. When a
+    figure or visualizer built the pending mark, its name still appears, as
+    the source of the mark being replaced, not as the remedy to type.
+    """
+    if pending is None:
+        return
+    pending_method = f"mark_{pending.kind}"
+    source = f" (built by {pending.entry}())" if pending.entry else ""
+    raise ValueError(
+        f"{entry}() cannot follow {pending_method}(){source} on one chart: a chart holds "
+        f"one composite mark, and {entry}() keeps every layer already drawn. Layer them "
+        f"with +: chart.{pending_method}() + chart.{entry}(...)"
+    )
 
 
 class StatisticalMarksMixin:
@@ -390,7 +417,15 @@ class StatisticalMarksMixin:
         Returns
         -------
         Chart
-            New ``Chart`` configured for smooth rendering.
+            New ``Chart`` configured for smooth rendering. A primitive mark
+            already set (``mark_point()`` etc.) is kept as its own layer
+            beside the fit, with its own data and style.
+
+        Raises
+        ------
+        ValueError
+            When this chart has a pending composite mark (``mark_histogram()``,
+            another ``mark_smooth()``, ...); use ``+`` instead.
 
         Examples
         --------
@@ -400,6 +435,7 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_smooth(method="linear", ci=0.95).encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
         """
+        _refuse_fitted_mark_after_pending_composite("mark_smooth", self._pending_stat_mark)
         from ferrum._desugar import validate_layer_kwargs
         from ferrum._core import x_estimator_accepted_values
         from ferrum._validate import validate_optional_choice
@@ -417,7 +453,10 @@ class StatisticalMarksMixin:
         )
         if layer_kwargs is not None:
             kwargs["layer_kwargs"] = layer_kwargs
-        _pm = self._mark if self._mark in _FLAT_MARK_METHODS else None
+        # Any primitive mark already set is kept as its own prior layer (the
+        # refusal above guarantees _mark cannot be a composite's placeholder
+        # here, since that would mean a pending composite was still set).
+        _pm = self._mark
         return self._set_composite_mark(
             "smooth",
             _resolve_smooth,
@@ -1439,9 +1478,19 @@ class StatisticalMarksMixin:
         """Render a mathematical function as a line.
 
         Evaluates ``fn(xs)`` on ``n`` evenly-spaced ``x`` values in the
-        specified domain and renders the result as a line.  The input data on
-        the chart is replaced with the synthetic dataset; use ``+`` composition
-        to overlay a function on a scatter chart.
+        specified domain and renders the result as a line. A chart that
+        already draws something over its own data -- a primitive mark
+        (``mark_point()`` etc.) with data, or an existing layered chart
+        (``a + b``) -- keeps every one of its existing layers, each with its
+        own data and style, and the function line joins them as one more
+        layer. A bare chart (no mark set yet), and a primitive mark with no
+        data of its own (``Chart(None).mark_line(stroke_width=7)``, a
+        style-only placeholder with nothing to keep as a layer), both keep
+        the single-layer shape: the chart's data becomes the synthetic
+        ``(x, y)`` table, and any style the placeholder mark carried merges
+        onto the function line's. A chart with a pending composite mark
+        (``mark_histogram()`` etc.) refuses; compose the two with ``+``
+        instead.
 
         Parameters
         ----------
@@ -1465,22 +1514,26 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides for the line (e.g. ``stroke``,
+            Mark-style overrides for the function line only (e.g. ``stroke``,
             ``stroke_width``, ``opacity``, or ``size`` for a dot-diameter
-            width), validated like any composite mark's style kwargs.
+            width), validated like any composite mark's style kwargs. A prior
+            layer this call keeps draws with its own style, never this one.
 
         Returns
         -------
         Chart
-            New ``Chart`` whose data is the synthetic ``(x, y)`` table.
+            A chart with the function line as one more layer when something
+            was already drawn; otherwise a new ``Chart`` whose data is the
+            synthetic ``(x, y)`` table.
 
         Raises
         ------
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
             inferred, when ``clip`` is not ``True`` or ``False``, when a style
-            kwarg is not one the line honors, or when ``size`` is not a finite
-            number above zero.
+            kwarg is not one the line honors, when ``size`` is not a finite
+            number above zero, or when this chart has a pending composite
+            mark (use ``+`` instead).
 
         Examples
         --------
@@ -1490,6 +1543,7 @@ class StatisticalMarksMixin:
         >>> fm.Chart(None).mark_function(np.sin, domain=[0, 6.28], n=100)
         Chart(mark='line', encoding=['x', 'y'])
         """
+        _refuse_fitted_mark_after_pending_composite("mark_function", self._pending_stat_mark)
         if position is not None:
             from ferrum.position import validate_position_eligibility
 
@@ -1559,9 +1613,18 @@ class StatisticalMarksMixin:
         # this mixin just applies whatever the desugar decided, the same way
         # every other composite mark's style dict is applied to its layers.
         line_mark_kwargs = {**style, **(result.mark_kwargs or {})}
-        if self._layers is not None and self._layers:
-            # Multi-layer: build a fresh single-chart with the function data and
-            # compose via + so it becomes a proper layer alongside existing layers.
+        if (self._layers is not None and self._layers) or (
+            self._mark is not None and self._data is not None
+        ):
+            # Something is already drawn -- an existing layered chart, or a
+            # primitive mark over real data (the refusal above guarantees it
+            # cannot be a composite's placeholder here). A primitive mark
+            # with no data of its own (e.g. a bare `mark_line()` on
+            # `Chart(None)`, used only to carry inherited style) has nothing
+            # to keep as its own layer, so it still takes the single-chart
+            # shortcut below. Build a fresh single-chart with the function
+            # data and compose via + so the function line joins what is
+            # already drawn as a proper layer, instead of overwriting it.
             fn_chart = self.__class__(synthetic)
             fn_chart._mark = mark
             fn_chart._entry = "mark_function"

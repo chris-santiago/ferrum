@@ -1221,6 +1221,21 @@ class Chart(
         # The mark this call sets speaks as this call, not as whatever entry
         # built the mark it replaces.
         new._entry = None
+        # A primitive mark call replaces whatever mark came before it,
+        # pending composite included: a chart holds one _pending_stat_mark
+        # slot, so a queued composite desugar is cleared here, rather than
+        # left for _resolve_pending to run against a mark this call already
+        # replaced.
+        new._pending_stat_mark = None
+        # _composite_kind is the other half of that same composite state
+        # (_set_composite_mark sets both together); left stale it would
+        # still read the replaced composite's name, e.g. _apply_auto_raster
+        # (_render.py) reading "histogram" on a chart that is now a plain
+        # mark_point() and so skipping its auto-raster eligibility check for
+        # no reason, and _overrides._valid_layer_names validating a
+        # layer_kwargs=/mark= door against the replaced composite's named
+        # sub-layers instead of the primitive's own (none).
+        new._composite_kind = None
         # S4: orient="horizontal" → coord flip (consumed Python-side).
         if m.orient_coord_flip():
             new._coord = "flip"

@@ -630,9 +630,10 @@ def desugar_smooth(
             smooth_kwargs["x_range"] = x_range
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": _smooth_cols["x"], "y": _smooth_cols["y"]}
-        # This shape keeps the chart's own encoding (the remap only renames
-        # the fields), so the axis titles are the caller's columns already --
-        # no `x_title`/`y_title` to thread, unlike the layered path below.
+        # This shape keeps the chart's own encoding; `_apply_remap` rebinds
+        # the caller's x/y channel to the renamed fields, keeping every
+        # option the caller wrote (title, axis, format, scale) -- no
+        # `x_title`/`y_title` to thread, unlike the layered path below.
         # The single mark IS the `line` layer of the layered shape below, so
         # it says so: `layer_kwargs={"line": ...}` reaches this shortcut
         # through `layer_name` and lands on `MarkDesugarResult.mark_kwargs`

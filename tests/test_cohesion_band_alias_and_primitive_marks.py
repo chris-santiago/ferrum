@@ -10,10 +10,14 @@ edge: ``Axis(min_band=5, min_extent=None)`` silently accepted while
 three surfaces now behave IDENTICALLY for (a) the single-alias path, (b) the
 double-supply path, and (c) the previously-divergent explicit-``None`` edge.
 
-ITEM 2 — ``_FLAT_MARK_METHODS`` was triplicated (chart.py / _desugar.py /
-marks/_chart_methods_statistical.py).  It is now defined once in ``_layer`` (the
-desugar leaf) and imported everywhere; these tests assert every site sees the
-SAME frozenset object so the dedup cannot silently regress.
+ITEM 2 — ``_FLAT_MARK_METHODS`` is defined once, in ``_layer`` (the desugar
+leaf). ``chart.py``'s ``SecondaryY`` validation is its consumer: a
+fitted-layer mark (``mark_smooth()``, ``mark_function()``) keeps any
+primitive mark already set, not only the eight members of this set, so it
+reads a prior mark's own ``_mark``/``_data`` state directly rather than
+testing membership here. This test asserts that consumer reads ``_layer``'s
+canonical object, so the constant cannot drift into a second, diverging
+copy.
 """
 
 from __future__ import annotations
@@ -125,17 +129,14 @@ class TestBandAliasCrossSibling:
 
 
 class TestFlatMarkMethodsSingleSourced:
-    """``_FLAT_MARK_METHODS`` is defined once in ``_layer`` and shared everywhere."""
+    """``_FLAT_MARK_METHODS`` is defined once in ``_layer``; ``chart.py``'s
+    consumer reads that object."""
 
-    def test_all_sites_are_the_same_object(self) -> None:
-        """Every consuming module must reference the identical frozenset object."""
-        from ferrum import _layer, chart, _desugar
-        from ferrum.marks import _chart_methods_statistical
+    def test_secondary_y_consumer_is_the_same_object(self) -> None:
+        """``chart.py``'s ``SecondaryY`` validation reads ``_layer``'s canonical object."""
+        from ferrum import _layer, chart
 
-        canonical = _layer._FLAT_MARK_METHODS
-        assert chart._FLAT_MARK_METHODS is canonical
-        assert _desugar._FLAT_MARK_METHODS is canonical
-        assert _chart_methods_statistical._FLAT_MARK_METHODS is canonical
+        assert chart._FLAT_MARK_METHODS is _layer._FLAT_MARK_METHODS
 
     def test_members_unchanged(self) -> None:
         """The relocated constant keeps its exact 8 flat-mark-method members."""

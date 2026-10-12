@@ -46,6 +46,22 @@ def _layer(chart: Any, mark: str, key: str) -> Any:
     return style.get(key)
 
 
+def _layer_by_entry(chart: Any, entry: str, key: str) -> Any:
+    """Like ``_layer``, but keyed on ``entry`` rather than ``mark``.
+
+    A prior primitive mark kept alongside a fitted-layer mark
+    (``mark_line().mark_function(...)``) can share its mark name with the
+    fitted layer -- both are ``"line"`` -- so distinguishing them needs the
+    entry each layer names: the fitted layer's own call (``"mark_function"``),
+    never the prior layer's (``None``, since a primitive mark call sets no
+    entry of its own).
+    """
+    (style,) = [
+        ly.get("mark_style") or {} for ly in _spec(chart)["layers"] if ly.get("entry") == entry
+    ]
+    return style.get(key)
+
+
 def _base() -> Any:
     return fm.Chart(_DF).encode(x="x", y="y")
 
@@ -115,11 +131,11 @@ _DOORS: dict[str, _Door] = {
         "theme:label",
         "#ff0000",
     ),
-    "mark_function(**style) over the chart's own style": _Door(
+    "mark_function(**style) on its own layer": _Door(
         lambda v: _base().mark_line(stroke_width=7).mark_function(np.sin, stroke_width=v),
         lambda: _base().mark_line(stroke_width=7).mark_function(np.sin),
-        lambda c: _flat(c, "stroke_width"),
-        7.0,
+        lambda c: _layer_by_entry(c, "mark_function", "stroke_width"),
+        None,
         2.0,
     ),
 }
