@@ -1483,291 +1483,212 @@ Every numeric door shares one predicate and one coercion in `ferrum._validate`: 
 
 ### 3.13 Themes
 
-A `Theme` is an immutable value object. All properties are optional; unset properties fall back to the Ferrum defaults.
+A `Theme` is an immutable value object holding a set of optional styling keys. A key that is unset (or passed as `None`) falls back to the built-in default listed below. `fm.Theme` and `fm.themes.Theme` are the same class.
 
 ```
 Theme(
-    # Canvas
-    background=None, width=None, height=None, padding=None,
+    # Canvas and spacing
+    background=None, background_color=None, padding=None,
+    axis_title_padding=None, column_padding=None, row_padding=None,
 
     # Typography
     font_family=None, font_size=None, font_weight=None, font_color=None,
     title_font_family=None, title_font_size=None, title_font_weight=None,
     title_color=None, title_anchor=None, title_offset=None,
-    label_font_family=None, label_font_size=None, label_color=None,
+    label_font_family=None, label_color=None,
 
     # Grid
-    grid=True, grid_color=None, grid_dash=None, grid_width=None, grid_opacity=None,
+    grid=None, grid_color=None, grid_width=None, grid_dash=None, grid_opacity=None,
+    major_grid_color=None, major_grid_width=None, major_grid_dash=None, major_grid_opacity=None,
+    minor=None, minor_grid_color=None, minor_grid_width=None, minor_grid_dash=None, minor_grid_opacity=None,
 
-    # Axes
-    axis_line=True, axis_line_width=None, axis_line_color=None,
+    # Axes and tick labels
+    axis_line=None, axis_line_width=None, axis_line_color=None,
     tick_size=None, tick_width=None, tick_color=None,
-    cull_threshold=None,  # int; minimum pixel gap between adjacent tick
-                           # labels — see the 2026-09-03 and 2026-09-20 dated
-                           # notes below. Default 8 (Rust).
-    cull_labels=None,      # bool; may the layout engine DROP tick labels to
-                           # reach that gap? Independent of the magnitude —
-                           # see the 2026-09-20 dated note below.
+    cull_threshold=None, cull_labels=None,
 
     # Marks
-    point_size=None, point_opacity=None,
+    mark_color=None, point_size=None, point_opacity=None,
     line_stroke_width=None, bar_corner_radius=None,
     area_opacity=None, opacity=None,
 
-    # Colors
-    color_scheme=None, mark_color=None, background_color=None,
+    # Palettes
+    color_scheme=None, sequential_scheme=None, diverging_scheme=None,
 
     # Legend
     legend_orient=None, legend_direction=None, legend_title_font_size=None,
 
-    # Spacing
-    axis_title_padding=None, column_padding=None, row_padding=None,
+    # Facet strips and reference lines
+    strip_background_color=None, strip_text_size=None, strip_padding=None,
+    reference_line_color=None, reference_line_dash=None,
 )
+Theme.update(**kwargs)
 ```
 
-> **2026-05-11 (Themes-T1):** Every key listed in the `Theme(...)` block above
-> is now plumbed end-to-end. The Python `Theme` class validates unknown
-> kwargs at construction time (raises `ValueError`); the Rust `theme_from_dict`
-> binding likewise rejects unknown keys. Spec key aliases (e.g. `background`
-> ↔ `background_color`) are accepted by both. Fallback chains (`title_color
-> → font_color`, `label_color → font_color`, `title_font_family →
-> font_family`, `label_font_family → font_family`) are resolved Python-side
-> in `Theme.to_theme_inputs_dict()` so the Rust binding sees a fully-populated
-> dict. Render-side consumption of the newly-plumbed keys lands in Themes-T2
-> through T4; defaults remain at their pre-T1 values in this sub-phase.
+The accepted key set is published by the Rust binding (`ferrum._core.theme_known_keys()`); `Theme` derives its key list from it, so Python and Rust accept exactly the same keys. A key outside that set raises `ValueError` at construction: `Unknown Theme key(s): ['width']. See ferrum-spec.md §3.13 for the supported key list.` Chart size is not a theme key; it is set on the chart (`Chart(df, width=, height=)` or `.properties()`). Values are not checked at construction; the Rust binding checks them when the chart renders (see Validation).
 
-> **2026-05-11 (Themes-T2 → T4):** Render-side consumers now read every
-> plumbed key. New `ThemeInputs::default()` ships an Observable Plot-flavored
-> visual identity: `mark_color="#4C78A8"` (tableau blue, was Okabe orange
-> `#E69F00`), faint visible grid (`grid_color="#DDDDDD"` width `0.5`, was
-> `#EEEEEE` width `1.0`), left-aligned semibold title (`title_anchor="start"`,
-> `title_font_weight="600"`), three-stop text color ramp (body `#222` / label
-> `#555` / axis `#888`), `point_size=36` (was `30`), `padding=16`,
-> `column_padding=row_padding=12`. `theme.color_scheme` defaults flip from
-> `okabe_ito` (§3.6) to `tableau10` — `okabe_ito` remains accessible via
-> `Theme(color_scheme="okabe_ito")`. `theme.grid` now actually emits
-> gridlines via `axis::draw_grid` (was a no-op before T3). `theme.axis_line:
-> bool` suppresses the axis stroke when `False`. Font family is kept as
-> `"Inter"` (bundled in `crates/ferrum-core/src/render/embed_font.rs`) rather
-> than the design spec's `"DejaVu Sans"` — Inter is deterministic across CI
-> hosts, DejaVu Sans would resolve through the system font path. The 8
-> built-in themes are rebuilt to use the newly-plumbed keys; each is visibly
-> distinct from the others on the same chart (see
-> `tests/goldens/theme_gallery/`).
+Effective defaults (Paper Ink, the built-in identity):
 
-> **2026-06-22 (D-THEME-1, T2.1):** The Python `Theme._KNOWN_KEYS` and color-key
-> sets are now *derived* from the Rust key manifest (`ferrum._core.theme_known_keys()`
-> / `theme_color_keys()`) so the Python and Rust accepted-key contracts cannot
-> drift. The accepted set now includes the per-level grid keys (`major_grid_*`,
-> `minor_grid_*`, `minor`) in `Theme(...)` as well (previously Python rejected
-> them though Rust accepted). The resolved-dict method is `Theme.to_spec_dict()`
-> (the older spec mention of `to_theme_inputs_dict()` is renamed). The
-> title/label → body-text fallback chain is now **complete**: in addition to the
-> four documented above it resolves `title_font_weight → font_weight` and
-> `title_font_size → font_size` (every `title_*`/`label_*` key that has a
-> body-text counterpart). There is no public `label_font_weight`/`label_font_size`
-> key — the public `font_size` key *is* the label/body font size (it routes to
-> the Rust binding's `label_font_size`, the same way `background` is the public
-> alias for `background_color`). CSS shorthand hex (`#rgb`/`#rgba`) is expanded
-> by the Rust color parser (`from_hex_str`); the prior redundant Python-side
-> expansion was removed.
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `background` | color | `"#FAF7F2"` | Chart background. `background_color` is an alias for the same field; if both are given, `background` wins. |
+| `padding` | `float` | `16` | Outer padding on every side, in px. Per-side padding and `padding.auto` are chart-level (§3.7 `configure_padding()`). |
+| `axis_title_padding` | `float` | `8` | Gap between tick labels and the axis title, in px. |
+| `column_padding`, `row_padding` | `float` | `12` | Gap between composite and facet cells, in px. |
+| `font_family` | `str` | `"Inter"` | Body-text family. Inter is bundled with the renderer, so text measures and renders the same on every host. |
+| `font_size` | `float` | `11` | Body and tick-label font size. There is no separate `label_font_size` key: `font_size` is the label size. |
+| `font_weight` | `str` | `"normal"` | Body-text weight. |
+| `font_color` | color | `"#1F2937"` | Body-text color. |
+| `title_font_family` | `str` | `"Inter"` | Chart-title family. |
+| `title_font_size` | `float` | `13` | Chart-title size. |
+| `title_font_weight` | `str` | `"600"` | Chart-title weight. |
+| `title_color` | color | `"#1F2937"` | Chart-title color. |
+| `title_anchor` | `str` | `"start"` | Title alignment: `"start"`, `"middle"` or `"end"`. |
+| `title_offset` | `float` | `6` | Gap below the title, in px. |
+| `label_font_family` | `str` | `"Inter"` | Tick-label family. |
+| `label_color` | color | `"#6B7280"` | Tick-label color. |
+| `grid` | `bool` or `fm.Grid` | `True` | Draw major gridlines. An `fm.Grid` value (§3.19) expands into the `grid`, `minor` and per-level keys below. |
+| `grid_color`, `grid_width`, `grid_dash`, `grid_opacity` | color, `float`, `list[float]`, `float` | `"#D6D3D1"`, `0.5`, solid, `1.0` | Major-gridline style. These flat keys style major gridlines only. |
+| `major_grid_color`, `major_grid_width`, `major_grid_dash`, `major_grid_opacity` | as above | the `grid_*` value | Major-gridline style; each wins over its `grid_*` counterpart. |
+| `minor` | `bool` | `False` | Draw minor gridlines on continuous scales. |
+| `minor_grid_color`, `minor_grid_width`, `minor_grid_dash`, `minor_grid_opacity` | color, `float`, `list[float]`, `float` | `"#E8E6E4"`, `0.3`, solid, `0.6` | Minor-gridline style. They do not inherit from `grid_*`. |
+| `axis_line` | `bool` | `True` | Draw the axis domain line. |
+| `axis_line_width` | `float` | `1` | Axis-line stroke width. |
+| `axis_line_color` | color | `"#6B7280"` | Axis-line color. |
+| `tick_size`, `tick_width` | `float` | `4`, `1` | Tick length and stroke width, in px. |
+| `tick_color` | color | `"#6B7280"` | Tick color. |
+| `cull_threshold` | `int` (non-negative) | `8` | Minimum pixel gap between adjacent x tick labels (see Tick-label gap and culling). |
+| `cull_labels` | `bool` | `True` | Whether the layout may drop x tick labels to reach that gap. Unset, it follows `cull_threshold`. |
+| `mark_color` | color | `"#2563EB"` | Color of marks with no color encoding. |
+| `point_size` | `float` | `36` | Default point area. |
+| `point_opacity` | `float` | `1.0` | Default point opacity. |
+| `line_stroke_width` | `float` | `1.5` | Default line width. |
+| `bar_corner_radius` | `float` | `0` | Default bar corner radius. |
+| `area_opacity` | `float` | `0.35` | Default area fill opacity. |
+| `opacity` | `float` | `1.0` | Default mark opacity. |
+| `color_scheme` | `str` | `"paper_ink"` | Categorical palette. Any categorical or continuous scheme name is accepted (§3.6 lists them and how a continuous name resolves on a nominal encoding). |
+| `sequential_scheme` | `str` | `"cool_blue"` | Default ramp for continuous color (heatmaps, densities) when no explicit scheme is given. |
+| `diverging_scheme` | `str` | `"blue_to_red"` | Default ramp for diverging color (correlation matrices and similar) when no explicit scheme is given. |
+| `legend_orient` | `str` | `"right"` | Legend side: `"left"`, `"right"`, `"top"` or `"bottom"`. |
+| `legend_direction` | `str` | implied by orient | `"horizontal"` or `"vertical"`. |
+| `legend_title_font_size` | `float` | `11` | Legend-title size. |
+| `strip_background_color` | color | `"#EDE9E3"` | Facet strip-title background. |
+| `strip_text_size` | `float` | `12` | Facet strip-title font size. |
+| `strip_padding` | `float` | `6` | Vertical padding around a facet strip title, in px. |
+| `reference_line_color` | color | `"#9CA3AF"` | Color of reference and annotation guide lines. |
+| `reference_line_dash` | `list[float]` | `[4, 4]` | Dash pattern of reference and annotation guide lines. |
 
-> **Dated note (2026-09-03, batch B task 3 — `cull_threshold` is a real pixel-gap minimum, and culling is reachable):** `cull_threshold` is the minimum pixel gap the layout engine keeps between adjacent tick labels; when the natural label set would pack tighter than that, labels are dropped until the survivors clear the gap. `cull_threshold=0` disables culling entirely. Before this task, culling was largely **unreachable**: a floating-point artifact (`cos(±90°)` evaluates to about `6.12e-17` in `f64`, not exactly `0`) made a vertically-rotated (`-90°`) label's computed footprint collapse to near-zero, so the rotation stage always reported "fits" and skipped straight past the cull/elide stages regardless of `cull_threshold`. The footprint calculation now includes the label's own line-height contribution at any rotation angle, so a `-90°` label gets a real fit test and dense categorical/tick axes now visibly cull. `cull_threshold` folds into **every** layout cascade stage as a minimum-gap budget (not just the final stage), so wrapping and packing degrade uniformly under it (shared word-balanced wrapping, never a one-word-per-line collapse) and elision (mid-label truncation with an ellipsis) only fires where truncating the label can actually free enough width to help — an infeasible truncation leaves the label intact rather than truncating for no gain. After culling removes some labels, the survivors re-select their own presentation (flat / rotated / wrapped / elided) at the new, sparser density — a survivor that no longer needs rotation renders flat rather than keeping the rotation the denser pre-cull set required. At `cull_threshold=0` the wrap/pack path is byte-identical to before this task (the verbatim pre-existing accumulator loop).
+**Fallbacks.** An unset `title_*` or `label_*` key that has a body-text counterpart takes that counterpart's value when the counterpart is set, before the default applies: `title_color` and `label_color` fall back to `font_color`, `title_font_family` and `label_font_family` to `font_family`, `title_font_weight` to `font_weight`, and `title_font_size` to `font_size`. So `Theme(font_size=20)` sets the title to 20 px as well. `title_anchor` and `title_offset` have no counterpart. `Theme.to_spec_dict()` resolves the fallbacks and renames `background` to `background_color`, so the Rust binding receives a fully resolved dict. The binding consumes every accepted key.
 
-> **Dated note (2026-09-20, wave 6A task 9 — `cull_threshold` splits into gap magnitude and cull permission, and it now reaches an independent-x facet axis):** Two changes, one additive and one a bug fix. **(1) The split.** `cull_threshold` used to answer two questions with one number: how much gap to require, and whether the layout engine may drop labels to reach it. `0` meant both "require no gap" and "never drop a label", so "keep an 8 px gap driving the flat / wrap / font-shrink / rotate stages, but never drop a label" was unspellable. A new boolean Theme key, `cull_labels`, now carries the permission on its own. Every pre-existing spelling is unchanged in meaning: `cull_threshold=0` still means gap 0 AND never cull; any positive `cull_threshold` still means that gap AND culling permitted; `fm.Axis(label_overlap="true")` still abandons the cascade entirely (independent-x faceted *output* does move for some of these spellings — see the fix below). What the split adds is the other two corners: `Theme(cull_threshold=30, cull_labels=False)` requires a 30 px gap of every presentation stage (S0–S3; S5's elision fallback is deliberately exempt, see the code comment at its fit test) and then keeps every label rather than dropping one — every label survives regardless of density, but WHICH stage the survivors land in does not: sparse enough and the gap is satisfiable early (flat or a shallow rotation), dense enough and the cascade falls through to its last resort, rotated -90° and possibly overlapping (elision, the nominal step after that, is gated on freeing width a -90° truncation can't actually reclaim, so it essentially never fires). Both arms are pinned by `tests/test_label_gap_policy.py::test_cull_labels_false_stage_depends_on_density`. And `Theme(cull_threshold=0, cull_labels=True)` drops labels only where they genuinely overlap, with no extra gap. The default is unchanged (gap 8, culling permitted) and its magnitude and mode are now two independent constants in Rust, so the still-open question of what the default gap should be can be settled without another change to this key surface. **(2) The fix.** On a facet whose x scale resolves independently (`.facet(col=…).share_scale(x="independent")`), the per-panel x axis was rebuilt with the compile-time default gap instead of the theme's, so `Theme(cull_threshold=…)` was entirely INERT there: a 60-category axis rendered the same label count at `cull_threshold` 0, 8 and 40, while the shared-x and un-faceted paths tracked the setting. That axis now reads the theme like every other axis, and an independent-x facet and a shared-x facet over the same data cull identically. Independent-x faceted output is the only output this task allows to move, and only where the setting actually changes which presentation the cascade lands in — a sparse independent-x facet whose presentation `cull_threshold` cannot change stays byte-identical; everything else in the corpus is byte-identical outright. The y axis was never affected — culling is an x-label concern.
+**Validation** (Rust, at render, all `ValueError`):
 
-**Built-in themes** (`ferrum.themes`)
+- An enumerated key outside its vocabulary is refused by name: `title_anchor must be one of 'start'|'middle'|'end', got 'left'`, `legend_orient must be one of 'left'|'right'|'top'|'bottom', got 'inside'`, `legend_direction must be one of 'horizontal'|'vertical', got 'diag'`.
+- A color key accepts a CSS color name, `#rrggbb`/`#rrggbbaa`, the shorthand `#rgb`/`#rgba`, or `rgb()`/`rgba()`; anything else is refused: `invalid color 'notacolor': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba()`.
+- An unknown scheme name is refused with the supported list: `Unknown color_scheme: 'nope'. Supported categorical: ... Supported sequential: ...`; `sequential_scheme` and `diverging_scheme` must name a continuous scheme (`Unknown sequential_scheme: 'tableau10'. Supported: ...`).
+- A value of the wrong type is refused with the deserializer's message, for example `theme: invalid type: string "x", expected f64 ...` for `padding="x"`, and ``theme: invalid value: integer `-1`, expected u32 ...`` for `cull_threshold=-1` (a float `cull_threshold` is refused the same way).
+
+**Tick-label gap and culling.** `cull_threshold` and `cull_labels` govern the x tick-label collision cascade. `cull_threshold` is the minimum pixel gap the cascade keeps between adjacent visible labels. It shrinks the fit budget of every presentation stage the cascade tries before dropping labels (flat, wrapped, smaller font, rotated), so a stage resolves only when it leaves that gap; at `0` the test is plain non-overlap. `cull_labels` says whether the cascade may then drop labels by stride to reach the gap. The two resolve as follows:
+
+| `cull_threshold` | `cull_labels` | Result |
+|---|---|---|
+| unset | unset | Gap 8 px, dropping permitted (the default). |
+| `N > 0` | unset | Gap `N` px, dropping permitted. |
+| `0` | unset | No gap requirement, never drop a label. |
+| any | `False` | That gap drives the presentation stages, and every label is kept. Which stage the labels land in depends on density: sparse labels satisfy the gap early (flat or a shallow rotation), dense ones fall through to the last resort, rotated -90 degrees and possibly overlapping. |
+| `0` | `True` | No extra gap; labels are dropped only where they genuinely overlap. |
+
+`cull_labels`, when given, always wins over the permission `cull_threshold` implies. When labels are dropped, the survivors choose their own presentation at the new, sparser density, so a survivor that no longer needs rotation renders flat. Mid-label elision (truncation with an ellipsis) is the step after culling; it is exempt from the gap and fires only where truncating a label frees enough width to help, so an infeasible truncation leaves the label intact. `fm.Axis(label_overlap=...)` (§3.7) overrides the cascade: `"true"` keeps every label regardless of either key. The axis band-height budget of §3.7 can still drop labels by stride under `cull_labels=False`. The policy applies to x tick labels only; y tick labels are never dropped by it. It applies identically to an un-faceted chart, a shared-x facet, and a facet whose x scale resolves independently (`.facet(col=...).share_scale(x="independent")`): each panel's x axis reads the theme's policy, and a shared-x and an independent-x facet over the same data keep the same labels.
+
+**Built-in themes** (`fm.themes`):
 
 | Name | Description |
 |---|---|
-| `default` | Ferrum defaults: light background, subtle grid, OKabe-Ito |
-| `minimal` | No grid lines, no axis lines, generous whitespace |
-| `dark` | Dark background (#1a1a2e), light text, neon-adjacent accents |
-| `publication` | Print-ready: no background, high-contrast, Tableau10 |
-| `economist` | Red accent, left-axis labels, horizontal grid only |
-| `fivethirtyeight` | Grey background, red/blue diverging, no axis lines |
-| `solarized_light` | Solarized palette |
-| `solarized_dark` | Solarized dark palette |
+| `default` | `Theme()`: every key at its built-in default (Paper Ink). |
+| `paper_ink` | Paper Ink with its identity keys set explicitly (cream `#FAF7F2` background, blue `#2563EB` marks, warm grid); renders the same as `default` and serves as a derivation base. |
+| `slate_citrus` | Dark navy background (`#111827`), light text, `slate_citrus` palette with neon accents. |
+| `arctic_signal` | Cool white background (`#F8FAFC`), sky-blue lead mark, `arctic_signal` palette. |
+| `observable` | White background, tableau blue `#4C78A8` marks, neutral gray grid, `tableau10` palette. |
+| `minimal` | No grid, no axis lines, zero-length ticks, 24 px padding. |
+| `dark` | Dark navy background (`#1a1a2e`), light text, `dark2` palette. |
+| `publication` | White background, no grid, black axes and text, bold middle-anchored title, black marks, `tableau10` palette. |
+| `economist` | Light blue background (`#d3e0e6`), red bold title, no axis lines, `set1` palette. |
+| `fivethirtyeight` | Grey background (`#f0f0f0`), no axis lines, bold start-anchored title, `set1` palette. |
+| `solarized_light` | Solarized cream background (`#fdf6e3`), `set2` palette. |
+| `solarized_dark` | Solarized dark background (`#002b36`), `set2` palette. |
+
+A built-in is an ordinary `Theme`, so `.update()` derives from it. Apart from the `default`/`paper_ink` pair, no two built-ins render the same chart identically.
 
 **Theme composition:**
 
 ```python
-my_theme = fr.themes.minimal.update(
+my_theme = fm.themes.minimal.update(
     font_family="Berkeley Mono",
-    grid=fr.Grid(major=True, minor=False, color="#f5f5f5"),
+    grid=fm.Grid(major=True, minor=False, color="#f5f5f5"),
     title_font_weight="bold",
 )
 ```
 
-`Theme.update(**kwargs)` returns a new `Theme`; source is unchanged.
+`Theme.update(**kwargs)` returns a new `Theme` with the given keys replaced; passing `None` for a key removes it, so it falls back to its default. The source theme is unchanged. Two themes are equal when they hold the same keys and values, and a `Theme` is hashable (list values such as `grid_dash` included).
 
-**Global default** (process-scoped, not module-level mutable):
+**Applying a theme.** `Chart.theme(t)` attaches `t` to a chart and replaces the whole active theme; it does not merge with the context default, so `.theme(fm.Theme())` renders at the built-in defaults even inside a dark context. A composition's `.theme(t)` applies `t` to every sub-chart. Layering with `+` keeps the primary layer's theme and warns (``Layered chart `+`: secondary layer's theme/facet is ignored; primary layer wins.``) when the right-hand layer carries a different one. Every other presentation source wins over the theme: `Chart.override()`, then per-channel `axis=`/`legend=`, then `configure_*()` (§3.7), then the theme, then the context default, then the built-in defaults.
 
-```python
-ferrum.set_default_theme(my_theme)  # returns a context manager
-# or
-with ferrum.theme_context(my_theme):
-    ...
+**Context default:**
+
+```
+set_default_theme(theme)
+theme_context(theme)
+get_default_theme()
 ```
 
-> **2026-05-10 (Phase 8a):** `set_default_theme(theme)` is implemented as a
-> contextvars-backed setter that returns a context manager. Per-chart
-> `Chart.theme(t)` always overrides this default. CLAUDE.md §"Hard
-> constraints" documents this as the single sanctioned exception to
-> "no global mutable state."
+`ferrum.set_default_theme(theme)` sets the default theme used by any chart that has no `.theme()` of its own, and returns a context manager. Used with `with`, the previous default is restored on exit, nested blocks included; called without `with`, the default stays set for the rest of the current context. `theme_context(theme)` is the same function under a context-manager name, and `get_default_theme()` returns the current default (initially `fm.themes.default`). A non-`Theme` argument raises `TypeError` (`theme must be a Theme instance, got str`).
+
+The default lives in a `contextvars.ContextVar`, not in module state. It is per thread: a new thread starts at `fm.themes.default` whatever its creator set, and a default set inside a thread does not leak out of it. An asyncio task starts with a copy of the default current when it was created. The default is read when a chart renders, not when it is built, so a chart built inside a `with` block and rendered after it uses the restored default. A per-chart `.theme()` always wins. This is the one sanctioned process-wide styling mutator.
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#313-themes).
 
 ---
 
 ### 3.14 Figure-Level Functions
 
-> **2026-05-10 (Phase 9):** All 8 Group A figure-level functions —
-> `displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`,
-> `clustermap`, `jointplot` — land in Phase 9 with every parameter
-> advertised in this section honored (no `NotImplementedError`,
-> no silent warn-fallbacks). Each function returns either a `Chart` or
-> a compound view (`JointChart`, `RepeatChart`, `ClusterMapChart`) whose
-> `.spec` / `.charts` / `.expand()` is a fully-formed object that
-> round-trips through `ChartSpec.from_json`. Group B (model-diagnostic
-> figure-level functions: `roc_chart`, `pr_chart`,
-> `confusion_matrix_chart`, `calibration_chart`, `gain_chart`,
-> `lift_chart`, `residuals_chart`, `importance_chart`, `shap_chart`,
-> `learning_curve_chart`, `validation_curve_chart`,
-> `cluster_diagnostics`, `decision_boundary_chart`,
-> `discrimination_threshold_chart`, `parallel_coordinates_chart`,
-> `class_prediction_error_chart`, `pca_scree_chart`, `rank_chart`,
-> `alpha_selection_chart`, `intercluster_distance_chart`,
-> `cv_scores_chart`) remains scheduled for Phase 10, alongside
-> `ModelSource` and the model-diagnostic marks they depend on.
+Figure-level functions return a `Chart` or a compound view. They handle data reshaping, faceting, axis labeling and legend placement themselves, and every result renders, saves and exports like any chart.
 
-> **2026-05-11 (Phase 10 — Model Diagnostics):** All Group B figure
-> functions ship in Phase 10 with every spec parameter implemented.
-> Multi-model overlay is supported via three entry points:
-> (a) pass a dict positional argument
-> (`roc_chart({"a": model_a, "b": model_b}, X, y)`),
-> (b) pass `compare=` kwarg
-> (`roc_chart(model_a, X, y, compare={"alt": model_b})`), or
-> (c) construct a `ComparedModelSource` explicitly via
-> `ModelSource.compare(...)` and pass it positionally. In all three
-> cases each per-model DataFrame is concatenated with a `model: Utf8`
-> column that downstream chart builders route to `color="model"`.
-> `random_state` affects compute on figure functions backed by
-> ModelSource methods that consume randomness (see §3.1 note); it is a
-> no-op on the rest. `parallel_coordinates_chart` and `rank_chart` do
-> not need a model — both accept a raw DataFrame / 2D array directly.
+| Function | Returns |
+|---|---|
+| `displot`, `catplot`, `relplot`, `lmplot`, `regplot`, `residplot`, `heatmap` | `Chart` |
+| `pairplot` | `RepeatChart` |
+| `jointplot` | `JointChart` |
+| `clustermap` | `ClusterMapChart` |
+| the model-diagnostic functions (Model Diagnostics, below) | `Chart`, or a composite (`ConcatChart`, `HConcatChart`, `VConcatChart`) for multi-panel and `compare=` layouts |
 
-> **2026-06-27 (compare= aggregate rendering, #35):** `compare=` now
-> renders **small multiples** — one panel per model, composed as a
-> `ConcatChart` — for the previously-gated aggregate diagnostics.
-> Affected families: the explanation family (`importance_chart`,
-> `shap_beeswarm_chart`, `shap_bar_chart`, `shap_waterfall_chart`,
-> `shap_chart`, `pdp_chart`); the model-selection family
-> (`learning_curve_chart`, `validation_curve_chart`, `cv_scores_chart`,
-> `alpha_selection_chart`); the regression aggregate family
-> (`cooks_distance_chart`; `residuals_chart` with a multi-panel layout;
-> `prediction_error_chart` with `ci=` or `reference_band=`, each band
-> computed per-model from that model's residuals only, never pooled);
-> and the source-based clustering charts (`pca_scree_chart`,
-> `intercluster_distance_chart`, `silhouette_chart`, `manifold_chart`)
-> with independent per-panel scales. Charts whose single-model output
-> is itself composite (`pdp_chart`, multi-panel `residuals_chart`) nest:
-> the outer `ConcatChart` children are per-model composites, each
-> carrying the model name as a figure-level title. The two sweep-based
-> clustering charts (`cluster_diagnostics`, `elbow_chart`) remain
-> excluded — they sweep one clusterer class over *k* on a feature
-> matrix and wrap no per-model `ModelSource`; algorithm/method
-> comparison is tracked in #43.
+Every leaf chart of a result lowers to a `ChartSpec` (`chart.to_spec()`) that round-trips through `ChartSpec.from_json(spec.to_json())`; a compound view reaches its leaves through `.charts` (and `RepeatChart.expand()`).
 
-> **2026-07-10 (dodge-by-model compare= layout, #42):** for the
-> dodge-eligible diagnostics, `compare=` now renders a **single
-> shared-axis panel** with marks grouped (dodged) by model — the
-> canonical seaborn/yellowbrick comparison plot — instead of the
-> 2026-06-27 small-multiples `ConcatChart`. **Landed:** `importance_chart`
-> returns one `Chart` whose bars are dodged by model within each feature
-> band, with a model legend and error rules / value labels dodged
-> alongside their bars; features are ranked once globally across models
-> (mean *absolute* importance, descending — mirrors shap_bar's
-> `_shap_order_features` magnitude ranking) and the shared top-`top_k` set
-> is used for every model; the value-axis domain is computed over the
-> combined frame.
-> `orient="horizontal"` (default) uses the vertical desugar form plus
-> `CoordFlip`; `orient="vertical"` renders the dodged layout directly.
-> `shap_bar_chart` (`per_class=False`) likewise returns one dodged `Chart`:
-> per-model SHAP values are stacked before `_shap_order_features` ranks the
-> pooled values once, globally; the shared top-`max_display` feature set is
-> aggregated per model, and the always-horizontal single-model layout uses
-> the same vertical-desugar-plus-`CoordFlip` idiom (`mark_shap_bar` gained
-> an internal `orient=`/`color_field=` pair mirroring `mark_importance`).
-> `shap_bar_chart(per_class=True)` keeps the 2026-06-27 small-multiples
-> `ConcatChart` (class is a competing facet dimension). `cv_scores_chart`
-> (`kind="box"`/`"strip"`, the default) likewise returns one dodged `Chart`
-> (spec D3): `split` (`train`/`test`, filtered by `split=` exactly as
-> today) stays the shared categorical axis, and each split band gets one
-> box/strip group per model, dodged and colored by model — the seaborn
-> `hue` convention, since `split` already has ≤ 2 levels and reads as
-> x-categories (facet-by-split would reintroduce panels to solve a problem
-> two bands don't have). `kind="strip"` drops the single-model jitter
-> under dodge (position adjustments are not composable — same rule
-> catplot already records); `desugar_cv_scores` gained a `color_field=`
-> parameter (`mark_cv_scores(color_field=...)`) that threads into
-> `desugar_boxplot`'s groupby for `"box"` and replaces the jittered point
-> layer's color for `"strip"`. `kind="bar"` keeps the 2026-06-27
-> small-multiples `ConcatChart` (fold x split x model is three grouping
-> dimensions — no coherent single dodge). The remaining explanation /
-> model-selection charts keep the 2026-06-27 small-multiples layout.
-> Single-model output is unchanged.
+**Shared keyword arguments.** Every figure function, including every model diagnostic, takes keyword-only `mark=None`, `encode=None`, `properties=None`, `layers=None` and `theme=None`. They apply in the order mark, encode, properties, layers, then the theme: `mark=` is a dict of mark overrides (keyed by layer name on a layered chart, flat on a single-mark chart), `encode=` is merged through `Chart.encode(**encode)`, `properties=` through `Chart.properties(**properties)`, `layers=` is appended through `Chart.layer(*layers)`, and `theme=` through `Chart.theme()`. On a composite result the overrides fan out to every child: a `mark=` key applies to each child that draws the layer it names and refuses when no child draws it, and `title`/`subtitle`/`caption` in `properties=` land at the figure level. A malformed `mark=` refuses before anything is computed. The distribution, categorical, relational, regression and matrix functions also take `**encode_kwargs`, forwarded to `Chart.encode()`. A warning or refusal about a layer the figure draws, and a refusal from its override or style doors, names the public function the caller invoked (`displot(...)`), not the mark method it used.
 
-> **2026-09-13 (wave 3 T5, #213 — `discrimination_threshold_chart(compare=)`
-> joins the small multiples):** `discrimination_threshold_chart` and
-> `DiscriminationThresholdVisualizer(compare=)` now render **small
-> multiples** — one `ConcatChart` panel per model, shared x/y scales,
-> titled with the model name — instead of the single pooled panel they
-> produced before. This is the one classification-curve chart that composes
-> rather than overlaying by `color="model"` (the 2026-05 classification
-> default), because its colour channel is already spent on the four-metric
-> legend; with N models overlaid there is no free channel left to tell the
-> models apart. **Breaking, and the geometry moves, not just the
-> annotation.** The builder's `unpivot` to long form listed neither `model`
-> in `index=` nor among the resolved metric columns, so polars dropped the
-> column outright: both models' sweeps stacked into one frame with nothing
-> distinguishing them, and the line mark drew each metric as a polyline that
-> traversed the threshold axis once per model — an interleaved zig-zag, not
-> an overlay. Measured on the pinned `binary_logistic` fixture vs. a
-> `GaussianNB` rival at `n_thresholds=20`: the old single panel held 160
-> rows over only 80 distinct `(threshold, metric)` pairs (every pair
-> duplicated); each panel now holds 80 rows, one per pair. The
-> F1-optimum annotation and the `threshold_line` rule were computed by a
-> single `arg_max` over that pooled frame, so they reported whichever model
-> won globally; each panel now computes them from its own model's sweep,
-> because `_compose_compare` builds every panel by re-entering the
-> single-model builder. Measured: base 0.918 @ t=0.42, rival 0.886 @ t=0.53
-> — two distinct labels where there was one. This also settles the render
-> half of the `compare=` metric-semantics note (F-L10-07) below:
-> `DiscriminationThresholdVisualizer(GaussianNB, compare={"rival": logistic})`
-> reprs `best_threshold=0.5263, best_f1=0.8865` (its base model, restricted
-> by `_base_model_rows` since batch G) while rendering `max F1 = 0.918 @
-> t=0.42` (the rival's). The `"base"` panel now annotates exactly the pair
-> the repr prints. The single-model path (no `compare=`) is unchanged, and
-> both single-model discrimination-threshold goldens are byte-identical.
+**Size arguments.** `displot`, `catplot`, `relplot` and `pairplot` check `height=` (a finite pixel value above 0) and `aspect=` (a finite number above 0), `jointplot` checks `height=`, and `clustermap` checks that `figsize=` is a `(width, height)` pair of finite pixel values above 0. The check runs at the figure's entry, before any size is derived, and `None` leaves the size unset. A malformed value (0, negative, NaN, infinity, a `bool`, a non-number) raises `EntryRefusal` (a `ValueError` subclass) naming the argument the caller passed: `displot(height=...) must be positive; received 0`, `displot(aspect=...) must be a finite number a float can hold; received nan`, `displot(height=...) must be a numeric pixel value (int or float), not bool; received True`, `clustermap(figsize=...) must be a (width, height) pair; received (300,)`. A size that is 0 only because the data is empty (row facets over an empty frame) is left unset, so the empty chart still renders.
 
-> **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
-> an explicit `scale=` on a chart-level positional channel (`x`/`y`) now
-> propagates onto the layers a composite mark desugars into — previously
-> it was silently dropped for every composite mark (box, violin,
-> cv_scores, letter-value, …). Rule: a layer channel with no scale
-> inherits the chart-level scale; a layer scale without a `domain` (e.g.
-> validation_curve's log x) merges in the domain only, keeping its own
-> `type`/`range`; a layer scale that already carries a `domain` (e.g.
-> SHAP's mark-computed `x_scale_domain`) always wins. Consequence for
-> `compare=`: shared-scale resolution now visibly applies to
-> composite-mark panels with flat data — e.g. `cv_scores_chart`
-> `compare=` panels render one union y-axis (the #45 report case).
-> Grid-composite children (multi-panel `residuals_chart` under
-> `compare=`) still do not share; that lands with the composite-render
-> unification (Phase B spec, 2026-07-02).
+**Multi-model comparison (`compare=`).** A model-diagnostic function that takes `compare=` compares several models in one figure. There are three equivalent spellings: a dict as the first argument (`roc_chart({"a": model_a, "b": model_b}, X, y)`), the `compare=` keyword (`roc_chart(model_a, X, y, compare={"alt": model_b})`, where the first model is named `"base"`), or a `ComparedModelSource` built with `ModelSource.compare(models, X, y)` and passed first. Each model's frame carries a `model` column, and the layout depends on the chart:
 
-Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
+| Layout | Charts |
+|---|---|
+| One panel, curves or points colored by `model` | `roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `residuals_chart` with a single panel (`panels="single"` or `None`), `prediction_error_chart` without `ci=` or `reference_band=` |
+| One shared-axis panel, marks dodged by `model` (color `model`, a model legend) | `importance_chart`, `shap_bar_chart` with `per_class=False` (the default), `cv_scores_chart` with `kind="box"` (the default) or `"strip"` |
+| Small multiples: a `ConcatChart` with one panel per model, in one row, each panel titled with its model's name; x and y scales shared | `discrimination_threshold_chart`, `shap_bar_chart` with `per_class=True`, `shap_beeswarm_chart`, `shap_waterfall_chart`, `shap_chart`, `learning_curve_chart`, `validation_curve_chart`, `alpha_selection_chart`, `cv_scores_chart` with `kind="bar"`, `cooks_distance_chart`, `residuals_chart` with several panels (the default `panels="auto"`), `prediction_error_chart` with `ci=` or `reference_band=` |
+| Small multiples, x independent and y shared | `pdp_chart` |
+| Small multiples, x and y independent | `pca_scree_chart` (fitted PCA estimators), `intercluster_distance_chart`, `silhouette_chart`, `manifold_chart` |
 
-> **Dated note (2026-10-11, #135 close: a figure's size arguments are checked at its entry, by their own names):** `displot`, `catplot`, `relplot` and `pairplot` check `height=` (a finite pixel value above 0) and `aspect=` (a finite number above 0), `jointplot` checks `height=`, and `clustermap` checks that `figsize=` is a `(width, height)` pair of finite pixel values above 0, before any size is derived from them. A malformed value (0, negative, NaN, infinity, a `bool`, a non-number) is refused with a `ValueError` in the figure's voice: `displot(height=...) must be positive; received 0`, `displot(aspect=...) must be a finite number a float can hold; received nan`, `clustermap(figsize=...) must be a (width, height) pair; received (300,)`. Before: `height=0` and `aspect=0` rendered silently at the default size, NaN reached the renderer, and `figsize=(300,)` raised `IndexError`. A size that is 0 only because the data is empty (row facets over an empty frame) is left unset, so the empty chart still renders.
+Each small-multiples panel is built by calling the single-model chart on that model alone, so everything it computes (a confidence band, a leverage panel, an F1 optimum) comes from that model's data only, never pooled. When the single-model chart is itself a composite (multi-panel `residuals_chart`, `pdp_chart`), each panel is that composite, titled with the model name. A refusal raised while a panel builds is prefixed with the model that refused: `compare={'alt': ...}: ...`.
+
+`discrimination_threshold_chart` composes rather than overlays because its color channel already carries the metric legend. Each panel draws its own model's sweep, F1-optimum annotation and `threshold_line` rule, and `DiscriminationThresholdVisualizer(compare=)` renders through the same builder, so its `"base"` panel annotates the threshold and F1 that its repr reports.
+
+The dodged layouts share one categorical axis across models, with each band's bars in model registration order (`"base"` first):
+
+- `importance_chart` ranks features once across all models by mean absolute importance (descending; a NaN-scored feature sorts last), keeps that one top-`top_k` set for every model, and computes the value-axis domain over the combined frame. Error rules and value labels dodge with their bars. `orient="horizontal"` (the default) draws the vertical form under `CoordFlip`; `orient="vertical"` draws it directly.
+- `shap_bar_chart` pools every model's SHAP values, ranks features once with the `order=` rule, keeps one top-`max_display` set, and aggregates each model's bars per feature. It is always horizontal, drawn as the vertical form under `CoordFlip`.
+- `cv_scores_chart` keeps `split` (`train`/`test`, filtered by `split=`) as the categorical axis and draws one box or strip group per model in each split band. Under `compare=`, `kind="strip"` draws no jitter, since one layer takes one position adjustment and the dodge uses it.
+
+`parallel_coordinates_chart`, `rank1d_chart` and `rank2d_chart` need no model: each accepts a DataFrame or 2-D array directly, and none takes `compare=`. `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart`, `class_balance_chart` and `decision_boundary_chart` have no `compare=` parameter. `cluster_diagnostics` and `elbow_chart` take `compare=` for signature uniformity but refuse any value other than `None` (`compare= is not supported for cluster_diagnostics: this takes the feature matrix and sweeps one clusterer class over k internally; ...`), because they sweep one clusterer class over `k` and wrap no per-model source. `pca_scree_chart` refuses `compare=` on its raw-matrix path (`pca_scree_chart: compare= requires a fitted PCA estimator; the raw-DataFrame / array path computes Rust SVD on a single matrix and has no per-model source to compare.`). `random_state=` seeds the randomized steps of the chart's source as described for `ModelSource` (§3.1).
+
+**Explicit positional scales through composite marks.** A composite mark (box, violin, cv_scores, letter-value and the rest) rebuilds each layer's encoding when it desugars, and an explicit `scale=` on the chart-level `x` or `y` channel carries onto those layers by one rule: a layer channel with no scale takes the chart-level scale whole; a layer scale with no `domain` (validation_curve's log x) takes only the chart-level domain and keeps its own `type`, `range` and other keys; a layer scale that already has a `domain` (SHAP's mark-computed domain) is left alone. Only `x` and `y` carry; `x2`/`y2` share their axis's scale through the primary channel. So a `compare=` composition resolves shared scales over composite-mark panels too: `cv_scores_chart(kind="bar")` panels under `compare=` draw one union y axis.
 
 #### Distribution
 
@@ -1777,206 +1698,54 @@ ferrum.displot(data, *, x=None, y=None, hue=None, col=None, row=None,
                fill=True, cumulative=False, log_scale=False, stat="count",
                bins="sturges", bandwidth="scott", bw_adjust=1.0,
                multiple="layer",     # "layer" | "stack" | "fill" | "dodge"
-               kde=False, rug=False, height=None, aspect=None, theme=None)
+               kde=False, rug=False, height=None, aspect=None,
+               mark=None, encode=None, properties=None, layers=None,
+               theme=None, **encode_kwargs)
 ```
 
-> **2026-09-10 (batch F, F-L09-01 + F-L09-10):** `kind="kde"`'s
-> `cumulative=` reaches the `Kde` transform end to end (grouped fits
-> included) -- previously `_displot_build` silently dropped it for the
-> primary KDE mark, so `cumulative=True` rendered byte-identically to
-> `cumulative=False`. It now produces a real CDF. The `kde=True` overlay on
-> `kind="hist"` inherits the same `cumulative` value, so a cumulative
-> histogram never carries a mismatched (non-cumulative) PDF overlay.
->
-> The `kind="hist", kde=True` overlay is also count-scaled and per-hue,
-> closing two adjacent bugs. Under `kind="hist", stat="count"`,
-> `multiple != "fill"` (the only combination where the histogram's y-axis
-> is actually in counts -- `multiple="fill"` normalizes bars to `[0, 1]`,
-> which a count-scaled curve would not match), the overlay's `Kde`
-> transform gains an opt-in `count_scale` (`n_group x bin_width` for the
-> density, `n_group` for the cumulative CDF) computed from the same
-> bin-width routine `Bin` uses on the histogram's own bins, so the curve is
-> visible against the bars instead of a flat ~2%-height sliver (measured
-> curve/bar height ratio 0.02 before, matching the bars after). The overlay
-> also now threads `groupby=hue` with a matching color channel --
-> previously a `hue=` histogram drew ONE pooled KDE curve in the theme's
-> flat default color over the per-hue bars, silently ignoring the
-> grouping. `stat=` is validated against its documented `{"count",
-> "density"}` vocabulary for every `kind=`, not just `"hist"`; an
-> unsupported value (e.g. the undocumented `"probability"`) now raises
-> instead of silently degrading to a count-mode render. `stat="density"`
-> overlays and `kind="ecdf"` are byte-identical (scaling is opt-in and
-> applies only to the count-axis case above). The overlay also carries an
-> explicit `Identity()` position so it can never inherit a `Stack`/
-> normalize adjustment from `multiple=` -- fixing a pre-existing crash
-> where `rug=True` combined with `hue=` and `multiple="stack"`/`"fill"`
-> raised `"Stack: value (y) encoding required"` (the rug tick layer gets
-> the same `Identity()` fix, so rug ticks are never dodged/stacked either).
+`displot` returns a `Chart` that draws one univariate distribution per `hue` level.
 
-> **2026-09-18 (wave 4, #193 — `bins=` accepts a vocabulary instead of
-> swallowing one):** `displot`'s `bins=` was passed to a door that read only
-> an integer count, so every other spelling was silently discarded and the
-> chart fell back to Sturges. Measured pre-fix: `bins="fd"`,
-> `"freedman_diaconis"`, `"auto"`, `"scott"`, `"stone"`, `bins=0.5` and
-> `bins=np.int64(9)` all rendered the identical 11-rect Sturges histogram
-> with an empty transform payload; `bins=True` rendered a 1-bin histogram
-> (because `bool` subclasses `int`); `bins=0` raised a `ValueError` naming
-> `Bin` rather than `displot`; and `bins=-3` leaked a raw `OverflowError`
-> out of the renderer. The accepted set is now explicit and closed:
->
-> | Value | Meaning |
-> |---|---|
-> | `"sturges"` | Sturges' rule (the default) |
-> | `"fd"` / `"freedman_diaconis"` | Freedman–Diaconis rule |
-> | `int` ≥ 1 | an exact bin count |
-> | positive finite `float` | a bin **width** |
-> | `None` | unset; falls through to `bin_count`/`bin_width` |
->
-> Everything else refuses with a typed `ValueError` in the voice of the entry
-> the caller invoked. Measured live: `"auto"`, `"scott"`, `"sqrt"`, `"rice"`,
-> `"doane"`, `"stone"`, and the near-misses `"FD"` and `"fd "` all give
-> `displot: unknown bins value 'auto'; expected 'sturges'|'fd'|int|float`
-> (no case or whitespace coercion — the vocabulary is closed); `True`/`False`
-> give `displot: bins must not be a bool (True); expected
-> 'sturges'|'fd'|int|float`, checked *before* the integer arm; `0`, `-3` and
-> `10**30` give `displot: bins as an int must be a bin count >= 1 within
-> machine range; got 0` — no `OverflowError`, and no fall-through into the
-> width arm; `0.0`, `-0.5`, `nan` and `inf` give `displot: bins as a float
-> must be a positive finite bin width; got 0`; and a `list`/`tuple`/`dict`/
-> arbitrary object gives `displot: bins must be 'sturges'|'fd'|int|float`.
->
-> `bins=` is validated for **every** `kind`, matching the `stat=` precedent —
-> so `displot(kind="kde", bins="auto")` and `displot(kind="rug",
-> bins="auto")` now raise where `bins=` was previously inert on those kinds.
-> A valid `bins=` on those kinds is still accepted and still inert.
->
-> Two doors that already spoke this vocabulary inherit the hardened parser
-> and therefore gain refusals they did not have: `Bin2D(bins_x=)`/`bins_y=`
-> and `Kde(count_scale=)` now refuse `bool`, non-positive and out-of-range
-> integers, and non-positive/non-finite floats at construction, each naming
-> itself (`Bin2D: …`, `stat_kde: …`). Valid values are unaffected.
->
-> Serialization is fixed with it: `BinMode::FreedmanDiaconis` previously
-> mapped to the same empty wire payload as Sturges, so `to_dict()`/
-> `to_json()` reported Sturges for a chart that had drawn Freedman–Diaconis.
-> FD now carries an explicitly-named additive `bin_rule` key; Sturges stays
-> the wire default (the absence of all three mode keys), so **every
-> pre-existing payload keeps its exact bytes**. A payload naming `bin_rule`
-> *and* a numeric key refuses rather than dropping one answer.
-> `repr(Bin("x", bins="fd"))` gains a trailing `, bins='freedman_diaconis'`;
-> every other mode's repr is byte-identical.
->
-> **Correction (2026-09-23, wave 6B, `#195`):** the sentence above was true when written and is false after `#195`: every `Bin` repr now also renders the five parameters it used to omit (`shared_extent`, `groupby`, `agg_field`, `agg`, `name`), whatever the mode. The mode rendering this note describes is kept: a count or width mode renders as before, and FD still ends in `bins='freedman_diaconis'`. See §3.5's `#195` note for the full repr change.
+| `kind` | Draws | Axes |
+|---|---|---|
+| `"hist"` (default) | `mark_histogram` bars | x: the variable; y: `count`, or `density` under `stat="density"` |
+| `"kde"` | `mark_density`, filled unless `fill=False` | x: the variable; y: `density` |
+| `"ecdf"` | a cumulative `Bin` drawn as `mark_line`, one line per `hue` level on bins the levels share | x: titled with the variable; y: `count` |
+| `"rug"` | `mark_tick` ticks, against `x=` or `y=` | the bound axis |
 
-> **2026-09-18 (wave 4, #194 — `multiple="stack"` means stacked):**
-> `displot` built its own position adjustment from `multiple=` and never
-> forwarded the mode into `mark_histogram`, so the underlying `Bin` ran at
-> its default and binned **each group over its own data range**. The two
-> groups' bars therefore shared no x position and were not even the same
-> width — measured on two 300-point normals at means 0 and 3: bar widths
-> `31.34 px` vs `34.19 px`, and **16 distinct x starts where a stack needs
-> 8**. The stack adjustment had no pairs to pair, and the render was a
-> side-by-side chart wearing a stack's name. What a `multiple=` mode means is
-> now answered in one place (`marks/_multiple.py`), which decides the
-> position adjustment *and* the binning extent together — because bars can
-> only stack if every group binned against the same edges. `displot` forwards
-> the mode; `"layer"`, `"dodge"`, the no-hue `"stack"` path and the
-> `kind="kde"` branch are byte-identical.
->
-> **`mark_histogram(position_by=)` is new public API** (additive,
-> keyword-only): the column the `multiple=` position adjustment groups by, so
-> forwarding the mode does not cost the caller its grouping. It accepts a
-> column name (`str`) or `None` and refuses anything else in its own voice —
-> `mark_histogram: position_by must be a column name (str) or None, not
-> Color; received Color('g').` — appending `Pass the column name itself:
-> position_by='g'.` when a channel object was passed. It is documented as a
-> column name, not as the figure layer's "str or encoding" spelling, on
-> purpose: `position_by` feeds `Stack(by=)`/`Dodge(by=)`, whose contract is
-> `Optional[str]`, and unwrapping would silently widen a contract this change
-> is only now creating.
->
-> Known limit, unchanged: `displot(kind="kde", multiple="stack")` still does
-> not forward the mode to `mark_density`.
+**Validation.** `kind=`, `multiple=` and `stat=` are closed vocabularies, checked for every `kind` before anything is built: `displot: stat must be one of ['count', 'density']; got 'probability'` (and the same shape for `kind` and `multiple`). The kinds `"hist"`, `"kde"` and `"ecdf"` draw the variable `x=` names and compute the other axis, so a call without `x=` refuses, in the caller's own column name: `displot(kind='hist', y='v') is not supported -- kind='hist' draws the distribution of the variable x= names and computes the other axis itself (a count, a density, a cumulative frequency), so a y= variable has nowhere to go. Pass x='v', or kind='rug', which draws its ticks against either axis.` `kind="rug"` draws from `x=` or `y=`. The `kde=` and `rug=` overlays are drawn against the `x=` variable too, so `displot(kind='rug', y='v', kde=True)` refuses: `... is not supported -- the kde= overlay is drawn against the variable x= names, and this call binds y= instead, so the overlay has no variable to read. Pass x='v' (kind='rug' draws the same ticks from x= or y=), or drop kde=.`
 
-> **2026-09-18 (wave 4, #200 — `kind="ecdf"` keeps the column it colors
-> by):** the ecdf branch is the one `displot` path that builds its own `Bin`,
-> and it built one without the group key, so the transform discarded the
-> `hue=` column before the encoding referred to it. Per-class curves could
-> not render. The branch now hands the `Bin` the group key, on a support the
-> groups share, so `displot(kind="ecdf", hue=...)` draws one curve per class.
-> The no-hue ecdf path is byte-identical.
+**`bins=`.** The vocabulary is closed, and is the one `Bin(bins=)` parses (§3.4):
 
-> **2026-09-18 (wave 4, #201-B — the rug gets the axis its curve was drawn
-> against):** `displot(x=..., kind="rug", kde=True)` is a composition the
-> docstring advertised twice and named rug for explicitly, and it **raised**
-> (`encoding 'y' expected EncodingSpec, got None`) because the x-only root
-> encoding fell through the generic x/y check. #201-D (above) made it render
-> with the correct extent and tick labels, but through the binding *fallback*
-> — which resolves a scale, not a chart-level binding — so the density axis
-> came out **untitled**. `displot` now binds the density column the overlay
-> already names at chart level, and the axis is titled `density`: the KDE
-> transform's own output column name, which is exactly what
-> `displot(kind="kde")` and `displot(kind="kde", rug=True)` already title the
-> same axis, and what `kind="ecdf"` does with `count`. The curve's extent and
-> tick labels are unchanged from #201-D; the rug's 200 ticks still sit at the
-> axis base; `hue=` still yields two curves and split ticks, now titled.
->
-> `displot(y="v", kind="rug", kde=True)` used to silently drop the KDE
-> overlay (the overlay block is gated on the x variable) and render a bare
-> vertical rug. It now refuses — see the close note below.
+| Value | Meaning |
+|---|---|
+| `"sturges"` | Sturges' rule (the default) |
+| `"fd"` / `"freedman_diaconis"` | Freedman-Diaconis rule |
+| `int` ≥ 1 (a numpy integer too) | an exact bin count |
+| positive finite `float` | a bin width in data units |
+| `None` | Sturges |
 
-> **2026-09-18 (wave 4 close, A2/A3/A5 — `displot` answers in its own voice,
-> and stops dropping a mark it was asked for):** three related changes to
-> what `displot` accepts.
->
-> 1. **One refusal for the x-requiring kinds.** `mark_histogram() requires
->    .encode(x=...)` and its `mark_density()` twin no longer escape from this
->    path: one helper answers for `hist`, `kde` and `ecdf` alike, naming the
->    entry the caller invoked, the binding observed, and the fix in the
->    caller's own column name. Measured:
->    `displot(kind='hist', y='v') is not supported -- kind='hist' draws the
->    distribution of the variable x= names and computes the other axis itself
->    (a count, a density, a cumulative frequency), so a y= variable has
->    nowhere to go. Pass x='v', or kind='rug', which draws its ticks against
->    either axis.` `kind="rug"` is deliberately excluded: a tick mark draws
->    against either axis.
-> 2. **`kind="rug", y=..., kde=True` refuses rather than dropping the
->    overlay.** Measured: `displot(kind='rug', y='v', kde=True) is not
->    supported -- the kde= overlay is drawn against the variable x= names,
->    and this call binds y= instead, so the overlay has no variable to read.
->    Pass x='v' (kind='rug' draws the same ticks from x= or y=), or drop
->    kde=.` Refusal rather than a warning because the overlay is not a knob
->    that got ignored, it is a whole requested mark with nowhere to stand —
->    there is no partially-honored reading of it, unlike `bins=` below. A
->    previously-accepted call now raises. The end state this defers is a
->    y-oriented density curve, which is an orientation feature, not a guard.
-> 3. **`bins=` warns where it is inert.** `kind="kde"` and `kind="rug"`
->    evaluate no binned statistic, so a stated rule cannot act. Measured:
->    `displot(kind='kde', bins=7): bins= is inert for kind='kde' -- it
->    evaluates no binned statistic, so the rule you named cannot act on
->    anything and the render is identical for every value. Drop bins=, or use
->    kind='hist'/'ecdf', which bin.` Only a rule the caller actually *stated*
->    warns: `bins=None` and `bins="sturges"` both mean the default a
->    non-binning kind would have used anyway, so nothing is discarded and
->    there is nothing to report. This is the warn-degraded half of the #193
->    refusal contract above, which validates the vocabulary for every kind.
+Anything else raises `ValueError` in `displot`'s voice, with no case or whitespace coercion: `displot: unknown bins value 'auto'; expected 'sturges'|'fd'|int|float` (also for `"scott"`, `"FD"`, `"fd "`); `displot: bins must not be a bool (True); expected 'sturges'|'fd'|int|float`, checked before the integer arm; `displot: bins as an int must be a bin count >= 1 within machine range; got 0` (also for negatives and integers too large for the machine); `displot: bins as a float must be a positive finite bin width; got 0` (also for NaN and infinity); and `displot: bins must be 'sturges'|'fd'|int|float` for a list, tuple, dict or other object. `bins=` is validated for every `kind`, but only `"hist"` and `"ecdf"` bin. A rule stated on `kind="kde"` or `kind="rug"` warns once and renders identically for every value: `displot(kind='kde', bins=7): bins= is inert for kind='kde' -- it evaluates no binned statistic, so the rule you named cannot act on anything and the render is identical for every value. Drop bins=, or use kind='hist'/'ecdf', which bin.` `bins=None` and `bins="sturges"` do not warn. `Bin2D(bins_x=, bins_y=)` and `Kde(count_scale=)` use the same parser and refuse the same values at construction in their own voice (`Bin2D: ...`, `stat_kde: ...`). On the wire a Freedman-Diaconis `Bin` carries `"bin_rule": "freedman_diaconis"`, Sturges carries no mode key, and a payload naming `bin_rule` together with `bin_count` or `bin_width` refuses (`stat_bin: bin_rule '<rule>' cannot be combined with bin_count/bin_width`). A Freedman-Diaconis `Bin`'s repr ends in `bins='freedman_diaconis'` (the repr rule is §3.5's).
 
-> **2026-09-18 (wave 4 close, A1 — `multiple="dodge"` bins on shared
-> edges):** `"dodge"` now maps to a shared binning extent, joining `"stack"`
-> and `"fill"`; `"layer"` is the only mode that may still bin per group,
-> because it is the only one that asks nothing of its neighbours. The band a
-> dodged bar takes its slot in *is* the bin, so the bins have to be the same
-> bins for every group before a slot means anything. Previously each hue
-> group binned over its own range: measured on a two-group frame, 9 bars of
-> one width against 10 of another, sharing **zero** x positions — two
-> histograms wearing a dodge's name. Measured after, on 200 rows in two
-> groups at `bins=10`: both groups draw 10 bars of equal width `22.57 px` on
-> one grid of step `50.16 px`, offset from each other by exactly one slot
-> (`22.57 px`), with no overlapping pairs and the two slots plus padding
-> spanning the band. **This is a user-visible rendering change** — a chart
-> built on the old geometry will look different, correctly so. (The
-> equal-width half of this depends on the R6 span fix noted under
-> `ferrum.Layer`; shared edges alone fixed the grid but not the widths.)
+**Density parameters.** `bandwidth=` (default `"scott"`) and `bw_adjust=` (default `1.0`) reach the `Kde` transform of `kind="kde"` and of the `kde=True` overlay. `bandwidth` takes `"scott"`, `"silverman"`, a positive finite float, or `None` (Scott); any other string raises `Kde: unknown bandwidth 'foo'; expected 'scott' | 'silverman' | float` (§3.4). `fill=` applies to `kind="kde"` only.
+
+**`cumulative=`.** Under `kind="hist"` the bars are a cumulative histogram; under `kind="kde"` the curve is the CDF, grouped fits included. The `kde=True` overlay takes the same `cumulative` value, so a cumulative histogram's overlay is a CDF.
+
+**`multiple=`.** One owner (`marks/_multiple.py`) decides both the position adjustment and the binning extent of each mode, so bars that must line up are binned on the same edges:
+
+| `multiple` | Position adjustment (grouped by `hue`) | Histogram bin edges |
+|---|---|---|
+| `"layer"` (default) | `Identity()`: groups overlap | each `hue` group bins over its own range |
+| `"stack"` | `Stack` with `offset="zero"` | one set of edges shared by every group |
+| `"fill"` | `Stack` with `offset="normalize"`: bars fill `[0, 1]` | shared |
+| `"dodge"` | `Dodge`: each group takes one slot of the bin's band | shared |
+
+Under `"stack"` and `"fill"` every group's bar in a bin sits on the same x and width. Under `"dodge"` every group's bars have one width on one grid, side by side and non-overlapping, one slot per group within each bin. Without `hue=` every mode draws one plain histogram. `mark_histogram(position_by=)` is the public door this forwarding uses (§3.3): the column the `multiple=` adjustment groups by, a column name or `None`; anything else refuses, e.g. `mark_histogram: position_by must be a column name (str) or None, not Color; received Color('g'). Pass the column name itself: position_by='g'.` Limit: `kind="kde"` does not support `"stack"` or `"fill"`. The mode's position adjustment is applied, but the densities are evaluated per group on grids the groups do not share, so the result is not a stacked or normalized density.
+
+**Overlays.** `kde=True` (on a kind other than `"kde"`) adds a `line` layer named `kde` that reads the original rows through a named `Kde` transform, grouped by `hue` and colored like the primary mark, one curve per level. Under `kind="hist"`, `stat="count"` and any `multiple` other than `"fill"`, where the value axis is in counts, the curve is count-scaled: density × group size × bin width (the CDF × group size when cumulative), with the bin width taken from the same `bins=` rule and binning extent as the bars, so the curve tracks the bars it is drawn against. Under `stat="density"`, `multiple="fill"`, `kind="ecdf"` or `kind="rug"` the curve is an unscaled density. Under `multiple="stack"` the count-scaled curves are drawn from zero, not stacked on the groups below. `rug=True` (on a kind other than `"rug"`) adds a `tick` layer named `rug` that reads the original `x=` values. Both overlays carry an explicit `Identity()` position, so neither is ever stacked, dodged or normalized by `multiple=`. On a layered chart the primary layer is named `histogram`, `kde` or `rug` after its mark, the names `mark=` overrides target. `displot(x=..., kind="rug", kde=True)` binds the overlay's density column as the chart's y axis, titled `density`, the same title `kind="kde"` and `kind="kde", rug=True` give that axis; the rug ticks sit at its base, and with `hue=` it draws one curve per level.
+
+**Encoding.** `hue=` is a column name or a channel object (`fm.Color("g")`) and is always encoded as a nominal color, so a numeric group column gets a swatch legend, not a colorbar. `log_scale=True` puts a log scale on x. `col=`/`row=` facet the chart.
+
+**Sizing.** With neither `height=` nor `aspect=` (and no `row=`), the chart keeps the default canvas size. Otherwise `height` (default 300 when only `aspect` is given) is the canvas height and the width is `height × aspect` (`height` when `aspect` is unset). Under `row=` faceting, `height` is the height of one row panel (default 150 px), the canvas height is that times the number of row levels, and the width is `height × aspect` when `aspect` is given, not growing with the panel count. Under `col=` faceting alone, `height` and `aspect` size the whole canvas.
 
 #### Categorical
 
@@ -1987,164 +1756,28 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                order=None, hue_order=None, orient=None,
                dodge=False, jitter=True, native_scale=False,
                ci=95, n_boot=1000, seed=None,
-               height=None, aspect=None,   # > **2026-05-31:** added; same semantics as displot
-               theme=None)
+               height=None, aspect=None,
+               mark=None, encode=None, properties=None, layers=None,
+               theme=None, **encode_kwargs)
 ```
 
-> **2026-09-18 (wave 4, #192 — `kind="count"` accepts a channel object like
-> its seven siblings):** `count` was the only one of catplot's eight kinds
-> that read the **raw** `x=`/`y=` argument again after the shared splitter
-> had already resolved it, so `catplot(..., kind="count", x=fm.X("g"))` died
-> with a bare PyO3 `TypeError: argument 'field': 'X' object is not an
-> instance of 'str'`, naming neither `catplot`, nor `kind="count"`, nor a
-> working route — while `x : str or encoding` was already the documented
-> contract for the parameter. It now derives the aggregated field from the
-> resolved channel, the same idiom the estimating kinds already use. This
-> closes a second, latent defect on the same line: an
-> `encode={"x": fm.X("other_col")}` override on `kind="count"` now aggregates
-> **the column its axis actually binds**, not the column named by the
-> original `x=`/`y=` keyword. The bare-string path is byte-identical
-> (SHA-256-pinned).
+`kind` picks the mark: `"strip"` is `mark_point` with `Jitter` (or `Dodge` when `dodge=True` and `hue=` is set, which replaces the jitter), `"swarm"` is `mark_swarm`, `"box"` `mark_boxplot`, `"violin"` `mark_violin`, `"boxen"` `mark_boxen`, `"count"` an `Aggregate(count)` drawn with `mark_bar`, and `"point"`/`"bar"` are the two estimating kinds below. An unknown `kind` raises `ValueError` listing the eight. `height`/`aspect` have the same meaning as on `displot`: with `row=` set, `height` is the per-panel height.
 
-> **2026-09-10 (batch F, F-L09-04):** `hue_order=` is honored for
-> `kind="box"` and `kind="violin"` -- previously silently ignored (byte-
-> identical output regardless of the argument). catplot already built
-> `Color(hue, sort=hue_order)` correctly; the drop point was
-> `_ResolveContext._color_field()` flattening the channel to a bare string
-> before the box/violin desugars ever saw the sort. The color sort now
-> rides the same threading pipeline `x_sort`/`y_sort` already use: a
-> `sort=` on a bare `Color(...)` channel -- catplot's `hue_order=`, or a
-> caller's own `mark_boxplot()`/`mark_violin()`/`mark_errorbar()`/
-> `mark_errorband()` plus `Color(sort=...)` -- now reaches the desugared
-> layers' color encoding and the legend order. `kind="boxen"` and
-> `kind="swarm"` keep their pre-existing, documented exclusion from this
-> mechanism (their own `hue_order=` already worked through chart-level
-> color, unaffected by this fix). `sort=None` (or omitted) is
-> byte-identical.
->
-> **Dated note (2026-09-11, wave-1 hardening, #190 — `catplot(hue=)` honors both a channel object's `sort=` AND `hue_order=`, kwarg wins):** `catplot(hue=fm.Color(...), hue_order=[...])` used to raise `TypeError` on every one of catplot's eight kinds — the `hue_order=` path always handed the raw `hue` argument straight into `Color(hue, sort=..., type_="nominal")` as `Color`'s positional `field`, and `ChannelBase.__init__` rejects a non-`str` `field`. `hue` is now routed through `_catplot_cat_field_parts`, the same channel-agnostic splitter `x`/`order` already use, so a channel-object `hue=` composes with `hue_order=` instead of crashing. When `hue_order=` is given, it OVERRIDES a channel's own `sort=` (checkpoint ruling: kwarg wins, matching the `order=` precedent — a documented divergence from the issue text's own parenthetical, which proposed "explicit channel sort wins"; splitting the builder's precedence rule between its two parallel channels was rejected as worse). When `hue_order=` is NOT given, a channel object's own `sort=` survives untouched, and — closing a sibling defect of the same root cause — `nominal_color_channel`'s previously-silent `sort=` drop on an already-built channel object now honors it instead of discarding it. An explicit `type_=` on the caller's own channel is honored verbatim alongside `hue_order=`, mirroring how `x_sort`/`type_=` already compose. A caller-supplied numeric `hue=fm.Color(<numeric col>)` with NO `hue_order=` keeps its continuous colorbar exactly as before (this composes with #240-4a below only through the shared `resolve_cmap_alias` refusal, not through the hue-typing decision itself).
->
-> **Dated note (2026-09-11, wave-1 hardening, #240-4a — unknown cmap/scheme name refuses at desugar, warns at the Rust resolve site):** `resolve_cmap_alias` (the shared `scheme=`/`cmap=` alias resolver used by `mark_raster`, `mark_hex`, `mark_contour`, `heatmap`, `clustermap`, and `RenderConfig`) now validates the resolved name against the registered continuous colormap list and refuses a bad name at Python desugar/construction time, closing the two channel-less Rust mark sites (`mark_raster`, the quantitative-color arm of `mark_hex`) that previously fell back to Viridis with no diagnostic at all, since the channel-bound warning below only fires when a `Color` scale is actually in the loop. The Rust side of the same fix (`resolve_continuous_scheme`) emits `RenderWarning::UnknownColorScheme` naming the bad name and falling back to the theme default, for the one path that IS channel-bound and therefore reachable only through a hand-built wire spec that bypasses the typed Python API — confirmed unreachable from `fm.Color(scheme="bad")` today, which already refuses at Python construction.
->
-> **2026-09-10 (batch F, F-L09-02/03):** `kind="point"` and `kind="bar"` are
-> ESTIMATING kinds. Each draws one mean per (category × `hue`) group from a
-> `Summary` transform, with a bootstrap CI whisker: the whisker paints under
-> the point marker and over the bar. Previously both drew one mark per raw row
-> (200 overplotted circles for a 200-row frame) and any non-default `ci=`/
-> `n_boot=` raised "not yet supported". `ci` is now a percent in the open
-> interval `(0, 100)` and `n_boot` must be `>= 1`; both are validated at the
-> catplot boundary for these two kinds only (they remain inert on the other
-> six). `seed=` seeds the bootstrap as well as `Jitter`, with `None` mapping
-> to the fixed default seed, so output is byte-deterministic. Both kinds are
-> layered charts now, so `mark=` takes per-layer keys (`"whisker"` plus
-> `"point"`/`"bar"`) rather than a flat mark-kwargs dict, and a call missing
-> either the category or the value channel raises instead of drawing a
-> value-less strip. `ci`/`n_boot` also refuse a `bool` (it subclasses `int`,
-> so `n_boot=True` would silently mean one resample); the numeric `1` stays
-> valid for both. An explicit positional `scale=` on the value channel (via
-> `y=`/`x=`, `encode=`, or `**encode_kwargs`) is honored on these kinds as it
-> is on the others **when it carries a `domain`**; a domain-less one (e.g. a
-> bare `{"type": "log"}`) now raises instead — main accepted it when these
-> kinds were single-mark charts, but on a layered chart the renderer resolves
-> an explicit domain-less scale from one column and would silently clip the CI
-> whiskers (the same gap drops marks on `kind="box"`/`"boxen"` today, without
-> an error). Adding a `domain` is the documented route; the refusal is deleted,
-> not relaxed, once the explicit-scale path gains the cross-layer domain union
-> the auto-inferred path has (tracked as SCALE-1 in the code-archaeology
-> followups doc). The other six kinds are byte-identical.
->
-> **2026-09-10 (batch F close):** every option stated on a channel the CALLER
-> built reaches all eight kinds. `x=fm.X("cat", sort=[...])` and
-> `hue=fm.Color("g", sort=[...])` were honored by the six per-row kinds and
-> dropped by `kind="point"`/`"bar"`, whose layers rebuilt both channels from
-> bare field names and re-threaded only `type_`, `order=` and the
-> native-scale domain -- so the encoding spelling of an order was inert while
-> the `order=`/`hue_order=` kwarg spelling worked. Both spellings resolve at
-> one site now and produce byte-identical output for the same order; where
-> both are given the kwarg wins (unchanged, and the same on every kind). The
-> third door is uniform too: `encode={"x": ...}` is a raw override that
-> REPLACES the builder's normalized category channel (discarding its typing
-> and its native-scale padding, as `encode=` is documented to). It always did
-> that on the six per-row kinds; it now does it on the two estimating kinds
-> as well, which previously kept their own channel and left the door inert.
-> `encode`'s `x` is the layer-space CATEGORY channel under both orientations,
-> the same key space the value-scale refusal and the scale propagation
-> already read it in.
-> **Refused, not dropped:** a PER-OBSERVATION appearance channel on the two
-> estimating kinds -- `size`, `shape`, `opacity`, `fill_opacity`,
-> `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle`, `color`, `fill`,
-> `stroke`, through a bare keyword or the `encode=` dict -- raises naming the
-> route. These kinds draw one mark per (category × `hue`) group, so the
-> mapping has no row to read: it reached the chart-level encoding only, where
-> it drew the channel's LEGEND over marks that carried none (measured:
-> `size=` rendered a six-swatch legend beside uniform-radius estimators;
-> `opacity=` was byte-identical to passing nothing). `hue=` is deliberately
-> NOT in the set -- it joins the `Summary` groupby, so its legend is true.
-> The six per-row kinds accept all of these unchanged.
->
-> **2026-09-10 (batch F, T5r rider — renderer-wide):** a LAYERED chart's
-> auto-inferred value-axis domain now extends to zero when a bar layer binds
-> that channel, mirroring the zero-anchor a single-chart `mark_bar` already
-> gets from its injected `scale.zero`; it is suppressed when the bar binds an
-> explicit span channel (`y2`/`x2`), whose extent is taken literally, matching
-> the same suppression on the single-chart rule. This is what keeps
-> `catplot(kind="bar")`'s bars on a zero baseline without an explicit
-> per-layer scale, which would have replaced the cross-layer domain union and
-> clipped the CI whiskers. The rule is not catplot-specific: any layered spec
-> with a bar layer on an auto-inferred value axis is affected, and one
-> phase-10 golden (`class_prediction_error_multiclass.svg`) moved its baseline
-> accordingly. `mark_bar(zero=False)` opts a layer out of the new rule as it
-> already opted a single chart out of the injected `scale.zero`: the opt-out
-> now travels with the mark as `mark_style.zero` when a chart is composed into
-> a layer, so it survives on the merged single-panel path
-> (`resolve={"y": "independent"}`, `SecondaryY`, and every `.interactive()`
-> `LayerChart`), where the chart-level injection never ran. On
-> `catplot(kind="bar")` itself -- whose bar layer is built directly as a
-> `_Layer`, not composed from a standalone `mark_bar()` chart -- the identical
-> opt-out is reachable through the ordinary per-layer `mark=` override:
-> `catplot(kind="bar", mark={"bar": {"zero": False}})` merges `zero: False`
-> into that layer's `mark_kwargs` (`_apply_mark_overrides`), which
-> `_build_layers_list` serializes wholesale as the layer's wire `mark_style` --
-> no special-case wiring needed, live and honored.
+**Axes and orientation.** `x` is the category axis and `y` the value axis. `orient="h"` swaps them (`y` names the category, `x` the value) and adds `CoordFlip`; any other value, including `None` and `"v"`, draws vertically. `x`, `y` and `hue` each take a column name or an already-built channel object (`fm.X("g")`, `fm.Color("h")`); every option stated on the caller's channel (`sort=`, `scale=`, `title=`, `type_=`, ...) reaches all eight kinds.
 
-> **2026-09-10 (batch F, F-L09-03):** the categorical channel is now ALWAYS
-> explicitly typed, for every one of the 8 `kind=` values, instead of never
-> being typed at all. `native_scale=False` (the default) types it
-> `"nominal"` -- **disclosed behavior change:** a numeric category column
-> (e.g. an integer year) previously inferred `"quantitative"` and rendered
-> on a linear axis, silently contradicting this documented default; it now
-> renders as equal-spaced categorical bands, matching a string column and
-> matching seaborn. `native_scale=True` types it `"quantitative"` and
-> places category values at their real numeric positions; it raises,
-> naming the column and its dtype, when the column is not numeric. The
-> former `native_scale=True` refusal ("the renderer does not support
-> quantitative categorical axes") is deleted -- it was factually wrong; the
-> renderer's continuous-band `Dodge` and non-ordinal `Jitter` paths already
-> existed and needed no Rust change. `kind="strip"`'s `Jitter` width on a
-> native scale is rescaled Python-side from the ordinal 0.4 band-fraction
-> to `0.4 x` the category column's own median unique-value spacing (data
-> units), mirroring the bandwidth proxy `Dodge`'s continuous-band path
-> already computes; a single-category column falls back to the literal 0.4.
-> One exclusion, orthogonal to this change: `kind="boxen"`'s letter-value
-> transform hard-requires a Utf8 groupby column regardless of
-> `native_scale` (a pre-existing Rust-transform gap, not introduced or
-> closed here).
->
-> **2026-09-10 addendum (cycle-2 close-out, same finding F-L09-03):** the
-> category channel's typing now covers the documented `x : str or encoding`
-> shape uniformly -- an already-built channel object (`x=fm.X("year")`) is
-> typed and `order=`-sorted exactly like a bare field name, honoring an
-> explicit `type_=` the caller stated on their own channel verbatim when
-> present. A quantitative axis's domain is otherwise just the raw data
-> extent, with no room for `Jitter`/`Dodge` to move a mark into; when
-> `kind="strip"` jitters (default `jitter=True`) or any kind dodges
-> (`dodge=True` + `hue=`), the category channel's domain is padded by half
-> that position adjustment's own maximum offset (plus a 5% safety margin)
-> so no mark renders outside it and is silently dropped by the renderer,
-> which resolves no awareness of the pending offset on its own. This
-> padding never overrides a domain the caller set explicitly (`x=fm.X(...,
-> scale=...)` or `encode={"x": ...}`) -- an explicit caller domain still
-> governs, and a mark that clips against IT is the caller's own choice.
+**The category channel is always typed.** `native_scale=False` (the default) types it `"nominal"`, so even a numeric column (an integer year) renders as equal-spaced categorical bands. `native_scale=True` types it `"quantitative"` and places each category at its numeric position; a non-numeric column raises `catplot(native_scale=True): the category column 'g' is not numeric (dtype String), so it has no native scale to place values on. Pass native_scale=False (the default) to render it as categorical bands instead.` An explicit `type_=` on the caller's own channel is honored verbatim and bypasses `native_scale`, including its dtype check. On a native scale, `kind="strip"`'s jitter width is `0.4` times the column's median spacing between unique values (`0.4` data units when there are fewer than two unique finite values), and whenever a strip jitters or any kind dodges, the category domain is padded by half the adjustment's maximum offset plus 5% so no adjusted mark falls outside it. The padding never overrides a scale the caller set on the category channel. `kind="boxen"`'s letter-value transform requires a string category column whatever `native_scale` says.
+
+**Hue.** A bare-string `hue=` is typed nominal on every kind. A channel object with no `type_` is typed nominal too; one that states a continuous `type_` keeps it (and its colorbar). `hue_order=` declares the hue categorical: with a channel object it rebuilds the channel with `sort=hue_order` (and nominal typing when the channel states no type), keeping the channel's other options. `hue_order=` beside a quantitative or temporal `type_` raises `catplot(hue=fm.Color('h', type_=...), hue_order=...): hue_order= cannot order a quantitative hue channel -- there is no discrete legend order for a continuous scale to apply. Drop hue_order=, or type the channel nominal/ordinal (e.g. type_='nominal') so hue_order= has levels to order.` With `dodge=False` (the default) the hue levels of one category overlay at the same position; `dodge=True` places them side by side.
+
+**Ordering precedence.** `order=` and `x=fm.X(..., sort=[...])` order the category axis identically, and `hue_order=` and `hue=fm.Color(..., sort=[...])` the hue levels and legend, on all eight kinds and with byte-identical output for the same order. When both spellings are given, the keyword wins. `encode={"x": ...}` is a raw override that replaces the builder's category channel on every kind, discarding its typing and its native-scale padding; prefer `x=fm.X(...)` to keep both.
+
+**Estimating kinds.** `kind="point"` and `kind="bar"` draw one estimate per (category, `hue`) group: a `Summary` transform computes the mean and a bootstrap confidence interval, drawn as a capless whisker under the point marker or over the bar. Both are layered charts whose layers are named `"whisker"` and `"point"`/`"bar"`, so `mark=` takes per-layer keys (`mark={"bar": {...}}`). `ci` is a percent in the open interval `(0, 100)` and `n_boot` an integer `>= 1`; `bool` and numeric strings are refused for both, and the refusal reads `catplot(ci=100) is not supported -- ci is a PERCENT and must be a number in the open interval (0, 100), exclusive at both ends (...). Pass ci=95 (the default) or any percent strictly between 0 and 100.` `seed=` seeds the bootstrap and the strip jitter; `seed=None` maps to a fixed seed, so output is byte-deterministic. Both kinds need a category and a value channel and raise `catplot(kind='point') summarises a value column per category, so it requires both a category and a value channel: ...` without one. The other six kinds draw no interval: a non-default `ci=` or `n_boot=` on them raises `catplot(ci=90) is not supported with kind='box' -- that kind draws no confidence interval, so ci= would be ignored. Drop ci=, or use one of the estimating kinds ('bar', 'point').`
+
+- **Per-observation channels are refused on the estimating kinds.** `size`, `shape`, `opacity`, `fill_opacity`, `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle`, `color`, `fill` and `stroke`, through a bare keyword or `encode=`, raise `catplot(kind='point', size=...) is not supported -- those channels map a visual property per OBSERVATION, and kind='point' draws one estimate per (category, hue) group from a Summary aggregate, ...`, naming `hue=` (which joins the `Summary` groupby, so its legend is true) and the per-row kinds as the routes. The six per-row kinds accept all of these.
+- **A value-axis `scale=` needs a `domain`.** An explicit value-axis scale with a `domain` governs both layers; a domain-less one (a bare `{"type": "log"}`) raises `catplot(kind='point'): a value-axis scale= without an explicit domain cannot be honored, because 'point' draws an estimate and its CI whisker from different columns of one Summary output, ... Add a domain (e.g. scale={'type': 'log', 'domain': [lo, hi]}), or use a kind that draws one mark per row.` A scale on the category channel is always honored.
+- **Bars start at zero.** A layered chart's auto-inferred value-axis domain extends to zero whenever a bar layer binds that channel, the same zero anchor a single-chart `mark_bar` gets from its `scale.zero`, unless the bar binds an explicit span channel (`y2`/`x2`). This rule applies to every layered spec with a bar layer, not only `catplot`. `mark_bar(zero=False)` opts a layer out and travels with the mark as `mark_style.zero`, so it holds on the merged single-panel path (`resolve={"y": "independent"}`, `SecondaryY`, interactive `LayerChart`); on `catplot(kind="bar")` the same opt-out is `mark={"bar": {"zero": False}}`.
+
+**`kind="count"`** counts rows of the resolved category channel per category (and per `hue` level when `hue=` is set, unless `hue` names the category column), so a channel object works and an `encode={"x": fm.X("other")}` override counts the column the axis actually binds. It requires a category channel: `catplot(kind='count') requires x= (or y= when orient='h')`. The count lands on the value axis as column `n`.
 
 #### Relational
 
@@ -2152,266 +1785,110 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
 ferrum.relplot(data, *, x, y, hue=None, size=None, style=None,
                col=None, row=None,
                kind="scatter",        # "scatter" | "line"
-               height=None, aspect=None, theme=None)
+               height=None, aspect=None,
+               mark=None, encode=None, properties=None, layers=None,
+               theme=None, **encode_kwargs)
 ```
 
-`size` maps to the `Size` channel (point area or line width). `style`
-maps to `Shape` for `kind="scatter"` or `StrokeDash` for `kind="line"`.
+`size` maps to the `Size` channel (point area or line width). `style` maps to `Shape` for `kind="scatter"` or `StrokeDash` for `kind="line"`. `hue` keeps dtype inference on `kind="scatter"` (a numeric column renders a gradient) and is typed nominal on `kind="line"`, which groups lines by it.
 
 #### Regression
 
 ```
 ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
-              method="lm",           # "lm" | "loess" | "quadratic" | "cubic" | "log" | "sqrt" | "gam" | "logistic" | "glm" | "robust" (smooth-family names derive live from the registry, 2026-09-05 batch D; "glm" maps to the dedicated Glm transform; mark_smooth's alias spellings are not accepted here)
-              ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,   # order=None = the method's own default degree; an explicit order forwards into the method's degree-acceptance matrix (2026-09-05, batch D; previously order=1 and silently absorbed)
+              method="lm",           # "lm" | "loess" | "quadratic" | "cubic" | "log" | "sqrt" | "gam" | "logistic" | "glm" | "robust"
+              ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,
               truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
-              logx=False, show_metrics=True, theme=None)
-# 2026-09-05 (batch D): this block previously mis-documented truncate=False (the
-# shipped default has been True since the function landed) and omitted
-# show_metrics= — both corrected above to the live signature.
+              logx=False, show_metrics=True,
+              mark=None, encode=None, properties=None, layers=None,
+              theme=None, **encode_kwargs)
 
 ferrum.regplot(data, *, x, y, hue=None,
                method="lm",          # same as lmplot
-               ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,   # order=None = the method's own default degree; an explicit order forwards into the method's degree-acceptance matrix (2026-09-05, batch D; previously order=1 and silently absorbed)
+               ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,
                truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
-               logx=False, show_metrics=True, theme=None)
-# 2026-09-10 (batch F, F-L10-09): logx, show_metrics, x_bins, x_estimator are
-# now real named parameters (identical defaults to lmplot's), corrected above
-# to the live signature -- previously reachable only through **encode_kwargs,
-# invisible to introspection. col=/row= raise TypeError naming lmplot as the
-# faceting route (previously silently faceted) -- see the prose note below.
+               logx=False, show_metrics=True,
+               mark=None, encode=None, properties=None, layers=None,
+               theme=None, **encode_kwargs)
 
 ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
                  dropna=True, show_metrics=True, zero_line=True,
-                 label=None, color=None, theme=None)
-# 2026-09-10 (batch F): the block above adds show_metrics= and zero_line=,
-# which the signature has always accepted but this doc omitted.
+                 label=None, color=None,
+                 mark=None, encode=None, properties=None, layers=None,
+                 theme=None, **encode_kwargs)
 ```
 
-`regplot` is the axes-level equivalent of `lmplot` — identical API minus
-`col=` and `row=`: passing either now raises `TypeError` naming `lmplot` as
-the faceting route (2026-09-10, batch F, F-L10-09 -- previously they
-silently faceted through `**encode_kwargs`). This exclusion is specific to
-`col=`/`row=`; it does not extend to the grammar-level `facet=` encoding
-channel, which `regplot` accepts the same as any other `Chart`. Every other
-parameter is forwarded to `lmplot` unchanged.
+**Methods.** `"lm"`, `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"` and `"gam"` route through `mark_smooth`; this set derives from the `Smooth` registry's methods minus `"linear"` and `"glm"`. `"logistic"`, `"glm"` and `"robust"` use their own `Logistic`, `Glm` (gaussian family) and `Robust` transforms. `mark_smooth`'s alias spellings (`"linear"`, `"lowess"`) are not accepted: an unknown method raises `lmplot: method must be one of ['cubic', 'gam', 'glm', 'lm', 'loess', 'log', 'logistic', 'quadratic', 'robust', 'sqrt']; got 'linear'`.
 
-> **2026-09-10 (batch F, F-L10-04):** `residplot`'s `color=` works, both
-> documented halves. A value that names a column of `data` groups the
-> residuals -- `Smooth`/`Robust` refit per group (via the transform's
-> `groupby`, the same mechanism `label=` already used) and the points/
-> lowess overlay color by that column; previously EVERY `color=` value
-> raised `ValueError: unknown column`, whether it named a column or not.
-> A value that is not a column is parsed as a literal color (CSS name,
-> hex, `rgb()`/`rgba()`, or an RGB tuple) and painted onto the points via
-> the mark's own `fill=` -- never through `encode(color=)` -- composing
-> with `label=` (a labeled legend swatch in that literal color, via a
-> pinned single-range `OrdinalScale`). A value that is neither raises,
-> naming both interpretations. Column-membership against the INPUT frame
-> is checked first, so a column literally named `"red"` groups rather than
-> paints, and a column name that collides with a transform OUTPUT column
-> (e.g. `"x"`) still resolves deterministically by input-frame membership.
-> `Robust` gained `groupby` in Rust to make this possible (see the
-> `Robust` dated note in §3.4) -- as a side effect, `robust=True,
-> label=...` now shows the label (previously a silent no-op, since
-> `Robust` had no `groupby` to carry the injected `_label` column into its
-> output). `lowess=True` with a grouping `color=` draws one curve per
-> group instead of one curve through the pooled cloud. `show_metrics=True`'s
-> corner annotation is suppressed only when `color=` actually groups
-> (mirrors `lmplot`'s `hue`-gated `metrics_applied`); a `label=`-only
-> grouping (one level by construction) keeps its corner. A user column
-> literally named `_label` plus `label=` now refuses with a typed
-> collision error instead of the label silently overwriting it.
-> `color=None` is byte-identical to before.
+**Parameters.**
 
-> **2026-09-10 (batch F close, F-L10-02):** `lmplot`/`regplot`'s scatter
-> layer keeps the OBSERVATIONS. With `ci=None` and `show_metrics=False` the
-> fit chart collapsed to a single line mark bound to a chain-advancing
-> (unnamed) `Smooth`, and composing it with the scatter applied that
-> transform to BOTH layers: every rendered "observation" landed exactly on a
-> fit vertex (measured: 200 of 200, zero spread about the curve) for `lm`,
-> `loess`, `quadratic`, `gam`, `log` and `sqrt`, in both functions -- or
-> raised `unknown column` when the frame's columns were not themselves named
-> `x`/`y`. The fit now binds to a NAMED transform through `data_source=`
-> whenever a scatter layer is present, the same shape the `ci=` path and the
-> `logistic`/`glm`/`robust` methods already used; with `scatter=False` the
-> single-mark shape is kept, since there is no sibling layer to corrupt.
-> (That shape's chart-level encoding titles the axes with the caller's own
-> column names -- but it is reached only at `ci=None, show_metrics=False`
-> on a `mark_smooth`-routed method, i.e. 7 of the 40 `scatter=False` cells,
-> so it was never what titled the other 33; see the 2026-09-17 note below.)
-> **One layer
-> renames:** on that combination the fit layer is
-> `"line"` rather than `"fit"` -- which every other `lmplot` shape already
-> called it -- so a per-layer `mark={"fit": ...}` override for it becomes
-> `mark={"line": ...}`. Separately, `x_jitter=` on a non-Float64 predictor
-> now renders: `Jitter` writes a Float64 offset back into the column it
-> adjusts, so an Int64 predictor failed Arrow's schema check on three of the
-> four `ci`/`show_metrics` combinations and was masked on the fourth by the
-> corruption above; the predictor is widened before either chart is built,
-> and the cast is deleted once `apply_jitter` coerces the column it writes.
+- `order=None` uses the method's own default degree. An explicit `order` is forwarded as `degree=` to every `mark_smooth`-routed method, and `Smooth`'s degree matrix decides: `"lm"` accepts any degree `>= 1` (`>= 2` fits a polynomial); `"quadratic"`/`"cubic"` accept only their own degree; for `"loess"` it is the local-fit degree, `1` or `2`; `"log"`/`"sqrt"`/`"gam"` refuse any degree. A negative `order` raises naming `lmplot`. `order` is ignored for the three dedicated methods.
+- `ci` is a percent (`ci=95`), or `None` for no band.
+- `truncate=True` clips the fit to the observed x range; `truncate=False` extends it over the data range padded 5% per side, for every `mark_smooth`-routed method and `"robust"`. `"logistic"`/`"glm"` refuse it: `lmplot(method='glm', truncate=False) is not supported -- the 'glm' transform has no x_range parameter ...`.
+- `x_bins=`/`x_estimator=` pre-aggregate the fit input on every `mark_smooth`-routed method (`x_estimator` defaults to the transform's `"mean"` and is checked against `fm.Smooth`'s vocabulary). The three dedicated methods refuse either one alone: `lmplot(method='robust', x_bins=...) is not supported -- the 'robust' transform has no x_bins/x_estimator binning parameters ...`.
+- `x_jitter=` jitters the scatter along x; an integer predictor is widened to float first, so it works on any numeric dtype.
+- `logx=True` puts a log scale on the x channel every layer shares. A channel that already carries its own `scale=` refuses: `lmplot(logx=True, x=<channel with its own scale=>): two instructions for one x scale. Keep your scale= and drop logx=True, or pass x as a column name and let logx set the log scale.`
+- `show_metrics=True` adds a top-right corner annotation with `R²` / `RMSE` / `MAE`, computed in Rust, for every `mark_smooth`-routed method and `"robust"`. It is skipped for `"logistic"`/`"glm"` and whenever `hue=` is set.
+- `x=` and `y=` take a column name or an encoding object wrapping one, on every method; the channel's `title=`/`scale=` survive. `None` raises `lmplot(x=None): x names the column to fit and has no default. Pass a column name, or an encoding object wrapping one.`
 
-> **2026-09-17 (wave 4, #199):** every fit path titles its axes with the
-> caller's own columns, and honors `line_kws` on every method. The fit
-> layers (ribbon / line / metrics) are bound to the transform's output
-> columns, and the renderer resolves an axis title from layer 0 only
-> (spec-level channel `title`, then layer-0 channel `title`, then layer-0
-> field name), so whenever no scatter happened to sit at layer 0 the value
-> axis was titled `ci_lower` -- the confidence band's LOWER BOUND -- and the
-> predictor axis `x`. Measured over the full 40-cell `method × ci ×
-> show_metrics` matrix under `scatter=False` (all ten `lmplot` methods ×
-> `ci ∈ {95, None}` × `show_metrics ∈ {True, False}`), only 7 cells were
-> right — the seven `mark_smooth`-routed methods at `ci=None,
-> show_metrics=False`, where the single-line shortcut keeps the chart-level
-> encoding; the other 33 were wrong. All 40 are correct now.
-> The fit-layer builder now carries the caller's field names as layer
-> titles, which fixes `lmplot(scatter=False)`, `regplot(scatter=False)` and
-> a standalone `Chart(df).mark_smooth(...)` from one site; an explicit
-> channel `title=` still outranks it. `residplot` gets the same treatment on
-> its DEFAULT path, where no flag was needed to reach the defect: its axes
-> were titled `x` and `residual`, and are now the caller's x column and
-> `"<y> residual"` (the one golden this moves is
-> `tests/test_phase_9_e2e/goldens/residplot_lowess.svg`, whose y-axis title
-> changes and nothing else). Separately, `line_kws` was silently discarded
-> for the seven `mark_smooth`-routed methods (`lm`, `loess`, `quadratic`,
-> `cubic`, `log`, `sqrt`, `gam`) under `scatter=False` — 28 of the 40 cells;
-> the three dedicated methods (`logistic`, `glm`, `robust`) already forwarded
-> it at construction and were never affected. It was
-> applied by rewriting the finished chart's layers, which on that branch are
-> still unmaterialized (the chart carries a pending stat mark until render).
-> Every branch now forwards it at construction, to the fit line alone, and
-> the same capability is exposed on the grammar as
-> `layer_kwargs={"<layer>": {...}}` — a composite mark's own `**mark_kwargs`
-> reach every emitted layer, so a `stroke=` passed that way repaints the CI
-> band too. **Precedence between the two is by specificity:** when both name
-> the same style key, the one aimed at the named layer wins, and the
-> catch-all still applies wherever nothing narrower was said — measured,
-> `mark_smooth(ci=0.95, stroke="#0000ff", layer_kwargs={"line": {"stroke":
-> "#ff0000"}})` draws the fit line `#ff0000` while the CI band keeps its
-> `#0000ff`-derived fill, on the layered shape and the single-line shortcut
-> alike. Charts with a scatter present and the single-line shortcut render
-> byte-identically. (This parameter was first written as a
-> `mark_smooth`-only `line_kwargs=` earlier in the same unreleased wave and
-> reshaped before release into the general door; see the 2026-09-18 note
-> under `ferrum.Layer` for the shipped contract. `line_kwargs=` is not
-> accepted.)
+**Hue and pooled fits.** For the `mark_smooth`-routed methods, `hue=` (typed nominal) refits per level, each fit and band in its level's color. `"logistic"`, `"glm"` and `"robust"` fit one curve pooled across all rows; when any channel that resolves to `color` is active (`hue=`, or `color=`/`fill=`/`stroke=` as a keyword or in `encode=`), the scatter is colored per level and the pooled fit and band draw in a neutral color.
 
-> **2026-09-18 (wave 4 close, B3/B6 — the fit paths accept a channel object
-> on every method, and refuse a missing fit column by name):** `lmplot`'s
-> `x=`/`y=` are documented as "str or encoding", and seven of the ten methods
-> already honored the encoding spelling — the `mark_smooth`-routed ones,
-> because `.encode()` takes a channel object. The three that construct a
-> transform directly did not, and neither did `residplot`, and all four
-> leaked a **binding-layer** error out of a figure-level call: measured
-> pre-fix, `lmplot(x=fm.X("bill"), method="robust")` raised the raw PyO3
-> `TypeError: argument 'x': 'X' object is not an instance of 'str'`,
-> `residplot(x=fm.X("bill"))` raised polars' `TypeError: cannot turn
-> 'ferrum.encoding.positional.X' into selector`, and any method with
-> `logx=True` raised `X: field must be str, ...`.
->
-> **Resolved by accepting, not refusing** — refusing would have regressed
-> seven working paths and contradicted the family's own documented contract.
-> Each consumer wants the column *name*, which is now narrowed once at the
-> figure's own entry; the channel itself still reaches `.encode()`, so the
-> caller's `title=`/`scale=` survive. Measured:
-> `lmplot(x=fm.X("bill", title="Total bill (USD)"), method="robust")` renders
-> that title, not the bare column name, and `residplot(x=fm.X("bill"))`
-> renders. **`residplot` now accepts an encoding object where it previously
-> died** — a widened public surface at a second entry, deliberately, to match
-> the family.
->
-> Two new typed refusals come with the narrowing, replacing untyped errors:
-> `lmplot(x=None): x names the column to fit and has no default. Pass a
-> column name, or an encoding object wrapping one.` (and its
-> `residplot(y=None)` twin, which names `residplot`), and the contradiction
-> `lmplot(logx=True, x=<channel with its own scale=>): two instructions for
-> one x scale. Keep your scale= and drop logx=True, or pass x as a column
-> name and let logx set the log scale.` The `None` case also closed a latent
-> instance of this same note's title defect: `residplot` built its titles
-> from the **raw** parameter, so `y=None` would have rendered the axis title
-> `"None residual"` and a channel object would have rendered an object repr —
-> unreachable only because polars raised first.
+**Layers and styling.** With a scatter, the chart's layers are `"scatter"`, then `"ribbon"` (when `ci` is set), `"line"` and `"metrics"` (when metrics apply); `mark={...}` keys use these names. The scatter always draws the raw observations: the fit binds to a named transform its own layers read. `scatter_kws` styles the scatter and `line_kws` the fit line alone, on every method and shape. Every fit path titles its axes with the caller's column names (or the channel's own `title=`), with or without a scatter.
+
+**`regplot`** is `lmplot` without faceting: every other parameter is forwarded to `lmplot` unchanged, and its refusals read as `lmplot`'s. `col=` or `row=` raises `TypeError: regplot(col=...) is not supported -- regplot is the axes-level regression plot and does not facet. Use lmplot(..., col=...) instead.` The grammar-level `facet=` encoding channel stays available, as on any `Chart`.
+
+**`residplot`** fits `Smooth(method="lm", degree=order)` (or `Robust` with `robust=True`) in residual mode and plots `(x, residual)` with `mark_point`. Its axes are titled with the caller's x column and `"<y> residual"`. `dropna=True` drops rows null in `x` or `y` first. `zero_line=True` adds a dashed rule at 0; `lowess=True` overlays a LOESS curve of the residuals; `show_metrics=True` adds the corner `R²` / `RMSE` / `MAE`. Layer names are `"point"`, `"reference"`, `"metrics"` and `"lowess"`. `x=`/`y=` take a column name or an encoding object and refuse `None` as `lmplot` does, voiced `residplot`.
+
+- **`color=`** is checked against the input frame's columns first. A column name groups the residuals: the fit is refit per group, the points and the lowess overlay (one curve per group) color by it, and the corner metrics are suppressed. Otherwise the value is parsed as a literal color (CSS name, hex, `rgb()`/`rgba()`, RGB tuple) and painted as the points' `fill`, never as a color encoding. A value that is neither raises `residplot(color='x'): not a column of the data and not a parseable color. As a column name it would group the data, ...; as a literal color it would paint the marks, but the color parser refused it (...)`.
+- **`label=`** adds a single legend entry through a private `_label` column. It composes with `robust=True`, with a grouping `color=`, and with a literal `color=` (the swatch and the points take that color). It keeps the corner metrics. A frame that already has a `_label` column refuses: `residplot(label=...) needs a private '_label' column, but the data already has one -- the label would overwrite it silently. ...`
 
 #### Matrix / Pairwise
 
 ```
 ferrum.pairplot(data, *, vars=None, x_vars=None, y_vars=None,
-                hue=None, kind="scatter",     # off-diagonal
-                diag_kind="auto",             # "hist" | "kde" | None
+                hue=None, kind="scatter",     # off-diagonal: "scatter" | "kde" | "hist" | "reg"
+                diag_kind="auto",             # "auto" (= "kde") | "hist" | "kde" | None | "none"
                 markers=None, height=None, aspect=None,
-                corner=False, dropna=False, theme=None)
+                corner=False, dropna=False,
+                mark=None, encode=None, properties=None, layers=None,
+                theme=None, **encode_kwargs)
 
-ferrum.heatmap(data, *, annot=True, fmt=".2f", cmap="blues",
+ferrum.heatmap(data, *, annot=True, fmt=".2f", scheme=None, cmap=None,
                linewidths=None, linecolor=None,   # None: 0.5 px, "white"
                vmin=None, vmax=None, center=None, robust=False,
-               square=False, mask=None, theme=None)
+               square=False, mask=None,
+               mark=None, encode=None, properties=None, layers=None,
+               theme=None, **encode_kwargs)
 
 ferrum.clustermap(data, *, method="ward", metric="euclidean",
-                  cmap="viridis", linewidths=None, linecolor=None,
+                  scheme=None, cmap=None,
+                  linewidths=None, linecolor=None,   # None: 0.5 px, "white"
                   z_score=None, standard_scale=None,
-                  figsize=None, dendrogram_ratio=0.2, theme=None)
+                  figsize=None, dendrogram_ratio=0.2,
+                  mark=None, encode=None, properties=None, layers=None,
+                  theme=None, **encode_kwargs)
 ```
 
-> **2026-09-02 (batch A — heatmap domain/border honesty):** `vmin=`/
-> `vmax=`/`center=`/`robust=` are honored end to end via a Diverging (when
-> `center=` is set) or Linear color scale's explicit `domain=`; previously
-> these fell through to an unscaled render. `vmin`/`vmax`/`center` must be
-> finite — `inf`/`-inf`/`NaN` raise `ValueError` immediately, before any
-> chart construction. When only one of `vmin=`/`vmax=` is given, the other
-> endpoint fills from the pre-mask finite data extent (matching `robust=`'s
-> existing convention); if there is no finite data to fill from, the fill is
-> dropped with a `UserWarning` naming the reason rather than silently
-> discarding the user's explicit bound. A one-sided fill that lands on the
-> wrong side of the given bound, or an explicit `vmin > vmax`, still renders
-> — deterministically as a single flat color, not a reversed ramp — with a
-> `UserWarning` naming both endpoints. A `center=` outside the effective
-> `[vmin, vmax]` renders as a one-sided compressed ramp with a
-> `UserWarning`, never silently and never as an error. `linewidths=`/
-> `linecolor=` are honored (default `linewidths=0.5`, `linecolor="white"`)
-> — every heatmap now ships default white 0.5px cell borders;
-> `linewidths=0` disables the border.
+`pairplot` returns a `RepeatChart`; `heatmap` returns a `Chart` (layers `"cells"` and, with `annot=True`, `"label"`, titled `"Heatmap"` by default); `clustermap` returns a `ClusterMapChart` (center heatmap plus row and column dendrograms, titled `"Clustermap"`).
 
-> **2026-09-10 (batch F, F-L09-08):** `clustermap`'s dendrogram panels no
-> longer silently blank at practical ratios. The row/column dendrogram
-> leaves reserved axis chrome -- a title gutter and (row side) a label
-> band -- for axes their own `axis(show=False)` never draws;
-> `_clustermap_build` now blanks the dendrogram leaves' `_X`/`_Y` titles
-> the same way the center heatmap already blanks its own
-> (`matrix.py:1157-1160`). At `dendrogram_ratio=0.1`, both dendrograms now
-> render instead of collapsing to an empty panel; at the default
-> `dendrogram_ratio=0.2`, a short center heatmap (e.g.
-> `figsize=(480, 200)`) no longer silently blanks the column dendrogram.
-> Sub-floor ratios still raise `PaddingExceedsViewport` as before -- the
-> fix removes dead chrome, it does not relax the hard floor. **All
-> clustermap output changes geometry** as a result (more of each
-> dendrogram panel is now real branch area rather than reserved-but-unused
-> chrome); the `clustermap_basic` and `clustermap_row_col_dendrograms`
-> goldens were regenerated and PNG-inspected. The same fix closed two
-> adjacent layered-chart wire bugs found alongside it (general, not
-> clustermap-specific): `SpecBuildMixin._build_layers_list` was dropping a
-> layer's `title=""` via a truthiness check instead of a presence check
-> (so `title=None` on a layered channel now also reaches the wire and
-> suppresses the axis title, where `title=""` already did), `format=` on
-> any layered channel no longer raises an unknown-field error
-> (`format_type` is what Rust actually calls the key), and a layer's
-> `condition=` now reaches the wire instead of silently vanishing.
+**Colormap.** `scheme=` is the canonical colormap kwarg on `heatmap` and `clustermap`; `cmap=` is its alias. Passing both with different values raises `heatmap: pass either scheme= or cmap= (its alias), not both with different values; got scheme='blues', cmap='rdbu'`. A name that is not a registered continuous colormap raises at the call, before rendering: `heatmap: color scheme 'nope' is not recognized; available: viridis, plasma, magma, ...`. Unset, the color scale takes the theme's `diverging_scheme` when its domain spans zero and the theme's `sequential_scheme` otherwise.
 
-> **Dated note (2026-10-07, #125: `clustermap` draws `heatmap`'s default cell border, and one helper owns that border for both):** `clustermap` gains `linewidths=` and `linecolor=`, with the same meaning, default and validation as `heatmap`'s. One helper owns the default (0.5 px, `"white"`), the `None`-means-default rule and the validation for both figures, so the two can no longer drift. Both signatures now default to `None`, which resolves to 0.5 and `"white"`. No Rust or theme default is involved, and `confusion_matrix_chart`, `classification_report_chart`, `rank2d_chart` and `jointplot(kind="hist")` stay borderless (user ruling 2026-10-07; a border stays reachable through `mark=`).
->
-> - **`clustermap(df)`'s center cells** had no border and now draw a white 0.5 px stroke, one per cell. Dendrograms, colorbar and labels are unchanged; the `clustermap_basic` and `clustermap_row_col_dendrograms` goldens moved and were PNG-inspected against their previous renders. `clustermap(df, linewidths=0)` draws no border (before, `linewidths=` was not a parameter and was refused as `unknown encoding channel: 'linewidths'`). `clustermap(mark={"stroke": ..., "stroke_width": ...})` still wins on the cells.
-> - **`heatmap(df)` with no border arguments is byte-identical.** `heatmap(df, linewidths=0)` is too.
-> - **`None` means the default on both figures.** `heatmap(linewidths=None)` raised a raw `TypeError: '>' not supported between instances of 'NoneType' and 'int'` and now draws the default border. `heatmap(linecolor=None)` drew no border, with a warning about `stroke_width`, and now draws the white default.
-> - **Malformed values are refused naming the figure and the argument, never `stroke`.** `linewidths` must be a finite, non-negative real number (`bool` excluded); `linecolor` must be a color `ferrum.color.to_hex` accepts, or one of the paint sentinels below. Before and after, for `heatmap`:
->     - `linewidths=-1`: drew no border, silently. Now `ValueError: heatmap(linewidths=...) must be non-negative; received -1`.
->     - `linewidths=float("nan")`: drew no border, silently. Now `heatmap(linewidths=...) must be a finite numeric pixel value; received nan`.
->     - `linewidths=True`: `heatmap(stroke_width=...) must be a real number (int, float, numpy scalar, or Decimal), not bool; received True`. Now `heatmap(linewidths=...) must be a numeric pixel value (int or float), not bool; received True`.
->     - `linewidths="a"`: raw `TypeError: '>' not supported between instances of 'str' and 'int'`. Now `heatmap(linewidths=...) must be a numeric pixel value (int or float), not str; received 'a'`.
->     - `linecolor="notacolor"`: `heatmap: stroke='notacolor' is not a valid color (...)`. Now `heatmap(linecolor=...)='notacolor' is not a valid color (invalid color 'notacolor': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba())`.
->     - `linecolor=3`: `heatmap: stroke must be a string; got 3`. Now `heatmap(linecolor=...)=3 must be a color string, not int`.
->
->   `clustermap` refuses the same values with the same text, voiced `clustermap(...)`. A malformed `linecolor` is refused even beside `linewidths=0`.
-> - **Paint sentinels.** `linecolor="none"` or `"transparent"` draws no border, the same as `linewidths=0`; before, `heatmap` also warned that `stroke_width` had no effect, and now it is silent. `linecolor="theme:label"` is forwarded unchanged and draws the theme's label color, as before.
-> - **An explicit value made inert by the other argument warns, naming both.** `heatmap(linewidths=2, linecolor="none")` warned about `stroke_width` and now warns `heatmap: linewidths=2.0 has no effect when linecolor='none' draws no cell border; it was ignored`. `heatmap(linewidths=0, linecolor="red")` was silent and now warns `heatmap: linecolor='red' has no effect when linewidths=0.0 draws no cell border; it was ignored`. `None` on either side is unset and never warns. The warnings `heatmap` and `clustermap` raise from their own argument handling (these two inert-pair warnings and `heatmap`'s three color-domain warnings for `vmin=`/`vmax=`/`center=`) now point at the caller's own line; warnings raised later at render time are unchanged.
+**Heatmap color domain.** `vmin`, `vmax` and `center` must be finite real numbers (`bool` refused); a non-finite value raises `heatmap(vmin=...) must be a finite number a float can hold; received inf` before the chart is built. They are honored end to end through a Diverging scale (when `center=` is set, as its `domainMid`) or a Linear scale with an explicit `domain`, `robust=True` sets each endpoint the caller left unset to the 2nd or 98th percentile of the finite cell values. When only one of `vmin`/`vmax` is given, the other is filled from the finite pre-mask data extent; with no finite data to fill from, the override is dropped with a `UserWarning` naming the reason. A filled domain that comes out inverted (`vmin=50` above the data max), or an explicit `vmin > vmax`, renders deterministically as one flat color, not a reversed ramp; the filled case warns, naming both endpoints. A `center=` outside the effective domain renders a one-sided compressed ramp and warns. The colorbar shows the same scale the cells use, so under `center=` its midpoint color sits at `center`. These `heatmap` warnings point at the caller's own line.
+
+**Masking and shape.** `mask="upper"` keeps the upper triangle and the diagonal, `"lower"` the lower triangle and the diagonal, and a boolean array shaped like the numeric block hides its `True` cells; any other string, or a mis-shaped array, raises. `square=True` sets width and height to 30 px times the larger of the row and column counts. `annot=True` labels each cell with its value formatted by `fmt`.
+
+**Cell border.** `heatmap` and `clustermap` share one cell-border rule: `linewidths=None` means 0.5 px and `linecolor=None` means `"white"`, so both draw a white 0.5 px stroke per cell by default, and `linewidths=0` draws none. `linewidths` must be a finite, non-negative real number (`bool` excluded); `linecolor` must be a color `ferrum.color.to_hex` accepts or a paint sentinel. Refusals name the figure and the argument:
+
+- `linewidths=-1`: `heatmap(linewidths=...) must be non-negative; received -1`.
+- `linewidths=float("nan")`: `heatmap(linewidths=...) must be a finite numeric pixel value; received nan`.
+- `linewidths=True`: `heatmap(linewidths=...) must be a numeric pixel value (int or float), not bool; received True`.
+- `linewidths="a"`: `heatmap(linewidths=...) must be a numeric pixel value (int or float), not str; received 'a'`.
+- `linecolor="notacolor"`: `heatmap(linecolor=...)='notacolor' is not a valid color (invalid color 'notacolor': expected a CSS color name, #rrggbb[aa]/#rgb[a] hex, or rgb()/rgba())`.
+- `linecolor=3`: `heatmap(linecolor=...)=3 must be a color string, not int`.
+
+`clustermap` refuses the same values with the same text, voiced `clustermap(...)`, and a malformed `linecolor` is refused even beside `linewidths=0`. `linecolor="none"` or `"transparent"` draws no border, like `linewidths=0`; `"theme:label"` draws the theme's label color. An explicit value made inert by the other argument warns, naming both: `heatmap: linewidths=2.0 has no effect when linecolor='none' draws no cell border; it was ignored` and `heatmap: linecolor='red' has no effect when linewidths=0.0 draws no cell border; it was ignored`; `None` on either side never warns. A `mark={"stroke": ..., "stroke_width": ...}` override still wins on the cells. Other figures that draw cells (the confusion-matrix and classification-report charts, `rank2d_chart`, `jointplot(kind="hist")`) draw no border by default; `mark=` reaches one.
+
+**Clustermap.** `method` and `metric` go to `Linkage`. `z_score` and `standard_scale` take `0` (rows), `1` (columns), `"rows"`, `"columns"` or `None`; anything else raises `clustermap: z_score=2 is invalid; expected 0 (rows), 1 (columns), 'rows', 'columns', or None`. `figsize=(width, height)` sizes the center heatmap in pixels. `dendrogram_ratio` is the share of the width and height each dendrogram panel takes. The dendrogram panels hide their axes and reserve no gutter for them, so their whole share is branch area; a ratio too small for the panel's padding raises a layout error (`padding top=16 exceeds viewport dimension ...`) rather than drawing a blank panel.
 
 #### Joint Distribution
 
@@ -2422,410 +1899,242 @@ ferrum.jointplot(data, *, x, y, hue=None,
                  ratio=5, space=0.05,
                  xlim=None, ylim=None,
                  joint_kws=None, marginal_kws=None,
-                 height=None, theme=None)
+                 height=None,
+                 mark=None, encode=None, properties=None, layers=None,
+                 theme=None, **encode_kwargs)
 ```
 
-Returns a `JointChart`. `kind` controls the center panel mark; `marginal_kind` controls both marginal panels. `joint_kws` and `marginal_kws` are passed as keyword arguments to the center and marginal chart constructors respectively.
+Returns a `JointChart`. `kind` controls the center panel mark; `marginal_kind` controls both marginal panels. `joint_kws` and `marginal_kws` are passed as keyword arguments to the center and marginal mark calls respectively.
 
 #### Model Diagnostics (figure-level)
 
+The model-diagnostic figure functions take a fitted estimator, a `ModelSource`, or (where `compare=` is accepted) a multi-model source as their first argument `model`. The exceptions are `parallel_coordinates_chart(data)`, `rank1d_chart`/`rank2d_chart`/`rank_chart(data_or_source)`, `class_balance_chart(y)`, and `cluster_diagnostics(model)`, whose `model` is the feature matrix it sweeps clusterers over. Every function takes the keyword-only override arguments `mark=`, `encode=`, `properties=`, `layers=` and `theme=`; the model-backed ones also take `random_state=`, which is forwarded to the `ModelSource`. Multi-model `compare=` is described at the start of §3.14; `cluster_diagnostics` and `elbow_chart` accept the keyword but refuse any non-`None` value with a `ValueError`, because they wrap no per-model source.
+
 ```
-ferrum.roc_chart(model_or_source=None, X=None, y=None, *,
+ferrum.roc_chart(model=None, X=None, y=None, *,
                  y_true=None, y_pred=None,   # precomputed path (1-D binary or 2-D multiclass scores)
-                 per_class=True,
-                 average="macro", annotate_auc=True,
-                 compare=None,     # dict[str, estimator] for multi-model overlay
-                 theme=None)
+                 per_class=True, average="macro", annotate_auc=True,
+                 subtitle=None, compare=None, random_state=None,
+                 mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.pr_chart(model_or_source=None, X=None, y=None, *,
+ferrum.pr_chart(model=None, X=None, y=None, *,
                 y_true=None, y_pred=None,    # precomputed path (1-D binary or 2-D multiclass scores)
-                per_class=True,
-                annotate_ap=True, iso_lines=True, compare=None, theme=None)
-# **2026-09-11 (wave-1 hardening, #220):** `iso_lines=True` on a multiclass
-# precomputed source no longer emits polars' internal "Comparisons with
-# None always result in null" `UserWarning` — the two group-enumeration
-# loops behind iso-line label placement (`_metric_labels.py`'s
-# `_apply_metric_label`, `_direct_label.py`'s `_direct_label_endpoint`)
-# now filter out a null class label before sorting, mirroring the same
-# file's already-correct `_curve_metrics_by_group` idiom, instead of
-# comparing `None` against every class value during the sort.
-#
-# **2026-09-18 (wave 4, #121):** the `iso_lines=True` reference curves now
-# render in the grey they always declared. The iso-line layer bound its
-# grouping key `_iso_f` to the `color` channel, but the chart's color scale
-# is keyed on `class`, so every `"F=0.2".."F=0.8"` lookup missed and the
-# line mark's stroke fallback painted `paint.fill` — theme blue at the
-# layer's `opacity=0.6` — instead of the literal `stroke="#AAAAAA"` the
-# layer had set all along. The key now travels on `detail` (the channel
-# that groups without painting), mirroring `desugar_parallel_coordinates`.
-# The stale `_iso_f` entry in the color-binding allowlist, whose rationale
-# asserted the curves were already grey, is deleted with it.
+                per_class=True, average="macro", annotate_ap=True, iso_lines=False,
+                subtitle=None, compare=None, random_state=None,
+                mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.confusion_matrix_chart(model_or_source=None, X=None, y=None, *,
+ferrum.confusion_matrix_chart(model=None, X=None, y=None, *,
                                y_true=None, y_pred=None,   # precomputed path (1-D hard labels)
-                               normalize="true", annotate=True, theme=None)
-# **2026-09-10 (batch G doc pass, adjacent transcription fix, pre-existing
-# drift, not a batch G behavior change):** corrected to match the live
-# signature — the prior listing showed a `cmap="blues"` parameter that does
-# not exist on this function and omitted the real `annotate=True` kwarg
-# (per-cell text annotations, already documented separately in the
-# Schwabish SB3 note below as "docstring already specified `annotate=True`
-# default").
+                               normalize="true",           # "true" | "pred" | "all" | None (counts)
+                               annotate=True, random_state=None,
+                               mark=None, encode=None, properties=None, layers=None, theme=None)
 
 ferrum.classification_report_chart(model=None, X=None, y=None, *,
                                     y_true=None, y_pred=None,   # precomputed path (1-D hard labels)
-                                    random_state=None, theme=None)
-# **2026-09-10 (batch G, F-L11-05 + F-L11-09):** joins the precomputed
-# family — eleven `y_true=`/`y_pred=` figure functions now, counting
-# `prediction_error_chart` (see the dated note below: the prior "nine"
-# framing already undercounted by one before this batch, since
-# `prediction_error_chart` documents and renders on this path too and was
-# never enumerated in the list). Renders
-# a rect-plus-text heatmap: rows are class labels, columns are
-# precision/recall/f1-score, color encodes the value, and each cell is
-# annotated with its value to two decimal places — no `support` row (a
-# deliberate, disclosed non-parity with sklearn's own
-# `classification_report`, which does report support counts; adding one
-# here would require inventing a count from confusion data that would not
-# reconcile with sklearn's on the model path, defeating the parity the
-# precomputed and model paths otherwise guarantee). The chart carries a
-# bare title, `"Classification Report"` — the family's title-only shape (no
-# `subtitle=` parameter), matching `confusion_matrix_chart`. On the
-# precomputed path, `y_true=`/`y_pred=` (hard labels) resolve metrics from
-# confusion counts with **no sklearn import**; class labels are the
-# distinct values of `y_true`/`y_pred` in sklearn `unique_labels` order
-# (their own ascending order, raw values — not stringified first), the
-# same order the model path's sklearn-backed report produces. On the model path, `X`/`y`
-# are both required — an X-less or y-less `ModelSource` (or a bare
-# `classification_report_chart(model)` call) raises a typed `ValueError`
-# naming the diagnostic and the fix, replacing what used to be a leaked
-# sklearn shape error (`"Expected 2D array, got scalar array instead"`) or
-# a foreign `InvalidParameterError` naming `y_true`. Both paths order the
-# class axis identically (#224a, 2026-09-13): the precomputed path's
-# `sorted(..., key=str)` rule — since retired for `confusion_matrix` too
-# (close remediation, 2026-09-17; see the dated note) — retired for this
-# figure, so the documented divergence between the two paths no longer
-# exists. `y_true` and `y_pred`
-# must each be 1-D (a 2-D `y_true` now refuses by name, mirroring the
-# `y_pred` shape check #208 already had). The label derivation
-# (`_curve_frames.report_labels`) is total by partition over the *values*
-# the two (1-D) arrays hold: a null in either array, a mix of ordering
-# families, and a homogeneous family that cannot serve as a class label —
-# either because it does not order (`complex`, `dict`) or because it
-# orders but cannot be hashed (`list`, `set`, `bytearray`) — each refuse
-# with a typed `ValueError` naming which array and what it holds. A
-# homogeneous, orderable, hashable family is the answer, deduplicated by
-# hash equality (not adjacency, so a partially-ordered-but-hashable family
-# such as `frozenset` cannot return a duplicate label). Nothing else can
-# reach the class axis. On the model path (#206 cycle 5, 2026-09-13): when
-# `model.classes_` is present, it is coerced into `y`'s dtype and checked
-# against `y`, and the call refuses if the two share no value at all (a
-# model whose `classes_` describe different labels than `y`, not merely a
-# different dtype) — see the dated #206 cycle-5 note above. A partial
-# overlap still renders, and so does a model that simply predicts none of
-# the classes `y` holds on the slice being reported.
+                                    random_state=None,
+                                    mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.calibration_chart(model_or_source=None, X=None, y=None, *,
+ferrum.calibration_chart(model=None, X=None, y=None, *,
                           y_true=None, y_pred=None,  # precomputed path (1-D positive-class proba)
-                          n_bins=10, theme=None)
+                          n_bins=10, strategy="uniform",   # "uniform" | "quantile"
+                          annotate_brier=True, subtitle=None, compare=None, random_state=None,
+                          mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.gain_chart(model_or_source=None, X=None, y=None, *,
+ferrum.gain_chart(model=None, X=None, y=None, *,
                   y_true=None, y_pred=None,          # precomputed path (soft scores)
-                  compare=None, theme=None)
+                  compare=None, subtitle=None, random_state=None,
+                  mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.lift_chart(model_or_source=None, X=None, y=None, *,
+ferrum.lift_chart(model=None, X=None, y=None, *,
                   y_true=None, y_pred=None,          # precomputed path (soft scores)
-                  compare=None, theme=None)
-# **2026-09-10 (batch G, F-L11-08):** `gain_chart`/`lift_chart` now show the
-# model's real class names for every class, not just a synthetic
-# `"Class N"` rename for the first two. **Disclosed change:** binary charts
-# label classes `"0"`/`"1"` (the stringified real value) instead of
-# `"Class 0"`/`"Class 1"`; a 3rd-and-later class, which previously rendered
-# unlabeled relative to its siblings, now renders with its own real name
-# too. String-named classes (e.g. `classes_=["setosa", "versicolor"]`) were
-# already rendered as-is and are unaffected. The only remaining display
-# rename is the synthetic baseline row (`gain_frame`/`lift_frame`'s own
-# reference-line data) → `"Baseline"`. See the `ModelSource.class_names`
-# dated note under §3.1 for the underlying resolution rule
-# (`class_names=` → `model.classes_` → real value, never invented).
+                  compare=None, subtitle=None, random_state=None,
+                  mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.residuals_chart(model_or_source=None, X=None, y=None, *,
-                        y_true=None, y_pred=None,    # precomputed path (fitted values); residuals = y_true − y_pred
-                        kind="studentized", panels="auto",
+ferrum.residuals_chart(model=None, X=None, y=None, *,
+                        y_true=None, y_pred=None,    # precomputed path (fitted values); residuals = y_true - y_pred
+                        kind="studentized",          # "studentized" | "raw"
+                        cook_threshold=None,         # float | "auto" (4/n) | None
+                        panels="auto",
                         # panels: "auto" | "single" | None | list of
                         #         "residuals_vs_fitted" | "qq" |
                         #         "scale_location" | "residuals_vs_leverage"
-                        theme=None)
-# **2026-05-12 (P3.12, F10):** `panels="auto"` ships the canonical
-# 4-panel layout — `residuals_vs_fitted`, `qq`, `scale_location`,
-# `residuals_vs_leverage` — composed as a 2x2 grid. `panels=None` or
-# `panels="single"` returns just the residuals-vs-fitted panel
-# (the pre-P3.12 behavior). For non-linear estimators (no `coef_`),
-# `ModelSource.predictions()` emits all-NaN `leverage`; the chart
-# builder silently drops the leverage panel from the auto layout so
-# `panels="auto"` stays safe for RandomForest / GBM / etc.
-#
-# **2026-05-15 (precomputed path):** `y_true=`, `y_pred=` bypass the model
-# entirely. Residuals are computed as `y_true − y_pred`. Leverage and
-# Cook's distance are unavailable (no design matrix), so the leverage
-# panel is silently dropped when `panels="auto"`. `compare=` is
-# incompatible with the precomputed path (raises `ValueError`).
-#
-# **2026-07-02 (GH #44):** the leverage drop only degrades gracefully when
-# at least one other panel survives it. If dropping `residuals_vs_leverage`
-# would empty the resolved panel list — an explicit `panels=` of just
-# `["residuals_vs_leverage"]`, or `cooks_distance_chart` (which always
-# requests that single panel) — on a non-linear estimator or a precomputed
-# source, the call raises `ValueError` naming the hat-matrix/`coef_`
-# requirement and the estimator type (when a model is available) instead of
-# returning an empty/broken chart. `compare=` inherits this: the error
-# identifies which compare= member failed. `panels="auto"` degradation is
-# unaffected — it still renders the remaining 3 panels.
-#
-# **2026-09-11 (wave-1 hardening, #208):** nine `_PrecomputedSource` methods
-# (`roc_curve`, `pr_curve`, `cumulative_gain`/`lift_curve`, `calibration_curve`,
-# `confusion_matrix`, `classification_report`, `predictions`,
-# `discrimination_threshold`) now refuse a malformed `y_pred` shape with a
-# typed `ValueError` naming the calling figure function and the observed vs.
-# required shape, instead of leaking `IndexError`/`ArrowInvalid`/
-# `TypeError: unhashable type: 'list'`/a numpy broadcast `ValueError`, or —
-# for a 1-D `y_pred` against a genuinely multiclass `y_true` on roc/pr/
-# gain/lift — silently computing a wrong-but-plausible curve. A degenerate
-# SINGLE-class `y_true` is NOT treated as multiclass (matching the
-# pre-existing, correct `binary_class_values` degradation to a NaN
-# AUC/AP with a still-rendering curve) — only `> 2` distinct classes
-# refuses. `predictions()` serves two public callers (`residuals_chart` and
-# `prediction_error_chart`); its refusal now names whichever one the caller
-# actually invoked, via a `chart_name=` parameter, rather than always
-# naming `residuals_chart`.
+                        annotate_metrics=True, subtitle=None, compare=None, random_state=None,
+                        mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.importance_chart(model_or_source, X=None, y=None, *,
+ferrum.prediction_error_chart(model=None, X=None, y=None, *,
+                               y_true=None, y_pred=None,   # precomputed path (fitted values)
+                               reference_line=True, ci=None, reference_band=False,
+                               compare=None, random_state=None,
+                               mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.cooks_distance_chart(model=None, X=None, y=None, *,
+                             threshold=None,             # float | "auto" | None
+                             compare=None, random_state=None,
+                             mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.importance_chart(model, X=None, y=None, *,
                          method="builtin", top_k=20, orient="horizontal",
-                         error_bars=True, theme=None)
+                         error_bars=True, show_values=True,
+                         subtitle=None, compare=None, random_state=None,
+                         mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.shap_chart(model_or_source, X=None, *,
-                   kind="beeswarm",   # "beeswarm" | "bar" | "waterfall" | "force" | "heatmap"
-                   max_display=20, sample_idx=None, theme=None)
+ferrum.shap_beeswarm_chart(model, X=None, y=None, *,
+                            max_display=20, order="abs_mean", background=None,
+                            per_class=False, zero_line=True, compare=None, random_state=None,
+                            mark=None, encode=None, properties=None, layers=None, theme=None)
+ferrum.shap_bar_chart(model, X=None, y=None, *,
+                       max_display=20, order="abs_mean", background=None,
+                       per_class=False, compare=None, random_state=None,
+                       mark=None, encode=None, properties=None, layers=None, theme=None)
+ferrum.shap_waterfall_chart(model, X=None, y=None, *,
+                             sample_idx, max_display=20, order="abs_mean", background=None,
+                             per_class=False, compare=None, random_state=None,
+                             mark=None, encode=None, properties=None, layers=None, theme=None)
+ferrum.shap_chart(model, X=None, y=None, *,
+                   kind="beeswarm",   # "beeswarm" | "bar" | "waterfall"; deprecated dispatcher
+                   max_display=20, sample_idx=None, order="abs_mean", background=None,
+                   compare=None, random_state=None,
+                   mark=None, encode=None, properties=None, layers=None, theme=None)
 
-# 2026-05-12 (P3.6): `shap_chart(kind=...)` is now a deprecation
-# shim for three sibling functions — `shap_beeswarm_chart`,
-# `shap_bar_chart`, and `shap_waterfall_chart` — that each take
-# kind-specific keyword arguments without the `kind=` dispatcher.
-# The visualizer side splits the same way: `SHAPBeeswarmVisualizer`,
-# `SHAPBarVisualizer`, `SHAPWaterfallVisualizer`.  Old call sites
-# emit `DeprecationWarning` but keep working.
-ferrum.shap_beeswarm_chart(model_or_source, X=None, y=None, *,
-                            max_display=20, order="abs_mean",
-                            background=None, random_state=None, theme=None)
-ferrum.shap_bar_chart(model_or_source, X=None, y=None, *,
-                       max_display=20, order="abs_mean",
-                       background=None, random_state=None, theme=None)
-ferrum.shap_waterfall_chart(model_or_source, X=None, y=None, *,
-                             sample_idx, max_display=20, order="abs_mean",
-                             background=None, random_state=None, theme=None)
+ferrum.pdp_chart(model, X=None, y=None, *,
+                  features=None, grid_resolution=100, kind="average",
+                  ice_alpha=0.2, center=False, compare=None, random_state=None,
+                  mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.learning_curve_chart(model, X, y, *, cv=5, scoring=None,
-                              train_sizes=None, ci_style="band",
-                              n_jobs=None, theme=None)
+ferrum.learning_curve_chart(model, X=None, y=None, *,
+                              cv=5, scoring=None, train_sizes=None, ci_style="band",
+                              subtitle=None, compare=None, random_state=None,
+                              mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.validation_curve_chart(model, X, y, param, values, *,
-                                cv=5, scoring=None, log_scale="auto",
-                                ci_style="band", theme=None)
+ferrum.validation_curve_chart(model, X=None, y=None, *,
+                                param="alpha", values=None,   # values= is required
+                                cv=5, scoring=None, log_scale="auto", ci_style="band",
+                                subtitle=None, compare=None, random_state=None,
+                                mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.cluster_diagnostics(model, *, ks, method="kmeans", scoring="both",
-                             # scoring: "elbow" | "silhouette" | "both"
-                             n_init=10, random_state=None, theme=None)
-# **2026-06-22 (T3.4, D-FIRSTPARAM-1):** the first positional parameter was
-# renamed `X` -> `model` so the whole model-diagnostic family shares one
-# canonical first-param name. Positional callers are unaffected; the legacy
-# keyword `X=` is accepted as a deprecated alias (supplying both `model=` and
-# `X=` raises `TypeError`).
+ferrum.alpha_selection_chart(model, X=None, y=None, *,
+                               alphas=None, cv=5, scoring=None,
+                               log_scale=True, highlight_best=True, compare=None, random_state=None,
+                               mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.decision_boundary_chart(model, X, y, *,
+ferrum.cv_scores_chart(model, X=None, y=None, *,
+                        cv=5, scoring=None, kind="box", split="both",
+                        compare=None, random_state=None,
+                        mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.cluster_diagnostics(model, *, ks,   # model: the feature matrix
+                             method="kmeans",   # "kmeans" | "hierarchical"
+                             scoring="both",    # "elbow" | "silhouette" | "both"
+                             n_init=10, compare=None, random_state=None,
+                             mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.elbow_chart(model, X, *, ks, metric="distortion", compare=None, random_state=None,
+                    mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.silhouette_chart(model, X=None, *, subtitle=None, compare=None, random_state=None,
+                         mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.intercluster_distance_chart(model, X=None, *, k=None, method="mds",
+                                    compare=None, random_state=None,
+                                    mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.pca_scree_chart(model, X=None, *, n_components=None,
+                        cumulative_line=True, threshold=0.95,
+                        subtitle=None, compare=None, random_state=None,
+                        mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.manifold_chart(model, X=None, *, method="umap", compare=None, random_state=None,
+                       mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.decision_boundary_chart(model, X, y=None, *,
                                  features=(0, 1),    # column indices or names
                                  grid_resolution=200,
-                                 proba=False,         # plot probability surface if True
-                                 scatter=True, theme=None)
+                                 proba=False,         # plot the probability surface if True
+                                 scatter=True, random_state=None,
+                                 mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.discrimination_threshold_chart(model_or_source=None, X=None, y=None, *,
+ferrum.discrimination_threshold_chart(model=None, X=None, y=None, *,
                                        y_true=None, y_pred=None,  # precomputed path (1-D positive-class scores); cv= not supported
                                        n_thresholds=50,
                                        metrics=("precision", "recall", "f1", "queue_rate"),
-                                       highlight_best=True, compare=None, theme=None)
-# 2026-05-12: gain_chart, lift_chart, and discrimination_threshold_chart gain
-# compare=None for multi-model overlay, consistent with roc_chart / pr_chart.
+                                       cv=None, threshold_line=False, optimum_label,
+                                       compare=None, subtitle=None, random_state=None,
+                                       mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.parallel_coordinates_chart(data_or_source, X=None, y=None, *,
+ferrum.class_prediction_error_chart(model=None, X=None, y=None, *,
+                                     y_true=None, y_pred=None,  # precomputed path (1-D hard labels)
+                                     normalize=False, show_counts=True, random_state=None,
+                                     mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.class_balance_chart(y, *, mark=None, encode=None, properties=None, layers=None, theme=None)
+
+ferrum.parallel_coordinates_chart(data, *,
                                    features=None, hue=None,
                                    rescale="minmax",   # "minmax" | "zscore" | None
-                                   alpha=0.5, theme=None)
+                                   alpha=0.5,
+                                   mark=None, encode=None, properties=None, layers=None, theme=None)
 
-ferrum.class_prediction_error_chart(model_or_source=None, X=None, y=None, *,
-                                     y_true=None, y_pred=None,  # precomputed path (1-D hard labels)
-                                     normalize=False, theme=None)
-
-ferrum.pca_scree_chart(model_or_source, X=None, *, n_components=None,
-                        cumulative_line=True, threshold=0.95, theme=None)
-
-ferrum.rank_chart(data_or_source, X=None, y=None, *,
-                   rank="2d",       # "1d" | "2d"
-                   algorithm=None,  # "1d" default: "shapiro"; "2d" default: "pearson"
-                   top_k=None, theme=None)
-# **2026-05-12 (P4.4, F4):** `rank_chart(rank=...)` is deprecated;
-# use the two sibling functions `ferrum.rank1d_chart(...)` and
-# `ferrum.rank2d_chart(...)` directly. They take the same parameters
-# minus the `rank` flag and route to the same chart builders.
-# `rank_chart` retains the dispatch behavior as a DeprecationWarning
-# shim for backward compatibility.
 ferrum.rank1d_chart(data_or_source, X=None, y=None, *,
-                     algorithm=None, top_k=None, orient="horizontal",
-                     color_field=None, random_state=None, theme=None)
+                     algorithm=None,   # None selects "shapiro"
+                     top_k=None, orient="horizontal", color_field=None, random_state=None,
+                     mark=None, encode=None, properties=None, layers=None, theme=None)
 ferrum.rank2d_chart(data_or_source, X=None, y=None, *,
-                     algorithm=None, annot=True,
-                     random_state=None, theme=None)
-
-ferrum.alpha_selection_chart(model, X, y, alphas, *, cv=5, scoring=None,
-                               log_scale=True, ci_style="band", theme=None)
-
-ferrum.intercluster_distance_chart(model_or_source, X=None, *, k=None,
-                                    method="mds", theme=None)
-
-ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
-                        kind="box", split="both", theme=None)
+                     algorithm=None,   # None selects "pearson"
+                     annot=True, random_state=None,
+                     mark=None, encode=None, properties=None, layers=None, theme=None)
+ferrum.rank_chart(data_or_source, X=None, y=None, *,
+                   rank="2d",       # "1d" | "2d"; deprecated dispatcher
+                   algorithm=None, top_k=None, annot=True, orient="horizontal",
+                   color_field=None, random_state=None,
+                   mark=None, encode=None, properties=None, layers=None, theme=None)
 ```
 
-> **2026-05-15 — Precomputed input path** (corrected count, **2026-09-10,
-> batch G, F-L11-05**: eleven members, not ten or nine — the original note
-> undercounted by omitting `prediction_error_chart`, which already
-> documented and rendered on this path before this batch). The
-> prediction-evaluation figure functions that appear above — `roc_chart`,
-> `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`,
-> `discrimination_threshold_chart`, `confusion_matrix_chart`,
-> `class_prediction_error_chart`, `residuals_chart`, `prediction_error_chart`,
-> and (batch G) `classification_report_chart` — each accept `y_true=` and
-> `y_pred=` as keyword-only arguments, bypassing the fitted model entirely.
-> Callers supply arrays they have already computed; the function returns a
-> chart visually identical to the model-backed path. Exactly one of {model
-> path, precomputed path} must be active — supplying both, neither, or only
-> one of `y_true`/`y_pred` raises `ValueError`. `compare=` is incompatible
-> with the precomputed path. `y_pred` semantics vary by function: soft
-> scores/probabilities for curve functions, hard labels for matrix functions
-> and `classification_report_chart`, fitted values for `residuals_chart` and
-> `prediction_error_chart`. See each function's docstring for the exact
-> expected shape.
+`discrimination_threshold_chart`'s `optimum_label` is keyword-only with an unset default that behaves as `True`; see that function below.
 
-> **Schwabish SB3 — 2026-05-11 — figure-function defaults.** Eight
-> Group-B functions adopt the Schwabish defaults from §3.19's principles doc:
->
-> - `roc_chart`: `annotate_auc=True` by default; one `AUCLabel` per curve,
->   staggered along the y axis so labels do not collide at the line endpoint.
->   (This bullet's original text gave single-curve charts the active title
->   `"ROC — AUC X.XXX"` and multi-curve charts a descriptive `"ROC"` title;
->   the metric-carrying title is superseded by the 2026-09-13 #219/D4 note in
->   §3.15 — every ROC chart is titled `"ROC Curve"` and the overlay is the
->   sole metric surface.)
-> - `pr_chart`: `annotate_ap=True` by default; overlay parallels `roc_chart`
->   (its active title is superseded by the same 2026-09-13 note). Binary
->   classifiers additionally render a dashed horizontal baseline at the
->   positive-class prevalence so the chance-level floor is always visible.
-> - `calibration_chart`: new `annotate_brier=True` kwarg (default on). A
->   corner `BrierLabel` carries the per-sample Brier score (see the
->   2026-09-10 dated note immediately below — this bullet's original text,
->   "multi-model charts get one `BrierLabel` per model from the bin-level
->   reliability data," is superseded; its active title is superseded by the
->   2026-09-13 #219/D4 note).
+**Precomputed input path.** Eleven prediction-evaluation functions accept `y_true=` and `y_pred=` as keyword-only arguments that bypass the fitted model entirely: `roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `discrimination_threshold_chart`, `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart`, `residuals_chart` and `prediction_error_chart`. The chart is the same one the model path draws from the same predictions. Exactly one path must be active:
 
-> **2026-09-10 (batch G, F-L11-04 — supersedes the bin-level compared-path
-> text above; itself partly superseded by the batch G close note that
-> follows it, which replaces the `precomputed_value=` mechanism described
-> here with a `brier` column on the frame — read both):** the `BrierLabel`
-> overlay and the title now show the exact
-> same per-sample Brier score, invariant to `n_bins=`/`strategy=`. Before
-> this fix, the title computed the true per-sample Brier from
-> `model.predict_proba`, but the overlay independently integrated the
-> chart's own *binned* reliability-diagram data — not the Brier score at
-> all, and a number that moved with `n_bins=`/`strategy=` even though the
-> real Brier score never does (observed: 0.078 → 0.028 on `strategy=` alone
-> while the true value held at 0.096). `_apply_metric_label_explicit` gains
-> `precomputed_value: float | dict[str, float] | None` — when set, the
-> overlay renders this value directly and `metric_fn`/`metric_field` are
-> never consulted; the calibration builder passes the per-sample Brier it
-> already computes for the title, so overlay and title cannot disagree.
-> **Compared-path (`compare=`) semantics change, disclosed:** each model's
-> label now shows **its own true per-sample Brier** (a `{model_name: brier}`
-> dict passed as `precomputed_value=`), replacing the bin-level number every
-> model previously shared. The compared-path title stays the plain
-> `"Calibration Curve"` — no single number describes several models.
-> **Precomputed path** (`calibration_chart(y_true=, y_pred=)`): the title
-> now carries the Brier too (computed from the held `y_true`/`y_prob`
-> arrays via `_PrecomputedSource.brier_score()`, the same formula as every
-> other path — one Brier formula, `ferrum._metric_labels._brier_score`, used
-> everywhere), where previously it stayed blank.
+- neither: `Supply either a fitted model/source (model=) or precomputed arrays (y_true=, y_pred=).`
+- both: `Supply either a model/source (model=) or precomputed arrays (y_true=, y_pred=), not both.`
+- one array only: `Precomputed path requires both y_true= and y_pred=; y_pred= is missing.`
+- `compare=` with arrays: `compare= is not supported with precomputed y_true/y_pred inputs.  Multi-model comparison requires a fitted model on each path.` (`confusion_matrix_chart`, `class_prediction_error_chart` and `classification_report_chart` take no `compare=` at all.)
 
-> **2026-09-10 (batch G close — supersedes the `precomputed_value=`
-> mechanism described in the note immediately above, which was written
-> earlier the same day; the user-visible contract below is the current
-> one):** the per-sample Brier now lives
-> on the **frame**, not in a builder-side override. `.calibration_curve()`
-> gains a broadcast `brier` column (schema above), computed at frame
-> assembly from the per-sample predictions and the binarized target — the
-> last point at which the per-sample arrays exist — exactly as `auc`/`ap`
-> are broadcast onto ROC/PR frames. The chart title, the figure builder's
-> overlay, and the composable `chart + BrierLabel()` path all read that one
-> column through the same rule (`_curve_metric`: read the kind's broadcast
-> column when the frame carries it, integrate the drawn curve only when it
-> does not), so `_apply_metric_label_explicit`'s `precomputed_value=`
-> parameter and `_PrecomputedSource.brier_score()` are both removed —
-> neither has a caller once the number rides on the frame. **User-visible
-> consequence:** `calibration_chart(...) + fm.BrierLabel()` — the example
-> in `BrierLabel`'s own docstring — now renders the true per-sample Brier
-> matching the title, on both `strategy="uniform"` and
-> `strategy="quantile"`. It previously rendered the bin-level integral
-> (0.030 uniform / 0.009 quantile against a true 0.028 on a reference
-> fixture) *and overwrote* the correct label the figure had already placed,
-> leaving a chart strictly less correct than its own default. Composing
-> `+ AUCLabel()`/`+ APLabel()` onto a `roc_chart`/`pr_chart` likewise now
-> reads the kernel's `auc`/`ap` column rather than re-integrating; the
-> values agreed already, so no rendered number moves there. A frame with no
-> such column — arbitrary user data, the reason the composable path exists
-> — still integrates the metric kind's own value function over the drawn
-> curve, unchanged. (The `metric_fn` parameter that phrase originally named
-> is gone: a surface now names a metric *kind* and the table supplies its
-> value function, column and display name together.)
-> - `residuals_chart`: new `annotate_metrics=True` kwarg (default on).
->   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on
->   the residuals-vs-fitted view in both the single-panel and the 4-panel
->   `panels="auto"` layouts. Implementation shares a pair of helpers —
->   `_inject_metrics_corner` (data augmentation) and
->   `_overlay_metrics_corner` (chart overlay) — so the orchestration
->   (which panels get the corner) stays separate from the implementation
->   (how to render it).
-> - `importance_chart`: new `show_values=True` kwarg (default on). Emits
->   the formatted importance value at each bar's end via a same-data
->   `mark_text` overlay.
-> - `learning_curve_chart` and `validation_curve_chart`: replace the
->   categorical color legend with endpoint-anchored direct labels (`train`
->   / `test`) via the new private `_direct_label_endpoint` helper. Legend
->   suppression flows through the new `Color(field, legend=None)` honored
->   kwarg (serialized to the renderer as `legend = {"disabled": true}`).
-> - `confusion_matrix_chart`: docstring already specified `annotate=True`
->   default; SB3 added a regression test.
->
-> Every Group-B function also accepts an opt-in `subtitle: str = None`
-> kwarg that flows through to the `Title(text, subtitle=…)` primitive.
->
-> Implementation lives in `src/ferrum/_diagnostics/charts.py` for the
-> single-model builders and `src/ferrum/_direct_label.py` for the
-> direct-label helper; primitives in `src/ferrum/annotations.py`. The
-> renderer-side legend suppression and `mark_text` align / dx / dy
-> support land in `crates/ferrum-core/src/render/prepare.rs` and
-> `…/marks/text.rs` respectively.
+All of these are `ValueError`. What `y_pred` holds depends on the function: soft scores for `roc_chart`, `pr_chart`, `gain_chart` and `lift_chart` (1-D positive-class scores for a binary target, or a 2-D `(n_samples, n_classes)` matrix); 1-D positive-class probabilities for `calibration_chart` and 1-D positive-class scores for `discrimination_threshold_chart` (which also refuses `cv=` on this path: `cross-validation requires a fitted model`); 1-D hard labels for `confusion_matrix_chart`, `class_prediction_error_chart` and `classification_report_chart`; 1-D fitted values for `residuals_chart` and `prediction_error_chart`.
+
+A `y_pred` of the wrong shape is refused with a `ValueError` naming the figure function that was called and the observed shape, for example `confusion_matrix_chart requires 1-D hard class labels; got an array with shape (200, 3).` and `prediction_error_chart requires 1-D fitted values; got an array with shape (200, 2).` A 2-D score matrix whose column count differs from the class count is refused (`pr_chart: y_pred has 2 score column(s) but y_true has 3 class(es); ...`), and so is a 1-D `y_pred` against a `y_true` with more than two distinct classes on `roc_chart`, `pr_chart`, `gain_chart` and `lift_chart` (`roc_chart with a 1-D y_pred requires binary y_true; got 3 unique classes.`). A `y_true` holding a single class is not multiclass: the curve still renders, its AUC or AP is NaN, and no metric label is drawn for it. A null in the target is refused before any metric is computed (`pr_chart: y has 50 null row(s) out of 200, and a null is not a class observation ...`).
+
+**Titles and metric labels.** `roc_chart` is titled `"ROC Curve"`, `pr_chart` `"Precision–Recall Curve"` and `calibration_chart` `"Calibration Curve"` in every shape (single curve, per class, averaged, compared, precomputed); the title never carries a metric. `annotate_auc`, `annotate_ap` and `annotate_brier` (all default `True`) each control one surface, a text label per curve placed at the curve's end and stacked so labels do not overlap one another: `AUC = 0.984`, `AP = 0.973`, `Brier = 0.060`, three decimals. Turning the flag off removes the number from the figure. Every function that takes `subtitle=` (`roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `residuals_chart`, `importance_chart`, `learning_curve_chart`, `validation_curve_chart`, `discrimination_threshold_chart`, `silhouette_chart`, `pca_scree_chart`) renders it beneath the title through `Title(text, subtitle=...)`. `roc_chart` and `pr_chart` title their legend `"Class"`, or `"Model"` under `compare=`.
+
+**`roc_chart`, `pr_chart`.** With `per_class=True` (default) one one-vs-rest curve is drawn per class, and a binary target draws the positive class's curve; `average` (`"macro"`, `"micro"`, `"weighted"` or `None`) applies only when `per_class=False`, which draws a single averaged curve. A binary `pr_chart` also draws a dashed grey horizontal baseline at the positive-class prevalence, the chance-level floor. Turning `iso_lines` on overlays dashed grey (`#AAAAAA` at opacity 0.6) F-score iso-curves at F = 0.2, 0.4, 0.6 and 0.8, each labelled `F=0.2` .. `F=0.8` at its right end; the curves group on the `detail` channel, so they never take a class color.
+
+**`confusion_matrix_chart`.** `normalize="true"` (default) normalizes rows, `"pred"` columns, `"all"` the whole matrix, and `None` shows raw counts; any other value is refused. The chart is titled `"Confusion Matrix"`, with axes `"True label"` and `"Predicted label"` and a color legend titled `"Proportion"` (normalized) or `"Count"`. `annotate=True` prints each cell's value, two decimals when normalized and an integer for counts. There is no `cmap` parameter.
+
+**`classification_report_chart`.** A rect-plus-text heatmap titled `"Classification Report"` (title only, no `subtitle=`): rows are class labels, columns are `precision`, `recall` and `f1-score`, color encodes the value, and each cell prints it to two decimals. There is no `support` row, a deliberate difference from sklearn's `classification_report`. On the precomputed path the metrics come from confusion counts with no sklearn import. Both paths order classes the same way, the sklearn `unique_labels` order: the distinct values of `y_true` and `y_pred` in their own ascending order, raw values, not stringified (`[10, 2, 3]` orders `2, 3, 10`). `y_true` and `y_pred` must each be 1-D. Class labels are derived by partition over the values the two arrays hold, and every value family that cannot be a class label refuses with a `ValueError` stating what the arrays hold: a null, a mix of ordering families, a family that does not order (`complex`, `dict`), and one that orders but cannot be hashed (`list`, `set`, `bytearray`), for example `classification_report_chart: y_true and y_pred hold complex values that cannot be used as class labels. ...`. A homogeneous, orderable, hashable family is deduplicated by hash equality. On the model path both `X` and `y` are required; a missing `y` raises `ModelSource.classification_report() requires y to be provided.` When the model exposes `classes_`, they are coerced into `y`'s dtype and the call refuses if they share no value with `y` (`classification_report_chart: the model's classes_ ['a', 'b'], translated into y's domain, match none of y's observed values, ...`); a partial overlap, or a model that predicts none of `y`'s classes on the reported slice, still renders.
+
+**`calibration_chart`.** The `BrierLabel` shows the per-sample Brier score of the predictions, the same number on every path and invariant to `n_bins=` and `strategy=`. The score is a broadcast `brier` column on the calibration frame (`mean_predicted`, `fraction_positive`, `count`, `brier`), computed when the frame is assembled from the per-sample predictions and the binarized target, as `auc` and `ap` are broadcast onto ROC and PR frames. The figure's label and a composed `calibration_chart(...) + fm.BrierLabel()` read that one column, and a re-applied label replaces the figure's own rather than stacking a second; `roc_chart(...) + fm.AUCLabel()` and `pr_chart(...) + fm.APLabel()` read the `auc` and `ap` columns the same way (metric labels on other frames are described in §3.15). Under `compare=` each model's label shows that model's own Brier score.
+
+**`gain_chart`, `lift_chart`.** Titled `"Cumulative Gains Curve"` and `"Lift Curve"`, with one curve per class labelled at its end by the class's real name, and a reference curve labelled `"Baseline"`, in place of a legend. Class names resolve through `ModelSource.class_names` (§3.1): `class_names=`, then `model.classes_`, then the stringified class value, so an integer binary target labels its curves `"0"` and `"1"` and a string target `"neg"` and `"pos"`; every class of a multiclass target gets its own name. Under `compare=` the curves are labelled by model name instead.
+
+**`residuals_chart`, `cooks_distance_chart`, `prediction_error_chart`.** `panels="auto"` (default) composes the canonical four panels, `residuals_vs_fitted`, `qq`, `scale_location` and `residuals_vs_leverage`, as a 2x2 grid; `panels="single"` or `None` returns only the residuals-vs-fitted panel; a list selects panels by name, and an unknown name is refused (`unknown residuals panel: 'bogus'`). Leverage and Cook's distance need the hat matrix of a linear estimator exposing `coef_`. For a non-linear estimator or a precomputed source the leverage panel is dropped from `panels="auto"`, which then renders the other three. When dropping it would leave no panel (`panels=["residuals_vs_leverage"]`, or `cooks_distance_chart`, which always draws that one panel), the call raises a `ValueError` naming the requirement and, when a model is present, its type: ``Cook's distance and residuals-vs-leverage are hat-matrix quantities that require a linear estimator exposing `coef_`. Got 'RandomForestRegressor'. Pass a linear estimator (e.g. LinearRegression, Ridge, Lasso), or drop residuals_vs_leverage from panels= and use the other diagnostic panels instead.`` Under `compare=` the message is prefixed with the member that failed (`compare={'base': ...}: ...`). On the precomputed path residuals are `y_true - y_pred` and studentized residuals are computed without a design matrix. `annotate_metrics=True` (default) adds a top-right corner annotation with `R²`, `RMSE` and `MAE` to the residuals-vs-fitted panel, in the single-panel and the multi-panel layouts. With `compare=`, `panels="single"` overlays one series per model in a `model` color group, and a multi-panel value returns a `ConcatChart` with one panel grid per model.
+
+**`importance_chart`.** `show_values=True` (default) prints each bar's formatted importance at the bar's end.
+
+**`learning_curve_chart`, `validation_curve_chart`.** The training and cross-validation curves are labelled directly at their right ends, `"Training Score"` and `"Cross-Validation Score"`, and the chart has no color legend. `validation_curve_chart` requires `values=` (`validation_curve_chart(values=...) is required — pass an explicit list of values to sweep for the given param.`) and is titled `"Validation Curve — <param>"`.
+
+**`discrimination_threshold_chart`** (binary classifiers). The sweep's metrics are drawn as lines over the threshold, titled `"Discrimination Threshold"`, with a `"Metric"` legend of `Precision`, `Recall`, `F1` and `Queue rate`. An unknown entry in `metrics=` is refused, naming the valid set. `optimum_label` labels the F1 optimum (`max F1 = 0.936 @ t=0.63`) and is on by default; `threshold_line=True` adds a vertical rule at the same threshold. Both need `"f1"` in `metrics=`: an explicit `optimum_label=True` or `threshold_line=True` without it raises at render (`mark_discrimination_threshold(optimum_label=True) has no F1-optimum row to draw from: ...`), while the unset default omits the label silently. `compare=` returns a `ConcatChart` of small multiples, one panel per model with shared x and y scales, each marking its own model's optimum.
+
+**SHAP.** `shap_beeswarm_chart`, `shap_bar_chart` and `shap_waterfall_chart` are the SHAP figures; `shap_waterfall_chart` requires `sample_idx`. `shap_chart` is a deprecated dispatcher: every call emits `DeprecationWarning: shap_chart(kind=...) is deprecated; use shap_beeswarm_chart / shap_bar_chart / shap_waterfall_chart instead.` and forwards to the sibling that `kind` names. `kind` must be `"beeswarm"`, `"bar"` or `"waterfall"`, and `kind="waterfall"` without `sample_idx` raises `shap_chart(kind='waterfall') requires sample_idx=<int>.` The visualizer classes split the same way (§3.15).
+
+**Ranking.** `rank1d_chart` and `rank2d_chart` are the ranking figures. `rank_chart` is a deprecated dispatcher that validates `rank` (`"1d"` or `"2d"`), emits `DeprecationWarning: rank_chart(rank=...) is deprecated; use rank1d_chart / rank2d_chart instead.` on every call, and forwards to the matching sibling.
+
+**First-parameter aliases.** The family's first parameter has one canonical name per kind of input (`model`, `data_or_source`). `cluster_diagnostics` also accepts the keyword `X=` for `model`, and `rank_chart`, `rank1d_chart` and `rank2d_chart` the keyword `source=` for `data_or_source`; positional callers are unaffected. Supplying both raises `TypeError`: `cluster_diagnostics() got both model= and X=; X= is a deprecated alias for model=, supply only one.` Supplying neither raises `TypeError: cluster_diagnostics() missing required argument: 'model'`.
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#314-figure-level-functions).
 
 ---
 
 ### 3.15 Sklearn-Protocol Visualizers
 
-Visualizers implement `fit` / `score` / `show` for drop-in compatibility with sklearn workflows. Unlike Yellowbrick, `.show()` always returns a `Chart` object — not a matplotlib figure.
+Visualizers implement `fit` / `score` / `show` for drop-in use in sklearn workflows. Unlike Yellowbrick, `.show()` always returns a ferrum chart object, never a matplotlib figure.
 
 **Base class:**
 
@@ -2839,173 +2148,68 @@ class FerrumVisualizer:
     def has_score(self) -> bool           # True iff score() returns a real metric
 ```
 
-> **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`
-> delegates to `float(self.model.score(X, y))` whenever the wrapped model
-> exposes a `.score` method, and returns `0.0` only for genuinely no-model
-> visualizers (`model=None`: rank / parallel-coordinates / class-balance /
-> elbow). Subclasses whose score is not the estimator's own (e.g.
-> `ROCVisualizer` → `roc_auc_score`) override it. `has_score` is a derived
-> read-only property (not a hand-set class flag): it reports `True` exactly
-> when `score()` returns a real metric, mirroring the model-has-`.score`
-> guard, so the two can never drift.
->
-> **Refinement (2026-06-23, cohesion campaign S4FIX2):** the "can never drift"
-> guarantee now holds for the two non-standard subclass shapes as well.
-> `ROCVisualizer` overrides `has_score` to mirror its own `score()` condition
-> (scoreable when the model exposes `predict_proba` or a callable `.score`), so
-> a `predict_proba`-only model — no `.score`, a valid sklearn shape — reports
-> `has_score=True` and `score()` returns the AUC. A multi-model
-> `CalibrationVisualizer` overlay (two or more positional models, or a single
-> dict-of-models) has no single well-defined metric: it now reports
-> `has_score=False` and `score()` returns the documented `0.0` no-single-score
-> fallback, rather than silently scoring only the first model. Single-model
-> calibration behavior is unchanged.
+- **fit.** `fit` refuses a malformed `mark=` first, then builds the source (by default a `ModelSource` wrapping the model), computes the headline metrics into `_metrics`, and builds the chart, all in the class's voice: every warning and refusal raised during `fit` names the visualizer class (`ROCVisualizer: ...`), not the figure function it shares a builder with. It returns `self`.
+- **show.** `show` returns the chart built by `fit`, and raises `RuntimeError: <Class> must be fit before .show(); call .fit(X, y) first.` before `fit`.
+- **repr.** The repr is `<Class>(unfit)` before `fit` and `<Class>(metric=value, ...)` afterwards, one entry per `_metrics` key, each formatted to four decimals.
+- **score.** `score` returns `float(self.model.score(X, y))` whenever the wrapped model has a callable `.score`, and `0.0` for the no-model visualizers (`ClassBalanceVisualizer`, `Rank1DVisualizer`, `Rank2DVisualizer`, `ParallelCoordinatesVisualizer`, `ElbowVisualizer`). `has_score` is a read-only property derived from the same condition, so it is `True` exactly when `score()` returns a real metric rather than the `0.0` fallback. Two subclasses override both together:
+  - `ROCVisualizer.score` returns the ROC AUC (`roc_auc_score` on the positive-class column for a binary model, one-vs-rest for multiclass) when the model has `predict_proba`, falling back to `model.score`, then `0.0`. Its `has_score` is `True` when the model has `predict_proba` or a callable `.score`, so a `predict_proba`-only model reports `has_score=True` and scores its AUC.
+  - `CalibrationVisualizer` given a symmetric multi-model overlay (two or more positional models, or one dict of models) has no single metric: `has_score` is `False` and `score()` returns `0.0`. A single model, or one base model with `compare=`, scores the base model's `.score`.
+- A visualizer defines no `get_params` / `set_params`, so it is not clonable by `sklearn.base.clone` and cannot sit inside a `Pipeline` or `GridSearchCV`; fit the visualizer on the search's best estimator instead.
 
 **Concrete visualizers:**
 
 | Class | Wraps |
 |---|---|
-| `ROCVisualizer(model, *, micro=True, macro=True, per_class=True, annotate_auc=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | ROC chart |
-| `PRVisualizer(model, *, per_class=True, average="macro", annotate_ap=True, iso_lines=False, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | PR chart |
-| `ConfusionMatrixVisualizer(model, *, normalize="true", annotate=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Confusion matrix |
-| `ClassificationReportVisualizer(model, *, mark=None, encode=None, properties=None, layers=None, theme=None)` | Heatmap of precision/recall/F1 per class |
-| `CalibrationVisualizer(*models, n_bins=10, strategy="uniform", annotate_brier=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Calibration chart |
-| `ResidualsVisualizer(model, *, kind="studentized", cook_threshold=None, panels=None, annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Residuals diagnostic |
-| `PredictionErrorVisualizer(model, *, reference_line=True, ci=None, reference_band=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | Prediction error |
-| `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, orient="horizontal", error_bars=True, show_values=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Importance chart |
-| `LearningCurveVisualizer(model, *, cv=5, scoring=None, train_sizes=None, ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Learning curve |
-| `ValidationCurveVisualizer(model, param, values, *, cv=5, scoring=None, log_scale="auto", ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Validation curve |
-| `SilhouetteVisualizer(model, *, k=None, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Silhouette chart (clusterers) |
-| `ElbowVisualizer(model_class, *, ks, metric="distortion", mark=None, encode=None, properties=None, layers=None, theme=None)` | Elbow chart |
-| `ManifoldVisualizer(model=None, *, method="umap", mark=None, encode=None, properties=None, layers=None, theme=None)` | Embedding projection |
-| `ClassBalanceVisualizer(*, mark=None, encode=None, properties=None, layers=None, theme=None)` | Class frequency bar chart |
-| `CooksDistanceVisualizer(model, *, threshold=None, kind="studentized", panels=("residuals_vs_leverage",), annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Cook's distance |
-| `SHAPVisualizer(model, *, kind="beeswarm", max_display=20, sample_idx=None, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP chart — **deprecated** since 2026-05-12 (P3.6); use the three sibling classes below. |
-| `SHAPBeeswarmVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP beeswarm |
-| `SHAPBarVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP mean-absolute bar |
-| `SHAPWaterfallVisualizer(model, *, sample_idx, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP single-sample waterfall |
-| `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, metrics=("precision", "recall", "f1", "queue_rate"), cv=None, threshold_line=False, optimum_label=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Discrimination threshold chart (binary classifiers only) |
-| `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", alpha=0.5, mark=None, encode=None, properties=None, layers=None, theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts raw feature matrix. `hue` applied from `y` if provided. |
-| `ClassPredictionErrorVisualizer(model, *, normalize=False, show_counts=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Class prediction error chart |
-| `PCAVarianceVisualizer(model, *, n_components=None, cumulative_line=True, threshold=0.95, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | PCA scree plot. Model must expose `explained_variance_ratio_` attribute (sklearn PCA, TruncatedSVD, or compatible). |
-| `Rank1DVisualizer(*, algorithm="shapiro", orient="horizontal", top_k=None, color_field=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Univariate feature ranking bar chart. No model required. |
-| `Rank2DVisualizer(*, algorithm="pearson", annot=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Pairwise feature correlation heatmap. No model required. |
-| `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, log_scale=True, highlight_best=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Regularization parameter selection curve |
-| `InterclusterDistanceVisualizer(model, *, method="mds", k=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Intercluster distance map |
-| `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", split="both", mark=None, encode=None, properties=None, layers=None, theme=None)` | Cross-validation score distribution |
+| `ROCVisualizer(model, *, micro=True, macro=True, per_class=True, annotate_auc=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | ROC chart. `micro` / `macro` translate to the builder's `average=`: `"macro"` when `macro=True`, else `"micro"` when `micro=True`, else `None`. As in `roc_chart`, `average` matters only with `per_class=False`, where it picks the single averaged curve (`None` keeps the per-class curves). `_metrics["auc_mean"]`. |
+| `PRVisualizer(model, *, per_class=True, average="macro", annotate_ap=True, iso_lines=False, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | PR chart. As in `pr_chart`, `average` picks the single averaged curve drawn with `per_class=False`. `_metrics["ap_mean"]`. |
+| `ConfusionMatrixVisualizer(model, *, normalize="true", annotate=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Confusion matrix. `_metrics["accuracy"]`. |
+| `ClassificationReportVisualizer(model, *, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Heatmap of precision/recall/F1 per class. `_metrics["f1_macro"]`. |
+| `CalibrationVisualizer(*models, n_bins=10, strategy="uniform", annotate_brier=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Calibration chart. At least one model is required (`TypeError: CalibrationVisualizer requires at least one model`). |
+| `ResidualsVisualizer(model, *, kind="studentized", cook_threshold=None, panels=None, annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Residuals diagnostic. `panels=None` renders the single residuals-vs-fitted panel; `panels="auto"` renders the same 4-panel grid as `residuals_chart(panels="auto")`. |
+| `PredictionErrorVisualizer(model, *, reference_line=True, ci=None, reference_band=False, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Prediction error |
+| `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, orient="horizontal", error_bars=True, show_values=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Importance chart |
+| `LearningCurveVisualizer(model, *, cv=5, scoring=None, train_sizes=None, ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Learning curve |
+| `ValidationCurveVisualizer(model, param, values, *, cv=5, scoring=None, log_scale="auto", ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Validation curve |
+| `SilhouetteVisualizer(model, *, k=None, subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Silhouette chart (clusterers) |
+| `ElbowVisualizer(model_class, *, ks, metric="distortion", mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Elbow chart. Takes a model **class**, not a fitted model, and fits one instance per `k` inside `fit()`; the class must accept `n_clusters`, `random_state` and `n_init`. |
+| `ManifoldVisualizer(model=None, *, method="umap", mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Embedding projection |
+| `ClassBalanceVisualizer(*, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Class frequency bar chart. No model required. |
+| `CooksDistanceVisualizer(model, *, threshold=None, kind="studentized", panels=("residuals_vs_leverage",), annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Cook's distance. Defaults to the residuals-vs-leverage panel alone, which needs a linear estimator exposing `coef_`. |
+| `SHAPVisualizer(model, *, kind="beeswarm", max_display=20, sample_idx=None, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | SHAP chart, **deprecated**: constructing it emits `DeprecationWarning: SHAPVisualizer(kind=...) is deprecated; use SHAPBeeswarmVisualizer / SHAPBarVisualizer / SHAPWaterfallVisualizer instead.` Use the three sibling classes below. |
+| `SHAPBeeswarmVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | SHAP beeswarm |
+| `SHAPBarVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | SHAP mean-absolute bar |
+| `SHAPWaterfallVisualizer(model, *, sample_idx, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | SHAP single-sample waterfall |
+| `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, metrics=("precision", "recall", "f1", "queue_rate"), cv=None, threshold_line=False, optimum_label, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Discrimination threshold chart (binary classifiers only). `_metrics["best_threshold"]` and `["best_f1"]`. |
+| `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", alpha=0.5, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts a raw feature matrix. `hue` is applied from `y` if provided. |
+| `ClassPredictionErrorVisualizer(model, *, normalize=False, show_counts=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Class prediction error chart. `_metrics["accuracy"]`. |
+| `PCAVarianceVisualizer(model, *, n_components=None, cumulative_line=True, threshold=0.95, subtitle=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | PCA scree plot. The model must expose `explained_variance_ratio_` (sklearn `PCA`, `TruncatedSVD`, or compatible). |
+| `Rank1DVisualizer(*, algorithm="shapiro", orient="horizontal", top_k=None, color_field=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Univariate feature ranking bar chart. No model required. |
+| `Rank2DVisualizer(*, algorithm="pearson", annot=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Pairwise feature correlation heatmap. No model required. |
+| `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, log_scale=True, highlight_best=True, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Regularization parameter selection curve |
+| `InterclusterDistanceVisualizer(model, *, method="mds", k=None, mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Intercluster distance map |
+| `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", split="both", mark=None, encode=None, properties=None, layers=None, random_state=None, theme=None)` | Cross-validation score distribution |
 
-> **2026-09-10 (batch G, F-L11-06 + F-L12-09 + F-L10-07 — full
-> visualizer↔chart signature parity):** every visualizer above gained, as
-> explicit keyword-only constructor parameters, every kwarg its underlying
-> chart builder documents — including the uniform override quartet
-> `mark=`/`encode=`/`properties=`/`layers=` on every single visualizer in
-> the family (checkpoint decision: no quartet exemptions). This closes the
-> gap where `PredictionErrorVisualizer` was the family's only fully-threaded
-> member and every other visualizer silently dropped documented builder
-> kwargs, with no `mark=`/`encode=`/`properties=`/`layers=` override
-> reachable from any visualizer at all. `FerrumVisualizer.__init__`'s prior
-> `**_extra: Any` silent swallow is removed — an unknown constructor kwarg
-> on any visualizer now raises `TypeError` naming it, instead of being
-> silently accepted and discarded. `ResidualsVisualizer(panels="auto")`
-> renders the canonical 4-panel grid identical to
-> `residuals_chart(panels="auto")` (a shared helper now owns the
-> `"auto"` → 4-panel-list expansion, consumed by both callers — a naive
-> per-caller forward previously fell back to single-panel, since the
-> builder's own vocabulary is `None`/`"single"`/an explicit list, never
-> `"auto"`). `CooksDistanceVisualizer`'s new `panels=` defaults to exactly
-> its historical `("residuals_vs_leverage",)` tuple — unchanged output for
-> every existing call. Three pre-existing spelling drifts are kept for
-> backward compatibility, not unified (spelling unification is a logged
-> follow-up, not this batch): `ROCVisualizer.micro=`/`macro=` vs. the
-> builder's `average=`; `CooksDistanceVisualizer.threshold=` vs. the
-> builder's `cook_threshold=`; `CalibrationVisualizer`'s variadic `*models`
-> vs. the public `calibration_chart`'s `compare=`. A mechanical parity test
-> (`inspect.signature` diff against each visualizer's actual `_build_chart`
-> target, patterned on `test_core_stub_parity.py`) enforces every
-> visualizer's keyword-only surface against its builder's, with an
-> explicit, rationale-carrying skip-map for exactly those three drifts —
-> an empty-rationale or stale skip-map entry fails the test, as does any
-> `FerrumVisualizer` subclass missing from the test's own completeness
-> registry. No existing kwarg was renamed or removed on any visualizer.
->
-> **`compare=` metric semantics (F-L10-07).** `ROCVisualizer`, `PRVisualizer`,
-> and `DiscriminationThresholdVisualizer` accept `compare=` per the drift
-> map above; their derived metrics (`auc_mean`, `ap_mean`,
-> `best_threshold`/`best_f1`, and `__repr__`'s summary) always describe the
-> **base model** (the visualizer's own `model=` argument), consistent with
-> `.score()` — never a value pooled across every compared model, and never
-> silently substituted with a stronger/weaker rival's number. Before this
-> fix, e.g. `DiscriminationThresholdVisualizer._metrics` searched the
-> concatenated per-model frame for the best F1 regardless of which model it
-> came from, so the object could report one model's `.score()` and a
-> different model's derived metrics simultaneously.
-> `CalibrationVisualizer`'s own genuinely-symmetric multi-model shape
-> (`has_score=False`, `score()=0.0`, no distinguished base) is unaffected —
-> `compare=` on the other three has one distinguished base model (the
-> primary `model=` argument) where `CalibrationVisualizer`'s `*models` does
-> not. **Rider (2026-09-13, wave 3 T5, #213):** that fix reached the
-> *metrics* only. `DiscriminationThresholdVisualizer._build_chart` kept
-> forwarding the unfiltered compared source to the pooled chart builder, so
-> the rendered F1-optimum annotation could still name the rival while
-> `_metrics`/`__repr__` named the base. `compare=` on that visualizer now
-> renders small multiples (see the 2026-09-13 note in the `compare=`
-> composition section), so the `"base"` panel's annotation and the repr
-> describe the same model by construction. `ROCVisualizer` and
-> `PRVisualizer` never had the render half of this problem: their charts
-> overlay by `color="model"`, so every curve is already labeled with the
-> model it belongs to.
+`DiscriminationThresholdVisualizer`'s `optimum_label` is keyword-only with an effective default of `True`, held as an internal unset sentinel and forwarded unset to `mark_discrimination_threshold`, so the mark can tell "never asked" from "asked". The F1-optimum label and the `threshold_line` rule need `"f1"` in `metrics=`: without it, an explicit `optimum_label=True` or `threshold_line=True` raises `ValueError` when the chart renders (`mark_discrimination_threshold(optimum_label=True) has no F1-optimum row to draw from: metrics=('precision',) excludes 'f1', ...`), while the unset default quietly draws neither (the same split as `discrimination_threshold_chart` and the mark itself, see §3.3 Model Diagnostic Marks). An integer `cv=` resolves to an unshuffled `StratifiedKFold`, so the sweep is deterministic; a splitter object is used as given and receives `y` in `.split(X, y)`.
 
-> **2026-09-13 (wave 3, #212 — `CalibrationVisualizer(compare=)`).**
-> Supersedes both statements above about `CalibrationVisualizer`: the
-> drift-map row naming its variadic `*models` as an adjudicated drift from
-> `calibration_chart`'s `compare=`, and the sentence saying its
-> "genuinely-symmetric multi-model shape" stands apart from `compare=`'s
-> distinguished base. The class now accepts **both**, as two different
-> questions rather than one drift:
->
-> - `CalibrationVisualizer(model, compare={"rival": other})` has one
->   distinguished base — the positional `model`, labelled `"base"` — with
->   exactly the semantics `ROCVisualizer`/`PRVisualizer`/
->   `DiscriminationThresholdVisualizer` already have: `has_score` is `True`,
->   `.score()` scores the base model, and `_metrics` carries a single
->   `calibration_error`, the base model's own (never pooled across rivals).
->   Before this change the kwarg did not exist and the call raised
->   `TypeError: CalibrationVisualizer.__init__() got an unexpected keyword
->   argument 'compare'`.
-> - `CalibrationVisualizer(m_a, m_b)` / `CalibrationVisualizer({"a": m_a,
->   "b": m_b})` is **unchanged**: symmetric, no base, `has_score=False`,
->   `score()` returns the `0.0` fallback, and `_metrics` carries one
->   `calibration_error[<model name>]` key per model. The 2026-06-23
->   refinement above still describes this shape exactly.
-> - The two are mutually exclusive. Several positional models (or a
->   dict-of-models) together with `compare=` is a self-contradicting
->   request — the two spell different metric contracts — and raises
->   `ValueError` at construction naming both idioms.
->
-> `fit` resolves `compare=` through the same shared helper the three curve
-> visualizers use, so `compare={"base": ...}` and a non-dict `compare=`
-> refuse with the same messages on all four, and the rendered chart is
-> byte-identical to `calibration_chart(model, X, y, compare=...)` — the
-> parity is the constructor and the metric semantics, not a new render
-> path. No default, no existing call's output, and no golden changed.
+**Parity with the chart builders.** Each visualizer takes, as explicit keyword-only constructor parameters, every keyword-only parameter of the chart builder its `fit` calls, including the override quartet `mark=` / `encode=` / `properties=` / `layers=` on every visualizer, and forwards each to the same builder the figure function uses. No constructor takes `**kwargs`, so an unknown keyword raises `TypeError` naming it (`ROCVisualizer.__init__() got an unexpected keyword argument 'bogus'`). Defaults match the public figure function's, with these deliberate differences:
 
-> **2026-05-11 (Phase 10 — Model Diagnostics):** Every visualizer constructor
-> documented above accepts `random_state: int | None = None` as an additional
-> keyword argument. The base `FerrumVisualizer.__init__` stores it on `self`
-> and forwards it to the underlying `ModelSource` (or to `_diagnostics/stats`
-> compute helpers for the no-model variants). Visualizers whose backing
-> compute is deterministic (`ROCVisualizer`, `PRVisualizer`,
-> `ConfusionMatrixVisualizer`, `CalibrationVisualizer`,
-> `ResidualsVisualizer`, `PredictionErrorVisualizer`,
-> `DiscriminationThresholdVisualizer`, `PCAVarianceVisualizer`,
-> `Rank2DVisualizer` — except `algorithm="kendall"` which is also
-> deterministic, `ClassBalanceVisualizer`, `ClassificationReportVisualizer`,
-> `ClassPredictionErrorVisualizer`) ignore the value; the rest propagate
-> it. (`DiscriminationThresholdVisualizer`'s membership in this deterministic
-> list was briefly false while its `cv=` path used a shuffled splitter — see
-> the dated 2026-09-13 §3.1 note for that history; the unshuffled
-> `StratifiedKFold` restores it.) The `ElbowVisualizer(model_class, *, ks, ...)` signature is unique —
-> it takes a model **class** and fits one instance per k inside `fit()`.
+- Spelling: `ROCVisualizer` takes `micro=` / `macro=` booleans where `roc_chart` takes `average=` (translated as in the table row), and `CooksDistanceVisualizer` takes `threshold=` where the builder takes `cook_threshold=`.
+- `ResidualsVisualizer(panels=None)` renders one panel where `residuals_chart` defaults to `panels="auto"`, and `CooksDistanceVisualizer` defaults to the leverage panel alone; both reach every layout through `panels=`.
+- `Rank1DVisualizer` / `Rank2DVisualizer` name `"shapiro"` / `"pearson"` outright where `rank1d_chart` / `rank2d_chart` spell the same default `algorithm=None`.
+
+`tests/diagnostics/test_visualizer_chart_parity.py` enforces this by diffing each visualizer's keyword-only signature and defaults against its builder and figure function, with a rationale-carrying skip-map for exactly the differences above, and fails on any `FerrumVisualizer` subclass missing from its registry.
+
+**`compare=`.** `ROCVisualizer`, `PRVisualizer`, `DiscriminationThresholdVisualizer` and `CalibrationVisualizer` accept `compare={"name": model, ...}`. The positional `model` is the base, labelled `"base"`; the merge goes through `ModelSource._from_base_and_compare`, the same path the figure functions use, so the refusals are shared: a non-dict raises `TypeError: compare= must be dict[str, model] or None; got list.` and a `"base"` key raises `ValueError: compare= must not use the key 'base' -- it is reserved for the primary model= argument. ...`. Every derived metric (`auc_mean`, `ap_mean`, `best_threshold` / `best_f1`, `calibration_error`) and therefore `__repr__` describes the base model only, computed from its rows and equal to what the visualizer reports without `compare=`, never a value pooled across models or a rival's; `.score()` and `has_score` likewise describe the base model. `ROCVisualizer`, `PRVisualizer` and `CalibrationVisualizer` overlay the models in one panel, each curve labelled with its model name; `DiscriminationThresholdVisualizer` renders small multiples, one `ConcatChart` panel per model built from that model's own sweep (its color channel already carries the four metrics), so the `"base"` panel's F1-optimum annotation names the same threshold and F1 that `_metrics` and `__repr__` report. `CalibrationVisualizer` with `compare=` renders the same chart as `calibration_chart` called with the same model, data and `compare=`.
+
+**`CalibrationVisualizer`'s two multi-model shapes** answer different questions:
+
+- **Base plus rivals.** A positional model with `compare={"rival": other}` has one distinguished base, with the `compare=` semantics above: `has_score=True`, `.score()` scores the base, and `_metrics` holds one `calibration_error`, the base model's own.
+- **Symmetric overlay.** Two or more positional models (named `model_0`, `model_1`, ...) or one dict of models (the caller's names) is symmetric with no base: `has_score=False`, `score()` returns `0.0`, and `_metrics` holds one `calibration_error[<model name>]` key per model.
+- **Not both.** The two are mutually exclusive. Several positional models or a dict of models together with `compare=` raises `ValueError` at construction, naming both idioms: `CalibrationVisualizer takes either a symmetric multi-model overlay (*models) or one base model plus compare= rivals, not both; got 2 positional models together with compare=. ...`.
+
+**`random_state`.** Every visualizer accepts `random_state: int | None = None` and forwards it to its `ModelSource` (or, for `ElbowVisualizer`, to every per-`k` model). It is consumed only where the computation is randomized: `LearningCurveVisualizer` (seeds sklearn's training-data shuffle), `FeatureImportancesVisualizer` with `method="permutation"` (seeds the permutation shuffles), `ManifoldVisualizer` and `InterclusterDistanceVisualizer` (seed the embedding), and `ElbowVisualizer` (the per-`k` models' `random_state`). `None` means seed `0` in each of these, so default output is reproducible. Every other visualizer's computation is deterministic and ignores the value; this includes the integer-`cv=` paths of `ValidationCurveVisualizer`, `AlphaSelectionVisualizer`, `CVScoresVisualizer` and `DiscriminationThresholdVisualizer`, which use sklearn's unshuffled splitters. `random_state` never seeds the wrapped estimator itself.
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#315-sklearn-protocol-visualizers).
 
 ---
 
@@ -3014,331 +2218,250 @@ class FerrumVisualizer:
 #### `RenderConfig`
 
 ```
-RenderConfig(
-    format="svg",         # "svg" | "png" | "html" | "json"
-    scale=2.0,            # pixel density multiplier for PNG
-    embed_fonts=True,     # embed fonts in SVG/HTML
-    background=None,      # override chart background for export
-    width=None, height=None,
-    engine="ferrum",      # "ferrum" | "vega-lite"  (vega-lite emits JSON spec)
-
-    # Auto-raster policy (see §3.3 and §3.17)
-    raster_threshold=500_000,   # int | None — mark count above which auto-raster
-                                # is triggered. None disables auto-raster entirely.
-                                # Overrides ferrum.config.set_raster_threshold()
-                                # for this render call.
-    raster_behavior="warn",     # "warn" | "silent" | "error" — controls whether
-                                # a warning is emitted when auto-raster
-                                # substitution occurs.
-    raster_aggregate="count",   # "count" | "density" | "mean" | "sum" | "any" —
-                                # default aggregate for auto-raster substitution
-    raster_field=None,          # str | None — column to aggregate when
-                                # raster_aggregate is "mean" or "sum"
-    raster_cmap="viridis",      # default colormap for auto-raster substitution
-
-    # Backend selection (see §3.17)
-    backend=None,               # "svg" | "tiny-skia" | "wgpu" | None (auto-select)
-    tile_parallel=False,        # enable Rayon tile parallelism in the tiny-skia
-                                # backend. Increases memory usage; recommended
-                                # for charts with > 500k marks.
-    font_path=None,             # str | list[str] | None — override font search
-                                # paths for the tiny-skia backend. None = use
-                                # bundled Ferrum fonts with system font fallback.
-)
+RenderConfig(raster_threshold=500_000, raster_behavior="warn", raster_aggregate="count", raster_scheme=None, raster_cmap=None, raster_field=None)
 ```
 
-`raster_threshold=None` and `raster_behavior="silent"` are not equivalent: `None` disables auto-raster entirely (the chart renders all marks through the requested backend, even if performance suffers); `"silent"` keeps auto-raster active but suppresses the substitution warning.
+`RenderConfig` is a frozen dataclass that holds one chart's auto-raster policy and nothing else. Attach it with `.properties(render_config=RenderConfig(...))`; on a composition view, `.properties(render_config=...)` forwards to every child chart, and each leaf applies its own policy. For a one-off override, the `Chart` output methods take `raster=`: `False` disables auto-raster for that call (as `raster_threshold=None` would), `True` forces it (as `raster_threshold=0` would, still subject to the eligibility rules below), and `None` (the default) uses the chart's policy. Composition output methods take no `raster=`.
 
-> **Dated note (2026-09-03, batch B task 5 — `raster_aggregate` validates at construction):** `raster_aggregate` is checked at `RenderConfig` construction against its true accepted set — `"count"` | `"density"` | `"mean"` | `"sum"` | `"any"` — matching the underlying Rust `Raster` transform exactly. `"max"`/`"min"`/`"median"` were never valid (despite being reachable at render time before this task, where they surfaced a confusing runtime error well after construction) and now raise `ValueError` immediately. The new `raster_field=` names the column to aggregate when `raster_aggregate` is `"mean"` or `"sum"` (both require it and raise at construction if it's missing); it is genuinely ignored — dropped before the substitution, never resolved as a column name — for `"count"`, `"density"`, and `"any"`, which need no field. The aggregated column must be `Float64`-typed; a non-`Float64` column raises `stat_raster: column '...' must be Float64` at render time (a pre-existing constraint of `Raster`, not new here). `mark_raster` and `desugar_raster`'s docstrings are truth-fixed to match this accepted set — `min`/`max` were never valid and are no longer listed as if they were.
->
-> **Dated note (2026-09-05, batch D task 2 — correcting the note above):** the aggregated column's dtype constraint stated above no longer holds. The batch-D M1 dtype-policy sweep widened `Raster`'s `x`, `y`, and `field` columns to accept any integer, unsigned, or float dtype (coerced to `Float64`); the quoted `stat_raster: column '...' must be Float64` error no longer exists anywhere in the tree. A non-numeric column now raises `stat_raster: column '<name>' must be numeric, got <Dtype>` instead, naming the transform, column, and actual dtype. This is the general M1 dtype-widening policy applied consistently across the transform engine (design spec `2026-09-05-batch-d-transform-engine-design.md` §4.1); `raster` was one of the transforms the batch-D sweep touched.
+| Field | Default | Meaning |
+|---|---|---|
+| `raster_threshold` | `500_000` | Row count at or above which auto-raster is considered. `None` disables auto-raster. |
+| `raster_behavior` | `"warn"` | What happens when an eligible chart reaches the threshold: `"warn"` substitutes and emits a `UserWarning`, `"silent"` substitutes without a warning, `"error"` raises `ValueError` (`Auto-raster: <n> marks exceed threshold <t>. Pass raster=False to .show()/.save() to disable.`) instead of substituting. |
+| `raster_aggregate` | `"count"` | Aggregate of the substituted `mark_raster`: one of `"count"`, `"density"`, `"mean"`, `"sum"`, `"any"`. |
+| `raster_field` | `None` | Column to aggregate. Required by `"mean"` and `"sum"`; ignored by `"count"`, `"density"` and `"any"`. |
+| `raster_scheme` | `None`, read back as `"viridis"` | Color scheme of the substituted `mark_raster`. |
+| `raster_cmap` | `None` | Alias of `raster_scheme`. Pass at most one of the two (or both with the same value); after construction both read back as the resolved scheme. |
 
-> **2026-05-09 (Phase 7 implementation note):** Phase 7 honors the following
-> `RenderConfig` fields: `scale`, `embed_fonts`, `background`, `width`,
-> `height`. The remaining fields (`format`, `engine`, `raster_threshold`,
-> `raster_behavior`, `raster_aggregate`, `raster_cmap`, `backend`,
-> `tile_parallel`, `font_path`) are deferred to subsequent phases that ship
-> their corresponding features. `embed_fonts` is treated as always-true in
-> Phase 7 for visual determinism (rendered text uses the bundled Inter
-> Regular regardless of system font availability); future phases may surface
-> the `False` case for size-conscious users.
+**Validation at construction.** `raster_aggregate` is checked against the `Raster` transform's own vocabulary, so `"max"`, `"min"` or `"median"` raise `ValueError: RenderConfig: raster_aggregate must be one of ['any', 'count', 'density', 'mean', 'sum']; got 'max'`. `"mean"` or `"sum"` without `raster_field` raises `RenderConfig: raster_aggregate='mean' requires raster_field=... (the column to aggregate); pass raster_field=... or use raster_aggregate='count'|'density'|'any', which need no field.` A `raster_field` given with `"count"`, `"density"` or `"any"` is dropped before the substitution, so it is never resolved as a column and never raises. Different `raster_scheme` and `raster_cmap` values raise `RenderConfig: pass either scheme= or cmap= (its alias), not both with different values; ...`. The aggregated column may be any integer, unsigned or float dtype (coerced to `Float64`); a non-numeric column raises at render time with `stat_raster: column '<name>' must be numeric, got <Dtype>`.
 
-> **2026-05-10 (Phase 8a):** `.show()` env detection in 8a covers Jupyter
-> inline (`_repr_svg_` / `_repr_html_` rich display) and a browser fallback
-> (writes temp HTML, calls `webbrowser.open`). Sixel terminal output and the
-> standalone HTML wrapper output are deferred to Phase 9. `.save()` honors
-> `.svg` and `.png` extensions; `.html` and `.json` raise
-> `NotImplementedError` pointing to Phase 9.
+**When auto-raster substitutes.** At render time a chart is replaced by a `mark_raster` equivalent when all of these hold: the threshold is not `None`; the chart's data has at least `raster_threshold` rows; its mark is `point`, `bar`, `rect`, `tick`, `rule` or `segment`; it is not a composite or statistical mark (histogram, density, hex, boxplot and the like, whose row count is not their element count); both `x` and `y` are explicitly quantitative (`"x:Q"` or `type="quantitative"`); and it has no non-quantitative `color` encoding. A `color` channel's type comes from its annotation, or from the column dtype when it has none, so a bare `color="z"` on a numeric column counts as quantitative.
+
+- A quantitative `color` channel drives the substitution: it uses `aggregate="mean"` over the color field and the channel's own `scheme=` (else `raster_scheme`), so the color information survives. A `RenderConfig` whose `raster_aggregate` or `raster_field` differs from the defaults wins wholesale over this; because the dataclass cannot tell an explicit `raster_aggregate="count"` from the default, that spelling also takes the color-driven path.
+- A categorical, ordinal, temporal or untyped `color` channel is excluded from auto-raster permanently, since rasterizing would collapse the categories into one pixel color per bin. An over-threshold chart in this case renders per element and warns, naming the field and its kind and pointing to `.mark_raster(aggregate=..., field=...)` for an explicit raster.
+- An over-threshold chart whose `x` or `y` is missing or not explicitly quantitative renders per element and warns `Chart has <n> marks which may produce large output. ...`. Other ineligible charts (another mark type, a statistical mark) render per element without a warning.
+
+`raster_threshold=None` and `raster_behavior="silent"` are not equivalent: `None` disables auto-raster entirely (every mark renders per element, however many there are); `"silent"` keeps auto-raster active and only suppresses the substitution warning.
+
+The policy is read only from the chart's `RenderConfig` and the `raster=` argument. `ferrum.config` accepts a `raster_threshold` key, but rendering does not read it.
+
+**Concerns that are not `RenderConfig` fields.** Pixel density is the `scale=` argument of `to_png()` and `save()` (PNG and PDF only). Chart size is `.properties(width=..., height=...)`, defaulting to `ferrum.config`'s `width` and `height` (640 x 480). The background is a theme key (`Theme(background=...)`, §3.13). The output format is the `save()` path extension or its `format=` argument. Fonts are not configurable: SVG output embeds the bundled Inter Regular font as an `@font-face` data URI and sets `font-family="Inter"`, and PNG rasterization loads that same bundled font only. The renderer is chosen by the output method (§3.17); there is no backend or engine field, and no Vega-Lite output.
 
 #### Chart output methods
 
-The output surface follows one convention: `to_*` returns an in-memory value,
-`show()` displays, `save(path)` writes to disk.
+The output surface follows one convention: `to_*` returns an in-memory value, `show()` displays, `save(path)` writes to disk.
 
 ```
-chart.show(*, renderer=None)                  # auto-detect environment, display
-chart.to_svg() -> str                         # in-memory SVG markup
-chart.to_png() -> bytes                        # in-memory PNG bytes
-chart.to_html() -> str                         # in-memory interactive HTML
-                                               #   (byte-identical to save('.html'))
-chart.to_spec() -> ChartSpec                  # internal dataclass (Chart only)
+chart.show(*, raster=None)
+chart.to_svg(*, raster=None) -> str
+chart.to_png(*, raster=None, scale=2.0) -> bytes
+chart.to_html(*, embed_wasm=True, toolbar=True, raster=None, csp_nonce=None) -> str
+chart.save(path, *, format=None, embed_wasm=True, raster=None, scale=2.0, toolbar=True, csp_nonce=None)
+chart.interactive(*, toolbar=True) -> InteractiveChart
+chart.to_spec() -> ChartSpec
+chart.to_dict() -> dict
 chart.to_json(*, indent=None) -> str
-chart.save(path, *, format=None, **render_kwargs)
-chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
+chart.pipe(fn, *args, **kwargs) -> Any
 ```
 
-These methods exist on `Chart` and on every composition view (`HConcatChart`,
-`VConcatChart`, `LayerChart`, `ConcatChart`, `JointChart`, `RepeatChart`,
-`ClusterMapChart`), with one exception: `to_spec` exists on `Chart` only — a
-`ChartSpec` is leaf-only by construction; composition views expose `to_dict()`/
-`to_json()` for their declaration (see the 2026-09-11 dated note below). On
-composition views `to_png` is scale-only (it accepts `scale=` but no `raster`
-argument).
+| Method | Returns or does |
+|---|---|
+| `show` | Displays the static SVG (see **Environment detection order for `.show()`**). |
+| `to_svg` | SVG markup. |
+| `to_png` | PNG bytes: the SVG rasterized at `scale` times its intrinsic size (`scale=2.0` turns a 640 x 480 chart into 1280 x 960 pixels). |
+| `to_html` | A self-contained interactive HTML document backed by the WASM renderer, byte-identical to what `save()` writes for `.html`. `embed_wasm=True` base64-inlines the WASM binary; `False` references a `ferrum_wasm_bg.wasm` sidecar served beside the page. `toolbar=False` hides the toolbar. `csp_nonce=` puts a `nonce="..."` on the inline `<style>` and `<script type="module">` tags. |
+| `save` | Writes one file; see the format table below. `scale` affects PNG and PDF only; `embed_wasm`, `toolbar` and `csp_nonce` affect HTML only. |
+| `interactive` | An `InteractiveChart` for the WASM renderer (§3.17). |
+| `to_spec` | The Rust `ChartSpec` the chart lowers to. |
+| `to_dict`, `to_json` | The declaration dict, and its JSON (compact by default, pretty-printed with `indent=`). For a `Chart`, `to_json` serializes the `ChartSpec` that `to_spec` returns, and `to_dict()` is `json.loads(chart.to_json())`. |
+| `pipe` | Calls `fn` with the chart as its first argument and returns the result, so a chart can pass through a fluent pipeline. |
 
-**Deprecated aliases.** `show_svg()` and `show_png()` are retained as deprecated
-aliases that forward to `to_svg()` / `to_png()` and emit a `DeprecationWarning`.
-They are slated for removal after `0.16.0`. New code should call `to_svg()` /
-`to_png()` / `to_html()`.
+| `save()` format | Written |
+|---|---|
+| `svg` | `to_svg()` |
+| `png` | `to_png()` at the given `scale` |
+| `html` | `to_html(...)`; with `embed_wasm=False` the `ferrum_wasm_bg.wasm` sidecar is copied next to the file |
+| `json` | The rendered scene graph as JSON (the payload the interactive renderer draws), not the declaration from `to_json()` |
+| `pdf` | The PNG render at `scale`, wrapped in a single-page PDF (raster, not vector) |
 
-> **Note (2026-06-04):** The in-memory output methods were renamed
-> `show_svg()` -> `to_svg()` and `show_png()` -> `to_png()`, and `to_html() -> str`
-> was added (returns the interactive HTML string, byte-identical to
-> `save('.html')`). This unifies the surface on the `to_*` = in-memory-value
-> convention, leaving `show()` for display and `save(path)` for disk. The old
-> `show_svg`/`show_png` names remain as deprecated aliases that forward to the
-> new methods and emit a `DeprecationWarning`; they are slated for removal after
-> `0.16.0`. The rename applies to `Chart` and all composition views; on
-> composition views `to_png` is scale-only (no `raster` argument).
+The format is `format=` when given, else the path extension, lower-cased. A path with no extension and no `format=` raises `ValueError: save('<path>') requires a format= or a path with extension.`; any other format raises `unknown extension '<ext>'; supported: svg, png, html, json, pdf.` `save()` takes no keyword arguments beyond those in its signature, and none selects a renderer.
 
-> **Dated note (2026-09-11, batch H task 11 — `to_dict`/`to_json`/`pipe` generalize; `to_spec` stays `Chart`-only, F-L14-01/F-L14-02/F-L06-04):** `to_json(*, indent=None)` and `pipe(fn, *args, **kwargs) -> Any` are now real on every composition view (`HConcatChart`, `VConcatChart`, `ConcatChart`, `LayerChart`, `JointChart`, `RepeatChart`, `ClusterMapChart`), not just `Chart` — this table's blanket "these methods exist on ... every composition view" claim was itself stale before this task, since neither existed on any of the seven. Each composite also gains `to_dict() -> dict`: a *recursive* declaration dict (`{"kind": <layout>, ...layout fields..., <child slots>: <embedded dict(s)>}`) generalizing the pre-existing `JointChart.spec` / `RepeatChart.spec` / `ClusterMapChart.spec` introspection properties — a leaf `Chart` child embeds as `json.loads(chart.to_spec().to_json())` (round-trippable through `ChartSpec.from_json`), and a nested composite child now embeds *recursively* via its own `to_dict()` instead of the old `None` placeholder. Those three `.spec` properties are unchanged in shape and now recursive-consistent with `to_dict` through the one shared embedding helper (`composition._embed_chart_spec`) — for `JointChart`/`RepeatChart`/`ClusterMapChart`, `to_dict()` returns `.spec` (plus figure chrome when set — see the 2026-09-11 note below).
->
-> **Figure chrome in the declaration dict (2026-09-11, batch H close remediation).** A composition's figure-level `title` / `subtitle` / `caption` — set via `.properties(title=..., subtitle=..., caption=...)` — is part of its declaration, so `to_dict()` carries it under those key names, omitted when unset. The **six** `_CompositeBase` views (`HConcatChart`, `VConcatChart`, `ConcatChart`, `JointChart`, `RepeatChart`, `ClusterMapChart`) carry all three, because all three are figure-level slots on those classes. `LayerChart` carries **`title` only**: it is a single-plot overlay with one `_title` slot, and `.properties(subtitle=..., caption=...)` on it fans those kwargs to its member charts (a layer's own title blob) rather than storing figure chrome — that fan-out is pre-existing behavior, lossy for this purpose (a fanned `caption` reaches no layer slot at all), and is named here rather than papered over. Before this correction only `LayerChart` emitted `title` (and emitted it as `None` when unset) while the other six silently dropped every one of the three, so `(a | b).properties(title="t").to_dict()` had no title anywhere. Because unset chrome is omitted, a chrome-free composition's dict is unchanged, and `JointChart`/`RepeatChart`/`ClusterMapChart`'s `to_dict()` still equals `.spec` exactly when untitled — for a titled one it is `.spec` plus the chrome keys. The `.spec` properties themselves stay pure layout introspection and never gain chrome.
->
-> **Chrome values are normalized at ingress, LOSSLESSLY where a lossless
-> answer exists, and applied to all three chrome keys (2026-09-11, batch H
-> close cycle 3, H3-4; made lossless and widened to `subtitle=`/`caption=`
-> in cycle 4).** All three of `title=`/`subtitle=`/`caption=` accept a bare
-> `str` or a `ferrum.Title`, normalized at `.properties()` — before it ever
-> reaches `_figure_title`/`_figure_subtitle`/`_figure_caption` (or
-> `LayerChart`'s single `_title`) — not at `to_dict()`/serialization time.
-> **`title=fm.Title(text=..., subtitle=...)` routes the `Title`'s own
-> `subtitle` into the composite's separate, already-working `subtitle` slot**
-> (the six `_CompositeBase` views only — `LayerChart` has no such slot, see
-> below) when no explicit `subtitle=` was ALSO given in the same call;
-> giving both **in the same `.properties()` call** is refused typed, naming
-> both spellings, the same idiom as the conditional-vocabulary collision
-> refusals. This scoping is deliberate, not an oversight (2026-09-11, batch
-> H close cycle 5): **across separate calls it is not a collision at all** —
-> a later `.properties()` call's routed subtitle silently replaces an
-> earlier one, the same last-write-wins rule an explicit `subtitle=` already
-> follows across chained calls (`.properties(subtitle="OLD").properties(title=fm.Title("T",
-> subtitle="NEW"))` ends with the figure subtitle `"NEW"`, no warning — a
-> routed subtitle behaves exactly like an explicit one once it lands in the
-> `subtitle` slot). This corrects the cycle-3
-> shipped behavior, which flattened `title=fm.Title(..., subtitle=...)` to
-> `.text` and **silently dropped** the subtitle with no warning — the same
-> disease this batch refused `shape` conditionals for elsewhere in the same
-> cycle ("accepted and inert"), reached here via the declaration layer
-> instead of the wire. A `Title` field with genuinely nowhere to go on ANY
-> chrome slot — `anchor`, `offset`, `font_size`, `font_weight`, `color`,
-> `subtitle_font_size`, `subtitle_color` on any of the three keys; `subtitle`
-> itself on `subtitle=`/`caption=` (nesting makes no sense) or on
-> `LayerChart`'s `title=` (no separate subtitle slot exists there) — is
-> refused typed rather than silently dropped, naming the field(s) and the
-> fix. `to_dict()` still serializes `title`'s (already-plain) text through
-> `Title.to_spec_dict()`, so the top-level `title` stays `{"text": ...}`,
-> identical in shape to every embedded child's `title`; the routed subtitle
-> surfaces as the top-level `subtitle` KEY (a dict sibling of `title`, not
-> nested inside `title`'s own dict), since that is the slot that actually
-> renders.
->
-> **The composite-tree renderer only ever accepted a bare-string title (and
-> subtitle/caption), and now the declaration surface agrees for all three
-> (2026-09-11, batch H close cycle 3, H3-4; widened in cycle 4).** Every
-> composite output path (all six `_CompositeBase` views' `to_svg`/
-> `.interactive()`, and `LayerChart.to_svg`'s default/shared-y path) lowers
-> the figure title into the one-call Rust composite entry's wire `title`
-> field, which is a bare `Optional<String>` — there is no per-figure-title
-> richness slot in the composite tree the way a leaf `Chart`'s
-> `ChartSpec.title` has one (a full `TitleSpec` with
-> subtitle/anchor/offset/colors). Cycle 3 fixed this for `title=` only;
-> cycle 4 found `subtitle=fm.Title(...)`/`caption=fm.Title(...)` still
-> raised the identical unmapped PyO3 `TypeError: 'Title' object is not an
-> instance of 'str'` from `to_svg()` on every wrapper including `LayerChart`
-> (whose `subtitle=`/`caption=` fan a normalized string to member charts
-> rather than storing composite-level chrome — pre-existing, unrelated to
-> this fix), while `to_dict()`/`to_json()` silently accepted the same call.
-> All three keys, on all seven wrappers, now agree: `.properties(title=...,
-> subtitle=..., caption=...)` with any `fm.Title(...)` either renders or
-> refuses typed at `.properties()` time — it never builds a declaration
-> `to_svg()` cannot honor. `ferrum.Title`'s own docstring previously claimed
-> it was "accepted everywhere a title string is accepted" including
-> `HConcat/VConcat/Layer(title=...)`; that claim is corrected to describe
-> the routing/refusal rule above.
->
-> **`to_spec() -> ChartSpec` stays `Chart`-only.** `ChartSpec` is a leaf-only Rust dataclass (one mark/encoding/transform set); a composite view has no single `ChartSpec` to return, so it does not gain this method — the original wording above implying `to_spec` was universal across composition views was the stale claim being corrected here, not a feature being removed.
->
-> **Composite construction now validates its children (H17).** `HConcatChart` / `VConcatChart` / `ConcatChart` / `LayerChart` / `JointChart` / `RepeatChart` / `ClusterMapChart` each raise `TypeError: {Class} children must be Chart or composition objects, got {TypeName}` at construction when a child is neither a `Chart` nor another composition object (e.g. `fm.HConcatChart([a_dataframe])`), instead of constructing silently and failing much later at render time with `_lower_any`'s generic, node-agnostic `ValueError: unrecognized node kind '...'` — that render-time error remains as a backstop for node shapes the construction-time check cannot describe (e.g. a `JointChart` marginal that is a composite but not a leaf `Chart`, still rejected by `_composite_tree`). `Chart.__or__`/`__and__` and every composition view's `__or__`/`__and__` now return `NotImplemented` for a non-chart, non-composition operand (mirroring `Chart.__add__`'s existing `NotImplemented` fallback), so `chart | 3` raises Python's own operator `TypeError` ("unsupported operand type(s) for |: ...") rather than reaching the constructor at all.
+**Composition views.** `HConcatChart`, `VConcatChart`, `LayerChart`, `ConcatChart`, `JointChart`, `RepeatChart` and `ClusterMapChart` share one output surface, routed through the same save, show and HTML paths as `Chart`:
+
+```
+HConcatChart.show()
+HConcatChart.to_svg() -> str
+HConcatChart.to_png(*, scale=2.0) -> bytes
+HConcatChart.to_html(*, embed_wasm=True, toolbar=True, csp_nonce=None) -> str
+HConcatChart.save(path, *, format=None, scale=2.0, toolbar=True, embed_wasm=True, csp_nonce=None)
+HConcatChart.interactive(*, toolbar=True)
+HConcatChart.to_dict() -> dict
+HConcatChart.to_json(*, indent=None) -> str
+HConcatChart.pipe(fn, *args, **kwargs) -> Any
+```
+
+These differ from `Chart` in two ways: they take no `raster=` argument, and they have no `to_spec()`, because a `ChartSpec` describes one leaf chart and a composition has none to return. A composition's `to_json()` is `json.dumps(to_dict(), indent=indent)`.
+
+A composition's `to_dict()` is recursive: `{"kind": <layout>, <layout fields>, <child slots>}`, where `kind` is `"hconcat"`, `"vconcat"`, `"overlay"` (`LayerChart`), `"wrap"` (`ConcatChart`), `"joint"`, `"repeat"` or `"cluster_map"`. The concat views and `LayerChart` list their children under `children`. A leaf child embeds as `json.loads(child.to_spec().to_json())`, and a nested composition embeds as its own `to_dict()`. For `JointChart`, `RepeatChart` and `ClusterMapChart`, `to_dict()` equals the `.spec` layout property, plus figure chrome when set; `.spec` itself never carries chrome.
+
+**Figure chrome.** A composition's figure `title`, `subtitle` and `caption` are part of its declaration and appear as top-level `to_dict()` keys of those names, each omitted when unset. `title` serializes as `{"text": ...}`, the same shape as an embedded child's title; `subtitle` and `caption` are plain strings. The six non-layer views carry all three. `LayerChart` carries `title` only: it has one title slot, and `.properties(subtitle=..., caption=...)` on it forwards to its member charts, where a subtitle lands in each member's title and a caption is not kept anywhere, so it neither renders nor appears in the dict.
+
+`.properties(title=, subtitle=, caption=)` on a composition accepts a `str` or a `ferrum.Title`, normalized when `.properties()` is called. The composite renderer draws plain text in each slot, so:
+
+- `title=fm.Title(text, subtitle=...)` on one of the six non-layer views routes the `Title`'s subtitle into the composition's `subtitle` slot, where it behaves like an explicit `subtitle=`. Giving both in the same `.properties()` call raises `ValueError` (`properties(title=fm.Title(..., subtitle=...)) and properties(subtitle=...) both declare the figure subtitle; a composite has one subtitle slot. ...`). Across separate calls the later value replaces the earlier one without a warning, as with any repeated `subtitle=`.
+- Any `Title` field set away from its default that has no slot is refused with a `ValueError` naming the field and the fix, e.g. `properties(title=fm.Title(...)) with anchor set is refused: a composite figure title carries text plus one routed subtitle line only, with no slot for anchor. ...`. That covers `anchor`, `offset`, `font_size`, `font_weight`, `color`, `subtitle_font_size` and `subtitle_color` on all three keys, `subtitle` on `subtitle=` and `caption=`, and `subtitle` on a `LayerChart` title. A declaration that `.properties()` accepts always renders.
+
+**Construction checks.** Each composition view raises `TypeError: <Class> children must be Chart or composition objects, got <TypeName>` at construction when a child is neither a `Chart` nor a composition (e.g. `fm.HConcatChart([a_dataframe])`). `|` and `&` on a `Chart` or a composition return `NotImplemented` for any other operand, so `chart | 3` raises Python's own `TypeError: unsupported operand type(s) for |: 'Chart' and 'int'`.
+
+**The declaration dict is write-only.** The dict from `to_dict()` (a plain `dict`), and the JSON from `to_json()`, are an export for inspection, logging and diffing. Ferrum does not read them back: no public API builds a `Chart` or a composition from either, and `ferrum.__all__` has no `from_dict`. (`ChartSpec.from_json` parses a leaf's JSON into a `ChartSpec` value, but that value does not rebuild the chart: the dict carries no data rows, size, caption, theme, `configure_*` settings or annotations.) The key layout is not a versioned schema. It may change in any release, without a deprecation period. To rebuild a chart, keep the Python code that built it.
+
+**Deprecated aliases.** `show_svg()` and `show_png()` forward to `to_svg()` and `to_png()` with the same arguments and emit a `DeprecationWarning` (`Chart.show_svg() is deprecated; use Chart.to_svg() instead.`). They have been deprecated since `0.16.0` and will be removed in a future release. New code calls `to_svg()`, `to_png()` or `to_html()`.
 
 #### Environment detection order for `.show()`
 
-1. Jupyter / IPython → inline SVG (static) or WASM widget (if `.interactive()`)
-2. VS Code notebook → same
-3. ~~Terminal with sixel support → PNG via sixel~~ — **REMOVED (2026-05-15):** sixel is niche, inconsistent across terminal emulators, and ferrum's audience is Jupyter/browser-first. Not worth implementation effort.
-4. Otherwise → write temp HTML and open browser
+`.show()` always displays static SVG, on `Chart` and on every composition view:
+
+1. Inside an IPython shell whose class is `ZMQInteractiveShell` (Jupyter Notebook and Lab, VS Code notebooks, any ipykernel front end) or `TerminalInteractiveShell` (terminal IPython), it calls `IPython.display.display(IPython.display.SVG(chart.to_svg()))`. Terminal IPython takes this branch too, so it shows no image there. If that display call raises, `.show()` falls through to step 2.
+2. Otherwise it writes the SVG, wrapped in a minimal HTML page whose `<title>` and heading are the figure title (`"Ferrum chart"` when untitled), to a temporary `.html` file that is not deleted, and opens it with `webbrowser.open`.
+
+Sixel or other terminal-graphics output is not supported. `.show()` never displays the interactive renderer: to see it in a notebook, display the `InteractiveChart` that `.interactive()` returns (for example as a cell's last expression), and outside a notebook use `.to_html()` or `.save("chart.html")`. A chart that is a notebook cell's value displays through its rich-display hooks instead of `.show()`: a `Chart` provides `_repr_svg_` and `_repr_html_` (the SVG in a `<div>`), and falls back to its text repr if rendering fails; a composition provides `_repr_svg_` and an `image/svg+xml` `_repr_mimebundle_`.
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#316-output-and-rendering).
 
 ---
 
 ### 3.17 Rendering Backends
 
-Ferrum has three rendering backends. The backend used for a given output is determined by the call (`.save()` vs `.show()` vs `.interactive()`), the file extension or format, the mark count, and any explicit override in `RenderConfig` or `ferrum.config`.
+Ferrum has two renderers, chosen by the output method alone: the static renderer for SVG, PNG and PDF, and the wgpu/WASM renderer for interactive output. Mark count never switches renderers; a chart with many marks stays on the same renderer, and auto-raster (§3.16) may change the chart itself by substituting `mark_raster`.
 
 #### SVG Backend
 
-- Default for static output when mark count is below threshold.
-- Resolution-independent, text-searchable, scalable.
-- Not viable above ~50k marks.
-- Output: `.svg` files; inline SVG in notebooks.
+- Rust (`ferrum-core`) renders the chart's scene graph to SVG. It backs `to_svg()`, `save(".svg")`, `.show()` and notebook rich display, and every PNG and PDF starts from its output.
+- Resolution-independent and text-searchable. Text uses `font-family="Inter"`, with the bundled Inter Regular embedded as an `@font-face` data URI, so the SVG renders the same without the font installed.
+- There is no mark-count cap or warning on SVG output itself; size control is the auto-raster policy (§3.16).
 
 #### tiny-skia Backend (CPU Rasterizer)
 
-- Pure Rust, zero system dependencies (no Cairo, no libpng, no X11).
-- Bundled in the wheel; works on Linux, macOS, Windows, ARM.
-- Text rendering via `fontdue` (rasterization) + `rustybuzz` (shaping); fonts bundled or resolved from system font paths.
-- Default for `.save("chart.png")` and `.show()` when mark count exceeds threshold.
-- Not used for interactive output.
-- Performance: ~200–800 ms for 1M antialiased marks (CPU-bound, SIMD-optimized); tile-based Rayon parallelism available as opt-in via `RenderConfig`.
-- Default output scale: `2.0` (retina); configurable in `RenderConfig`.
-- Limitations: no vector output; zoom invalidates raster and requires re-render.
+- `to_png()` and `save(".png")` rasterize the SVG from the SVG backend with `resvg` (`usvg` parsing, `tiny-skia` drawing): pure Rust, no system dependencies (no Cairo, libpng or X11), bundled in the wheel.
+- Text is drawn from the bundled Inter Regular only; system fonts are not loaded.
+- Output pixel size is the SVG's intrinsic size times `scale` (default `2.0`, retina).
+- `save(".pdf")` wraps this PNG in a single-page PDF, so PDF output is raster, not vector.
+- Not used for interactive output. Limitations: no vector output; zooming a PNG does not re-render it.
 
 #### wgpu / WASM Backend (GPU Interactive)
 
-- Used only when `.interactive()` is called.
-- `wgpu` targets WebGPU (Chrome 113+, Edge 113+, Safari 17+) with automatic WebGL2 fallback for broader compatibility.
-- Vello is not used; its compute-shader-based approach is incompatible with the WebGL2 fallback path. Instanced draws for simple marks (points, bars) and tessellation for curves and areas require no compute shaders and work across both WebGPU and WebGL2.
-- Text and axis labels rendered via CSS overlay (real DOM text; accessible, no font bundling required in browser context).
-- Pan and zoom are GPU matrix transforms — no Python round-trip, no re-render.
-- Selections that trigger Python-side recomputation require a Python kernel round-trip (~50–200 ms in local notebooks); managed via the `anywidget` protocol.
-- Jupyter integration via `anywidget`; browser integration via standalone HTML bundle.
-- WASM bundle size: ~2–4 MB compressed (CDN-hosted recommended).
-- On macOS including M-series, the native `wgpu` backend targets Metal; unified memory architecture reduces GPU buffer upload latency vs. discrete GPUs.
-- Viewport changes (zoom, resize) trigger re-rasterization of `mark_raster` layers at the new resolution.
+- Used for `.interactive()` and for every HTML export (`to_html()`, `save(".html")`), which is always interactive. Rust renders the scene graph plus packed mark data, and the browser draws it with the `ferrum-wasm` module; `save(".json")` writes that scene graph.
+- `wgpu` requests WebGPU where the browser provides it and falls back to WebGL2, with device limits held to the WebGL2 downlevel defaults.
+- No compute shaders, so the same pipeline runs on WebGPU and WebGL2: simple marks (points, bars) are instanced draws and curves and areas are tessellated with `lyon`. Vello is not used, since its compute-shader approach cannot run on the WebGL2 fallback.
+- Text and axis labels are real DOM text in an SVG overlay above the canvas.
+- Pan and zoom are view transforms applied in the browser, with the overlay text re-placed; redrawing needs no Python round-trip.
+- Jupyter integration is through `anywidget` (the `jupyter` extra, `ferrum-viz[jupyter]`): selection state syncs to Python as `InteractiveChart.selection_state`, and `on_selection_change(callback)` registers a Python callback. Without `anywidget`, an `InteractiveChart` displays as its text repr, and `to_html()` and `save()` still work.
+- An `InteractiveChart` has `to_html` (keyword-only `embed_wasm` and `csp_nonce`) and `save` (`path`, then keyword-only `format`, `embed_wasm`, `csp_nonce` and `scale`), with the same defaults as on `Chart`. Both route through the same HTML and save paths as `Chart` and carry the `toolbar` flag given to `.interactive()`; it has no `show`, `to_svg` or `to_png`.
+- The WASM binary is several megabytes. HTML export base64-inlines it by default; `embed_wasm=False` references a `ferrum_wasm_bg.wasm` sidecar instead.
 
 #### Backend selection
 
-The threshold column refers to `raster_threshold` (default `500_000`), configurable in `RenderConfig` and `ferrum.config`.
+| Call | Backend |
+|---|---|
+| `.to_svg()`, `.save("chart.svg")` | SVG |
+| `.to_png()`, `.save("chart.png")` | SVG, rasterized by tiny-skia |
+| `.save("chart.pdf")` | SVG, rasterized by tiny-skia, wrapped in PDF |
+| `.show()`, notebook rich display of a chart | SVG (inline in a notebook, else in a browser page) |
+| `.interactive()`, `.to_html()`, `.save("chart.html")` | wgpu / WASM |
+| `.save("chart.json")` | Scene graph JSON (the WASM renderer's input) |
 
-| Call                                            | Backend                            |
-|-------------------------------------------------|------------------------------------|
-| `.save("chart.svg")`                            | SVG (warns if `mark_count > 50k`)  |
-| `.save("chart.png")`                            | tiny-skia                          |
-| `.show()` — `mark_count < threshold` (def 500k) | SVG inline                         |
-| `.show()` — `mark_count >= threshold`           | tiny-skia PNG                      |
-| `.show()` in headless / no display              | tiny-skia PNG (always)             |
-| `.show()` in terminal with sixel support        | ~~tiny-skia → sixel~~ — removed    |
-| `.interactive()`                                | wgpu / WASM                        |
-
-Per-call `RenderConfig` takes precedence over global `ferrum.config` settings for all threshold and backend parameters.
+The auto-raster threshold (`RenderConfig.raster_threshold`, default `500_000`) never changes this table; it decides only whether eligible marks are substituted by `mark_raster` before rendering.
 
 ---
 
 ### 3.18 Data Source Compatibility
 
-Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level functions:
+`Chart(data=...)` and the figure-level functions accept the inputs below. Every input is converted to one Arrow table by `ferrum._coerce.to_arrow_table` at render time, normalized once by `normalize_for_rust`, and crosses to Rust once over the Arrow C Data Interface.
 
-| Type | Notes |
+| Type | Behavior |
 |---|---|
-| `polars.DataFrame` | Zero-copy via Arrow |
-| `polars.LazyFrame` | Collected at render time; lazy evaluation where possible |
-| `pandas.DataFrame` | Converted to Arrow once on first access |
-| `pyarrow.Table` | Native |
-| `pyarrow.RecordBatch` | Native |
-| `dict[str, list]` | Converted to Arrow inline |
-| `list[dict]` | Converted to Arrow inline |
-| `numpy.ndarray` (2D) | Columns named `col_0`, `col_1`, ... |
-| `ModelSource` | Wraps an estimator; derived data accessed via `.predictions()` etc. |
-| `ComparedModelSource` | Multi-model wrapper; adds `model` column to all derived data |
-| `str` / `pathlib.Path` | CSV, Parquet, JSON, NDJSON; loaded lazily |
-| `None` | Data supplied per-layer |
+| `polars.DataFrame` | Exported to Arrow by polars' own `to_arrow`, zero-copy except for the columns cast first: `Date` and non-millisecond `Datetime` become `Datetime("ms")`, and `Categorical` and `Enum` become strings. |
+| `polars.LazyFrame` | Collected once, then handled as a `polars.DataFrame`. |
+| `polars.Series` | One column, named by the series. |
+| `pandas.DataFrame` | Converted through narwhals (`narwhals>=1.0,<2` is a dependency; pandas is not). |
+| `pandas.Series` | One column, named by the series, or `"value"` when it is unnamed. |
+| Other eager frames narwhals accepts (modin, cuDF) | Converted through narwhals' `from_native` with `eager_only=True`. Lazy frames other than `polars.LazyFrame` (dask, ibis) are not accepted. |
+| `pyarrow.Table` | Used as is, after `date32`/`date64` and non-millisecond `timestamp` columns are cast to `timestamp[ms]`. |
+| `pyarrow.RecordBatch` | Wrapped as a one-batch table. |
+| `dict[str, list]` | `pyarrow.Table.from_pydict`. A GeoJSON `FeatureCollection` dict, or a bare GeoJSON geometry dict, is read as features instead: property columns plus a geometry column. |
+| `list[dict]` | One dict per row, `pyarrow.Table.from_pylist`. An empty list raises `ValueError: Cannot construct Chart from empty list`; a list of non-dicts raises `TypeError: Chart(list) expects a list of dicts (one per row), got list of int`. |
+| `numpy.ndarray` (2D) | Columns named `col_0`, `col_1`, ... A 1D array raises `TypeError` asking for column names (`Chart({'value': arr})`); an array with `ndim > 2` raises `TypeError: numpy arrays with ndim=3 not supported (use 2D)`. |
+| `None` | A chart with no data of its own, for layers that bring theirs: compose independent-data charts with `+` or `ferrum.layer(...)` (§3.12). Rendering a chart whose data is `None` raises `ValueError: Chart(data=None) requires per-layer data. ...`. |
 
-> **2026-05-10 (Phase 8a):** Data input compatibility provided via narwhals
-> (~1.x) for pandas, modin, cuDF, dask, ibis. Polars goes via direct CDI
-> (zero-copy). pyarrow `Table` and `RecordBatch` accepted as native. Dict,
-> list-of-records, and 2D numpy with auto-named columns supported. File path
-> inputs (`Chart("file.csv")`) and `ModelSource`/`ComparedModelSource`
-> deferred to Phases 9 and 10 respectively.
+Any other type goes to narwhals, and one narwhals cannot read raises `TypeError: Unsupported data type: <type>. Supported: ...`. File paths are not data: a `str` or `pathlib.Path` is refused like any other unsupported type, so load a file with polars or pyarrow first. `ModelSource` and `ComparedModelSource` (§3.1) are not `Chart` data either; their derivation methods (`predictions()`, `roc_curve()`, ...) return `polars.DataFrame`s that are, a `ComparedModelSource`'s with an added `model` column, and the diagnostic figure functions take a source directly (§3.14).
 
-> **Dated note (2026-09-25, wave 6C, `#167`(1) — `Utf8View`/`LargeUtf8` string columns normalize through an Arrow cast):** a string column arriving as `Utf8View` or `LargeUtf8` (e.g. from a pyarrow/polars source using Arrow's newer string encodings) now casts to `Utf8` via `arrow::compute::cast` and renders byte-identically to the same column carried as plain `Utf8`. A cast that cannot complete refuses with a typed `RenderError::StringNormalizationFailed` naming the column and the reason, instead of an internal error. `Utf8` columns are unaffected.
+**Column normalization.** Before the table reaches Rust, `normalize_for_rust` applies one dtype contract on every path (static and interactive): `date32`/`date64` and `timestamp` of any unit become `timestamp[ms]`; `duration` of any unit becomes `timestamp[ms]` with the same temporal scaling; a dictionary-encoded column is decoded to its value type; an all-null `Null` column becomes `float64`. On the Rust side, a string column carried as `Utf8View` or `LargeUtf8` (as polars and newer pyarrow export strings) is cast to `Utf8` with `arrow::compute::cast` and renders identically to the same column carried as `Utf8`. A cast that cannot complete is a typed render error, `could not normalize column '<name>' to Utf8: <reason>` (`RenderError::StringNormalizationFailed`).
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#318-data-source-compatibility).
 
 ---
 
 ### 3.19 Utilities
 
+**Color helpers (`ferrum.color`).** The functions read the one palette registry (`crates/ferrum-core/src/render/color/palette.rs` and `.../color/continuous.rs`) through the `ferrum._core` accessors `list_palettes`, `palette_kind`, `palette_colors` and `palette_sample`, so they return the colors that render.
+
 ```
-# ferrum.data — REMOVED (2026-05-15)
-# Users source sample data from sklearn/seaborn optional dependencies.
-# A ferrum-native dataset loader duplicates existing ecosystem tooling
-# with no user-facing benefit. This namespace will not be implemented.
-
-ferrum.color.palette(scheme, n)            # return n colors from a scheme as hex list
-ferrum.color.to_hex(color, *, scale=None)  # normalize color to hex; scale="unit"|"byte"
-ferrum.color.sequential(name, n=256)       # n render-truth samples of a sequential scheme
-ferrum.color.diverging(name, n=11)         # n render-truth samples of a diverging scheme
-ferrum.color.diverging_palette(low, mid, high, n)
-
-# 2026-06-22 (T2.2, ENC-06/XNAME-02/XSIB-07/ENC-11): the palette registry in
-# crates/ferrum-core/src/render/palette.rs + .../color/continuous.rs is the
-# single source of truth. ferrum.color consumes it through the _core accessors
-# (list_palettes / palette_kind / palette_colors / palette_sample); the
-# hand-mirrored Python hex tables are gone. Surfaced behavior changes:
-#   * color.palette()/sequential()/diverging() for the 7 colorous-backed
-#     schemes (viridis, plasma, magma, inferno, cividis, blues, rdbu) now
-#     return RENDER-TRUTH colors (what actually renders), replacing the old
-#     hand-picked 7-stop approximations. The 19 other palettes are unchanged.
-#   * scheme= on Color/Fill/Stroke is validated at declaration time against the
-#     registry (a bogus name raises ValueError immediately, not at render).
-#   * to_hex(color, scale=) takes an explicit "unit"/"byte" override; the
-#     default (scale=None) heuristic is now range-based (any component > 1 means
-#     byte), so (1,0,0) and (1.0,0.0,0.0) agree. Pass scale="byte" for the old
-#     all-integers-are-bytes interpretation of ambiguous <=1 tuples.
-#   * scheme= is the canonical colormap kwarg on mark_raster/mark_contour/
-#     mark_hex/clustermap; cmap= remains a documented back-compat alias.
-
-ferrum.config.set_max_rows(n)              # raise/lower data size guard (default: None)
-ferrum.config.set_renderer(renderer)       # default renderer for .show()
-ferrum.config.set_default_width(n)
-ferrum.config.set_default_height(n)
-
-ferrum.config.set_raster_threshold(n)      # mark count threshold for auto-raster
-                                           # substitution. Pass None to disable.
-                                           # Default: 500_000.
-ferrum.config.set_raster_behavior(mode)    # "warn" (default), "silent", "error"
-ferrum.config.set_default_backend(backend) # "svg", "tiny-skia", "wgpu", or None (auto)
-ferrum.config.set_font_paths(*paths)       # prepend paths to the font search list
-                                           # used by the tiny-skia backend
-
-ferrum.Title(text, *, subtitle=None, anchor="start", offset=None,
-             font_size=None, font_weight=None, color=None,
-             subtitle_font_size=None, subtitle_color=None)
-
-ferrum.Grid(major=True, minor=False, *,
-            color=None, width=None, dash=None, opacity=None,
-            major_color=None, minor_color=None,
-            major_dash=None, minor_dash=None,
-            major_width=None, minor_width=None,
-            major_opacity=None, minor_opacity=None)
-# 2026-05-30 (item 18): the bare color=/width=/dash=/opacity= shorthand
-# (shown in the Theme example above) is a FALLBACK that sets BOTH the major
-# and minor level; an explicit major_*/minor_* overrides that level. minor
-# gridlines render on continuous axes only (linear/log/time/pow/sqrt/symlog);
-# categorical/discretizing axes have no continuum to subdivide, so minor=True
-# is a documented no-op there. Major ticks/gridlines are scale-projected (a
-# tick at value v coincides with a data mark at v); minors subdivide between
-# them on the same grid.
-
-ferrum.Aggregate(fn, field, *, as_=None)   # used in transform_aggregate
-ferrum.WindowTransform(fn, *, field=None, param=None, as_=None, peer=False)
+ferrum.color.palette(name, n=None)
+ferrum.color.sequential(name, n=256)
+ferrum.color.diverging(name, n=11)
+ferrum.color.to_hex(color, *, scale=None)
 ```
+
+- `palette` returns hex strings from any registered palette (10 categorical, 16 sequential, 4 diverging). A categorical palette returns all its colors when `n` is `None` and cycles when `n` exceeds its length. A continuous palette is sampled `n` times evenly at `t = i / (n - 1)`, endpoints included, with the renderer's own interpolator (`n` defaults to 7; `n=1` returns the midpoint; `n=0` returns `[]`). An unknown name raises `ValueError: Unknown palette: 'nope'. Available: <every name, sorted>`.
+- `sequential` and `diverging` sample a continuous palette the same way, and accept only their own kind: `ValueError: Unknown sequential palette: 'rdbu'. Available: ...` (and `Unknown diverging palette: ...`).
+- `to_hex` normalizes a color string (the one vocabulary of §3.2, parsed by the Rust color parser) or an RGB(A) tuple to `#rrggbb`, or `#rrggbbaa` when the alpha is not fully opaque; a fully opaque alpha is dropped on both input forms, so `to_hex` is idempotent on its own output. `scale="unit"` reads tuple components in `[0, 1]`, `scale="byte"` in `[0, 255]`; with `scale=None` a tuple is byte-scaled when any of r, g, b exceeds 1 and unit-scaled otherwise, so `(1, 0, 0)` and `(1.0, 0.0, 0.0)` are both `#ff0000`. A byte reading forced by a non-integer component above 1, such as `(0.9, 0.9, 1.1)`, warns (`to_hex: ambiguous color tuple ...`). A paint-clearing sentinel (`"none"`, `"transparent"`) raises `ValueError` saying it has no hex form, and so do a non-numeric component, a tuple shorter than 3, and a `scale` other than `"unit"`, `"byte"` or `None`.
+
+`scheme=` on `Color`, `Fill` and `Stroke` is checked against the registry at construction (`ValueError: Color(scheme=...): Unknown palette: 'bogus'. Available: ...`). `scheme=` is the colormap keyword of `mark_raster`, `mark_contour`, `mark_hex`, `heatmap` and `clustermap` (and `raster_scheme=` of `RenderConfig`), with `cmap=` (`raster_cmap=`) as an alias: passing both with different values raises `ValueError: mark_raster: pass either scheme= or cmap= (its alias), not both with different values; ...`, and a name that is not a registered continuous colormap raises `ValueError: mark_raster: color scheme 'bogus' is not recognized; available: ...`.
+
+**Process defaults (`ferrum.config`).** A per-context store (`contextvars.ContextVar`), so a value set in one thread or task does not leak into another.
+
+```
+ferrum.config.set(**kwargs)
+ferrum.config.get(key)
+ferrum.config.defaults(**kwargs)
+ferrum.config.reset()
+```
+
+`set` merges keyword values into the store; `get` returns a stored value, else the built-in default, and raises `KeyError: "Unknown config key: 'nope'"` for a key with neither; `defaults` is a context manager that applies its values inside the `with` block and restores the prior store on exit; `reset` clears every stored value. `set` and `defaults` do not check key names, so a misspelled key is stored and has no effect.
+
+| Key | Built-in default | Read by |
+|---|---|---|
+| `width` | `640` | The render viewport of a chart with no width of its own (a `width=` given to `Chart` or `.properties` wins). |
+| `height` | `480` | The same, for height. |
+| `renderer` | `"svg"` | Stored only; no render path reads it. |
+| `max_rows` | `5000` | Stored only; no row limit is enforced. |
+| `raster_threshold` | `500_000` | Stored only; the auto-raster threshold is `RenderConfig`'s `raster_threshold` (§3.16). |
+
+**Titles.** A leaf chart's `title=` (`Chart(title=...)`, `.properties(title=...)`) takes a string or a `Title`; a string is `Title(text=string)`. On a leaf every field renders. Composite figure titles accept only what their chrome can draw (§3.16).
+
+```
+ferrum.Title(text, subtitle=None, anchor="start", offset=None, font_size=None, font_weight=None, color=None, subtitle_font_size=None, subtitle_color=None)
+```
+
+`anchor` is `"start"`, `"middle"` or `"end"`; `subtitle=None` draws no second line.
+
+**Gridlines.** `Grid` is the value of the theme's `grid` key (`Theme(grid=...)`, `theme.update(grid=ferrum.Grid(...))`); a bare `bool` there sets `major` alone.
+
+```
+ferrum.Grid(major=True, minor=False, color=None, width=None, dash=None, opacity=None, major_color=None, minor_color=None, major_width=None, minor_width=None, major_dash=None, minor_dash=None, major_opacity=None, minor_opacity=None)
+```
+
+The bare `color`, `width`, `dash` and `opacity` set both levels; a `major_*` or `minor_*` value overrides its own level. Only the resolved per-level keys reach the renderer. Major gridlines sit on the major ticks, which are scale-projected, so a gridline at value v is on the pixel of a mark at v. `minor=True` draws minor gridlines strictly between the majors on continuous axes (linear, log, time, pow, sqrt, symlog); a categorical or discretizing axis (band, ordinal, quantile, threshold, bin-ordinal) has no continuum to subdivide, so it draws none and does not raise.
+
+**Aggregation values.** `Aggregate` is the group-by stat transform passed to `.transform(...)`; each `AggregateOp` names one input column, one function from the aggregation vocabulary of §3.5 and its output column (`AggregateOp: unknown fn 'bogus'; expected mean|sum|count|...` otherwise). The dict-spec builders `transform_aggregate`, `transform_join_aggregate` and `transform_window` (whose ops are `{"op": ..., "as": ...}` dicts; there is no window value class) are in §3.5.
+
+```
+ferrum.AggregateOp(field, fn_, as_)
+ferrum.Aggregate(ops, *, groupby=None, name=None)
+```
+
+ferrum has no `ferrum.data` namespace and ships no sample datasets.
+
+> **Consolidated 2026-10-12.** Earlier dated notes for this section are kept verbatim in [spec history](design-docs/spec-history.md#319-utilities).
 
 ---
 
@@ -3346,37 +2469,23 @@ ferrum.WindowTransform(fn, *, field=None, param=None, as_=None, peer=False)
 
 ## Part IV: Extension Points
 
+ferrum has no plugin registry. There is no `register_mark`, `register_stat` or `register_renderer`, and no `MarkProtocol`, `StatProtocol` or `RendererProtocol`: a new mark, stat transform or output format is added inside the library, not by user registration. What a user extends without the library's help is below.
+
 ### Custom Marks
 
-Implement the `MarkProtocol`:
-
-```
-class MyMark:
-    def to_primitive_layers(self, data: ArrowTable, encodings: Encodings) -> list[PrimitiveLayer]:
-        ...
-```
-
-Register: `ferrum.register_mark("mark_my_mark", MyMark)`
+Not provided as a protocol. A custom visual form is built by composing shipped marks: layering charts with `+` or `ferrum.layer(...)` (§3.12), or giving a mark precomputed columns.
 
 ### Custom Stat Transforms
 
-Implement `StatProtocol`:
-
-```
-class MyStat:
-    def apply(self, data: ArrowTable) -> ArrowTable:
-        ...
-```
-
-Register: `ferrum.register_stat(MyStat)`
+Not provided as a protocol. A custom statistic is computed on the data before it is passed (for example, with polars), and the result is charted with the shipped marks.
 
 ### Custom Themes
 
-Themes are plain dataclass instances. No registration needed — pass directly to `.theme()`.
+Themes are `Theme` values, not registered: build one with `Theme(**keys)` or derive one from a built-in with `.update(...)` (which returns a new `Theme`), and pass it to `.theme()` or `ferrum.set_default_theme()` (§3.13). An unknown key raises `ValueError: Unknown Theme key(s): [...]`.
 
 ### Renderer Plugins
 
-Implement `RendererProtocol` and register via `ferrum.register_renderer(name, RendererClass)`. The built-in renderers (`"svg"`, `"png"`, `"html"`, `"json"`) cannot be overridden, only supplemented.
+Not provided. The output formats are the built-in ones of §3.16 (`to_svg`, `to_png`, `to_html`, `to_json`, `save`, `show`, `interactive`).
 
 ---
 
@@ -3384,11 +2493,11 @@ Implement `RendererProtocol` and register via `ferrum.register_renderer(name, Re
 
 ## Appendix: Version Target
 
-This document describes **Ferrum 1.0 API surface**. Nothing here exists yet.
+This document describes the shipped ferrum API as of 0.24.0.
 
 The intent is that 1.0 be complete enough that a practitioner moving from Altair, Seaborn, or Yellowbrick finds every chart type they reach for without falling back to matplotlib.
 
-Post-1.0 candidates (explicitly out of scope for 1.0):
+Not in the shipped API, and candidates for after 1.0:
 
 - `mark_network` / graph layout
 - `mark_gantt` / timeline
