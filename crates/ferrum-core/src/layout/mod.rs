@@ -11030,6 +11030,46 @@ mod tests {
         assert!(room.culls_x_labels(&labelling(&plot, x, |i| i % 3 == 0)), "the next stride is a loss");
     }
 
+    /// A culled blank-label tick is not a lost label ([`lost_x_tick_labels`]
+    /// filters `!t.label.is_empty()` before counting a cull or elide): on a
+    /// categorical axis (no even-thinning exception), a pass that culls only
+    /// a blank-label tick, drawing every one of its own generated labels,
+    /// draws as many as `auto=false` and is usable; the same pass with one
+    /// more, real tick also culled loses one real label and is not.
+    #[test]
+    fn a_culled_blank_label_tick_on_a_categorical_axis_is_still_usable() {
+        let (mut room, plot, x) = eleven_x_ticks(false);
+        assert!(!room.x_continuous, "fixture assumption: the x axis is categorical");
+        let mut blanked = plot.clone();
+        blanked.axis_layouts[x].ticks[1].label = String::new();
+        room.x_label_losses = x_label_losses(&blanked);
+        assert_eq!(
+            room.x_label_losses,
+            vec![0],
+            "fixture assumption: auto=false draws every generated (non-blank) tick"
+        );
+        let blank_only_culled = labelling(&blanked, x, |i| i != 1);
+        assert_eq!(
+            lost_x_tick_labels(&blank_only_culled.axis_layouts[x]),
+            0,
+            "the culled blank tick is not a lost label"
+        );
+        assert!(
+            !room.culls_x_labels(&blank_only_culled),
+            "culling only the blank tick draws every generated label"
+        );
+        let blank_and_real_culled = labelling(&blanked, x, |i| i != 1 && i != 3);
+        assert_eq!(
+            lost_x_tick_labels(&blank_and_real_culled.axis_layouts[x]),
+            1,
+            "the one real tick culled alongside the blank one is a lost label"
+        );
+        assert!(
+            room.culls_x_labels(&blank_and_real_culled),
+            "culling a real tick too is a loss"
+        );
+    }
+
     /// A pass that lays out a different number of x axes than `auto=false`
     /// is unusable. An x axis that draws no labels (`show_labels == false`)
     /// loses none, however its ticks are flagged.

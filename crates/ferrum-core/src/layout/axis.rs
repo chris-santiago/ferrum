@@ -7884,6 +7884,94 @@ mod tests {
         );
     }
 
+    /// An explicit `label_angle=` axis whose survivors never fit the band
+    /// budget — even once culled by stride, since the stride-cull elides
+    /// each survivor against its own widened slot, and a fixed angle's
+    /// drawn band never shrinks just because more room opened up — draws
+    /// tick marks only. Proportional metrics: twelve labels alternating a
+    /// cheap (`'i'`) and an expensive (`'W'`) glyph at 45°; index 0 is
+    /// always a stride survivor, so every stride's drawn band is anchored
+    /// by that `'i'`-run's own width (elided only to the pre-cull slot,
+    /// never wider), and the lone `'W'` surviving a given stride (never
+    /// narrower than the `'i'`-run once un-elided) never brings the band
+    /// under budget either.
+    #[test]
+    fn an_explicit_angle_axis_whose_survivors_never_fit_draws_tick_marks_only() {
+        let m = MockMetrics {
+            measure: |s: &str, _fs: f64| {
+                s.chars()
+                    .map(|c| match c {
+                        'i' => 7.0,
+                        'W' => 42.0,
+                        '\u{2026}' => 10.0,
+                        _ => 8.0,
+                    })
+                    .sum::<f64>()
+            },
+            line_h_factor: 1.2,
+        };
+        let labels: Vec<String> = (0..12)
+            .map(|i| if i % 2 == 0 { "iiiiiiiiii".to_string() } else { "W".to_string() })
+            .collect();
+        let mut input = axis_input(AxisOrient::Bottom, None, labels, None);
+        input.overrides.labels.angle = Some(45.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let panel_w = 360.0;
+        let (free, _) = lay_out_x_tick_labels(&input, 0.0, panel_w, &ctx);
+        let band_initial = band_of(&free, &input, &ctx);
+        assert!(
+            (band_initial - 52.81).abs() < 0.01,
+            "fixture assumption: the unbudgeted band is 52.81, got {band_initial}"
+        );
+        // Midway between the all-'i…'-survivors band (49.98, what a stride-2
+        // cull alone would need) and the unbudgeted band (52.81): a tight
+        // enough budget that no stride's drawn band can meet it.
+        let budget = (49.98 + 52.81) / 2.0;
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, panel_w, &ctx.with_band_budget(budget));
+        assert!(
+            ticks.iter().all(|t| t.culled),
+            "no stride's survivors fit under budget, so none are drawn: {ticks:?}"
+        );
+    }
+
+    /// An axis whose over-budget band is driven by a wide label that a
+    /// stride's cull removes draws its narrower survivors, unelided, at
+    /// that very stride. Four labels alternating a narrow `"ab"` and a wide
+    /// `"W"`; stride 2 keeps only the `"ab"`s, and their own (much smaller)
+    /// band fits a budget the full, `"W"`-driven density does not.
+    #[test]
+    fn an_explicit_angle_axis_thins_when_the_wide_label_is_culled_away() {
+        let m = MockMetrics {
+            measure: |s: &str, _fs: f64| {
+                s.chars()
+                    .map(|c| match c {
+                        'W' => 42.0,
+                        '\u{2026}' => 10.0,
+                        _ => 8.0,
+                    })
+                    .sum::<f64>()
+            },
+            line_h_factor: 1.2,
+        };
+        let labels: Vec<String> = (0..4)
+            .map(|i| if i % 2 == 0 { "ab".to_string() } else { "W".to_string() })
+            .collect();
+        let mut input = axis_input(AxisOrient::Bottom, None, labels, None);
+        input.overrides.labels.angle = Some(45.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let panel_w = 120.0;
+        let (free, _) = lay_out_x_tick_labels(&input, 0.0, panel_w, &ctx);
+        let band_initial = band_of(&free, &input, &ctx);
+        assert!(band_initial > 43.0, "fixture assumption: full density needs culling, got {band_initial}");
+        let (ticks, _) = lay_out_x_tick_labels(&input, 0.0, panel_w, &ctx.with_band_budget(43.0));
+        let drawn: Vec<&TickLayout> = ticks.iter().filter(|t| !t.culled).collect();
+        assert_eq!(drawn.len(), 2, "stride 2, every other label drawn");
+        assert!(
+            drawn.iter().all(|t| !t.elided && t.label == "ab"),
+            "the narrow survivors draw in full once the wide one is culled away: {drawn:?}"
+        );
+    }
+
     // ── the x label band budget ──────────────────────────────────────────────
 
     /// Twelve 60px labels on a 360px axis: the cascade rotates them to -90

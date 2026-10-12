@@ -1539,8 +1539,12 @@ fn route_panel_axes_and_grid(
             }
         } else {
             for axis in panel_axes_layout {
-                if dual_axis && matches!(axis.orient, crate::layout::AxisOrient::Left) {
-                    // The primary y-axis (slot 0) in the shared/global layout.
+                // The primary y-axis (slot 0) in the shared/global layout:
+                // every y-oriented axis here is the primary, Left or Right
+                // (a reoriented `configure_axis_y(orient="right")`), so a
+                // dual-axis panel tags it the same way the independent branch
+                // above always does, regardless of its own orient.
+                if dual_axis && matches!(axis.orient, crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right) {
                     route_y_axis_slotted(axis, 0, &mut axes_above, &mut axes_below);
                 } else {
                     route_axis(axis, &mut axes_above, &mut axes_below);
@@ -7033,6 +7037,48 @@ mod tests {
         assert!(
             with_secondary_axis_nodes > baseline_axis_nodes,
             "secondary axis must emit its own scene nodes: baseline={baseline_axis_nodes}, with={with_secondary_axis_nodes}"
+        );
+    }
+
+    /// A dual-axis panel slot-tags every y axis, slot 0 (primary) included,
+    /// whatever that axis's own orient — on the shared path (an unfaceted
+    /// chart, read through `panel_axes_layout`'s global list) exactly as on
+    /// the independent-facet path (read from the per-panel inputs directly).
+    /// `configure_axis_y(orient="right")` alongside an `independent_y` layer
+    /// reaches a Right-oriented primary on the shared path, the one case the
+    /// two branches used to disagree on.
+    #[test]
+    fn a_dual_axis_chart_slot_tags_every_y_axis_whatever_its_orient() {
+        use super::super::chart_config::{AxisConfigSpec, AxisStyleSpec, ChartConfig};
+
+        let (spec, batch) = two_layer_dual_y_spec(true);
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let config = super::super::config::RenderConfig::default();
+        let right_primary = ChartConfig {
+            axis_y: Some(AxisConfigSpec {
+                style: AxisStyleSpec {
+                    orient: Some("right".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (json, _, _) =
+            super::super::render_scene_json(&spec, &batch, &theme, viewport, &config, &right_primary)
+                .unwrap();
+        let scene: ferrum_scene::SceneGraph = serde_json::from_str(&json).unwrap();
+        let tags = collect_y_slot_group_tags(&scene.panels[0].axes);
+        let mut sorted_tags = tags.clone();
+        sorted_tags.sort();
+        assert_eq!(
+            sorted_tags,
+            vec!["0".to_string(), "1".to_string()],
+            "a Right-oriented primary and its secondary are both slot-tagged, got {tags:?}"
         );
     }
 

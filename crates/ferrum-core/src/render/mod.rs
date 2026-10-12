@@ -5878,6 +5878,57 @@ mod orchestration_tests {
         }
     }
 
+    /// `route_panel_axes_and_grid` keeps two separate branches (independent
+    /// vs. shared facet resolution), and the x/y write order is an artifact
+    /// of that split, not a decision either branch makes on purpose: the
+    /// independent branch emits the x axis's nodes before the y axis's;
+    /// the shared branch walks the global per-panel axis list, which layout
+    /// fills with the y axis before the x (`layout/mod.rs` pushes `y_axis`
+    /// then `x_axis`), so a shared panel emits y before x. The bottom-left
+    /// panel of a 2x2 grid draws both titles, so its node order pins which
+    /// axis went first. The two asymmetric cases (only one channel
+    /// independent) pin that each channel's own `resolve` flag decides the
+    /// branch, not the other channel's. A future collapse of the two
+    /// branches into one would change this order along with it; this test
+    /// is then the one to rewrite, not preserve.
+    #[test]
+    fn an_independent_facet_panel_writes_x_before_y_a_shared_one_writes_y_first() {
+        use crate::layout::facet::FacetResolve;
+        use crate::layout::ResolveMode::{Independent, Shared};
+        let four = ["A", "B", "C", "D"];
+        let cases = [
+            (FacetResolve { x: Shared, y: Shared }, false),
+            (FacetResolve { x: Independent, y: Independent }, true),
+            (FacetResolve { x: Independent, y: Shared }, true),
+            (FacetResolve { x: Shared, y: Independent }, true),
+        ];
+        for (resolve, x_before_y) in cases {
+            let (spec, batch) = facet_points(&four, 2, resolve.clone(), BandedChannel::Neither);
+            let (po, scene) = facet_scene(&spec, &batch, 420.0, 360.0);
+            let bottom_row = po.layout.panels.iter().map(|p| p.row).max();
+            let panel_idx = po
+                .layout
+                .panels
+                .iter()
+                .position(|p| Some(p.row) == bottom_row && p.col == 0)
+                .expect("a bottom-left panel exists");
+            let panel = &scene.panels[panel_idx];
+            let title_index = |content: &str| {
+                panel
+                    .axes
+                    .iter()
+                    .position(|n| matches!(n, ferrum_scene::SceneNode::Text { content: c, .. } if c == content))
+                    .unwrap_or_else(|| panic!("{resolve:?}: no {content} node in {panel:?}"))
+            };
+            let (x_idx, y_idx) = (title_index("x title"), title_index("y title"));
+            assert_eq!(
+                x_idx < y_idx,
+                x_before_y,
+                "{resolve:?}: x title at {x_idx}, y title at {y_idx}"
+            );
+        }
+    }
+
     /// An explicit `BandScale(range=[10, 110])` or `PointScale(range=[10,
     /// 110])` is chart-absolute, so each facet panel re-anchors it by its
     /// offset from the first panel, and the panel's tick dashes sit on its
