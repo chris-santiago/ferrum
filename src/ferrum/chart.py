@@ -1106,8 +1106,8 @@ class Chart(
         self,
         data: Any = None,
         *,
-        width: Optional[Union[int, str]] = None,
-        height: Optional[Union[int, str]] = None,
+        width: Optional[Union[int, float, str]] = None,
+        height: Optional[Union[int, float, str]] = None,
         title: "Optional[Union[str, 'Title']]" = None,
         description: Optional[str] = None,
     ) -> None:
@@ -2310,8 +2310,9 @@ class Chart(
         Parameters
         ----------
         *transforms
-            One or more transform objects (e.g. ``fm.Filter(...)``,
-            ``fm.Aggregate(...)``, ``fm.Sort(...)``, ``fm.Window(...)``).
+            One or more transform specs, as built by the ``fm.transform_*``
+            builders (e.g. ``fm.transform_filter(...)``,
+            ``fm.transform_aggregate(...)``, ``fm.transform_window(...)``).
             Accepts any object that serialises to a valid ``TransformSpec`` JSON
             shape.
 
@@ -2326,7 +2327,7 @@ class Chart(
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
         >>> fm.Chart(df).mark_point().encode(x="x", y="y").transform(
-        ...     fm.Filter("datum.x > 1")
+        ...     fm.transform_filter("datum.x > 1")
         ... )
         Chart(mark='point', encoding=['x', 'y'])
         """
@@ -2982,8 +2983,8 @@ class Chart(
         Parameters
         ----------
         theme : Theme
-            A ``ferrum.Theme`` instance (e.g. ``fm.themes.dark()``,
-            ``fm.Theme(background="white", font="serif")``).
+            A ``ferrum.Theme`` instance (e.g. the built-in ``fm.themes.dark``,
+            or ``fm.Theme(background="white", font="serif")``).
 
         Returns
         -------
@@ -2995,7 +2996,7 @@ class Chart(
         >>> import ferrum as fm
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> dark = fm.themes.dark()
+        >>> dark = fm.themes.dark
         >>> fm.Chart(df).mark_point().encode(x="x", y="y").theme(dark)
         Chart(mark='point', encoding=['x', 'y'])
         """
@@ -3220,8 +3221,8 @@ class Chart(
     def properties(
         self,
         *,
-        width=None,
-        height=None,
+        width: Optional[Union[int, float, str]] = None,
+        height: Optional[Union[int, float, str]] = None,
         title=None,
         subtitle=None,
         caption=None,

@@ -54,10 +54,12 @@ def set_default_theme(theme: Theme) -> AbstractContextManager:
     Fire-and-forget:
 
     >>> import ferrum as fm
-    >>> fm.set_default_theme(fm.themes.dark)
+    >>> fm.set_default_theme(fm.themes.dark)  # doctest: +SKIP
 
     Scoped to a block:
 
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"hp": [110, 150, 95], "mpg": [21.0, 18.5, 30.4]})
     >>> with fm.set_default_theme(fm.themes.dark):
     ...     chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
     """

@@ -56,8 +56,10 @@ class LearningCurveVisualizer(FerrumVisualizer):
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
-        Seed forwarded to ``ModelSource`` and from there to
-        ``learning_curve`` for reproducible CV splits (ChaCha8 RNG).
+        Seed forwarded to ``ModelSource`` and from there to sklearn's
+        ``learning_curve``, which shuffles the training data with it before
+        splitting. ``None`` seeds that shuffle with ``0``, so the default
+        is reproducible too. It does not seed the wrapped estimator.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
@@ -181,8 +183,10 @@ class ValidationCurveVisualizer(FerrumVisualizer):
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
-        Seed forwarded to ``ModelSource`` for reproducible CV splits
-        (ChaCha8 RNG).
+        Seed forwarded to ``ModelSource``. The folds come from sklearn's
+        unshuffled K-fold split for the integer ``cv``, which is
+        deterministic without a seed, so this value does not change the
+        result. It does not seed the wrapped estimator.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
@@ -301,8 +305,10 @@ class CVScoresVisualizer(FerrumVisualizer):
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
-        Seed forwarded to ``ModelSource`` for reproducible CV splits
-        (ChaCha8 RNG).
+        Seed forwarded to ``ModelSource``. The folds come from sklearn's
+        unshuffled K-fold split for the integer ``cv``, which is
+        deterministic without a seed, so this value does not change the
+        result. It does not seed the wrapped estimator.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
@@ -410,8 +416,10 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
     layers : list, optional
         Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
-        Seed forwarded to ``ModelSource`` for reproducible CV splits
-        (ChaCha8 RNG).
+        Seed forwarded to ``ModelSource``. The folds come from sklearn's
+        unshuffled K-fold split for the integer ``cv``, which is
+        deterministic without a seed, so this value does not change the
+        result. It does not seed the wrapped estimator.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.

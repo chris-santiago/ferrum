@@ -57,7 +57,10 @@ class Rank1DVisualizer(FerrumVisualizer):
         If given, display only the top ``top_k`` features.  ``None``
         shows all features.
     color_field : str, optional
-        Column name forwarded to the chart's color encoding.  ``None``
+        Column of the computed ranking forwarded to the chart's color
+        encoding: one of ``"feature"``, ``"score"`` or ``"rank"``. The fitted data's own columns are gone
+        by the time the bars are encoded, so naming one fails with
+        ``ValueError: unknown column`` when the chart renders.  ``None``
         produces a single-color chart.
     mark : dict, optional
         Per-layer mark overrides. See ``rank1d_chart``.
@@ -87,10 +90,16 @@ class Rank1DVisualizer(FerrumVisualizer):
     --------
     >>> import ferrum as fm
     >>> import polars as pl
-    >>> df = pl.read_csv("wine.csv")
+    >>> df = pl.DataFrame({
+    ...     "alcohol": [13.2, 12.4, 14.1, 12.0, 13.7, 12.9],
+    ...     "ash": [2.4, 2.1, 2.6, 2.0, 2.5, 2.2],
+    ...     "hue": [1.0, 0.9, 1.1, 0.8, 1.05, 0.95],
+    ...     "target": [0, 1, 0, 1, 0, 1],
+    ... })
     >>> X, y = df.drop("target"), df["target"]
     >>> viz = fm.Rank1DVisualizer(algorithm="variance").fit(X)
     >>> viz.show()
+    Chart(mark='bar', encoding=['x', 'y'])
     """
 
     def __init__(
@@ -191,10 +200,16 @@ class Rank2DVisualizer(FerrumVisualizer):
     --------
     >>> import ferrum as fm
     >>> import polars as pl
-    >>> df = pl.read_csv("wine.csv")
+    >>> df = pl.DataFrame({
+    ...     "alcohol": [13.2, 12.4, 14.1, 12.0, 13.7, 12.9],
+    ...     "ash": [2.4, 2.1, 2.6, 2.0, 2.5, 2.2],
+    ...     "hue": [1.0, 0.9, 1.1, 0.8, 1.05, 0.95],
+    ...     "target": [0, 1, 0, 1, 0, 1],
+    ... })
     >>> X = df.drop("target")
     >>> viz = fm.Rank2DVisualizer(algorithm="spearman").fit(X)
     >>> viz.show()
+    Chart(mark='rect', encoding=[])
     """
 
     def __init__(
@@ -258,7 +273,8 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         Subset of column names to include as axes.  When ``None``, all
         non-``hue`` columns are used.
     hue : str, optional
-        Column name used to color-encode each sample line. ``None``
+        Column of the ``X`` passed to ``fit`` used to color-encode each
+        sample line; it is not drawn as an axis. ``None``
         produces a single-color chart unless ``fit(X, y)`` is called
         with ``y`` — in that case ``y`` is attached as the hue column
         automatically.
@@ -292,10 +308,26 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
     --------
     >>> import ferrum as fm
     >>> import polars as pl
-    >>> df = pl.read_csv("iris.csv")
+    >>> df = pl.DataFrame({
+    ...     "sepal_length": [5.1, 4.9, 7.0, 6.4, 6.3, 5.8],
+    ...     "sepal_width": [3.5, 3.0, 3.2, 3.2, 3.3, 2.7],
+    ...     "petal_length": [1.4, 1.4, 4.7, 4.5, 6.0, 5.1],
+    ...     "species": ["setosa", "setosa", "versicolor", "versicolor",
+    ...                 "virginica", "virginica"],
+    ... })
     >>> viz = fm.ParallelCoordinatesVisualizer(hue="species", rescale="minmax")
-    >>> viz.fit(df.drop("species"), df["species"])
+    >>> viz.fit(df)
+    ParallelCoordinatesVisualizer(n_samples=6.0000, n_features=3.0000)
     >>> viz.show()
+    Chart(mark='line', encoding=[])
+
+    Without ``hue``, the ``y`` passed to ``fit`` colors the lines:
+
+    >>> viz = fm.ParallelCoordinatesVisualizer().fit(
+    ...     df.drop("species"), df["species"]
+    ... )
+    >>> viz.show()
+    Chart(mark='line', encoding=[])
     """
 
     def __init__(

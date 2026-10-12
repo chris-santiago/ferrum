@@ -426,7 +426,7 @@ class _ChartOperatorMixin:
         >>> left = fm.Chart(df).mark_point().encode(x="x", y="y")
         >>> right = fm.Chart(df).mark_bar().encode(x="x", y="y")
         >>> left | right
-        HConcatChart(n=2)
+        HConcatChart([Chart(mark='point', encoding=['x', 'y']), Chart(mark='bar', encoding=['x', 'y'])])
 
         Returns ``NotImplemented`` for a non-chart, non-composition *other*
         so ``chart | 3`` raises Python's own operator ``TypeError`` rather
@@ -461,7 +461,7 @@ class _ChartOperatorMixin:
         >>> top = fm.Chart(df).mark_point().encode(x="x", y="y")
         >>> bottom = fm.Chart(df).mark_bar().encode(x="x", y="y")
         >>> top & bottom
-        VConcatChart(n=2)
+        VConcatChart([Chart(mark='point', encoding=['x', 'y']), Chart(mark='bar', encoding=['x', 'y'])])
 
         Returns ``NotImplemented`` for a non-chart, non-composition *other*
         so ``chart & 3`` raises Python's own operator ``TypeError`` rather

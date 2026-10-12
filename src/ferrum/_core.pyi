@@ -27,12 +27,22 @@ MarkStr = Literal[
 
 def process_batch(reader: Any) -> Any:
     """
-    Convert a Python record batch through the ferrum transform pipeline.
+    Round-trip an Arrow C Data Interface stream through the Rust transport.
+
+    Reads any object exposing ``__arrow_c_stream__`` (a polars
+    ``DataFrame``, a pyarrow ``Table`` or ``RecordBatch``) and returns a
+    one-shot ``RecordBatchReader`` over the same batches with the first
+    column renamed to ``<name>_renamed``. It checks the zero-copy
+    transport path and is not part of chart rendering. Raises
+    ``ValueError`` when the input has zero columns.
 
     Examples
     --------
     >>> import ferrum as fm
-    >>> result = fm.process_batch(record_batch)
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    >>> pl.from_arrow(fm.process_batch(df)).columns
+    ['x_renamed', 'y']
     """
     ...
 
@@ -394,8 +404,10 @@ class PointScale:
     """Discrete point scale for dot plots.
 
     ``padding`` defaults to ``None`` in the constructor, and the ``padding``
-    getter returns it as passed: ``None`` when unset, like every sibling
-    scale's getter. The renderer owns the default for an unset padding (half
+    getter returns it as passed: ``None`` when unset, as ``BandScale``,
+    ``LinearScale`` and ``TimeScale`` do (``OrdinalScale`` is the exception:
+    its constructor defaults ``padding`` to ``0.0`` and its getter returns
+    that). The renderer owns the default for an unset padding (half
     a step at each end). Equality and ``repr()`` see the same value, so
     ``PointScale() != PointScale(padding=0.5)`` and ``repr(PointScale())``
     prints ``padding=None``, even though both render identically.
@@ -922,10 +934,21 @@ def compute_layout(
     """
     Compute the layout plan (panel sizes, margins) for a chart spec.
 
+    The tick-label lists are the labels the axes will draw, which size the
+    margins. Returns a dict with ``"viewport"``, ``"panels"`` and ``"axes"``.
+
     Examples
     --------
     >>> import ferrum as fm
-    >>> layout = fm.compute_layout(chart_spec_json, viewport_json)
+    >>> spec = fm.ChartSpec(mark="point", x="a", y="b")
+    >>> layout = fm.compute_layout(
+    ...     spec,
+    ...     viewport=(300.0, 200.0),
+    ...     x_tick_labels=["1", "2", "3"],
+    ...     y_tick_labels=["1", "2", "4"],
+    ... )
+    >>> sorted(layout)
+    ['axes', 'panels', 'viewport']
     """
     ...
 
@@ -941,10 +964,18 @@ def render_svg(
     """
     Render a chart spec to an SVG string.
 
+    ``data`` is any Arrow C Data Interface source (a polars ``DataFrame``,
+    a pyarrow ``Table``). Layout is computed internally from ``viewport``.
+
     Examples
     --------
     >>> import ferrum as fm
-    >>> svg = fm.render_svg(chart_spec_json, layout_json, data_batch)
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 1.0, 2.0]})
+    >>> spec = fm.ChartSpec(mark="point", x="a", y="b")
+    >>> svg = fm.render_svg(spec, df, viewport=(300.0, 200.0))
+    >>> svg.startswith("<svg")
+    True
     """
     ...
 
@@ -960,10 +991,17 @@ def render_png(
     """
     Render a chart spec to PNG bytes.
 
+    Takes the same arguments as ``render_svg``.
+
     Examples
     --------
     >>> import ferrum as fm
-    >>> png_bytes = fm.render_png(chart_spec_json, layout_json, data_batch)
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 1.0, 2.0]})
+    >>> spec = fm.ChartSpec(mark="point", x="a", y="b")
+    >>> png = fm.render_png(spec, df, viewport=(300.0, 200.0))
+    >>> png[1:4]
+    b'PNG'
     """
     ...
 

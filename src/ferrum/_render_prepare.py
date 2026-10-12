@@ -227,7 +227,8 @@ def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
 
     Examples
     --------
-    >>> _build_ordinal_norm_map(["a", "b", "c"])
+    >>> norm = _build_ordinal_norm_map(["a", "b", "c"])
+    >>> {k: round(v, 4) for k, v in norm.items()}
     {'a': 0.1667, 'b': 0.5, 'c': 0.8333}
     """
     n = len(domain)

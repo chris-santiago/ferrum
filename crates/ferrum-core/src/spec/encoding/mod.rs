@@ -716,7 +716,7 @@ fn default_band_align() -> f64 {
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> enc = fm.EncodingSpec(x="sepal_length", y="sepal_width", color="species")
+/// >>> enc = fm.EncodingSpec("sepal_length", title="Sepal Length")
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

@@ -801,9 +801,12 @@ class StatisticalMarksMixin:
         opacity : float, optional
             Fill opacity of the ribbon.  Default is ``0.3``.
         interpolate : str, optional
-            Boundary interpolation, validated against the live
-            ``ferrum._core.interpolate_accepted_values()`` vocabulary (spec
-            §4.6). Default is ``"linear"``.
+            Curve drawn through both the lower (``y``) and upper (``y2``)
+            boundaries: one of ``"linear"``, ``"step"``, ``"step-before"``,
+            ``"step-after"``, ``"monotone"``, ``"basis"`` or ``"cardinal"``
+            (the live ``ferrum._core.interpolate_accepted_values()``
+            vocabulary). Any other value raises ``ValueError`` at this call.
+            Default is ``"linear"``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs

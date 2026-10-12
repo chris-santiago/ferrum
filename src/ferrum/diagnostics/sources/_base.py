@@ -182,13 +182,16 @@ def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | Non
         with no ``columns=`` given — a *structural* check on the index
         type, not a guess from the label strings, so it can't be
         confused with a caller who deliberately named a column ``"f0"``).
-        Every other shape — a pandas DataFrame with a real column index,
-        any ``polars.DataFrame`` (including ``pl.DataFrame(array)``, whose
-        auto-generated ``column_0, column_1, ...`` labels carry no
-        structural marker distinguishing them from user-chosen names —
-        see `sources/_importance.py`'s `_sklearn_X` docstring for the
-        disclosed consequence), dict, list[dict], or other
+        Every other shape — a pandas DataFrame with any other column
+        index, any ``polars.DataFrame``, dict, list[dict], or other
         narwhals-compatible frame — reports ``False`` (genuinely named).
+        That includes nameless frames whose auto-generated labels carry
+        no structural marker: ``pl.DataFrame(array)``'s ``column_0,
+        column_1, ...``, and a ``pd.DataFrame(array)`` whose default
+        labels stopped being a ``RangeIndex`` (selecting a list of its
+        columns, ``df[[0, 2]]``, yields a plain ``Index``). See
+        `sources/_importance.py`'s `_sklearn_X` docstring for the
+        disclosed consequence.
         Consumed by `_sklearn_X` to decide whether it's safe to stamp a
         model's ``feature_names_in_`` onto X positionally, or whether
         X's own names must be honored and validated by sklearn.

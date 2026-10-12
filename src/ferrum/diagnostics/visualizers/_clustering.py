@@ -317,8 +317,10 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
     area encodes the cluster's sample count. Built on
     ``ferrum.intercluster_distance_chart``.
 
-    Takes a *fitted* clustering estimator that exposes either ``n_clusters`` or
-    ``cluster_centers_`` so the number of clusters can be inferred.
+    Takes a *fitted* clustering estimator that exposes ``cluster_centers_``
+    (e.g. ``KMeans``): the centers are what the chart embeds, so a clusterer
+    without them (e.g. ``AgglomerativeClustering``, which exposes only
+    ``n_clusters``) raises ``AttributeError`` at ``fit``.
 
     Records ``max_intercluster_dist`` — the largest Euclidean distance from any
     cluster center to the centroid of all centers in the 2D embedding — as a
@@ -328,7 +330,7 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
     ----------
     model : Any
         Fitted clustering estimator (e.g. ``KMeans`` instance) that exposes
-        ``n_clusters`` or ``cluster_centers_``.
+        ``cluster_centers_``.
     method : str, default "mds"
         Dimensionality-reduction algorithm forwarded to
         ``ModelSource.intercluster_distance``. Typical values include

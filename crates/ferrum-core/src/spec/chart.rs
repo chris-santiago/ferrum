@@ -53,7 +53,7 @@ use crate::spec::encoding::EncodingSpec;
 /// --------
 /// >>> import ferrum as fm
 /// >>> spec = fm.ChartSpec(mark="point", x="x", y="y")
-/// >>> spec.to_json()
+/// >>> json_str = spec.to_json()
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // No-silent-drop seam (S4FIX2): deny unknown top-level keys so a typo'd field

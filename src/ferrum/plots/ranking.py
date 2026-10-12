@@ -113,7 +113,10 @@ def rank_chart(
     orient : {"horizontal", "vertical"}, default "horizontal"
         Bar orientation for ``rank="1d"``; ignored for ``rank="2d"``.
     color_field : str or None, default None
-        Column name to use for bar fill color in ``rank="1d"``; when
+        Column of the computed ranking to use for bar fill color in
+        ``rank="1d"``: one of ``"feature"``, ``"score"`` or ``"rank"``. The input data's own columns are
+        gone by the time the bars are encoded, so naming one fails with
+        ``ValueError: unknown column`` when the chart renders. When
         ``None``, a single color is used.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -249,7 +252,10 @@ def rank1d_chart(
     orient : {"horizontal", "vertical"}, default "horizontal"
         Bar orientation.
     color_field : str or None, optional
-        Column name to map to bar color.
+        Column of the computed ranking to map to bar color: one of
+        ``"feature"``, ``"score"`` or ``"rank"``. The input data's own columns are gone by the time the
+        bars are encoded, so naming one fails with
+        ``ValueError: unknown column`` when the chart renders.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource`` when ``data_or_source`` is a
         fitted estimator (not raw data, not already a ``ModelSource``)

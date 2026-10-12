@@ -875,16 +875,20 @@ def intercluster_distance_chart(
     Parameters
     ----------
     model : fitted clusterer or ModelSource
-        A fitted sklearn-compatible clusterer (must expose
-        ``cluster_centers_`` or ``n_clusters``) or an explicit
-        ``ferrum.ModelSource``.
+        A fitted sklearn-compatible clusterer that exposes
+        ``cluster_centers_`` (e.g. ``KMeans``), or an explicit
+        ``ferrum.ModelSource`` wrapping one. The centers are what the
+        chart embeds, so a clusterer without them (e.g.
+        ``AgglomerativeClustering``, which exposes only ``n_clusters``)
+        raises ``AttributeError`` even when ``k`` is known.
     X : array-like, optional
         Feature matrix used to compute cluster member counts.
         Required when ``model`` is a raw estimator.
     k : int or None, default None
         Number of clusters. When ``None``, inferred from
-        ``model.n_clusters`` or ``len(model.cluster_centers_)``; raises
-        ``ValueError`` if neither attribute is present.
+        ``model.n_clusters`` or, failing that,
+        ``len(model.cluster_centers_)``; raises ``ValueError`` if neither
+        attribute is present.
     method : {"mds", "tsne"}, default "mds"
         Dimensionality-reduction method for embedding cluster centers.
         ``"mds"`` (default) uses ferrum's Rust classical MDS
@@ -919,6 +923,8 @@ def intercluster_distance_chart(
     ValueError
         If ``k`` is ``None`` and the model exposes neither
         ``n_clusters`` nor ``cluster_centers_``.
+    AttributeError
+        If the model does not expose ``cluster_centers_``.
 
     Examples
     --------
@@ -1016,7 +1022,10 @@ def silhouette_chart(
     --------
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
+    >>> from sklearn.datasets import make_blobs
+    >>> X, _ = make_blobs(n_samples=60, centers=3, random_state=0)
     >>> fm.silhouette_chart(KMeans(n_clusters=3, random_state=0).fit(X), X)
+    Chart(mark='rect', encoding=[])
 
     Notes
     -----
@@ -1105,7 +1114,11 @@ def manifold_chart(
     --------
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
-    >>> fm.manifold_chart(KMeans(n_clusters=4, random_state=0).fit(X), X, method="tsne")
+    >>> from sklearn.datasets import make_blobs
+    >>> X, _ = make_blobs(n_samples=60, centers=4, random_state=0)
+    >>> model = KMeans(n_clusters=4, random_state=0).fit(X)
+    >>> fm.manifold_chart(model, X, method="tsne", random_state=0)
+    Chart(mark='point', encoding=['x', 'y', 'color'])
 
     Notes
     -----

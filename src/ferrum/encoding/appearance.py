@@ -284,8 +284,8 @@ class Fill(ChannelBase):
     """Fill color channel — maps a field to filled-mark fill color.
 
     Distinct from ``stroke``, which controls only the outline color.  When
-    both ``Fill`` and ``Color`` are encoded, ``Fill`` takes precedence for the
-    interior of the mark.
+    both ``Fill`` and ``Color`` are encoded, ``Color`` decides the interior of
+    the mark and the ``Fill`` encoding is dropped without a warning.
 
     Parameters
     ----------

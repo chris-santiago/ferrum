@@ -138,9 +138,8 @@ def _voiced(entry: str, check: Callable[[str], _Checked]) -> _Checked:
     itself (:func:`voiced_as`) and a mark method called directly keeps its
     own. Only *check*'s own ``ValueError`` becomes the refusal. The one
     owner of this conversion: every door that turns a pure validator's
-    ``ValueError`` into a re-voiceable refusal (``ferrum.marks.base``,
-    ``ferrum._override_apply``) imports it from here rather than each
-    defining its own.
+    ``ValueError`` into a re-voiceable refusal imports it from here rather
+    than each defining its own.
     """
     try:
         return check(entry)

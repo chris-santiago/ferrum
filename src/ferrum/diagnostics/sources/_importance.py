@@ -493,23 +493,21 @@ def _sklearn_X(model: Any, X: pl.DataFrame, *, x_names_synthetic: bool, diagnost
          positionally-wrong (and warning-free) result. NEVER silently
          falls back to positional trust for a named frame.
 
-    Disclosed residual (documented in `_coerce_X_y`'s docstring too):
-    ``pl.DataFrame(array)`` -- a bare-array polars DataFrame built by the
-    *caller* with no ``schema=`` given -- auto-generates ``column_0,
-    column_1, ...`` labels that carry no structural marker distinguishing
-    them from a user's real, deliberately-chosen names; polars does not
-    expose anywhere on a ``pl.DataFrame`` instance whether its column
-    labels were auto-assigned. That input is therefore treated as
-    genuinely named (``x_names_synthetic=False``), so
-    ``ModelSource(model_fit_with_real_names, pl.DataFrame(array), y)``
-    now raises sklearn's name-mismatch error where a prior version of
-    this helper silently computed a positionally-correct result with a
-    warning. This is a deliberate, disclosed behavior change: a loud,
-    actionable error naming the mismatched columns is strictly better
-    than a silent guess that happens to be right. The two most common
-    ways to hand over a nameless feature matrix -- a bare
-    ``numpy.ndarray``, and ``pd.DataFrame(array)`` -- are unaffected;
-    both are detected structurally, not by name pattern.
+    Disclosed residual (documented in `_coerce_X_y`'s docstring too): a
+    nameless frame whose auto-generated labels carry no structural marker
+    is treated as genuinely named (``x_names_synthetic=False``). Two
+    shapes reach this: ``pl.DataFrame(array)`` built with no ``schema=``
+    (polars does not record anywhere on the instance that its ``column_0,
+    column_1, ...`` labels were auto-assigned), and a ``pd.DataFrame(array)``
+    whose default labels stopped being a ``RangeIndex`` -- selecting a list
+    of its columns (``df[[0, 2]]``) yields a plain ``Index``, while a slice
+    (``df.iloc[:, :2]``) keeps the ``RangeIndex``. For either,
+    ``ModelSource(model_fit_with_real_names, X, y)`` raises sklearn's
+    name-mismatch error rather than computing a positional result: a loud,
+    actionable error naming the mismatched columns is strictly better than
+    a silent guess that happens to be right. A bare ``numpy.ndarray`` and an
+    untouched ``pd.DataFrame(array)`` are detected structurally, not by name
+    pattern, and keep the positional stamp.
 
     Falls back to a plain numpy array when pandas isn't importable (no
     ``feature_names_in_`` means no warning today either way).

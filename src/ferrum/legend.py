@@ -82,7 +82,11 @@ class Legend:
     label_limit : float, optional
         Maximum label width.
     symbol_size : float, optional
-        Symbol size.
+        Legend swatch area in square pixels (px²), on the same area-to-radius
+        mapping as the mark ``size`` channel: a circle swatch has radius
+        ``sqrt(symbol_size / pi)``, and every swatch shape scales with it.
+        Unset, zero or negative keeps the default swatch (radius 4 px, about
+        50 px²).
     symbol_stroke_width : float, optional
         Symbol stroke width.
     symbol_type : str, optional

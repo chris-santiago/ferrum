@@ -780,10 +780,9 @@ def desugar_ribbon(
     opacity : float, default 0.2
         Ribbon fill opacity.
     interpolate : str, default "linear"
-        Boundary interpolation, validated against the live
-        ``ferrum._core.interpolate_accepted_values()`` vocabulary (spec
-        §4.6) by the caller (``Chart.mark_ribbon``) before this function
-        ever runs. Forwarded to the emitted layer's mark style unvalidated
+        Curve drawn through both ribbon boundaries, validated against the
+        live ``ferrum._core.interpolate_accepted_values()`` vocabulary by
+        the caller (``Chart.mark_ribbon``) before this function ever runs. Forwarded to the emitted layer's mark style unvalidated
         here -- this function has no declaration-time gate of its own, so a
         caller reaching it directly (bypassing ``mark_ribbon``) gets an
         unrecognized value refused by the renderer instead.

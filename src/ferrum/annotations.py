@@ -183,6 +183,7 @@ def annotate_hline(
     Labelled reference line:
 
     >>> fm.annotate_hline(y=0.0, label="baseline")
+    Chart(mark='rule', encoding=['y'])
     """
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
@@ -264,6 +265,7 @@ def annotate_vline(
     Labelled reference line:
 
     >>> fm.annotate_vline(x=2020, label="cutoff")
+    Chart(mark='rule', encoding=['x'])
     """
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
@@ -657,10 +659,12 @@ def annotate_arrow(
 
     >>> import ferrum as fm
     >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9)
+    Chart(mark='segment', encoding=['x', 'y', 'x2', 'y2'])
 
     Arrow with a label at the tip:
 
     >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9, label="threshold", label_side="end")
+    Chart(mark='segment', encoding=['x', 'y', 'x2', 'y2'])
     """
     from ferrum.annotation.primitives import AnnotationArrow
 

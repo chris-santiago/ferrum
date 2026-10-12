@@ -34,7 +34,7 @@ pub(crate) fn rename_column(
     RecordBatch::try_new(Arc::new(Schema::new(new_fields)), batch.columns().to_vec())
 }
 
-/// Accept an Arrow C Data Interface stream and return a normalised stream.
+/// Round-trip an Arrow C Data Interface stream through the Rust transport.
 ///
 /// Parameters
 /// ----------
@@ -47,10 +47,10 @@ pub(crate) fn rename_column(
 /// Returns
 /// -------
 /// pyarrow.RecordBatchReader
-///     A fresh ``RecordBatchReader`` over the same data after Ferrum's
-///     internal normalisation pass (column validation and canonicalisation).
-///     The returned reader is consumed once; iterate it or pass it directly
-///     to ``render_svg`` / ``render_png``.
+///     A fresh, one-shot ``RecordBatchReader`` over the same batches with
+///     the first column renamed to ``<name>_renamed``. This checks the
+///     zero-copy transport path and is not part of chart rendering. The
+///     returned reader is consumed once.
 ///
 /// Raises
 /// ------
@@ -59,17 +59,18 @@ pub(crate) fn rename_column(
 ///
 /// Notes
 /// -----
-/// This is the Arrow CDI entry point for the Ferrum pipeline. Polars and
-/// pyarrow take the zero-copy C Data Interface fast-path; other DataFrame
-/// libraries (pandas, modin, cuDF) should be coerced to Arrow via
-/// ``narwhals`` before calling this function.
+/// This is the Arrow CDI entry point used to exercise the zero-copy
+/// transport path. Polars and pyarrow take the zero-copy C Data Interface
+/// fast-path; other DataFrame libraries (pandas, modin, cuDF) should be
+/// coerced to Arrow via ``narwhals`` before calling this function.
 ///
 /// Examples
 /// --------
 /// >>> import ferrum as fm
 /// >>> import polars as pl
 /// >>> df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-/// >>> result = fm.process_batch(df)
+/// >>> pl.from_arrow(fm.process_batch(df)).columns
+/// ['x_renamed', 'y']
 #[pyfunction]
 pub(crate) fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
     let reader = reader.into_reader()?;

@@ -58,13 +58,19 @@ def save_chart(
 
     Examples
     --------
+    ``Chart.save(path)`` is the public entry point and routes here:
+
     >>> import ferrum as fm
+    >>> import polars as pl
+    >>> from ferrum.display import save_chart
+    >>> df = pl.DataFrame({"hp": [110, 150, 95], "mpg": [21.0, 18.5, 30.4]})
     >>> chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
-    >>> fm.save_chart(chart, "scatter.svg")
-    >>> fm.save_chart(chart, "scatter.png")
-    >>> fm.save_chart(chart, "scatter.html")
-    >>> fm.save_chart(chart, "scatter.json")
-    >>> fm.save_chart(chart, "scatter.pdf")
+    >>> chart.save("scatter.svg")
+    >>> save_chart(chart, "scatter.png")
+    >>> save_chart(chart, "scatter.html")
+    >>> save_chart(chart, "scatter.json")
+    >>> save_chart(chart, "scatter.pdf")
+    >>> save_chart(chart, "scatter.out", format="svg")
     """
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
@@ -169,9 +175,15 @@ def show_chart(chart: SupportsRender) -> None:
 
     Examples
     --------
+    ``Chart.show()`` is the public entry point and routes here:
+
     >>> import ferrum as fm
+    >>> import polars as pl
+    >>> from ferrum.display import show_chart
+    >>> df = pl.DataFrame({"hp": [110, 150, 95], "mpg": [21.0, 18.5, 30.4]})
     >>> chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
-    >>> fm.show_chart(chart)
+    >>> chart.show()  # doctest: +SKIP
+    >>> show_chart(chart)  # doctest: +SKIP
     """
     if _is_jupyter():
         try:

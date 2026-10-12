@@ -116,10 +116,15 @@ def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
       own) is also value-checked under the OLD type, through
       :func:`_refuse_old_type_padding_value`, before the merge returns --
       whether the switch carries that key's value under a new name or drops
-      it. The translation preserves bounds by construction (each carry
-      target's bound equals its source's), so a carried value is malformed
-      after the switch exactly when it was already malformed under the
-      old type, in the key the user wrote. This
+      it. The translation preserves bounds one way by construction: the key
+      a carry writes accepts every value the key it reads accepts under the
+      old type (band ``padding``'s ``[0, 1]`` lies inside point
+      ``padding``'s finite ``>= 0``), so this old-type check catches every
+      out-of-bounds carried value, in the key the user wrote. It also
+      refuses a value the new type alone would accept, because that value
+      was out of bounds under the type the user wrote: a band
+      ``padding=1.5`` switched to point is refused, though
+      ``PointScale(padding=1.5)`` is valid. This
       is the one check for BOTH a carried value (nothing else ever checks
       it -- it reaches the new type's own field under a different key name,
       so the new type's downstream gate sees a key the user never wrote) and

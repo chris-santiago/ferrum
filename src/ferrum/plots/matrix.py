@@ -1174,7 +1174,7 @@ def clustermap(
     Returns
     -------
     ClusterMapChart
-        Compound view with ``center``, ``row_dendrogram``, and
+        Compound view with ``heatmap``, ``row_dendrogram``, and
         ``col_dendrogram`` sub-charts.
 
     Raises

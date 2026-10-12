@@ -194,7 +194,7 @@ class Selection(Parameter):
         >>> import ferrum as fm
         >>> brush = fm.selection_interval(name="brush", encodings=["x"])
         >>> brush.to_param_spec_dict()
-        {'name': 'brush', 'kind': 'interval', 'select': {'translate': True, ...}}
+        {'name': 'brush', 'kind': 'interval', 'select': {'translate': True, 'zoom': True, 'resolve': 'global', 'encodings': ['x']}}
         """
         d: dict[str, Any] = {
             "name": self.name,

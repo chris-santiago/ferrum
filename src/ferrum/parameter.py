@@ -238,9 +238,9 @@ def param(name: str, value: Any = None, bind: Any = None) -> VariableParameter:
     Returns
     -------
     VariableParameter
-        Frozen, immutable parameter descriptor.  Pass to
-        ``Chart.add_param()`` (coming in a later sub-task) and reference
-        via ``p.ref()`` at scale domain or conditional sites.
+        Frozen, immutable parameter descriptor.  Attach it with
+        ``Chart.add_params()`` and reference it, or its ``p.ref()``
+        marker, at scale-domain, filter-predicate or conditional sites.
 
     Examples
     --------
