@@ -755,7 +755,7 @@ class LetterValue:
         group: Optional[str] = None,
         k_depth: str = "proportion",
         k_proportion: float = 0.007,
-        outlier_threshold: float = 1.5,
+        outlier_threshold: float = 0.0,
         name: Optional[str] = None,
         sort: Optional[dict[str, str]] = None,
     ) -> None: ...

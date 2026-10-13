@@ -1092,7 +1092,7 @@ def desugar_boxen(
     *,
     k_depth: str = "tukey",
     k_proportion: float = 0.007,
-    outlier_threshold: float = 1.5,
+    outlier_threshold: float = 0.0,
     palette: str | Sequence[str] | None = None,
     horizontal: bool = False,
     color_field: str | None = None,

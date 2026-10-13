@@ -109,7 +109,7 @@ pub(crate) struct LetterValueSpec {
     pub sort: Option<LetterValueSort>,
 }
 
-fn default_outlier_threshold() -> f64 { 1.5 }
+fn default_outlier_threshold() -> f64 { 0.0 }
 
 /// The K depth a strategy computes for group size `n`, BEFORE the
 /// [`K_MAX_NAMED`] cap. [`k_for_depth`] applies the cap; comparing this
@@ -735,8 +735,13 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// k_proportion : float, default 0.007
 ///     Fraction of sample size used when ``k_depth="proportion"``. Must
 ///     be in (0, 1).
-/// outlier_threshold : float, default 1.5
-///     Tukey fence multiplier for labelling outliers. Must be ≥ 0.
+/// outlier_threshold : float, default 0.0
+///     Fence multiplier for labelling outliers: a row is flagged when its
+///     value falls strictly outside ``[lo - t*span, hi + t*span]``, where
+///     ``lo``/``hi`` are the group's outermost letter values and ``span =
+///     hi - lo``. At the default ``0.0`` the fence sits at the outermost
+///     letter values themselves, so every observation strictly beyond them
+///     is flagged; a value tied with ``lo`` or ``hi`` is not. Must be ≥ 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 /// sort : dict, optional
@@ -765,7 +770,7 @@ impl PyLetterValue {
         group = None,
         k_depth = "proportion",
         k_proportion = 0.007,
-        outlier_threshold = 1.5,
+        outlier_threshold = 0.0,
         name = None,
         sort = None,
     ))]
@@ -1602,6 +1607,95 @@ mod tests {
             "descending-by-median order must be e(90), c(50), a(10) -- \
              an all-NaN group's NaN aggregate must not collapse the comparator \
              to Equal and invert the real groups' relative order"
+        );
+    }
+
+    // ── default fence (outlier_threshold = 0.0) ───────────────────────────
+
+    #[test]
+    fn letter_value_outlier_threshold_defaults_to_zero() {
+        assert_eq!(default_outlier_threshold(), 0.0);
+    }
+
+    #[test]
+    fn letter_value_outlier_threshold_defaults_to_zero_on_the_wire() {
+        // A wire payload omitting `outlier_threshold` must resolve to the
+        // default via `#[serde(default = "default_outlier_threshold")]`,
+        // not require every caller to pass it explicitly.
+        let json = serde_json::json!({
+            "type": "letter_value",
+            "value": "x",
+            "k_depth": {"type": "tukey"}
+        });
+        let parsed: TransformSpec = serde_json::from_value(json).unwrap();
+        match parsed {
+            TransformSpec::LetterValue(s) => assert_eq!(s.outlier_threshold, 0.0),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn letter_value_default_threshold_flags_strictly_beyond_and_not_ties_at_outermost_letter_value() {
+        // n=9, KDepth::Full -> k = floor(log2(9)) = 3 (no cap). At depth 3,
+        // p = 0.125: h = 0.125*8 = 1.0 (exact) -> lower = sorted[1] = 2.0;
+        // 1-p = 0.875: h = 0.875*8 = 7.0 (exact) -> upper = sorted[7] = 8.0.
+        // Depth 3 is the outermost (max) depth emitted, so under the
+        // default outlier_threshold the fence sits exactly at [2.0, 8.0] --
+        // the outermost letter values themselves, with no widening span.
+        // Only 1.0 and 9.0 fall strictly outside it; 2.0 and 8.0 are ties
+        // with the fence and must not be flagged.
+        let vs: Vec<f64> = (1..=9).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Full,
+            outlier_threshold: default_outlier_threshold(),
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        let sch = outliers.1.schema();
+        assert_eq!(sch.field(0).name(), "group");
+        assert_eq!(sch.field(1).name(), "value");
+        assert_eq!(sch.field(2).name(), "is_outlier");
+        let val_col = outliers.1.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let flag_col = outliers.1.column(2).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(
+            outliers.1.num_rows(), 2,
+            "exactly the two values strictly beyond [2.0, 8.0] survive the filter; \
+             a tie at the fence (2.0 or 8.0) must not"
+        );
+        let mut seen: Vec<f64> = (0..outliers.1.num_rows()).map(|i| val_col.value(i)).collect();
+        seen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(seen, vec![1.0, 9.0]);
+        for i in 0..outliers.1.num_rows() {
+            assert!(flag_col.value(i), "every surviving row must be flagged true");
+        }
+    }
+
+    #[test]
+    fn letter_value_default_threshold_group_with_nothing_beyond_is_empty() {
+        // A constant-valued group: every letter-value quantile collapses to
+        // the same constant, so the outermost fence is exactly that point
+        // and every input row is tied with it, not beyond it -- the
+        // outliers layer for this group must be empty.
+        let vs: Vec<f64> = std::iter::repeat(5.0).take(10).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: default_outlier_threshold(),
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        assert_eq!(
+            outliers.1.num_rows(), 0,
+            "nothing lies beyond a constant group's single letter value"
         );
     }
 }

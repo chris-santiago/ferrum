@@ -2483,6 +2483,8 @@ The spec states the current contract; this file is the record of how each contra
 
 > *(2026-05-10) Phase 8b: `stat_kde_2d` is implemented as the `Kde2D` transform (10th transform of the phase). Output is a single-row Arrow batch with `grid_x` / `grid_y` / `density` list columns.*
 
+> **2026-10-12.** `LetterValue`'s `outlier_threshold` default moves from `1.5` to `0.0` (`mark_boxen`'s own default moves with it, in `ferrum-spec.md`'s Composite Marks table under §3.3): at `0.0` the fence sits at the outermost letter values themselves, so every observation strictly beyond them is an outlier and a tie at the fence is not, matching seaborn's boxen semantics. `1.5` passed explicitly keeps the prior fence behavior unchanged. `mark_boxplot` is unaffected — its own outlier fence is `BoxStats`/`Outliers`' unrelated `whisker_mult`/`extent`, not `outlier_threshold`.
+
 ## 3.5 Data Transforms
 
 <!-- from: table row, ferrum-spec.md line 2778 at 5c67fb0f -->

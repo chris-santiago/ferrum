@@ -929,7 +929,10 @@ _UNTOUCHED_KIND_DIGESTS = {
     "swarm": "0025f54533609a1f28565844c2444f73382347eeff4c63f808a07b77bed07a13",
     "box": "397b96d9a1c250f468ec8de85e96ce38c019a93890082fe2f7fa533de88f14c0",
     "violin": "f685cf8ddcd62bfd75cf10f8fbe4e630faa629446df2c9eb50e417580a630bb5",
-    "boxen": "b5769400e6d07cfad179678c6b83ff9c9fdc7084ff0efdbd370ea3381363de74",
+    # `boxen`'s digest pins the render at the mark's default
+    # `outlier_threshold=0.0` fence (the outermost letter values); the
+    # other five kinds stay pinned to the pre-aggregation baseline.
+    "boxen": "aabd1f5d477f3be51282da9b43bf2b885daa677ebad2719fe9a492b631a14f3d",
     "count": "25480897e3c061c194cabf66911eecc2002d7adefb1f61f4c2ac9748acfdb0bf",
 }
 

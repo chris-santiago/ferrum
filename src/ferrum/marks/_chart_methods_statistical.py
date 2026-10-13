@@ -577,7 +577,7 @@ class StatisticalMarksMixin:
         *,
         k_depth: str = "tukey",
         k_proportion: float = 0.007,
-        outlier_threshold: float = 1.5,
+        outlier_threshold: float = 0.0,
         palette: str | Sequence[str] | None = None,
         horizontal: bool = False,
         orient=None,
@@ -610,13 +610,14 @@ class StatisticalMarksMixin:
         outlier_threshold : float, optional
             Fence multiple applied to the OUTERMOST computed letter-value
             band's own span (``upper - lower`` of the deepest depth
-            ``LetterValue`` reaches for a group), not the interquartile
-            range: a value is flagged as an outlier when it falls outside
-            ``[lower - outlier_threshold * span, upper + outlier_threshold *
-            span]``.  This coincides with the classic IQR multiple only when
-            the deepest depth is ``k=2`` (the first real band beyond the
-            median); at any greater depth the reference span is that band's
-            own, narrower span.  Default is ``1.5``.
+            ``LetterValue`` reaches for a group): a value is flagged as an
+            outlier when it falls outside ``[lower - outlier_threshold *
+            span, upper + outlier_threshold * span]``.  Default is ``0.0``,
+            so the fence sits at the outermost letter values themselves and
+            every observation strictly beyond them is flagged as an
+            outlier; a value exactly at the fence (a tie) is not flagged.
+            A positive value widens the fence by that multiple of the
+            deepest band's own span on each side.
         palette : str, sequence of str, or None, optional
             Colors the depth bands directly at opacity 1.0, replacing the
             opacity ramp.  The mapping anchors on the **base band**:
