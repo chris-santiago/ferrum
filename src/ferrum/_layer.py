@@ -88,6 +88,17 @@ class _Layer:
     #: as that primitive itself. Serialized onto the wire
     #: layer dict only when set (``Layer::entry`` in Rust ``spec/layer.rs``).
     entry: Optional[str] = None
+    #: The positional channels (``"x"``, ``"y"``, ``"x2"``, ``"y2"``) this
+    #: layer's ``encoding`` carries because they were copied from its
+    #: operand chart's own encoding, not declared on the layer. ``chart +
+    #: chart`` copies them when it routes a right-hand layer to a named
+    #: output, because Rust passes a layer with a ``data_source`` none of the
+    #: chart's positional channels.
+    #: Rust treats a listed channel as inherited, not owned, so a rule or
+    #: tick that owns one axis keeps spanning the other as it does on its
+    #: own chart. Serialized onto the wire layer dict only when non-empty
+    #: (``Layer::inherited_positional`` in Rust ``spec/layer.rs``).
+    inherited_positional: tuple[str, ...] = ()
     #: The ``ConditionalSpec`` objects this layer declared, held by identity.
     #: A conditional is owned by a layer when it was declared on that layer's
     #: own ``Layer(encoding=...)``, or on the chart the layer came from when

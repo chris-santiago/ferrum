@@ -20,8 +20,11 @@ from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
 from ferrum._layer import _Layer, _PendingMark
 from ferrum._layer_transforms import (
+    _Branch,
     _NamedTransform,
+    _advances_chain,
     _resolve_layer_aggregates,
+    _same_step,
     _resolve_layer_bins,
     _transforms_to_json_list_named,
 )
@@ -163,27 +166,20 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
 
 
 def _transform_already_covered(transform: object, existing: list) -> bool:
-    """Return whether *transform* is identity- or value-equal to some entry of *existing*.
+    """Return whether *transform* publishes the same output as some entry of *existing*.
 
-    Mirrors ``_merge_top_transforms``'s own dedup test (``composition.py``) --
-    the same "counts as the same transform" rule the actual merge uses, so
-    this check and the merge can never disagree about whether a transform is
+    Uses ``_merge_top_transforms``'s own dedup test (``_same_step``), so this
+    check and the merge never disagree about whether a transform is
     genuinely new.
     """
-    from ferrum._layer_transforms import _NamedTransform as _NT
-
-    inner_t = transform.transform if isinstance(transform, _NT) else transform
-    for e in existing:
-        if transform is e:
-            return True
-        inner_e = e.transform if isinstance(e, _NT) else e
-        if inner_t == inner_e:
-            return True
-    return False
+    return any(_same_step(transform, e) for e in existing)
 
 
 def _refuse_data_source_collision(
-    lhs_layers: list, rhs_layers: list, lhs_top_xforms: list, rhs_top_xforms: list
+    lhs_layers: list,
+    rhs_layers: list,
+    lhs_top_xforms: list,
+    rhs_top_xforms: list,
 ) -> None:
     """Refuse a ``+`` composition whose two sides would silently share one
     named transform output (#198).
@@ -246,6 +242,154 @@ def _refuse_data_source_collision(
                 "distinctly-named transforms (e.g. give each its own "
                 "`.transform(..., name=...)`) before composing them."
             )
+
+
+def _source_identity(name: str) -> _NamedTransform:
+    """Build a named identity step, which publishes the batch it reads under *name*."""
+    from ferrum.marks._desugar_helpers import identity_transform
+
+    return _NamedTransform(identity_transform(name), name)
+
+
+_POSITIONAL_CHANNELS = ("x", "y", "x2", "y2")
+
+
+def _point_rhs_layers(
+    layers: list, *, tail: str, operand_encoding: dict, scope: str | None = None
+) -> list:
+    """Point the RHS operand's layers at the named outputs they read.
+
+    A layer reading the pipeline tail (no ``data_source``) reads *tail*
+    instead. Rust passes a layer that has a ``data_source`` none of the
+    chart's positional channels, so each of x, y, x2 and y2 the operand chart
+    binds and the layer does not is copied onto the layer and listed in its
+    ``inherited_positional``: the layer draws as it does on its own chart,
+    where it inherits them. A layer reading an output its operand named
+    keeps it, addressed under *scope* when the operand's chain runs as a
+    branch of that name (a branch publishes its inner outputs under
+    ``secondary_key(branch, key)``).
+    """
+    from dataclasses import replace as _dc_replace
+
+    from ferrum._core import secondary_key
+
+    out = []
+    for layer in layers:
+        if layer.data_source is not None:
+            if scope is not None:
+                layer = _dc_replace(layer, data_source=secondary_key(scope, layer.data_source))
+            out.append(layer)
+            continue
+        filled = {
+            ch: copy.copy(operand_encoding[ch])
+            for ch in _POSITIONAL_CHANNELS
+            if ch in operand_encoding and ch not in layer.encoding
+        }
+        out.append(
+            _dc_replace(
+                layer,
+                data_source=tail,
+                encoding={**layer.encoding, **filled},
+                inherited_positional=layer.inherited_positional + tuple(filled),
+            )
+        )
+    return out
+
+
+def _route_tail_readers_to_source(
+    chart: "Chart", layers: list, name: str, *, operand_encoding: dict
+) -> list:
+    """Point *layers* that read the pipeline tail at the chart's source rows.
+
+    When ``chart``'s chain has an unnamed step, its tail is that chain's
+    output, not the source. Each layer with no ``data_source`` is then
+    pointed at a named identity of the source, added ahead of the chain (see
+    ``_merge_top_transforms``), through :func:`_point_rhs_layers`. With no
+    unnamed step the tail is the source and *layers* is returned unchanged.
+    """
+    tail_readers = [l for l in layers if l.data_source is None]
+    if not tail_readers or not any(_advances_chain(t) for t in chart._transforms):
+        return layers
+    _merge_top_transforms(chart, [_source_identity(name)])
+    return _point_rhs_layers(layers, tail=name, operand_encoding=operand_encoding)
+
+
+def _is_lhs_pipeline(rhs_chain: list, lhs_chain: list) -> bool:
+    """Whether running *rhs_chain* adds nothing to *lhs_chain* over the same rows.
+
+    True when every RHS step is already an LHS step and the two unnamed
+    chains are the same sequence, so the RHS's tail is the LHS's tail and its
+    named outputs are already published.
+    """
+    if not all(_transform_already_covered(t, lhs_chain) for t in rhs_chain):
+        return False
+    lhs_unnamed = [t for t in lhs_chain if _advances_chain(t)]
+    rhs_unnamed = [t for t in rhs_chain if _advances_chain(t)]
+    return len(lhs_unnamed) == len(rhs_unnamed) and all(
+        _same_step(a, b) for a, b in zip(lhs_unnamed, rhs_unnamed)
+    )
+
+
+def _route_rhs_chain(
+    new: "Chart",
+    rhs_layers: list,
+    rhs_chain: list,
+    *,
+    operand_encoding: dict,
+    same_data: bool,
+) -> list:
+    """Add the RHS operand's chain to *new*'s pipeline so it reads its own rows.
+
+    Over the same data, a chain of named steps only whose layers read those
+    names (a multi-output composite such as a boxplot) is added as it is:
+    placed ahead of the LHS chain, each step reads the source. Any other chain
+    becomes one named step: the step itself when the chain has one step and
+    no layer reads a name inside it, else one ``_Branch`` over the source
+    running the whole chain. A branch publishes its inner outputs under its
+    own name (``secondary_key``), so two operands' composites never share a
+    key, whatever data they read.
+
+    The step is named from its own identity: the composed chart holds the
+    step for as long as any layer reads the name, so no other live step
+    shares it, even when two operands reuse one transform object.
+    """
+    if not rhs_chain:
+        return rhs_layers
+    routed = any(l.data_source is not None for l in rhs_layers)
+    if routed and same_data and not any(_advances_chain(t) for t in rhs_chain):
+        _merge_top_transforms(new, rhs_chain)
+        return rhs_layers
+    only = rhs_chain[0]
+    if not routed and len(rhs_chain) == 1 and not isinstance(only, (_NamedTransform, _Branch)):
+        step: _NamedTransform | _Branch = _NamedTransform(only, "")
+    else:
+        step = _Branch("", None, rhs_chain)
+    step.name = f"_auto_{id(step):x}"
+    _merge_top_transforms(new, [step])
+    return _point_rhs_layers(
+        rhs_layers,
+        tail=step.name,
+        operand_encoding=operand_encoding,
+        scope=step.name if isinstance(step, _Branch) else None,
+    )
+
+
+def _rhs_rows_prefix(marker: str, renames: dict[str, str]) -> list:
+    """Build the steps that turn the merged batch back into the RHS operand's own frame.
+
+    Keeps the rows whose *marker* column is ``true`` (the rows the RHS
+    contributed), then restores each renamed column under its original name
+    (``Calculate`` replaces a column it names), so the RHS chain reads the
+    columns it was written against.
+    """
+    from ferrum.transforms import transform_calculate, transform_filter
+
+    keep = transform_filter(f"datum[{json.dumps(marker)}] == true")
+    restore = [
+        transform_calculate(original, f"datum[{json.dumps(renamed)}]")
+        for original, renamed in sorted(renames.items())
+    ]
+    return [keep, *restore]
 
 
 def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
@@ -322,6 +466,10 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
         MarkBase(feature.mark, **mark_overrides).to_mark_kwargs_dict() if mark_overrides else None
     )
 
+    # The secondary series is built on the base chart itself, so like a
+    # layer added through `Chart.layer` it reads the base chart's transformed
+    # rows (its chain's tail). A separate `+` operand is what reads its own
+    # source rows.
     secondary_layer = _Layer(
         mark=feature.mark,
         encoding={"x": x_encoding, "y": y_encoding},
@@ -2205,6 +2353,14 @@ class Chart(
         method to miss (see :func:`_strip_layer_conditionals`, which only
         the public-``Layer`` branch below calls).
 
+        A layer added here is built on this chart, so it reads the chart's
+        transformed rows: the output of the chart's transform chain (a
+        histogram's bins, a density grid, a filter's surviving rows, a swarm's
+        placed points), and it inherits the chart's encodings. A column that
+        chain does not output is unknown to the layer. To draw the chart's
+        source rows instead, give the layer its own chart and compose the two
+        with ``+``, which runs each operand's own chain over its own rows.
+
         When a ``Layer(data=df, ...)`` has its own ``data`` attribute, that
         data is merged with the chart's existing data via diagonal concatenation
         (same strategy as the ``+`` operator). Each layer's encoding references
@@ -2244,7 +2400,9 @@ class Chart(
         """
         from ferrum.layer import Layer as PublicLayer
 
-        resolved = self._resolve_pending()
+        # The chart's data is normalized before its pending mark resolves, so
+        # unsupported data is refused here rather than replaced by a layer's.
+        resolved = self._with_polars_data()._resolve_pending()
         new = resolved._clone()
         existing, _ = _expand_layers(new)
         converted = []
@@ -2269,11 +2427,7 @@ class Chart(
                     if new._data is None:
                         new._data = layer_df
                     else:
-                        try:
-                            chart_df = to_polars(new._data)
-                            new._data = pl.concat([chart_df, layer_df], how="diagonal")
-                        except (TypeError, ValueError):
-                            new._data = layer_df
+                        new._data = pl.concat([new._data, layer_df], how="diagonal")
                 encoding, owned = _strip_layer_conditionals(
                     new, ly.encoding, claimed_here=claimed_here
                 )
@@ -2524,9 +2678,15 @@ class Chart(
         # The encoding the RHS's author wrote for the whole operand, the one
         # source of auxiliary-channel promotion below.
         rhs_authored = dict(rhs._encoding)
-        # Data merging: when data differs, decide whether to diagonal-concat
-        # or route the RHS through a named Identity transform.
-        if not lhs_in._shares_data_with(rhs_in):
+        # The chain the RHS's layers draw from, run over the RHS's own rows.
+        rhs_chain = list(rhs_top_xforms)
+        # Name of the identity of the composed source RHS tail readers read
+        # whenever the merged pipeline's tail is not their data.
+        source_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
+        shares_data = lhs_in._shares_data_with(rhs_in)
+        # Data merging: when data differs, diagonal-concat the two frames,
+        # renaming RHS columns that collide with LHS ones.
+        if not shares_data:
             import polars as pl
 
             lhs_df = to_polars(lhs_in._data)
@@ -2534,14 +2694,7 @@ class Chart(
             overlap = set(lhs_df.columns) & set(rhs_df.columns)
 
             if overlap:
-                # Column names collide — rename RHS columns so diagonal
-                # concat produces disjoint null-padded columns, AND route
-                # RHS layers through a named Identity transform with
-                # data_source so inherit_non_positional prevents the Rust
-                # renderer from injecting chart-level positional channels.
                 from dataclasses import replace as _dc_replace
-
-                from ferrum.marks._desugar_helpers import identity_transform
 
                 # Deterministic, collision-free per-merge suffix (GH #71 defect 2).
                 # Start from the number of layers already accumulated on the LHS at
@@ -2556,62 +2709,67 @@ class Chart(
                 # rename target can already exist as a real column in the (already
                 # renamed) inner merge's frame, and polars' `rename` raises
                 # `DuplicateError`. The while loop bumps the index until every
-                # renamed target is absent from BOTH frames' current columns,
-                # which is what actually guarantees no collision; the layer count
-                # only supplies a deterministic starting point.
+                # renamed target (and the RHS-row marker) is absent from BOTH
+                # frames' current columns, which is what actually guarantees no
+                # collision; the layer count only supplies a deterministic
+                # starting point.
                 n = len(lhs_layers)
                 existing_cols = set(lhs_df.columns) | set(rhs_df.columns)
-                while any(f"{c}__rhs_{n:04d}" in existing_cols for c in overlap):
+                while any(f"{c}__rhs_{n:04d}" in existing_cols for c in (*overlap, "__rhs_row")):
                     n += 1
                 suffix = f"__rhs_{n:04d}"
                 col_renames = {c: f"{c}{suffix}" for c in overlap}
                 rhs_df = rhs_df.rename(col_renames)
 
-                auto_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
-                identity_xform = _NamedTransform(identity_transform(auto_name), auto_name)
-                # A layer that already reads a named output (a multi-output
-                # composite mark's own layer, e.g. qq/violin/boxplot) keeps
-                # that data_source -- rerouting it through this merge's
-                # Identity would silently swap its intended transform output
-                # for the raw renamed-and-concatenated batch (#198). Only a
-                # layer with no data_source of its own (reading the default
-                # chain tail) needs to be pointed at the Identity so it does
-                # not inherit the LHS's chart-level encoding.
-                rhs_layers = [
-                    _dc_replace(
-                        l,
-                        encoding=_rename_encoding_fields(l.encoding, col_renames),
-                        data_source=l.data_source if l.data_source is not None else auto_name,
-                    )
-                    for l in rhs_layers
-                ]
-                rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
-                new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
-                _merge_top_transforms(new, [identity_xform])
-            else:
-                new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
+                if rhs_chain:
+                    # The RHS chain names the RHS's own columns, so its branch
+                    # starts by keeping only the rows the RHS contributed (an
+                    # explicit marker written here, never inferred from null
+                    # padding) and restoring their original names. Its layers
+                    # then read the chain's output under the names they were
+                    # written with.
+                    marker = f"__rhs_row{suffix}"
+                    rhs_df = rhs_df.with_columns(pl.lit(True).alias(marker))
+                    rhs_chain = _rhs_rows_prefix(marker, col_renames) + rhs_chain
+                    # A binding promoted to chart level reaches the LHS layers
+                    # too, which read the merged rows, so it names the renamed
+                    # RHS column rather than the LHS column of the same name.
+                    rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
+                else:
+                    # No chain: the RHS layers read the merged source through a
+                    # named identity under the renamed fields, so
+                    # inherit_non_positional keeps the Rust renderer from
+                    # injecting the LHS's chart-level positional channels. A
+                    # layer that already reads a named output (a multi-output
+                    # composite mark's own layer, e.g. qq/violin/boxplot)
+                    # keeps that data_source -- rerouting it would silently
+                    # swap its intended transform output for the raw
+                    # renamed-and-concatenated batch (#198).
+                    rhs_layers = [
+                        _dc_replace(l, encoding=_rename_encoding_fields(l.encoding, col_renames))
+                        for l in _point_rhs_layers(
+                            rhs_layers, tail=source_name, operand_encoding=rhs._encoding
+                        )
+                    ]
+                    rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
+                    _merge_top_transforms(new, [_source_identity(source_name)])
+            new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
 
-        # Named-transform routing for RHS transforms (smooth, etc.):
-        # wrap as _NamedTransform so FINAL_OUTPUT_KEY stays the LHS batch.
-        # Skipped when the RHS layers are ALREADY routed to a named output --
-        # every multi-output composite mark (qq, violin, boxplot, ...) gives
-        # its own top-level transform(s) an explicit name and points each
-        # consuming layer's data_source at it, precisely so those layers can
-        # be read standalone. Re-wrapping such a transform under a fresh
-        # ``_auto_...`` name here would rename it WITHOUT updating the
-        # data_source strings baked into it by its own desugar (e.g. a QQ
-        # transform's secondary-output key is derived from its own name),
-        # stranding those layers pointing at a name nothing publishes (#198).
-        rhs_already_routed = any(l.data_source is not None for l in rhs_layers)
-        if not new._transforms and rhs_top_xforms and not rhs_already_routed:
-            auto_name = f"_auto_{id(rhs_top_xforms[-1]) & 0xFFFFFFFF:08x}"
-            named_xforms = [_NamedTransform(t, auto_name) for t in rhs_top_xforms]
-            from dataclasses import replace as _dc_replace
-
-            rhs_layers = [_dc_replace(l, data_source=auto_name) for l in rhs_layers]
-            _merge_top_transforms(new, named_xforms)
-        else:
-            _merge_top_transforms(new, rhs_top_xforms)
+        # An RHS whose chain is the LHS's own pipeline over the same rows (a
+        # chart composed with itself, `mark_line(point=True)`'s line + point)
+        # already reads the merged tail; every other RHS is routed to read its
+        # own chain over its own rows.
+        if not (shares_data and _is_lhs_pipeline(rhs_chain, lhs_top_xforms)):
+            rhs_layers = _route_rhs_chain(
+                new,
+                rhs_layers,
+                rhs_chain,
+                operand_encoding=rhs._encoding,
+                same_data=shares_data,
+            )
+            rhs_layers = _route_tail_readers_to_source(
+                new, rhs_layers, source_name, operand_encoding=rhs._encoding
+            )
 
         _refuse_data_source_collision(lhs_layers, rhs_layers, lhs_top_xforms, rhs_top_xforms)
         new._layers = lhs_layers + rhs_layers
@@ -3552,10 +3710,10 @@ class Chart(
 
         # --- Transform serialization ---
         if effective_transforms:
-            # If any transform is a _NamedTransform or a plain dict (Phase 12
-            # data transforms), serialize everything via JSON so Rust receives
-            # the full pipeline through the serde path.
-            has_named = any(isinstance(t, _NamedTransform) for t in effective_transforms)
+            # If any transform is a _NamedTransform, a _Branch or a plain dict
+            # (Phase 12 data transforms), serialize everything via JSON so Rust
+            # receives the full pipeline through the serde path.
+            has_named = any(isinstance(t, (_NamedTransform, _Branch)) for t in effective_transforms)
             has_dict = any(isinstance(t, dict) for t in effective_transforms)
             if has_named or has_dict:
                 xform_json = _transforms_to_json_list_named(effective_transforms)

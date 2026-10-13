@@ -23,7 +23,7 @@ mod tests;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::{DataType as ArrowDataType, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::ThemeInputs;
@@ -1719,6 +1719,14 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
     pub(in crate::render) transform_outputs: &'a HashMap<String, RecordBatch>,
     pub(in crate::render) theme: &'a ThemeInputs,
     pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
+    /// This layer's index, for a [`RenderError::LayerUnknownColumn`] refusal.
+    pub(in crate::render) layer_idx: usize,
+    /// The chart's SOURCE schema, taken before any transform ran —
+    /// [`PreparedInputs::source_schema`](
+    /// crate::render::prepare::PreparedInputs::source_schema). Forwarded to
+    /// [`crate::render::prepare::validate_layer_positional_columns`], which
+    /// reads it only for a layer with no `data_source` of its own.
+    pub(in crate::render) source_schema: &'a Schema,
 }
 
 /// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52 / #72).
@@ -1738,23 +1746,67 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
 /// piece the prepare path previously lacked (#72), which made static right-axis
 /// ticks diverge from mark placement once layer params reached the wire.
 ///
+/// Before resolving, runs the SAME positional gate `Chart.layer(...)` itself
+/// is judged by
+/// ([`crate::render::prepare::validate_layer_positional_columns`]), over the
+/// merged encoding and this layer's own batch, with this layer's own coord
+/// flip, so a missing `x`, `y`, `x2` or `y2` is reported on its real channel
+/// through the one `LayerUnknownColumn` constructor, rather than every `UnknownColumn` this
+/// resolution could raise being rewritten and mislabeled `"y"`. A
+/// non-positional miss (e.g. a bad `color` field) is not caught by that gate
+/// and passes through as the plain [`RenderError::UnknownColumn`] this
+/// function always raised, unchanged.
+///
 /// Returns the resolved `y` [`ScaleKind`] plus any warnings the resolution
 /// produced (the caller propagates them). No-op param substitution keeps
 /// param-free dual-axis charts byte-identical.
 pub(in crate::render) fn resolve_layer_y_slot_scale(
     ctx: &LayerScaleCtx,
-    layer_mark: crate::spec::mark::Mark,
-    layer_encoding: &crate::spec::encoding::Encoding,
+    layer: &crate::render::prepare::LayerPrepared,
     layer_batch: &RecordBatch,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
-    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
+    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales, layer_idx, source_schema } = ctx;
+
+    // The positional gate reads `layer.encoding` — `LayerPrepared`'s own,
+    // already prepare-time-merged encoding — NOT the `merged_encoding`
+    // freshly re-derived below for scale resolution. The two differ for a
+    // layer with its own `data_source`: `from_chart_and_layer` built
+    // `layer.encoding` via `inherit_non_positional` (positional channels
+    // belong to the layer's own data, so x2/y2 are never inherited there),
+    // while `merged_encoding`'s `overlay_from` falls back to `spec.encoding`
+    // for any channel `layer.encoding` left unset — reintroducing a
+    // chart-level x2/y2 the layer's own batch never had whenever
+    // `layer.encoding` (correctly) didn't carry one.
+    //
+    // `layer.encoding` is normalized through
+    // [`crate::render::prepare::normalize_rule_tick_own_span`] before the
+    // gate sees it — the same normalization `scene_build`'s per-panel route
+    // applies before its own call to this gate — so a `Mark::Tick`/`Mark::Rule`
+    // layer that declares only `y` (or only `x`) is judged on the one
+    // channel it actually draws, not on an inherited opposite channel the
+    // mark builder never reads.
+    let layer_flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
+    let source = layer.data_source.is_none().then_some(source_schema);
+    let gate_encoding = crate::render::prepare::normalize_rule_tick_own_span(
+        layer.encoding.clone(),
+        layer.mark,
+        layer.x_is_own,
+        layer.y_is_own,
+    );
+    crate::render::prepare::validate_layer_positional_columns(
+        layer_idx,
+        &gate_encoding,
+        layer_batch,
+        layer_flipped,
+        source,
+    )?;
 
     let mut merged_encoding = spec.encoding.clone();
-    merged_encoding.overlay_from(layer_encoding);
+    merged_encoding.overlay_from(&layer.encoding);
     let mut layer_spec = ChartSpec {
-        mark: layer_mark,
+        mark: layer.mark,
         encoding: merged_encoding,
         layers: None,
         ..spec.clone()

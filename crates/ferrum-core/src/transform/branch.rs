@@ -12,9 +12,17 @@
 //! rules coexist so a layer can derive its data from the source rather than
 //! from another layer's chained output.
 //!
-//! The sub-chain tail is published under `name`, and every named or
-//! secondary output inside it under its own key; on a key collision `name`
-//! wins. A branch never advances the outer unnamed chain. Execution lives in
+//! The sub-chain tail is published under `name`, unscoped. Every named or
+//! secondary output inside it — a branch's inner outputs are its secondary
+//! outputs — is published SCOPED under
+//! [`secondary_key(Some(name), key)`](crate::transform::registry::secondary_key),
+//! so two branches that reuse the same inner name (two composites of the
+//! same kind over different data, e.g. `boxplot(df) + boxplot(df2)`) publish
+//! two distinct keys, each carrying its own rows. A scoped
+//! key can never equal the branch's own bare `name` (the rule's
+//! `"{name}_{key}"` shape always has the separator), so there is no
+//! collision between a branch's own name and anything it scopes. A
+//! branch never advances the outer unnamed chain. Execution lives in
 //! [`crate::transform::core::apply_transforms_named`].
 
 use std::collections::HashMap;
@@ -171,8 +179,12 @@ mod tests {
     }
 
     /// Inside a branch, unnamed steps chain, a named step reads the inner
-    /// tail and publishes under its own key, and a nested branch with no
-    /// input reads the pipeline's original batch, not the outer branch's.
+    /// tail and publishes under its own (inner-scope) key, and a nested
+    /// branch with no input reads the pipeline's original batch, not the
+    /// outer branch's. Every one of "outer"'s inner keys — the named step,
+    /// and the nested branches' own (already bare-published-then-rescoped)
+    /// tails — reaches the TOP level scoped under "outer"; "outer" itself,
+    /// the one key this chain's enclosing `run_chain` publishes, stays bare.
     #[test]
     fn the_sub_chain_has_top_level_semantics_recursively() {
         let specs = vec![
@@ -189,32 +201,154 @@ mod tests {
             ),
         ];
         let (outputs, _) = run(&specs).unwrap();
+        let scoped = |key: &str| crate::transform::registry::secondary_key(Some("outer"), key);
         assert_eq!(values(&outputs["outer"]), [2.0, 3.0, 4.0]);
-        assert_eq!(values(&outputs["inner"]), [3.0, 4.0]);
-        assert_eq!(values(&outputs["nested"]), [1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(values(&outputs["nested_on_inner"]), [4.0]);
+        assert_eq!(values(&outputs[&scoped("inner")]), [3.0, 4.0]);
+        assert_eq!(values(&outputs[&scoped("nested")]), [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(values(&outputs[&scoped("nested_on_inner")]), [4.0]);
         assert_eq!(values(&outputs[FINAL_OUTPUT_KEY]), [4.0]);
     }
 
-    /// A secondary output produced inside a branch is published under its own
-    /// key beside the branch tail.
+    /// Two sibling branches that reuse the same inner name publish two
+    /// DIFFERENT scoped keys, each with its own rows — the exact collision
+    /// Branch-scoped publication removes (e.g. `boxplot(df) + boxplot(df2)`,
+    /// two composites of the same kind over different data, each publishing
+    /// an inner "box").
+    #[test]
+    fn two_sibling_branches_with_the_same_inner_name_publish_distinct_scoped_keys() {
+        let specs = vec![
+            branch("b1", None, vec![keep(1.0, Some("x"))]),
+            branch("b2", None, vec![keep(2.0, Some("x"))]),
+        ];
+        let (outputs, _) = run(&specs).unwrap();
+        let x1 = crate::transform::registry::secondary_key(Some("b1"), "x");
+        let x2 = crate::transform::registry::secondary_key(Some("b2"), "x");
+        assert_ne!(x1, x2);
+        assert_eq!(values(&outputs[&x1]), [2.0, 3.0, 4.0]);
+        assert_eq!(values(&outputs[&x2]), [3.0, 4.0]);
+    }
+
+    /// A branch nested inside a branch: the inner branch's own secondary
+    /// output reaches the top level double-scoped (`b1_b2_k`), not single
+    /// ("b2_k") or bare ("k") — one more level of `secondary_key` prefix per
+    /// level of nesting the output crosses.
+    #[test]
+    fn a_doubly_nested_branch_publishes_its_secondary_output_double_scoped() {
+        let qq: TransformSpec =
+            serde_json::from_value(serde_json::json!({"type": "qq", "field": "v"})).unwrap();
+        let specs = vec![branch("b1", None, vec![branch("b2", None, vec![qq])])];
+        let (outputs, _) = run(&specs).unwrap();
+        // b2's own tail, inserted bare into b1's child by run_chain's Branch
+        // arm, then rescoped once (by b1) on the way to the top level.
+        let b1_b2 = crate::transform::registry::secondary_key(Some("b1"), "b2");
+        assert!(outputs.contains_key(&b1_b2), "got keys: {:?}", outputs.keys().collect::<Vec<_>>());
+        // b2's own secondary output, already scoped to "b2_<key>" by b2's
+        // OWN run_branch before b1 ever sees it, then rescoped once more
+        // (by b1) on the way to the top level.
+        let b2_qq = crate::transform::registry::secondary_key(Some("b2"), crate::transform::qq::QQ_LINE_KEY);
+        let b1_b2_qq = crate::transform::registry::secondary_key(Some("b1"), &b2_qq);
+        assert!(outputs.contains_key(&b1_b2_qq), "got keys: {:?}", outputs.keys().collect::<Vec<_>>());
+    }
+
+    /// An inner `Reorder(from=...)` resolves against an inner (SCOPE-LOCAL)
+    /// `Linkage`'s own secondary output, exactly as the pair does at top
+    /// level (`reorder.rs`'s `clustermap_chain` fixture) — both run inside
+    /// the SAME child `Published`, before either's keys are rescoped on the
+    /// way out, so the inner lookup sees the unscoped inner key.
+    #[test]
+    fn an_inner_reorder_reads_its_inner_linkages_order_output() {
+        use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
+        use crate::transform::reorder::ReorderSpec;
+        use arrow::array::Float64Array as F64;
+
+        // Two well-separated row pairs so Ward's leaf order is not the
+        // identity permutation — a bug that dropped the branch-local scope
+        // and fed Reorder nothing would leave rows in schema order instead.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row", DataType::Utf8, false),
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let clustered_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["r0", "r1", "r2", "r3"])),
+                Arc::new(F64::from(vec![0.0, 0.1, 10.0, 10.1])),
+                Arc::new(F64::from(vec![0.0, 0.1, 10.0, 10.1])),
+            ],
+        )
+        .unwrap();
+
+        let linkage = TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward,
+            metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows,
+            z_score: None,
+            standard_scale: None,
+            name: Some("link".into()),
+        });
+        let reorder = TransformSpec::Reorder(ReorderSpec {
+            by: "original_idx".into(),
+            drop_index: false,
+            from: Some("link_order".into()),
+            axis: LinkageAxis::Rows,
+            name: None,
+        });
+        let specs = vec![branch("clustered", None, vec![linkage, reorder])];
+
+        pyo3::Python::initialize();
+        let (outputs, _) =
+            apply_transforms_named(&specs, &clustered_batch, &TransformContext::default()).unwrap();
+        // The real assertion is that this ran at all: `Reorder::apply_with_outputs`
+        // raises a typed "from=... not found in named outputs" error (not a
+        // silent identity fallback) when the inner Linkage's "link_order"
+        // isn't visible — which it would not be if the child `Published` a
+        // branch's sub-chain runs against failed to expose a sibling inner
+        // step's own key to a later step in the SAME branch. Every row must
+        // also survive the round trip.
+        let tail = &outputs["clustered"];
+        assert_eq!(tail.num_rows(), 4);
+        let rows = tail.column(tail.schema().index_of("row").unwrap());
+        let mut rows: Vec<&str> = rows
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap())
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, ["r0", "r1", "r2", "r3"]);
+    }
+
+    /// A secondary output produced inside a branch is published SCOPED under
+    /// the branch's name — a branch's inner outputs are its secondary
+    /// outputs — beside the branch's own (unscoped) tail.
     #[test]
     fn inner_secondary_outputs_are_published_under_their_own_keys() {
         let qq: TransformSpec =
             serde_json::from_value(serde_json::json!({"type": "qq", "field": "v"})).unwrap();
         let (outputs, _) = run(&[branch("b", None, vec![qq])]).unwrap();
         assert!(outputs.contains_key("b"));
-        assert!(outputs.contains_key(crate::transform::qq::QQ_LINE_KEY));
+        let scoped = crate::transform::registry::secondary_key(Some("b"), crate::transform::qq::QQ_LINE_KEY);
+        assert!(outputs.contains_key(&scoped), "got keys: {:?}", outputs.keys().collect::<Vec<_>>());
     }
 
-    /// On a key collision the branch's own `name` wins over an inner named
-    /// step, for both the batch and the swarm record.
+    /// An inner step named exactly like the branch publishes under its own
+    /// SCOPED key (`"b_b"`), never the branch's bare name — which the tail
+    /// alone occupies.
     #[test]
-    fn the_branch_name_wins_a_key_collision() {
+    fn an_inner_step_named_like_the_branch_publishes_under_its_scoped_key_and_the_tail_under_the_bare_name() {
         let specs = vec![branch("b", None, vec![swarm(Some("b")), keep(3.0, None)])];
         let (outputs, swarms) = run(&specs).unwrap();
-        assert_eq!(values(&outputs["b"]), [4.0]);
+        assert_eq!(values(&outputs["b"]), [4.0], "the tail, under the bare name");
         assert!(!swarms.contains_key("b"), "the tail descends from no Swarm");
+        let scoped = crate::transform::registry::secondary_key(Some("b"), "b");
+        assert_eq!(
+            values(&outputs[&scoped]),
+            [1.0, 2.0, 3.0, 4.0],
+            "the inner named Swarm step's own output, under its scoped key"
+        );
+        assert!(swarms.contains_key(&scoped), "the inner step's own Swarm record follows it");
     }
 
     /// The swarm record follows the sub-chain: a tail after an inner unnamed

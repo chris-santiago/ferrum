@@ -31,19 +31,40 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
         PyValueError::new_err(format!("data_calculate: invalid expression: {e}"))
     })?;
 
-    ensure_expr_fields_supported(&parsed, &batch.schema(), "data_calculate")?;
+    // A bare field reference (`datum.x` or `datum["x"]`, no operators) that
+    // resolves against this batch carries that column's array through
+    // unchanged — dtype, nulls and dictionary encoding included — rather
+    // than going through the row-by-row `ExprValue`
+    // evaluator below, which can only represent Number/Str/Bool/Null and so
+    // would collapse an Int64, Date32, Datetime or Dictionary column to
+    // Float64 or Utf8. A bare reference that does NOT resolve falls through
+    // to the inference path below, exactly like every other expression
+    // shape: `datum.missing` evaluating to `Null` on every row (and so to an
+    // all-null `Float64` column here) is the documented, pinned Vega-style
+    // missing-field rule (`filter.rs`'s `ensure_expr_fields_supported` doc),
+    // not a malformed input — a bare reference is not a special case of that
+    // rule, just the one shape this function can also preserve a dtype for
+    // when the column IS there.
+    let bare_ref_idx = parsed
+        .as_bare_field_ref()
+        .and_then(|field_name| batch.schema().index_of(field_name).ok());
+    let (dtype, col): (DataType, ArrayRef) = if let Some(idx) = bare_ref_idx {
+        (batch.schema().field(idx).data_type().clone(), batch.column(idx).clone())
+    } else {
+        ensure_expr_fields_supported(&parsed, &batch.schema(), "data_calculate")?;
 
-    let n_rows = batch.num_rows();
+        let n_rows = batch.num_rows();
 
-    // Evaluate the parsed expression for each row to determine result type.
-    let mut results: Vec<ExprValue> = Vec::with_capacity(n_rows);
-    for row in 0..n_rows {
-        let val = parsed.eval(&|field_name: &str| batch_field_value(batch, field_name, row));
-        results.push(val);
-    }
+        // Evaluate the parsed expression for each row to determine result type.
+        let mut results: Vec<ExprValue> = Vec::with_capacity(n_rows);
+        for row in 0..n_rows {
+            let val = parsed.eval(&|field_name: &str| batch_field_value(batch, field_name, row));
+            results.push(val);
+        }
 
-    // Determine output dtype from the results.
-    let (dtype, col): (DataType, ArrayRef) = infer_and_build_column(&spec.expr, &results)?;
+        // Determine output dtype from the results.
+        infer_and_build_column(&spec.expr, &results)?
+    };
 
     let old_schema = batch.schema();
     let mut fields: Vec<Field> = old_schema.fields().iter().map(|f| f.as_ref().clone()).collect();
@@ -284,5 +305,147 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("data_calculate:"), "got: {msg}");
         assert!(msg.contains("row 0"), "got: {msg}");
+    }
+
+    // ─── Bare field reference preserves the column's Arrow type ───────────
+    // `Calculate { expr: "datum.<col>" }` (or the bracketed
+    // `datum["<col>"]` form) carries the column's array through unchanged —
+    // dtype, nulls and dictionary encoding — instead of re-inferring it from
+    // the evaluated `ExprValue`s, which can only represent Number/Str/Bool/
+    // Null and so collapses Int64 to Float64, Date32/Datetime to Float64,
+    // and Dictionary to Utf8. ─────────────────────────────────────────────
+
+    use arrow::array::{Array, Date32Array, DictionaryArray, Int64Array, StringDictionaryBuilder, TimestampMillisecondArray};
+    use arrow::datatypes::Int32Type;
+
+    /// A batch with the standard `x`/`y` Float64 pair plus one extra column
+    /// of whatever dtype the bare-reference case under test needs.
+    fn make_batch_with_extra(name: &str, dtype: DataType, col: ArrayRef) -> RecordBatch {
+        let base = make_batch();
+        let mut fields: Vec<Field> = base.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new(name, dtype, true));
+        let mut columns = base.columns().to_vec();
+        columns.push(col);
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    /// Asserts a bare `datum.<name>` reference carries `col` through with
+    /// `dtype` unchanged, both appended under a new name and replacing an
+    /// existing column.
+    fn assert_bare_ref_preserves(name: &str, dtype: DataType, col: ArrayRef) {
+        // Formatting a `PyErr`'s `Display` (as an `.unwrap()` panic message
+        // would) needs a live interpreter, so every caller through this
+        // helper initializes one up front.
+        pyo3::Python::initialize();
+        let batch = make_batch_with_extra(name, dtype.clone(), col.clone());
+
+        // New name: appended as a fourth column, values and dtype untouched.
+        let out = apply(&calc("new_name", &format!("datum.{name}")), &batch).unwrap();
+        assert_eq!(out.num_columns(), 4, "dtype {dtype:?}");
+        let idx = out.schema().index_of("new_name").unwrap();
+        assert_eq!(out.schema().field(idx).data_type(), &dtype, "dtype {dtype:?}");
+        assert_eq!(out.column(idx), &col, "dtype {dtype:?}: values must be byte-identical");
+
+        // Replace in place: same position, same dtype, same values.
+        let out = apply(&calc(name, &format!("datum.{name}")), &batch).unwrap();
+        assert_eq!(out.num_columns(), 3, "dtype {dtype:?}");
+        let idx = out.schema().index_of(name).unwrap();
+        assert_eq!(out.schema().field(idx).data_type(), &dtype, "dtype {dtype:?}");
+        assert_eq!(out.column(idx), &col, "dtype {dtype:?}: values must be byte-identical");
+    }
+
+    #[test]
+    fn bare_reference_preserves_int64() {
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(3)]));
+        assert_bare_ref_preserves("n", DataType::Int64, col);
+    }
+
+    #[test]
+    fn bare_reference_preserves_date32() {
+        let col: ArrayRef = Arc::new(Date32Array::from(vec![Some(0_i32), None, Some(19_000)]));
+        assert_bare_ref_preserves("d", DataType::Date32, col);
+    }
+
+    #[test]
+    fn bare_reference_preserves_datetime() {
+        let dtype = DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None);
+        let col: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+            Some(0_i64),
+            None,
+            Some(1_700_000_000_000),
+        ]));
+        assert_bare_ref_preserves("t", dtype, col);
+    }
+
+    #[test]
+    fn bare_reference_preserves_dictionary() {
+        let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+        builder.append_value("a");
+        builder.append_null();
+        builder.append_value("a");
+        let dict: DictionaryArray<Int32Type> = builder.finish();
+        let dtype = dict.data_type().clone();
+        let col: ArrayRef = Arc::new(dict);
+        assert_bare_ref_preserves("cat", dtype, col);
+    }
+
+    #[test]
+    fn bare_reference_preserves_boolean() {
+        let col: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)]));
+        assert_bare_ref_preserves("flag", DataType::Boolean, col);
+    }
+
+    #[test]
+    fn bare_reference_preserves_utf8_with_nulls() {
+        let col: ArrayRef = Arc::new(StringArray::from(vec![Some("hi"), None, Some("there")]));
+        assert_bare_ref_preserves("s", DataType::Utf8, col);
+    }
+
+    #[test]
+    fn bare_reference_bracketed_form_preserves_dtype() {
+        // `datum["name"]` is the other bare-reference shape `as_bare_field_ref`
+        // must recognize — same rule, not just the dotted form.
+        pyo3::Python::initialize();
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(5_i64), Some(6), Some(7)]));
+        let batch = make_batch_with_extra("full name", DataType::Int64, col.clone());
+        let out = apply(&calc("z", "datum[\"full name\"]"), &batch).unwrap();
+        let idx = out.schema().index_of("z").unwrap();
+        assert_eq!(out.schema().field(idx).data_type(), &DataType::Int64);
+        assert_eq!(out.column(idx), &col);
+    }
+
+    #[test]
+    fn non_bare_expression_still_infers_as_float64() {
+        // An operator present (even `+ 0`) takes the existing inference path:
+        // an Int64 column still collapses to Float64, unchanged behavior.
+        pyo3::Python::initialize();
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), Some(2), Some(3)]));
+        let batch = make_batch_with_extra("n", DataType::Int64, col);
+        let out = apply(&calc("z", "datum.n + 0"), &batch).unwrap();
+        let idx = out.schema().index_of("z").unwrap();
+        assert_eq!(out.schema().field(idx).data_type(), &DataType::Float64);
+        let z = out.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(z.values().to_vec(), [1.0, 2.0, 3.0]);
+    }
+
+    /// A bare reference to a missing column is not malformed: it falls
+    /// through to the same inference path every other expression shape
+    /// takes, yielding an all-null Float64
+    /// column (`ExprValue::Null` per row maps to `None` in
+    /// `infer_and_build_column`'s default branch), never a typed error.
+    /// `non_bare_expression_still_infers_as_float64` above pins the
+    /// sibling fact that an OPERATOR over the same missing field yields
+    /// `NaN` (not a null) through the same default branch, since `Null`
+    /// arithmetic coerces via `as_number()` before reaching inference — a
+    /// bare reference is the one shape where the raw per-row `ExprValue`
+    /// (not an arithmetic result) reaches inference directly.
+    #[test]
+    fn bare_reference_to_missing_column_is_null_like_any_expression() {
+        let batch = make_batch();
+        let out = apply(&calc("z", "datum.nonexistent"), &batch).unwrap();
+        let idx = out.schema().index_of("z").unwrap();
+        assert_eq!(out.schema().field(idx).data_type(), &DataType::Float64);
+        let z = out.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(z.null_count(), z.len(), "every row must be a genuine Arrow null, not NaN");
     }
 }

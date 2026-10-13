@@ -4,6 +4,19 @@ use crate::spec::encoding::Encoding;
 use crate::spec::mark::Mark;
 use crate::transform::core::TransformSpec;
 
+/// A positional encoding channel name: `x`, `y`, `x2` or `y2` — the domain
+/// [`Layer::inherited_positional`] ranges over. Deserializes from exactly
+/// those four lowercase wire strings; any other value is a deserialize
+/// error, not a silently-ignored one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PositionalChannel {
+    X,
+    Y,
+    X2,
+    Y2,
+}
+
 /// A single layer within a multi-layer ChartSpec. Inherits chart-level
 /// encoding for any field set to None at the layer level.
 ///
@@ -17,6 +30,25 @@ pub struct Layer {
     pub mark: Mark,
     #[serde(default)]
     pub encoding: Encoding,
+    /// Positional channel names (`"x"`, `"y"`, `"x2"`, `"y2"`) this layer's
+    /// `encoding` carries a VALUE for but did not itself declare — filled in
+    /// by Python's `+` routing from the RHS operand's chart-level encoding
+    /// when a layered operand gets a `data_source` and would otherwise lose
+    /// every chart positional channel it never bound itself (a
+    /// `_promote_layer_channels`-style copy with provenance). Read only by
+    /// [`LayerPrepared::from_chart_and_layer`] to
+    /// decide `x_is_own`/`y_is_own`: a channel listed here is treated
+    /// exactly as the standalone-inherited case the own-span normalization
+    /// (`scene_build`'s rule/tick own-span rule) already clears, not as a
+    /// layer-declared one. No other Rust reader looks at this field — every
+    /// other consumer (domain unions, axis titles, legends) reads
+    /// `encoding` itself, which already carries the filled value, exactly
+    /// as it reads a flat operand's own snapshot. Empty (the default) for
+    /// every layer that declares its own channels or inherits none,
+    /// including every pre-existing spec, so the field is omitted from the
+    /// wire then and round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_positional: Vec<PositionalChannel>,
     /// A layer does not run its own transforms: it reads the chart's pipeline
     /// output, or a named chart-level output via `data_source`. This field is
     /// read only to refuse a non-empty list at render
@@ -82,6 +114,7 @@ impl Default for Layer {
         Self {
             mark: Mark::Point,
             encoding: Encoding::default(),
+            inherited_positional: Vec::new(),
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
@@ -354,5 +387,49 @@ mod tests {
         let inheriting = point_layer();
         assert_eq!(inheriting.effective_coord(Some(&chart)), Some(&chart));
         assert_eq!(inheriting.effective_coord(None), None);
+    }
+
+    /// `inherited_positional` round-trips all four positional channel names,
+    /// each as its lowercase wire string, and is omitted entirely when
+    /// empty.
+    #[test]
+    fn inherited_positional_round_trips_every_channel() {
+        let layer = Layer {
+            inherited_positional: vec![
+                PositionalChannel::X,
+                PositionalChannel::Y,
+                PositionalChannel::X2,
+                PositionalChannel::Y2,
+            ],
+            ..point_layer()
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            json.contains(r#""inherited_positional":["x","y","x2","y2"]"#),
+            "expected the four lowercase channel strings: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Layer>(&json).unwrap(), layer);
+
+        let empty = point_layer();
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(
+            !json.contains("inherited_positional"),
+            "an empty list must be omitted from the wire: {json}"
+        );
+    }
+
+    /// A channel name outside `{x, y, x2, y2}` is a deserialize error, not a
+    /// silently-dropped or silently-accepted value.
+    #[test]
+    fn inherited_positional_refuses_an_unknown_channel_name() {
+        let err = serde_json::from_value::<Layer>(serde_json::json!({
+            "mark": "point",
+            "inherited_positional": ["color"],
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant `color`"),
+            "expected an unknown-variant error naming 'color': {err}"
+        );
     }
 }

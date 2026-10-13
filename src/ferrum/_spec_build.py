@@ -777,6 +777,10 @@ class SpecBuildMixin:
             # declared directly, so those specs are unchanged.
             if layer.entry is not None:
                 layer_dict["entry"] = layer.entry
+            # Positional channels copied from the operand chart; absent when
+            # none was copied, so every other spec is unchanged on the wire.
+            if layer.inherited_positional:
+                layer_dict["inherited_positional"] = list(layer.inherited_positional)
             out.append(layer_dict)
         return out
 

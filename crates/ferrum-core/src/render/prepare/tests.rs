@@ -3067,6 +3067,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
                 }),
                 ..Default::default()
             },
+            inherited_positional: vec![],
             transforms: vec![],
             mark_style: None,
             data_source: None,
@@ -6190,3 +6191,76 @@ fn a_layer_level_aux_binding_draws_its_legend_like_a_chart_level_one() {
         assert!(unbound.aux_legends.is_empty(), "{channel}: {:?}", unbound.aux_legends);
     }
 }
+
+// ── `inherited_positional` ───────────────────────────────────────────────
+//
+// `Layer::inherited_positional` names a positional channel Python's `+`
+// routing fills onto a routed layer's own encoding from the RHS operand's
+// chart-level encoding (so a layer that gets a `data_source` — and so loses
+// `inherit_non_positional`'s ordinary chart-level inheritance — still has
+// something to plot), while recording that the layer never declared that
+// channel itself. `LayerPrepared::from_chart_and_layer` reads it to keep
+// `x_is_own`/`y_is_own` describing "declared by this layer", not merely
+// "present on this layer's encoding" — the same distinction `color_is_own`
+// already draws between a chart-inherited and a layer-declared channel, now
+// extended to a channel Python filled rather than the chart merge inheriting.
+
+/// A `Mark::Rule` layer routed to its own `data_source` (so ordinary
+/// chart-level positional inheritance does NOT apply, per
+/// `from_chart_and_layer`'s `data_source.is_some()` branch): it declares its
+/// own `x`, and carries a `y` value Python filled from the RHS operand's
+/// chart-level encoding. Listed in `inherited_positional`, `y_is_own` must
+/// be `false` — exactly the standalone-inherited shape — even though
+/// `encoding.y` is `Some`.
+#[test]
+fn a_filled_positional_channel_listed_as_inherited_is_not_own() {
+    let x = EncodingSpec { field: "a".into(), ..Default::default() };
+    let y = EncodingSpec { field: "b".into(), ..Default::default() };
+    let spec = ChartSpec {
+        mark: Mark::Rule,
+        encoding: Encoding { x: Some(x.clone()), y: Some(y.clone()), ..Default::default() },
+        ..Default::default()
+    };
+    let layer = crate::spec::layer::Layer {
+        mark: Mark::Rule,
+        encoding: Encoding { x: Some(x), y: Some(y), ..Default::default() },
+        data_source: Some("tagged".into()),
+        inherited_positional: vec![crate::spec::layer::PositionalChannel::Y],
+        ..Default::default()
+    };
+    let prepared = LayerPrepared::from_chart_and_layer(&spec, &layer);
+    assert!(prepared.encoding.y.is_some(), "the filled value itself is untouched");
+    assert!(prepared.x_is_own, "x was declared by this layer");
+    assert!(!prepared.y_is_own, "y is listed in inherited_positional, so it is not own");
+}
+
+/// The mutation guard: the identical layer WITHOUT the `inherited_positional`
+/// entry — same `data_source`, same filled `y` value — reads `y_is_own` as
+/// `true`, proving the field (not the data_source or the value) is what
+/// flips the flag.
+#[test]
+fn the_same_filled_channel_without_the_list_reads_as_own() {
+    let x = EncodingSpec { field: "a".into(), ..Default::default() };
+    let y = EncodingSpec { field: "b".into(), ..Default::default() };
+    let spec = ChartSpec {
+        mark: Mark::Rule,
+        encoding: Encoding { x: Some(x.clone()), y: Some(y.clone()), ..Default::default() },
+        ..Default::default()
+    };
+    let layer = crate::spec::layer::Layer {
+        mark: Mark::Rule,
+        encoding: Encoding { x: Some(x), y: Some(y), ..Default::default() },
+        data_source: Some("tagged".into()),
+        inherited_positional: vec![],
+        ..Default::default()
+    };
+    let prepared = LayerPrepared::from_chart_and_layer(&spec, &layer);
+    assert!(prepared.x_is_own);
+    assert!(prepared.y_is_own, "with no inherited_positional entry, a present y reads as own");
+}
+
+// The end-to-end rendered-geometry consequence (a rule drawing the same
+// vertical span standalone inheritance draws) is pinned in `scene_build`'s
+// own test module, next to the fixture and helpers
+// (`line_endpoints`, `build_scene_for`) it reuses — see
+// `a_filled_and_listed_y_renders_the_same_vertical_rule_as_standalone_inheritance`.

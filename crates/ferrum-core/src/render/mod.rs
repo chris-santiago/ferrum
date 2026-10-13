@@ -594,13 +594,31 @@ pub enum RenderError {
     /// `channel` is the RESOLVED (post-`CoordFlip`) token the gate acted on;
     /// `coord_flipped` (R3) is the `Display`-time un-flip back to the token
     /// the user wrote, patched at the one construction site
-    /// (`scene_build::validate_layer_positional_columns`) from
+    /// (`prepare::validate_layer_positional_columns`) from
     /// `PreparedInputs::coord_flipped`.
+    ///
+    /// `in_source` is `true` when this layer has no `data_source` of its own
+    /// (so it reads its chart's pipeline output — `Chart.layer(...)` and
+    /// `SecondaryY(...)` both read the tail this way) AND the missing column
+    /// names a field present in the chart's SOURCE batch, taken before any
+    /// transform ran. Both facts together, not merely "a transform ran
+    /// somewhere": a typo (absent from both the source and the tail) or a
+    /// chain of only named steps (whose tail IS the source, unchanged) does
+    /// not claim the column is reachable by composing a separate chart with
+    /// `+` when it is not there either. `Display` appends the `+` remedy
+    /// only then; a layer with its own `data_source`, or a column the source
+    /// batch never had, keeps the plain message. Set at the one positional
+    /// gate (`prepare::validate_layer_positional_columns`), shared by
+    /// `Chart.layer(...)`'s own gate and the `SecondaryY(...)` y-slot
+    /// resolution (`scale_resolve::resolve_layer_y_slot_scale`, which runs
+    /// the same gate before resolving), so both routes report the real
+    /// channel and the real fact through one constructor.
     LayerUnknownColumn {
         layer: usize,
         channel: &'static str,
         name: String,
         coord_flipped: bool,
+        in_source: bool,
     },
     /// A layer whose mark DRAWS and needs both positional channels has no
     /// binding for one of them — neither on its own encoding nor on the chart
@@ -1305,13 +1323,23 @@ impl std::fmt::Display for RenderError {
                      the layer its own scale with resolve={{\"{channel}\": \"independent\"}}."
                 )
             }
-            Self::LayerUnknownColumn { layer, channel, name, coord_flipped } => {
+            Self::LayerUnknownColumn { layer, channel, name, coord_flipped, in_source } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                write!(
-                    f,
-                    "layer {layer}: encoding '{channel}' references unknown column '{name}' \
-                     (not present in that layer's data)"
-                )
+                if *in_source {
+                    write!(
+                        f,
+                        "layer {layer}: encoding '{channel}' references unknown column '{name}' \
+                         (not present in that layer's data) — this layer reads the chart's \
+                         transformed rows, not its source data; draw '{name}' from the source \
+                         by composing a separate chart with `+` instead"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "layer {layer}: encoding '{channel}' references unknown column '{name}' \
+                         (not present in that layer's data)"
+                    )
+                }
             }
             Self::LayerMissingPositionalChannel { layer, mark, channel, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);

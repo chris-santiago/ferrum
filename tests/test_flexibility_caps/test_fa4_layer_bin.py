@@ -53,7 +53,18 @@ def _multi_row_df() -> pl.DataFrame:
 
 
 def _bin_transforms(spec_dict: dict) -> list[dict]:
-    return [t for t in (spec_dict.get("transforms") or []) if t.get("type") == "bin"]
+    """Each top-level bin step, under the name a layer reads it by.
+
+    A layer that reads a named input gets its step as a one-step branch over
+    that input; the branch publishes the step's output under its own name.
+    """
+    steps = []
+    for t in spec_dict.get("transforms") or []:
+        if t.get("type") == "branch" and len(t["transforms"]) == 1:
+            t = {**t["transforms"][0], "name": t["name"]}
+        if t.get("type") == "bin":
+            steps.append(t)
+    return steps
 
 
 def _layer_bin(spec_dict: dict, layer: dict) -> dict:

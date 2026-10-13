@@ -745,6 +745,19 @@ impl Expr {
         collect_field_refs(&self.root, &mut out);
         out
     }
+
+    /// The column name this expression reads, when the whole expression is
+    /// nothing but a single field access — `datum.x` or the bracketed
+    /// `datum["field"]` form `parse_datum_access` accepts for names that
+    /// aren't identifiers — with no operators. Returns `None` for every other
+    /// shape, including multi-segment access like `datum.a.b` (a different
+    /// node than the one this matches: `fields.len() == 1`).
+    pub(crate) fn as_bare_field_ref(&self) -> Option<&str> {
+        match &self.root {
+            Node::DatumAccess(fields) if fields.len() == 1 => Some(fields[0].as_str()),
+            _ => None,
+        }
+    }
 }
 
 fn collect_field_refs(node: &Node, out: &mut BTreeSet<String>) {

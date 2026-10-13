@@ -901,6 +901,7 @@ def inject_scale(chart, channel: str, scale_dict: dict):
                 mark_kwargs=layer.mark_kwargs,
                 data_source=layer.data_source,
                 position=layer.position,
+                inherited_positional=layer.inherited_positional,
             )
             for layer in new._layers
         ]
@@ -4360,9 +4361,9 @@ def _expand_layers(c) -> tuple[list, list]:
     that layer: the caller rebuilding a chart from these layers clears its
     own ``_entry``, so the entry names this operand's layer and no other.
 
-    Transforms are returned as plain PyO3 objects.  The named-transform path
-    (routing a layer's output to a specific ``data_source``) is handled in
-    ``__add__`` when the LHS chart has no transforms and the RHS does.
+    Transforms are returned as the chart holds them.  Routing the RHS
+    operand's chain to a named output its layers read (``data_source``) is
+    handled in ``Chart.__add__``.
 
     Encoding-implicit ``_PendingAggregate`` sentinels (added to ``c._transforms``
     by ``encode()`` for channels like ``Y("v", aggregate="mean")``) are excluded
@@ -4428,28 +4429,28 @@ def _layer_mark_kwargs(c) -> dict | None:
     return kwargs or None
 
 
-def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
-    """Merge RHS top-level transforms into the combined chart's pipeline.
+def _merge_top_transforms(new, steps: list) -> None:
+    """Add named pipeline steps to the composed chart so each reads the source.
 
-    Deduplicates by identity first (fast), then by value equality
-    (PyO3 transform classes implement ``__eq__`` via ``#[pyclass(eq, ...)]``;
-    ``_NamedTransform`` defers to its inner transform for equality checks).
-    Value deduplication prevents the same logical transform from running
-    twice when both sides of ``+`` use an identical transform object.
+    Every step in *steps* publishes beside the unnamed chain (a named step, a
+    ``_Branch`` or a named identity), and is inserted ahead of the first
+    unnamed step of ``new._transforms``: at that position nothing has narrowed
+    or replaced the batch yet, so the step reads the composed chart's original
+    rows whatever the other operand's chain does.  With no unnamed step the
+    insertion point is the end of the list.
+
+    A step already present (by identity, or publishing the same output under
+    the same key, see ``_same_step``) is not added twice.
     """
-    from ferrum._layer_transforms import _NamedTransform
+    from ferrum._layer_transforms import _first_chain_step, _same_step
 
     existing = list(new._transforms or [])
-    existing_ids = {id(t) for t in existing}
-    for t in rhs_top_xforms:
-        if id(t) in existing_ids:
+    at = _first_chain_step(existing)
+    for step in steps:
+        if any(_same_step(step, e) for e in existing):
             continue
-        # Value dedup: unwrap _NamedTransform for the equality check.
-        inner_t = t.transform if isinstance(t, _NamedTransform) else t
-        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e) for e in existing):
-            continue
-        existing.append(t)
-        existing_ids.add(id(t))
+        existing.insert(at, step)
+        at += 1
     new._transforms = existing
 
 

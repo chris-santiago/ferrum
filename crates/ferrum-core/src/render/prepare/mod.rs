@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
@@ -194,8 +194,19 @@ impl LayerPrepared {
         let color_is_own = layer.encoding.color.is_some();
         // Same capture-before-merge for the positional channels (batch-A Task
         // 13 spec c3) — see `x_is_own`'s doc comment on [`LayerPrepared`].
-        let x_is_own = layer.encoding.x.is_some();
-        let y_is_own = layer.encoding.y.is_some();
+        // `inherited_positional` excludes a channel Python filled onto the
+        // layer's own encoding from an operand's chart-level encoding during
+        // `+` routing: that channel
+        // is present on `layer.encoding` but was never declared by this
+        // layer, so it is treated exactly as the standalone-inherited case —
+        // otherwise a filled span channel on a `mark_rule`/`mark_tick` layer
+        // would read as "own" and the own-span normalization would stop
+        // clearing it, turning an inherited spanning rule into a
+        // wrongly-owned one.
+        let x_is_own = layer.encoding.x.is_some()
+            && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::X);
+        let y_is_own = layer.encoding.y.is_some()
+            && !layer.inherited_positional.contains(&crate::spec::layer::PositionalChannel::Y);
         let size_is_own = layer.encoding.size.is_some();
         let stroke_width_is_own = layer.encoding.stroke_width.is_some();
         let mut encoding = layer.encoding.clone();
@@ -532,6 +543,16 @@ pub struct PreparedInputs {
     /// router all read it instead of re-deriving the mapping. Empty (default)
     /// for every chart with no independent-y layer — the byte-stable path.
     pub y_slot_plan: crate::render::scale_resolve::YSlotPlan,
+    /// The chart's SOURCE batch's schema — `normalized.schema()`, taken
+    /// before [`run_transforms_with_facet`] partitions it, so a faceted
+    /// chart's source schema is the unpartitioned one. The one fact
+    /// [`validate_layer_positional_columns`] needs to tell "this column was
+    /// never there" (a typo, or a chain of only named steps whose tail IS
+    /// the source) from "this column was dropped by a transform this
+    /// layer's own tail doesn't see" — the only case where naming `+` as a
+    /// remedy is true. A composite leaf reaches `prepare_render_inputs` with
+    /// its own batch, so it gets its own source schema.
+    pub source_schema: SchemaRef,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -1106,6 +1127,10 @@ pub fn prepare_render_inputs(
     // Normalize Utf8View columns (e.g. from polars) to Utf8 so downstream
     // downcasts to StringArray succeed uniformly.
     let normalized = normalize_string_views(batch)?;
+    // The chart's SOURCE schema, taken HERE — before `run_transforms_with_facet`
+    // (below) partitions the batch for a faceted chart — so it is always the
+    // one unpartitioned schema (`PreparedInputs::source_schema` doc).
+    let source_schema = normalized.schema();
 
     // Run the Phase 5 transform pipeline, applying the facet-aware partition →
     // per-panel transforms → inject → concat path when a facet is present and
@@ -1278,6 +1303,7 @@ pub fn prepare_render_inputs(
         &transformed,
         &transform_outputs,
         chart_config,
+        &source_schema,
         &mut scale_warnings,
     )?;
 
@@ -1372,6 +1398,7 @@ pub fn prepare_render_inputs(
         secondary_y_scales,
         secondary_y_tick_counts,
         y_slot_plan,
+        source_schema,
     })
 }
 
@@ -1740,6 +1767,152 @@ pub(crate) struct SecondaryYAxes {
     pub(crate) tick_counts: Vec<usize>,
 }
 
+/// Refuse a layer beyond the first whose positional encoding names a column
+/// absent from that layer's own resolved batch (spec §4/§6).
+///
+/// **Why this gate exists.** A layer ≥ 1's encoding reaches scale resolution
+/// only where layer 0 leaves that channel unbound — `resolve_panel_scales`
+/// merges layer 0 onto the chart encoding, `scale_resolve::positional_binding`
+/// falls back to the first layer that binds an otherwise-unbound `x`/`y`, and
+/// `resolve_layer_y_slot_scale` covers only an `independent_y` layer's `y`. A
+/// layer ≥ 1 naming a missing positional column that layer 0 also binds
+/// therefore sailed past every check and reached the mark builders, whose
+/// `.ok()`-swallowing column reads
+/// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into an
+/// empty mark batch: the layer vanished from the render with no error and no
+/// warning. Those readers are deliberately unchanged — they are correct for
+/// the per-row null/dtype cases they were written for; the drift they could
+/// not distinguish (a column that isn't there at all) is caught here instead,
+/// once, upstream of all of them.
+///
+/// **Where it runs, and why there.** `scene_build`, immediately before
+/// `validate_mark_encoding`, on the DrawCtx-local `layer_spec.encoding` — the
+/// post-normalization copy the mark builder actually reads — and against the
+/// layer's own PRE-position-adjust batch. Both refusal gates therefore judge
+/// one encoding: a refusal gate and the geometry must not
+/// disagree about a layer's shape. Placed on the other side of the rule/tick own-span
+/// normalization, this gate refused a `mark_rule`/`mark_tick`
+/// layer for an inherited channel that normalization then cleared and no
+/// builder ever read — e.g. a chart whose `x` names a named-fan-out transform
+/// output column (absent from `__final__`, found by `locate_field` only in the
+/// named output) plus an added `mark_rule().encode(y=…)`, which renders
+/// correctly and must keep rendering. `scale_resolve::resolve_layer_y_slot_scale`
+/// (the `SecondaryY(...)`/independent-y route) runs this SAME gate, over the
+/// merged chart+layer encoding, before resolving — one constructor for both
+/// routes.
+///
+/// **Scope (normative, spec §4).**
+/// - Layer 0 is exempt: it already raises [`RenderError::UnknownColumn`] from
+///   scale resolution, and standalone single-mark charts must keep that exact
+///   error.
+/// - Positional channels only. A non-owning layer that merely INHERITED a
+///   `color` channel naming a column its own batch lacks keeps rendering
+///   exactly as before (#106 ownership); so does every other non-positional
+///   channel.
+/// - The batch is the layer's OWN resolved batch — base data for
+///   `data_source: None`, the named transform output otherwise — never the
+///   union `locate_field` searches. A field that exists only in some sibling
+///   transform output is precisely the silent-drop shape: the scale resolves,
+///   the marks cannot.
+/// - Zero-row layers never reach here (the caller skips them first), so an
+///   empty batch still means "nothing to draw", not "broken encoding".
+///
+/// **Known boundary.** Marks that ignore positional channels entirely
+/// (`Mark::Arc`, `Mark::Geoshape`) are still refusable on an inherited `x`/`y`
+/// they never read — nothing normalizes those away the way rule/tick's own-span
+/// rule does. Left as-is deliberately: every constructible shape was already
+/// degenerate (`mark_arc` under a non-Polar coord refuses earlier via
+/// [`RenderError::MarkRequiresCoord`], and its dropped-channel case already
+/// warns), so widening the gate with a per-mark "does this mark read
+/// positional channels" table would add a second, drift-prone answer to a
+/// question `dispatch_mark_build` already owns.
+///
+/// Checks in a fixed channel order so the reported channel is deterministic
+/// when a layer gets more than one of them wrong.
+///
+/// `source` is the chart's SOURCE schema, taken before any transform ran —
+/// `Some` only for a layer with no `data_source` of its own (the
+/// tail-reading case the `+` remedy is about); `None` for a layer reading a
+/// named `data_source` output, which already has its own identity
+/// independent of the source. A missing column's
+/// [`RenderError::LayerUnknownColumn::in_source`] is `true` only when `source`
+/// is `Some` AND that schema actually has the column — a typo or a
+/// named-only chain (whose tail IS the source) does not claim the column is
+/// reachable by composing a separate chart with `+` when the source never had
+/// it either.
+pub(in crate::render) fn validate_layer_positional_columns(
+    layer_index: usize,
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    coord_flipped: bool,
+    source: Option<&Schema>,
+) -> Result<(), RenderError> {
+    if layer_index == 0 {
+        return Ok(());
+    }
+    let positional = [
+        ("x", encoding.x.as_ref()),
+        ("y", encoding.y.as_ref()),
+        ("x2", encoding.x2.as_ref()),
+        ("y2", encoding.y2.as_ref()),
+    ];
+    for (channel, enc) in positional {
+        let Some(enc) = enc else { continue };
+        if batch.column_by_name(&enc.field).is_none() {
+            let in_source = source.is_some_and(|s| s.index_of(&enc.field).is_ok());
+            return Err(RenderError::LayerUnknownColumn {
+                layer: layer_index,
+                channel,
+                name: enc.field.clone(),
+                coord_flipped,
+                in_source,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The rule/tick own-span-axis normalization (spec §4.4). A reference-line
+/// layer, or a rug tick, declares the axis it belongs to by declaring
+/// exactly one positional channel. When the chart (or, for the y-slot route,
+/// the merged encoding) also binds the opposite channel, that layer's own
+/// shape is one-channel but the encoding handed to the mark builder would
+/// otherwise carry both — so this clears the inherited one, leaving only the
+/// channel the layer actually declared. Deliberately narrow: only for
+/// `Mark::Rule`/`Mark::Tick`, and only when the encoding binds neither `x2`
+/// nor `y2` — a ranged/diagonal shape assembled partly from inherited
+/// channels keeps assembling it, and a layer that declares both `x` and `y`
+/// itself (a composite tick layer such as a boxplot whisker-cap) keeps its
+/// own two-channel shape.
+///
+/// Shared by [`crate::render::scene_build`]'s per-panel `layer_geometry_encoding`
+/// (which also applies its own color/width steps around this one) and
+/// [`crate::render::scale_resolve::resolve_layer_y_slot_scale`] (the
+/// `SecondaryY(...)`/independent-y route), each of which normalizes before
+/// calling [`validate_layer_positional_columns`] — so the gate and the mark
+/// builder judge the SAME encoding on both routes: an independent-y tick
+/// that declares only `y`, with `x` inherited from the chart, is never
+/// refused on that inherited `x`, since neither route's mark builder ever
+/// reads it.
+pub(in crate::render) fn normalize_rule_tick_own_span(
+    mut encoding: crate::spec::encoding::Encoding,
+    mark: crate::spec::mark::Mark,
+    x_is_own: bool,
+    y_is_own: bool,
+) -> crate::spec::encoding::Encoding {
+    if matches!(mark, crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick)
+        && encoding.x2.is_none()
+        && encoding.y2.is_none()
+    {
+        match (x_is_own, y_is_own) {
+            (true, false) => encoding.y = None,
+            (false, true) => encoding.x = None,
+            _ => {}
+        }
+    }
+    encoding
+}
+
 /// What [`build_axes`] produces: the axis inputs, the two resolved primary tick
 /// counts, and the secondary y axes' own resolved scales.
 ///
@@ -1770,6 +1943,7 @@ fn build_axes(
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     chart_config: &crate::render::chart_config::ChartConfig,
+    source_schema: &Schema,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<PreparedAxes, RenderError> {
     // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
@@ -1803,6 +1977,7 @@ fn build_axes(
         transform_outputs,
         theme,
         chart_config,
+        source_schema,
         warnings,
     )?;
     let axes = AxesInput {
@@ -1879,6 +2054,7 @@ fn build_secondary_y_axis_inputs(
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &crate::layout::ThemeInputs,
     chart_config: &crate::render::chart_config::ChartConfig,
+    source_schema: &Schema,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<SecondaryYAxes, RenderError> {
     let mut inputs = Vec::new();
@@ -1908,6 +2084,8 @@ fn build_secondary_y_axis_inputs(
             transform_outputs,
             theme,
             leaf_scales: None,
+            layer_idx,
+            source_schema,
         };
         // This call resolves over a metadata-only placeholder `(0.0, 1.0)`
         // pixel range — it exists only to get this layer's y DOMAIN for
@@ -1923,8 +2101,7 @@ fn build_secondary_y_axis_inputs(
         let (y_scale, layer_scale_warnings) =
             crate::render::scale_resolve::resolve_layer_y_slot_scale(
                 &layer_ctx,
-                layer.mark,
-                &layer.encoding,
+                layer,
                 layer_batch,
                 (0.0, 1.0),
                 (0.0, 1.0),

@@ -314,8 +314,11 @@ impl TransformSpec {
                     Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
                         s, batch, Some(&ctx.named_outputs)),
                     Self::Branch(s) => {
-                        let mut published =
-                            Published { outputs: ctx.named_outputs.clone(), swarms: HashMap::new() };
+                        let mut published = Published {
+                            outputs: ctx.named_outputs.clone(),
+                            swarms: HashMap::new(),
+                            inserted: Vec::new(),
+                        };
                         run_branch(s, batch, &mut published, ctx).map(|(tail, _)| tail)
                     }
                     Self::Bin2D(_)
@@ -422,9 +425,11 @@ pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, HashMap<String, Sw
 /// - **Unnamed transforms** chain: each consumes the prior unnamed output.
 /// - **`Branch`** runs its own sub-chain, with these same rules, over the
 ///   original batch (`input = None`) or the batch published under `input`.
-///   Every named and secondary output inside it is published under its own
-///   key, then the sub-chain tail under the branch's `name`, so that name
-///   wins a collision. It does not advance the chained pipeline pointer.
+///   Every named and secondary output inside it — a branch's outputs are
+///   its secondary outputs — is published
+///   SCOPED under [`crate::transform::registry::secondary_key`]`(Some(branch.name), key)`,
+///   then the sub-chain tail under the branch's own `name`, unscoped, as
+///   always. It does not advance the chained pipeline pointer.
 ///
 /// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
 /// the original input when no unnamed transforms ran.
@@ -456,10 +461,17 @@ pub(crate) fn apply_transforms_named(
 
 /// Every output published so far in one pipeline run, with the `Swarm`
 /// record each key carries ([`NamedOutputs`]).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Published {
     outputs: HashMap<String, RecordBatch>,
     swarms: HashMap<String, SwarmSpec>,
+    /// Keys [`Self::insert`] has recorded since the last [`Self::clear_log`]
+    /// (construction counts as one), in insertion order, not deduplicated —
+    /// a key an inner step overwrites is logged once per insert. A branch's
+    /// sub-chain runs against a CHILD `Published` cloned from the parent;
+    /// this log is how [`run_branch`] tells "genuinely new in this run" from
+    /// "inherited by the clone" without diffing the two maps.
+    inserted: Vec<String>,
 }
 
 impl Published {
@@ -470,7 +482,15 @@ impl Published {
             Some(swarm) => self.swarms.insert(key.clone(), swarm),
             None => self.swarms.remove(&key),
         };
+        self.inserted.push(key.clone());
         self.outputs.insert(key, batch);
+    }
+
+    /// Reset the insertion log without touching `outputs`/`swarms` — called
+    /// on a branch's child `Published` right after it is cloned from the
+    /// parent, so the log that follows counts only this branch's own run.
+    fn clear_log(&mut self) {
+        self.inserted.clear();
     }
 }
 
@@ -523,8 +543,26 @@ fn run_chain(
 }
 
 /// Run a branch's sub-chain over its input, publishing every output inside
-/// it; returns the sub-chain tail, which the caller publishes under the
-/// branch's `name`.
+/// it into `published` SCOPED under the branch's own name — a branch's
+/// inner outputs are its secondary outputs. Returns the sub-chain tail,
+/// which the caller (`run_chain`'s `Branch` arm) publishes UNSCOPED under
+/// the branch's `name`.
+///
+/// The sub-chain runs against a CHILD `Published` cloned from `published`
+/// (batches are Arc-backed, so the clone is cheap): every inner step sees
+/// every outer key plus its own unscoped inner keys, exactly as if run at
+/// top level — `Reorder(from=)` on an inner `Linkage`, and a nested `Branch`
+/// whose `input` names an inner or outer key, both resolve correctly. The
+/// child's insertion log is cleared right after cloning
+/// ([`Published::clear_log`]), so only keys this run genuinely adds —
+/// the branch's own named/secondary outputs, and (recursively) a nested
+/// branch's tail plus its own already-scoped keys — are logged. Each
+/// logged key, deduplicated and read at its final value, is re-published
+/// into the PARENT under [`crate::transform::registry::secondary_key`]`(Some(&spec.name),
+/// key)`: a scoped key can never equal the branch's own bare name (the
+/// rule's `"{name}_{key}"` shape always has the separator), so two sibling
+/// branches that reuse the same inner name publish two DIFFERENT scoped
+/// keys, each carrying its own rows.
 fn run_branch(
     spec: &BranchSpec,
     source: &RecordBatch,
@@ -533,7 +571,27 @@ fn run_branch(
 ) -> PyResult<ChainTail> {
     let input = branch::resolve_input(spec, source, &published.outputs)?.clone();
     let input_swarm = spec.input.as_ref().and_then(|key| published.swarms.get(key)).cloned();
-    run_chain(&spec.transforms, (input, input_swarm), source, published, ctx)
+
+    let mut child = published.clone();
+    child.clear_log();
+    let tail = run_chain(&spec.transforms, (input, input_swarm), source, &mut child, ctx)?;
+
+    let mut seen = std::collections::HashSet::new();
+    for key in &child.inserted {
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        // `insert` always logs and inserts a key together, so `child.inserted`
+        // never names a key `child.outputs` lacks — `get` rather than
+        // indexing keeps that invariant from becoming a panic site if it
+        // ever stops holding.
+        let Some(batch) = child.outputs.get(key).cloned() else { continue };
+        let scoped = crate::transform::registry::secondary_key(Some(&spec.name), key);
+        let swarm = child.swarms.get(key).cloned();
+        published.insert(scoped, batch, swarm);
+    }
+
+    Ok(tail)
 }
 
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
