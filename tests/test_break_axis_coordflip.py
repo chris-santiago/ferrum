@@ -160,10 +160,13 @@ def test_break_y_axis_effective_on_a_transposed_flip_while_x_warns_ordinal():
     y_ticks = axis_tick_dash_label_pairs(svg_break_y, axis="y")
     hidden = [t for t in y_ticks if tick_along(t.dash, axis="y") < -1000]
     visible = [t for t in y_ticks if tick_along(t.dash, axis="y") > 0]
-    assert len(hidden) == 5 and len(visible) == 5, (
-        f"expected 5 hidden + 5 visible physical-y tick dashes under the gap; "
+    # The native horizontal bar anchors its value axis at zero, so the visible
+    # ticks run from 0 up to the gap and on past it.
+    assert len(hidden) == 5 and len(visible) == 6, (
+        f"expected 5 hidden + 6 visible physical-y tick dashes under the gap; "
         f"got hidden={len(hidden)} visible={len(visible)} total={len(y_ticks)}"
     )
+    assert any(label[2] == "0" for t in visible for label in t.labels), visible
 
     with warnings.catch_warnings(record=True) as caught_x:
         warnings.simplefilter("always")

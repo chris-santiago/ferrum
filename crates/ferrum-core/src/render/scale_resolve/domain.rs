@@ -571,34 +571,27 @@ fn sort_domain_by_aggregate(
 /// The terms mirror the single-chart injection's guards
 /// (`_spec_build.py::_build_encoding_specs`'s zero-anchor block), not just
 /// its arithmetic:
-///   (a) `axis == "y"` there — the anchor is the bar's EXTENT axis only,
-///       never its POSITION axis. Ferrum always authors a bar's value on
-///       `y` (category/position on `x`, or the reverse under `CoordFlip`,
-///       which is exactly what the caller's `coord_flipped`/`encoding`
-///       normalization already applies) — so the value channel is `"y"`
-///       unflipped, `"x"` flipped. Dropping this guard is what fired the
-///       anchor on a histogram bar's `x` (bin-range position) channel too,
-///       squeezing `displot(kind="hist")` bars into a fraction of the panel
-///       when the data doesn't straddle zero. A bar authored with its value
-///       on the OTHER channel directly (no `CoordFlip`) — e.g.
-///       `_explanation.py::desugar_shap_waterfall`'s floating `x`/`x2` bars
-///       (`x=x0`, `x2=x1`, `y=feature`) — is excluded by this same guard for
-///       the identical reason Python's own `axis=="y"` rule already excludes
-///       it: ferrum's zero-anchor has never covered a directly-authored
-///       x-as-value bar, layered or not, so this mirrors existing scope
-///       rather than widening it under this fix.
+///   (a) the value axis there — the anchor is the bar's EXTENT axis only,
+///       never its POSITION axis. A bar's value channel follows its
+///       orientation ([`bar_value_on_x`]): `y`, or `x` when the bar is
+///       horizontal (a categorical `y`, a native horizontal bar), and the
+///       other one under `CoordFlip`, which the caller's
+///       `coord_flipped`/`encoding` normalization already applies. Dropping
+///       this guard is what fired the anchor on a histogram bar's `x`
+///       (bin-range position) channel too, squeezing `displot(kind="hist")`
+///       bars into a fraction of the panel when the data doesn't straddle
+///       zero. A floating horizontal bar such as
+///       `_explanation.py::desugar_shap_waterfall`'s (`x=x0`, `x2=x1`,
+///       `y=feature`) has its value on `x` and is excluded by guard (b): its
+///       value channel carries `x2`.
 ///   (b) `not _y2_bound` there (the D3 rule) — when this layer's OWN value
-///       channel carries a paired span field (`y2`, or `x2` under flip —
-///       `layer_fields[1]`), the extent is taken literally from `[value,
-///       span]` and force-anchoring to zero would distort a domain that was
-///       never meant to touch zero. `desugar_shap_waterfall` is ALSO the
-///       concrete instance of this shape (its bar layer's value channel
-///       carries `x2`) — doubly protected here: guard (a) already excludes
-///       it (its value channel is `x`, never the recognized value slot
-///       unflipped), and guard (b) would independently exclude it too if
-///       ferrum ever authored a value-on-`y`-with-`y2` floating bar (the
-///       shape `y2_bound_bar_layer_never_zero_extends` below pins).
-///   (c) the layer's own opt-out — `layer.mark_style.zero == Some(false)`,
+///       channel carries a paired span field (`y2`, or `x2` on an x value
+///       channel — `layer_fields[1]`), the extent is taken literally from
+///       `[value, span]` and force-anchoring to zero would distort a domain
+///       that was never meant to touch zero. `desugar_shap_waterfall` is the
+///       concrete horizontal instance (its value channel carries `x2`);
+///       `y2_bound_bar_layer_never_zero_extends` below pins the vertical one.
+///   (c) the layer's own opt-out ([`bar_wants_zero`]) — `layer.mark_style.zero == Some(false)`,
 ///       the per-layer mirror of `mark_bar(zero=False)` / `_mark_zero`
 ///       (`spec::mark_style::MarkKwargsSpec::zero`, T5r cycle 2). Live and
 ///       user-reachable today via the generic per-layer `mark=` passthrough
@@ -615,17 +608,35 @@ fn sort_domain_by_aggregate(
 fn layer_wants_bar_zero_anchor(
     layer: &Layer,
     channel: &str,
-    coord_flipped: bool,
+    value_on_x: bool,
     layer_fields: [Option<&str>; 2],
     value_field_contributed: bool,
 ) -> bool {
-    let is_value_channel = if coord_flipped { channel == "x" } else { channel == "y" };
-    let layer_wants_zero = layer.mark_style.as_ref().and_then(|m| m.zero).unwrap_or(true);
+    let is_value_channel = if value_on_x { channel == "x" } else { channel == "y" };
     is_value_channel
-        && layer.mark == Mark::Bar
-        && layer_wants_zero
+        && bar_wants_zero(layer.mark, layer.mark_style.as_ref())
         && value_field_contributed
         && layer_fields[1].is_none()
+}
+
+/// Whether a bar draws its value along x, in the coordinates it renders in.
+///
+/// A bar's value channel follows its orientation: a categorical `y` makes it
+/// horizontal (its value on `x`), and a `CoordFlip` exchanges the two. The
+/// categorical reading is the one Python's zero-anchor injection asks through
+/// the published `ferrum._core.column_reads_categorical`, so both pick the
+/// value channel the bar builders draw along.
+fn bar_value_on_x(coord_flipped: bool, y_categorical: bool) -> bool {
+    coord_flipped != y_categorical
+}
+
+/// Whether a mark is a bar that keeps its zero anchor: any bar whose own
+/// `mark_bar(zero=False)` (`MarkKwargsSpec::zero`) has not opted out.
+fn bar_wants_zero(
+    mark: Mark,
+    mark_style: Option<&crate::spec::mark_style::MarkKwargsSpec>,
+) -> bool {
+    mark == Mark::Bar && mark_style.and_then(|m| m.zero).unwrap_or(true)
 }
 
 /// Compute the unioned numeric/temporal extent for an axis field across
@@ -857,7 +868,15 @@ pub(in crate::render) fn column_reads_categorical(
 ) -> bool {
     use crate::spec::encoding::DataType;
     matches!(enc.type_, Some(DataType::Nominal | DataType::Ordinal))
-        || located.is_some_and(|located| !crate::render::arrow_cast::is_numeric(located.col.data_type()))
+        || located.is_some_and(|located| dtype_reads_categorical(located.col.data_type()))
+}
+
+/// Whether an undeclared encoding over a column of `dtype` reads categorical:
+/// any dtype the continuous-axis reader cannot place. The dtype half of
+/// [`column_reads_categorical`], published to Python as
+/// `ferrum._core.column_reads_categorical`.
+pub(in crate::render) fn dtype_reads_categorical(dtype: &arrow::datatypes::DataType) -> bool {
+    !crate::render::arrow_cast::is_numeric(dtype)
 }
 
 /// The first scale a caller wrote among `members`, in member order, with the
@@ -1322,11 +1341,16 @@ pub(in crate::render) fn numeric_domain_union_over(
                     value_field_contributed = contributed;
                 }
             }
+            // The authored `y` decides the bar's orientation: categorical by
+            // its declared type or by the column it reads in this layer's batch.
+            let y_categorical = layer.encoding.y.as_ref().is_some_and(|y| {
+                column_reads_categorical(y, source.locate(&y.field, primary_batch, transform_outputs))
+            });
             if matches!(layer_union, LayerUnion::Every)
                 && layer_wants_bar_zero_anchor(
                     layer,
                     channel,
-                    coord_flipped,
+                    bar_value_on_x(coord_flipped, y_categorical),
                     layer_fields,
                     value_field_contributed,
                 )

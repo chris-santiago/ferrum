@@ -85,6 +85,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The numeric columns `Linkage`/`Reorder` select from a table, so
     // heatmap/clustermap split id from numeric columns by Rust's rule.
     m.add_function(wrap_pyfunction!(transform::numeric_util::numeric_columns, m)?)?;
+    // How the render reads a column's dtype as categorical, so the Python bar
+    // zero-anchor picks the same value channel the bar builders draw along.
+    m.add_function(wrap_pyfunction!(render::binding::column_reads_categorical, m)?)?;
     // Wave-4 task 9 (#193): the `bins=` vocabulary gate, published so a figure
     // entry (`displot`) can refuse a malformed `bins=` naming ITSELF rather
     // than the private `Bin` transform it builds — without a second copy of the

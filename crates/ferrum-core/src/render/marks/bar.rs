@@ -2,8 +2,14 @@
 //!   ordinal x → quantitative y: one <rect> per row anchored at x-band center.
 //!   quantitative x + x2 → quantitative y: bin rect from x_pixel to x2_pixel
 //!   (histogram path added Phase 10c-pre).
-//!   quantitative x → ordinal y: horizontal bar per row from panel-left to
-//!   x_pixel (Phase 10d-pre, feature-importance chart).
+//!   quantitative x → ordinal y: horizontal bar per row from the value
+//!   baseline to x_pixel (Phase 10d-pre, feature-importance chart).
+//!
+//! Every unstacked bar grows from its value axis's baseline
+//! ([`ScaleKind::value_baseline_px`]): the 0 tick when 0 is in the value
+//! domain, else the plot edge on zero's side. A stack base maps through the
+//! same scale and falls back to that baseline. Spans are signed, so a value on
+//! the far side of its base draws toward it.
 
 #[cfg(test)]
 use crate::layout::Rect;
@@ -24,62 +30,52 @@ fn row_num(col: &Option<Vec<Option<f64>>>, i: usize) -> Option<f64> {
     col.as_ref().and_then(|v| v.get(i).copied().flatten())
 }
 
-/// A filled rect of zero width or height draws nothing in SVG, but costs a
-/// scale lookup, a layout slot and bytes on the wire — exactly the
-/// silent-drop-adjacent smell `tests/_svg_corpus.py::query_zero_size_filled`
-/// exists to catch. Every `build_*` fn below checks this immediately after
-/// computing a row's rect geometry and skips the push (the row is simply
-/// absent from `nodes`/`data_indices`, the same lockstep skip already used
-/// for null categories and non-finite values above each of these checks) —
-/// there is no other gate, so a mark this drops here never reaches the SVG.
-/// Because the skip is silent, a batch this guard empties entirely names why
-/// through [`zero_extent_empty_reason`] rather than rendering a blank panel
-/// with no diagnostic.
+/// Whether a bar's POSITION extent (its band, or its bin's width) is zero, so
+/// the bar has no slot to be drawn in at all. Every `build_*` fn below checks
+/// this immediately after computing a row's rect geometry and skips the push
+/// (the row is simply absent from `nodes`/`data_indices`, the same lockstep
+/// skip already used for null categories and non-finite values above each of
+/// these checks). Because the skip is silent, a batch this guard empties
+/// entirely names why through [`zero_band_empty_reason`] rather than rendering
+/// a blank panel with no diagnostic.
 ///
-/// A shared-extent stacked histogram routinely produces this: `apply_stack`
-/// (`render/position.rs`) emits one row per (bin, group) pair even when a
-/// group has zero rows in a bin, so that group's segment has `base == top`
-/// and a real, computed zero-height rect.
+/// A zero VALUE extent is a different thing and is drawn: a bar whose value
+/// equals its base (an empty histogram bin, a zero group in a stack, a stack
+/// whose values sum to nothing) is a correct, data-true zero, emitted as a
+/// zero-height (or zero-width) rect at its base, so a chart keeps one mark per
+/// bin and category.
 ///
-/// Exact `0.0` equality, not an epsilon: `w`/`h` here are always the result
-/// of `(a - b).abs()` or `.max(0.0)` over two scale lookups, so a
-/// zero-row group-bin is exactly `0.0` to the bit, never merely small. An
-/// epsilon would additionally swallow a genuinely tiny-but-nonzero bar (a
-/// real, if visually thin, value) — a different thing from an empty group,
-/// and not this fix's job to hide. The oracle above makes the same choice
-/// (`w == 0 or h == 0`), so this matches the guard it satisfies.
+/// Exact `0.0` equality, not an epsilon: a degenerate band is exactly `0.0`
+/// to the bit, and an epsilon would additionally swallow a genuinely thin but
+/// real band.
 #[inline]
-fn is_zero_extent(w: f64, h: f64) -> bool {
-    w == 0.0 || h == 0.0
+fn is_zero_position_extent(span: f64) -> bool {
+    span == 0.0
 }
 
 /// The [`MarkBuildResult::empty_reason`] a rect builder carries when
-/// [`is_zero_extent`] is the reason its batch is empty.
+/// [`is_zero_position_extent`] is the reason its batch is empty.
 ///
 /// `dropped` counts the rows that reached rect geometry and were skipped by the
 /// guard; `emitted` is how many rects survived. `Some` only when the guard
 /// emptied a batch that had rows to draw — a batch that was already empty for a
 /// documented reason (zero input rows, null categories, non-finite values,
 /// unresolvable pixels) never reaches the guard and keeps the `None` that
-/// [`MarkBuildResult::empty_reason`]'s doc reserves for a legitimate empty.
+/// [`MarkBuildResult::empty_reason`]'s doc reserves for a legitimate empty. A
+/// batch whose values are all zero emits its rects and carries no reason.
 ///
-/// The guard is otherwise silent by construction: it skips the push, so an
-/// all-zero-extent batch renders a blank panel that is indistinguishable from a
-/// rendering bug — the exact case `empty_because` exists for. The eight sibling
-/// producers (`marks/rect.rs`, `geoshape.rs`, `image.rs`, `segment.rs`) name
-/// their mark, what it needed, and what it got; this one does the same, in the
-/// singular voice `RenderWarning::MarkBuildEmpty`'s Display wraps
-/// ("bar layer 0 drew nothing: …").
-///
-/// Shared by all four `build_*` rect builders rather than written out at each
-/// return: one guard, one sentence, so the four batches cannot drift into
-/// describing the same drop four ways.
-fn zero_extent_empty_reason(dropped: usize, emitted: usize) -> Option<EmptyReason> {
+/// The eight sibling producers (`marks/rect.rs`, `geoshape.rs`, `image.rs`,
+/// `segment.rs`) name their mark, what it needed, and what it got; this one
+/// does the same, in the singular voice `RenderWarning::MarkBuildEmpty`'s
+/// Display wraps ("bar layer 0 drew nothing: …"). Shared by all four `build_*`
+/// rect builders so the four batches cannot drift into describing the same
+/// drop four ways.
+fn zero_band_empty_reason(dropped: usize, emitted: usize) -> Option<EmptyReason> {
     (emitted == 0 && dropped > 0).then(|| {
         EmptyReason(format!(
-            "mark_bar() computed a zero width or height for all {dropped} of its rects \
-             (every value equal to its own baseline, or an empty group in every bin); \
-             a zero-extent fill paints nothing, so none were emitted"
+            "mark_bar() computed a zero band or bin width for all {dropped} of its rects \
+             (a degenerate position scale); a bar with no width paints nothing, so none \
+             were emitted"
         ))
     })
 }
@@ -367,7 +363,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         col_as_f64(ctx.batch, "__stack_y_base__").ok();
 
     let panel = ctx.panel.plot_area;
-    let baseline_y = panel.y + panel.h;
+    let baseline_y = ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
@@ -406,8 +402,8 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // aligned to kept nodes only. Rows are skipped for null categories, non-finite
     // y values, and out-of-range pixels (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(x_strs.len());
-    // Rows the zero-extent guard skipped (`zero_extent_empty_reason`).
-    let mut zero_extent_drops = 0usize;
+    // Rows the zero-band guard skipped (`zero_band_empty_reason`).
+    let mut zero_band_drops = 0usize;
 
     for i in 0..x_strs.len() {
         let xs = match &x_strs[i] { Some(s) => s.as_str(), None => continue };
@@ -436,7 +432,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let rect_top_y = top_y.min(bottom_y);
         let cx = cx + x_offsets[i];
         let top_y = rect_top_y + y_offsets[i];
-        if is_zero_extent(bar_width, height) { zero_extent_drops += 1; continue; }
+        if is_zero_position_extent(bar_width) { zero_band_drops += 1; continue; }
 
         let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -467,7 +463,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
+    let empty_reason = zero_band_empty_reason(zero_band_drops, nodes.len());
 
     MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
@@ -508,13 +504,11 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // through `scales.x` here would silently render at the wrong pixels
     // (Utf8 ordinal columns fail safely via `col_as_f64`'s type error; only
     // int-typed ones slip through). Gating on the stamp makes that
-    // disagreement fall back to `baseline_x` (the safe pre-remediation
-    // render) instead. Priority matches `build_ordinal`'s y2-vs-base
+    // disagreement fall back to `baseline_x` instead. Priority matches `build_ordinal`'s y2-vs-base
     // ordering: an explicit x2 range column (checked first, below) always
     // wins over a stacking base. Absent the stamp (no Stack, a vertical
     // Stack, or a Stack whose value lives on Y), `x_bases` is `None` and
-    // every row falls back to the fixed `baseline_x` — byte-identical to
-    // the pre-fix formula.
+    // every row falls back to `baseline_x`.
     let x_bases: Option<Vec<Option<f64>>> = if pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
@@ -522,7 +516,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let panel = ctx.panel.plot_area;
-    let baseline_x = panel.x;
+    let baseline_x = ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     // Under an ordinal-band Dodge, shrink each horizontal bar to its sub-band so
@@ -557,8 +551,8 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(y_strs.len());
-    // Rows the zero-extent guard skipped (`zero_extent_empty_reason`).
-    let mut zero_extent_drops = 0usize;
+    // Rows the zero-band guard skipped (`zero_band_empty_reason`).
+    let mut zero_band_drops = 0usize;
 
     for i in 0..y_strs.len() {
         let ys = match &y_strs[i] { Some(s) => s.as_str(), None => continue };
@@ -586,13 +580,11 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .and_then(|b| ctx.scales.x.to_pixel_f64(b))
                 .map(|p| p + x_offsets[i])
                 .unwrap_or(baseline_x);
-            // Clamp (not abs) to zero, matching the pre-existing unstacked
-            // formula (`(px - baseline_x).max(0.0)`): a degenerate row whose
-            // value pixel lands left of its base renders nothing, not a
-            // mirrored rect on the wrong side of the base.
-            (row_base_x, (px - row_base_x).max(0.0))
+            // Signed span: a value left of its base (a negative bar, or a
+            // negative stack segment) draws leftward from the base to it.
+            (row_base_x.min(px), (px - row_base_x).abs())
         };
-        if is_zero_extent(width, bar_height) { zero_extent_drops += 1; continue; }
+        if is_zero_position_extent(bar_height) { zero_band_drops += 1; continue; }
 
         let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -623,7 +615,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
+    let empty_reason = zero_band_empty_reason(zero_band_drops, nodes.len());
 
     MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
@@ -683,7 +675,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let panel = ctx.panel.plot_area;
-    let baseline_y = panel.y + panel.h;
+    let baseline_y = ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
@@ -701,12 +693,11 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // every reachable vertical-histogram path has the stamp absent today;
     // the gate below is a defensive mirror of that invariant rather than a
     // bet on it — a batch that somehow reaches this builder while stamped
-    // falls back to the fixed `baseline_y` (the safe pre-remediation
-    // render) instead of mapping a value-on-X base through `scales.y`.
+    // falls back to `baseline_y` instead of mapping a value-on-X base
+    // through `scales.y`.
     // Absent a usable base (gated out by the stamp, no Stack at all, or a
     // Stack whose base column doesn't exist), `y_bases` is `None` and every
-    // row falls back to `baseline_y` via the `unwrap_or` below —
-    // byte-identical to the pre-fix formula.
+    // row falls back to `baseline_y` via the `unwrap_or` below.
     let y_bases: Option<Vec<Option<f64>>> = if !pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
@@ -725,8 +716,8 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(xs.len());
-    // Rows the zero-extent guard skipped (`zero_extent_empty_reason`).
-    let mut zero_extent_drops = 0usize;
+    // Rows the zero-band guard skipped (`zero_band_empty_reason`).
+    let mut zero_band_drops = 0usize;
 
     for i in 0..xs.len() {
         let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -745,11 +736,10 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|b| ctx.scales.y.to_pixel_f64(b))
             .map(|p| p + y_offsets[i])
             .unwrap_or(baseline_y);
-        // Clamp (not abs) to zero, matching the pre-existing unstacked
-        // formula (`(baseline_y - top_y).max(0.0)`): a degenerate row whose
-        // value pixel lands below its base renders nothing, not a mirrored
-        // rect on the wrong side of the base.
-        let height = (bottom_y - top_y).max(0.0);
+        // Signed span: a value below its base (a negative bar, or a negative
+        // stack segment) draws downward from the base to it.
+        let rect_y = top_y.min(bottom_y);
+        let height = (bottom_y - top_y).abs();
 
         let (rect_x, width) = if let Some(ref x2s) = x2s_opt {
             // x2 present: bin-style rect from x to x2 (histogram path).
@@ -766,7 +756,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let bw = auto_bar_width.unwrap_or(20.0);
             (cx - bw / 2.0, bw)
         };
-        if is_zero_extent(width, height) { zero_extent_drops += 1; continue; }
+        if is_zero_position_extent(width) { zero_band_drops += 1; continue; }
 
         let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -788,7 +778,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         acc.push(SceneNode::Rect {
             x: rect_x,
-            y: top_y,
+            y: rect_y,
             w: width,
             h: height,
             style,
@@ -797,7 +787,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
+    let empty_reason = zero_band_empty_reason(zero_band_drops, nodes.len());
 
     MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
@@ -820,18 +810,18 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
 
     let panel = ctx.panel.plot_area;
-    let baseline_x = panel.x;
+    let baseline_x = ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
 
     // GH #77 follow-up: a stacked horizontal bar/histogram (value column on
     // X — `apply_stack` stamps `STACK_VALUE_ON_X_KEY`) must span
-    // [base, value] on X, not [panel-left, value]; each bin's segments
+    // [base, value] on X, not [baseline, value]; each bin's segments
     // accumulate outward from the stack base rather than every segment
     // overlapping from x=0. Absent the stamp (no Stack, or a vertical
     // Stack whose value lives on Y), `stack_bases` is `None` and every bar
-    // keeps today's fixed `baseline_x` — byte-identical.
+    // grows from `baseline_x`.
     let stack_bases: Option<Vec<Option<f64>>> = if pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
@@ -850,8 +840,8 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(xs.len());
-    // Rows the zero-extent guard skipped (`zero_extent_empty_reason`).
-    let mut zero_extent_drops = 0usize;
+    // Rows the zero-band guard skipped (`zero_band_empty_reason`).
+    let mut zero_band_drops = 0usize;
 
     for i in 0..xs.len() {
         let xv  = match xs[i]  { Some(v) if v.is_finite() => v, _ => continue };
@@ -866,7 +856,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let py_bottom = py_bottom + y_offsets[i];
         let height = (py_top - py_bottom).abs().max(1.0);
 
-        // Stack base (segment start on X); falls back to the panel-left
+        // Stack base (segment start on X); falls back to the value
         // baseline when unstacked, the base row is non-finite, or the base
         // doesn't resolve through the x-scale.
         let row_base_x = stack_bases
@@ -876,13 +866,11 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
             .and_then(|b| ctx.scales.x.to_pixel_f64(b))
             .map(|p| p + x_offsets[i])
             .unwrap_or(baseline_x);
-        // Clamp (not abs) to zero, matching the pre-existing unstacked
-        // formula (`(px_right - baseline_x).max(0.0)`): a degenerate row
-        // whose value pixel lands left of its base renders nothing, not a
-        // mirrored rect on the wrong side of the base.
-        let rect_x = row_base_x;
-        let width = (px_right - row_base_x).max(0.0);
-        if is_zero_extent(width, height) { zero_extent_drops += 1; continue; }
+        // Signed span: a value left of its base (a negative bar, or a
+        // negative stack segment) draws leftward from the base to it.
+        let rect_x = row_base_x.min(px_right);
+        let width = (px_right - row_base_x).abs();
+        if is_zero_position_extent(height) { zero_band_drops += 1; continue; }
 
         let fill = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -913,7 +901,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     }
 
     let (nodes, data_indices) = acc.finalize();
-    let empty_reason = zero_extent_empty_reason(zero_extent_drops, nodes.len());
+    let empty_reason = zero_band_empty_reason(zero_band_drops, nodes.len());
 
     MarkBuildResult::populated(MarkBatchKind::Bar, nodes, data_indices, &meta)
         .with_empty_reason(empty_reason)
@@ -979,8 +967,12 @@ mod tests {
     /// emits: bin0 [0,1) has versicolor=0 (base=0, top=0, the empty
     /// group-bin) stacked under setosa=1 (base=0, top=1); bin1 [1,2) has
     /// versicolor=2 (base=0, top=2) stacked under setosa=1 (base=2, top=3).
+    ///
+    /// The empty group-bin is a data-true zero, so it emits a zero-height
+    /// rect at its base (0 → the panel bottom here), keeping one mark per
+    /// (bin, group); only a zero BAND or bin width skips the push.
     #[test]
-    fn bar_quantitative_stacked_histogram_drops_zero_height_bin_keeps_siblings() {
+    fn bar_quantitative_stacked_histogram_emits_zero_height_bin_at_its_base_keeps_siblings() {
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
 
@@ -1030,14 +1022,12 @@ mod tests {
             if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
         }).collect();
 
-        assert_eq!(rects.len(), 3, "the zero-count versicolor row in bin0 must not emit a rect; got {rects:?}");
-        assert!(
-            rects.iter().all(|(_, _, w, h)| *w > 0.0 && *h > 0.0),
-            "every surviving rect must have strictly positive extent; got {rects:?}"
-        );
+        assert_eq!(rects.len(), 4, "every (bin, group) row emits a rect, the empty one included; got {rects:?}");
+        assert_eq!(rects[0], (0.0, 100.0, 100.0, 0.0),
+            "the zero-count versicolor row in bin0 is a zero-height rect at its base (value 0 -> 100px); got {rects:?}");
 
         // bin0 setosa: x in [0,100], top=1 -> y=66.667px, height=33.333px.
-        let setosa_bin0 = rects.iter().find(|(x, ..)| (*x - 0.0).abs() < 1e-6).expect("setosa bin0 rect (x=0)");
+        let setosa_bin0 = rects.iter().find(|(x, _, _, h)| (*x - 0.0).abs() < 1e-6 && *h > 0.0).expect("setosa bin0 rect (x=0)");
         assert!((setosa_bin0.1 - 200.0 / 3.0).abs() < 1e-6, "setosa bin0 top pixel: {setosa_bin0:?}");
         assert!((setosa_bin0.2 - 100.0).abs() < 1e-6, "setosa bin0 width: {setosa_bin0:?}");
         assert!((setosa_bin0.3 - 100.0 / 3.0).abs() < 1e-6, "setosa bin0 height: {setosa_bin0:?}");
@@ -1058,23 +1048,20 @@ mod tests {
         );
     }
 
-    /// The horizontal twin of the test above, and the observation the
-    /// mutation gate found missing: deleting `is_zero_extent` in
-    /// `build_quantitative_horizontal` left the whole suite green, because
-    /// the one Python test rendering this chart counts rects *after*
-    /// filtering `width > 0` and says so in its own docstring. The property
-    /// that went unasserted is that a zero-extent bar never reaches the
-    /// scene graph on this path at all.
+    /// The horizontal twin of the test above: on
+    /// `build_quantitative_horizontal` an empty (bin, group) cell is a
+    /// zero-width rect at its base, the same data-true zero the vertical
+    /// builder emits, and its siblings keep their exact geometry.
     ///
     /// The batch is `apply_stack`'s own output for two bins x two groups
     /// with the value column on X (`StackValueAxis::X`, the horizontal
     /// desugar's shape) -- produced by calling `apply_position`, not
     /// hand-written -- where group "a" has zero count in bin 0. That
     /// (bin, group) cell's segment has `base == top`, so its rect is
-    /// exactly zero-width and must not be emitted, while its three siblings
-    /// keep their exact geometry.
+    /// exactly zero-width and sits at its base (x=0), while its three
+    /// siblings keep their exact geometry.
     #[test]
-    fn bar_horizontal_stacked_histogram_drops_zero_width_bin_keeps_siblings() {
+    fn bar_horizontal_stacked_histogram_emits_zero_width_bin_at_its_base_keeps_siblings() {
         use crate::render::position::apply_position;
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
@@ -1133,14 +1120,12 @@ mod tests {
             if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
         }).collect();
 
-        assert_eq!(rects.len(), 3, "the zero-count group-a row in bin0 must not emit a rect; got {rects:?}");
-        assert!(
-            rects.iter().all(|(_, _, w, h)| *w > 0.0 && *h > 0.0),
-            "every surviving rect must have strictly positive extent; got {rects:?}"
-        );
+        assert_eq!(rects.len(), 4, "every (bin, group) row emits a rect, the empty one included; got {rects:?}");
+        assert_eq!(rects[0], (0.0, 0.0, 0.0, 50.0),
+            "the zero-count group-a row in bin0 is a zero-width rect at its base (x=0); got {rects:?}");
 
         // bin0 group b: base=0 top=1 -> x=0px, w=30px; bin y-span [0,50].
-        let b_bin0 = rects.iter().find(|(_, y, ..)| (*y - 0.0).abs() < 1e-6).expect("bin0 group-b rect (y=0)");
+        let b_bin0 = rects.iter().find(|(_, y, w, _)| (*y - 0.0).abs() < 1e-6 && *w > 0.0).expect("bin0 group-b rect (y=0)");
         assert!((b_bin0.0 - 0.0).abs() < 1e-6, "bin0 b x: {b_bin0:?}");
         assert!((b_bin0.2 - 30.0).abs() < 1e-6, "bin0 b width: {b_bin0:?}");
         assert!((b_bin0.3 - 50.0).abs() < 1e-6, "bin0 b height: {b_bin0:?}");
@@ -1159,19 +1144,12 @@ mod tests {
         );
     }
 
-    /// The `build_ordinal_y` twin, and the second observation the mutation
-    /// gate found missing: deleting `is_zero_extent` here also left the
-    /// whole suite green, because the two Python tests that reach this
-    /// branch with a zero-extent row assert only `"<svg" in svg` and
-    /// `"NaN" not in svg` -- a smoke test that cannot tell a chart drawing
-    /// every bar from one drawing none.
-    ///
-    /// The shape is `importance_chart`'s: a quantitative value on x, an
-    /// ordinal category on y, one feature scoring exactly the baseline
-    /// value. Its bar spans zero pixels and must not be emitted; its
-    /// non-zero sibling keeps its exact width and its own band center.
+    /// The `build_ordinal_y` twin. The shape is `importance_chart`'s: a
+    /// quantitative value on x, an ordinal category on y, one feature
+    /// scoring exactly 0. Its bar is a zero-width rect at the 0 pixel on its
+    /// own band; its non-zero sibling keeps its exact width and band center.
     #[test]
-    fn bar_ordinal_y_drops_zero_width_row_keeps_siblings() {
+    fn bar_ordinal_y_emits_zero_width_row_at_its_base_keeps_siblings() {
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
         use crate::scale::ordinal::OrdinalScale;
@@ -1215,9 +1193,13 @@ mod tests {
             if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
         }).collect();
 
-        assert_eq!(rects.len(), 1, "the zero-importance row must not emit a rect; got {rects:?}");
-        let (x, y, w, h) = rects[0];
-        assert!((x - 0.0).abs() < 1e-6, "the surviving bar starts at the panel-left baseline; got {x}");
+        assert_eq!(rects.len(), 2, "the zero-importance row emits a rect too; got {rects:?}");
+        let (zx, zy, zw, zh) = rects[0];
+        assert_eq!((zx, zw), (0.0, 0.0), "the zero-importance bar is zero-width at the 0 pixel; got {rects:?}");
+        let cy_a = scales.y.to_pixel_str("a").expect("category a must map through the ordinal y scale");
+        assert!((zy + zh / 2.0 - cy_a).abs() < 1e-6, "it sits on category a's band; got {rects:?}");
+        let (x, y, w, h) = rects[1];
+        assert!((x - 0.0).abs() < 1e-6, "the non-zero bar starts at the 0 pixel; got {x}");
         assert!((w - 100.0).abs() < 1e-6, "the surviving bar spans importance=5 -> 100px; got {w}");
         assert!(h > 0.0, "the surviving bar must have a positive band height; got {h}");
         // It is category "b"'s bar, not "a"'s drawn at the wrong band.
@@ -1225,22 +1207,13 @@ mod tests {
         assert!((y + h / 2.0 - cy_b).abs() < 1e-6,
             "the surviving bar must sit on category b's band center ({cy_b}); got center {}", y + h / 2.0);
         assert!(result.empty_reason.is_none(),
-            "a batch that still drew something is not an empty batch; got {:?}", result.empty_reason);
+            "a batch that drew its rects is not an empty batch; got {:?}", result.empty_reason);
     }
 
-    /// #118's channel, on the case this wave created: when the zero-extent
-    /// guard drops EVERY row, the batch names why instead of rendering a
-    /// blank panel with no diagnostic. `scene_build`'s
-    /// `dispatch_mark_build` seam lifts that reason into
-    /// `RenderWarning::MarkBuildEmpty`, exactly as it does for the eight
-    /// sibling producers in `rect.rs`/`image.rs`/`segment.rs`/`geoshape.rs`.
-    ///
-    /// Measured consequence this pins: `importance_chart` over an all-zero
-    /// importance column renders zero bars (it rendered four before the
-    /// guard landed). The empty render stands -- an empty group draws
-    /// nothing is the guard's whole point -- but it is now diagnosable.
-    #[test]
-    fn bar_all_zero_batch_names_its_zero_extent_emptiness() {
+    /// An `importance_chart` over an all-zero importance column: four
+    /// importance rows over an ordinal y with the given pixel range, and the
+    /// all-zero column's fallback x domain [0, 1] → [0, 100].
+    fn all_zero_importance_build(y_range: [f64; 2]) -> crate::render::draw::MarkBuildResult {
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
         use crate::scale::ordinal::OrdinalScale;
@@ -1267,23 +1240,45 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        // The degenerate all-zero column's fallback domain [0,1]: every
-        // value pixel lands on the panel-left baseline.
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(
                 vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
-                vec![0.0, 100.0], DiscreteLayout::UNPADDED,
+                y_range.to_vec(), DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        super::build(&ctx)
+    }
+
+    /// An all-zero-value batch is correct data, not an empty batch: every
+    /// row emits a zero-width rect at the 0 pixel, one per category, and the
+    /// batch carries no "drew nothing" reason.
+    #[test]
+    fn bar_all_zero_batch_emits_zero_width_rects_and_no_empty_reason() {
+        let result = all_zero_importance_build([0.0, 100.0]);
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect();
+        assert_eq!(rects, vec![(0.0, 0.0); 4], "one zero-width rect per category at the 0 pixel");
+        assert!(result.empty_reason.is_none(), "an all-zero batch is not empty; got {:?}", result.empty_reason);
+    }
+
+    /// #118's channel: when the zero-band guard drops EVERY row (a degenerate
+    /// band scale whose range has no extent), the batch names why instead of
+    /// rendering a blank panel with no diagnostic. `scene_build`'s
+    /// `dispatch_mark_build` seam lifts that reason into
+    /// `RenderWarning::MarkBuildEmpty`, exactly as it does for the eight
+    /// sibling producers in `rect.rs`/`image.rs`/`segment.rs`/`geoshape.rs`.
+    #[test]
+    fn bar_zero_band_batch_names_its_emptiness() {
+        let result = all_zero_importance_build([50.0, 50.0]);
 
         assert!(
             !result.nodes.iter().any(|n| matches!(n, SceneNode::Rect { .. })),
-            "every row is zero-extent, so no rect may be emitted"
+            "every band is zero-height, so no rect may be emitted"
         );
         let reason = result.empty_reason.as_ref().expect(
             "an all-dropped batch must name why it is empty, not stay silent",
@@ -1297,7 +1292,7 @@ mod tests {
             reason: reason.0.clone(),
         };
         assert!(
-            format!("{warning}").starts_with("bar layer 0 drew nothing: mark_bar() computed a zero width or height"),
+            format!("{warning}").starts_with("bar layer 0 drew nothing: mark_bar() computed a zero band or bin width"),
             "the reason must read as a fragment of the warning that carries it; got {warning}"
         );
     }
@@ -1899,42 +1894,21 @@ mod tests {
             "rect bottom {rect_bottom:.3} should be below baseline {baseline_pixel:.3} (lo=-3 side)");
     }
 
-    /// Pins the deliberate `abs` (ordinal x + explicit y2, `:360`) vs `clamp`
-    /// (quantitative x + stack base, `:684`) distinction for the SAME
-    /// pixel-inverted scenario: a "bottom" pixel that lands numerically
-    /// *above* (smaller than) the "top" pixel. `build_ordinal` uses `.abs()`
-    /// so the rect still renders with a positive height regardless of which
-    /// of y/y2 is larger; `build_quantitative` uses `.max(0.0)` (no abs) so
-    /// the same inversion — a row whose value pixel lands below its stack
-    /// base — clamps to a zero-extent raw height instead of mirroring it.
-    /// Neither branch was pinned by any existing test:
-    /// `bar_ordinal_x_y2_spans_y_to_y2_not_baseline` exercises the same
-    /// abs-triggering data shape but only asserts the bar doesn't sit at the
-    /// baseline, never the exact height or the "abs, not clamp" contract; no
-    /// test drives `build_quantitative`'s stack-base path with an inverted
-    /// base at all.
+    /// Every bar span is signed: a rect covers the pixels between its base and
+    /// its value whichever of the two is larger, so a value on the far side of
+    /// its base draws toward it rather than vanishing or mirroring away.
     ///
-    /// Zero-extent-drop update (#194 follow-up, bar.rs's `is_zero_extent`):
-    /// the clamp site's own comment (`:680-683`) always said the intent was
-    /// "renders nothing", not "renders an invisible rect" — the original
-    /// assertion here (`rects.len() == 1` with `h == 0.0`) pinned the OLD
-    /// implementation detail of *how* that nothing-ness was achieved
-    /// (a real, zero-area `SceneNode::Rect`, invisible in SVG but still
-    /// serialized), not the contract itself. `is_zero_extent` now drops any
-    /// zero-height/-width rect at the push site regardless of whether the
-    /// zero came from equal endpoints (an empty group-bin) or a clamped
-    /// negative raw extent (this scenario) — the two are indistinguishable
-    /// in the final geometry the corpus guard inspects
-    /// (`tests/_svg_corpus.py::query_zero_size_filled` flags a filled
-    /// zero-extent rect regardless of provenance), so carving out an
-    /// exception for one cause and not the other would leave this exact
-    /// scenario able to trip that guard the day a real chart hits it. The
-    /// "abs, not clamp" contract this test exists to pin is unchanged — the
-    /// computed raw height is still `-50` clamped to `0.0`, never mirrored
-    /// to `50.0` — only "and then a rect with that zero height is still
-    /// written" is gone.
+    /// Both builders below meet the same pixel-inverted shape, a "bottom"
+    /// pixel numerically above (smaller than) the "top" pixel: `build_ordinal`
+    /// through an explicit `y2`, `build_quantitative` through a stack base
+    /// above the segment's value (a negative stack segment, or a negative bar
+    /// over a 0 baseline). Each must draw the rect spanning exactly
+    /// `[min, max]` of the two pixels. A clamp to zero extent would drop the
+    /// quantitative row, which with a 0 baseline deletes every negative bar; an
+    /// `abs` height hung from the value pixel would draw it on the wrong side
+    /// of its base.
     #[test]
-    fn bar_ordinal_abs_vs_quantitative_clamp_on_inverted_y_pixel_ordering() {
+    fn bar_spans_are_signed_on_inverted_y_pixel_ordering() {
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
 
@@ -1948,10 +1922,10 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
 
-        // ── build_ordinal (bar.rs:360): abs -> positive height ─────────────
+        // ── build_ordinal: y + y2 ──────────────────────────────────────────
         // y="lo"=3 (top_y=70px), y2="hi"=8 (bottom_y=20px): bottom_y < top_y,
-        // so the naive (bottom_y - top_y) is -50. `.abs()` must still yield
-        // a rendered rect with height 50, not zero.
+        // so the naive (bottom_y - top_y) is -50. The rect spans [20, 70]:
+        // y=20, h=50.
         {
             let spec = ChartSpec {
                 mark: Mark::Bar,
@@ -1983,37 +1957,25 @@ mod tests {
             let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
             let result = super::build(&ctx);
-            let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
-                if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+            let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+                if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
             }).collect();
             assert_eq!(rects.len(), 1, "expected 1 bar");
-            assert!((rects[0] - 50.0).abs() < 1e-6,
-                "build_ordinal must abs() an inverted y/y2 pixel pair into a positive height; got {}", rects[0]);
+            assert!((rects[0].0 - 20.0).abs() < 1e-6 && (rects[0].1 - 50.0).abs() < 1e-6,
+                "build_ordinal must span an inverted y/y2 pixel pair from 20px to 70px; got {rects:?}");
         }
 
-        // ── build_quantitative (bar.rs:684): clamp -> dropped ───────────────
-        // Row 0 is the inverted row: y="val"=3 (top_y=70px),
-        // __stack_y_base__=8 (bottom_y=20px) — the identical inverted-pixel
-        // shape as the ordinal block above, but via the stack-base path. No
-        // `.abs()` here — the comment at :680-683 says this must clamp to
-        // zero (render nothing), not mirror a positive-height rect. Since
-        // `is_zero_extent`, "renders nothing" is achieved by not emitting
-        // the rect at all rather than emitting an invisible zero-height one
-        // — see the doc comment above this test for why that is the
-        // correct reading of the original "renders nothing" intent, not a
-        // relaxation of it.
+        // ── build_quantitative: stack base ────────────────────────────────
+        // Row 0 is the inverted row: y="val"=3 (value pixel 70px) over
+        // __stack_y_base__=8 (base pixel 20px), the identical inverted-pixel
+        // shape as the ordinal block above via the stack-base path. It must
+        // span [20, 70]: y=20, h=50.
         //
-        // Row 1 is a well-formed sibling in the SAME batch (val=8 over
-        // base=3: top_y=20px, bottom_y=70px, a positive raw height of 50),
-        // and it is what keeps this assertion a WITNESS. `rects.is_empty()`
-        // over the single-row fixture this test used to carry was satisfied
-        // by ANY earlier exit in the builder — a missing column, a
-        // non-finite skip, a `to_pixel_f64` miss, or a dispatch elsewhere —
-        // so it no longer proved the clamp ran. With the sibling present,
-        // `rects == [50.0]` proves both halves at once: the builder reached
-        // its push site (the sibling survived with its exact geometry) and
-        // the degenerate row was clamped to zero and dropped there rather
-        // than mirrored to a positive 50.0 of its own.
+        // Row 1 is a well-formed sibling in the SAME batch (val=10 over
+        // base=6: value pixel 0px, base pixel 40px, so y=0, h=40). Its
+        // distinct geometry ties each rect to its row, so the assertion
+        // proves the builder reached its push site for both rows and placed
+        // the inverted one between its own two pixels.
         {
             let spec = ChartSpec {
                 mark: Mark::Bar,
@@ -2031,8 +1993,8 @@ mod tests {
             ]));
             let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
                 Arc::new(Float64Array::from(vec![5.0, 8.0])),
-                Arc::new(Float64Array::from(vec![3.0, 8.0])),
-                Arc::new(Float64Array::from(vec![8.0, 3.0])),
+                Arc::new(Float64Array::from(vec![3.0, 10.0])),
+                Arc::new(Float64Array::from(vec![8.0, 6.0])),
             ]).unwrap();
             let scales = ResolvedScales {
                 x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
@@ -2042,24 +2004,17 @@ mod tests {
             let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
             let result = super::build(&ctx);
-            let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
-                if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+            let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+                if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
             }).collect();
-            // The "abs, not clamp" contract this test pins is that the raw
-            // height is clamped to `0.0`, never mirrored to a positive
-            // `50.0` -- `is_zero_extent` then drops that zero-height rect
-            // entirely (see the doc comment above this test), so "clamped,
-            // not mirrored" now reads as "the inverted row emits no rect
-            // while its well-formed sibling still does". A second rect here
-            // would mean the clamp regressed into a mirror; zero rects would
-            // mean the builder bailed before the clamp ever ran.
-            assert_eq!(rects.len(), 1,
-                "exactly the well-formed sibling must survive: the inverted row clamps to zero extent and is dropped, the sibling is not; got {rects:?}");
-            assert!((rects[0] - 50.0).abs() < 1e-6,
-                "the surviving rect must be the sibling's exact height (val=8 over base=3 -> 70px-20px); got {rects:?}");
+            assert_eq!(rects.len(), 2,
+                "the inverted row draws toward its base instead of clamping to zero extent; got {rects:?}");
+            assert!((rects[0].0 - 20.0).abs() < 1e-6 && (rects[0].1 - 50.0).abs() < 1e-6,
+                "the inverted row spans its base (20px) to its value (70px); got {rects:?}");
+            assert!((rects[1].0 - 0.0).abs() < 1e-6 && (rects[1].1 - 40.0).abs() < 1e-6,
+                "the sibling spans its value (0px) to its base (40px); got {rects:?}");
         }
     }
-
     /// D7: a stacked bar under CoordPolar renders arc wedges (not rects), and
     /// stacked segments accumulate outward — each segment's inner radius equals
     /// the previous segment's outer radius, with no overlap at r=0.
@@ -3846,6 +3801,314 @@ mod tests {
             let fillets: Vec<f64> = arc_radii.iter().copied().filter(|r| (*r - 8.0).abs() < 1e-6).collect();
             assert_eq!(fillets.len(), 2,
                 "both outer corners must fillet at the resolved 8.0 corner radius; got {arc_radii:?}");
+        }
+    }
+
+    // ── Value baseline: bars grow from the 0 tick ────────────────────────
+
+    /// The geometry `(x, y, w, h)` of every rect a bar build emits, over a
+    /// 300×100 panel at the origin.
+    fn baseline_rects(
+        spec: &ChartSpec,
+        batch: &arrow::record_batch::RecordBatch,
+        scales: &crate::render::scale_resolve::ResolvedScales,
+    ) -> Vec<(f64, f64, f64, f64)> {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
+        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales, batch, mark_style: &mark_style };
+        super::build(&ctx).nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
+        }).collect()
+    }
+
+    fn baseline_scales(
+        x: ScaleKind,
+        y: ScaleKind,
+    ) -> crate::render::scale_resolve::ResolvedScales {
+        crate::render::scale_resolve::ResolvedScales {
+            x, y,
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        }
+    }
+
+    fn abc_ordinal(range: [f64; 2]) -> ScaleKind {
+        ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+            vec!["a".to_string(), "b".to_string(), "c".to_string()], range.to_vec(), DiscreteLayout::UNPADDED,
+        ))
+    }
+
+    fn linear(domain: [f64; 2], range: [f64; 2], clamp: bool) -> ScaleKind {
+        ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(domain.to_vec(), range.to_vec(), clamp, false))
+    }
+
+    fn cat_value_batch(cat: &str, value: &str, values: [f64; 3]) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(cat, DataType::Utf8, false),
+            Field::new(value, DataType::Float64, false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(values.to_vec())),
+        ]).unwrap()
+    }
+
+    fn ordinal_x_bar_spec() -> ChartSpec {
+        ChartSpec {
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn assert_spans(rects: &[(f64, f64, f64, f64)], expected: &[(f64, f64)], pick: fn(&(f64, f64, f64, f64)) -> (f64, f64), case: &str) {
+        let got: Vec<(f64, f64)> = rects.iter().map(pick).collect();
+        assert_eq!(got.len(), expected.len(), "{case}: rect count; got {got:?}");
+        for (g, e) in got.iter().zip(expected) {
+            assert!((g.0 - e.0).abs() < 1e-9 && (g.1 - e.1).abs() < 1e-9, "{case}: expected {expected:?}, got {got:?}");
+        }
+    }
+
+    /// Vertical bars over an inset y range (95 → 5 on a 100px panel, the
+    /// padding inset every auto-resolved axis carries) grow from the 0 tick
+    /// whenever 0 is in the domain, whatever the sign of the values: mixed
+    /// signs hang negatives below the tick, all-positive bars keep the inset
+    /// below their base, all-negative bars hang from the tick at the top, and a
+    /// reversed axis puts the tick (and the base) at the top with the heights
+    /// unchanged. A padding-only change would leave "b" in the mixed case
+    /// starting at the panel bottom (100px).
+    #[test]
+    fn unstacked_vertical_bars_grow_from_the_zero_tick() {
+        let cases: [(&str, [f64; 2], [f64; 3], [(f64, f64); 3]); 4] = [
+            // zero at 95 - 2/5·90 = 59; 3 → 5, -2 → 95, 1 → 41.
+            ("mixed sign", [-2.0, 3.0], [3.0, -2.0, 1.0], [(5.0, 54.0), (59.0, 36.0), (41.0, 18.0)]),
+            // zero at 95; the 5px inset below the base is kept.
+            ("all positive", [0.0, 3.0], [3.0, 2.0, 1.0], [(5.0, 90.0), (35.0, 60.0), (65.0, 30.0)]),
+            // zero at 5; -3 → 95.
+            ("all negative", [-3.0, 0.0], [-3.0, -2.0, -1.0], [(5.0, 90.0), (5.0, 60.0), (5.0, 30.0)]),
+            // reversed domain: zero at 5, 3 → 95.
+            ("reversed", [3.0, 0.0], [3.0, 2.0, 1.0], [(5.0, 90.0), (5.0, 60.0), (5.0, 30.0)]),
+        ];
+        for (case, domain, values, expected) in cases {
+            let scales = baseline_scales(abc_ordinal([0.0, 300.0]), linear(domain, [95.0, 5.0], false));
+            let rects = baseline_rects(&ordinal_x_bar_spec(), &cat_value_batch("cat", "v", values), &scales);
+            assert_spans(&rects, &expected, |r| (r.1, r.3), case);
+        }
+    }
+
+    /// When 0 is outside the value domain the base is the plot edge on zero's
+    /// side: the bottom edge (100px, not the 95px domain floor) for a domain
+    /// above 0, including a `clamp` scale that would map 0 onto that floor; the
+    /// top edge for a domain below 0, and for a reversed domain above 0, whose
+    /// end nearest 0 is drawn at the top.
+    #[test]
+    fn bars_whose_domain_excludes_zero_start_at_the_edge_on_zeros_side() {
+        let cases: [(&str, [f64; 2], bool, [f64; 3], [(f64, f64); 3]); 4] = [
+            ("above zero", [50.0, 70.0], false, [50.0, 60.0, 70.0], [(95.0, 5.0), (50.0, 50.0), (5.0, 95.0)]),
+            // `reverse=True` with `zero=False`: 50 sits at the top, so the bars
+            // hang from the top edge and grow down toward their values.
+            ("reversed above zero", [70.0, 50.0], false, [50.0, 60.0, 70.0], [(0.0, 5.0), (0.0, 50.0), (0.0, 95.0)]),
+            ("above zero, clamped", [50.0, 70.0], true, [50.0, 60.0, 70.0], [(95.0, 5.0), (50.0, 50.0), (5.0, 95.0)]),
+            ("below zero", [-70.0, -50.0], false, [-70.0, -60.0, -50.0], [(0.0, 95.0), (0.0, 50.0), (0.0, 5.0)]),
+        ];
+        for (case, domain, clamp, values, expected) in cases {
+            let scales = baseline_scales(abc_ordinal([0.0, 300.0]), linear(domain, [95.0, 5.0], clamp));
+            let rects = baseline_rects(&ordinal_x_bar_spec(), &cat_value_batch("cat", "v", values), &scales);
+            assert_spans(&rects, &expected, |r| (r.1, r.3), case);
+        }
+    }
+
+    /// Native horizontal bars (categorical y, `build_ordinal_y`) grow from the
+    /// x 0 tick: x range 5 → 95 over [-2, 3] puts 0 at 41, so -2 draws
+    /// leftward from it rather than from the panel's left edge.
+    #[test]
+    fn native_horizontal_bars_grow_from_the_zero_tick() {
+        let spec = ChartSpec {
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let scales = baseline_scales(linear([-2.0, 3.0], [5.0, 95.0], false), abc_ordinal([0.0, 100.0]));
+        let rects = baseline_rects(&spec, &cat_value_batch("cat", "v", [3.0, -2.0, 1.0]), &scales);
+        assert_spans(&rects, &[(41.0, 54.0), (5.0, 36.0), (41.0, 18.0)], |r| (r.0, r.2), "native horizontal");
+    }
+
+    /// The quantitative-x builder (`build_quantitative`) and the quantitative
+    /// horizontal one (`build_quantitative_horizontal`) take the same base:
+    /// the 0 tick, with a negative value drawing toward it.
+    #[test]
+    fn quantitative_bars_grow_from_the_zero_tick() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("p", DataType::Float64, false),
+            Field::new("p2", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5])),
+            Arc::new(Float64Array::from(vec![3.0, -2.0, 1.0])),
+        ]).unwrap();
+        let enc = |field: &str| Some(EncodingSpec { field: field.into(), type_: Some(SDT::Quantitative), ..Default::default() });
+
+        let vertical = ChartSpec {
+            mark: Mark::Bar,
+            encoding: Encoding { x: enc("p"), y: enc("v"), ..Default::default() },
+            ..Default::default()
+        };
+        let scales = baseline_scales(linear([0.0, 4.0], [0.0, 300.0], false), linear([-2.0, 3.0], [95.0, 5.0], false));
+        let rects = baseline_rects(&vertical, &batch, &scales);
+        assert_spans(&rects, &[(5.0, 54.0), (59.0, 36.0), (41.0, 18.0)], |r| (r.1, r.3), "quantitative x");
+
+        let horizontal = ChartSpec {
+            mark: Mark::Bar,
+            encoding: Encoding { x: enc("v"), y: enc("p"), y2: enc("p2"), ..Default::default() },
+            ..Default::default()
+        };
+        let scales = baseline_scales(linear([-2.0, 3.0], [5.0, 95.0], false), linear([0.0, 4.0], [100.0, 0.0], false));
+        let rects = baseline_rects(&horizontal, &batch, &scales);
+        assert_spans(&rects, &[(41.0, 54.0), (5.0, 36.0), (41.0, 18.0)], |r| (r.0, r.2), "quantitative horizontal");
+    }
+
+    /// A mixed-sign horizontal stack (value on x, categorical y) draws every
+    /// segment: positives stack rightward from 0 and negatives leftward, so the
+    /// stack's own output (`apply_position`, not a hand-built base column) puts
+    /// "a" at [-1, 2] and "b" at [-2, 3]. A clamped span would drop the two
+    /// segments whose value lies left of their base.
+    #[test]
+    fn mixed_sign_horizontal_stack_draws_every_segment() {
+        use crate::render::position::apply_position;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            Arc::new(Float64Array::from(vec![2.0, -1.0, -2.0, 3.0])),
+        ]).unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        // x over [-2, 3] → [0, 100]: 0 at 40, 20px per unit.
+        let scales = baseline_scales(linear([-2.0, 3.0], [0.0, 100.0], false), abc_ordinal([0.0, 100.0]));
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let spec = ChartSpec { mark: Mark::Bar, encoding: enc, position: Some(pos), ..Default::default() };
+        let rects = baseline_rects(&spec, &adjusted, &scales);
+        assert_spans(
+            &rects,
+            &[(40.0, 40.0), (20.0, 20.0), (0.0, 40.0), (40.0, 60.0)],
+            |r| (r.0, r.2),
+            "mixed-sign horizontal stack",
+        );
+    }
+
+    /// A stack whose bin sums to nothing (`P + N = 0`) draws zero-height
+    /// segments at the 0 pixel, and a zero segment stacked on a nonzero one
+    /// draws a zero-height rect at its own base: one rect per (bin, group),
+    /// all from the stack's own output (`apply_position`).
+    #[test]
+    fn zero_value_stack_segments_emit_zero_height_rects_at_their_base() {
+        use crate::render::position::apply_position;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        // Bin "a" is all zero; bin "b" stacks q=0 on p=2.
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 2.0, 0.0])),
+        ]).unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        // y over [0, 2] → [95, 5]: 0 at 95, 2 at 5.
+        let scales = baseline_scales(abc_ordinal([0.0, 300.0]), linear([0.0, 2.0], [95.0, 5.0], false));
+        // Zero: b's p spans [0, 2] (5px to 95px). Normalize: b sums to 2, so p
+        // spans [0, 1] (50px to 95px).
+        for (offset, p_top) in [(StackOffset::Zero, 5.0), (StackOffset::Normalize, 50.0)] {
+            let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+            let spec = ChartSpec { mark: Mark::Bar, encoding: enc.clone(), position: Some(pos), ..Default::default() };
+            let rects = baseline_rects(&spec, &adjusted, &scales);
+            assert_spans(
+                &rects,
+                &[(95.0, 0.0), (95.0, 0.0), (p_top, 95.0 - p_top), (p_top, 0.0)],
+                |r| (r.1, r.3),
+                &format!("{offset:?}"),
+            );
+        }
+    }
+
+    /// An all-negative bar stack hangs from the 0 tick for every offset, its
+    /// segments drawn from the stack's own output: `zero` spans [-3, 0],
+    /// `normalize` fills [-1, 0], `center` centers [-3, 0] on 0 as [-1.5, 1.5].
+    /// Bin "a" holds p=-2, q=-1; y over the given domain → [95, 5].
+    #[test]
+    fn an_all_negative_bar_stack_hangs_from_the_zero_tick() {
+        use crate::render::position::apply_position;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "a"])),
+            Arc::new(StringArray::from(vec!["p", "q"])),
+            Arc::new(Float64Array::from(vec![-2.0, -1.0])),
+        ]).unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        // (offset, y domain, expected (y, h) per segment)
+        let cases = [
+            // [-3, 0]: 0 at 5, 30px per unit.
+            (StackOffset::Zero, [-3.0, 0.0], [(5.0, 60.0), (65.0, 30.0)]),
+            // [-1, 0]: 0 at 5, 90px per unit; p fills [-2/3, 0], q [-1, -2/3].
+            (StackOffset::Normalize, [-1.0, 0.0], [(5.0, 60.0), (65.0, 30.0)]),
+            // [-1.5, 1.5]: 0 at 50, 30px per unit; p spans [-0.5, 1.5], q [-1.5, -0.5].
+            (StackOffset::Center, [-1.5, 1.5], [(5.0, 60.0), (65.0, 30.0)]),
+        ];
+        for (offset, domain, expected) in cases {
+            let scales = baseline_scales(abc_ordinal([0.0, 300.0]), linear(domain, [95.0, 5.0], false));
+            let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+            let spec = ChartSpec { mark: Mark::Bar, encoding: enc.clone(), position: Some(pos), ..Default::default() };
+            assert_spans(&baseline_rects(&spec, &adjusted, &scales), &expected, |r| (r.1, r.3), &format!("{offset:?}"));
         }
     }
 }

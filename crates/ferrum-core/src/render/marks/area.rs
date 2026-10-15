@@ -118,8 +118,8 @@ impl<'a> BottomEdge<'a> {
 ///
 /// The baseline lies on the coordinate the series does NOT advance along, so
 /// the point keeps its own independent coordinate and takes the baseline for
-/// its dependent one: straight down to the panel bottom for an x-advancing
-/// series, straight across to the panel's left edge for a y-advancing one.
+/// its dependent one: straight down to the y baseline for an x-advancing
+/// series, straight across to the x baseline for a y-advancing one.
 fn baseline_meet(axis: CurveAxis, baseline: f64, point: (f64, f64)) -> (f64, f64) {
     match axis {
         CurveAxis::X => (point.0, baseline),
@@ -135,7 +135,7 @@ fn build_top_line_cmds(top: &[(f64, f64)], trace: Trace) -> Vec<ferrum_scene::Pa
 /// Build closed area path commands: top edge (with interpolation) + baseline closure.
 ///
 /// `baseline` is a coordinate on the axis the series does NOT advance along —
-/// the panel bottom under [`CurveAxis::X`], the panel's left edge under
+/// the y value baseline under [`CurveAxis::X`], the x value baseline under
 /// [`CurveAxis::Y`] — so the two closure segments run to it from the edge's
 /// last and first points. Before `#172`(2) the closure was hard-coded to a
 /// y-baseline, which turned a y-advancing area's fill into very nearly the
@@ -207,10 +207,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|f| col_as_f64(ctx.batch, f).ok());
     let has_y2 = y2s_opt.is_some();
 
-    let baseline_y = ctx.panel.plot_area.y + ctx.panel.plot_area.h;
-    // GH #77 follow-up: fallback baseline for a horizontal stacked area's
-    // base edge (see `stack_value_on_x` below), mirroring `baseline_y`.
-    let baseline_x = ctx.panel.plot_area.x;
+    // The value baselines on each axis: the 0 tick when 0 is in that axis's
+    // domain, else the plot edge on zero's side (`value_baseline_px`). They
+    // close an unstacked fill and stand in for a stack base or `y2` value that
+    // does not map; `baseline_x` serves a horizontal series (see
+    // `stack_value_on_x` below).
+    let panel = ctx.panel.plot_area;
+    let baseline_y = ctx.scales.y.value_baseline_px(panel.y + panel.h, panel.y);
+    let baseline_x = ctx.scales.x.value_baseline_px(panel.x, panel.x + panel.w);
 
     let cf = color_field(ctx, spec);
     // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
@@ -272,10 +276,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         step: AREA_STEP_SPELLING,
         axis: bottom_edge.axis(ctx),
     };
-    // The fill closes on the panel edge at the LOW end of the axis carrying the
-    // value — the bottom for an x-advancing series, the left for a y-advancing
-    // one. `baseline_x` has been in hand since GH #77; until `#172`(2) only the
-    // horizontal stack's bottom point used it.
+    // The fill closes on the baseline of the axis carrying the value — y for an
+    // x-advancing series, x for a y-advancing one.
     let baseline = match trace.axis {
         CurveAxis::X => baseline_y,
         CurveAxis::Y => baseline_x,
@@ -2009,11 +2011,14 @@ mod tests {
             closure_on(&spec, overrides)
         };
 
+        // y spans 0..30, so the y baseline is the 0 tick (inset above the panel
+        // bottom); x spans 10..90, so the x baseline is the panel's left edge.
+        let y_zero = scales.y.to_pixel_f64(0.0).expect("0 is in the y domain");
         let (last, first) = closure(None);
         assert_eq!(
             (last.1, first.1),
-            (100.0, 100.0),
-            "UNDECLARED: both closing points sit on the panel bottom (y=100). This is the \
+            (y_zero, y_zero),
+            "UNDECLARED: both closing points sit on the y baseline (the 0 tick). This is the \
              control the deleted monotonicity inference failed — it read this same edge as \
              y-advancing and closed an ordinary vertical area on the left."
         );
@@ -2076,7 +2081,7 @@ mod tests {
             closure_on(&flipped_spec, Some(&declared_y)),
             closure(None),
             "DECLARED y + CoordFlip: the post-flip declaration says the value is on y, so the \
-             series is vertical and closes on the panel bottom — identical to the unflipped, \
+             series is vertical and closes on the y baseline — identical to the unflipped, \
              undeclared area. This is `mark_density(orientation=\"horizontal\")\
              .coord(CoordFlip())` in miniature: `flip_coords` turns the producer's `x` into \
              `y`, and precedence lets it cancel the flip. Under the `||` this replaced, \
@@ -2101,5 +2106,111 @@ mod tests {
             PathCmd::Close,
         ];
         assert_eq!(build_stacked_area_cmds(&top, &bottom, vertical(Interpolate::Linear)), expected);
+    }
+
+    /// The two closing points of an unstacked area over x [1, 4] → [0, 300]
+    /// and the given y domain over the inset range 95 → 5 on a 100px panel.
+    fn area_closing_ys(y_domain: [f64; 2], ys: Vec<f64>) -> (f64, f64) {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use ferrum_scene::PathCmd;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(ys)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![1.0, 4.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(y_domain.to_vec(), vec![95.0, 5.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("an area must emit a closed Path");
+        match (&cmds[cmds.len() - 3], &cmds[cmds.len() - 2]) {
+            (PathCmd::LineTo { y: y0, .. }, PathCmd::LineTo { y: y1, .. }) => (*y0, *y1),
+            other => panic!("expected the two closing LineTos, got {other:?}"),
+        }
+    }
+
+    /// A mixed-sign area closes on the 0 tick (95 - 2/5·90 = 59), not the
+    /// panel bottom; one whose domain excludes 0 still closes on the bottom
+    /// edge, exactly.
+    #[test]
+    fn an_unstacked_area_closes_on_the_zero_tick_when_zero_is_in_its_domain() {
+        let (last, first) = area_closing_ys([-2.0, 3.0], vec![3.0, -2.0, 1.0, 2.0]);
+        assert!((last - 59.0).abs() < 1e-9 && (first - 59.0).abs() < 1e-9, "mixed sign closes at 0; got {last}, {first}");
+        assert_eq!(area_closing_ys([50.0, 70.0], vec![50.0, 60.0, 55.0, 70.0]), (100.0, 100.0), "a domain above 0 closes on the bottom edge");
+    }
+
+    /// An all-negative stacked area whose domain excludes 0 (an area has no
+    /// zero anchor, and a stack's 0 origin stays out of its domain): the first
+    /// layer's base is the stack origin, which closes on the plot edge on
+    /// zero's side, the top, for `zero` and `normalize` alike.
+    #[test]
+    fn an_all_negative_stacked_area_closes_its_first_layer_on_the_top_edge() {
+        use crate::render::position::apply_position;
+        use crate::spec::encoding::DataType as SDT;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        use ferrum_scene::PathCmd;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![-2.0, -3.0, -1.0, -4.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area).unwrap();
+        for offset in [StackOffset::Zero, StackOffset::Normalize] {
+            let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+            let spec = ChartSpec {
+                mark: Mark::Area,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                    ..Default::default()
+                },
+                position: Some(pos.clone()),
+                ..Default::default()
+            };
+            let (scales, _) = resolve_scales(&spec, &raw, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
+            let (lo, hi) = scales.y.data_domain().unwrap();
+            assert!(hi < 0.0, "{offset:?}: premise, 0 is outside the domain; got ({lo}, {hi})");
+            let stacked = apply_position(&raw, Some(&pos), &scales, &spec.encoding, false, &mut Vec::new()).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &stacked, mark_style: &mark_style };
+            let first = super::build(&ctx).nodes.into_iter().find_map(|n| {
+                if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+            }).expect("the first layer's closed path");
+            // Top edge forward (2 points), bottom edge back (2 points), Close.
+            let bottom: Vec<f64> = first[2..4].iter().map(|c| match c {
+                PathCmd::LineTo { y, .. } => *y,
+                other => panic!("expected the bottom edge's LineTos, got {other:?}"),
+            }).collect();
+            assert_eq!(bottom, vec![0.0, 0.0], "{offset:?}: the first layer closes on the top edge; got {first:?}");
+        }
     }
 }

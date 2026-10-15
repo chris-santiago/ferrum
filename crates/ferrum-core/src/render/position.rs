@@ -18,6 +18,57 @@ use crate::render::RenderWarning;
 use crate::spec::chart::ChartSpec;
 use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
 
+/// The batch a value axis resolves against, and the span partner that widens
+/// it to every stacked segment's drawn extent.
+///
+/// A stacked segment draws from its base to its top. `batch` carries the tops
+/// (the stacked value column); `base` names the base column, so the scale
+/// reads it as the value field's paired span, the same read a bound `x2`/`y2`
+/// takes. In the preview batch the base column holds only the nonzero bases:
+/// a 0 base is a stack's origin, not a data extent, and it follows the
+/// unstacked baseline rule (0 enters the domain only through zero anchoring),
+/// so zero and normalize stacks resolve exactly as before while a center
+/// stack, whose runs start at a nonzero shift, covers its lowest base. The
+/// draw pass runs its own `apply_stack` and reads the full base column.
+pub(crate) struct StackedAxisBatch<'a> {
+    pub(crate) batch: Cow<'a, RecordBatch>,
+    pub(crate) base: Option<crate::spec::encoding::EncodingSpec>,
+}
+
+impl<'a> StackedAxisBatch<'a> {
+    fn unstacked(primary_batch: &'a RecordBatch) -> Self {
+        Self { batch: Cow::Borrowed(primary_batch), base: None }
+    }
+
+    /// The preview stack's output with its 0 bases nulled, paired with the
+    /// base column. `apply_stack` always writes that column as nullable
+    /// `Float64`, so the rebuild cannot fail in practice; if it did, the
+    /// stacked tops still widen the axis, without the base span.
+    fn stacked(stacked: RecordBatch) -> Self {
+        let rebuilt = stacked.schema().index_of(STACK_BASE_COLUMN).ok().and_then(|idx| {
+            let bases = stacked.column(idx).as_any().downcast_ref::<Float64Array>()?;
+            let nonzero: Float64Array = bases.iter().map(|b| b.filter(|v| *v != 0.0)).collect();
+            let mut columns = stacked.columns().to_vec();
+            columns[idx] = Arc::new(nonzero);
+            RecordBatch::try_new(stacked.schema(), columns).ok()
+        });
+        match rebuilt {
+            Some(batch) => Self {
+                batch: Cow::Owned(batch),
+                base: Some(crate::spec::encoding::EncodingSpec {
+                    field: STACK_BASE_COLUMN.into(),
+                    ..Default::default()
+                }),
+            },
+            None => Self { batch: Cow::Owned(stacked), base: None },
+        }
+    }
+}
+
+/// The column `apply_stack` writes each segment's base into, whichever axis
+/// carries the stacked value.
+const STACK_BASE_COLUMN: &str = "__stack_y_base__";
+
 /// Return the batch the y-scale should resolve against, accounting for a
 /// Stack position adjustment.
 ///
@@ -36,7 +87,11 @@ use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValue
 /// matching Stack's value axis resolves to X instead (GH #77 follow-up —
 /// widening belongs to `axis_batch_for_x` in that case, not here). The owned
 /// stacked batch is returned (boxed by `Cow`) when the value axis resolves
-/// to Y. On a stack failure the caller's primary batch is returned — the
+/// to Y, with the stack's base as its paired span ([`StackedAxisBatch`]), so
+/// the domain covers every segment's drawn extent; a stack's 0 origin follows
+/// the unstacked baseline rule and enters the domain only through zero
+/// anchoring, which keeps zero and normalize stacks resolving as before. On a
+/// stack failure the caller's primary batch is returned — the
 /// scale resolves from raw data and the downstream `apply_stack` re-attempt
 /// during drawing will surface the same error to the user.
 ///
@@ -48,9 +103,9 @@ pub(crate) fn axis_batch_for_y<'a>(
     spec: &'a ChartSpec,
     y_field: &str,
     primary_batch: &'a RecordBatch,
-) -> Cow<'a, RecordBatch> {
+) -> StackedAxisBatch<'a> {
     let Some((by, offset, anchor, value_axis, layer_enc)) = find_stack_for_y(spec, y_field) else {
-        return Cow::Borrowed(primary_batch);
+        return StackedAxisBatch::unstacked(primary_batch);
     };
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     // GH #77 follow-up: only proceed when this Stack's resolved value axis
@@ -59,7 +114,7 @@ pub(crate) fn axis_batch_for_y<'a>(
     // whose value lives on X (explicit `value_axis: Some(X)`, or a real
     // CoordFlip) is `axis_batch_for_x`'s to widen, not this function's.
     if resolve_stack_value_on_x(value_axis, coord_flipped) {
-        return Cow::Borrowed(primary_batch);
+        return StackedAxisBatch::unstacked(primary_batch);
     }
     // This is the scale-resolve *preview* stack (to widen the y-domain to the
     // stacked tops); the real draw-pass stack runs later via `apply_position`
@@ -69,8 +124,8 @@ pub(crate) fn axis_batch_for_y<'a>(
     // duplicate.
     let mut discard_warnings = Vec::new();
     match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
-        Ok(b) => Cow::Owned(b),
-        Err(_) => Cow::Borrowed(primary_batch),
+        Ok(b) => StackedAxisBatch::stacked(b),
+        Err(_) => StackedAxisBatch::unstacked(primary_batch),
     }
 }
 
@@ -82,7 +137,8 @@ pub(crate) fn axis_batch_for_y<'a>(
 /// clips them and drawers silently skip every row past the first group),
 /// same preview-stack / discard-warnings structure, same per-layer walk
 /// shape, same real-`coord_flipped` + [`resolve_stack_value_on_x`] gating —
-/// only proceeding when the resolved value axis is X. Needed once GH #77's
+/// only proceeding when the resolved value axis is X, and the same base span
+/// ([`StackedAxisBatch`]). Needed once GH #77's
 /// `value_axis: Some(X)` (horizontal composite-mark desugars) or a real
 /// `CoordFlip` can put the stacked *value* column on X instead of Y —
 /// before this, X was never anything but an ordinal/binned category axis,
@@ -109,18 +165,18 @@ pub(crate) fn axis_batch_for_x<'a>(
     spec: &'a ChartSpec,
     x_field: &str,
     primary_batch: &'a RecordBatch,
-) -> Cow<'a, RecordBatch> {
+) -> StackedAxisBatch<'a> {
     let Some((by, offset, anchor, value_axis, layer_enc)) = find_stack_for_x(spec, x_field) else {
-        return Cow::Borrowed(primary_batch);
+        return StackedAxisBatch::unstacked(primary_batch);
     };
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     if !resolve_stack_value_on_x(value_axis, coord_flipped) {
-        return Cow::Borrowed(primary_batch);
+        return StackedAxisBatch::unstacked(primary_batch);
     }
     let mut discard_warnings = Vec::new();
     match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
-        Ok(b) => Cow::Owned(b),
-        Err(_) => Cow::Borrowed(primary_batch),
+        Ok(b) => StackedAxisBatch::stacked(b),
+        Err(_) => StackedAxisBatch::unstacked(primary_batch),
     }
 }
 
@@ -1554,39 +1610,52 @@ pub(crate) fn apply_stack(
         bins.entry(x_bins[i]).or_default().push((group_idx[i], i, ya_vals[i]));
     }
 
-    let totals: HashMap<usize, f64> = bins
+    // Each bin's magnitude `P + N`: the sum of its positive values and the
+    // absolute values of its negative ones, the denominator `Normalize`
+    // divides by. With no negative value it is the bin's plain sum.
+    let magnitudes: HashMap<usize, f64> = bins
         .iter()
-        .map(|(k, rows)| (*k, rows.iter().map(|(_, _, y)| y).sum::<f64>()))
+        .map(|(k, rows)| (*k, rows.iter().map(|(_, _, y)| y.abs()).sum::<f64>()))
         .collect();
 
-    // new_y holds the cumulative TOP of each segment; new_y_base holds the
-    // cumulative BOTTOM (the previous segment's top within the same bin, or
-    // 0 / -mid for the first segment). Bar / area renderers draw each
-    // segment from new_y_base[i] to new_y[i] so segments don't overlap.
+    // Stacking is split by sign: within a bin, non-negative values accumulate
+    // upward from 0 and negative values downward from 0, each in group order,
+    // so a negative segment hangs below the axis instead of overdrawing the
+    // positive segment under it. The stack spans `[-N, P]`; `Normalize`
+    // scales it to `[-n, p]` with `p + n = 1`; `Center` shifts it by
+    // `(N - P) / 2` so that span is centered on 0. A bin with no negative value
+    // stacks exactly as a single running total would.
+    //
+    // new_y holds each segment's value end and new_y_base its base end (the
+    // previous same-sign segment's value end, or 0 for the first). Bar / area
+    // renderers draw each segment from new_y_base[i] to new_y[i], so segments
+    // never overlap.
     let mut new_y = vec![0.0_f64; ya_len];
     let mut new_y_base = vec![0.0_f64; ya_len];
     for (xkey, rows) in bins.iter_mut() {
         rows.sort_by_key(|(gi, _, _)| *gi);
-        let total = totals.get(xkey).copied().unwrap_or(0.0);
-        let mut acc = 0.0_f64;
+        let magnitude = magnitudes.get(xkey).copied().unwrap_or(0.0);
+        let mut positive_acc = 0.0_f64;
+        let mut negative_acc = 0.0_f64;
         for (_, row_idx, y) in rows.iter() {
             let normalized = match offset {
                 StackOffset::Zero => *y,
                 StackOffset::Normalize => {
-                    if total != 0.0 {
-                        y / total
+                    if magnitude != 0.0 {
+                        y / magnitude
                     } else {
                         0.0
                     }
                 }
                 StackOffset::Center => *y,
             };
-            new_y_base[*row_idx] = acc;
-            acc += normalized;
-            new_y[*row_idx] = acc;
+            let acc = if normalized < 0.0 { &mut negative_acc } else { &mut positive_acc };
+            new_y_base[*row_idx] = *acc;
+            *acc += normalized;
+            new_y[*row_idx] = *acc;
         }
         if matches!(offset, StackOffset::Center) {
-            let mid = acc / 2.0;
+            let mid = (positive_acc + negative_acc) / 2.0;
             for (_, row_idx, _) in rows.iter() {
                 new_y[*row_idx] -= mid;
                 new_y_base[*row_idx] -= mid;
@@ -1627,7 +1696,7 @@ pub(crate) fn apply_stack(
     // per-segment rects (base → top) instead of drawing every segment from
     // y=0. Bar / area renderers look this up via `col_as_f64` when present.
     cols.push(Arc::new(Float64Array::from(new_y_base)));
-    new_fields.push(Field::new("__stack_y_base__", DataType::Float64, true));
+    new_fields.push(Field::new(STACK_BASE_COLUMN, DataType::Float64, true));
 
     // GH #77 follow-up: stamp explicit schema metadata (mirroring the
     // `DODGE_N_GROUPS_KEY` / `DODGE_SUB_BAND_PX_KEY` pattern from
@@ -2662,7 +2731,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = axis_batch_for_y(&spec, "y", &batch);
+        let result = axis_batch_for_y(&spec, "y", &batch).batch;
         assert!(
             matches!(result, Cow::Borrowed(_)),
             "expected Borrowed fallback on stack failure"
@@ -2772,10 +2841,10 @@ mod tests {
             ..Default::default()
         };
 
-        let x_result = axis_batch_for_x(&spec, "x", &b);
+        let x_result = axis_batch_for_x(&spec, "x", &b).batch;
         assert!(matches!(x_result, Cow::Borrowed(_)), "x-side must be a no-op for a vertical stack");
 
-        let y_result = axis_batch_for_y(&spec, "y", &b);
+        let y_result = axis_batch_for_y(&spec, "y", &b).batch;
         match y_result {
             Cow::Owned(out) => {
                 let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -2835,7 +2904,7 @@ mod tests {
             ..Default::default()
         };
 
-        let x_result = axis_batch_for_x(&spec, "val", &batch);
+        let x_result = axis_batch_for_x(&spec, "val", &batch).batch;
         match x_result {
             Cow::Owned(out) => {
                 let val_idx = out.schema().index_of("val").unwrap();
@@ -2849,7 +2918,7 @@ mod tests {
             Cow::Borrowed(_) => panic!("expected x-side widening to succeed through the CoordFlip fallback"),
         }
 
-        let y_result = axis_batch_for_y(&spec, "cat", &batch);
+        let y_result = axis_batch_for_y(&spec, "cat", &batch).batch;
         assert!(matches!(y_result, Cow::Borrowed(_)), "y-side must be a no-op once value has flipped to x");
     }
 
@@ -2901,7 +2970,7 @@ mod tests {
             ..Default::default()
         };
 
-        let y_result = axis_batch_for_y(&spec, "cat", &batch);
+        let y_result = axis_batch_for_y(&spec, "cat", &batch).batch;
         assert!(
             matches!(y_result, Cow::Borrowed(_)),
             "axis_batch_for_y must gate out (Cow::Borrowed) for a flipped numeric-category \
@@ -5576,8 +5645,11 @@ mod tests {
 
     #[test]
     fn bughunt_stack_normalize_bin_total_zero_no_div_by_zero() {
-        // A bin whose values cancel to total 0.0 (10 and -10). The `total != 0`
-        // guard must make every segment 0.0, never NaN/inf from a 0/0 division.
+        // The `Normalize` denominator is a bin's magnitude `P + N`. Bin 1's
+        // values sum to 0 (10 and -10) but its magnitude is 20, so they split
+        // to [0, 0.5] and [-0.5, 0]. Bin 2's values are all 0, so its
+        // magnitude is 0 and the guard must make every segment 0.0, never
+        // NaN/inf from a 0/0 division.
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
@@ -5586,9 +5658,9 @@ mod tests {
         let b = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(Float64Array::from(vec![1.0, 1.0])),
-                Arc::new(Float64Array::from(vec![10.0, -10.0])),
-                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, -10.0, 0.0, 0.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
             ],
         )
         .unwrap();
@@ -5604,11 +5676,14 @@ mod tests {
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
         assert!(warnings.is_empty());
         let tops = stack_tops(&out, 1);
+        let bases = stack_bases(&out);
         assert!(
-            tops.iter().all(|v| v.is_finite()),
-            "zero-total normalize must not yield NaN/inf, got {tops:?}"
+            tops.iter().chain(bases.iter()).all(|v| v.is_finite()),
+            "normalize must not yield NaN/inf, got tops {tops:?} bases {bases:?}"
         );
-        assert_eq!(tops, vec![0.0, 0.0], "all segments collapse to 0 when total is 0");
+        assert_eq!(&tops[..2], &[0.5, -0.5], "a cancelling bin splits by sign over its magnitude");
+        assert_eq!(&bases[..2], &[0.0, 0.0], "each sign stacks from 0");
+        assert_eq!(&tops[2..], &[0.0, 0.0], "all segments collapse to 0 when the magnitude is 0");
     }
 
     #[test]
@@ -6288,6 +6363,153 @@ mod tests {
         assert!(!json.contains("value_axis"), "got {json}");
         let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, without_axis);
+    }
+
+    /// A two-bin, two-group batch with mixed signs in each bin: bin 1 holds
+    /// a=2, b=-1 and bin 2 holds a=-2, b=3.
+    fn batch_mixed_sign_xyg() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![2.0, -1.0, -2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The `(base, top)` of every segment a mixed-sign stack under `offset`
+    /// produces, in row order.
+    fn mixed_sign_segments(offset: StackOffset) -> Vec<(f64, f64)> {
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+        let out = apply_position(&batch_mixed_sign_xyg(), Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut Vec::new()).unwrap();
+        stack_bases(&out).into_iter().zip(stack_tops(&out, 1)).collect()
+    }
+
+    fn assert_segments(got: &[(f64, f64)], expected: &[(f64, f64)], case: &str) {
+        assert_eq!(got.len(), expected.len(), "{case}: {got:?}");
+        for (g, e) in got.iter().zip(expected) {
+            assert!((g.0 - e.0).abs() < 1e-12 && (g.1 - e.1).abs() < 1e-12, "{case}: expected {expected:?}, got {got:?}");
+        }
+    }
+
+    /// `zero`: positives stack upward from 0 and negatives downward from 0, so
+    /// each bin spans `[-N, P]` and no segment overlaps another. A single
+    /// running total would draw bin 1's b from 2 down to 1, over a.
+    #[test]
+    fn stack_zero_splits_mixed_signs_at_zero() {
+        assert_segments(
+            &mixed_sign_segments(StackOffset::Zero),
+            &[(0.0, 2.0), (0.0, -1.0), (0.0, -2.0), (0.0, 3.0)],
+            "zero",
+        );
+    }
+
+    /// `normalize`: each segment is divided by its bin's `P + N`, so
+    /// positives fill `[0, p]` and negatives `[-n, 0]` with `p + n = 1`.
+    #[test]
+    fn stack_normalize_splits_mixed_signs_over_the_bin_magnitude() {
+        assert_segments(
+            &mixed_sign_segments(StackOffset::Normalize),
+            &[(0.0, 2.0 / 3.0), (0.0, -1.0 / 3.0), (0.0, -0.4), (0.0, 0.6)],
+            "normalize",
+        );
+    }
+
+    /// `center`: the sign-split stack shifts by `(N - P) / 2`, centering its
+    /// `[-N, P]` extent on 0: bin 1's [-1, 2] and bin 2's [-2, 3] both move
+    /// down by 0.5.
+    #[test]
+    fn stack_center_centers_the_sign_split_extent_on_zero() {
+        assert_segments(
+            &mixed_sign_segments(StackOffset::Center),
+            &[(-0.5, 1.5), (-0.5, -1.5), (-0.5, -2.5), (-0.5, 2.5)],
+            "center",
+        );
+    }
+
+    /// An all-negative stack: every segment hangs below 0. The batch is
+    /// bin 1 a=-2, b=-1 and bin 2 a=-3, b=-4.
+    fn all_negative_segments(offset: StackOffset) -> Vec<(f64, f64)> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![-2.0, -1.0, -3.0, -4.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+        let out = apply_position(&batch, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut Vec::new()).unwrap();
+        stack_bases(&out).into_iter().zip(stack_tops(&out, 1)).collect()
+    }
+
+    /// All-negative stacks, the shared stack bars and areas both draw from:
+    /// `zero` spans `[-N, 0]` downward from 0; `normalize` fills `[-1, 0]`
+    /// (not the upside-down `[0, 1]` a single signed running total over a
+    /// signed sum gives); `center` centers each bin's `[-N, 0]` on 0.
+    #[test]
+    fn an_all_negative_stack_hangs_below_zero_for_every_offset() {
+        assert_segments(
+            &all_negative_segments(StackOffset::Zero),
+            &[(0.0, -2.0), (-2.0, -3.0), (0.0, -3.0), (-3.0, -7.0)],
+            "zero",
+        );
+        assert_segments(
+            &all_negative_segments(StackOffset::Normalize),
+            &[(0.0, -2.0 / 3.0), (-2.0 / 3.0, -1.0), (0.0, -3.0 / 7.0), (-3.0 / 7.0, -1.0)],
+            "normalize",
+        );
+        assert_segments(
+            &all_negative_segments(StackOffset::Center),
+            &[(1.5, -0.5), (-0.5, -1.5), (3.5, 0.5), (0.5, -3.5)],
+            "center",
+        );
+    }
+
+    /// With no negative value every offset stacks bit for bit as one running
+    /// total in group order does (the all-positive fixture `batch_xyg`).
+    #[test]
+    fn stack_without_negatives_is_one_running_total_for_every_offset() {
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let raw = [10.0_f64, 20.0, 30.0, 40.0];
+        for offset in [StackOffset::Zero, StackOffset::Normalize, StackOffset::Center] {
+            let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new()).unwrap();
+            let mut expected_tops = Vec::new();
+            let mut expected_bases = Vec::new();
+            for bin in raw.chunks(2) {
+                let total: f64 = bin.iter().sum();
+                let mut acc = 0.0_f64;
+                let mut segs = Vec::new();
+                for v in bin {
+                    let n = if matches!(offset, StackOffset::Normalize) { v / total } else { *v };
+                    segs.push((acc, acc + n));
+                    acc += n;
+                }
+                let mid = if matches!(offset, StackOffset::Center) { acc / 2.0 } else { 0.0 };
+                for (b0, t0) in segs {
+                    expected_bases.push(b0 - mid);
+                    expected_tops.push(t0 - mid);
+                }
+            }
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&stack_tops(&out, 1)), bits(&expected_tops), "{offset:?} tops");
+            assert_eq!(bits(&stack_bases(&out)), bits(&expected_bases), "{offset:?} bases");
+        }
     }
 }
 

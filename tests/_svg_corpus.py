@@ -25,8 +25,11 @@ that no correct renderer should ever violate:
     base64 font contains the letters ``nan`` and ``inf`` many times over, and a
     text scan reports a false positive on every golden in the repo.
 ``zero_size_filled``
-    A filled ``rect``/``circle`` with zero extent: a mark that was computed,
-    emitted, and renders as nothing.
+    A filled ``rect`` with zero width and zero height, or a filled ``circle``
+    with zero radius: a mark that was computed, emitted, and renders as
+    nothing. A rect with only one zero side is allowed: it is a bar whose
+    value is 0, drawn at its base (zero height on a vertical bar, zero width
+    on a horizontal one).
 ``duplicate_id``
     Two elements sharing one ``id``. ``url(#id)`` resolves to the FIRST match,
     so a duplicate silently cross-wires gradients and clip paths. The output
@@ -784,7 +787,12 @@ def query_nan_inf(doc: Document) -> list[Finding]:
 
 
 def query_zero_size_filled(doc: Document) -> list[Finding]:
-    """Filled ``rect``/``circle`` elements with zero extent."""
+    """Filled ``rect`` elements with zero width and height, and ``circle`` elements with zero radius.
+
+    A zero width or a zero height alone is a zero value on a bar's value axis
+    (a zero-value bar drawn at its base), so only a rect with both sides 0 is a
+    finding.
+    """
     out = []
     for node in doc.nodes:
         if node.in_defs:
@@ -795,7 +803,7 @@ def query_zero_size_filled(doc: Document) -> list[Finding]:
         if node.tag == "rect":
             w = _as_float(node.attrib.get("width"), 0.0)
             h = _as_float(node.attrib.get("height"), 0.0)
-            if w == 0 or h == 0:
+            if w == 0 and h == 0:
                 out.append(
                     Finding("zero_size_filled", doc.name, "rect", f"width={w:g} height={h:g}")
                 )

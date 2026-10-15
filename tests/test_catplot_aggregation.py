@@ -30,7 +30,7 @@ import ferrum as fm
 from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
 from ferrum.plots.distribution import _CATPLOT_PER_ROW_APPEARANCE_CHANNELS
 
-from _svg_extents import y_axis_units_per_pixel
+from _svg_extents import assert_bars_start_on_the_zero_tick, y_axis_units_per_pixel
 from _svg_rects import data_bar_rects, svg_elements
 
 # The whisker is a `rule` mark stroked with the theme's `label` token. Axis
@@ -933,7 +933,10 @@ _UNTOUCHED_KIND_DIGESTS = {
     # `outlier_threshold=0.0` fence (the outermost letter values); the
     # other five kinds stay pinned to the pre-aggregation baseline.
     "boxen": "aabd1f5d477f3be51282da9b43bf2b885daa677ebad2719fe9a492b631a14f3d",
-    "count": "25480897e3c061c194cabf66911eecc2002d7adefb1f61f4c2ac9748acfdb0bf",
+    # `count`'s digest encodes two changes: the aggregation wiring leaving the
+    # count path untouched, and its bars grown from the 0 tick, which
+    # `test_count_bars_start_on_the_zero_tick` asserts directly.
+    "count": "2117a960073e5d1aaa1bf3e4f04da95631b8c3b2113e900a75446f6f34196b3c",
 }
 
 
@@ -1032,6 +1035,10 @@ class TestCountChannelObjectParity:
         assert set(t for t in labels if t in {"X", "Y"}) == {"X", "Y"}
         assert not any(t in {"a", "b", "c", "d"} for t in labels)
         assert len(estimator_bars(svg)) == 2
+
+    def test_count_bars_start_on_the_zero_tick(self, cat_df):
+        """The geometry the `count` digest pins: every count bar grows from 0."""
+        assert_bars_start_on_the_zero_tick(fm.catplot(cat_df, x="cat", kind="count").to_svg())
 
     def test_bare_string_count_is_unaffected(self, cat_df):
         """The clean-input path (no channel object, no `encode=`) is untouched."""

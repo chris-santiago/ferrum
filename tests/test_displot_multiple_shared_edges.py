@@ -47,6 +47,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_extents import assert_bars_start_on_the_zero_tick
 from tests._svg_rects import data_bar_rects
 
 #: Modes whose groups must land on one shared bin grid, and the one mode that
@@ -535,12 +536,30 @@ class TestPositionByRefusesNonColumnNames:
 #: so its digest is no longer a statement about anything. Re-baselining it to
 #: the new bytes would turn a record of "this path is untouched" into a
 #: record of "whatever it does today", which is what the entry exists to
-#: prevent. The three below still hold the original pre-fix bytes.
+#: prevent. `kde_kind_stack` still holds the original pre-fix bytes; the two
+#: histogram rows are re-measured with the bars grown from the 0 tick, which
+#: moves only their `<rect>` elements. Each of those two digests encodes two
+#: changes: the shared-edges fix leaving the path untouched, and the bars grown
+#: from the 0 tick, which `test_unaffected_histogram_paths_start_on_the_zero_tick`
+#: asserts directly.
 _PRE_FIX_SVG_DIGESTS = {
     "kde_kind_stack": "c5572e1467e762e9009b92f838db248ee80241534022a6a1fc4cbb841605d9ea",
-    "layer": "529199fcca368cb3740c509a0aaac7a164a4ce7a49208f4bcd83f5e3c71ba68e",
-    "no_hue": "634e2b6966ca6998ce1008efff01279df5f070ab1742ee2cde825d1016302754",
+    "layer": "fe9b741ca7d1d33f80ad65505d0a3f6a0975405631596b4e089a4a24ee941247",
+    "no_hue": "8d2607348247a2e2a13d27cd88c83fdf3e5fcafeaa8e4b649c993e2821fdc19d",
 }
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        dict(x="x", hue="g", kind="hist", multiple="layer"),
+        dict(x="x", kind="hist", multiple="stack"),
+    ],
+    ids=["layer", "no_hue"],
+)
+def test_unaffected_histogram_paths_start_on_the_zero_tick(two_group_df, call):
+    """The geometry the re-measured digests pin: every bar grows from 0."""
+    assert_bars_start_on_the_zero_tick(fm.displot(two_group_df, **call).to_svg())
 
 
 @pytest.mark.parametrize("name", sorted(_PRE_FIX_SVG_DIGESTS))

@@ -53,7 +53,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    apply_sort_to_domain, column_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
+    apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
 };
@@ -293,6 +293,37 @@ impl ScaleKind {
                 let [lo, hi] = dispatch_continuous!(self, domain_pair);
                 Some((lo, hi))
             }
+        }
+    }
+
+    /// The pixel a bar or area on this value axis grows from.
+    ///
+    /// When 0 lies in the domain and maps to a pixel, that pixel: the base sits
+    /// on the 0 tick whatever the sign of the values, the padding inset, or a
+    /// `reverse`. Otherwise (a log axis, `zero=False`, an explicit domain that
+    /// excludes 0, or an ordinal scale) the plot edge on zero's side: the edge
+    /// nearer the pixel of the domain endpoint with the smaller absolute value.
+    ///
+    /// `low_edge` is the plot edge at the axis's low end before any `reverse`
+    /// (the panel bottom for y, the panel left for x) and `high_edge` the
+    /// opposite one. A tie, a degenerate domain or a scale with no numeric
+    /// domain answers `low_edge`, so an all-positive domain that excludes 0
+    /// returns the edge it always drew from, bit for bit.
+    ///
+    /// The domain test comes before the mapping because a `clamp` scale maps an
+    /// out-of-domain 0 onto its range end, which is the domain endpoint's pixel
+    /// and not the edge on zero's side.
+    pub(crate) fn value_baseline_px(&self, low_edge: f64, high_edge: f64) -> f64 {
+        let Some((lo, hi)) = self.data_domain() else { return low_edge };
+        if lo.min(hi) <= 0.0 && 0.0 <= lo.max(hi) {
+            if let Some(zero_px) = self.to_pixel_f64(0.0) {
+                return zero_px;
+            }
+        }
+        let nearest_zero = if lo.abs() <= hi.abs() { lo } else { hi };
+        match self.to_pixel_f64(nearest_zero) {
+            Some(p) if (p - high_edge).abs() < (p - low_edge).abs() => high_edge,
+            _ => low_edge,
         }
     }
 
@@ -2354,7 +2385,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 // `position::axis_batch_for_x` for the rationale.
                 let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
@@ -2365,7 +2396,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             (None, Some(y_enc)) => {
                 let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
@@ -2434,12 +2465,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // resolved value axis is X. See `position::axis_batch_for_x` for the
     // rationale.
     let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.

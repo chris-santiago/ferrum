@@ -3026,3 +3026,53 @@ mod render_config_background_tests {
         });
     }
 }
+
+/// `ferrum._core.column_reads_categorical(schema, field)`: whether an
+/// undeclared encoding over `field` of an Arrow `schema` reads categorical,
+/// the answer the render's own categorical reading gives
+/// (`scale_resolve::domain::dtype_reads_categorical`). Python's bar
+/// zero-anchor injection asks it to pick a bar's value channel from its
+/// orientation, so the two halves cannot drift. The caller passes the schema
+/// of the frame after `_coerce.normalize_for_rust`, the one normalizer every
+/// batch crosses before the render, so the dtypes read here are the ones the
+/// render reads; nothing is cast here. A field the schema lacks reads not
+/// categorical, as an absent column does in the render. Registered in
+/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn column_reads_categorical(schema: pyo3_arrow::PySchema, field: &str) -> bool {
+    schema
+        .into_inner()
+        .field_with_name(field)
+        .is_ok_and(|f| super::scale_resolve::dtype_reads_categorical(f.data_type()))
+}
+
+#[cfg(test)]
+mod column_reads_categorical_tests {
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use std::sync::Arc;
+
+    fn schema(dtype: DataType) -> pyo3_arrow::PySchema {
+        pyo3_arrow::PySchema::new(Arc::new(Schema::new(vec![Field::new("c", dtype, true)])))
+    }
+
+    /// The published categorical reading over the dtypes a normalized schema
+    /// carries: a string (including a decoded dictionary's value type) or a
+    /// boolean reads categorical; a number, an all-null column (normalized to
+    /// `Float64`), and an instant (a date or duration is normalized to a
+    /// `Timestamp`) do not; a field the schema lacks does not.
+    #[test]
+    fn column_reads_categorical_publishes_the_render_reading() {
+        for dtype in [DataType::Utf8, DataType::LargeUtf8, DataType::Boolean] {
+            assert!(super::column_reads_categorical(schema(dtype.clone()), "c"), "{dtype:?} reads categorical");
+        }
+        for dtype in [
+            DataType::Float64,
+            DataType::Int32,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+        ] {
+            assert!(!super::column_reads_categorical(schema(dtype.clone()), "c"), "{dtype:?} reads numeric");
+        }
+        assert!(!super::column_reads_categorical(schema(DataType::Utf8), "absent"), "an absent field");
+    }
+}

@@ -18,8 +18,11 @@ import json
 import math
 from typing import Any, NamedTuple
 
+import pyarrow as pa
+
 from ferrum._core import (
     EncodingSpec as _EncodingSpec,
+    column_reads_categorical as _core_column_reads_categorical,
     scale_accepted_keys as _scale_accepted_keys,
     validate_scale_dict as _validate_scale_dict,
 )
@@ -27,6 +30,8 @@ from ferrum._facet import (
     build_facet_dict as _build_facet_dict_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
+from ferrum._coerce import normalize_for_rust
+from ferrum._shorthand import parse_shorthand
 from ferrum.coord import _coord_wire
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
@@ -108,6 +113,124 @@ def _with_override_scale(d: dict, channel: str, override: OverridePayload | None
     merged = _scale_to_dict(pre_merge)
     _validate_scale_dict(merged)
     return {**d, "scale": merged}
+
+
+# Encoding ``type_`` values that make a channel categorical (band scale).
+_CATEGORICAL_TYPES = ("O", "N", "ordinal", "nominal")
+
+
+def _bar_value_on_x(enc: dict, data: Any) -> bool:
+    """Whether a bar draws its value along its authored ``x`` channel.
+
+    A bar's orientation follows its ``y``: a categorical ``y`` makes it a
+    native horizontal bar whose value runs along ``x``; otherwise the value is
+    ``y``. ``y`` is categorical when declared ordinal/nominal, or when it is
+    undeclared and its column in *data* reads categorical to the render
+    (``ferrum._core.column_reads_categorical``: a string, boolean or
+    dictionary column; a date reads numeric). ``CoordFlip`` (and
+    ``orient="horizontal"``, which desugars to it) moves where the authored
+    channels draw, not which one holds the value, so it does not enter here.
+    """
+    y = enc.get("y")
+    if y is None:
+        return False
+    field, declared = _encoding_field_and_type(y)
+    if declared is not None:
+        return declared in _CATEGORICAL_TYPES
+    return _column_reads_categorical(data, field)
+
+
+def _encoding_field_and_type(value: Any) -> tuple[Any, str | None]:
+    """The ``(field, declared type)`` of one encoding value, in any spelling.
+
+    A channel object (``fm.Y("v", type_="N")``) answers from its own spec
+    dict; a string (a layer's ``encoding={"y": "v"}``) is read as encoding
+    shorthand, so ``"v:N"`` declares ``N``. A string the shorthand grammar
+    does not parse is a plain field name with no declared type.
+    """
+    if isinstance(value, str):
+        try:
+            field, declared, _aggregate = parse_shorthand(value)
+        except ValueError:
+            return value, None
+        return field, declared
+    return value.field, value.to_encoding_spec_dict().get("type_")
+
+
+def _column_reads_categorical(data: Any, field: Any) -> bool:
+    """Whether *field*'s column in *data* reads categorical to the render.
+
+    *data* is the chart's frame (a ``polars.DataFrame``, a ``pyarrow.Table``
+    or ``None``); a missing frame, a non-string field (an aggregate's
+    ``None``, a repeat placeholder) or a column the frame lacks reads not
+    categorical, as an absent column does in the render. The predicate reads
+    the schema the render receives: an empty slice of *data* passed through
+    ``normalize_for_rust``, which decodes dictionaries and casts null, date
+    and duration columns.
+    """
+    if data is None or not isinstance(field, str):
+        return False
+    empty = data.slice(0, 0) if isinstance(data, pa.Table) else data.head(0).to_arrow()
+    return _core_column_reads_categorical(normalize_for_rust(empty).schema, field)
+
+
+def _bar_zero_anchor(
+    d: dict, *, mark: Any, mark_zero: bool, value_on_x: bool, axis: str, enc: dict
+) -> dict:
+    """Return channel dict *d* with a bar's zero anchor injected, when it applies.
+
+    The one producer of the bar zero anchor: ``scale.zero=True`` on a bar's
+    value channel, so a bar starts at zero unless the caller set ``domain`` or
+    ``zero`` on that channel. Used for a flat chart's encoding and for every
+    independent-y bar layer (a ``SecondaryY`` slot, a
+    ``LayerChart(resolve={"y": "independent"})`` member), so each gets the
+    same answer for every caller-scale shape. *d* is never mutated.
+
+    - The value channel is ``y``, or ``x`` for a native horizontal bar
+      (*value_on_x*, from :func:`_bar_value_on_x`); any other *axis* is
+      returned unchanged.
+    - Suppressed when the bar opted out (*mark_zero* false, ``zero=False``) or
+      the value channel's span partner (``y2`` for ``y``, ``x2`` for ``x``) is
+      bound in *enc*: the bar's extent is then taken literally from
+      ``[y, y2]``, and anchoring at zero would distort the domain. The other
+      channel's partner only sets a histogram's bin width, so it does not
+      suppress.
+    - Only a quantitative value channel takes the linear+zero scale: an
+      ordinal/nominal one needs a band scale, and forcing linear raises
+      "unsupported dtype: Utf8" in the Rust scale resolver. An absent
+      ``type_`` is quantitative (Altair convention), so only an explicit
+      categorical type suppresses.
+    - ``zero`` is a ``ScaleSpec::Linear``-only wire field and the raw-dict
+      scale gate refuses it elsewhere, so it is added only to a scale with no
+      ``domain`` or ``zero`` whose type accepts it, asked of the gate itself
+      (:func:`_scale_type_accepts_zero`). The scale carries ``type`` because
+      Rust's ``ScaleSpec`` is a tagged enum.
+    - ``systemInjected`` marks the scale as ferrum's only when this function
+      authored all of it, so Rust's "is there an explicit scale here" gates
+      (``composite::leaf_positional_domain``'s sharing exclusion and
+      ``positional::build_axis_scale``'s bypass) let a layered bar join the
+      shared domain union. A caller's own ``scale=`` (or an
+      ``override(<axis>_scale_*=...)`` leaf) that only gained ``zero`` here is
+      not marked: its ``padding``/``nice``/``range``/``clamp`` are real intent,
+      which only the explicit-scale path honors.
+    """
+    is_value_channel = axis == "x" if value_on_x else axis == "y"
+    if (
+        not is_value_channel
+        or mark != "bar"
+        or not mark_zero
+        or f"{axis}2" in enc
+        or d.get("type_") in _CATEGORICAL_TYPES
+    ):
+        return d
+    scale = d.get("scale") or {}
+    scale_type = scale.get("type")
+    if "domain" in scale or "zero" in scale or not _scale_type_accepts_zero(scale_type):
+        return d
+    anchored = {"type": scale_type or "linear", **scale, "zero": True}
+    if not scale:
+        anchored["systemInjected"] = True
+    return {**d, "scale": anchored}
 
 
 def _scale_type_accepts_zero(scale_type: Any) -> bool:
@@ -413,6 +536,7 @@ class SpecBuildMixin:
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw: dict = {}
+        bar_value_on_x = _bar_value_on_x(enc, resolved._data)
         for axis in _RENDERER_HONORED_CHANNELS:
             if axis not in enc:
                 continue
@@ -467,73 +591,14 @@ class SpecBuildMixin:
             # just reached through override composition instead of a direct
             # scale= dict.
             d = _with_override_scale(d, axis, override)
-            # Bar y-axis zero-anchor (gallery defaults A3): inject
-            # scale.zero=True on the y-encoding so bar charts always
-            # start at zero unless the caller explicitly sets domain or
-            # zero on their Y() channel.  The injected scale must carry
-            # `type` because Rust's ScaleSpec is a tagged enum.
-            #
-            # D3: suppress the injection when the caller passed zero=False OR
-            # when y2 is bound (the bar extent is taken literally from [y, y2]
-            # and force-anchoring to zero would distort the domain).
-            # x2 only affects the horizontal bin width of histograms; it must
-            # NOT suppress the y zero-anchor.
-            _y2_bound = "y2" in enc
-            _zero_anchor_wanted = mark_zero and not _y2_bound
-            # D4-C: only inject the linear+zero scale when the y encoding is
-            # quantitative.  Ordinal/nominal y (e.g. string category on a
-            # horizontal bar) requires a band scale — forcing linear here raises
-            # "unsupported dtype: Utf8" in the Rust scale resolver.  When type_
-            # is absent the encoding defaults to quantitative (Altair convention),
-            # so we only suppress when an explicit categorical type is set.
-            _y_enc_type = d.get("type_")
-            _y_is_categorical = _y_enc_type in ("O", "N", "ordinal", "nominal")
-            if (
-                axis == "y"
-                and resolved._mark == "bar"
-                and _zero_anchor_wanted
-                and not _y_is_categorical
-            ):
-                scale = d.get("scale") or {}
-                # F-L04-07 gate interaction (batch-C task 4 quality-review
-                # remediation): `zero` is a `ScaleSpec::Linear`-only wire
-                # field. Before the raw-dict scale key gate landed, injecting
-                # it into e.g. a `log`/`symlog`/`sqrt`/`time`/`band` scale
-                # dict was a harmless no-op — serde's flatten silently
-                # dropped the unrecognized key. The gate now refuses it, so
-                # injection is scoped to the scale types that actually accept
-                # `zero`, asked of the gate itself, to reproduce that exact
-                # pre-gate effective behavior rather than newly breaking
-                # every non-linear bar y-scale.
-                _scale_type = scale.get("type")
-                if (
-                    "domain" not in scale
-                    and "zero" not in scale
-                    and _scale_type_accepts_zero(_scale_type)
-                ):
-                    d["scale"] = {"type": _scale_type or "linear", **scale, "zero": True}
-                    # #247A provenance: mark the scale as OURS, not the caller's,
-                    # but only when this injection authored the whole thing.
-                    # Rust's two "is there an explicit scale here" gates --
-                    # `composite::leaf_positional_domain`'s sharing exclusion and
-                    # `positional::build_axis_scale`'s bypass -- could otherwise
-                    # only ask `scale.is_some()`, so a layered bar leaf was locked
-                    # out of the cross-leaf domain union in both directions and
-                    # every sibling layer drew against a scale the rendered ticks
-                    # did not describe (`fm.layer(bar(1..3), point(40..80))` showed
-                    # a 0..3 axis). Rust honors the `zero` anchor on the shared
-                    # path, so nothing about a bar's baseline changes.
-                    #
-                    # Withheld when the caller wrote a `scale=` of their own that
-                    # this block merely ADDED `zero` to (or an
-                    # `override(y_scale_*=...)` leaf did, merged just above): their
-                    # `padding`/`nice`/`range`/`clamp` are real intent, and the
-                    # explicit-scale path is the only one that honors those. Such a
-                    # leaf keeps today's behavior -- it stays out of the union,
-                    # deliberately, because it is a user scale with our anchor on
-                    # top rather than our scale outright.
-                    if not scale:
-                        d["scale"]["systemInjected"] = True
+            d = _bar_zero_anchor(
+                d,
+                mark=resolved._mark,
+                mark_zero=mark_zero,
+                value_on_x=bar_value_on_x,
+                axis=axis,
+                enc=enc,
+            )
             # D5b: strip ``stack=`` on marks that cannot honor stacking and emit
             # a one-time UserWarning.  Only ``bar`` and ``area`` consume the
             # ``__stack_y_base__`` column emitted by ``apply_stack``; every other
@@ -635,6 +700,13 @@ class SpecBuildMixin:
             _warn_unbucketed_channels(layer_enc)
 
             encoding_dict: dict = {}
+            # An independent-y layer (a `SecondaryY` slot, a
+            # `LayerChart(resolve={"y": "independent"})` member) resolves its own
+            # y scale, so a bar there takes the bar zero anchor from the same
+            # producer a flat bar does; a layer on the shared axes is anchored by
+            # Rust's layered rule instead.
+            anchor_bar_value = layer.independent_y and layer_mark(layer.mark) == "bar"
+            layer_value_on_x = anchor_bar_value and _bar_value_on_x(layer_enc, self._data)
             for axis in _RENDERER_HONORED_CHANNELS:
                 ch = layer_enc.get(axis)
                 if ch is None:
@@ -649,6 +721,15 @@ class SpecBuildMixin:
                     # annotation was given (same logic as _build_encoding_specs).
                     d = _apply_inferred_type(d, field, self._data)
                     d = _with_override_scale(d, axis, override)
+                    if anchor_bar_value:
+                        d = _bar_zero_anchor(
+                            d,
+                            mark="bar",
+                            mark_zero=layer_mk.get("zero") is not False,
+                            value_on_x=layer_value_on_x,
+                            axis=axis,
+                            enc=layer_enc,
+                        )
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -732,7 +813,23 @@ class SpecBuildMixin:
                         enc_json_dict["formatType"] = d["format_type"]
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
-                    encoding_dict[axis] = _with_override_scale({"field": ch}, axis, override)
+                    d = _with_override_scale({"field": ch}, axis, override)
+                    if anchor_bar_value:
+                        # The shorthand's declared type decides the anchor, as
+                        # a channel object's `type_` does; the wire dict keeps
+                        # the string's own spelling.
+                        _field, declared = _encoding_field_and_type(ch)
+                        scale = _bar_zero_anchor(
+                            {**d, "type_": declared},
+                            mark="bar",
+                            mark_zero=layer_mk.get("zero") is not False,
+                            value_on_x=layer_value_on_x,
+                            axis=axis,
+                            enc=layer_enc,
+                        ).get("scale")
+                        if scale is not None:
+                            d = {**d, "scale": scale}
+                    encoding_dict[axis] = d
             layer_dict: dict = {
                 "mark": layer_mark(layer.mark),
                 "encoding": encoding_dict,

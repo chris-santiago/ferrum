@@ -121,10 +121,11 @@ def test_corpus_has_no_nonfinite_attribute_values(corpus_findings):
 
 
 def test_corpus_has_no_zero_size_filled_marks(corpus_findings):
-    """No golden emits a filled rect/circle of zero extent.
+    """No golden emits a filled rect of zero width and height or a filled circle of zero radius.
 
     A computed, serialized, invisible mark: it cost a scale lookup, a layout
-    slot and bytes on the wire, and renders as nothing.
+    slot and bytes on the wire, and renders as nothing. A filled rect with only
+    one zero side is allowed: it is a bar whose value is 0, drawn at its base.
     """
     assert corpus.unexplained(corpus_findings["zero_size_filled"]) == []
 
@@ -417,15 +418,22 @@ def test_nonfinite_token_regex_ignores_nan_inside_an_alphanumeric_run():
 
 def test_zero_size_filled_flags_a_planted_defect_and_clears_a_clean_doc(tmp_path):
     doc = _doc(
-        '<rect x="1" y="1" width="0" height="4" fill="#123456"/>'
-        '<rect x="1" y="1" width="0" height="4" fill="none"/>'
+        '<rect x="1" y="1" width="0" height="0" fill="#123456"/>'
+        '<rect x="1" y="1" width="0" height="0" fill="none"/>'
         '<circle cx="5" cy="5" r="0" fill="#abcdef"/>',
         tmp_path=tmp_path,
     )
     hits = corpus.query_zero_size_filled(doc)
-    assert sorted(h.tag for h in hits) == ["circle", "rect"]
+    assert sorted((h.tag, h.detail) for h in hits) == [
+        ("circle", "r=0"),
+        ("rect", "width=0 height=0"),
+    ]
+    # A zero-value vertical bar (zero height) and a zero-value horizontal bar
+    # (zero width) are data, not findings.
     clean = _doc(
         '<rect x="1" y="1" width="3" height="4" fill="#123456"/>'
+        '<rect x="1" y="1" width="3" height="0" fill="#123456"/>'
+        '<rect x="1" y="1" width="0" height="4" fill="#123456"/>'
         '<circle cx="5" cy="5" r="2" fill="#abcdef"/>',
         tmp_path=tmp_path,
     )

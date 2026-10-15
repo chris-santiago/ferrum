@@ -39,6 +39,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import ChartSpec
+from tests._svg_extents import assert_bars_start_on_the_zero_tick
 from tests._svg_rects import data_bar_rects, polylines
 
 # ---------------------------------------------------------------------------
@@ -285,15 +286,23 @@ class TestBinsVocabularyRefuses:
 #: The stacked path's new geometry is pinned by
 #: `tests/test_displot_multiple_shared_edges.py`, which asserts what the bars
 #: must do rather than a digest of what they happened to do.
+#:
+#: The histogram rows (`default`, `sturges`, `none`, `int7`, `kde_overlay_int7`,
+#: `hue_str_hist`) are re-measured with the bars grown from the 0 tick, which
+#: moves only their `<rect>` elements; the ecdf and kde rows draw no bars and
+#: keep the pre-fix measurement. Each re-measured digest encodes two changes:
+#: the bins vocabulary leaving the path untouched, and the bars grown from the
+#: 0 tick, which `test_clean_histogram_paths_start_on_the_zero_tick` asserts
+#: directly.
 _PRE_FIX_SVG_DIGESTS = {
-    "default": "747bef4e8cbf4042ca00c7dd8a9b85a2e1888101d382890f866bdebb2cdcba97",
-    "sturges": "747bef4e8cbf4042ca00c7dd8a9b85a2e1888101d382890f866bdebb2cdcba97",
-    "none": "747bef4e8cbf4042ca00c7dd8a9b85a2e1888101d382890f866bdebb2cdcba97",
-    "int7": "b80375d1207046594a0734bdb3b188487526d9a4d881adedd963bc0f458e6e19",
+    "default": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
+    "sturges": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
+    "none": "75f92caa6814f72f5890ef1dd938a0d2e63ca5ceb9bb58f2e2e93afc4c75f926",
+    "int7": "73721a813b2c3dfc4c3da5b9f99961fc4962dfd10e4a9b87f94cd2caf122b675",
     "ecdf_default": "d96af5dc99c6e334a38525317774b1331f1b3f7bbf28e6e3d841df669b2ce2be",
     "ecdf_int7": "08095cf826f2bba9be7122a96772d41728d737af726f8da99c47ebd2965a7677",
-    "kde_overlay_int7": "380fc7f2b4f54e6b52280afa5b7d3c8ea9f14e0e11cfb96cad505b2d8b4ece07",
-    "hue_str_hist": "026d89fb991e49b1a5d67468f85ea170cec38087bdd8ee360f800844fff7ca3d",
+    "kde_overlay_int7": "b17a16a139e5085bd66d58e4725480dec832eb2dd78db55cc606b377a397747b",
+    "hue_str_hist": "3ac4841424604764fc17557a1bf1fbb94977a517fd77fa6b24a5e589dfd6c887",
     "hue_str_kde": "4b5bf25e46b4335ad48c2e3f5668f59cbd0a039835e730217c02acfe93461c63",
 }
 
@@ -308,6 +317,15 @@ _CLEAN_PATHS = {
     "hue_str_hist": dict(x="v", hue="g"),
     "hue_str_kde": dict(x="v", hue="g", kind="kde"),
 }
+
+
+_CLEAN_HISTOGRAM_PATHS = ("default", "sturges", "none", "int7", "kde_overlay_int7", "hue_str_hist")
+
+
+@pytest.mark.parametrize("name", _CLEAN_HISTOGRAM_PATHS)
+def test_clean_histogram_paths_start_on_the_zero_tick(normal_df, name):
+    """The geometry the re-measured digests pin: every bar grows from 0."""
+    assert_bars_start_on_the_zero_tick(fm.displot(normal_df, **_CLEAN_PATHS[name]).to_svg())
 
 
 @pytest.mark.parametrize("name", sorted(_CLEAN_PATHS))

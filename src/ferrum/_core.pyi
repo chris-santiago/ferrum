@@ -1073,6 +1073,14 @@ def mark_size_reason(mark: str, size: float) -> str | None: ...
 # and its dtype.
 def numeric_columns(schema: Any, entry: str) -> list[str]: ...
 
+# Whether an undeclared encoding over ``field`` of ``schema`` (any object
+# exporting ``__arrow_c_schema__``) reads categorical to the render. The schema
+# must be ``ferrum._coerce.normalize_for_rust`` output, the dtypes the render
+# receives; the reading applies no cast of its own. Over those dtypes a string
+# or boolean column reads categorical, a number or timestamp does not, and a
+# field the schema lacks reads ``False``.
+def column_reads_categorical(schema: Any, field: str) -> bool: ...
+
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
 # at declaration instead of mirroring the list as a Python literal.

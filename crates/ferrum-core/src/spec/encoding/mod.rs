@@ -253,8 +253,9 @@ pub enum ScaleSpec {
         #[serde(default)]
         zero: bool,
         /// **Provenance (#247A, spec §6): ferrum wrote this scale, the caller
-        /// did not.** Its ONE producer is the bar zero-anchor injection in
-        /// `_spec_build.py::_build_encoding_specs`, and only in the case where
+        /// did not.** Its ONE producer is the Python bar zero-anchor
+        /// injection in `_spec_build.py`, reached from the flat chart's
+        /// encoding and from every independent-y bar layer, and only where
         /// that injection authored the whole scale (the channel carried no
         /// `scale=` of its own). An injection that merely ADDS `zero` on top of
         /// a scale the caller wrote leaves this `false` — the caller's

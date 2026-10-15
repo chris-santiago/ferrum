@@ -94,6 +94,8 @@ import pytest
 import ferrum as fm
 from ferrum.encoding.base import ChannelBase
 
+from _svg_extents import assert_bars_start_on_the_zero_tick
+
 # ---------------------------------------------------------------------------
 # Panel-order matrix
 # ---------------------------------------------------------------------------
@@ -762,13 +764,18 @@ def _build_valid_sort_chart(value: Any) -> "fm.Chart":
 # commit (a `git archive` checkout plus an extension compiled from it, not
 # a file-copy revert of the current tree) -- byte-identical to the current
 # tree's own hashes for every form, proving this task's Rust and Python
-# changes together leave every valid form's render untouched.
+# changes together leave every valid form's render untouched. The SVG halves
+# are re-measured with the bars grown from the 0 tick; the wire halves are
+# the original measurement, so the sort itself still reaches the wire
+# unchanged. Each SVG half encodes two changes: the sort forms leaving the
+# render untouched, and the bars grown from the 0 tick, which
+# `test_valid_x_sort_forms_start_on_the_zero_tick` asserts directly.
 _VALID_SORT_HASHES: dict[str, tuple[str, str]] = {
-    "ascending": ("21d3b3ee54bd6ea8", "7da2b45fd52a0a06"),
-    "descending": ("11a72509fa32001e", "24c72b8a3dffbddf"),
-    "explicit_list": ("acf0ad7a8e57a6ae", "fb086988c2686cb8"),
-    "shorthand": ("7729f0d515a2b635", "7d5d947e3b082fdd"),
-    "sort_object": ("5944aef825507443", "048087a0413c1c1f"),
+    "ascending": ("2b97ce24c178b6b6", "7da2b45fd52a0a06"),
+    "descending": ("ae23dc6a5bb62204", "24c72b8a3dffbddf"),
+    "explicit_list": ("ef348b6ceece096c", "fb086988c2686cb8"),
+    "shorthand": ("5ff8dc0cf99835ca", "7d5d947e3b082fdd"),
+    "sort_object": ("f272e77125c5ef75", "048087a0413c1c1f"),
 }
 
 
@@ -780,6 +787,13 @@ def test_valid_x_sort_forms_render_the_expected_order(form_name: str) -> None:
     value = _VALID_SORT_FORMS[form_name]
     svg = _build_valid_sort_chart(value).to_svg()
     assert _x_cat_order(svg, {"apple", "banana", "cherry"}) == _VALID_SORT_EXPECTED_ORDER[form_name]
+
+
+@pytest.mark.parametrize("form_name", sorted(_VALID_SORT_FORMS), ids=sorted(_VALID_SORT_FORMS))
+def test_valid_x_sort_forms_start_on_the_zero_tick(form_name: str) -> None:
+    """The geometry the SVG digests pin: every bar grows from 0."""
+    svg = _build_valid_sort_chart(_VALID_SORT_FORMS[form_name]).to_svg()
+    assert_bars_start_on_the_zero_tick(svg)
 
 
 @pytest.mark.parametrize("form_name", sorted(_VALID_SORT_FORMS), ids=sorted(_VALID_SORT_FORMS))

@@ -36,6 +36,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_extents import value_axis_ladder
 
 
 # ---------------------------------------------------------------------------
@@ -485,26 +486,30 @@ def test_bar_default_zero_true_still_anchors_at_baseline(
     zero_anchor_df: pl.DataFrame,
 ) -> None:
     """mark_bar() default (zero=True) with only y bound must still anchor bars
-    at the zero baseline.  This test passes today and guards against regressing
-    the zero-anchor default when the zero= escape is added.
+    at zero: the y domain reaches 0 and every bar grows from the 0 tick. Guards
+    against regressing the zero-anchor default when the zero= escape is added.
 
-    Observable check: all data bars' bottoms coincide with the axis baseline.
+    Observable check: the y axis draws a 0 tick and all data bars' bottoms sit
+    on it. The 0 tick sits above the plot bottom by the padding inset, so the
+    plot bottom is not the baseline.
     """
     svg = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
 
-    baseline = _baseline_y(svg)
+    ladder = value_axis_ladder(svg, axis="y")
+    assert 0.0 in ladder, f"the default zero-anchor dropped 0 from the y axis: {sorted(ladder)}"
+    zero_y = ladder[0.0]
     data_rects = _rects(svg)
 
     assert data_rects, (
         "No data bars emitted for default-zero-anchor chart (val=[5,8]).  Expected 2 rects."
     )
 
-    tol = 2.0
-    all_at_baseline = all(abs((r[1] + r[3]) - baseline) <= tol for r in data_rects)
-    assert all_at_baseline, (
-        "mark_bar() default (zero=True) — at least one bar does NOT bottom out "
-        "at the axis baseline.  The default zero-anchor must be preserved.  "
-        f"baseline_y={baseline:.3f}, data rects (x,y,w,h)={data_rects}"
+    tol = 0.05
+    all_at_zero = all(abs((r[1] + r[3]) - zero_y) <= tol for r in data_rects)
+    assert all_at_zero, (
+        "mark_bar() default (zero=True) — at least one bar does NOT start at the "
+        "0 tick.  The default zero-anchor must be preserved.  "
+        f"zero_y={zero_y:.3f}, data rects (x,y,w,h)={data_rects}"
     )
 
 

@@ -41,6 +41,7 @@ import pytest
 import ferrum as fm
 
 from _shared_axis_refusal import composite_wrapped_refusal, refusal
+from _svg_extents import assert_bars_start_on_the_zero_tick
 
 LEFT = pl.DataFrame({"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]})
 
@@ -364,19 +365,22 @@ def test_the_matrix_discriminates_refusal_from_render() -> None:
 # both routes for "integer_category_ordinal_union", render unaffected by
 # that reservation. These hashes guard the ordinal-union rule against the
 # continuous-axis predicate; they are unrelated to it, and must not move on
-# their own.
+# their own. Each digest encodes two changes: the ordinal-union rule leaving
+# the route untouched, and the bar layer's bars grown from the 0 tick, which
+# `test_ordinal_union_control_bars_start_on_the_zero_tick` asserts directly
+# for the two static routes.
 # ---------------------------------------------------------------------------
 
 _ORDINAL_UNION_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
-        "fm.layer": "88e542e4ab5ec225",
-        "+": "dddad057de646ff7",
-        "interactive": "3248f9cb42c3bc79",
+        "fm.layer": "a46894be42998cf3",
+        "+": "1a8ac40fe0c24787",
+        "interactive": "374f5ba1bc1ce13f",
     },
     "integer_category_ordinal_union": {
-        "fm.layer": "cb7dd96040391486",
-        "+": "82230fef7158dad8",
-        "interactive": "bf46421a6e9e7426",
+        "fm.layer": "b8cc832a7a444d3e",
+        "+": "c1439d743c0b264a",
+        "interactive": "5e5f785f6862c6b4",
     },
 }
 
@@ -393,24 +397,44 @@ def _control_hash(route: str, a: fm.Chart, b: fm.Chart) -> str:
     return _sha16(fm.layer(a, b).interactive().scene_json)
 
 
+def _ordinal_union_control_charts() -> dict[str, tuple[fm.Chart, fm.Chart]]:
+    """The two ordinal-union control fixtures below, as ``(bar, other)`` pairs."""
+    cat = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
+    stamps = pl.DataFrame(
+        {
+            "when": [datetime.datetime(2020, month, 1) for month in (1, 2, 3)],
+            "v2": [4.0, 5.0, 6.0],
+        }
+    )
+    numeric = pl.DataFrame({"n": [10, 20], "v2": [4.0, 5.0]})
+    bar = fm.Chart(cat).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
+    return {
+        "categorical_bar_temporal_line": (
+            bar,
+            fm.Chart(stamps).mark_line().encode(x=fm.X("when", type_="T"), y="v2"),
+        ),
+        "integer_category_ordinal_union": (
+            bar,
+            fm.Chart(numeric).mark_point().encode(x="n", y="v2"),
+        ),
+    }
+
+
+@pytest.mark.parametrize("fixture", sorted(_ORDINAL_UNION_CONTROL_HASHES))
+@pytest.mark.parametrize("route", ["fm.layer", "+"])
+def test_ordinal_union_control_bars_start_on_the_zero_tick(fixture: str, route: str) -> None:
+    """The geometry the control digests pin: the bar layer grows from 0."""
+    bar, other = _ordinal_union_control_charts()[fixture]
+    svg = fm.layer(bar, other).to_svg() if route == "fm.layer" else (bar + other).to_svg()
+    assert_bars_start_on_the_zero_tick(svg)
+
+
 @pytest.mark.parametrize("route", ROUTES)
 def test_categorical_x_bar_plus_temporal_x_line_is_byte_identical(route: str) -> None:
     """A layer column the ordinal ladder cannot enumerate (`Timestamp`) beside a
     categorical-x bar layer: skipped, not refused -- unrelated to the
     continuous-axis predicate under test, and must not move."""
-    cat = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
-    stamps = pl.DataFrame(
-        {
-            "when": [
-                datetime.datetime(2020, 1, 1),
-                datetime.datetime(2020, 2, 1),
-                datetime.datetime(2020, 3, 1),
-            ],
-            "v2": [4.0, 5.0, 6.0],
-        }
-    )
-    bar = fm.Chart(cat).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
-    line = fm.Chart(stamps).mark_line().encode(x=fm.X("when", type_="T"), y="v2")
+    bar, line = _ordinal_union_control_charts()["categorical_bar_temporal_line"]
     assert (
         _control_hash(route, bar, line)
         == _ORDINAL_UNION_CONTROL_HASHES["categorical_bar_temporal_line"][route]
@@ -422,10 +446,7 @@ def test_integer_category_columns_under_the_ordinal_union_is_byte_identical(rout
     """A quantitative layer column beside a categorical-x bar layer: bands and
     draws on the ordinal ladder (F2). Also unrelated to the continuous-axis
     predicate under test, and must not move."""
-    cat = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
-    numeric = pl.DataFrame({"n": [10, 20], "v2": [4.0, 5.0]})
-    bar = fm.Chart(cat).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
-    point = fm.Chart(numeric).mark_point().encode(x="n", y="v2")
+    bar, point = _ordinal_union_control_charts()["integer_category_ordinal_union"]
     assert (
         _control_hash(route, bar, point)
         == _ORDINAL_UNION_CONTROL_HASHES["integer_category_ordinal_union"][route]

@@ -477,9 +477,10 @@ def test_horizontal_stacked_histogram_coord_flip_primitive_still_works():
 # (wave-5 close review F3)
 # ---------------------------------------------------------------------------
 
-#: Six rows, three bins, one group per bin — so a correct render draws exactly
-#: three rects and a cumulation that mixed up the value and bin columns cannot
-#: coincide with it.
+#: Six rows, three bins, one group per bin — so a correct render draws one
+#: rect per (bin, group): three carrying the counts and six empty group-bins at
+#: zero extent on their stack base, and a cumulation that mixed up the value
+#: and bin columns cannot coincide with it.
 _FLIP_FRAME = pl.DataFrame({"v": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5], "g": list("aabbcc")})
 
 
@@ -530,7 +531,11 @@ def test_a_declared_horizontal_stack_under_coord_flip_is_its_vertical_twin():
         .encode(x="v:Q", color="g:N")
         .to_svg()
     )
-    assert len(_data_rects(vertical_twin)) == 3, "premise: the twin draws one rect per bin"
+    twin_rects = _data_rects(vertical_twin)
+    assert len(twin_rects) == 9, "premise: the twin draws one rect per (bin, group)"
+    assert sum(r["height"] > 0 for r in twin_rects) == 3, (
+        "premise: one rect per bin carries its count; the empty group-bins are zero-height"
+    )
     assert _rect_fractions(flipped) == _rect_fractions(vertical_twin), (
         "a flipped horizontal stack must land exactly where its vertical twin does"
     )
@@ -550,11 +555,14 @@ def test_an_unflipped_horizontal_stack_still_stacks_along_x():
         .to_svg()
     )
     rects = _data_rects(svg)
-    assert len(rects) == 3, f"expected one rect per bin; got {len(rects)}"
-    # Bins run down the y axis and the counts along x: every rect starts at the
-    # same left edge (one group per bin, so each is the first segment).
-    assert len({round(r["x"], 1) for r in rects}) == 1, rects
-    assert len({round(r["y"], 1) for r in rects}) == 3, rects
+    assert len(rects) == 9, f"expected one rect per (bin, group); got {len(rects)}"
+    # Bins run down the y axis and the counts along x: every counted rect
+    # starts at the same left edge (one group per bin, so each is the first
+    # segment), and the empty group-bins are zero-width.
+    counted = [r for r in rects if r["width"] > 0]
+    assert len(counted) == 3, f"expected one counted rect per bin; got {rects}"
+    assert len({round(r["x"], 1) for r in counted}) == 1, counted
+    assert len({round(r["y"], 1) for r in counted}) == 3, counted
 
 
 def test_an_explicitly_declared_vertical_stack_under_a_flip_moves_with_it():

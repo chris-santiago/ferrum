@@ -38,6 +38,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import NamedTuple, TypeVar
 
+from tests._svg_rects import data_bar_rects, mark_layer
+
 _T = TypeVar("_T")
 
 # An axis's tick row/column has at least this many labels; a smaller group
@@ -436,3 +438,20 @@ def pixel_for(ladder: dict[float, float], value: float) -> float:
     lo, hi = min(ladder), max(ladder)
     slope = (ladder[hi] - ladder[lo]) / (hi - lo)
     return ladder[lo] + (value - lo) * slope
+
+
+def assert_bars_start_on_the_zero_tick(svg: str, *, tol: float = 0.05) -> None:
+    """Every data bar of a single-panel vertical bar chart grows from its y axis's 0 tick.
+
+    Reads the bars inside the plot area and the y tick ladder, so a base drawn
+    by the bar builder is compared with the 0 tick the axis draws. The chart
+    must draw at least one bar and a ``0`` y tick.
+    """
+    ladder = value_axis_ladder(svg, axis="y")
+    assert 0.0 in ladder, f"the y axis draws no 0 tick: {sorted(ladder)}"
+    zero = ladder[0.0]
+    rects = data_bar_rects(mark_layer(svg))
+    assert rects, "the chart draws no bars"
+    for a in rects:
+        base = float(a["y"]) + float(a["height"])
+        assert abs(base - zero) <= tol, f"bar {a} starts at {base}, not on the 0 tick {zero}"

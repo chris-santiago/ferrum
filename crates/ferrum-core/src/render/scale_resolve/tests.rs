@@ -7632,3 +7632,348 @@ fn diverging_scale_without_a_scheme_takes_the_theme_diverging_scheme() {
     assert_eq!(scheme_of(serde_json::json!({"type": "linear"}), &positive), sequential);
     assert_eq!(scheme_of(serde_json::json!({"type": "linear"}), &straddling), diverging);
 }
+
+// ── Value baseline and the bar zero anchor's value channel ─────────────────
+
+/// `value_baseline_px` answers the 0 pixel whenever 0 is in the domain, and
+/// otherwise the plot edge on zero's side, returned exactly as passed.
+#[test]
+fn value_baseline_px_is_the_zero_pixel_or_the_edge_on_zeros_side() {
+    use crate::scale::linear::LinearScale;
+    use crate::scale::log::LogScale;
+    let linear = |domain: [f64; 2], clamp: bool| {
+        ScaleKind::Linear(LinearScale::new_internal(domain.to_vec(), vec![95.0, 5.0], clamp, false))
+    };
+    // low edge 100 (the panel bottom), high edge 0 (the panel top).
+    let baseline = |scale: &ScaleKind| scale.value_baseline_px(100.0, 0.0);
+
+    assert!((baseline(&linear([-2.0, 3.0], false)) - 59.0).abs() < 1e-9, "mixed: the 0 tick");
+    assert_eq!(baseline(&linear([0.0, 3.0], false)), 95.0, "all positive: the 0 tick above the inset");
+    assert_eq!(baseline(&linear([-3.0, 0.0], false)), 5.0, "all negative: the 0 tick at the top");
+    assert_eq!(baseline(&linear([3.0, 0.0], false)), 5.0, "reversed: the 0 tick at the top");
+    assert_eq!(baseline(&linear([50.0, 70.0], false)), 100.0, "above 0: the low edge");
+    assert_eq!(baseline(&linear([50.0, 70.0], true)), 100.0, "a clamp scale's floor is not the edge");
+    assert_eq!(baseline(&linear([-70.0, -50.0], false)), 0.0, "below 0: the high edge");
+    assert_eq!(baseline(&linear([70.0, 50.0], false)), 0.0, "reversed above 0: 50 sits at the top");
+    assert_eq!(
+        baseline(&ScaleKind::Log(LogScale::new_internal(vec![1.0, 100.0], vec![95.0, 5.0], 10.0, false, false))),
+        100.0,
+        "log: 0 is never in the domain",
+    );
+    let ordinal = ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+        vec!["a".to_string()], vec![0.0, 100.0], DiscreteLayout::UNPADDED,
+    ));
+    assert_eq!(baseline(&ordinal), 100.0, "no numeric domain: the low edge");
+}
+
+/// A layered bar + point spec whose `y` is categorical, read as horizontal
+/// bars and resolved over the x axis: `bar` and `point` both draw `x` (1..6)
+/// against the `species` categories.
+fn layered_bar_point_spec(y_type: crate::spec::encoding::DataType, y_field: &str) -> ChartSpec {
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    let encoding = || Encoding {
+        x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
+        y: Some(EncodingSpec { field: y_field.into(), type_: Some(y_type), ..Default::default() }),
+        ..Default::default()
+    };
+    ChartSpec {
+        mark: Mark::Bar,
+        encoding: encoding(),
+        layers: Some(vec![layer_with(Mark::Bar, encoding()), layer_with(Mark::Point, encoding())]),
+        ..Default::default()
+    }
+}
+
+/// A layered native horizontal bar (categorical `y`) carries its value on
+/// `x`, so the layered zero-anchor rule widens x to 0. Unanchored, x spans
+/// the data's 1..6 and the shortest bar is a stub.
+#[test]
+fn a_layered_native_horizontal_bar_anchors_x_at_zero() {
+    use crate::spec::encoding::DataType;
+    let spec = layered_bar_point_spec(DataType::Nominal, "species");
+    let (scales, _) = resolve_scales(&spec, &make_batch_q_q_n(), (0.0, 100.0), (0.0, 80.0), &ThemeInputs::default())
+        .expect("a layered horizontal bar resolves");
+    assert_eq!(resolved_domain(&scales.x, "x")[0], 0.0, "the value axis x reaches 0");
+}
+
+/// The control: a vertical bar layer (quantitative `y`) draws its value on y,
+/// so x is its position channel and is never anchored.
+#[test]
+fn a_layered_vertical_bar_leaves_its_position_axis_unanchored() {
+    use crate::spec::encoding::DataType;
+    let spec = layered_bar_point_spec(DataType::Quantitative, "y");
+    let (scales, _) = resolve_scales(&spec, &make_batch_q_q_n(), (0.0, 100.0), (0.0, 80.0), &ThemeInputs::default())
+        .expect("a layered vertical bar resolves");
+    assert_eq!(resolved_domain(&scales.x, "x")[0], 1.0, "the position axis x keeps the data's 1");
+    assert_eq!(resolved_domain(&scales.y, "y")[0], 0.0, "the value axis y reaches 0");
+}
+
+/// The tick labels of the secondary y axis a line + `independent_y` layer
+/// resolves, with the secondary layer drawn as `mark` over values
+/// 1.85M..2.4M and its `y` carrying `scale`.
+fn secondary_axis_labels(
+    mark: crate::spec::mark::Mark,
+    scale: Option<crate::spec::encoding::ScaleSpec>,
+) -> Vec<String> {
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    let field = |name: &str| Some(EncodingSpec { field: name.into(), ..Default::default() });
+    let primary = Layer {
+        mark: Mark::Line,
+        encoding: Encoding { y: field("y0"), ..Default::default() },
+        ..Default::default()
+    };
+    let secondary = Layer {
+        mark,
+        encoding: Encoding { y: Some(EncodingSpec { field: "y1".into(), scale, ..Default::default() }), ..Default::default() },
+        independent_y: true,
+        ..Default::default()
+    };
+    let spec = ChartSpec {
+        mark: Mark::Line,
+        encoding: Encoding { x: field("x"), ..Default::default() },
+        layers: Some(vec![primary, secondary]),
+        ..Default::default()
+    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y0", ArrowDataType::Float64, false),
+        Field::new("y1", ArrowDataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![3.0, 2.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.85e6, 2.0e6, 2.4e6])),
+        ],
+    )
+    .unwrap();
+    let prep = crate::render::prepare::prepare_render_inputs(
+        &spec,
+        &batch,
+        &ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("a dual-axis chart prepares");
+    prep.axes.secondary_y[0].tick_labels.clone()
+}
+
+/// A `SecondaryY` bar slot resolves the `y` it is given: the ferrum-authored
+/// zero-anchor scale Python serializes onto an independent-y bar reaches 0,
+/// exactly as a standalone bar does; with no scale the slot spans its data
+/// (the anchor has one producer, the Python injection); a line slot over the
+/// same values keeps its data range.
+#[test]
+fn a_secondary_y_bar_slot_reaches_zero_and_a_line_slot_does_not() {
+    use crate::spec::mark::Mark;
+    let bar = secondary_axis_labels(Mark::Bar, Some(injected_zero_scale()));
+    assert!(bar.iter().any(|l| l == "0"), "the anchored bar slot's axis reaches 0; got {bar:?}");
+    let bare = secondary_axis_labels(Mark::Bar, None);
+    assert!(!bare.iter().any(|l| l == "0"), "the slot adds no anchor of its own; got {bare:?}");
+    let line = secondary_axis_labels(Mark::Line, None);
+    assert!(!line.iter().any(|l| l == "0"), "a line slot keeps its data range; got {line:?}");
+}
+
+// ── A stacked value axis covers every segment's drawn extent ────────────────
+
+/// A two-bin, two-group stack over `x = [1, 1, 2, 2]`, `g = [p, q, p, q]`.
+fn stacked_batch(ys: [f64; 4], with_y2: bool) -> RecordBatch {
+    let mut fields = vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("g", ArrowDataType::Utf8, false),
+    ];
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+        Arc::new(Float64Array::from(ys.to_vec())),
+        Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+    ];
+    if with_y2 {
+        fields.push(Field::new("lo", ArrowDataType::Float64, false));
+        columns.push(Arc::new(Float64Array::from(vec![0.25; 4])));
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+/// The ferrum-authored zero-anchor scale a standalone bar's value channel
+/// carries.
+fn injected_zero_scale() -> crate::spec::encoding::ScaleSpec {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+    ScaleSpec::Linear {
+        common: ContinuousScaleCommon {
+            domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
+        },
+        nice: false,
+        zero: true,
+        system_injected: true,
+    }
+}
+
+/// A `mark` spec over [`stacked_batch`]: the value on `value` (`"y"`, or
+/// `"x"` for a horizontal stack), the category on the other channel, a bar's
+/// zero-anchor scale when `zero_anchor`, a `y2` span when `with_y2`, and a
+/// `Stack` when `offset` is `Some`.
+fn stack_spec(
+    mark: crate::spec::mark::Mark,
+    offset: Option<crate::spec::position::StackOffset>,
+    value_on_x: bool,
+    zero_anchor: bool,
+    with_y2: bool,
+) -> ChartSpec {
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::position::{PositionAdjust, StackAnchor, StackValueAxis};
+    let quant = |field: &str| EncodingSpec { field: field.into(), type_: Some(DataType::Quantitative), ..Default::default() };
+    let value = EncodingSpec { scale: zero_anchor.then(injected_zero_scale), ..quant("y") };
+    let (x, y) = if value_on_x { (value, quant("x")) } else { (quant("x"), value) };
+    ChartSpec {
+        mark,
+        encoding: Encoding {
+            x: Some(x),
+            y: Some(y),
+            y2: with_y2.then(|| quant("lo")),
+            color: Some(EncodingSpec { field: "g".into(), type_: Some(DataType::Nominal), ..Default::default() }),
+            ..Default::default()
+        },
+        position: offset.map(|offset| PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset,
+            anchor: StackAnchor::Top,
+            value_axis: value_on_x.then_some(StackValueAxis::X),
+        }),
+        ..Default::default()
+    }
+}
+
+/// The value-axis domain a stacked spec resolves, and the one the same spec
+/// resolves from its stacked tops alone (the tops fed in as plain data, with
+/// no stack): the domain the value axis had before the base joined it.
+fn stacked_and_tops_only_domains(
+    mark: crate::spec::mark::Mark,
+    offset: crate::spec::position::StackOffset,
+    ys: [f64; 4],
+    value_on_x: bool,
+    zero_anchor: bool,
+    with_y2: bool,
+) -> ((f64, f64), (f64, f64)) {
+    let theme = ThemeInputs::default();
+    let batch = stacked_batch(ys, with_y2);
+    let value_scale = |scales: &ResolvedScales| {
+        if value_on_x { scales.x.data_domain() } else { scales.y.data_domain() }.expect("a continuous value axis")
+    };
+    let stacked = stack_spec(mark, Some(offset), value_on_x, zero_anchor, with_y2);
+    let (scales, _) = resolve_scales(&stacked, &batch, (0.0, 100.0), (0.0, 100.0), &theme).expect("the stack resolves");
+    let stacked_domain = value_scale(&scales);
+
+    let stacked_rows = crate::render::position::apply_position(
+        &batch, stacked.position.as_ref(), &scales, &stacked.encoding, false, &mut Vec::new(),
+    )
+    .expect("the stack applies");
+    let tops_only = stack_spec(mark, None, value_on_x, zero_anchor, with_y2);
+    let (scales, _) = resolve_scales(&tops_only, &stacked_rows, (0.0, 100.0), (0.0, 100.0), &theme).expect("the tops resolve");
+    (stacked_domain, value_scale(&scales))
+}
+
+/// An all-positive `center` stack's runs start at a nonzero shift, its lowest
+/// segment's base (-3.5 here: bin 2's [3, 4] centered on 0) below every top,
+/// so the domain covers that base, for bars and areas alike. Read from the
+/// tops alone it stops at -0.5 and the segment is truncated.
+#[test]
+fn a_center_stack_domain_covers_its_lowest_base() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    for (mark, zero_anchor) in [(Mark::Bar, true), (Mark::Area, false)] {
+        let (stacked, tops_only) =
+            stacked_and_tops_only_domains(mark, StackOffset::Center, [2.0, 1.0, 3.0, 4.0], false, zero_anchor, false);
+        assert!(stacked.0 <= -3.5, "{mark:?}: the lowest base -3.5 is in the domain; got {stacked:?}");
+        assert!(tops_only.0 > -3.5, "{mark:?}: premise, the tops alone stop short of it; got {tops_only:?}");
+    }
+}
+
+/// An all-negative `center` stack's runs start above every top (bin 2's run
+/// starts at 3.5), and the domain covers that base.
+#[test]
+fn an_all_negative_center_stack_domain_covers_its_top_base() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    let (stacked, _) =
+        stacked_and_tops_only_domains(Mark::Bar, StackOffset::Center, [-2.0, -1.0, -3.0, -4.0], false, true, false);
+    assert!(stacked.1 >= 3.5, "the top base 3.5 is in the domain; got {stacked:?}");
+}
+
+/// A horizontal (value on x) `center` stack takes the same base span on x.
+#[test]
+fn a_horizontal_center_stack_domain_covers_its_lowest_base_on_x() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    let (stacked, _) =
+        stacked_and_tops_only_domains(Mark::Bar, StackOffset::Center, [2.0, 1.0, 3.0, 4.0], true, true, false);
+    assert!(stacked.0 <= -3.5, "the lowest base -3.5 is in the x domain; got {stacked:?}");
+}
+
+/// Every stack whose bases are 0 or another segment's top resolves exactly
+/// the domain its tops alone give: zero and normalize stacks of either sign,
+/// bars (with the zero anchor) and areas (without it, so an all-positive
+/// area's domain still excludes its 0 origin), and a mixed-sign center stack
+/// whose shared shift lies between its runs' tops.
+#[test]
+fn a_stack_whose_bases_are_origins_or_tops_keeps_its_tops_only_domain() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    let cases = [
+        (StackOffset::Zero, [2.0, 1.0, 3.0, 4.0]),
+        (StackOffset::Normalize, [2.0, 1.0, 3.0, 4.0]),
+        (StackOffset::Zero, [-2.0, -1.0, -3.0, -4.0]),
+        (StackOffset::Normalize, [-2.0, -1.0, -3.0, -4.0]),
+        (StackOffset::Zero, [2.0, -1.0, -2.0, 3.0]),
+        (StackOffset::Normalize, [2.0, -1.0, -2.0, 3.0]),
+        (StackOffset::Center, [2.0, -1.0, -2.0, 3.0]),
+    ];
+    for (offset, ys) in cases {
+        for (mark, zero_anchor) in [(Mark::Bar, true), (Mark::Area, false)] {
+            let (stacked, tops_only) = stacked_and_tops_only_domains(mark, offset, ys, false, zero_anchor, false);
+            assert_eq!(stacked, tops_only, "{mark:?} {offset:?} {ys:?}");
+        }
+    }
+    let (area, _) = stacked_and_tops_only_domains(Mark::Area, StackOffset::Zero, [2.0, 1.0, 3.0, 4.0], false, false, false);
+    assert!(area.0 > 0.0, "an all-positive stacked area's 0 origin stays out of its domain; got {area:?}");
+}
+
+/// A bound `y2` keeps priority over the stack base as the value axis's span:
+/// the center stack's -3.5 base does not join the domain, the `y2` column
+/// (0.25) does.
+#[test]
+fn a_bound_y2_keeps_priority_over_the_stack_base() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    let (stacked, tops_only) =
+        stacked_and_tops_only_domains(Mark::Bar, StackOffset::Center, [2.0, 1.0, 3.0, 4.0], false, true, true);
+    assert_eq!(stacked, tops_only, "the base is not read when y2 is bound");
+    assert!(stacked.0 > -3.5, "got {stacked:?}");
+}
+
+/// A layered center stack (a stacked bar plus a point layer over the same
+/// rows) carries the stack base through the layered seed read, so the shared
+/// y domain covers the lowest base (-3.5) exactly as the unlayered stack's
+/// does.
+#[test]
+fn a_layered_center_stack_domain_covers_its_lowest_base() {
+    use crate::spec::mark::Mark;
+    use crate::spec::position::StackOffset;
+    let stacked = stack_spec(Mark::Bar, Some(StackOffset::Center), false, true, false);
+    let bar = Layer {
+        mark: Mark::Bar,
+        encoding: stacked.encoding.clone(),
+        position: stacked.position.clone(),
+        ..Default::default()
+    };
+    let point = Layer { mark: Mark::Point, encoding: stacked.encoding.clone(), ..Default::default() };
+    let spec = ChartSpec { layers: Some(vec![bar, point]), ..stacked };
+    let (scales, _) = resolve_scales(&spec, &stacked_batch([2.0, 1.0, 3.0, 4.0], false), (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default())
+        .expect("the layered stack resolves");
+    let (lo, _) = scales.y.data_domain().expect("a continuous y");
+    assert!(lo <= -3.5, "the lowest base -3.5 is in the layered domain; got {lo}");
+}

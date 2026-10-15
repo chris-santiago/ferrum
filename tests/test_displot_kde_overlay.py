@@ -38,6 +38,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_extents import assert_bars_start_on_the_zero_tick
 from tests._svg_rects import data_bar_rects as _data_bar_rects
 from tests._svg_rects import polylines as _polylines
 from tests._svg_rects import rug_tick_x1_by_stroke as _rug_tick_x1_by_stroke
@@ -305,9 +306,15 @@ class TestOverlayCountAxisVisibility:
         # `bar_position_channel_never_zero_extends` and
         # `coord_flipped_bar_position_channel_never_zero_extends` in
         # `domain.rs` -- because this fixture is structurally blind to it.
-        assert digest == "84afa395a92ad173597898b22adb9b7615996dbd82112e667ce7102a42f09e4f", (
-            "stat='density' overlay output moved -- expected byte-identity with the T5r baseline"
+        #
+        # The digest encodes two changes: the overlay leaving a density
+        # histogram unscaled, and the histogram's bars grown from the 0 tick
+        # (the padding inset above the plot bottom), which the geometry
+        # assertion below the digest checks directly.
+        assert digest == "c7e2e76bfdf1fe6651a10ab1001d617576dfdca6021436ce6bde3664f8d0db71", (
+            "stat='density' overlay output moved -- expected byte-identity with the pinned render"
         )
+        assert_bars_start_on_the_zero_tick(svg)
 
     def test_stat_count_sets_count_scale_matching_bins(self, unimodal_df):
         """stat="count" must set `count_scale` from the same rule the

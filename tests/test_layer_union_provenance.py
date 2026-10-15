@@ -93,15 +93,23 @@ def point_marks(svg: str, *, axis: str) -> list[float]:
 def bar_value_ends(svg: str, *, axis: str) -> list[float]:
     """Each bar's value-end edge -- the edge that moves with the datum.
 
-    A bar grows from its baseline toward its value, so the moving edge is the
-    rect's ``y`` (top) on a vertical bar and ``x + width`` (right) on a
-    `CoordFlip`'d one. The baseline edge is deliberately NOT read: it clamps to
-    the panel edge, which says nothing about the scale.
+    A bar grows from its base toward its value, so the moving edge is the
+    rect side away from the base: the base sits on the 0 tick, or on the plot
+    edge on zero's side when 0 is outside the domain, so it is the side nearer
+    0's pixel on this chart's own ``axis`` ladder (extrapolated when the axis
+    draws no 0 tick). Which side that is depends on the scale's direction: the
+    bottom of a vertical bar under ``reverse=True``, the top otherwise. The
+    base edge is deliberately NOT read: it says nothing about the scale.
     """
-    rects = data_bar_rects(svg)
-    if axis == "x":
-        return sorted(float(a["x"]) + float(a["width"]) for a in rects)
-    return sorted(float(a["y"]) for a in rects)
+    zero = pixel_for(value_axis_ladder(svg, axis=axis), 0.0)
+    ends = []
+    for a in data_bar_rects(svg):
+        if axis == "x":
+            lo, hi = float(a["x"]), float(a["x"]) + float(a["width"])
+        else:
+            lo, hi = float(a["y"]), float(a["y"]) + float(a["height"])
+        ends.append(hi if abs(hi - zero) > abs(lo - zero) else lo)
+    return sorted(ends)
 
 
 def assert_marks_match_the_ladder(svg: str, *, axis: str, bar_values, point_values) -> None:
