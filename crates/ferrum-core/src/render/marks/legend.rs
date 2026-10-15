@@ -13,6 +13,13 @@ const COLORBAR_TICK_LEN: f64 = 4.0;
 /// Gap (px) between a colorbar tick mark and its label.
 const COLORBAR_LABEL_GAP: f64 = 4.0;
 
+/// The text a colorbar stop's offset renders as. The one precision for the
+/// static SVG and the interactive scene (which draws the same raw fragment):
+/// two stop positions with the same text are the same stop on the bar.
+pub(crate) fn colorbar_offset_text(p: f64) -> String {
+    format!("{p:.4}")
+}
+
 pub fn build_legend(
     legend: &LegendLayout,
     color_scale: Option<&ColorScale>,
@@ -83,8 +90,9 @@ pub fn build_legend(
         let mut stops_xml = String::new();
         for (pos, color) in &cb.stops {
             stops_xml.push_str(&format!(
-                "<stop offset=\"{:.4}\" stop-color=\"{}\"/>",
-                pos, color,
+                "<stop offset=\"{}\" stop-color=\"{}\"/>",
+                colorbar_offset_text(*pos),
+                color,
             ));
         }
         // Gradient vector: a vertical bar runs bottom→top (Cartesian: high data

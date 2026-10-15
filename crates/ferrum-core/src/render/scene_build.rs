@@ -2348,7 +2348,7 @@ pub(crate) fn resolve_legend_color_scale(
     scale_resolve::resolve_param_domains(&mut rendering_spec_for_legend);
     // The legend reads only the color scale, so no positional axis is
     // resolved here.
-    let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
+    let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         scale_resolve::resolve_color_scale(
             &rendering_spec_for_legend,
             prep.final_batch(),
@@ -2358,14 +2358,10 @@ pub(crate) fn resolve_legend_color_scale(
     } else {
         None
     };
-    if let Some(ref cfg) = chart_config.color {
-        // See the per-panel site above: the chart-level application already
-        // reported any warning, so this legend-only re-application is silent
-        // for warnings. A refusal (#126) is propagated for the same reason
-        // given there.
-        super::config_apply::apply_color_config_to_color_scale(&mut color_scale, cfg)?;
-    }
-    Ok(color_scale)
+    // The same configured scale the colorbar is built from: silent for
+    // warnings (the chart-level application already reported them), a
+    // refusal propagated.
+    super::config_apply::configured_color_scale(color_scale.as_ref(), chart_config)
 }
 
 fn build_legend_decorations(

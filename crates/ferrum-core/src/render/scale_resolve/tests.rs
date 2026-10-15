@@ -7600,3 +7600,35 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
     }
     assert_eq!(auxiliary_scale_channels(), AUXILIARY_SCALE_CHANNELS.map(String::from));
 }
+
+/// With no scheme named, a `Diverging` scale takes the theme's diverging
+/// scheme even on a domain that does not straddle zero; a named scheme wins;
+/// any other scale keeps choosing by the data's sign.
+#[test]
+fn diverging_scale_without_a_scheme_takes_the_theme_diverging_scheme() {
+    use crate::render::color::{ContinuousScheme, NamedContinuous};
+    let positive = batch_with_numeric_color(vec![0.1, 0.5, 0.9]);
+    let straddling = batch_with_numeric_color(vec![-0.4, 0.2, 0.9]);
+    let theme = ThemeInputs::default();
+    let named = |s: &str| ContinuousScheme::Named(NamedContinuous::from_name(s).unwrap());
+    let scheme_of = |scale_json: serde_json::Value, batch: &RecordBatch| match resolve_color(
+        &spec_with_color_scale_json(scale_json),
+        batch,
+    )
+    .0
+    {
+        ColorScale::Continuous { scheme, .. } => scheme,
+        other => panic!("expected a continuous scale, got {other:?}"),
+    };
+    let diverging = named(&theme.palette.diverging_scheme);
+    let sequential = named(&theme.palette.sequential_scheme);
+
+    assert_eq!(scheme_of(serde_json::json!({"type": "diverging", "domainMid": 0.5}), &positive), diverging);
+    assert_eq!(scheme_of(serde_json::json!({"type": "diverging"}), &positive), diverging);
+    assert_eq!(
+        scheme_of(serde_json::json!({"type": "diverging", "domainMid": 0.5, "scheme": "viridis"}), &positive),
+        named("viridis"),
+    );
+    assert_eq!(scheme_of(serde_json::json!({"type": "linear"}), &positive), sequential);
+    assert_eq!(scheme_of(serde_json::json!({"type": "linear"}), &straddling), diverging);
+}

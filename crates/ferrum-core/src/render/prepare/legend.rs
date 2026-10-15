@@ -171,6 +171,13 @@ fn resolve_conditional_color_domain(bindings: &LegendBindings<'_>, transformed: 
 /// overrides, builds the size/shape aux legends, and applies the same-field
 /// color+size merge (which suppresses the now-redundant colorbar).
 ///
+/// `colorbar_color` is the color scale with the chart-level
+/// `configure_color(domain=, range=)` applied
+/// ([`crate::render::config_apply::configured_color_scale`]), the scale the
+/// marks are drawn from. Only the colorbar arms (continuous gradient and
+/// discretizing swatches) read it; whether a bar exists, the categorical
+/// entries and everything else read `provisional_scales`.
+///
 /// `layers` is this panel's prepared layer list (from `build_layers`, already
 /// available at the caller before this is invoked) — the single coherent
 /// point where the color-legend decision can see the mark set consuming the
@@ -192,6 +199,7 @@ pub(crate) fn build_color_legend(
     bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
     provisional_scales: &ResolvedScales,
+    colorbar_color: Option<&crate::render::scale_resolve::ColorScale>,
     layers: &[super::LayerPrepared],
     leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
@@ -261,18 +269,20 @@ pub(crate) fn build_color_legend(
                     .collect();
                 (entries, None)
             }
-            Some(ColorScale::Continuous { domain, scheme, .. }) => {
-                // Sample the scheme at 11 evenly-spaced positions so the
-                // gradient looks smooth without bloating the SVG. The
-                // renderer emits these as `linearGradient` stops.
-                let n_stops = 11;
-                let stops: Vec<(f64, String)> = (0..n_stops)
-                    .map(|i| {
-                        let t = i as f64 / (n_stops - 1) as f64;
-                        let color = scheme.sample(t);
-                        (t, super::super::color::fmt_svg(color))
-                    })
-                    .collect();
+            Some(ColorScale::Continuous { domain, scheme, midpoint }) => {
+                // The bar is drawn from `colorbar_color`, the scale with
+                // `configure_color` applied. Contract: it has the resolved
+                // scale's variant, because `apply_color_config_to_color_scale`
+                // only mutates fields of the variant it matched, and
+                // `prepare_render_inputs`, the one production caller, always
+                // passes that configured clone. The fallback arm (no clone, or
+                // another variant) is reached only by a caller passing `None`,
+                // and then the resolved scale is the one the marks read.
+                let (domain, scheme, midpoint) = match colorbar_color {
+                    Some(ColorScale::Continuous { domain, scheme, midpoint }) => (domain, scheme, midpoint),
+                    _ => (domain, scheme, midpoint),
+                };
+                let stops = continuous_colorbar_stops(*domain, scheme, *midpoint);
                 // Tick labels: check for explicit tickLabels override from the
                 // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
                 // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
@@ -313,6 +323,12 @@ pub(crate) fn build_color_legend(
                 )
             }
             Some(ColorScale::Discretizing(buckets)) => {
+                // Swatches from the configured scale, under the same variant
+                // contract as the continuous arm above.
+                let buckets = match colorbar_color {
+                    Some(ColorScale::Discretizing(configured)) => configured,
+                    _ => buckets,
+                };
                 // Discrete colorbar: emit each swatch as a pair of gradient
                 // stops at its own edges, so the `linearGradient` paints k flat
                 // bands instead of interpolating between them. Reusing the
@@ -1362,6 +1378,63 @@ fn size_legend_symbol(
     }
 }
 
+/// The `linearGradient` stops of a continuous colorbar, drawn from the same
+/// mapping the marks use so the bar shows a value's cell color at that
+/// value's (linear) position.
+///
+/// Eleven evenly spaced positions keep the gradient smooth without bloating
+/// the SVG. With no midpoint each position `t` samples the scheme at `t`
+/// directly, which is what the marks' linear normalization gives and keeps a
+/// degenerate domain sampling the whole ramp. With a midpoint each position
+/// `p` is colored at its value `lo + p·(hi − lo)` through the marks' piecewise
+/// normalization, and a midpoint strictly inside the domain adds a stop at its
+/// own position so the scheme's mid color sits at the midpoint; a midpoint
+/// outside the domain yields the cells' one-sided ramp with no extra stop.
+///
+/// Two positions are the same stop when they render to the same offset
+/// ([`colorbar_offset_text`]). A midpoint that renders at the center offset is
+/// the plain bar: the no-midpoint stops, byte for byte, however many ulps its
+/// position sits from 0.5. A midpoint that renders at another even offset adds
+/// no stop; that stop is colored through the midpoint normalization.
+///
+/// [`colorbar_offset_text`]: crate::render::marks::legend::colorbar_offset_text
+fn continuous_colorbar_stops(
+    domain: (f64, f64),
+    scheme: &crate::render::color::ContinuousScheme,
+    midpoint: Option<f64>,
+) -> Vec<(f64, String)> {
+    use crate::render::color::fmt_svg;
+    use crate::render::marks::legend::colorbar_offset_text;
+    use crate::render::scale_resolve::normalize_continuous;
+    const N_STOPS: usize = 11;
+    let mut positions: Vec<f64> = (0..N_STOPS).map(|i| i as f64 / (N_STOPS - 1) as f64).collect();
+    let plain = |positions: Vec<f64>| -> Vec<(f64, String)> {
+        positions.into_iter().map(|t| (t, fmt_svg(scheme.sample(t)))).collect()
+    };
+    let Some(mid) = midpoint else {
+        return plain(positions);
+    };
+    let (lo, hi) = domain;
+    if lo < mid && mid < hi {
+        let p_mid = (mid - lo) / (hi - lo);
+        let p_mid_text = colorbar_offset_text(p_mid);
+        if p_mid_text == colorbar_offset_text(0.5) {
+            return plain(positions);
+        }
+        if !positions.iter().any(|&p| colorbar_offset_text(p) == p_mid_text) {
+            let at = positions.partition_point(|&p| p < p_mid);
+            positions.insert(at, p_mid);
+        }
+    }
+    positions
+        .into_iter()
+        .map(|p| {
+            let t = normalize_continuous(domain, midpoint, lo + p * (hi - lo));
+            (p, fmt_svg(scheme.sample(t)))
+        })
+        .collect()
+}
+
 /// Format a single colorbar tick value into a short human-readable label.
 /// Picks decimal precision from the domain span so that small ranges still
 /// show enough digits and large ranges don't waste pixels on noise.
@@ -1676,7 +1749,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
 
         assert!(bundle.legend_entries.is_empty(), "buckets render as a colorbar");
         let cb = bundle.colorbar.expect("discretizing color must build a colorbar");
@@ -1708,7 +1781,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("continuous color must build a colorbar");
         assert_eq!(cb.stops.len(), 11);
         assert_eq!(cb.tick_labels.len(), 5);
@@ -1737,7 +1810,7 @@ mod tests {
         let mut warnings = Vec::new();
         let scales_default = scales_with_color(scale());
         let default_bundle =
-            build_color_legend(&bindings(&spec), &empty_batch(), &scales_default, &layers, None, &mut warnings);
+            build_color_legend(&bindings(&spec), &empty_batch(), &scales_default, scales_default.color.as_ref(), &layers, None, &mut warnings);
         let default_labels = default_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
@@ -1748,7 +1821,7 @@ mod tests {
         ));
         let scales_typed = scales_with_color(scale());
         let typed_bundle =
-            build_color_legend(&bindings(&spec), &empty_batch(), &scales_typed, &layers, None, &mut warnings);
+            build_color_legend(&bindings(&spec), &empty_batch(), &scales_typed, scales_typed.color.as_ref(), &layers, None, &mut warnings);
         let typed_labels = typed_bundle.colorbar.expect("must build a colorbar").tick_labels;
 
         assert_eq!(
@@ -1802,7 +1875,7 @@ mod tests {
         );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &temporal, &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &temporal, &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         let labels = bundle.colorbar.expect("must build a colorbar").tick_labels;
         assert!(
             labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
@@ -1849,7 +1922,7 @@ mod tests {
         let config = ChartConfig::default();
         let labels = |spec: &ChartSpec, batch: &RecordBatch| {
             let layers = vec![LayerPrepared::from_chart_only(spec)];
-            build_color_legend(&bindings(spec), batch, &scales, &layers, None, &mut Vec::new())
+            build_color_legend(&bindings(spec), batch, &scales, scales.color.as_ref(), &layers, None, &mut Vec::new())
                 .colorbar
                 .expect("must build a colorbar")
                 .tick_labels
@@ -1964,7 +2037,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render continuous color; colorbar must be suppressed");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "exactly one warning must fire");
@@ -1991,7 +2064,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Ribbon, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "ribbon cannot render continuous color; colorbar must be suppressed");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -2020,7 +2093,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line cannot render a discretizing color scale either");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
@@ -2052,7 +2125,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         let cb = bundle.colorbar.expect("a point layer sharing the scale genuinely renders it; colorbar must stay");
         assert_eq!(cb.stops.len(), 11);
         assert!(warnings.is_empty(), "a mixed line+point chart sharing the scale must not warn spuriously");
@@ -2070,7 +2143,7 @@ mod tests {
         let spec = spec_with_color_field("v");
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert_eq!(bundle.legend_entries.len(), 3, "categorical color on line stays byte-identical (NF-A3)");
         assert!(bundle.colorbar.is_none());
         assert!(warnings.is_empty(), "categorical color must never trigger the inert-scale suppression");
@@ -2099,7 +2172,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "legend=None never built a colorbar in the first place");
         assert!(bundle.legend_entries.is_empty());
         assert_eq!(warnings.len(), 1, "the inert channel must still warn even with no legend to suppress");
@@ -2149,7 +2222,7 @@ mod tests {
         line.encoding.size = spec.encoding.size.clone();
         let layers = vec![line];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         // Sanity: the merge premise actually held (colorbar nulled by the
         // merge, not the inert-scale check testing nothing).
         assert!(bundle.colorbar.is_none());
@@ -2222,7 +2295,7 @@ mod tests {
     fn size_block_of(layers: &[LayerPrepared], sibling_draws_dots: bool) -> Option<(SymbolKind, Vec<f64>)> {
         let (scales, spec) = size_only_fixture();
         let ctx = LeafScaleContext { size_scale_has_non_line_sibling: sibling_draws_dots, ..Default::default() };
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, layers, Some(&ctx), &mut Vec::new());
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), layers, Some(&ctx), &mut Vec::new());
         let mut blocks = bundle.aux_legends.iter().filter_map(|a| match a {
             AuxLegendInput::Size { entries, symbol, .. } => Some((*symbol, entries.iter().map(|e| e.radius).collect())),
             _ => None,
@@ -2322,7 +2395,7 @@ mod tests {
         };
         let symbol_beside_line = |other: LayerPrepared| {
             let layers = [sized(Mark::Line), other];
-            let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut Vec::new());
+            let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut Vec::new());
             match &bundle.aux_legends[0] {
                 AuxLegendInput::Size { symbol, .. } => *symbol,
                 other => panic!("expected a size block, got {other:?}"),
@@ -2364,7 +2437,7 @@ mod tests {
         point.encoding.size = spec.encoding.size.clone();
         let layers = vec![point];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "the merge still folds the colorbar into the size legend");
         assert!(warnings.is_empty(), "point genuinely renders continuous color; nothing is inert here");
         let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
@@ -2423,7 +2496,7 @@ mod tests {
         ));
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no Size legend was emitted; the colorbar is the chart's only color legend and must survive");
         assert!(
             !bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })),
@@ -2442,7 +2515,7 @@ mod tests {
         scales.size = None; // the channel is bound in `spec` but never resolved
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "no resolved size scale means no Size block; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2469,7 +2542,7 @@ mod tests {
         });
         let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "an empty-entries Size legend is not emitted; the colorbar must survive");
         assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
     }
@@ -2496,7 +2569,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("g")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_none(), "line's inert v channel must still lose its colorbar");
         assert_eq!(warnings.len(), 1, "point's unrelated field g must not exempt line's v: {warnings:?}");
         match &warnings[0] {
@@ -2527,7 +2600,7 @@ mod tests {
             layer_with_mark_and_color(Mark::Point, Some("v")),
         ];
         let mut warnings = Vec::new();
-        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, &layers, None, &mut warnings);
+        let bundle = build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut warnings);
         assert!(bundle.colorbar.is_some(), "point genuinely renders the shared v mapping; colorbar must stay");
         assert!(warnings.is_empty(), "same-field point sibling must still exempt line");
     }
@@ -2576,6 +2649,7 @@ mod tests {
             &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
+            None,
             &layers(&spec),
             None,
             &mut warnings,
@@ -2590,6 +2664,7 @@ mod tests {
             &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
+            None,
             &layers(&spec),
             None,
             &mut warnings,
@@ -2605,6 +2680,7 @@ mod tests {
             &bindings(&spec),
             &empty_batch(),
             &scales_with_color(scale()),
+            None,
             &layers(&spec),
             None,
             &mut warnings,
@@ -2637,6 +2713,7 @@ mod tests {
                 domain: vec!["a".into(), "b".into()],
                 palette: std::borrow::Cow::Owned(vec![]),
             }),
+            None,
             &layers,
             None,
             &mut warnings,
@@ -2873,5 +2950,170 @@ mod tests {
             aux_legend_channel_pairs(&bindings(&spec)).iter().map(|(name, _)| name.to_string()).collect();
         assert_eq!(aux_legend_channels(), pair_names);
         assert_eq!(aux_legend_channels(), vec!["size", "shape", "stroke_dash"]);
+    }
+
+    // ── Continuous colorbar stops drawn from the marks' color mapping ──────
+
+    fn colorbar_of(scale: ColorScale) -> ColorbarInput {
+        let scales = scales_with_color(scale);
+        let spec = spec_with_color_field("v");
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        build_color_legend(&bindings(&spec), &empty_batch(), &scales, scales.color.as_ref(), &layers, None, &mut Vec::new())
+            .colorbar
+            .expect("a continuous color scale builds a colorbar")
+    }
+
+    fn diverging(domain: (f64, f64), midpoint: Option<f64>) -> ColorScale {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        ColorScale::Continuous {
+            domain,
+            scheme: ContinuousScheme::Named(NamedContinuous::BlueToRed),
+            midpoint,
+        }
+    }
+
+    /// The mid color of the scheme [`diverging`] builds.
+    fn scheme_mid_hex() -> String {
+        use crate::render::color::{fmt_svg, ContinuousScheme, NamedContinuous};
+        fmt_svg(ContinuousScheme::Named(NamedContinuous::BlueToRed).sample(0.5))
+    }
+
+    fn hex_rgb(hex: &str) -> [f64; 3] {
+        let c = crate::render::color::parse_color(hex).expect("stop colors are hex");
+        [c.red as f64, c.green as f64, c.blue as f64]
+    }
+
+    /// No two stops render to the same offset text.
+    fn assert_unique_offsets(cb: &ColorbarInput) {
+        let texts: Vec<String> = cb.stops.iter().map(|(o, _)| crate::render::marks::legend::colorbar_offset_text(*o)).collect();
+        let mut deduped = texts.clone();
+        deduped.dedup();
+        assert_eq!(deduped, texts, "duplicate offsets: {:?}", cb.stops);
+    }
+
+    fn cell_color(scale: &ColorScale, v: f64) -> [f64; 3] {
+        let c = scale.lookup_f64(v).expect("continuous scales map numbers");
+        [c.red as f64, c.green as f64, c.blue as f64]
+    }
+
+    /// A centered heatmap's domain is asymmetric about its center: every stop
+    /// of the bar carries exactly the cell color of the value at its linear
+    /// position, and the scheme's mid color sits at the midpoint's own stop.
+    /// Sampling the scheme at even offsets (ignoring the midpoint) puts the
+    /// mid color at the geometric center instead.
+    #[test]
+    fn diverging_colorbar_matches_its_cells() {
+        let (lo, hi) = (-0.42, 1.0);
+        let scale = diverging((lo, hi), Some(0.0));
+        let cb = colorbar_of(scale.clone());
+        let p_mid = (0.0 - lo) / (hi - lo);
+        assert_eq!(cb.stops.len(), 12, "11 even stops plus the midpoint's: {:?}", cb.stops);
+        assert!(cb.stops.windows(2).all(|w| w[0].0 < w[1].0), "offsets ascend: {:?}", cb.stops);
+        assert_unique_offsets(&cb);
+        let mid_stop = cb.stops.iter().find(|(o, _)| *o == p_mid).expect("a stop at the midpoint");
+        let scheme_mid = scheme_mid_hex();
+        assert_eq!(mid_stop.1, scheme_mid);
+        for (o, hex) in &cb.stops {
+            let v = lo + o * (hi - lo);
+            assert_eq!(hex_rgb(hex), cell_color(&scale, v), "stop at offset {o} (value {v})");
+        }
+    }
+
+    /// The tick labels stay linear in value with a midpoint: the same labels
+    /// as the bar without one.
+    #[test]
+    fn diverging_colorbar_ticks_stay_linear_in_value() {
+        let with_mid = colorbar_of(diverging((-0.42, 1.0), Some(0.0)));
+        let without = colorbar_of(diverging((-0.42, 1.0), None));
+        assert_eq!(with_mid.tick_labels, without.tick_labels);
+        assert_eq!(with_mid.domain, Some((-0.42, 1.0)));
+    }
+
+    /// No midpoint: 11 stops at `k/10` sampling the scheme at `k/10`,
+    /// including a degenerate domain (which still shows the whole ramp, not
+    /// the mid color the cells' normalization gives it).
+    #[test]
+    fn colorbar_without_midpoint_samples_the_scheme_at_even_offsets() {
+        use crate::render::color::{fmt_svg, ContinuousScheme, NamedContinuous};
+        let scheme = ContinuousScheme::Named(NamedContinuous::BlueToRed);
+        let expected: Vec<(f64, String)> =
+            (0..11).map(|i| i as f64 / 10.0).map(|t| (t, fmt_svg(scheme.sample(t)))).collect();
+        for domain in [(-0.42, 1.0), (5.0, 5.0), (3.0, 1.0)] {
+            let cb = colorbar_of(diverging(domain, None));
+            assert_unique_offsets(&cb);
+            assert_eq!(cb.stops, expected, "domain {domain:?}");
+        }
+    }
+
+    /// A midpoint at the geometric center is the plain bar, byte for byte,
+    /// including centers a few ulps off 0.5 (`(a + b) / 2` is rarely exact).
+    #[test]
+    fn midpoint_at_geometric_center_matches_the_plain_bar() {
+        let exact = [(-2.0, 2.0), (-1.0, 1.0), (0.0, 10.0), (-0.3, 0.7), (2.5, 7.5)];
+        let inexact = [(-0.1, 0.5), (0.2, 0.8), (0.1, 0.7), (-0.3, 0.9), (-0.1, 0.7)];
+        for (lo, hi) in exact.into_iter().chain(inexact) {
+            let plain = colorbar_of(diverging((lo, hi), None));
+            let centered = colorbar_of(diverging((lo, hi), Some((lo + hi) / 2.0)));
+            assert_unique_offsets(&centered);
+            assert_eq!(centered.stops, plain.stops, "domain ({lo}, {hi})");
+        }
+    }
+
+    /// A midpoint already on an even offset adds no stop; its stop carries
+    /// the scheme's mid color.
+    #[test]
+    fn midpoint_on_an_even_offset_adds_no_stop() {
+        let cb = colorbar_of(diverging((-1.0, 4.0), Some(0.0)));
+        assert_eq!(cb.stops.len(), 11);
+        assert_unique_offsets(&cb);
+        let scheme_mid = scheme_mid_hex();
+        assert_eq!(cb.stops[2], (0.2, scheme_mid));
+    }
+
+    /// A midpoint whose position renders at an even offset, though a few ulps
+    /// off it ((-1, 2) mid 0.2 sits at 0.39999999999999997), adds no stop.
+    #[test]
+    fn midpoint_ulps_off_an_even_offset_adds_no_stop() {
+        let cb = colorbar_of(diverging((-1.0, 2.0), Some(0.2)));
+        assert_eq!(cb.stops.len(), 11, "{:?}", cb.stops);
+        assert_unique_offsets(&cb);
+        let at_04 = cb.stops.iter().find(|(o, _)| crate::render::marks::legend::colorbar_offset_text(*o) == "0.4000").expect("a 0.4000 stop");
+        assert_eq!(at_04.1, scheme_mid_hex());
+    }
+
+    /// A midpoint within the offset precision of an even offset, though far
+    /// more than an ulp from it, adds no stop either.
+    #[test]
+    fn midpoint_within_the_offset_precision_adds_no_stop() {
+        let cb = colorbar_of(diverging((0.0, 1.0), Some(0.40003)));
+        assert_eq!(cb.stops.len(), 11, "{:?}", cb.stops);
+        assert_unique_offsets(&cb);
+    }
+
+    /// A genuinely off-center midpoint keeps its own stop.
+    #[test]
+    fn off_center_midpoint_keeps_its_stop() {
+        let cb = colorbar_of(diverging((-1.0, 10.0), Some(3.0)));
+        assert_eq!(cb.stops.len(), 12, "{:?}", cb.stops);
+        assert_unique_offsets(&cb);
+        let mid = cb.stops.iter().find(|(o, _)| crate::render::marks::legend::colorbar_offset_text(*o) == "0.3636").expect("a 0.3636 stop");
+        assert_eq!(mid.1, scheme_mid_hex());
+    }
+
+    /// A midpoint outside the domain colors the 11 even stops through the
+    /// cells' one-sided normalization, with no extra stop.
+    #[test]
+    fn midpoint_outside_the_domain_shows_the_cells_one_sided_ramp() {
+        for (domain, mid) in [((0.1, 0.9), -1.0), ((0.1, 0.9), 2.0), ((0.1, 0.9), 0.1)] {
+            let scale = diverging(domain, Some(mid));
+            let cb = colorbar_of(scale.clone());
+            assert_eq!(cb.stops.len(), 11, "mid {mid}");
+            assert_unique_offsets(&cb);
+            for (k, (o, hex)) in cb.stops.iter().enumerate() {
+                assert_eq!(*o, k as f64 / 10.0);
+                let v = domain.0 + o * (domain.1 - domain.0);
+                assert_eq!(*hex, crate::render::color::fmt_svg(scale.lookup_f64(v).unwrap()), "mid {mid}, offset {o}");
+            }
+        }
     }
 }

@@ -2997,3 +2997,286 @@ mod pipeline_order_tests {
         );
     }
 }
+
+/// The colorbar is built from the color scale with `configure_color(domain=,
+/// range=)` applied, the scale the marks are drawn from: each stop carries the
+/// color the marks take at that stop's value, and the labels span the
+/// configured domain. Charts without a color domain or range keep their bar.
+mod configured_colorbar_tests {
+    use super::*;
+    use crate::layout::{ColorbarInput, ThemeInputs, Viewport};
+    use crate::render::chart_config::{ChartConfig, ColorConfigSpec};
+    use crate::render::prepare;
+    use crate::render::scale_resolve::ColorScale;
+    use crate::spec::chart::ChartSpec;
+    use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    /// A point chart coloring by the numeric `v`, with an optional color scale
+    /// spec given as its wire JSON.
+    fn chart(values: Vec<f64>, scale: Option<serde_json::Value>) -> (ChartSpec, RecordBatch) {
+        let n = values.len();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs.clone())),
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(values)),
+            ],
+        )
+        .unwrap();
+        let field = |f: &str| EncodingSpec { field: f.into(), type_: None, ..Default::default() };
+        let spec = ChartSpec {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(field("x")),
+                y: Some(field("y")),
+                color: Some(EncodingSpec {
+                    scale: scale.map(|s| serde_json::from_value::<ScaleSpec>(s).unwrap()),
+                    ..field("v")
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (spec, batch)
+    }
+
+    fn color_config(domain: Option<[f64; 2]>, range: Option<&[&str]>) -> ChartConfig {
+        ChartConfig {
+            color: Some(ColorConfigSpec {
+                domain: domain.map(|d| d.iter().map(|v| serde_json::json!(v)).collect()),
+                range: range.map(|r| r.iter().map(|s| s.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The prepared inputs after the chart-config pipeline (whose color scale
+    /// is the configured one the marks read), and every warning reported.
+    fn pipeline(spec: &ChartSpec, batch: &RecordBatch, cfg: &ChartConfig) -> (prepare::PreparedInputs, Vec<RenderWarning>) {
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let mut prep = prepare::prepare_render_inputs(spec, batch, &theme, viewport, cfg, None).unwrap();
+        let mut warnings = prep.warnings.clone();
+        apply_chart_config_pipeline(&mut prep, &theme, cfg, &mut warnings).unwrap();
+        (prep, warnings)
+    }
+
+    fn colorbar(spec: &ChartSpec, batch: &RecordBatch, cfg: &ChartConfig) -> (ColorbarInput, ColorScale) {
+        let (prep, _) = pipeline(spec, batch, cfg);
+        (
+            prep.colorbar.expect("a numeric color channel builds a colorbar"),
+            prep.provisional_scales.color.expect("a color scale"),
+        )
+    }
+
+    fn channels(hex: &str) -> [i32; 3] {
+        let c = crate::render::color::parse_color(hex).unwrap();
+        [c.red as i32, c.green as i32, c.blue as i32]
+    }
+
+    /// Every stop's color is the marks' color at the stop's value (within 1
+    /// per channel of float rounding at a channel edge).
+    fn assert_stops_follow(cb: &ColorbarInput, scale: &ColorScale) {
+        let ColorScale::Continuous { domain: (lo, hi), .. } = scale else {
+            panic!("expected a continuous scale, got {scale:?}")
+        };
+        for (o, hex) in &cb.stops {
+            let v = lo + o * (hi - lo);
+            let mark = channels(&crate::render::color::fmt_svg(scale.lookup_f64(v).unwrap()));
+            let bar = channels(hex);
+            assert!(
+                (0..3).all(|i| (bar[i] - mark[i]).abs() <= 1),
+                "stop {o} (value {v}): bar {hex} vs marks {mark:?}; stops {:?}",
+                cb.stops
+            );
+        }
+    }
+
+    fn mid_hex(scale: &ColorScale) -> String {
+        let ColorScale::Continuous { scheme, .. } = scale else { panic!("expected continuous") };
+        crate::render::color::fmt_svg(scheme.sample(0.5))
+    }
+
+    /// A color config with no domain or range leaves the bar as resolved.
+    #[test]
+    fn color_config_without_domain_or_range_keeps_the_bar() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        let (plain, _) = colorbar(&spec, &batch, &ChartConfig::default());
+        let (configured, _) = colorbar(&spec, &batch, &color_config(None, None));
+        assert_eq!(configured, plain);
+    }
+
+    #[test]
+    fn configured_range_recolors_the_bar_and_keeps_its_labels() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        let (plain, _) = colorbar(&spec, &batch, &ChartConfig::default());
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(None, Some(&["red", "blue"])));
+        assert_stops_follow(&cb, &scale);
+        assert_eq!(cb.stops.first().unwrap().1, "#ff0000");
+        assert_eq!(cb.stops.last().unwrap().1, "#0000ff");
+        assert_eq!(cb.tick_labels, plain.tick_labels);
+        assert_eq!(cb.domain, plain.domain);
+    }
+
+    #[test]
+    fn configured_domain_relabels_the_bar_and_keeps_its_stops() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        let (plain, _) = colorbar(&spec, &batch, &ChartConfig::default());
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(Some([-4.0, 4.0]), None));
+        assert_stops_follow(&cb, &scale);
+        assert_eq!(cb.stops, plain.stops);
+        assert_eq!(cb.domain, Some((-4.0, 4.0)));
+        assert_eq!(cb.tick_labels, vec!["-4", "-2", "0", "2", "4"]);
+    }
+
+    #[test]
+    fn configured_domain_and_range_both_reach_the_bar() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(Some([-4.0, 4.0]), Some(&["red", "blue"])));
+        assert_stops_follow(&cb, &scale);
+        assert_eq!(cb.domain, Some((-4.0, 4.0)));
+        assert_eq!(cb.stops.first().unwrap().1, "#ff0000");
+    }
+
+    /// A midpoint inside the configured domain puts its stop at the midpoint's
+    /// position in that domain, carrying the scheme's mid color.
+    #[test]
+    fn configured_domain_moves_the_midpoint_stop() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], Some(serde_json::json!({"type": "diverging", "domainMid": 3.0})));
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(Some([-1.0, 10.0]), None));
+        assert_stops_follow(&cb, &scale);
+        assert_eq!(cb.stops.len(), 12, "{:?}", cb.stops);
+        let p_mid = (3.0 - -1.0) / (10.0 - -1.0);
+        let mid_stop = cb.stops.iter().find(|(o, _)| *o == p_mid).expect("a stop at the configured midpoint");
+        assert_eq!(mid_stop.1, mid_hex(&scale));
+        assert_eq!(cb.domain, Some((-1.0, 10.0)));
+    }
+
+    /// A midpoint outside the configured domain: 11 even stops on the marks'
+    /// one-sided ramp, no extra stop.
+    #[test]
+    fn midpoint_outside_the_configured_domain_shows_the_one_sided_ramp() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], Some(serde_json::json!({"type": "diverging", "domainMid": 3.0})));
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(Some([4.0, 10.0]), None));
+        assert_eq!(cb.stops.len(), 11);
+        assert_stops_follow(&cb, &scale);
+    }
+
+    /// A midpoint at the configured domain's center is that domain's plain bar.
+    #[test]
+    fn midpoint_at_the_configured_center_is_the_plain_bar() {
+        let scale = serde_json::json!({"type": "diverging", "domainMid": 3.0});
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], Some(scale));
+        let cfg = color_config(Some([-4.0, 10.0]), None);
+        let (centered, _) = colorbar(&spec, &batch, &cfg);
+        let (plain_spec, _) = chart(vec![1.0, 5.0, 9.0], Some(serde_json::json!({"type": "diverging"})));
+        let (plain, _) = colorbar(&plain_spec, &batch, &cfg);
+        assert_eq!(centered, plain);
+    }
+
+    /// `format=` formats the configured domain's labels.
+    #[test]
+    fn colorbar_format_reads_the_configured_domain() {
+        let (mut spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+            format: Some(".1f".into()),
+            ..Default::default()
+        }));
+        let (cb, _) = colorbar(&spec, &batch, &color_config(Some([-4.0, 4.0]), None));
+        assert_eq!(cb.tick_labels, vec!["-4.0", "-2.0", "0.0", "2.0", "4.0"]);
+    }
+
+    fn quantize() -> serde_json::Value {
+        serde_json::json!({"type": "quantize", "range": ["#ff0000", "#00ff00", "#0000ff"]})
+    }
+
+    /// A range of the bucket count recolors the swatches; the bound labels stay.
+    #[test]
+    fn configured_range_recolors_discretizing_swatches() {
+        let (spec, batch) = chart(vec![0.0, 4.0, 9.0], Some(quantize()));
+        let (plain, _) = colorbar(&spec, &batch, &ChartConfig::default());
+        let (cb, scale) = colorbar(&spec, &batch, &color_config(None, Some(&["#111111", "#222222", "#333333"])));
+        let ColorScale::Discretizing(buckets) = &scale else { panic!("expected buckets, got {scale:?}") };
+        let swatches: Vec<String> = cb.stops.iter().step_by(2).map(|(_, c)| c.clone()).collect();
+        let marks: Vec<String> = buckets.colors().iter().map(|c| crate::render::color::fmt_svg(*c)).collect();
+        assert_eq!(swatches, marks);
+        assert_eq!(swatches, vec!["#111111", "#222222", "#333333"]);
+        assert_eq!(cb.tick_labels, plain.tick_labels);
+    }
+
+    /// A range of the wrong length leaves the swatches and is reported once.
+    #[test]
+    fn mismatched_range_leaves_the_swatches_and_warns_once() {
+        let (spec, batch) = chart(vec![0.0, 4.0, 9.0], Some(quantize()));
+        let (plain, _) = colorbar(&spec, &batch, &ChartConfig::default());
+        let cfg = color_config(None, Some(&["#111111", "#222222"]));
+        let (prep, warnings) = pipeline(&spec, &batch, &cfg);
+        assert_eq!(prep.colorbar.unwrap(), plain);
+        let n = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::ColorRangeBucketCountMismatch { .. }))
+            .count();
+        assert_eq!(n, 1, "{warnings:?}");
+    }
+
+    /// An unparseable range refuses with the same typed error.
+    #[test]
+    fn unparseable_range_still_refuses() {
+        let (spec, batch) = chart(vec![1.0, 5.0, 9.0], None);
+        let err = crate::render::render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &color_config(None, Some(&["red", "notacolor"])),
+        )
+        .unwrap_err();
+        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "notacolor".into() });
+    }
+
+    /// The rendered SVG: points sitting at stop values are filled with the
+    /// bar's color at those stops.
+    #[test]
+    fn rendered_bar_stops_match_the_rendered_marks() {
+        // Values at the configured domain's offsets 0, 0.2, 0.5, 0.9 and 1.
+        let values = vec![-4.0, -2.4, 0.0, 3.2, 4.0];
+        let offsets = ["0.0000", "0.2000", "0.5000", "0.9000", "1.0000"];
+        let (spec, batch) = chart(values, None);
+        let svg = crate::render::render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &color_config(Some([-4.0, 4.0]), Some(&["red", "blue"])),
+        )
+        .unwrap()
+        .bytes;
+        let fills: Vec<&str> = svg
+            .split("<circle ")
+            .skip(1)
+            .filter_map(|c| c.split("fill=\"").nth(1)?.split('"').next())
+            .collect();
+        assert_eq!(fills.len(), 5, "{svg}");
+        for (fill, offset) in fills.iter().zip(offsets) {
+            let tag = format!("<stop offset=\"{offset}\" stop-color=\"");
+            let stop = svg.split(&tag).nth(1).and_then(|r| r.split('"').next()).expect("a stop at the offset");
+            let (a, b) = (channels(fill), channels(stop));
+            assert!((0..3).all(|i| (a[i] - b[i]).abs() <= 1), "offset {offset}: mark {fill} vs bar {stop}");
+        }
+    }
+}

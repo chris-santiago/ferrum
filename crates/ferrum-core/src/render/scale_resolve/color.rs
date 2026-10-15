@@ -297,8 +297,8 @@ pub fn build_color_scale(
 ///      `Gradient`-backed scheme, F-L04-02 second revision
 ///   2. `encoding.scheme` (top-level field on `EncodingSpec`, D1/D4)
 ///   3. the scale spec's own scheme ([`scale_common_scheme`])
-///   4. the theme's diverging scheme when `(lo, hi)` straddles zero, else its
-///      sequential scheme
+///   4. the theme's diverging scheme for a `Diverging` scale spec or when
+///      `(lo, hi)` straddles zero, else its sequential scheme
 ///   5. hard fallback: Viridis
 ///
 /// A `Sequential { reverse: true }` spec wraps the result in
@@ -343,7 +343,13 @@ fn resolve_continuous_scheme(
                             name: name.to_string(),
                         });
                     }
-                    let theme_scheme = if lo < 0.0 && hi > 0.0 {
+                    // A `Diverging` scale asked for a diverging ramp whatever
+                    // the data sign; any other scale guesses from the sign.
+                    let diverging_spec = matches!(
+                        enc.scale.as_ref(),
+                        Some(crate::spec::encoding::ScaleSpec::Diverging { .. })
+                    );
+                    let theme_scheme = if diverging_spec || (lo < 0.0 && hi > 0.0) {
                         &theme.palette.diverging_scheme
                     } else {
                         &theme.palette.sequential_scheme

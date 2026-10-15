@@ -1364,6 +1364,11 @@ pub fn prepare_render_inputs(
     // built from (`LegendBindings`).
     let legend_bindings = legend::LegendBindings::new(spec, rendering_encoding);
     legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, chart_config)?;
+    // The colorbar shows the scale the marks are drawn from, so it is built
+    // from the color scale with `configure_color(domain=, range=)` applied,
+    // which the pipeline applies to `provisional_scales` only after this.
+    let colorbar_color =
+        crate::render::config_apply::configured_color_scale(provisional_scales.color.as_ref(), chart_config)?;
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
@@ -1374,6 +1379,7 @@ pub fn prepare_render_inputs(
         &legend_bindings,
         &transformed,
         &provisional_scales,
+        colorbar_color.as_ref(),
         &layers,
         leaf_scales,
         &mut scale_warnings,

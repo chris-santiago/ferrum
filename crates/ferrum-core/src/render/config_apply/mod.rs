@@ -1390,6 +1390,27 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
     Ok(warnings)
 }
 
+/// A clone of `scale` with the chart-level `configure_color(...)` override
+/// applied: the color scale the marks are drawn from, for the products of the
+/// scale built before the pipeline applies the override (the colorbar) and for
+/// the legend's re-resolved color scale.
+///
+/// The override's warnings are discarded: the pipeline's own application
+/// ([`apply_color_config_then_filter_legend_entries`]) reports them once for
+/// the same config against the same scale. A refusal (an unparseable `range`
+/// entry) is propagated. Returns an equal clone when the chart sets no color
+/// config.
+pub(in crate::render) fn configured_color_scale(
+    scale: Option<&scale_resolve::ColorScale>,
+    chart_config: &ChartConfig,
+) -> Result<Option<scale_resolve::ColorScale>, RenderError> {
+    let mut configured = scale.cloned();
+    if let Some(ref cfg) = chart_config.color {
+        apply_color_config_to_color_scale(&mut configured, cfg)?;
+    }
+    Ok(configured)
+}
+
 /// Re-derive the color legend's entry labels from the categorical scale domain.
 ///
 /// `prepare_render_inputs` builds the entries from the domain as resolved, but
