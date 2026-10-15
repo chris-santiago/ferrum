@@ -18,7 +18,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning, ScaleDomainSurface};
 
 use super::domain::{
-    apply_sort_to_domain, layered_caller_scale, locate_field, numeric_domain_union,
+    apply_sort_to_domain, layered_caller_scale, locate_field, locate_seed_field, numeric_domain_union,
     numeric_domain_union_over, positional_category_union,
     LayerUnion, SortContext,
 };
@@ -173,9 +173,16 @@ pub(in crate::render) fn build_axis_scale(
     shared: Option<&SharedDomain>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
+    // The bound field is typed, and a caller's categorical scale takes its
+    // categories, from the batch that draws it (layer 0's on a layered spec).
+    // A data-aware sort aggregates the opposite channel's field, which lives
+    // beside the bound field in the chart's data, so the sort reads the batch
+    // `locate_field` finds first.
+    let seed = locate_seed_field(&enc.field, spec, primary_batch, transform_outputs)
+        .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
-    let dtype = infer_spec_type(enc, located.col.data_type());
+    let dtype = infer_spec_type(enc, seed.col.data_type());
     let pr = axis_pixel_range(channel, &dtype, pixel_range);
     // #95: `positional_fields` names the RENDERED channels (the caller derives
     // them from the post-`CoordFlip` encoding), while a `sort="-y"` shorthand
@@ -316,7 +323,7 @@ pub(in crate::render) fn build_axis_scale(
         // matching on it explicitly means a future caller that did route an
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
-        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, &data_extent, warnings)
+        return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, &data_extent, warnings)
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
                     RenderError::InvalidBandPadding { channel, error: e, coord_flipped }

@@ -4155,7 +4155,7 @@ fn d4b_shared_numeric_seeds_auto_path_with_padding() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
 
     // Domain is REPLACED by the shared extent, not the leaf's own [1, 6].
     let (lo, hi) = shared.x.data_domain().unwrap();
@@ -4204,7 +4204,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
     // The union category vector seeds the axis — every leaf renders the full domain.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4239,7 +4239,7 @@ fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
     // Seeded order survives verbatim despite the "-y" sort on the encoding.
     assert_eq!(x_ordinal_domain(&shared), vec!["z", "a", "b", "c", "d"]);
 }
@@ -4257,7 +4257,7 @@ fn d4b_none_context_is_byte_identical_noop() {
     let (plain, _) =
         resolve_scales_with_outputs(&spec, &batch, &empty, pr, pr, &theme).unwrap();
     let (threaded_none, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, None).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, None).unwrap();
 
     assert_eq!(plain.x.data_domain(), threaded_none.x.data_domain());
     assert_eq!(plain.y.data_domain(), threaded_none.y.data_domain());
@@ -4304,7 +4304,7 @@ fn d4b_user_scale_wins_over_shared() {
         ..Default::default()
     };
     let (scales, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
 
     // User scale wins: the explicit [0, 500] domain is used, NOT the shared [-100, 100].
     let (lo, hi) = scales.x.data_domain().unwrap();
@@ -4349,7 +4349,7 @@ fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
     match shared.color.expect("shared color scale") {
         ColorScale::Categorical { domain, .. } => assert_eq!(
             domain,
@@ -4384,7 +4384,7 @@ fn d10preb_shared_size_extent_seeds_scale_through_seam() {
         ..Default::default()
     };
     let (shared, _) =
-        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+        resolve_scales_with_leaf_context(&spec, &spec.encoding, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
     let shared_size = shared.size.expect("shared size scale");
     let (lo, hi) = shared_size.inner.data_domain().unwrap();
     assert!(
@@ -7471,6 +7471,102 @@ fn a_channel_bound_nowhere_still_raises_the_channel_level_error() {
     match err {
         RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "y"),
         other => panic!("expected EncodingTypeMismatch{{channel: \"y\", ..}}, got {other:?}"),
+    }
+}
+
+// --- A chart-level channel reaches a layer only on the chart's data, from the authored encoding ---
+
+/// An encoding binding both `make_batch_q_q_n` positional columns.
+fn both_positional_channels() -> crate::spec::encoding::Encoding {
+    crate::spec::encoding::Encoding { y: single_channel_encoding("y").y, ..single_channel_encoding("x") }
+}
+
+/// The positional channel other than `channel`.
+fn other_channel(channel: &str) -> &'static str {
+    if channel == "x" { "y" } else { "x" }
+}
+
+/// A line binding both channels as layer 0, then `point` as layer 1, with the
+/// line's merge as the rendering encoding.
+fn line_then(point: Layer) -> ChartSpec {
+    use crate::spec::mark::Mark;
+    let mut spec = layered_x_only_spec(Mark::Line, vec![layer_with(Mark::Line, both_positional_channels()), point]);
+    spec.encoding = both_positional_channels();
+    spec
+}
+
+/// Resolves `spec` with `chart_encoding` as its authored chart encoding and the
+/// fixture batch registered as the named output `"other"`.
+fn resolve_against(
+    spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
+) -> Result<(), RenderError> {
+    let batch = make_batch_q_q_n();
+    let outputs = HashMap::from([("other".to_string(), batch.clone())]);
+    resolve_scales_with_leaf_context(
+        spec,
+        chart_encoding,
+        &batch,
+        &outputs,
+        (0.0, 100.0),
+        (0.0, 80.0),
+        &ThemeInputs::default(),
+        None,
+    )
+    .map(|_| ())
+}
+
+fn assert_point_layer_refused(result: Result<(), RenderError>, channel: &str) {
+    match result {
+        Err(RenderError::LayerMissingPositionalChannel { layer, mark, channel: refused, .. }) => {
+            assert_eq!((layer, mark, refused), (1, "point", channel));
+        }
+        other => panic!("expected layer 1 refused for a missing {channel}, got {other:?}"),
+    }
+}
+
+/// A layer on its own data (`data_source`) does not inherit the chart's
+/// positional channels (prepare gives it only the non-positional ones), so a
+/// chart-level binding it does not carry itself leaves it nothing to plot on
+/// that axis: it is refused rather than drawn empty. A value Python filled onto
+/// the layer's own encoding (`inherited_positional`) is the layer's to draw, so
+/// the same layer carrying it resolves.
+#[test]
+fn a_data_source_layer_is_refused_a_chart_level_channel_it_does_not_carry() {
+    use crate::spec::layer::PositionalChannel;
+    use crate::spec::mark::Mark;
+
+    for (channel, filled) in [("x", PositionalChannel::X), ("y", PositionalChannel::Y)] {
+        let routed = |encoding, inherited_positional| Layer {
+            data_source: Some("other".into()),
+            inherited_positional,
+            ..layer_with(Mark::Point, encoding)
+        };
+        let spec = line_then(routed(single_channel_encoding(other_channel(channel)), Vec::new()));
+        assert_point_layer_refused(resolve_against(&spec, &spec.encoding), channel);
+
+        let spec = line_then(routed(both_positional_channels(), vec![filled]));
+        resolve_against(&spec, &spec.encoding)
+            .unwrap_or_else(|e| panic!("a filled {channel} is the layer's own binding: {e:?}"));
+    }
+}
+
+/// A layer on the chart's data inherits the AUTHORED chart encoding, not the
+/// rendering encoding the resolver's `spec` carries (layer 0's merge). A channel
+/// only the rendering encoding binds came from layer 0's own encoding and never
+/// reaches the later layer, which is refused; the same layer resolves when the
+/// authored chart encoding binds the channel.
+#[test]
+fn a_chart_data_layer_reaches_only_the_authored_chart_channels() {
+    use crate::spec::mark::Mark;
+
+    for channel in ["x", "y"] {
+        let spec = line_then(layer_with(Mark::Point, crate::spec::encoding::Encoding::default()));
+        let authored = single_channel_encoding(other_channel(channel));
+        assert_point_layer_refused(resolve_against(&spec, &authored), channel);
+
+        resolve_against(&spec, &both_positional_channels())
+            .unwrap_or_else(|e| panic!("an authored {channel} reaches a chart-data layer: {e:?}"));
     }
 }
 

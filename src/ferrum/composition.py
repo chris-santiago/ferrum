@@ -878,7 +878,6 @@ def inject_scale(chart, channel: str, scale_dict: dict):
     ``_build_merged`` -- the single remaining raw-column
     scale-injection seam (see that function's docstring for why).
     """
-    from ferrum._layer import _Layer
     from ferrum.encoding.base import ChannelBase
     from ferrum.chart import _channel_class_for
 
@@ -892,16 +891,13 @@ def inject_scale(chart, channel: str, scale_dict: dict):
 
     new = chart._clone()
     if new._layers:
+        # Every other field of the layer survives the rewrite.
         new._layers = [
-            _Layer(
-                mark=layer.mark,
+            replace(
+                layer,
                 encoding={
                     k: (_set_on(v) if k == channel else v) for k, v in layer.encoding.items()
                 },
-                mark_kwargs=layer.mark_kwargs,
-                data_source=layer.data_source,
-                position=layer.position,
-                inherited_positional=layer.inherited_positional,
             )
             for layer in new._layers
         ]
@@ -3197,17 +3193,28 @@ class RepeatChart(_CompositeBase):
         from ferrum.repeat import _RepeatPlaceholder
         from ferrum.encoding.base import ChannelBase
 
-        new = source._clone()
-        for axis, ch in list(new._encoding.items()):
-            if isinstance(ch, _RepeatPlaceholder):
-                concrete = self._concrete_field(ch.field, row_field, col_field, layer_field)
-                from ferrum.chart import _channel_class_for
+        def substitute(encoding: dict) -> dict:
+            out = dict(encoding)
+            for axis, ch in encoding.items():
+                if isinstance(ch, _RepeatPlaceholder):
+                    concrete = self._concrete_field(ch.field, row_field, col_field, layer_field)
+                    from ferrum.chart import _channel_class_for
 
-                cls = _channel_class_for(axis) or _channel_class_for("x")
-                new._encoding[axis] = cls(concrete)
-            elif isinstance(ch, ChannelBase) and isinstance(ch.field, _RepeatPlaceholder):
-                concrete = self._concrete_field(ch.field.field, row_field, col_field, layer_field)
-                new._encoding[axis] = ch.__class__(concrete)
+                    cls = _channel_class_for(axis) or _channel_class_for("x")
+                    out[axis] = cls(concrete)
+                elif isinstance(ch, ChannelBase) and isinstance(ch.field, _RepeatPlaceholder):
+                    concrete = self._concrete_field(
+                        ch.field.field, row_field, col_field, layer_field
+                    )
+                    out[axis] = ch.__class__(concrete)
+            return out
+
+        new = source._clone()
+        new._encoding = substitute(new._encoding)
+        # A placeholder bound on a composition resolves for its right-hand
+        # layers as it does in the chart encoding.
+        if new._written_positional is not None:
+            new._written_positional = substitute(new._written_positional)
         return new
 
     @staticmethod

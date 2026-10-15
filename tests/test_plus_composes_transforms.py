@@ -27,6 +27,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._svg_extents import axis_tick_labels
 
 _N = 241
 _VALUES = [sum(math.sin(i * k * 0.7311 + k) for k in range(1, 7)) for i in range(_N)]
@@ -226,19 +227,69 @@ def test_two_contours_over_different_frames_each_draw_their_own_output():
     assert _plot_marks((a + b).to_svg()) == _plot_marks(fm.LayerChart(a, b).to_svg())
 
 
+def _tick_labels(svg: str) -> list[str]:
+    """Every text label the chart draws: axis ticks, axis titles and legend entries."""
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+
+def _point_by_group(data=DF):
+    return fm.Chart(data).mark_point().encode(x="g", y="value")
+
+
+def _mean_bar(data=DF):
+    return fm.Chart(data).mark_bar().encode(x="g", y=fm.Y("value", aggregate="mean"))
+
+
+def _violin(data=DF):
+    return fm.Chart(data).mark_violin().encode(x="g", y="value")
+
+
+def _imputed_ticks(data=DF):
+    return (
+        fm.Chart(data)
+        .transform(fm.transform_impute("value", value=0.0), fm.transform_impute("y", value=0.0))
+        .mark_tick()
+        .encode(x="value")
+    )
+
+
+_OTHER_COLUMNS = DF_SHIFTED.rename({"value": "w", "y": "y2"}).with_columns(
+    pl.Series("c", ["p", "q"] * (_N // 2) + ["p"])
+)
+
+
 @pytest.mark.parametrize(
-    "right",
+    "operands",
     [
-        pytest.param(lambda: _box(DF_SHIFTED), id="other-frame"),
+        pytest.param(lambda: (_box(), _box(DF_SHIFTED)), id="boxplot+boxplot-other-frame"),
         pytest.param(
-            lambda: _box(DF_SHIFTED.rename({"y": "w"})), id="overlapping-frame-with-chain"
+            lambda: (_box(), _box(DF_SHIFTED.rename({"y": "w"}))),
+            id="boxplot+boxplot-overlapping-frame",
         ),
+        pytest.param(lambda: (_violin(), _violin(DF_SHIFTED)), id="violin+violin"),
+        pytest.param(lambda: (_box(), _point_by_group(DF_SHIFTED)), id="boxplot+point"),
+        pytest.param(lambda: (_mean_bar(), _mean_bar(DF_SHIFTED)), id="mean-bar+mean-bar"),
+        # A nested branch from an earlier `+` reads only its operand's rows:
+        # imputing over the combined rows would turn the other frame's
+        # padding into extra ticks.
+        pytest.param(
+            lambda: (P() + _imputed_ticks(), T(DF_SHIFTED)), id="nested-imputed-ticks+tick"
+        ),
+        pytest.param(
+            lambda: (H(), fm.Chart(_OTHER_COLUMNS).mark_point().encode(x="w", y="y2", color="c")),
+            id="histogram+colored-point",
+        ),
+        pytest.param(lambda: (_contour(), _contour(DF_SHIFTED)), id="contour+contour"),
+        pytest.param(lambda: (H(), D(DF_SHIFTED)), id="histogram+density-overlapping-frame"),
     ],
 )
-def test_two_boxplots_over_different_frames_each_draw_their_own_boxes(right):
-    """Each boxplot reads its own statistics: the same box, whisker and outlier marks as LayerChart."""
-    a, b = _box(), right()
-    assert _census((a + b).to_svg()) == _census(fm.LayerChart(a, b).to_svg())
+def test_operands_over_different_frames_each_read_their_own_rows(operands):
+    """Each operand's chain runs over only the rows it brought, as LayerChart draws it."""
+    a, b = operands()
+    composed = (a + b).to_svg()
+    oracle = fm.LayerChart(a, b).to_svg()
+    assert _plot_marks(composed) == _plot_marks(oracle)
+    assert _tick_labels(composed) == _tick_labels(oracle)
 
 
 def test_two_contours_render_on_the_interactive_route():
@@ -251,9 +302,11 @@ def test_two_contours_render_on_the_interactive_route():
 
 def test_two_boxplots_render_on_the_interactive_route():
     a, b = _box(), _box(DF_SHIFTED)
-    merged = fm.LayerChart(a, b)._build_merged()
-    assert _census(merged.to_svg()) == _census(fm.LayerChart(a, b).to_svg())
+    merged = fm.LayerChart(a, b)._build_merged().to_svg()
+    oracle = fm.LayerChart(a, b).to_svg()
     assert "<html" in fm.LayerChart(a, b).interactive().to_html().lower()
+    assert _plot_marks(merged) == _plot_marks(oracle)
+    assert _tick_labels(merged) == _tick_labels(oracle)
 
 
 def test_two_contours_render_with_independent_y():
@@ -365,6 +418,516 @@ def test_a_routed_layer_keeps_its_operands_positional_channels(operands):
     composed = _plot_marks((a + b).to_svg())
     assert composed == _plot_marks(fm.LayerChart(a, b).to_svg())
     assert "<circle" in composed or "<line" in composed
+
+
+# ---------------------------------------------------------------------------
+# A left-hand layer reading its own rows keeps taking the chart's x/y.
+# ---------------------------------------------------------------------------
+
+_UV = pl.DataFrame({"u": [1.0, 2.0, 3.0], "v": [3.0, 2.0, 1.0]})
+
+
+def _unencoded_filtered_points():
+    return fm.Chart(DF).transform(_positive()).mark_point()
+
+
+def _uv_line():
+    return fm.Chart(_UV).mark_line().encode(x="u", y="v")
+
+
+def test_a_chart_level_encode_after_the_merge_reaches_the_left_operands_rows():
+    """The left chain runs over its own rows, and its layer still reads the composed chart's x/y."""
+    after = (_unencoded_filtered_points() + _uv_line()).encode(x="value", y="y")
+    before = _unencoded_filtered_points().encode(x="value", y="y") + _uv_line()
+    svg = after.to_svg()
+    assert svg.count("<circle") == _N_POSITIVE
+    assert _plot_marks(svg) == _plot_marks(before.to_svg())
+
+
+def test_a_composed_chart_as_an_operand_keeps_its_own_x_and_y():
+    """Once a composed chart is an operand, its own encoding stays with the layers it gave x/y."""
+    composed = _unencoded_filtered_points() + _uv_line()
+    a = composed.encode(x="value", y="y")
+    b = composed.encode(x="value", y="value")
+    assert _plot_marks((a + b).to_svg()) == _plot_marks(fm.LayerChart(a, b).to_svg())
+
+
+# ---------------------------------------------------------------------------
+# A chart-level x/y bound on the composition reaches a routed right layer too.
+# ---------------------------------------------------------------------------
+
+_AB_LEFT = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [1.0, 2.0, 3.0]})
+_AB_RIGHT = pl.DataFrame({"a": [10.0, 20.0], "b": [10.0, 20.0]})
+
+
+def _bare_points(data, *chain):
+    chart = fm.Chart(data)
+    if chain:
+        chart = chart.transform(*chain)
+    return chart.mark_point()
+
+
+@pytest.mark.parametrize(
+    "right",
+    [
+        pytest.param(lambda: _bare_points(_AB_RIGHT), id="overlapping-frame-no-chain"),
+        pytest.param(
+            lambda: _bare_points(_AB_RIGHT, fm.transform_filter("datum.a > 0")),
+            id="overlapping-frame-with-chain",
+        ),
+    ],
+)
+def test_an_encode_after_a_cross_frame_merge_reaches_the_right_layer(right):
+    """The right layer draws the right frame's own a/b, as LayerChart draws it."""
+    composed = (_bare_points(_AB_LEFT) + right()).encode(x="a", y="b")
+    oracle = fm.LayerChart(
+        _bare_points(_AB_LEFT).encode(x="a", y="b"), right().encode(x="a", y="b")
+    )
+    svg = composed.to_svg()
+    assert svg.count("<circle") == _AB_LEFT.height + _AB_RIGHT.height
+    assert _plot_marks(svg) == _plot_marks(oracle.to_svg())
+    assert _tick_labels(svg) == _tick_labels(oracle.to_svg())
+
+
+def test_an_encode_after_a_same_data_merge_reaches_the_routed_right_layer():
+    right = _bare_points(DF, _positive())
+    composed = (_bare_points(DF) + right).encode(x="value", y="y")
+    oracle = _bare_points(DF).encode(x="value", y="y") + right.encode(x="value", y="y")
+    svg = composed.to_svg()
+    assert svg.count("<circle") == _N + _N_POSITIVE
+    assert _plot_marks(svg) == _plot_marks(oracle.to_svg())
+
+
+# ---------------------------------------------------------------------------
+# The left operand's written x/y reaches a right layer that binds none; a
+# binding a composite placed reaches it only once the composition binds it.
+# ---------------------------------------------------------------------------
+
+_RIGHT_ROUTES = {
+    "overlapping-frame-no-chain": lambda: _bare_points(_AB_RIGHT),
+    "overlapping-frame-with-chain": lambda: _bare_points(
+        _AB_RIGHT, fm.transform_filter("datum.a > 0")
+    ),
+    "same-data-with-chain": lambda: _bare_points(_AB_LEFT, fm.transform_filter("datum.a > 1")),
+}
+_RIGHT_ROWS = {
+    "overlapping-frame-no-chain": _AB_RIGHT.height,
+    "overlapping-frame-with-chain": _AB_RIGHT.height,
+    "same-data-with-chain": 2,
+}
+
+
+def _left_ab():
+    return _bare_points(_AB_LEFT).encode(x="a", y="b")
+
+
+@pytest.fixture(params=sorted(_RIGHT_ROUTES))
+def route(request):
+    return request.param
+
+
+def test_the_left_operands_written_x_y_reaches_a_right_layer_that_binds_none(route):
+    right = _RIGHT_ROUTES[route]
+    svg = (_left_ab() + right()).to_svg()
+    oracle = fm.LayerChart(_left_ab(), right().encode(x="a", y="b")).to_svg()
+    assert svg.count("<circle") == _AB_LEFT.height + _RIGHT_ROWS[route]
+    assert _plot_marks(svg) == _plot_marks(oracle)
+
+
+def test_a_same_data_right_operand_without_a_chain_inherits_natively():
+    svg = (_left_ab() + _bare_points(_AB_LEFT)).to_svg()
+    assert svg.count("<circle") == 2 * _AB_LEFT.height
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        pytest.param(lambda c: c.encode(x="a", y="b"), id="exact-re-encode"),
+        pytest.param(lambda c: c.encode(x="b").encode(x="a", y="b"), id="after-another-binding"),
+    ],
+)
+def test_re_encoding_the_left_operands_binding_draws_every_right_point(route, encode):
+    right = _RIGHT_ROUTES[route]
+    svg = encode(_left_ab() + right()).to_svg()
+    assert svg.count("<circle") == _AB_LEFT.height + _RIGHT_ROWS[route]
+    assert _plot_marks(svg) == _plot_marks(
+        fm.LayerChart(_left_ab(), right().encode(x="a", y="b")).to_svg()
+    )
+
+
+def test_a_partial_re_encode_reaches_both_channels(route):
+    right = _RIGHT_ROUTES[route]
+    svg = (_left_ab() + right()).encode(x="a", y="a").to_svg()
+    assert svg.count("<circle") == _AB_LEFT.height + _RIGHT_ROWS[route]
+    oracle = fm.LayerChart(_left_ab().encode(y="a"), right().encode(x="a", y="a")).to_svg()
+    assert _plot_marks(svg) == _plot_marks(oracle)
+
+
+def _histogram_left():
+    return fm.Chart(_AB_LEFT).mark_histogram().encode(x="a")
+
+
+def _y_only_rule(route):
+    chart = fm.Chart(_AB_LEFT if route == "same-data-with-chain" else _AB_RIGHT)
+    if route != "overlapping-frame-no-chain":
+        chart = chart.transform(fm.transform_filter("datum.a > 0"))
+    return chart.mark_rule().encode(y="b")
+
+
+def test_a_right_layer_takes_the_left_binding_as_written_even_after_a_retitle(route):
+    """The y-only rule gets the histogram's written x="a", never its binned bin_start."""
+    composed = _histogram_left() + _y_only_rule(route)
+    for chart in (composed, composed.labs(x="T")):
+        rule = json.loads(chart.to_spec().to_json())["layers"][-1]
+        assert rule["encoding"]["x"]["field"].split("__rhs_")[0] == "a", rule
+    assert _plot_marks(composed.labs(x="T").to_svg()) == _plot_marks(composed.to_svg())
+
+
+def test_a_placed_binding_reaches_a_right_layer_once_the_composition_binds_it(route):
+    right = _RIGHT_ROUTES[route]
+    composed = (_histogram_left() + right()).encode(x="a", y="b")
+    assert composed.to_svg().count("<circle") == _RIGHT_ROWS[route]
+
+
+@pytest.mark.parametrize("ci", [None, 0.95], ids=["smooth", "smooth-ci"])
+def test_a_smooth_left_operand_hands_its_written_x_y_to_a_right_layer(route, ci):
+    """mark_smooth rewrites its x/y to the fit's columns; the right layer gets the written a/b."""
+    right = _RIGHT_ROUTES[route]
+    left = fm.Chart(_AB_LEFT).mark_smooth(ci=ci).encode(x="a", y="b")
+    svg = (left + right()).to_svg()
+    assert svg.count("<circle") == _RIGHT_ROWS[route]
+    assert _plot_marks(svg) == _plot_marks(
+        fm.LayerChart(left, right().encode(x="a", y="b")).to_svg()
+    )
+
+
+@pytest.mark.parametrize(
+    "compose",
+    [
+        pytest.param(lambda right: _histogram_left() + right(), id="bare-right"),
+        pytest.param(
+            lambda right: (_histogram_left() + right()).encode(x="a"), id="composition-binds-x"
+        ),
+    ],
+)
+def test_a_right_layer_left_without_y_is_refused_as_layerchart_refuses_it(route, compose):
+    """The histogram's count y was never written, so the right point has no y to plot."""
+    right = _RIGHT_ROUTES[route]
+    with pytest.raises(ValueError, match="needs both positional channels, but no 'y'"):
+        compose(right).to_svg()
+    with pytest.raises(ValueError):
+        fm.LayerChart(_histogram_left(), right()).to_svg()
+
+
+def test_an_encode_on_an_outer_composition_reaches_every_nested_right_layer():
+    inner = _histogram_left() + _bare_points(_AB_RIGHT, fm.transform_filter("datum.a > 0"))
+    third = pl.DataFrame({"a": [5.0], "b": [5.0]})
+    composed = (inner + _bare_points(third)).encode(x="a", y="b")
+    assert composed.to_svg().count("<circle") == _AB_RIGHT.height + third.height
+
+
+# ---------------------------------------------------------------------------
+# The composition's written bindings survive nesting and later encodes.
+# ---------------------------------------------------------------------------
+
+_ABC_LEFT = pl.DataFrame(
+    {"a": [1.0, 2.0, 3.0, 4.0], "b": [1.0, 3.0, 2.0, 4.0], "c": [100.0, 200.0, 300.0, 400.0]}
+)
+_ABC_RIGHT = pl.DataFrame({"a": [10.0, 20.0], "b": [10.0, 20.0], "c": [500.0, 600.0]})
+_ABC_THIRD = pl.DataFrame({"a": [30.0, 40.0, 50.0], "b": [30.0, 40.0, 50.0]})
+
+
+def _abc_right(route):
+    if route == "overlapping-frame-no-chain":
+        return _bare_points(_ABC_RIGHT)
+    if route == "overlapping-frame-with-chain":
+        return _bare_points(_ABC_RIGHT, fm.transform_filter("datum.a > 0"))
+    return _bare_points(_ABC_LEFT, fm.transform_filter("datum.a > 1"))
+
+
+def _abc_right_rows(route):
+    return 3 if route == "same-data-with-chain" else _ABC_RIGHT.height
+
+
+_WRITING_LEFTS = {
+    "point": lambda: _bare_points(_ABC_LEFT).encode(x="a", y="b"),
+    "line": lambda: fm.Chart(_ABC_LEFT).mark_line().encode(x="a", y="b"),
+    "smooth": lambda: fm.Chart(_ABC_LEFT).mark_smooth().encode(x="a", y="b"),
+    "smooth-ci": lambda: fm.Chart(_ABC_LEFT).mark_smooth(ci=0.95).encode(x="a", y="b"),
+}
+
+
+def _right_field(chart, channel="x"):
+    """The field the last layer reads on *channel*, without the merge's rename suffix."""
+    layer = json.loads(chart.to_spec().to_json())["layers"][-1]
+    return layer["encoding"][channel]["field"].split("__rhs_")[0]
+
+
+@pytest.mark.parametrize("left", ["point", "smooth", "histogram"])
+def test_an_encode_after_a_rewriting_left_reaches_the_right_layer(route, left):
+    """A later x binding replaces the left's written one for the right layer."""
+    lefts = {
+        **_WRITING_LEFTS,
+        "histogram": lambda: fm.Chart(_ABC_LEFT).mark_histogram().encode(x="a"),
+    }
+    composed = (lefts[left]() + _abc_right(route)).encode(x="c")
+    assert _right_field(composed) == "c"
+
+
+@pytest.mark.parametrize("left", sorted(_WRITING_LEFTS))
+def test_both_groupings_of_three_operands_draw_every_right_point(left):
+    """``a + b + c`` and ``a + (b + c)`` both hand the left's written x/y on."""
+    third = _bare_points(_ABC_THIRD)
+    left_points = _ABC_LEFT.height if left == "point" else 0
+    for composed in (
+        _WRITING_LEFTS[left]() + _bare_points(_ABC_RIGHT) + third,
+        _WRITING_LEFTS[left]() + (_bare_points(_ABC_RIGHT) + third),
+    ):
+        assert composed.to_svg().count("<circle") == (
+            left_points + _ABC_RIGHT.height + _ABC_THIRD.height
+        )
+
+
+def test_an_encode_on_an_inner_composition_reaches_the_outer_right_layer():
+    inner = (_WRITING_LEFTS["smooth"]() + _bare_points(_ABC_RIGHT)).encode(x="c")
+    composed = inner + _bare_points(_ABC_THIRD.with_columns(c=pl.col("a") * 10))
+    layers = json.loads(composed.to_spec().to_json())["layers"]
+    assert [layer["encoding"]["x"]["field"].split("__rhs_")[0] for layer in layers[-2:]] == [
+        "c",
+        "c",
+    ]
+    assert composed.to_svg().count("<circle") == _ABC_RIGHT.height + _ABC_THIRD.height
+
+
+def test_a_composed_right_operand_hands_its_own_written_x_y_to_its_layers():
+    right = _bare_points(_ABC_RIGHT).encode(x="a", y="b") + _bare_points(_ABC_THIRD)
+    composed = fm.Chart(_ABC_LEFT).mark_smooth().encode(x="c", y="c") + right
+    assert _right_field(composed) == "a"
+    assert _right_field(composed, "y") == "b"
+    assert composed.to_svg().count("<circle") == _ABC_RIGHT.height + _ABC_THIRD.height
+
+
+def test_a_right_layer_drawn_once_the_composition_binds_the_missing_y(route):
+    composed = (fm.Chart(_ABC_LEFT).mark_histogram().encode(x="a") + _abc_right(route)).encode(
+        y="b"
+    )
+    assert composed.to_svg().count("<circle") == _abc_right_rows(route)
+
+
+def test_a_written_x2_reaches_a_bare_right_rule():
+    """A left rule's written x/x2/y reach the right rule, as LayerChart draws both encoded."""
+    left = fm.Chart(_ABC_LEFT).mark_rule().encode(x="a", x2="b", y="c")
+    right = fm.Chart(_ABC_RIGHT).mark_rule()
+    composed = left + right
+    assert _right_field(composed, "x2") == "b"
+    oracle = fm.LayerChart(left, right.encode(x="a", x2="b", y="c"))
+    assert _plot_marks(composed.to_svg()) == _plot_marks(oracle.to_svg())
+
+
+def test_a_histograms_binned_x2_never_reaches_a_right_layer(route):
+    composed = (fm.Chart(_ABC_LEFT).mark_histogram().encode(x="a") + _abc_right(route)).encode(
+        y="b"
+    )
+    layer = json.loads(composed.to_spec().to_json())["layers"][-1]
+    assert "x2" not in layer["encoding"], layer
+
+
+def test_a_repeat_placeholder_bound_on_a_composition_reaches_the_right_layer():
+    template = (
+        _bare_points(_ABC_LEFT) + _bare_points(_ABC_RIGHT, fm.transform_filter("datum.a > 0"))
+    ).encode(x=fm.Repeat.column, y="b")
+    svg = fm.RepeatChart(template, column=["a", "c"]).to_svg()
+    assert svg.count("<circle") == 2 * (_ABC_LEFT.height + _ABC_RIGHT.height)
+
+
+_D1 = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [1.0, 2.0, 2.5, 4.0]})
+_D2 = pl.DataFrame({"a": [10.0, 20.0], "b": [10.0, 20.0]})
+
+
+def _bare_composition():
+    """Two filtered frames composed with no x/y of their own."""
+    keep = fm.transform_filter("datum.a > 0")
+    return _bare_points(_D1, keep) + _bare_points(_D2, keep)
+
+
+@pytest.mark.parametrize("mark", ["point", "smooth"])
+@pytest.mark.parametrize(
+    "shares_chain",
+    [
+        pytest.param(False, id="routed-named-steps"),
+        pytest.param(True, id="left-runs-the-right-chain"),
+    ],
+)
+def test_a_composed_same_data_right_operand_takes_the_left_written_x_y(mark, shares_chain):
+    """The composition's layers draw the left's written a/b, as if bound on the composition."""
+    inner = _bare_composition()
+    base = fm.Chart(inner._data)
+    if shares_chain:
+        base = base.transform(*inner._transforms)
+    left = getattr(base, f"mark_{mark}")().encode(x="a", y="b")
+    svg = (left + inner).to_svg()
+    oracle = (left + inner.encode(x="a", y="b")).to_svg()
+    assert svg.count("<circle") >= _D1.height + _D2.height
+    assert _plot_marks(svg) == _plot_marks(oracle)
+
+
+# ---------------------------------------------------------------------------
+# A flipped, colored layered chart renders its legend.
+# ---------------------------------------------------------------------------
+
+
+def test_a_flipped_colored_bar_with_inheriting_labels_renders():
+    """The value axis spans v, in static and interactive output."""
+    frame = pl.DataFrame({"g": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
+    chart = (
+        fm.Chart(frame).mark_bar().encode(x="g", y="v", color="g")
+        + fm.Chart(frame).mark_text().encode(text="v")
+    ).coord(fm.CoordFlip())
+    svg = chart.to_svg()
+    value_ticks = [float(t) for t in axis_tick_labels(svg, axis="x")]
+    assert value_ticks[0] <= 1.0 and value_ticks[-1] >= 3.0, value_ticks
+    assert len(re.findall(r"<rect [^>]*fill=\"#", _plot_marks(svg))) == frame.height
+    assert "<html" in chart.interactive().to_html().lower()
+
+
+# ---------------------------------------------------------------------------
+# A step added to the composition reaches the layers reading the chart's rows.
+# ---------------------------------------------------------------------------
+
+_V = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0]})
+_W = pl.DataFrame({"w": [10.0, 20.0, 30.0]})
+
+
+def _filtered_v_points():
+    return (
+        fm.Chart(_V).transform(fm.transform_filter("datum.v > 1")).mark_point().encode(x="v", y="v")
+    )
+
+
+def _own_chain_w_points(data=_W):
+    return (
+        fm.Chart(data)
+        .transform(fm.transform_filter("datum.w > 0"))
+        .mark_point()
+        .encode(x="w", y="w")
+    )
+
+
+def test_a_step_after_a_cross_frame_merge_reaches_the_left_operands_rows():
+    """The post-merge filter runs over the left rows; the right chain is its own."""
+    composed = (_filtered_v_points() + _own_chain_w_points()).transform(
+        fm.transform_filter("datum.v < 4")
+    )
+    # v in {2, 3} on the left, and every right point.
+    assert composed.to_svg().count("<circle") == 2 + _W.height
+
+
+def test_steps_after_nested_merges_reach_the_innermost_left_rows_in_order():
+    third = pl.DataFrame({"w": [40.0, 50.0]})
+    inner = (_filtered_v_points() + _own_chain_w_points()).transform(
+        fm.transform_filter("datum.v < 5")
+    )
+    composed = (inner + _own_chain_w_points(third)).transform(fm.transform_filter("datum.v > 2"))
+    # v > 1, then v < 5, then v > 2: v in {3, 4}; both right operands keep every point.
+    assert composed.to_svg().count("<circle") == 2 + _W.height + third.height
+
+
+def test_a_composition_with_a_step_used_as_a_right_operand_draws_as_it_does_alone():
+    inner = (_filtered_v_points() + _own_chain_w_points()).transform(
+        fm.transform_filter("datum.v < 4")
+    )
+    left = fm.Chart(_UV).mark_line().encode(x="u", y="v")
+    svg = (left + inner).to_svg()
+    assert svg.count("<circle") == inner.to_svg().count("<circle") == 2 + _W.height
+    assert _plot_marks(svg) == _plot_marks(fm.LayerChart(left, inner).to_svg())
+
+
+def test_a_left_per_layer_count_sees_a_step_added_after_the_merge():
+    """The count runs over the left rows the post-merge filter keeps: v in {2, 3}."""
+    rule = fm.Chart(_V).transform(fm.transform_filter("datum.v > 1")).mark_rule()
+    composed = (rule.encode(y="count()") + _own_chain_w_points()).transform(
+        fm.transform_filter("datum.v < 4")
+    )
+    expected = (
+        fm.Chart(_V)
+        .transform(fm.transform_filter("datum.v > 1"), fm.transform_filter("datum.v < 4"))
+        .mark_rule()
+        .encode(y="count()")
+        + _own_chain_w_points()
+    )
+    assert _plot_marks(composed.to_svg()) == _plot_marks(expected.to_svg())
+
+
+# ---------------------------------------------------------------------------
+# A per-layer aggregate over different frames counts only its own rows.
+# ---------------------------------------------------------------------------
+
+_COUNTED = pl.DataFrame({"g": ["a", "b", "a", "b"], "value": [1.0, 2.0, 3.0, 4.0]})
+
+
+def _many_points(n, column="h"):
+    return (
+        fm.Chart(pl.DataFrame({column: ["c"] * n, "w": [0.5] * n}))
+        .mark_point()
+        .encode(x="w", y="w")
+    )
+
+
+@pytest.mark.parametrize("column", ["h", "g"], ids=["disjoint-columns", "overlapping-columns"])
+@pytest.mark.parametrize("order", ["count-first", "count-second"])
+def test_a_count_beside_another_frame_counts_only_its_own_rows(column, order):
+    """The count is 4 whether the other frame has 3 rows or 50."""
+    rule = fm.Chart(_COUNTED).mark_rule().encode(y="count()")
+
+    def compose(n):
+        other = _many_points(n, column)
+        return rule + other if order == "count-first" else other + rule
+
+    assert _tick_labels(compose(50).to_svg()) == _tick_labels(compose(3).to_svg())
+    assert max(float(t) for t in _tick_labels(compose(50).to_svg()) if t[0].isdigit()) < 10
+
+
+def test_a_binned_count_bar_beside_another_frame_counts_only_its_own_rows():
+    """The bars are the same whether the other frame holds its rows once or twice."""
+    other = DF_SHIFTED.rename({"value": "w"})
+
+    def compose(frame):
+        return _binned_bar() + fm.Chart(frame).mark_point().encode(x="w", y="y")
+
+    assert _rect_heights(compose(other).to_svg()) == _rect_heights(
+        compose(pl.concat([other, other])).to_svg()
+    )
+
+
+# ---------------------------------------------------------------------------
+# LayerChart's shared-scale injection keeps every other field of a layer.
+# ---------------------------------------------------------------------------
+
+
+def test_a_shared_scale_keeps_an_encode_after_reaching_the_left_rows():
+    """Every kept left point lies inside the shared x domain, so all of them draw."""
+    left = pl.DataFrame({"value": [-2.0, -1.0, 1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    composed = (fm.Chart(left).transform(_positive()).mark_point() + _uv_line()).encode(
+        x="value", y="y"
+    )
+    other = fm.Chart(_UV).mark_point().encode(x="u", y="v")
+    chart = fm.LayerChart(composed, other, resolve={"x": "shared"})
+    assert chart._build_merged().to_svg().count("<circle") == 3 + _UV.height
+    assert "<html" in chart.interactive().to_html().lower()
+
+
+def test_injecting_a_shared_scale_changes_only_the_channel_it_sets():
+    from dataclasses import fields
+
+    from ferrum.composition import inject_scale
+
+    member = P() + fm.SecondaryY("value")
+    injected = inject_scale(member, "x", {"domain": [0.0, 1.0]})
+    for before, after in zip(member._layers, injected._layers, strict=True):
+        for f in fields(before):
+            if f.name != "encoding":
+                assert getattr(after, f.name) == getattr(before, f.name), f.name
+    assert any(layer.independent_y for layer in injected._layers)
 
 
 # ---------------------------------------------------------------------------

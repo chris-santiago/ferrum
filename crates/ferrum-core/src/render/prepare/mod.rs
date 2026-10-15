@@ -1247,6 +1247,7 @@ pub fn prepare_render_inputs(
     let (provisional_scales, provisional_scale_warnings) =
         crate::render::scale_resolve::resolve_scales_with_leaf_context(
             &rendering_spec,
+            &spec.encoding,
             &transformed,
             &transform_outputs,
             (0.0, 1.0),

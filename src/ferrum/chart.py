@@ -23,6 +23,8 @@ from ferrum._layer_transforms import (
     _Branch,
     _NamedTransform,
     _advances_chain,
+    _layer_pending_aggregates,
+    _layer_pending_bins,
     _resolve_layer_aggregates,
     _same_step,
     _resolve_layer_bins,
@@ -254,18 +256,112 @@ def _source_identity(name: str) -> _NamedTransform:
 _POSITIONAL_CHANNELS = ("x", "y", "x2", "y2")
 
 
-def _point_rhs_layers(
-    layers: list, *, tail: str, operand_encoding: dict, scope: str | None = None
-) -> list:
-    """Point the RHS operand's layers at the named outputs they read.
+def _written_bindings(chart: "Chart") -> dict:
+    """Return the positional bindings *chart*'s callers wrote, latest per channel.
+
+    A chart ``chart + chart`` produced carries them in ``_written_positional``:
+    its left operand's at the merge, then each ``.encode(...)`` on the
+    composition. Any other chart's own pre-resolution encoding is its written
+    bindings (a composite that rewrites x/y is still pending when ``+`` reads
+    it). A channel absent from the result is one no caller wrote.
+    """
+    if chart._written_positional is not None:
+        return dict(chart._written_positional)
+    return {ch: chart._encoding[ch] for ch in _POSITIONAL_CHANNELS if ch in chart._encoding}
+
+
+def _fill_chart_positional(layers: list, chart: "Chart") -> list:
+    """Copy *chart*'s positional channels onto each layer that takes them from it.
+
+    A layer with ``positional_source`` set reads a named output, and Rust
+    passes such a layer none of the chart's positional channels, so each of
+    x, y, x2 and y2 its source binds and the layer does not is copied onto the
+    layer, renamed by its ``positional_renames``, and listed in its
+    ``inherited_positional``: Rust treats a listed channel as inherited, not
+    owned, exactly as it treats a chart channel a layer reading the chart's
+    rows inherits. The source is the chart's encoding for ``"encoding"`` (a
+    left operand's tail reader, drawing as on its own chart) and the chart's
+    written bindings for ``"written"`` (a layer a merge routed from the right
+    side, see :func:`_written_bindings`). Every other layer is returned
+    unchanged.
+    """
+    from dataclasses import replace as _dc_replace
+
+    written = None
+    out = []
+    for layer in layers:
+        if layer.positional_source is None:
+            out.append(layer)
+            continue
+        if layer.positional_source == "encoding":
+            source = chart._encoding
+        else:
+            if written is None:
+                written = _written_bindings(chart)
+            source = written
+        filled = {
+            ch: copy.copy(source[ch])
+            for ch in _POSITIONAL_CHANNELS
+            if ch in source and ch not in layer.encoding
+        }
+        if filled and layer.positional_renames:
+            filled = _rename_encoding_fields(filled, dict(layer.positional_renames))
+        out.append(
+            _dc_replace(
+                layer,
+                encoding={**layer.encoding, **filled},
+                inherited_positional=layer.inherited_positional + tuple(filled),
+            )
+        )
+    return out
+
+
+def _settle_chart_rows(layers: list, chain: list) -> tuple[list, list]:
+    """Run *chain*'s unnamed steps over the rows each ``rows_from_chart`` layer reads.
+
+    A layer with ``rows_from_chart`` set reads its operand's share of the
+    chart's rows through a named output, so the chart's own unnamed steps
+    (a ``.transform(...)`` added after the merge) would never reach it. For
+    each distinct ``data_source`` among those layers, the steps run as one
+    ``_Branch`` over that output, the same shape a per-layer aggregate takes
+    over the output its layer reads, and the layers read the branch instead.
+    Encoding-level aggregate and bin sentinels stay per layer. Returns the
+    re-pointed layers and the branches for the caller to add as named steps;
+    with no unnamed step, or no such layer, nothing changes.
+    """
+    from dataclasses import replace as _dc_replace
+
+    from ferrum.encoding.base import _PendingBin
+
+    steps = [
+        t
+        for t in chain
+        if not isinstance(t, (_PendingAggregate, _PendingBin)) and _advances_chain(t)
+    ]
+    if not steps:
+        return layers, []
+    branches: dict[str, _Branch] = {}
+    out = []
+    for layer in layers:
+        if layer.rows_from_chart and layer.data_source is not None:
+            branch = branches.get(layer.data_source)
+            if branch is None:
+                branch = _Branch("", layer.data_source, steps)
+                branch.name = f"_auto_{id(branch):x}"
+                branches[layer.data_source] = branch
+            layer = _dc_replace(layer, data_source=branch.name)
+        out.append(layer)
+    return out, list(branches.values())
+
+
+def _read_operand_tail(layers: list, *, tail: str, source: str, scope: str | None = None) -> list:
+    """Point one ``+`` operand's layers at *tail*, keeping their chart's positional channels.
 
     A layer reading the pipeline tail (no ``data_source``) reads *tail*
-    instead. Rust passes a layer that has a ``data_source`` none of the
-    chart's positional channels, so each of x, y, x2 and y2 the operand chart
-    binds and the layer does not is copied onto the layer and listed in its
-    ``inherited_positional``: the layer draws as it does on its own chart,
-    where it inherits them. A layer reading an output its operand named
-    keeps it, addressed under *scope* when the operand's chain runs as a
+    instead and takes *source* as its ``positional_source``, so it still takes
+    each positional channel it does not bind from its chart (see
+    :func:`_fill_chart_positional`). A layer reading an output its operand
+    named keeps it, addressed under *scope* when the operand's chain runs as a
     branch of that name (a branch publishes its inner outputs under
     ``secondary_key(branch, key)``).
     """
@@ -275,43 +371,45 @@ def _point_rhs_layers(
 
     out = []
     for layer in layers:
-        if layer.data_source is not None:
-            if scope is not None:
-                layer = _dc_replace(layer, data_source=secondary_key(scope, layer.data_source))
-            out.append(layer)
-            continue
-        filled = {
-            ch: copy.copy(operand_encoding[ch])
-            for ch in _POSITIONAL_CHANNELS
-            if ch in operand_encoding and ch not in layer.encoding
-        }
-        out.append(
-            _dc_replace(
-                layer,
-                data_source=tail,
-                encoding={**layer.encoding, **filled},
-                inherited_positional=layer.inherited_positional + tuple(filled),
-            )
-        )
+        if layer.data_source is None:
+            layer = _dc_replace(layer, data_source=tail, positional_source=source)
+        elif scope is not None:
+            layer = _dc_replace(layer, data_source=secondary_key(scope, layer.data_source))
+        out.append(layer)
     return out
 
 
+def _point_operand_layers(
+    layers: list, *, tail: str, operand: "Chart", scope: str | None = None
+) -> list:
+    """Point the right ``+`` operand's layers at the named outputs they read.
+
+    As :func:`_read_operand_tail`, with the positional channels the *operand*
+    chart binds copied onto each tail reader now: the layer draws as it does
+    on its own chart, where it inherits them. ``Chart.__add__`` then has every
+    right layer with a role take the composition's written bindings.
+    """
+    return _fill_chart_positional(
+        _read_operand_tail(layers, tail=tail, source="encoding", scope=scope), operand
+    )
+
+
 def _route_tail_readers_to_source(
-    chart: "Chart", layers: list, name: str, *, operand_encoding: dict
+    chart: "Chart", layers: list, name: str, *, operand: "Chart"
 ) -> list:
     """Point *layers* that read the pipeline tail at the chart's source rows.
 
     When ``chart``'s chain has an unnamed step, its tail is that chain's
     output, not the source. Each layer with no ``data_source`` is then
     pointed at a named identity of the source, added ahead of the chain (see
-    ``_merge_top_transforms``), through :func:`_point_rhs_layers`. With no
+    ``_merge_top_transforms``), through :func:`_point_operand_layers`. With no
     unnamed step the tail is the source and *layers* is returned unchanged.
     """
     tail_readers = [l for l in layers if l.data_source is None]
     if not tail_readers or not any(_advances_chain(t) for t in chart._transforms):
         return layers
     _merge_top_transforms(chart, [_source_identity(name)])
-    return _point_rhs_layers(layers, tail=name, operand_encoding=operand_encoding)
+    return _point_operand_layers(layers, tail=name, operand=operand)
 
 
 def _is_lhs_pipeline(rhs_chain: list, lhs_chain: list) -> bool:
@@ -335,19 +433,18 @@ def _route_rhs_chain(
     rhs_layers: list,
     rhs_chain: list,
     *,
-    operand_encoding: dict,
-    same_data: bool,
+    operand: "Chart",
 ) -> list:
-    """Add the RHS operand's chain to *new*'s pipeline so it reads its own rows.
+    """Add the RHS operand's chain to *new*'s pipeline so it reads the shared source.
 
-    Over the same data, a chain of named steps only whose layers read those
-    names (a multi-output composite such as a boxplot) is added as it is:
-    placed ahead of the LHS chain, each step reads the source. Any other chain
-    becomes one named step: the step itself when the chain has one step and
-    no layer reads a name inside it, else one ``_Branch`` over the source
-    running the whole chain. A branch publishes its inner outputs under its
-    own name (``secondary_key``), so two operands' composites never share a
-    key, whatever data they read.
+    Both operands read the same data. A chain of named steps only whose
+    layers read those names (a multi-output composite such as a boxplot) is
+    added as it is: placed ahead of the LHS chain, each step reads the source.
+    Any other chain becomes one named step: the step itself when the chain
+    has one step and no layer reads a name inside it, else one ``_Branch``
+    over the source running the whole chain. A branch publishes its inner
+    outputs under its own name (``secondary_key``), so two operands'
+    composites never share a key.
 
     The step is named from its own identity: the composed chart holds the
     step for as long as any layer reads the name, so no other live step
@@ -356,7 +453,7 @@ def _route_rhs_chain(
     if not rhs_chain:
         return rhs_layers
     routed = any(l.data_source is not None for l in rhs_layers)
-    if routed and same_data and not any(_advances_chain(t) for t in rhs_chain):
+    if routed and not any(_advances_chain(t) for t in rhs_chain):
         _merge_top_transforms(new, rhs_chain)
         return rhs_layers
     only = rhs_chain[0]
@@ -366,21 +463,22 @@ def _route_rhs_chain(
         step = _Branch("", None, rhs_chain)
     step.name = f"_auto_{id(step):x}"
     _merge_top_transforms(new, [step])
-    return _point_rhs_layers(
+    return _point_operand_layers(
         rhs_layers,
         tail=step.name,
-        operand_encoding=operand_encoding,
+        operand=operand,
         scope=step.name if isinstance(step, _Branch) else None,
     )
 
 
-def _rhs_rows_prefix(marker: str, renames: dict[str, str]) -> list:
-    """Build the steps that turn the merged batch back into the RHS operand's own frame.
+def _operand_rows_prefix(marker: str, renames: dict[str, str]) -> list:
+    """Build the steps that turn the merged batch back into one operand's own frame.
 
-    Keeps the rows whose *marker* column is ``true`` (the rows the RHS
-    contributed), then restores each renamed column under its original name
-    (``Calculate`` replaces a column it names), so the RHS chain reads the
-    columns it was written against.
+    Keeps the rows whose *marker* column is ``true`` (the rows that operand
+    contributed), restores each renamed column under its original name
+    (``Calculate`` replaces a column it names), and publishes those rows under
+    *marker* through a named identity, so the operand's chain and any branch
+    in it read the columns and rows it was written against.
     """
     from ferrum.transforms import transform_calculate, transform_filter
 
@@ -389,7 +487,49 @@ def _rhs_rows_prefix(marker: str, renames: dict[str, str]) -> list:
         transform_calculate(original, f"datum[{json.dumps(renamed)}]")
         for original, renamed in sorted(renames.items())
     ]
-    return [keep, *restore]
+    return [keep, *restore, _source_identity(marker)]
+
+
+def _read_rows(chain: list, rows: str) -> list:
+    """Return *chain* with every branch that reads the original batch reading *rows* instead.
+
+    A branch with no ``input`` reads the pipeline's original batch, which in a
+    composition over different data holds both operands' rows; inside one
+    operand's chain it must read that operand's own rows. Branches are
+    rebuilt, never mutated, so the operand chart keeps its own chain.
+    """
+    out = []
+    for step in chain:
+        if isinstance(step, _Branch):
+            step = _Branch(
+                step.name,
+                rows if step.input is None else step.input,
+                _read_rows(step.transforms, rows),
+            )
+        out.append(step)
+    return out
+
+
+def _reads_own_rows(layers: list, chain: list) -> bool:
+    """Whether a ``+`` operand over different data must run over only its own rows.
+
+    True when the operand has a chain, or any of its layers carries an
+    encoding-level aggregate or bin: either runs over the rows it reads, and
+    the combined batch holds the other frame's padded rows too (a ``count()``
+    would count them). An operand that only draws its rows can read the
+    combined batch, where the other frame's rows are null in every field it
+    reads.
+    """
+    return bool(chain) or any(
+        _layer_pending_aggregates(layer) or _layer_pending_bins(layer) for layer in layers
+    )
+
+
+def _operand_branch(marker: str, renames: dict[str, str], chain: list) -> _Branch:
+    """Run one operand's whole chain as a branch over that operand's own rows."""
+    branch = _Branch("", None, _operand_rows_prefix(marker, renames) + _read_rows(chain, marker))
+    branch.name = f"_auto_{id(branch):x}"
+    return branch
 
 
 def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
@@ -1225,6 +1365,9 @@ class Chart(
         "_tooltip_promoted",  # bool — chart-level tooltip came from __add__ promoting a
         # layer's own explicit tooltip, not from a direct .encode(tooltip=...) on the
         # merged chart (GH #78) — see _inject_auto_tooltips's short-circuit discriminator.
+        "_written_positional",  # dict or None — on a chart `+` produced, the
+        # composition's positional bindings as their callers wrote them, latest per
+        # channel (see _written_bindings); None on any other chart.
     )
 
     def __init__(
@@ -1275,6 +1418,7 @@ class Chart(
         self._mark_zero: bool = True
         self._figure_caption: Optional[str] = None
         self._tooltip_promoted: bool = False
+        self._written_positional: Optional[dict[str, Any]] = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -2252,6 +2396,15 @@ class Chart(
                 # (GH #78).
                 new._tooltip_promoted = False
 
+        # A positional channel bound here on a composition is its callers'
+        # latest written binding (see _written_bindings).
+        bound = [name for name in channels if name in _POSITIONAL_CHANNELS]
+        if bound and new._written_positional is not None:
+            new._written_positional = {
+                **new._written_positional,
+                **{ch: new._encoding[ch] for ch in bound},
+            }
+
         # H3-2 (batch-H close cycle 3): refuse an alias source's base field
         # silently dropping while its OWN condition= survives and overrides
         # the target it collided with. Checked once, after every channel in
@@ -2604,12 +2757,23 @@ class Chart(
         lhs = lhs_in._resolve_pending()
         rhs = rhs_in._resolve_pending()
         new = lhs._clone()
+        # Read before resolution, so a pending composite's written x/y are kept
+        # and a composed left passes its own record on.
+        new._written_positional = _written_bindings(lhs_in)
         lhs_layers, lhs_top_xforms = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
         # Each operand's conditionals belong to the layers that operand
         # contributes, carried by identity through every rewrite below.
         lhs_layers = _bind_operand_conditionals(lhs_layers, lhs._conditionals)
         rhs_layers = _bind_operand_conditionals(rhs_layers, rhs._conditionals)
+        # The RHS's chart encoding and chain stop applying once it is an
+        # operand, so every RHS layer that takes positional channels or rows
+        # from that chart gets them now, from the RHS's own encoding and
+        # chain; a step added to the composed chart later does not reach them.
+        rhs_layers = _fill_chart_positional(rhs_layers, rhs)
+        rhs_layers, rhs_settled = _settle_chart_rows(rhs_layers, rhs_top_xforms)
+        rhs_layers = [replace(l, rows_from_chart=False) for l in rhs_layers]
+        rhs_top_xforms = rhs_top_xforms + rhs_settled
         # The RHS's own coordinate system travels with the layers it
         # contributes (#172(1)). `new` keeps the LHS's coord at chart level --
         # the panel's chrome, aspect ratio and scale domains are one thing --
@@ -2684,93 +2848,123 @@ class Chart(
         # whenever the merged pipeline's tail is not their data.
         source_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
         shares_data = lhs_in._shares_data_with(rhs_in)
-        # Data merging: when data differs, diagonal-concat the two frames,
-        # renaming RHS columns that collide with LHS ones.
         if not shares_data:
+            # Different data: diagonal-concat the two frames, renaming RHS
+            # columns that collide with LHS ones. An operand with a chain or a
+            # per-layer aggregate or bin (`_reads_own_rows`) runs as one branch
+            # over exactly its own rows, picked out by a row marker column
+            # written here (never inferred from null padding), so the other
+            # frame's padded rows never reach its transforms. Any other
+            # operand draws its rows straight from the combined batch, where
+            # the other frame's rows are null in every field it reads. The
+            # composed chart's own chain holds only named steps, so its tail
+            # is the combined data.
             import polars as pl
 
             lhs_df = to_polars(lhs_in._data)
             rhs_df = to_polars(rhs_in._data)
             overlap = set(lhs_df.columns) & set(rhs_df.columns)
-
-            if overlap:
-                from dataclasses import replace as _dc_replace
-
-                # Deterministic, collision-free per-merge suffix (GH #71 defect 2).
-                # Start from the number of layers already accumulated on the LHS at
-                # this point in the `__add__` chain -- a structural property of the
-                # chart, not a runtime identity like `id(other)`, so it is
-                # reproducible byte-for-byte across repeated runs of the same
-                # chart-building code. That starting index alone is NOT
-                # collision-free, though: a right-associated chain (`a + (b + c)`)
-                # can derive the SAME starting index for two different merges --
-                # the inner `b + c` and the outer `a + (b + c)` each see an LHS
-                # with exactly one accumulated layer -- so the outer merge's
-                # rename target can already exist as a real column in the (already
-                # renamed) inner merge's frame, and polars' `rename` raises
-                # `DuplicateError`. The while loop bumps the index until every
-                # renamed target (and the RHS-row marker) is absent from BOTH
-                # frames' current columns, which is what actually guarantees no
-                # collision; the layer count only supplies a deterministic
-                # starting point.
-                n = len(lhs_layers)
-                existing_cols = set(lhs_df.columns) | set(rhs_df.columns)
-                while any(f"{c}__rhs_{n:04d}" in existing_cols for c in (*overlap, "__rhs_row")):
-                    n += 1
-                suffix = f"__rhs_{n:04d}"
-                col_renames = {c: f"{c}{suffix}" for c in overlap}
-                rhs_df = rhs_df.rename(col_renames)
-
-                if rhs_chain:
-                    # The RHS chain names the RHS's own columns, so its branch
-                    # starts by keeping only the rows the RHS contributed (an
-                    # explicit marker written here, never inferred from null
-                    # padding) and restoring their original names. Its layers
-                    # then read the chain's output under the names they were
-                    # written with.
-                    marker = f"__rhs_row{suffix}"
-                    rhs_df = rhs_df.with_columns(pl.lit(True).alias(marker))
-                    rhs_chain = _rhs_rows_prefix(marker, col_renames) + rhs_chain
-                    # A binding promoted to chart level reaches the LHS layers
-                    # too, which read the merged rows, so it names the renamed
-                    # RHS column rather than the LHS column of the same name.
-                    rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
-                else:
-                    # No chain: the RHS layers read the merged source through a
-                    # named identity under the renamed fields, so
-                    # inherit_non_positional keeps the Rust renderer from
-                    # injecting the LHS's chart-level positional channels. A
-                    # layer that already reads a named output (a multi-output
-                    # composite mark's own layer, e.g. qq/violin/boxplot)
-                    # keeps that data_source -- rerouting it would silently
-                    # swap its intended transform output for the raw
-                    # renamed-and-concatenated batch (#198).
-                    rhs_layers = [
-                        _dc_replace(l, encoding=_rename_encoding_fields(l.encoding, col_renames))
-                        for l in _point_rhs_layers(
-                            rhs_layers, tail=source_name, operand_encoding=rhs._encoding
-                        )
-                    ]
-                    rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
-                    _merge_top_transforms(new, [_source_identity(source_name)])
+            # Deterministic, collision-free per-merge suffix (GH #71 defect 2).
+            # Start from the number of layers already accumulated on the LHS at
+            # this point in the `__add__` chain -- a structural property of the
+            # chart, not a runtime identity like `id(other)`, so it is
+            # reproducible byte-for-byte across repeated runs of the same
+            # chart-building code. That starting index alone is NOT
+            # collision-free, though: a right-associated chain (`a + (b + c)`)
+            # can derive the SAME starting index for two different merges --
+            # the inner `b + c` and the outer `a + (b + c)` each see an LHS
+            # with exactly one accumulated layer -- so the outer merge's
+            # rename target can already exist as a real column in the (already
+            # renamed) inner merge's frame, and polars' `rename` raises
+            # `DuplicateError`. The while loop bumps the index until every
+            # renamed target and both row markers are absent from BOTH
+            # frames' current columns, which is what actually guarantees no
+            # collision; the layer count only supplies a deterministic
+            # starting point.
+            n = len(lhs_layers)
+            existing_cols = set(lhs_df.columns) | set(rhs_df.columns)
+            while any(
+                f"{c}__rhs_{n:04d}" in existing_cols for c in (*overlap, "__lhs_row", "__rhs_row")
+            ):
+                n += 1
+            suffix = f"__rhs_{n:04d}"
+            col_renames = {c: f"{c}{suffix}" for c in overlap}
+            rhs_df = rhs_df.rename(col_renames)
+            # A binding promoted to chart level reaches every layer, so it
+            # names the renamed RHS column rather than the LHS column of the
+            # same name.
+            rhs_authored = _rename_encoding_fields(rhs_authored, col_renames)
+            own_rows: list = []
+            if _reads_own_rows(lhs_layers, lhs_top_xforms):
+                lhs_marker = f"__lhs_row{suffix}"
+                lhs_df = lhs_df.with_columns(pl.lit(True).alias(lhs_marker))
+                # The LHS chain becomes the branch's, so its own post-merge
+                # steps settle onto the layers reading its rows first.
+                lhs_layers, lhs_settled = _settle_chart_rows(lhs_layers, lhs_top_xforms)
+                lhs_branch = _operand_branch(lhs_marker, {}, lhs_top_xforms + lhs_settled)
+                own_rows.append(lhs_branch)
+                # The LHS's tail readers read the chart's pipeline before the
+                # merge, so they keep taking the composed chart's positional
+                # channels and its later unnamed steps.
+                lhs_layers = _read_operand_tail(
+                    [
+                        replace(l, rows_from_chart=True) if l.data_source is None else l
+                        for l in lhs_layers
+                    ],
+                    tail=lhs_branch.name,
+                    source="encoding",
+                    scope=lhs_branch.name,
+                )
+            if _reads_own_rows(rhs_layers, rhs_chain):
+                rhs_marker = f"__rhs_row{suffix}"
+                rhs_df = rhs_df.with_columns(pl.lit(True).alias(rhs_marker))
+                rhs_branch = _operand_branch(rhs_marker, col_renames, rhs_chain)
+                own_rows.append(rhs_branch)
+                rhs_layers = _point_operand_layers(
+                    rhs_layers,
+                    tail=rhs_branch.name,
+                    operand=rhs,
+                    scope=rhs_branch.name,
+                )
+            elif overlap:
+                # The RHS layers read the combined source through a named
+                # identity under the renamed fields, so Rust does not pass
+                # them the LHS's chart-level positional channels; a chart
+                # positional field reaches them renamed the same way. A layer
+                # that already reads a named output keeps that data_source
+                # (#198).
+                renames = tuple(sorted(col_renames.items()))
+                rhs_layers = [
+                    replace(
+                        l,
+                        encoding=_rename_encoding_fields(l.encoding, col_renames),
+                        positional_renames=renames,
+                    )
+                    for l in _point_operand_layers(rhs_layers, tail=source_name, operand=rhs)
+                ]
+                own_rows.append(_source_identity(source_name))
             new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
-
-        # An RHS whose chain is the LHS's own pipeline over the same rows (a
-        # chart composed with itself, `mark_line(point=True)`'s line + point)
-        # already reads the merged tail; every other RHS is routed to read its
-        # own chain over its own rows.
-        if not (shares_data and _is_lhs_pipeline(rhs_chain, lhs_top_xforms)):
+            new._transforms = own_rows
+        elif not _is_lhs_pipeline(rhs_chain, lhs_top_xforms):
+            # Same data: an RHS whose chain is the LHS's own pipeline (a chart
+            # composed with itself, `mark_line(point=True)`'s line + point)
+            # already reads the merged tail; every other RHS is routed to read
+            # its own chain over the source.
             rhs_layers = _route_rhs_chain(
                 new,
                 rhs_layers,
                 rhs_chain,
-                operand_encoding=rhs._encoding,
-                same_data=shares_data,
+                operand=rhs,
             )
-            rhs_layers = _route_tail_readers_to_source(
-                new, rhs_layers, source_name, operand_encoding=rhs._encoding
-            )
+            rhs_layers = _route_tail_readers_to_source(new, rhs_layers, source_name, operand=rhs)
 
+        # Every right layer that takes positional channels from a chart takes
+        # the ones it still lacks from the composition's written bindings
+        # (see _written_bindings), whichever route above it took.
+        rhs_layers = [
+            replace(l, positional_source="written") if l.positional_source is not None else l
+            for l in rhs_layers
+        ]
         _refuse_data_source_collision(lhs_layers, rhs_layers, lhs_top_xforms, rhs_top_xforms)
         new._layers = lhs_layers + rhs_layers
         # GH #78: record whether the merged chart's chart-level tooltip (if
@@ -3693,7 +3887,17 @@ class Chart(
         # onto the chart.
         serialized_layers = resolved._layers
         if resolved._layers:
-            serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(resolved._layers)
+            # A layer reading its operand's own rows takes the chart's
+            # positional channels here, against the final chart encoding, so
+            # a per-layer aggregate or bin of an inherited channel reads those
+            # rows too.
+            settled_layers, settled_rows = _settle_chart_rows(
+                resolved._layers, resolved._transforms
+            )
+            effective_transforms = effective_transforms + settled_rows
+            serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(
+                _fill_chart_positional(settled_layers, resolved)
+            )
             if layer_agg_transforms:
                 effective_transforms = effective_transforms + layer_agg_transforms
 

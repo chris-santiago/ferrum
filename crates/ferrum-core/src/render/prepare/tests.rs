@@ -6264,3 +6264,45 @@ fn the_same_filled_channel_without_the_list_reads_as_own() {
 // own test module, next to the fixture and helpers
 // (`line_endpoints`, `build_scene_for`) it reuses — see
 // `a_filled_and_listed_y_renders_the_same_vertical_rule_as_standalone_inheritance`.
+
+/// The flat render's prepare pass resolves a layered axis against layer 0's
+/// rendering encoding, while a layer on the chart's data that binds nothing
+/// there draws the chart-level field: `(P(x="a") + tick(y only)).encode(x="c")`.
+/// The x axis must reach the tick's `c` (100..300). The rejected reading
+/// takes the inherited field from the rendering encoding (layer 0's `a`) and
+/// resolves 1..3.
+#[test]
+fn a_layer_inheriting_a_re_encoded_chart_field_widens_the_axis() {
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+    let spec: ChartSpec = serde_json::from_str(
+        r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c"},"y":{"field":"b"}},"layers":[{"mark":"point","encoding":{"x":{"field":"a"},"y":{"field":"b"}}},{"mark":"tick","encoding":{"y":{"field":"b"}}}]}"#,
+    )
+    .expect("layered spec JSON must deserialize");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Float64, false),
+        Field::new("b", DataType::Float64, false),
+        Field::new("c", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+        ],
+    )
+    .unwrap();
+    let prep = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap();
+    let (lo, hi) = prep.provisional_scales.x.data_domain().expect("a continuous x");
+    assert!(lo <= 1.0 && hi >= 300.0, "x domain {lo}..{hi} must cover a (1..3) and c (100..300)");
+}

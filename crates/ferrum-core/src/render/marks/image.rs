@@ -34,6 +34,40 @@ use crate::render::draw::{col_as_f64, col_as_str, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::rasterize::encode_png;
 
+/// The Raster-transform batch columns holding the image's data extent on the
+/// rendered x axis. The raster path draws the image over exactly this extent.
+pub(crate) const RASTER_X_EXTENT: [&str; 2] = ["x_min", "x_max"];
+/// The y-axis counterpart of [`RASTER_X_EXTENT`].
+pub(crate) const RASTER_Y_EXTENT: [&str; 2] = ["y_min", "y_max"];
+
+/// Which path an image mark whose effective `url` channel is `url` draws: the
+/// tile path's url field (one tile per row), or `None` for the raster path
+/// (one image over the Raster batch's extent).
+pub(crate) fn url_tile_field(url: Option<&crate::spec::encoding::EncodingSpec>) -> Option<&str> {
+    url.map(|enc| enc.field.as_str())
+}
+
+/// The extent columns an image layer draws on the rendered `channel` when it
+/// takes the raster path ([`url_tile_field`] over its effective `url` is
+/// `None`), or `None` for any other layer. Such a layer's `x`/`y` encoding
+/// names the source columns the Raster transform binned, which its own
+/// one-row batch does not carry, so these columns are what it contributes to
+/// the axis domain.
+pub(crate) fn raster_extent_columns(
+    mark: crate::spec::mark::Mark,
+    url: Option<&crate::spec::encoding::EncodingSpec>,
+    channel: &str,
+) -> Option<[&'static str; 2]> {
+    if mark != crate::spec::mark::Mark::Image || url_tile_field(url).is_some() {
+        return None;
+    }
+    match channel {
+        "x" => Some(RASTER_X_EXTENT),
+        "y" => Some(RASTER_Y_EXTENT),
+        _ => None,
+    }
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
@@ -61,13 +95,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         _ => {}
     }
 
-    // ── URL-tile path ──────────────────────────────────────────────────────
-    if let Some(url_enc) = ctx.spec.encoding.url.as_ref() {
-        return build_url_tiles(ctx, url_enc.field.as_str());
+    match url_tile_field(ctx.spec.encoding.url.as_ref()) {
+        // ── URL-tile path ──────────────────────────────────────────────────
+        Some(field) => build_url_tiles(ctx, field),
+        // ── Raster path ────────────────────────────────────────────────────
+        None => build_raster(ctx),
     }
-
-    // ── Raster path ────────────────────────────────────────────────────────
-    build_raster(ctx)
 }
 
 /// URL-tile path: one `SceneNode::Image` per row, positioned via x/y scales.
@@ -211,28 +244,28 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let x_min = match batch
-        .column_by_name("x_min")
+        .column_by_name(RASTER_X_EXTENT[0])
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
         None => return empty_no_data(),
     };
     let x_max = match batch
-        .column_by_name("x_max")
+        .column_by_name(RASTER_X_EXTENT[1])
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
         None => return empty_no_data(),
     };
     let y_min = match batch
-        .column_by_name("y_min")
+        .column_by_name(RASTER_Y_EXTENT[0])
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
         None => return empty_no_data(),
     };
     let y_max = match batch
-        .column_by_name("y_max")
+        .column_by_name(RASTER_Y_EXTENT[1])
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),

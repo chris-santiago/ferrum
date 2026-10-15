@@ -44,7 +44,7 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field,
+    distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
     column_reads_categorical, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, LayerUnion, LeafScaleContext, SharedDomain,
 };
@@ -618,7 +618,10 @@ fn overlay_axis<'g, 'a>(
     AxisMembers::new(members, |position| {
         let lead = &leaves[group[position]];
         leaf_post_flip_encoding(lead, channel)
-            .is_some_and(|enc| column_reads_categorical(enc, lead.final_batch, lead.transform_outputs))
+            .is_some_and(|enc| {
+                let located = locate_seed_field(&enc.field, lead.spec, lead.final_batch, lead.transform_outputs);
+                column_reads_categorical(enc, located)
+            })
     })
 }
 
@@ -785,7 +788,7 @@ fn refuse_unplaceable_overlay_members<'a>(
         // only, so a non-positional channel never reaches here; it would
         // judge no member rather than panic if that guard is ever loosened.
         let Some(enc) = leaf_post_flip_encoding(leaf, channel) else { continue };
-        let Some(located) = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
+        let Some(located) = locate_seed_field(&enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
         else {
             continue;
         };
@@ -916,7 +919,7 @@ fn leaf_positional_domain(
         }
     }
 
-    let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
+    let located = locate_seed_field(&enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: channel.as_str(),
             field: enc.field.clone(),
@@ -2695,7 +2698,7 @@ mod tests {
                 let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
                 let y_domain = |o: &LeafOwned, c: &LeafScaleContext| {
                     let (scales, _) = resolve_scales_with_leaf_context(
-                        &o.spec, &o.batch, &o.outputs, pr, pr, &theme, Some(c),
+                        &o.spec, &o.spec.encoding, &o.batch, &o.outputs, pr, pr, &theme, Some(c),
                     )
                     .unwrap();
                     scales.y.data_domain()
@@ -2917,7 +2920,7 @@ mod tests {
                     .zip(&ctx)
                     .map(|(o, c)| {
                         let (scales, _) =
-                            resolve_scales_with_leaf_context(&o.spec, &o.batch, &o.outputs, pr, pr, &theme, Some(c))?;
+                            resolve_scales_with_leaf_context(&o.spec, &o.spec.encoding, &o.batch, &o.outputs, pr, pr, &theme, Some(c))?;
                         let adopted = match channel {
                             Channel::X => c.x_scale.is_some(),
                             _ => c.y_scale.is_some(),
@@ -3198,7 +3201,7 @@ mod tests {
             .expect("fm.layer resolves");
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&leaves[0].spec, &batch, &leaves[0].outputs, pr, pr, &theme, Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&leaves[0].spec, &leaves[0].spec.encoding, &batch, &leaves[0].outputs, pr, pr, &theme, Some(&ctx[0]))
                 .expect("fm.layer panel resolves");
         assert_eq!(band_categories(&scales.x), ["a", "b"], "fm.layer panel x");
         assert_eq!(only_excluded(warnings), excluded(ExcludedLayerPlacement::OwnScale), "fm.layer");
@@ -3432,7 +3435,7 @@ mod tests {
         let ctx = resolve_composite_scales(&tree, &[input(&a), input(&b)], &mut Vec::new()).unwrap();
         let pr = (0.0, 100.0);
         let (scales, _) =
-            resolve_scales_with_leaf_context(&a.spec, &a.batch, &a.outputs, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
+            resolve_scales_with_leaf_context(&a.spec, &a.spec.encoding, &a.batch, &a.outputs, pr, pr, &ThemeInputs::default(), Some(&ctx[0]))
                 .unwrap();
         assert_eq!(scales.y.data_domain(), Some((1.0, 80.0)));
     }
@@ -3692,5 +3695,97 @@ mod tests {
                 }),
             }
         );
+    }
+
+    // -- per-layer domain source ------------------------------------------------
+
+    /// A layered overlay leaf contributes each layer's data from the batch
+    /// that layer draws. The leaf's chart data carries a same-named column
+    /// far outside it, which the rejected reading would take in.
+    #[test]
+    fn an_overlay_leaf_contributes_each_layers_own_batch() {
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"ci_lower"},"y2":{"field":"ci_upper"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"ci_lower"},"y2":{"field":"ci_upper"}},"data_source":"smooth"},{"mark":"line","encoding":{"x":{"field":"x"},"y":{"field":"y"}},"data_source":"smooth"}]}"#,
+        )
+        .expect("layered spec JSON must deserialize");
+        let f64_col = |v: &[f64]| -> arrow::array::ArrayRef { Arc::new(Float64Array::from(v.to_vec())) };
+        let batch_of = |cols: Vec<(&str, arrow::array::ArrayRef)>| {
+            let fields: Vec<Field> =
+                cols.iter().map(|(n, c)| Field::new(*n, c.data_type().clone(), true)).collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), cols.into_iter().map(|(_, c)| c).collect())
+                .unwrap()
+        };
+        let raw = batch_of(vec![("x", f64_col(&[0.0, 5.0, 10.0])), ("y", f64_col(&[-4.15, 10.0, 22.0]))]);
+        let smooth = batch_of(vec![
+            ("x", f64_col(&[0.0, 5.0, 10.0])),
+            ("y", f64_col(&[0.5, 10.0, 19.5])),
+            ("ci_lower", f64_col(&[-0.2, 9.0, 18.0])),
+            ("ci_upper", f64_col(&[1.0, 11.0, 20.0])),
+        ]);
+        let mut leaf = owned(spec, raw);
+        leaf.outputs.insert("smooth".to_string(), smooth);
+        let domain = leaf_positional_domain(&input(&leaf), Channel::Y, LayerUnion::Every)
+            .expect("every column is Float64");
+        assert_eq!(domain, Some(SharedDomain::Numeric { lo: -0.2, hi: 20.0 }));
+    }
+
+    /// The ordinal overlay union: each operand's categories from its own rows,
+    /// and no `null` band for the merged frame's padding.
+    #[test]
+    fn an_overlay_leaf_contributes_each_layers_own_categories() {
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}},"data_source":"lhs"},{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}},"data_source":"rhs"}]}"#,
+        )
+        .expect("layered spec JSON must deserialize");
+        let batch_of = |g: Vec<Option<&str>>, v: Vec<f64>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("v", DataType::Float64, true),
+            ]));
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(g)), Arc::new(Float64Array::from(v))])
+                .unwrap()
+        };
+        let merged = batch_of(vec![Some("a"), Some("b"), None, None], vec![1.0, 2.0, 3.0, 4.0]);
+        let mut leaf = owned(spec, merged);
+        leaf.outputs.insert("lhs".to_string(), batch_of(vec![Some("a"), Some("b")], vec![1.0, 2.0]));
+        leaf.outputs.insert("rhs".to_string(), batch_of(vec![Some("x"), Some("y")], vec![3.0, 4.0]));
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every)
+            .expect("every category column is Utf8");
+        let expected: Vec<String> = ["a", "b", "x", "y"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
+    }
+
+    /// The other live `+` lowering on the composite path: a chainless left
+    /// operand on the chart's data and the right operand on the merged
+    /// frame's `_ident_0` under renamed fields. The ladder is the left
+    /// categories then the right, with no band for the merge padding.
+    #[test]
+    fn an_overlay_leaf_contributes_chart_and_output_layer_categories() {
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"val__rhs_0001"}},"data_source":"_ident_0"}]}"#,
+        )
+        .expect("layered spec JSON must deserialize");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("cat__rhs_0001", DataType::Utf8, true),
+            Field::new("val__rhs_0001", DataType::Float64, true),
+        ]));
+        let merged = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c"), Some("a"), None])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+                Arc::new(StringArray::from(vec![None, None, Some("b")])),
+                Arc::new(Float64Array::from(vec![None, None, Some(40.0)])),
+            ],
+        )
+        .unwrap();
+        let mut leaf = owned(spec, merged.clone());
+        leaf.outputs.insert("_ident_0".to_string(), merged);
+        let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every)
+            .expect("every category column is Utf8");
+        let expected: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
     }
 }

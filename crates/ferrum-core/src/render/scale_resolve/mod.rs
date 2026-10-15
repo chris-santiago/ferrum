@@ -53,7 +53,7 @@ pub use self::color::build_color_scale;
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
 pub(in crate::render) use self::domain::{
-    apply_sort_to_domain, column_reads_categorical, establishing_caller_scale, locate_field, numeric_domain_union_over,
+    apply_sort_to_domain, column_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, LayerUnion,
     SortContext,
 };
@@ -1571,6 +1571,30 @@ fn build_auxiliary_scales(
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }
 
+/// The chart's color scale alone: the `color` [`resolve_scales_with_leaf_context`]
+/// returns, built by the same [`build_auxiliary_scales`] with no composite leaf
+/// context, without resolving either positional axis. A geoshape chart
+/// resolves no scales there, and so no color here. Warnings are the full
+/// resolver's to report.
+///
+/// None of the full resolver's refusals run here (an arc without a polar
+/// coord, an unbound `x`/`y`, a drawing layer with no field on an axis). That
+/// is sound because prepare's provisional resolution, through
+/// [`resolve_scales_with_leaf_context`], runs first on every route that
+/// reaches this function and raises them there.
+pub(in crate::render) fn resolve_color_scale(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &ThemeInputs,
+) -> Result<Option<ColorScale>, RenderError> {
+    if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
+        return Ok(None);
+    }
+    let mut warnings = Vec::new();
+    Ok(build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, None, &mut warnings)?.color)
+}
+
 /// The channels [`build_auxiliary_scales`] builds a scale for, in
 /// [`AuxiliaryScales`] field order. Each scale is built once per chart from
 /// the chart's rendering encoding (the chart-level encoding as its first
@@ -1612,7 +1636,11 @@ fn dummy_unit_scale(pixel_range: (f64, f64), ascending: bool) -> ScaleKind {
 ///
 /// This is the back-compat single-batch entry point. For Phase 8b layered charts
 /// where encoding fields may live in named transform outputs other than
-/// `__final__`, prefer `resolve_scales_with_outputs`.
+/// `__final__`, prefer `resolve_scales_with_outputs`. `spec` must be as
+/// authored, as for [`resolve_scales_with_outputs`]. Test-only: every render
+/// route resolves through [`resolve_scales_with_leaf_context`] or, for a
+/// legend, [`resolve_color_scale`].
+#[cfg(test)]
 pub fn resolve_scales(
     spec: &ChartSpec,
     batch: &RecordBatch,
@@ -1638,6 +1666,12 @@ pub fn resolve_scales(
 /// to [`resolve_scales_with_leaf_context`] with `None`, mirroring the way
 /// [`resolve_scales`] delegates here with an empty outputs map. Byte-identical to
 /// the pre-D4b behavior for every existing caller.
+///
+/// Precondition: `spec` is as authored, so `spec.encoding` is the chart-level
+/// encoding its layers inherit. A caller that has replaced it with a rendering
+/// encoding calls [`resolve_scales_with_leaf_context`] and names the authored
+/// one. Test-only, as [`resolve_scales`] is.
+#[cfg(test)]
 pub fn resolve_scales_with_outputs(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
@@ -1648,6 +1682,7 @@ pub fn resolve_scales_with_outputs(
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     resolve_scales_with_leaf_context(
         spec,
+        &spec.encoding,
         primary_batch,
         transform_outputs,
         x_pixel_range,
@@ -1815,6 +1850,9 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
 
     let (layer_scales, warnings) = resolve_scales_with_leaf_context(
         &layer_spec,
+        // `layer_spec.layers` is `None`, so no layer inherits from it and this
+        // encoding is never read for inheritance.
+        &layer_spec.encoding,
         layer_batch,
         transform_outputs,
         x_pixel_range,
@@ -2092,10 +2130,17 @@ fn positional_binding<'a>(
 /// [`RenderError::LayerUnknownColumn`](crate::render::RenderError::LayerUnknownColumn)
 /// exists to stop, arriving by a different road.
 ///
-/// **What counts as "available", and why not the fallback.** A layer's own
-/// encoding, or the chart encoding it inherits — which, at every caller,
-/// already carries layer 0's merge. Deliberately NOT `positional_binding`'s
-/// fallback: that resolves a SCALE, not a field to plot. This is the whole
+/// **What counts as "available", and why not the fallback.** What the layer
+/// draws, built the way prepare builds it: the layer's own encoding (which
+/// carries any value Python filled into it, `inherited_positional`), plus,
+/// for a layer on the chart's data only, the authored `chart_encoding`, in
+/// the layer's coordinate space. A layer with a `data_source` inherits no
+/// chart positional channel, so a chart-level binding never makes one of its
+/// axes available. `spec.encoding` is not read: at the flat render's callers
+/// it is layer 0's rendering encoding, whose positional channels may come
+/// from layer 0's own bindings, which no later layer inherits. Deliberately
+/// NOT `positional_binding`'s fallback either: that resolves a SCALE, not a
+/// field to plot. This is the whole
 /// discriminator between the two orderings of one pair. `mark_line(x=,y=) +
 /// mark_point(x=)` puts the line's `y` field into the chart encoding (it is
 /// layer 0), so the point inherits a real column and keeps drawing its three
@@ -2125,7 +2170,10 @@ fn positional_binding<'a>(
 /// fires for an arc — which is correct here, since the coord's theta channel
 /// IS bound spec-wide (that is what the caller's `ok_or` proved) and an arc's
 /// radius channel is optional by design.
-fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError> {
+fn validate_drawing_layers_can_plot(
+    spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
+) -> Result<(), RenderError> {
     let Some(layers) = spec.layers.as_deref() else {
         return Ok(());
     };
@@ -2142,19 +2190,19 @@ fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError>
         // written to do without.
         let coord = layer.effective_coord(spec.coord.as_ref());
         let coord_flipped = crate::spec::coord::flips_positional_channels(coord);
-        // The layer's own bindings, moved into the resolved channels' space —
-        // the same normalization, for the same reason, as `positional_binding`.
-        let own = if coord_flipped {
-            let mut flipped = layer.encoding.clone();
-            flipped.flip_positional();
-            Cow::Owned(flipped)
-        } else {
-            Cow::Borrowed(&layer.encoding)
-        };
+        // What the layer draws, as prepare builds it: its own bindings
+        // (Python's `inherited_positional` fills included), plus the authored
+        // chart encoding's when it reads the chart's data, moved into the
+        // resolved channels' space by the layer's own coord.
+        let mut drawn = layer.encoding.clone();
+        if layer.data_source.is_none() {
+            drawn.inherit_from(chart_encoding);
+        }
+        if coord_flipped {
+            drawn.flip_positional();
+        }
         for channel in [PositionalChannel::X, PositionalChannel::Y] {
-            let available =
-                channel.select(&spec.encoding).0.is_some() || channel.select(&own).0.is_some();
-            if available {
+            if channel.select(&drawn).0.is_some() {
                 continue;
             }
             // One channel is enough for this mark, so the axis it cannot reach
@@ -2191,9 +2239,18 @@ fn with_group_scale(
 /// the standalone behavior byte-for-byte. A channel carrying a genuine user
 /// `enc.scale` short-circuits at the explicit-scale bypass inside
 /// [`build_axis_scale`] before the context is consulted, so user scale still wins.
+///
+/// `chart_encoding` is the authored chart-level encoding `spec`'s layers
+/// inherit, named by every caller: `&spec.encoding` when `spec` is as
+/// authored, the original chart's encoding when `spec.encoding` has been
+/// replaced by layer 0's resolved rendering encoding (the flat render's
+/// prepare and per-panel passes). A layer on the chart's data that binds
+/// nothing on an axis draws the chart-level field there, so the positional
+/// domain reads it from this encoding.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn resolve_scales_with_leaf_context(
     spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     x_pixel_range: (f64, f64),
@@ -2271,6 +2328,15 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     let x_adopted = with_group_scale(x_enc, leaf_scales.and_then(|c| c.x_scale.as_ref()));
     let y_adopted = with_group_scale(y_enc, leaf_scales.and_then(|c| c.y_scale.as_ref()));
     let (x_enc, y_enc) = (x_adopted.as_ref().or(x_enc), y_adopted.as_ref().or(y_enc));
+    // The spec the positional axes resolve against: its layers read
+    // inherited channels from the chart-level encoding. `build_axis_scale`
+    // takes each axis's bound encoding as its own argument, so the spec's
+    // `encoding` there serves only that inheritance.
+    let axis_spec: Cow<'_, ChartSpec> = if spec.layers.is_some() && *chart_encoding != spec.encoding {
+        Cow::Owned(ChartSpec { encoding: chart_encoding.clone(), ..spec.clone() })
+    } else {
+        Cow::Borrowed(spec)
+    };
     let has_x = x_enc.is_some();
     let has_y = y_enc.is_some();
 
@@ -2288,7 +2354,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 // `position::axis_batch_for_x` for the rationale.
                 let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-                let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
+                let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
@@ -2299,7 +2365,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             (None, Some(y_enc)) => {
                 let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-                let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
+                let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
                 let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
@@ -2354,7 +2420,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // layer that draws may still have nothing to plot on it. Asked here, after
     // the channel-level check above, so each refusal keeps its own lane — see
     // `validate_drawing_layers_can_plot`.
-    validate_drawing_layers_can_plot(spec)?;
+    validate_drawing_layers_can_plot(spec, chart_encoding)?;
 
     // Data-aware sort (channel shorthand `"-y"`, sort-field objects) needs both
     // positional field names so an ordinal axis can aggregate the opposite
@@ -2368,12 +2434,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // resolved value axis is X. See `position::axis_batch_for_x` for the
     // rationale.
     let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.

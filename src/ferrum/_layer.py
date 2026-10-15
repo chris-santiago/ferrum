@@ -99,6 +99,33 @@ class _Layer:
     #: own chart. Serialized onto the wire layer dict only when non-empty
     #: (``Layer::inherited_positional`` in Rust ``spec/layer.rs``).
     inherited_positional: tuple[str, ...] = ()
+    #: Where this layer, though it reads a named output, takes each
+    #: positional channel it does not bind, as a layer reading the chart's
+    #: own rows takes the chart's: ``None`` (it takes none), ``"encoding"``
+    #: (the chart's encoding: a left ``+`` operand's tail reader routed into
+    #: its own-rows branch, drawing as on its own chart) or ``"written"`` (the
+    #: composition's caller-written bindings, ``Chart._written_positional``:
+    #: every layer a merge routed from the right side). ``chart + chart``
+    #: fills a right operand's tail readers from that operand first, so a
+    #: composed chart used as an operand keeps its own x/y; ``Chart.to_spec()``
+    #: fills the channels still unbound (listing every copied channel in
+    #: ``inherited_positional``). Never serialized.
+    positional_source: Optional[str] = None
+    #: The ``(column, renamed column)`` pairs a chart-level positional field
+    #: is renamed by before it reaches this layer: the right operand of
+    #: ``chart + chart`` over different data with overlapping columns reads
+    #: the combined rows, where its own columns carry the merge's suffix, so a
+    #: chart field ``"a"`` names that operand's ``"a__rhs_0001"``. Empty for
+    #: every other layer. Never serialized.
+    positional_renames: tuple[tuple[str, str], ...] = ()
+    #: Whether this layer reads its operand's share of the chart's rows
+    #: through a branch, so each unnamed step of the chart's chain must run
+    #: over that share before the layer reads it. ``chart + chart`` over
+    #: different data sets it on the left operand's tail readers, which read
+    #: the chart's pipeline before the merge; a step a later
+    #: ``.transform(...)`` adds to the composed chart still reaches them. See
+    #: :func:`ferrum.chart._settle_chart_rows`. Never serialized.
+    rows_from_chart: bool = False
     #: The ``ConditionalSpec`` objects this layer declared, held by identity.
     #: A conditional is owned by a layer when it was declared on that layer's
     #: own ``Layer(encoding=...)``, or on the chart the layer came from when

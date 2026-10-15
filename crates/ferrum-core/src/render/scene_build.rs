@@ -1027,6 +1027,7 @@ fn resolve_panel_scales(
     // Scale resolution over this panel's pixel range.
     let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_leaf_context(
         &rendering_spec_for_panel,
+        &spec.encoding,
         panel_batch,
         &prep.transform_outputs,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
@@ -2345,16 +2346,15 @@ pub(crate) fn resolve_legend_color_scale(
         ..spec.clone()
     };
     scale_resolve::resolve_param_domains(&mut rendering_spec_for_legend);
+    // The legend reads only the color scale, so no positional axis is
+    // resolved here.
     let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
-        let (gs, _) = scale_resolve::resolve_scales_with_outputs(
+        scale_resolve::resolve_color_scale(
             &rendering_spec_for_legend,
             prep.final_batch(),
             &prep.transform_outputs,
-            (0.0, 1.0),
-            (0.0, 1.0),
             theme,
-        )?;
-        gs.color
+        )?
     } else {
         None
     };
@@ -5455,6 +5455,60 @@ mod tests {
             "the legend must still render when the colored layer is NOT layer 0 \
              (text, which has no color of its own, is layer 0 here); legend was empty"
         );
+    }
+
+    /// `(bar(x=g, y=v, color=g) + text(text=v)).coord(CoordFlip())` through the
+    /// whole scene build. The text layer binds no position, so it draws the
+    /// bar's `g`/`v`; the legend's color scale is resolved with no positional
+    /// axis. Resolving the legend's axes against the rendering encoding read
+    /// the inherited field through the flip a second time and refused the
+    /// chart (`column 'g' (Utf8) cannot be drawn on the shared x axis`).
+    #[test]
+    fn a_flipped_colored_bar_with_an_inheriting_text_layer_renders_its_bars_and_legend() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec: ChartSpec = serde_json::from_str(
+            r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"g"},"y":{"field":"v","scale":{"type":"linear","clamp":false,"nice":false,"zero":true,"systemInjected":true}},"color":{"field":"g"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"g"},"y":{"field":"v"},"color":{"field":"g"}}},{"mark":"text","encoding":{"text":{"field":"v"}}}],"coord":{"kind":"flip"}}"#,
+        )
+        .expect("the lowered spec deserializes");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let scene = try_build_scene_for(&spec, &batch).expect("the flipped colored bar chart renders");
+        let bars: usize = scene
+            .panels
+            .iter()
+            .flat_map(|panel| &panel.marks)
+            .filter(|batch| batch.kind == ferrum_scene::MarkBatchKind::Bar)
+            .map(|batch| batch.nodes.len())
+            .sum();
+        assert_eq!(bars, 3, "one bar per category");
+        fn texts(nodes: &[ferrum_scene::SceneNode], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    ferrum_scene::SceneNode::Text { content, .. } => out.push(content.clone()),
+                    ferrum_scene::SceneNode::Group { children, .. } => texts(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut legend = Vec::new();
+        texts(&scene.legend, &mut legend);
+        for category in ["a", "b", "c"] {
+            assert!(legend.iter().any(|t| t == category), "legend {legend:?} lists {category}");
+        }
     }
 
     /// Shared bar+text spec/batch for the dodge/stack position-grouping
