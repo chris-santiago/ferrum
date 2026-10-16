@@ -53,6 +53,7 @@ On one panel each channel has one scale, except an independent-y layer, which ow
 
 - *Coherence:* one rule for positional and auxiliary scales (`seed_reads` / `aux_reads` already read per layer). It removes the reason promotion exists (Rust built auxiliary scales from `spec.encoding` only, per the `_promote_layer_channels` docstring).
 - *Users:* one legend per field, listing every value drawn. A channel bound only on a later layer still gets its scale and legend.
+- *Every mark (user ruling 2026-10-16):* a channel's scale maps its values the same way on every mark that draws it, so the legend states what each mark draws. The opacity family (`opacity`, `fill_opacity`, `stroke_opacity`) maps through its scale on line, area, bar, tick, rule and segment marks as it does on point, rect, arc and polygon. Before the ruling those six drew the raw value clamped to 0–1, which the opacity legend would misstate. Vega-Lite and ggplot2 map opacity/alpha through one scale on every mark.
 - *Libraries:* Vega-Lite layers share scales and merge legends by default, with `resolve` to opt out. ggplot2 trains each scale on every layer. The divergence is the x/y fallback (Ruling A): Vega-Lite gives a sibling nothing. It is justified because one panel has one coordinate space, and the wave-6 rule already makes layer 0 its owner.
 
 ### P6. Titles come from the binding the caller wrote
@@ -131,6 +132,7 @@ Each row is one cell group. Doors are collapsed where P1–P8 make them identica
 | composite stat | `H/D/B(color=g)`; `S(color=g)`; `S(color=g).layer(tick)` | the stat groups by color (P3) | H/D/B group; `S(color=g)` refused (`unknown column 'c'`); `S(color=g).layer(tick)` **renders an ungrouped fit, color dropped silently** | H/D/B group; S refused flat and layered | per-group fit | gap G8 |
 | user transform | aggregate in `.transform()`, bind the output (`SY("mean_r")`, `layer(text="my")`) | renders | renders | partly refused | same | consistent |
 | scale domain | color/size/opacity union over layers (c6); type conflict excluded with `LayerScaleExcluded` (c7) | union; one legend | union on `+` (numeric 5..45, categorical a, b, c); **LCs draws two `g` legends (a, b and a, b, c)** while `+` draws one | `+` used the first color layer's domain (a, b) | shared scale, merged legend | `+` consistent; LCs **contradiction K1** |
+| mark kind | `opacity` / `fill_opacity` / `stroke_opacity` bound to a field on line, area, bar, tick, rule, segment vs point, rect, arc, polygon | one scale maps the value on every mark; the legend shows the alphas the marks draw (user ruling 2026-10-16) | point, rect, arc, polygon map through the scale; the other six draw the raw value clamped to 0–1 | same | one opacity scale on every mark | **gap**, fixed with the opacity legend (plan Task 31) |
 | legend title | promoted statistic, same vs different frame; promoted bin | written-binding title: `mean_z`; bin → `z` | same frame `mean_z`, different frame `z`; bin `bin_start` | `z` | "Mean of z", "z (binned)" | **contradiction K3 (open item 2, §3)** |
 | `Layer(encoding=)` strings | `P.layer(Layer(point, encoding={"y": "r", "color": "c"}))` | draws colored by `c` with a legend | **not drawn**: a string is not promoted and Rust builds no scale for a later layer's own channel; a `Color("c")` object is promoted and drawn | same | Altair: string ≡ object | gap G7 |
 
@@ -245,6 +247,10 @@ Ordered by severity: silent wrong output first, then refusal of a valid chart, t
 **Recommendation: D4-A.**
 
 No other cell needs the user: X2/Y2 aggregates and the source-field bin title are already ruled (c8, 2026-10-16), and every remaining gap follows from P1–P8 with a single answer.
+
+### Rulings recorded after adoption
+
+- **Opacity maps on every mark (2026-10-16).** Raised while adding the opacity legend: six marks drew `opacity=<field>` raw while four mapped it. Ruled: every mark maps the opacity family through its one scale (P4, P5), so marks and legend agree. See the P5 *Every mark* line and the §2.3 "mark kind" row.
 
 ---
 
