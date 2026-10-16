@@ -6,11 +6,11 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 ## Start every session here
 
-1. **Read `design-docs/superpowers/ferrum-phases.md`** — it lists all 12 implementation phases, their dependency order, done criteria, and the current status of each. Find the first phase that is not `done` and start there.
+The initial build (the 12 phases in `design-docs/superpowers/ferrum-phases.md`) is done. Work now runs as campaign waves and batches of fixes and capabilities, each on its own branch.
 
-2. **Read the phase's spec doc** (linked in the phases table) before writing any code. If no spec exists yet, run `chris-code:brainstorming` before touching anything.
-
-3. **Read `ferrum-spec.md`** (repo root) only if you need the user-facing API contract for the phase you are working on. It is the concept spec, not the implementation guide.
+1. **Find where the work stands.** Check the branch and `git status`, then the campaign entries in memory (`MEMORY.md`). For an in-flight subagent-driven run, read its store under `.sdd/<run>/`: the ledger (`ledger.py completed` / `open`) and `orchestrator-notes.md`.
+2. **Read the run's design artifacts** before writing code: the decision doc, spec and plan under `.claude/output/{decisions,specs,plans}/`. New, design-open work starts with `chris-code:brainstorming`; a determined change starts with `chris-code:coherent-change` (or `chris-code:remediating-issues` for a known defect).
+3. **Read the code before stating anything about behavior.** `ferrum-spec.md` is the user-facing API contract, but its weight varies by section; see the `ferrum-spec.md` bullet under Hard constraints.
 
 ---
 
@@ -106,7 +106,7 @@ Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.to
 
 - **No matplotlib.** Not as a dependency, not as a dev dependency, not as an optional extra. Ever.
 - **No global mutable state.** No module-level config objects, no module-level theme rebinding. Themes are values passed to `Chart`; per-chart `.theme()` always wins. The single documented exception is `ferrum.set_default_theme()` (phase 8a+), which mutates a per-thread `contextvars.ContextVar` — scope-bounded, automatic-revert when used as a context manager, and overridden by per-chart `.theme()` at render time. Do not introduce other process-scoped mutators.
-- **`ferrum-spec.md` is the API contract.** If implementation diverges, amend the contract text in place and append a dated entry under that section's heading in `design-docs/spec-history.md`. Never silently drift.
+- **`ferrum-spec.md` is the API contract.** If implementation diverges, amend the contract text in place and append a dated entry under that section's heading in `design-docs/spec-history.md`. Never silently drift. How far to trust it: every signature and default it states is machine-checked against the shipped code (`scripts/check_spec.py`, run by `tests/test_spec_contract.py`), and §3.13 onward was rewritten as a code-verified contract in batch I (2026-10). Prose elsewhere captures the original design intent (from about April 2026) and may lag behavior changed in July and August 2026, when spec edits fell well behind code changes. Verify a prose claim against the code before relying on it, and fix the prose in place when it is wrong.
 - **`cargo test` must pass** before any phase (2+) is marked done. Phase 1 is the only exception.
 - **No seaborn, sklearn, yellowbrick, or scikit-plot imports in `src/ferrum/`.** They exist solely as gallery-audit comparators in isolated PEP 723 envs (see Gallery audit).
 - **No `unsafe` blocks** without clear justification documented in a comment.
@@ -119,16 +119,25 @@ Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.to
 
 ---
 
-## Implementation philosophy (Phase 12 and beyond)
+## Implementation philosophy
 
 **Do the work now. Do it the right way. Enable a better end-user experience now.**
 
-- Do NOT propose "defer X to a later phase / follow-up ticket" as a scope-reduction strategy.
-- If a `ferrum-spec.md` parameter is hard to ship completely, ship it completely (with whatever Rust transform, mark, encoding, or position-adjustment subsystem it needs) — not a warn-fallback or `NotImplementedError`.
-- Use sub-phase decomposition to manage build order, not to drop scope.
-- "Implement everything fully" is the default. No Warn-fallbacks. **NotImplementedErrors ARE NOT ACCEPTABLE.**
+- Fix fully. A change closes every case its rule reaches (siblings, producers, boundary inputs). Only a genuinely separate, larger improvement is logged as a follow-up; "the rest later" is not a scope-reduction strategy.
+- No warn-fallbacks and no `NotImplementedError`. A parameter that is hard to ship gets the Rust transform, mark, encoding or position subsystem it needs.
+- **Refuse malformed, warn degraded.** Input the library would ignore or misread is refused with a typed error that names the remedy. Output that renders but loses something is warned. Nothing silently blanks or silently drops.
+- Decompose work to manage build order, not to drop scope.
+- **Implement what the decision defends.** A coder that finds the defended approach breaks tests, or can't be built as written, stops and reports instead of inventing a mechanism; the gap goes back through a decision doc.
 
-This rule governs all open phases; it does not retroactively reopen closed phases (1–12 spec completeness are done; Phase 12 extension points is the current frontier).
+### How design decisions are judged
+
+Every design decision and recommendation (decision docs, checkpoint questions, defended choices) states its case against all three of these:
+
+1. **Coherence with the existing code.** The same rule holds on every door (for example `+`, `Chart.layer`, `SecondaryY` and `LayerChart` read data the same way), an existing mechanism is reused rather than a parallel one added, and the change fits the layering of Python declaration over Rust computation.
+2. **User expectations.** What would someone writing the call assume happens? A result that silently misaligns, blanks or depends on call order fails this test even when it is internally consistent.
+3. **Alignment with popular plotting libraries** (Vega-Lite/Altair, d3, ggplot2, seaborn, plotly). Ferrum may go a different way, but only when the divergence is justified, reasonable and coherent, and the justification is written down.
+
+Earlier rulings that fail these criteria are open to review, not binding; reversals are logged for the decision-flip audit.
 
 ---
 
@@ -335,7 +344,7 @@ The review gates read this file; these hard-constraint violations map to fixed s
 
 The lite agents gate every commit; the heavyweight skills (`python-review` / `rust-review`) are subsystem-level audits that produce a six-section report and a refactor roadmap. They are deliberate interventions — not appropriate for every diff. The orchestrator should **offer the heavyweight skill proactively, without waiting for the user to type `/python-review` or `/rust-review`**, when any of these conditions hold:
 
-1. **A phase is about to be marked done.** Before transitioning a phase in `design-docs/superpowers/ferrum-phases.md` from in-progress to done, run the matching heavyweight skill on the subsystems that phase modified. The lite agent sees one commit at a time; the heavy skill sees how the subsystem hangs together after a phase's worth of accumulated work.
+1. **A subsystem keeps needing fixes inside one run.** When one subsystem takes three or more review or fix cycles in a run, or a task hits its fix cap, the problem is structural, not diff-level (batch I's `+` layering routing is the example: each cycle fixed one route and broke another until one representation replaced three partial ones). Offer a heavy review scoped to that subsystem before the next patch. The completion close (`verification-before-completion`) already runs the `*-design-reviewer` agents on the whole change, so a wave or batch close does not need a separate heavy review.
 2. **The lite agent has escalated 2+ times on the same module within the session.** Repeated escalation means the band-aid pattern is broken — lite is treating diff-level symptoms while the structural issue lives in the module. Escalate to a heavy review scoped to that module.
 3. **A new public-API surface is added to an existing family.** A new `*_chart` in `src/ferrum/figures.py`, a new mark in `src/ferrum/marks/`, a new transform in `crates/ferrum-core/src/transform/`, a new encoding channel, or a new visualizer subclass all warrant a heavy review of the whole family afterwards to catch sibling drift (signature mismatches, naming drift, inconsistent return shapes, parallel-API mismatch) before the new member becomes entrenched. The `calibration_chart` signature drift caught in May 2026 is the canonical example: it lived for a phase before anyone audited the family.
 4. **The user expresses a coherence smell in natural language.** "This feels off", "sibling drift", "X drifted from Y", "utility module sprawl", "inconsistent return shapes", "parallel-API mismatch", "this module feels overgrown" — the heavyweight skill descriptions already list these triggers. Offer the heavyweight review immediately rather than waiting for the slash command.
@@ -345,6 +354,12 @@ Always announce the offer before running — e.g. "This feels like sibling drift
 For the full surface comparison table, severity rubric (S1–S5), audit trail paths, and detailed descriptions of what each agent does — see **`.claude/README.md`**.
 
 ---
+
+## Layer encoding model (adopted 2026-10-16)
+
+**Read `design-docs/architecture/layer-encoding-model.md` before touching layering, `+`, `Chart.layer`, `Layer`, `SecondaryY`, `LayerChart`, encoding inheritance, encoding aggregates/bins, or auxiliary scales and legends.** It is the one model for how encodings and statistics behave on every door (principles P1–P8, a rule table over channel × statistic × door, a gap list, and reuse-vs-rewrite verdicts). Its spec and plan are `.claude/output/{specs,plans}/2026-10-16-layer-encoding-model-*`. It was written because per-finding fixes kept breaking neighbouring doors (Task 16 of batch I reached seven decisions). Changes in this area are judged against its rule table, not patched case by case; a case the table does not cover goes back to the model first.
+
+User rulings adopted with it: sibling isolation (a `+` operand's or `Layer`'s bindings stay on its own layers; shared bindings are written on the host or the composition; promotion is removed; layer 0 still owns the x/y axes); statistics are per layer at the layer's own grain; one scale per channel per panel resolved over every layer that draws it; `aggregate=` is honored on every channel that draws a value (x/y, x2/y2, theta/radius, value channels) and refused on the rest; `bin=` on color/fill/stroke is a discretizing color scale and refused on other non-positional channels; a positional bin without an aggregate bins each row.
 
 ## Key architectural decisions
 
