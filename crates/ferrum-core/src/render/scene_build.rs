@@ -1976,20 +1976,18 @@ fn build_panel_mark_batches(
         // inherited channel the normalization then cleared and no builder ever
         // read — a working chart turned into a hard error.
         //
-        // `source` is `Some` only for a layer with no `data_source` of its
-        // own — so it reads `spec`'s pipeline output, exactly what
-        // `Chart.layer(...)` always does, which is the one case a missing
-        // column might be a pre-transform source column this layer cannot
-        // reach, drawable only by composing a separate chart with `+`. The
-        // gate itself decides whether the source schema actually has the
-        // column.
-        let source = layer.data_source.is_none().then(|| prep.source_schema.as_ref());
+        // The gate searches every batch the pipeline saw to name where a
+        // missing column does exist, which picks the remedy it names.
         super::prepare::validate_layer_positional_columns(
             li,
+            layer,
             &layer_spec.encoding,
             own_batch,
             layer_flipped,
-            source,
+            &super::prepare::PipelineBatches {
+                source: prep.source_schema.as_ref(),
+                outputs: &prep.transform_outputs,
+            },
         )?;
         // `#172`(1)'s second refusal reason (wave-5 close remediation). Asked
         // here, after the presence gate above and before the mark-shape gate
@@ -2351,6 +2349,7 @@ pub(crate) fn resolve_legend_color_scale(
     let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         scale_resolve::resolve_color_scale(
             &rendering_spec_for_legend,
+            &spec.encoding,
             prep.final_batch(),
             &prep.transform_outputs,
             theme,
@@ -4208,6 +4207,7 @@ mod tests {
             data_source: None,
             position: None,
             independent_y,
+            reads_chart_data: true,
             color_is_own: false,
             x_is_own: false,
             y_is_own: true,
@@ -8997,7 +8997,8 @@ mod tests {
                 channel,
                 ref name,
                 coord_flipped,
-                in_source,
+                remedy,
+                ..
             } => {
                 assert_eq!(layer, 1, "the offending layer index must be named");
                 assert_eq!(channel, "y");
@@ -9007,7 +9008,7 @@ mod tests {
                 // remedy is for a layer with NO `data_source` of its own, so
                 // this control case keeps the plain message regardless
                 // of whether "y0" is a source column.
-                assert!(!in_source, "a layer with its own data_source keeps the plain message");
+                assert_eq!(remedy, None, "a layer with its own data_source keeps the plain message");
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -9883,11 +9884,15 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("layer 1 names a column the transformed tail dropped");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x");
                 assert_eq!(name, "value");
-                assert!(in_source, "'value' is a column of the untransformed source batch");
+                assert_eq!(
+                    remedy,
+                    Some(crate::render::MissingColumnRemedy::Source),
+                    "'value' is a column of the untransformed source batch"
+                );
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -9901,8 +9906,8 @@ mod tests {
     }
 
     /// The control: no transforms upstream at all, and the missing column
-    /// ("nope") was never a column of the source either. `in_source` must be
-    /// false because the column is not in the source, not merely because
+    /// ("nope") was never a column of the source either. `remedy` must be
+    /// `None` because the column is not in the source, not merely because
     /// there happens to be no transform.
     #[test]
     fn layer_with_no_data_source_keeps_todays_message_with_no_transforms_upstream() {
@@ -9927,11 +9932,11 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("layer 1 still names a column absent from its own batch");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x");
                 assert_eq!(name, "nope");
-                assert!(!in_source, "\"nope\" is not a column of the source either");
+                assert_eq!(remedy, None, "\"nope\" is not a column of the source either");
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -9956,11 +9961,11 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("layer 1 names a column absent from source and tail alike");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x");
                 assert_eq!(name, "nope");
-                assert!(!in_source, "a typo is not in the source either, transforms notwithstanding");
+                assert_eq!(remedy, None, "a typo is not in the source either, transforms notwithstanding");
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -10022,11 +10027,11 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("layer 1 names a column absent from the untouched tail/source");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x");
                 assert_eq!(name, "nope");
-                assert!(!in_source, "a named-only chain's tail IS the source; \"nope\" is in neither");
+                assert_eq!(remedy, None, "a named-only chain's tail IS the source; \"nope\" is in neither");
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -10043,11 +10048,12 @@ mod tests {
     /// `prepare::build_secondary_y_axis_inputs` →
     /// `scale_resolve::resolve_layer_y_slot_scale`, not through
     /// `validate_layer_positional_columns` directly — a different route into
-    /// the SAME `LayerUnknownColumn` variant and the same wording: a
-    /// `Chart.layer(...)` layer and a `SecondaryY(...)` layer say the exact
-    /// same thing for the exact same mistake.
+    /// the SAME `LayerUnknownColumn` variant and the same classification: a
+    /// `Chart.layer(...)` layer and a `SecondaryY(...)` layer get the same
+    /// source remedy for the same mistake, spelled for the independent-y
+    /// door with `fm.LayerChart(...)` rather than `+`.
     #[test]
-    fn independent_y_layer_with_no_data_source_names_plus_remedy_when_chart_has_transforms() {
+    fn independent_y_layer_with_no_data_source_names_layer_chart_remedy_when_chart_has_transforms() {
         pyo3::Python::initialize();
         use crate::spec::encoding::Encoding;
 
@@ -10063,19 +10069,21 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("the independent-y layer names a column the transformed tail dropped");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "y");
                 assert_eq!(name, "value");
-                assert!(in_source);
+                assert_eq!(remedy, Some(crate::render::MissingColumnRemedy::Source));
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
         let msg = err.to_string();
         assert!(msg.contains("'value'"), "message must name the column: {msg}");
         assert!(
-            msg.contains("chart's transformed rows") && msg.contains('+'),
-            "a SecondaryY layer must say the same thing a Chart.layer(...) layer does: {msg}"
+            msg.contains("chart's transformed rows")
+                && msg.contains("fm.LayerChart(base, other, resolve={\"y\": \"independent\"})")
+                && !msg.contains('+'),
+            "a SecondaryY layer gets the source remedy spelled for its own y axis: {msg}"
         );
     }
 
@@ -10106,17 +10114,17 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("the independent-y layer's own x names a column the tail dropped");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x", "the layer's own x is the missing channel, not y");
                 assert_eq!(name, "value");
-                assert!(in_source);
+                assert_eq!(remedy, Some(crate::render::MissingColumnRemedy::Source));
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
         let msg = err.to_string();
         assert!(msg.contains("'x'"), "message must name the real channel: {msg}");
-        assert!(msg.contains("chart's transformed rows") && msg.contains('+'), "{msg}");
+        assert!(msg.contains("chart's transformed rows") && msg.contains("fm.LayerChart("), "{msg}");
     }
 
     /// The positional gate is positional-only (`validate_layer_positional_columns`'s
@@ -10316,11 +10324,15 @@ mod tests {
         let err = try_build_scene_for(&spec, &batch)
             .expect_err("every panel's layer 1 names a column its own aggregate dropped");
         match err {
-            RenderError::LayerUnknownColumn { layer, channel, ref name, in_source, .. } => {
+            RenderError::LayerUnknownColumn { layer, channel, ref name, remedy, .. } => {
                 assert_eq!(layer, 1);
                 assert_eq!(channel, "x");
                 assert_eq!(name, "value");
-                assert!(in_source, "'value' is a column of the unpartitioned source schema");
+                assert_eq!(
+                    remedy,
+                    Some(crate::render::MissingColumnRemedy::Source),
+                    "'value' is a column of the unpartitioned source schema"
+                );
             }
             ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
         }
@@ -10329,6 +10341,212 @@ mod tests {
             msg.contains("chart's transformed rows") && msg.contains('+'),
             "a faceted chart's remedy must still fire, judged against the unpartitioned source: {msg}"
         );
+    }
+
+    // ── unknown-column remedy classification ───────────────────────────────
+
+    /// A chart over a one-column `value` source with two outputs: a NAMED
+    /// `Aggregate` published as `"agg"` (`total`), and an UNNAMED one that
+    /// replaces the tail (`mean_v`). So `value` lives only in the source,
+    /// `total` only in a named output, and `mean_v` only in the tail. Layer 0
+    /// draws the tail's `mean_v`; layer 1 is the caller's, given as the wire
+    /// JSON Python emits so the `reads_chart_data` flag is set the way the
+    /// renderer receives it.
+    fn layer_gate_remedy_spec(layer1: serde_json::Value) -> (ChartSpec, RecordBatch) {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::transform::aggregate::{AggFn, AggregateOp, AggregateSpec};
+        use crate::transform::core::TransformSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let field = |name: &str| Some(EncodingSpec { field: name.into(), ..Default::default() });
+        let aggregate = |fn_, as_: &str, name: Option<&str>| {
+            TransformSpec::Aggregate(AggregateSpec {
+                ops: vec![AggregateOp { field: "value".into(), fn_, as_: as_.into() }],
+                groupby: vec![],
+                name: name.map(Into::into),
+            })
+        };
+        let layer0 = Layer {
+            mark: Mark::Tick,
+            encoding: Encoding { x: field("mean_v"), ..Default::default() },
+            ..Default::default()
+        };
+        let layer1: Layer = serde_json::from_value(layer1).expect("the layer wire JSON deserializes");
+        let spec = ChartSpec {
+            mark: Mark::Tick,
+            encoding: Encoding { x: field("mean_v"), ..Default::default() },
+            transforms: vec![
+                aggregate(AggFn::Sum, "total", Some("agg")),
+                aggregate(AggFn::Mean, "mean_v", None),
+            ],
+            layers: Some(vec![layer0, layer1]),
+            ..Default::default()
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))]).unwrap();
+        (spec, batch)
+    }
+
+    /// The refusal message rendering `layer_gate_remedy_spec(layer1)` raises.
+    fn layer_gate_remedy_message(layer1: serde_json::Value) -> String {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_remedy_spec(layer1);
+        try_build_scene_for(&spec, &batch)
+            .expect_err("layer 1 names a column absent from the batch it reads")
+            .to_string()
+    }
+
+    /// The plain refusal every classification starts with.
+    fn unknown_column_prefix(channel: &str, name: &str) -> String {
+        format!(
+            "layer 1: encoding '{channel}' references unknown column '{name}' \
+             (not present in that layer's data)"
+        )
+    }
+
+    fn source_remedy_shared(channel: &str, name: &str) -> String {
+        format!(
+            "{} — this layer reads the chart's transformed rows, not its source data; draw \
+             '{name}' from the source by composing a separate chart with `+` instead",
+            unknown_column_prefix(channel, name)
+        )
+    }
+
+    fn source_remedy_independent_y(channel: &str, name: &str) -> String {
+        format!(
+            "{} — this layer reads the chart's transformed rows, not its source data; draw \
+             '{name}' from the source with fm.LayerChart(base, other, resolve={{\"y\": \
+             \"independent\"}}) instead",
+            unknown_column_prefix(channel, name)
+        )
+    }
+
+    fn statistic_remedy_shared(channel: &str, name: &str) -> String {
+        format!(
+            "{} — '{name}' is a statistic another layer's mark computes for itself; compute it \
+             in the chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every \
+             layer reads it, or draw it from its own chart composed with `+`",
+            unknown_column_prefix(channel, name)
+        )
+    }
+
+    fn statistic_remedy_independent_y(channel: &str, name: &str) -> String {
+        format!(
+            "{} — '{name}' is a statistic another layer's mark computes for itself; compute it \
+             in the chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every \
+             layer reads it, or draw it from its own chart with fm.LayerChart(base, other, \
+             resolve={{\"y\": \"independent\"}})",
+            unknown_column_prefix(channel, name)
+        )
+    }
+
+    /// A tail reader naming a source column the chain dropped: the source
+    /// remedy, spelled with `+` for a shared-axis layer.
+    #[test]
+    fn tail_reader_missing_a_source_column_gets_the_shared_axis_source_remedy() {
+        let msg = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "encoding": {"x": {"field": "value"}},
+        }));
+        assert_eq!(msg, source_remedy_shared("x", "value"));
+    }
+
+    /// The same miss on an independent-y layer (the `SecondaryY` door): the
+    /// source remedy is spelled with `fm.LayerChart(..., resolve=...)`, since
+    /// `+` would put the column on the shared y axis instead.
+    #[test]
+    fn tail_reader_missing_a_source_column_gets_the_independent_y_source_remedy() {
+        let msg = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "independent_y": true, "encoding": {"y": {"field": "value"}},
+        }));
+        assert_eq!(msg, source_remedy_independent_y("y", "value"));
+    }
+
+    /// A tail reader naming a column only another output of the pipeline
+    /// carries (`total`, published as `"agg"`): the statistic remedy, not the
+    /// plain message a column found nowhere gets.
+    #[test]
+    fn tail_reader_missing_a_pipeline_output_column_gets_the_shared_axis_statistic_remedy() {
+        let msg = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "encoding": {"x": {"field": "total"}},
+        }));
+        assert_eq!(msg, statistic_remedy_shared("x", "total"));
+    }
+
+    #[test]
+    fn tail_reader_missing_a_pipeline_output_column_gets_the_independent_y_statistic_remedy() {
+        let msg = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "independent_y": true, "encoding": {"y": {"field": "total"}},
+        }));
+        assert_eq!(msg, statistic_remedy_independent_y("y", "total"));
+    }
+
+    /// A typo is in no batch at all: plain, on both doors.
+    #[test]
+    fn tail_reader_naming_a_column_found_nowhere_keeps_the_plain_message_on_both_doors() {
+        let shared = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "encoding": {"x": {"field": "nope"}},
+        }));
+        assert_eq!(shared, unknown_column_prefix("x", "nope"));
+        let independent = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "independent_y": true, "encoding": {"y": {"field": "nope"}},
+        }));
+        assert_eq!(independent, unknown_column_prefix("y", "nope"));
+    }
+
+    /// A layer reading a named output WITH `reads_chart_data` reads its
+    /// chart's data through that output, so it is classified like a tail
+    /// reader: a source column gets the source remedy, a column of another
+    /// output the statistic remedy, each spelled for the layer's door.
+    #[test]
+    fn chart_data_reader_with_its_own_output_is_classified_on_both_doors() {
+        let source = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "data_source": "agg", "reads_chart_data": true,
+            "encoding": {"x": {"field": "value"}},
+        }));
+        assert_eq!(source, source_remedy_shared("x", "value"));
+        let statistic = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "data_source": "agg", "reads_chart_data": true,
+            "encoding": {"x": {"field": "mean_v"}},
+        }));
+        assert_eq!(statistic, statistic_remedy_shared("x", "mean_v"));
+        let source_independent = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "data_source": "agg", "reads_chart_data": true, "independent_y": true,
+            "encoding": {"x": {"field": "total"}, "y": {"field": "value"}},
+        }));
+        assert_eq!(source_independent, source_remedy_independent_y("y", "value"));
+        let statistic_independent = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "data_source": "agg", "reads_chart_data": true, "independent_y": true,
+            "encoding": {"x": {"field": "total"}, "y": {"field": "mean_v"}},
+        }));
+        assert_eq!(statistic_independent, statistic_remedy_independent_y("y", "mean_v"));
+        let typo = layer_gate_remedy_message(serde_json::json!({
+            "mark": "tick", "data_source": "agg", "reads_chart_data": true,
+            "encoding": {"x": {"field": "nope"}},
+        }));
+        assert_eq!(typo, unknown_column_prefix("x", "nope"));
+    }
+
+    /// A named-output reader WITHOUT the flag (a `+` operand's branch reader)
+    /// does not read its chart's data, so neither remedy is true of it: a
+    /// source column and a column of another output both keep the plain
+    /// message.
+    #[test]
+    fn data_source_reader_without_the_flag_keeps_the_plain_message() {
+        for name in ["value", "mean_v"] {
+            let msg = layer_gate_remedy_message(serde_json::json!({
+                "mark": "tick", "data_source": "agg", "encoding": {"x": {"field": name}},
+            }));
+            assert_eq!(msg, unknown_column_prefix("x", name), "column '{name}'");
+        }
+        let independent = layer_gate_remedy_message(serde_json::json!({
+            "mark": "point", "data_source": "agg", "independent_y": true,
+            "encoding": {"x": {"field": "total"}, "y": {"field": "mean_v"}},
+        }));
+        assert_eq!(independent, unknown_column_prefix("y", "mean_v"));
     }
 
     // ── structural feature build (close-review S2/S4) ───────────────────────

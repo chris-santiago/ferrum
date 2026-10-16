@@ -153,6 +153,169 @@ fn seed_reads<'a>(
     reads
 }
 
+/// One read of a chart-level non-positional channel's domain (color, size,
+/// the opacity family, shape, stroke_dash) on a layered spec: the layer's
+/// index, its batch ([`LayerSource`]), and the binding it draws there on the
+/// channel. `pub` (its fields are not) because the crate-visible scale
+/// builders take a slice of it; this module is private to `scale_resolve`.
+#[derive(Clone, Copy)]
+pub struct AuxRead<'a> {
+    layer: usize,
+    source: LayerSource<'a>,
+    field: &'a str,
+    binding: &'a crate::spec::encoding::EncodingSpec,
+}
+
+impl AuxRead<'_> {
+    /// The column this read draws, in the batch its layer draws; `None` when
+    /// that batch lacks the field.
+    pub(in crate::render) fn locate<'b>(
+        &self,
+        primary_batch: &'b RecordBatch,
+        transform_outputs: &'b HashMap<String, RecordBatch>,
+    ) -> Option<LocatedColumn<'b>> {
+        self.source.locate(self.field, primary_batch, transform_outputs)
+    }
+}
+
+/// The reads that make up a chart-level non-positional channel's domain, in
+/// layer order, one per layer: every layer that draws the channel,
+/// reading the field it draws from the batch it draws ([`LayerSource::of`]).
+/// A layer binding the channel itself draws its own field; a layer binding
+/// nothing there draws the chart-level binding, which `prepare` gives a layer
+/// on the chart's data (`inherit_from`) and a layer on its own output
+/// (`inherit_non_positional`) alike. The same layer-to-batch rule the
+/// positional union reads by ([`seed_reads`]), without its positional-only
+/// skip of `data_source` layers. Empty for an unlayered spec, whose one mark
+/// draws the primary batch. The first read is the establishing layer's: layer
+/// 0 when it draws the channel, else the first layer that does, the layer
+/// whose binding the rendering encoding carries (`prepare`'s
+/// `establishing_encoding`).
+pub(in crate::render) fn aux_reads<'a>(
+    layers: Option<&'a [Layer]>,
+    chart_encoding: &'a crate::spec::encoding::Encoding,
+    slot: impl Fn(&'a crate::spec::encoding::Encoding) -> Option<&'a crate::spec::encoding::EncodingSpec>,
+) -> Vec<AuxRead<'a>> {
+    let mut reads: Vec<AuxRead<'a>> = Vec::new();
+    for (index, layer) in layers.unwrap_or_default().iter().enumerate() {
+        let Some(binding) = slot(&layer.encoding).or_else(|| slot(chart_encoding)) else { continue };
+        reads.push(AuxRead { layer: index, source: LayerSource::of(layer), field: binding.field.as_str(), binding });
+    }
+    reads
+}
+
+/// The reads a chart-level `channel` scale admits into its domain: those whose
+/// column reads as the scale does, categorical when `scale_reads_categorical`.
+/// The establishing-scale rule of the layered axes ([`AxisMembers`]): the
+/// first read, the establishing layer's ([`aux_reads`]), draws the rendering
+/// encoding's field, which decided the scale's kind, so it is always admitted
+/// and establishes it. Every later
+/// read is classified by [`column_reads_categorical`] over the column it
+/// draws; one that reads the other way stays out of the domain, and one
+/// [`RenderWarning::LayerScaleExcluded`] names its layer, its marks drawing
+/// through the shared scale ([`crate::render::ExcludedLayerPlacement::SharedAxis`]).
+/// A read whose batch lacks its field adds nothing to a domain and is kept.
+pub(in crate::render) fn admitted_aux_reads<'a>(
+    reads: &[AuxRead<'a>],
+    channel: &str,
+    scale_reads_categorical: bool,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    warnings: &mut Vec<RenderWarning>,
+) -> Vec<AuxRead<'a>> {
+    let Some((lead, rest)) = reads.split_first() else { return Vec::new() };
+    let mut admitted = vec![*lead];
+    for read in rest {
+        let located = read.source.locate(read.field, primary_batch, transform_outputs);
+        let conflicts = located.is_some()
+            && column_reads_categorical(read.binding, located) != scale_reads_categorical;
+        if conflicts {
+            warnings.push(RenderWarning::LayerScaleExcluded {
+                layer: read.layer,
+                establishing: lead.layer,
+                channel: channel.to_string(),
+                placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+            });
+        } else {
+            admitted.push(*read);
+        }
+    }
+    admitted
+}
+
+/// The numeric domain of a chart-level non-positional channel on a layered
+/// spec: the union of `extent` over each read's column, read from the batch
+/// that layer draws. On a faceted chart a read of the chart's data also takes
+/// in the all-panels batch, as the unlayered read does
+/// ([`super::union_panel_with_global_extent`]); a layer's own output is
+/// already the all-panels one. A column with no value joins only when no
+/// read has one, so the result is exactly the single read's extent whenever
+/// one layer draws the channel. `None` when no read's batch holds its field,
+/// leaving the caller its unlayered read (and its refusal).
+pub(in crate::render) fn aux_numeric_union(
+    reads: &[AuxRead<'_>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    facet_shared: bool,
+    extent: impl Fn(&dyn Array, &str) -> Result<(f64, f64), RenderError>,
+) -> Result<Option<(f64, f64)>, RenderError> {
+    let mut union: Option<(f64, f64)> = None;
+    let mut first: Option<(f64, f64)> = None;
+    for read in reads {
+        let Some(located) = read.source.locate(read.field, primary_batch, transform_outputs) else { continue };
+        let mut read_extent = extent(located.col, read.field)?;
+        if facet_shared && read.source == LayerSource::Chart {
+            read_extent = super::union_panel_with_global_extent(read_extent, read.field, transform_outputs);
+        }
+        first.get_or_insert(read_extent);
+        if located.col.null_count() == located.col.len() {
+            continue;
+        }
+        union = Some(union.map_or(read_extent, |(lo, hi)| (lo.min(read_extent.0), hi.max(read_extent.1))));
+    }
+    Ok(union.or(first))
+}
+
+/// The categorical domain of a chart-level color, shape or stroke-dash on a
+/// layered spec: each read's distinct values in first-appearance order,
+/// unioned in layer order, as [`positional_category_union`] unions an axis's
+/// categories. A read of
+/// the chart's data takes the all-panels batch on a faceted chart
+/// ([`super::shared_categorical_batch`]). Returns the domain and the first
+/// contributing batch, which a data-aware `sort=` aggregates over; `None`
+/// when no read's batch holds its field.
+pub(in crate::render) fn aux_category_union<'b>(
+    reads: &[AuxRead<'_>],
+    primary_batch: &'b RecordBatch,
+    transform_outputs: &'b HashMap<String, RecordBatch>,
+    facet_shared: bool,
+) -> Result<Option<(Vec<String>, &'b RecordBatch)>, RenderError> {
+    let mut union: Option<(Vec<String>, &'b RecordBatch)> = None;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for read in reads {
+        let batch = match read.source {
+            LayerSource::Chart => {
+                super::shared_categorical_batch(primary_batch, read.field, transform_outputs, facet_shared)
+            }
+            LayerSource::Output(_) => {
+                let Some(batch) = read.source.batch(primary_batch, transform_outputs) else { continue };
+                batch
+            }
+        };
+        if batch.column_by_name(read.field).is_none() {
+            continue;
+        }
+        let values = super::distinct_values_in_order(batch, read.field)?;
+        let (domain, _) = union.get_or_insert_with(|| (Vec::new(), batch));
+        for value in values {
+            if seen.insert(value.clone()) {
+                domain.push(value);
+            }
+        }
+    }
+    Ok(union)
+}
+
 /// The positional bindings of one encoding for the post-flip `channel`: the
 /// value, its paired `x2`/`y2` span and the opposite channel's value.
 struct ChannelSlots<'a> {

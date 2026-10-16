@@ -72,6 +72,14 @@ pub struct LayerPrepared {
     /// [`crate::spec::layer::Layer::independent_y`]; always `false` for a
     /// single-layer (chart-only) chart, whose sole layer is the primary.
     pub independent_y: bool,
+    /// Whether this layer reads its chart's data: it has no `data_source`
+    /// (it reads the pipeline tail), or the wire marks its `data_source` as
+    /// the chart's data recomputed
+    /// ([`crate::spec::layer::Layer::reads_chart_data`]). Resolved once here
+    /// so the positional gate ([`validate_layer_positional_columns`]) asks
+    /// one question on every route; a missing column gets a chart-data
+    /// remedy only on such a layer.
+    pub reads_chart_data: bool,
     /// Whether THIS layer's own (pre-merge) encoding declared a `color`
     /// channel, as opposed to `encoding.color` (above) having been filled in
     /// purely by [`Encoding::inherit_from`](crate::spec::encoding::Encoding::inherit_from)
@@ -166,6 +174,7 @@ impl LayerPrepared {
             data_source: None,
             position: spec.position.clone(),
             independent_y: false,
+            reads_chart_data: true,
             color_is_own: spec.encoding.color.is_some(),
             x_is_own: spec.encoding.x.is_some(),
             y_is_own: spec.encoding.y.is_some(),
@@ -220,6 +229,17 @@ impl LayerPrepared {
         } else {
             encoding.inherit_from(&spec.encoding);
         }
+        // An independent-y layer's y scale is its own, never the chart's: the
+        // chart-level y scale belongs to the primary axis (a bar's zero
+        // anchor, say), while this layer's axis spans its own data, as
+        // `fm.LayerChart(..., resolve={"y": "independent"})` draws it. An
+        // independent-y bar carries its own anchor on its own `y`. Both the
+        // y-slot resolution and the scene read this encoding.
+        if layer.independent_y {
+            if let Some(y) = encoding.y.as_mut() {
+                y.scale = layer.encoding.y.as_ref().and_then(|own| own.scale.clone());
+            }
+        }
         // A layer's style is its own: a layered chart resolves
         // `layer.mark_style > theme` and never reads `spec.mark_style`
         // (`build_layers` refuses a layered spec that sets it).
@@ -231,6 +251,7 @@ impl LayerPrepared {
             data_source: layer.data_source.clone(),
             position: layer.position.clone().or_else(|| spec.position.clone()),
             independent_y: layer.independent_y,
+            reads_chart_data: layer.data_source.is_none() || layer.reads_chart_data,
             color_is_own,
             x_is_own,
             y_is_own,
@@ -488,12 +509,12 @@ pub struct PreparedInputs {
     pub warnings: Vec<RenderWarning>,
     /// One entry per layer. Single-layer charts have len() == 1.
     pub layers: Vec<LayerPrepared>,
-    /// Layer 0's resolved (post-`CoordFlip`) encoding, which every scale,
-    /// axis and legend of the chart is built from. A chart-level binding is
-    /// inherited into it and a layer's own binding replaces it, so layer 0
-    /// decides. Computed once at construction, from the same `layers` list
-    /// `build_layers` already guarantees is non-empty, so the
-    /// `rendering_encoding()` accessor below never indexes `layers[0]`.
+    /// The encoding every scale, axis and legend of the chart is built from
+    /// ([`establishing_encoding`]): layer 0's resolved (post-`CoordFlip`)
+    /// encoding, so layer 0 decides every channel it draws, with each
+    /// auxiliary-scale channel layer 0 does not draw taken from the first
+    /// layer that does. Computed once at construction, from the same `layers`
+    /// list `build_layers` already guarantees is non-empty.
     rendering_encoding: crate::spec::encoding::Encoding,
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
@@ -545,13 +566,12 @@ pub struct PreparedInputs {
     pub y_slot_plan: crate::render::scale_resolve::YSlotPlan,
     /// The chart's SOURCE batch's schema — `normalized.schema()`, taken
     /// before [`run_transforms_with_facet`] partitions it, so a faceted
-    /// chart's source schema is the unpartitioned one. The one fact
+    /// chart's source schema is the unpartitioned one. The fact
     /// [`validate_layer_positional_columns`] needs to tell "this column was
-    /// never there" (a typo, or a chain of only named steps whose tail IS
-    /// the source) from "this column was dropped by a transform this
-    /// layer's own tail doesn't see" — the only case where naming `+` as a
-    /// remedy is true. A composite leaf reaches `prepare_render_inputs` with
-    /// its own batch, so it gets its own source schema.
+    /// dropped by a transform this layer's own rows don't see", which the
+    /// source remedy names, from a column found only in a transform output
+    /// or nowhere. A composite leaf reaches `prepare_render_inputs` with its
+    /// own batch, so it gets its own source schema.
     pub source_schema: SchemaRef,
 }
 
@@ -631,9 +651,8 @@ pub struct LegendPreparedOverrides {
 }
 
 impl PreparedInputs {
-    /// Layer 0's resolved (post-`CoordFlip`) rendering encoding: the
-    /// `rendering_encoding` field this struct already carries (see that
-    /// field's doc for why).
+    /// The chart's rendering encoding: the `rendering_encoding` field this
+    /// struct already carries (see that field's doc for what it holds).
     pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
         &self.rendering_encoding
     }
@@ -1049,7 +1068,17 @@ pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarni
             | RenderWarning::ShapePaletteOverflowed { .. }
             | RenderWarning::StrokeDashPaletteOverflowed { .. }
             | RenderWarning::ColorPaletteOverflowed { .. }
-    )
+    ) || excluded_from_a_non_positional_scale(w)
+}
+
+/// A layer left out of a chart-level non-positional scale
+/// (`scale_resolve::admitted_aux_reads`). Unlike an axis exclusion, which
+/// `prepare_render_inputs` reports once before any scale resolves, this one is
+/// decided inside scale resolution, so the provisional pass and every panel
+/// re-derive it from the same layers and columns: both predicates above and
+/// below treat the later copies as restatements.
+fn excluded_from_a_non_positional_scale(w: &RenderWarning) -> bool {
+    matches!(w, RenderWarning::LayerScaleExcluded { channel, .. } if !crate::render::excluded_channel_is_positional(channel))
 }
 
 /// True for a warning `resolve_panel_scales` restates once per panel of a
@@ -1083,7 +1112,7 @@ pub(crate) fn panel_pass_warning_restated_by_every_panel(w: &RenderWarning) -> b
         RenderWarning::UnsupportedOpacityScale { .. }
             | RenderWarning::ShapePaletteOverflowed { .. }
             | RenderWarning::StrokeDashPaletteOverflowed { .. }
-    )
+    ) || excluded_from_a_non_positional_scale(w)
 }
 
 /// Keep only the FIRST copy of any warning
@@ -1206,22 +1235,18 @@ pub fn prepare_render_inputs(
         }
     }
 
-    // Build provisional scales and axes using the first layer's resolved encoding,
-    // which already incorporates CoordFlip. For single-layer non-flipped specs this
-    // is identical to what Phase 7 computed (same encoding, same spec fields).
+    // Build provisional scales and axes from the rendering encoding: the first
+    // layer's resolved encoding, which already incorporates CoordFlip, with
+    // each auxiliary-scale channel it does not draw taken from the first layer
+    // that does (`establishing_encoding`). For single-layer non-flipped specs
+    // this is identical to what Phase 7 computed (same encoding, same spec
+    // fields).
     //
     // We need a ChartSpec whose encoding reflects the (possibly swapped) channels.
     // Clone spec and substitute the rendering encoding so resolve_scales works
     // correctly. For back-compat (single-layer, no flip), this clone is structurally
     // equal to spec itself — goldens should be byte-identical.
-    // `build_layers` above already refuses an empty `layers` list
-    // (`RenderError::LayeredChartNoLayers`), so `.first()` here always
-    // succeeds; the `ok_or` keeps that true by construction instead of by
-    // `layers[0]` indexing.
-    let rendering_encoding = layers
-        .first()
-        .map(|l| &l.encoding)
-        .ok_or(RenderError::LayeredChartNoLayers)?;
+    let rendering_encoding = &establishing_encoding(&layers)?;
     let rendering_spec = ChartSpec {
         encoding: rendering_encoding.clone(),
         ..spec.clone()
@@ -1683,6 +1708,24 @@ fn build_layers(spec: &ChartSpec) -> Result<Vec<LayerPrepared>, RenderError> {
         .collect())
 }
 
+/// The encoding a chart's scales, axes and legends are built from, over its
+/// prepared `layers` (each already completed from the chart-level encoding).
+/// Layer 0 owns the axes and every channel it draws, so its encoding is the
+/// base. An auxiliary-scale channel layer 0 does not draw still gets its one
+/// scale and legend when a later layer draws it: the first layer that does
+/// establishes the channel, so its binding (field, type, title, scale,
+/// legend) is the one the scale's kind and the legend's title come from.
+/// The scale's domain still spans every drawing layer
+/// (`scale_resolve`'s per-layer reads).
+fn establishing_encoding(layers: &[LayerPrepared]) -> Result<crate::spec::encoding::Encoding, RenderError> {
+    let (lead, rest) = layers.split_first().ok_or(RenderError::LayeredChartNoLayers)?;
+    let mut encoding = lead.encoding.clone();
+    for layer in rest {
+        encoding.take_unbound_auxiliary_scale_channels(&layer.encoding);
+    }
+    Ok(encoding)
+}
+
 /// Refuse a malformed sort-field object anywhere it could reach render
 /// without passing through Python's construction-time gate
 /// (`EncodingSpec.__new__`, `parse_sort_field_object`): a chart-level
@@ -1837,22 +1880,18 @@ pub(crate) struct SecondaryYAxes {
 /// Checks in a fixed channel order so the reported channel is deterministic
 /// when a layer gets more than one of them wrong.
 ///
-/// `source` is the chart's SOURCE schema, taken before any transform ran —
-/// `Some` only for a layer with no `data_source` of its own (the
-/// tail-reading case the `+` remedy is about); `None` for a layer reading a
-/// named `data_source` output, which already has its own identity
-/// independent of the source. A missing column's
-/// [`RenderError::LayerUnknownColumn::in_source`] is `true` only when `source`
-/// is `Some` AND that schema actually has the column — a typo or a
-/// named-only chain (whose tail IS the source) does not claim the column is
-/// reachable by composing a separate chart with `+` when the source never had
-/// it either.
+/// `encoding` is the encoding the layer's mark builder will see (after the
+/// rule/tick own-span normalization), and `batch` the layer's own batch; the
+/// layer's other facts come from `layer`. A missing column's remedy
+/// ([`RenderError::LayerUnknownColumn::remedy`]) is classified by
+/// [`missing_column_remedy`] against `pipeline`.
 pub(in crate::render) fn validate_layer_positional_columns(
     layer_index: usize,
+    layer: &LayerPrepared,
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     coord_flipped: bool,
-    source: Option<&Schema>,
+    pipeline: &PipelineBatches<'_>,
 ) -> Result<(), RenderError> {
     if layer_index == 0 {
         return Ok(());
@@ -1866,17 +1905,54 @@ pub(in crate::render) fn validate_layer_positional_columns(
     for (channel, enc) in positional {
         let Some(enc) = enc else { continue };
         if batch.column_by_name(&enc.field).is_none() {
-            let in_source = source.is_some_and(|s| s.index_of(&enc.field).is_ok());
             return Err(RenderError::LayerUnknownColumn {
                 layer: layer_index,
                 channel,
                 name: enc.field.clone(),
                 coord_flipped,
-                in_source,
+                remedy: missing_column_remedy(&enc.field, layer, pipeline),
+                independent_y: layer.independent_y,
             });
         }
     }
     Ok(())
+}
+
+/// Every batch a chart's pipeline saw: its SOURCE schema, taken before any
+/// transform ran ([`PreparedInputs::source_schema`]), and every batch the
+/// transforms produced, the tail and each named output
+/// ([`PreparedInputs::transform_outputs`]). What
+/// [`validate_layer_positional_columns`] searches to say where a column a
+/// layer cannot find does exist.
+pub(in crate::render) struct PipelineBatches<'a> {
+    pub(in crate::render) source: &'a Schema,
+    pub(in crate::render) outputs: &'a HashMap<String, RecordBatch>,
+}
+
+/// Where a column missing from a layer's own batch exists, for a layer that
+/// reads its chart's data ([`LayerPrepared::reads_chart_data`]). Every
+/// other layer (a `+` operand's branch reader) reads rows of its own, so
+/// neither remedy is true of it and it gets `None`, the plain message.
+///
+/// Precedence: the source batch first, since a source column the chain
+/// dropped is drawable from the source; then any batch the pipeline
+/// produced, where the column is a statistic another layer's mark computes;
+/// otherwise the column exists nowhere (a typo) and gets `None`.
+fn missing_column_remedy(
+    name: &str,
+    layer: &LayerPrepared,
+    pipeline: &PipelineBatches<'_>,
+) -> Option<crate::render::MissingColumnRemedy> {
+    use crate::render::MissingColumnRemedy;
+    if !layer.reads_chart_data {
+        None
+    } else if pipeline.source.index_of(name).is_ok() {
+        Some(MissingColumnRemedy::Source)
+    } else if pipeline.outputs.values().any(|b| b.column_by_name(name).is_some()) {
+        Some(MissingColumnRemedy::Statistic)
+    } else {
+        None
+    }
 }
 
 /// The rule/tick own-span-axis normalization (spec §4.4). A reference-line

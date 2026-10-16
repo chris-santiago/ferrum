@@ -1081,6 +1081,20 @@ def numeric_columns(schema: Any, entry: str) -> list[str]: ...
 # field the schema lacks reads ``False``.
 def column_reads_categorical(schema: Any, field: str) -> bool: ...
 
+# The refusal text of the render gate's unknown-column error
+# (``RenderError::LayerUnknownColumn``), formatted by its own ``Display``, so a
+# Python check that knows a layer's schema before the render raises the gate's
+# words. ``channel`` is any channel name ``encode()`` accepts, aliases
+# included (``x``, ``color``, ``fill``, ``detail``, ``order``, a facet
+# channel, ...; ``ferrum.encoding._channel_policy._SPEC_KNOWN_CHANNELS``), and
+# the message names it as written; ``remedy`` is ``"plain"``, ``"source"`` or
+# ``"statistic"``; ``independent_y`` picks the remedy's spelling for a layer
+# with its own y axis. Any other ``channel``, or an unknown ``remedy``, raises
+# ``ValueError``.
+def layer_unknown_column_message(
+    layer: int, channel: str, name: str, remedy: str, independent_y: bool
+) -> str: ...
+
 # #176: the ``interpolate=`` vocabulary, published from Rust's
 # ``Interpolate::ALL`` (in its order) so every ``interpolate=`` door gates it
 # at declaration instead of mirroring the list as a Python literal.

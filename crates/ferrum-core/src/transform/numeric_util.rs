@@ -349,28 +349,62 @@ pub(crate) fn grouped_column_extent(
     field: &str,
     groupby: &[String],
 ) -> Option<(f64, f64)> {
-    use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
-
-    if groupby.is_empty() {
-        return column_extent(batch, field);
-    }
     let schema = batch.schema();
     let idx = schema.index_of(field).ok()?;
     let arr = coerce_to_float64(batch.column(idx), "column_extent", field).ok()?;
+    match kept_by_groupby(batch, groupby) {
+        Some(keep) => finite_extent_where(&arr, keep),
+        None => finite_extent(&arr),
+    }
+}
 
+/// The clean (non-null, non-NaN) values of `field` over the rows a GROUPED
+/// transform draws: the same rows [`grouped_column_extent`] folds, so a
+/// statistic of the pooled values (a bin count over them) and the pooled
+/// extent describe one set of rows. `None` when the field is missing or
+/// non-numeric.
+pub(crate) fn grouped_clean_values(
+    batch: &RecordBatch,
+    field: &str,
+    groupby: &[String],
+) -> Option<Vec<f64>> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let arr = coerce_to_float64(batch.column(idx), "column_extent", field).ok()?;
+    Some(match kept_by_groupby(batch, groupby) {
+        Some(keep) => {
+            let rows: Vec<usize> = (0..arr.len()).filter(|&row| keep(row)).collect();
+            clean_float64_values(&arr, Some(&rows))
+        }
+        None => clean_float64_values(&arr, None),
+    })
+}
+
+/// Whether a row's `groupby` key survives GH #197's null-key policy, the one
+/// row filter [`grouped_column_extent`] and [`grouped_clean_values`] share.
+/// `None` keeps every row: an ungrouped request, or a malformed `groupby` (a
+/// missing column or an unsupported key dtype), which the transform's own
+/// partitioner refuses with a proper message (see [`grouped_column_extent`]).
+fn kept_by_groupby<'a>(
+    batch: &'a RecordBatch,
+    groupby: &[String],
+) -> Option<impl Fn(usize) -> bool + 'a> {
+    use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+
+    if groupby.is_empty() {
+        return None;
+    }
+    let schema = batch.schema();
     let mut key_cols: Vec<(usize, DataType)> = Vec::with_capacity(groupby.len());
     for name in groupby {
-        let Ok(gi) = schema.index_of(name) else {
-            return finite_extent(&arr);
-        };
+        let gi = schema.index_of(name).ok()?;
         let dt = schema.field(gi).data_type().clone();
         if !is_groupby_supported_dtype(&dt) {
-            return finite_extent(&arr);
+            return None;
         }
         key_cols.push((gi, dt));
     }
-
-    finite_extent_where(&arr, |row| {
+    Some(move |row: usize| {
         key_cols.iter().all(|(gi, dt)| {
             !matches!(
                 groupby_key_at(batch.column(*gi).as_ref(), dt, row),

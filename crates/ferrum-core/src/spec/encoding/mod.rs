@@ -1059,6 +1059,33 @@ pub struct Encoding {
     pub fill_opacity: Option<EncodingSpec>,
 }
 
+/// One channel the renderer builds a chart-wide auxiliary scale for: its wire
+/// name and its slot on an [`Encoding`].
+#[derive(Clone, Copy)]
+pub(crate) struct AuxiliaryScaleChannel {
+    pub(crate) name: &'static str,
+    slot: fn(&Encoding) -> &Option<EncodingSpec>,
+    slot_mut: fn(&mut Encoding) -> &mut Option<EncodingSpec>,
+}
+
+/// The channels the renderer builds a chart-wide auxiliary scale for, in
+/// `scale_resolve`'s `AuxiliaryScales` field order: the one list the
+/// establishing fill ([`Encoding::take_unbound_auxiliary_scale_channels`])
+/// walks and `ferrum._core.auxiliary_scale_channels()` publishes. Each scale
+/// is built once per chart from the chart's rendering encoding, whose binding
+/// on each of these channels is the establishing layer's (layer 0 when it
+/// draws the channel, else the first layer that does); on a layered spec each
+/// domain spans every drawing layer's own column.
+pub(crate) const AUXILIARY_SCALE_CHANNELS: [AuxiliaryScaleChannel; 7] = [
+    AuxiliaryScaleChannel { name: "color", slot: |e| &e.color, slot_mut: |e| &mut e.color },
+    AuxiliaryScaleChannel { name: "size", slot: |e| &e.size, slot_mut: |e| &mut e.size },
+    AuxiliaryScaleChannel { name: "shape", slot: |e| &e.shape, slot_mut: |e| &mut e.shape },
+    AuxiliaryScaleChannel { name: "opacity", slot: |e| &e.opacity, slot_mut: |e| &mut e.opacity },
+    AuxiliaryScaleChannel { name: "fill_opacity", slot: |e| &e.fill_opacity, slot_mut: |e| &mut e.fill_opacity },
+    AuxiliaryScaleChannel { name: "stroke_opacity", slot: |e| &e.stroke_opacity, slot_mut: |e| &mut e.stroke_opacity },
+    AuxiliaryScaleChannel { name: "stroke_dash", slot: |e| &e.stroke_dash, slot_mut: |e| &mut e.stroke_dash },
+];
+
 /// Merge a single `parent` `EncodingSpec` into a `child` slot.
 ///
 /// - If `child` is `None`, adopt the entire parent value.
@@ -1193,6 +1220,20 @@ impl Encoding {
         inherit_encoding_spec(&mut self.stroke_dash, &parent.stroke_dash);
         inherit_encoding_spec(&mut self.angle, &parent.angle);
         inherit_encoding_spec(&mut self.fill_opacity, &parent.fill_opacity);
+    }
+
+    /// Take each auxiliary-scale channel ([`AUXILIARY_SCALE_CHANNELS`]) this
+    /// encoding leaves unbound from `drawer`, whole. A channel bound here
+    /// keeps its own binding untouched: unlike
+    /// [`inherit_from`](Self::inherit_from), nothing of `drawer`'s binding
+    /// (its title, scale, legend) merges into a binding of the same field.
+    pub(crate) fn take_unbound_auxiliary_scale_channels(&mut self, drawer: &Encoding) {
+        for channel in AUXILIARY_SCALE_CHANNELS {
+            let own = (channel.slot_mut)(self);
+            if own.is_none() {
+                own.clone_from((channel.slot)(drawer));
+            }
+        }
     }
 
     /// Overlay channels from `overlay` onto `self`.

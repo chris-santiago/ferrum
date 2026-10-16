@@ -71,6 +71,22 @@ pub struct Layer {
     /// pre-#52 layer wire JSON stays byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub independent_y: bool,
+    /// Whether this layer, reading a named `data_source`, reads its chart's
+    /// data through it: Python points a layer attached with `Chart.layer` or
+    /// `SecondaryY` at the output that recomputes the chart's rows when they
+    /// are not the pipeline tail. A layer with no `data_source` reads its
+    /// chart's data already, so the flag is only ever set beside a
+    /// `data_source`.
+    ///
+    /// Read only to pick the remedy of a missing positional column
+    /// ([`RenderError::LayerUnknownColumn`](crate::render::RenderError::LayerUnknownColumn)):
+    /// without it a layer reading its chart's data through a named output
+    /// could not be told apart from a `+` operand's branch reader, whose
+    /// missing column no chart-data remedy describes. `false` is omitted
+    /// when serializing, so every spec without such a layer is unchanged on
+    /// the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_chart_data: bool,
     /// This layer's OWN coordinate system (`#172`(1)). `None` (absent on the
     /// wire) = inherit the chart's, which is every pre-`#172` spec, so a layer
     /// that declares none serializes byte-identically to before.
@@ -121,6 +137,7 @@ impl Default for Layer {
             position: None,
             name: None,
             independent_y: false,
+            reads_chart_data: false,
             coord: None,
             entry: None,
         }
@@ -431,5 +448,24 @@ mod tests {
             err.to_string().contains("unknown variant `color`"),
             "expected an unknown-variant error naming 'color': {err}"
         );
+    }
+
+    /// `reads_chart_data` is read from the wire when set and omitted when
+    /// false, so a layer that does not read its chart's data through a named
+    /// output serializes exactly as before the field existed.
+    #[test]
+    fn reads_chart_data_round_trips_and_is_omitted_when_false() {
+        let flagged: Layer = serde_json::from_value(serde_json::json!({
+            "mark": "point", "data_source": "rows", "reads_chart_data": true,
+        }))
+        .expect("the flag deserializes");
+        let json = serde_json::to_value(&flagged).unwrap();
+        assert_eq!(json["reads_chart_data"], serde_json::json!(true));
+        assert_eq!(serde_json::from_value::<Layer>(json).unwrap(), flagged);
+
+        let plain: Layer =
+            serde_json::from_value(serde_json::json!({"mark": "point"})).unwrap();
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("reads_chart_data").is_none(), "false is omitted: {json}");
     }
 }

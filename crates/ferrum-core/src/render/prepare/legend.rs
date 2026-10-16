@@ -25,9 +25,10 @@ use super::LegendPreparedOverrides;
 
 /// What the legends read off a chart. Each legend channel is bound as its
 /// scale was built, from the rendering encoding
-/// (`PreparedInputs::rendering_encoding()`): a chart-level binding is
-/// inherited into it and a layer's own binding replaces it, so the legend's title and
-/// `Legend(...)` style come from the binding that draws. `x`/`y` stay as
+/// (`PreparedInputs::rendering_encoding()`): the binding of the layer that
+/// establishes the channel, layer 0 when it draws it and otherwise the first
+/// layer that does, so the legend's title and `Legend(...)` style come from
+/// that binding and never from a later layer's. `x`/`y` stay as
 /// authored: they feed only the color legend's `Legend(...)` cascade, which
 /// must not swap under `CoordFlip`.
 pub(crate) struct LegendBindings<'a> {
@@ -1261,10 +1262,11 @@ fn categorical_aux_fate(
 /// field-keyed (spec-review 2026-08-28, cycle-2 finding 2 corrected the
 /// composite path this way; cycle-4 finding 2 extends it here so the flat
 /// path — which also serves `LayerChart.interactive()` — agrees). The
-/// resolved field is `layers[0]`'s own color field: `prepare_render_inputs`
-/// feeds the rendering encoding (`PreparedInputs::rendering_encoding()`) into
-/// scale resolution, so that is definitionally the field `scales.color` was
-/// resolved from.
+/// resolved field is the color field of the first layer that draws color:
+/// `prepare_render_inputs` feeds the rendering encoding
+/// (`PreparedInputs::rendering_encoding()`), whose color that layer
+/// establishes, into scale resolution, so that is definitionally the field
+/// `scales.color` was resolved from.
 /// `LayerPrepared::from_chart_and_layer` clones each layer's own encoding,
 /// so per-layer color fields genuinely differ in a merged multi-layer spec
 /// (`fm.layer(line(color='v:Q'), point(color='g:N'))`) — without field-keying,
@@ -1307,12 +1309,12 @@ fn inert_numeric_color_on_line_or_ribbon_only(
         return None;
     }
     // The field the resolved color scale was actually built from — see the
-    // doc comment above. `layers[0]` always exists (`build_layers` never
-    // returns an empty `Vec`); if it has no color bound, `scales.color`
-    // could not have resolved (the `is_numeric` check above would have
-    // already returned `None`), so this is unreachable as `None` in
-    // practice but handled defensively rather than indexed/unwrapped.
-    let resolved_field = layers.first().and_then(|l| l.encoding.color.as_ref()).map(|e| e.field.as_str())?;
+    // doc comment above: the first layer that draws color establishes the
+    // scale. With no layer drawing color, `scales.color` could not have
+    // resolved (the `is_numeric` check above would have already returned
+    // `None`), so this is unreachable as `None` in practice but handled
+    // rather than unwrapped.
+    let resolved_field = layers.iter().find_map(|l| l.encoding.color.as_ref()).map(|e| e.field.as_str())?;
     let consumers = channel_consumer_marks(layers, resolved_field, |e| e.color.as_ref());
     if !consumers.is_empty() && consumers.iter().all(|m| matches!(m, Mark::Line | Mark::Ribbon)) {
         Some(consumers)
@@ -1725,6 +1727,7 @@ mod tests {
             data_source: None,
             position: None,
             independent_y: false, coord: None,
+            reads_chart_data: true,
             color_is_own: color_field.is_some(),
             x_is_own: false,
             y_is_own: false,

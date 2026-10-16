@@ -1,11 +1,20 @@
 """A later layer's auxiliary channel binding promotes to the chart level like ``color``.
 
-Rust builds every auxiliary (non-positional) scale from the chart-level
-encoding only, so ``Chart + Chart`` promotes the first layer-level binding of
-each auxiliary channel to chart level. Without that, ``point + sized_line``
-drew the line untapered and the dots at the default radius, while
-``sized_line + point`` tapered the line and sized the dots: the result
-depended on layer order.
+Rust resolves each auxiliary (non-positional) scale -- color, size, shape,
+opacity, fill_opacity, stroke_opacity, stroke_dash -- from whichever layer
+draws the channel: layer 0 if it draws the channel, else the first layer
+that does. That layer's own binding always gets its scale, whether or not
+the binding also reaches the chart level, and in either layer order.
+Promotion is for every OTHER layer: an unbound layer inherits an auxiliary
+binding only through the chart-level encoding, so without promotion a
+drawing layer's own binding still tapers or colors that layer, but a sibling
+that does not draw the channel stays at the mark default instead of varying
+with it. ``Chart + Chart`` promotes the first layer-level binding of each
+auxiliary channel to chart level so every sibling inherits it the same way
+a leading chart's own binding is inherited: without that, ``sized_line +
+point`` (the line leading) sizes both the line and the dots, while ``point
++ sized_line`` tapers the line but leaves the dots at the default radius --
+only the unbound sibling's rendering depends on layer order.
 
 The channel population is Rust's auxiliary-scale channel list, read through
 :func:`ferrum.encoding._auxiliary_scale_channels`, so a new auxiliary channel joins this matrix
@@ -175,10 +184,12 @@ def _compose(route: str, channel: str, order: str, bound_mark: str = "point"):
 def test_derived_channels_are_exactly_rusts_auxiliary_scales() -> None:
     """The promotion set is Rust's auxiliary-scale set, read from Rust in its order.
 
-    Every auxiliary scale Rust builds reads the chart-level encoding only, so
-    a channel missing from the set would stay layer-order dependent, and an
-    extra one would promote a channel no scale reads. Rust pins the list to
-    its ``AuxiliaryScales`` slots; this pins that Python asks Rust.
+    Promotion exists to make an unbound sibling layer inherit a channel's
+    scale, so it only needs to cover the channels Rust actually builds a
+    scale for: a channel missing from the set would leave an unbound
+    sibling's rendering layer-order dependent, and an extra one would
+    promote a channel no scale reads. Rust pins the list to its
+    ``AuxiliaryScales`` slots; this pins that Python asks Rust.
     """
     from ferrum._core import auxiliary_scale_channels
 
@@ -336,12 +347,39 @@ def test_a_channel_without_a_constant_cell_has_no_mark_kwarg(channel: str) -> No
 
 
 # ---------------------------------------------------------------------------
-# Controls
+# Scale resolution: the drawing layer keeps its own scale without promotion
 # ---------------------------------------------------------------------------
 
 
 def _without_promotion(monkeypatch) -> None:
     monkeypatch.setattr(chart_module, "_promote_layer_channels", lambda new, authored: None)
+
+
+@pytest.mark.parametrize("channel", _CHANNELS)
+def test_a_later_binding_without_promotion_still_gets_its_own_scale(
+    channel: str, monkeypatch
+) -> None:
+    """V1: a later layer's own binding gets its scale whether or not promotion ran.
+
+    Promotion only copies the binding onto the merged chart's own encoding;
+    the auxiliary scale's existence, kind and domain come from the layers
+    that draw the channel, so the drawing layer (index 1, ``bound_later``)
+    renders the full range of its own binding either way. The unbound
+    partner layer (index 0) is the one that would have inherited the
+    channel through promotion, so without it that layer stays at one value
+    (``never crosses siblings``), while the drawing layer keeps varying.
+    """
+    on = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
+    _without_promotion(monkeypatch)
+    off = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
+    assert off[1] == on[1], (off, on)
+    assert len(set(off[1])) > 1, off
+    assert len(set(off[0])) == 1, off
+
+
+# ---------------------------------------------------------------------------
+# Controls
+# ---------------------------------------------------------------------------
 
 
 def test_an_unbound_layered_chart_is_byte_identical_with_and_without_promotion(monkeypatch) -> None:
@@ -352,15 +390,3 @@ def test_an_unbound_layered_chart_is_byte_identical_with_and_without_promotion(m
     on = render()
     _without_promotion(monkeypatch)
     assert render() == on
-
-
-@pytest.mark.parametrize("channel", _CHANNELS)
-def test_vacuity_control_a_later_binding_without_promotion_renders_differently(
-    channel: str, monkeypatch
-) -> None:
-    """Switching the promotion off makes ``point + bound`` collapse to one value per layer."""
-    on = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
-    _without_promotion(monkeypatch)
-    off = _scene_batches(_compose("plus", channel, "bound_later").interactive().scene_json, channel)
-    assert off != on
-    assert all(len(set(values)) == 1 for values in off), off

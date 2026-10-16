@@ -3076,3 +3076,218 @@ mod column_reads_categorical_tests {
         assert!(!super::column_reads_categorical(schema(DataType::Utf8), "absent"), "an absent field");
     }
 }
+
+/// `ferrum._core.layer_unknown_column_message(layer, channel, name, remedy,
+/// independent_y)`: the refusal text of
+/// [`RenderError::LayerUnknownColumn`], formatted by its own `Display`, so a
+/// Python check that knows a layer's schema before the render raises the
+/// render gate's words rather than a copy of them. `channel` is the channel
+/// as the caller wrote it, any of [`MESSAGE_CHANNELS`] (a statistic's input
+/// or groupby field can sit on any channel, `color`, `fill` or `detail` as
+/// well as a positional one), and the message names it verbatim; `remedy` is `"plain"`, `"source"` or `"statistic"`; `independent_y` picks
+/// the remedy's spelling for a layer with its own y axis. An unknown
+/// `channel` or `remedy` raises `ValueError`. Registered in `lib.rs`, typed
+/// in `src/ferrum/_core.pyi`.
+#[pyfunction]
+pub(crate) fn layer_unknown_column_message(
+    layer: usize,
+    channel: &str,
+    name: &str,
+    remedy: &str,
+    independent_y: bool,
+) -> PyResult<String> {
+    use super::MissingColumnRemedy;
+    let Some(channel) = MESSAGE_CHANNELS.iter().copied().find(|c| *c == channel) else {
+        return Err(PyValueError::new_err(format!(
+            "unknown encoding channel '{channel}'; expected one of {}",
+            MESSAGE_CHANNELS.map(|c| format!("'{c}'")).join(", ")
+        )));
+    };
+    let remedy = match remedy {
+        "plain" => None,
+        "source" => Some(MissingColumnRemedy::Source),
+        "statistic" => Some(MissingColumnRemedy::Statistic),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown remedy '{other}'; expected one of 'plain', 'source', 'statistic'"
+            )))
+        }
+    };
+    Ok(RenderError::LayerUnknownColumn {
+        layer,
+        channel,
+        name: name.to_string(),
+        coord_flipped: false,
+        remedy,
+        independent_y,
+    }
+    .to_string())
+}
+
+/// Every channel name [`layer_unknown_column_message`] can name: the wire name
+/// of every channel an [`Encoding`](crate::spec::encoding::Encoding) carries,
+/// as `Encoding::channels` names them (`tooltip_fields` once, for any of its
+/// entries), then the channels of Python's `encode(...)` vocabulary that
+/// lower onto those or onto the chart (the alias, polar, error, order and
+/// facet channels), which a caller checking a layer's fields before the
+/// render writes as the user wrote them.
+/// `layer_unknown_column_message_accepts_every_encoding_channel` fails when
+/// `Encoding` gains a channel this list lacks.
+const MESSAGE_CHANNELS: [&str; 35] = [
+    "x",
+    "y",
+    "color",
+    "size",
+    "shape",
+    "opacity",
+    "x2",
+    "y2",
+    "text",
+    "tooltip",
+    "tooltip_fields",
+    "href",
+    "description",
+    "key",
+    "url",
+    "stroke_width",
+    "stroke_opacity",
+    "stroke_dash",
+    "angle",
+    "fill_opacity",
+    "fill",
+    "stroke",
+    "detail",
+    "theta",
+    "theta2",
+    "radius",
+    "radius2",
+    "x_error",
+    "x_error2",
+    "y_error",
+    "y_error2",
+    "order",
+    "facet",
+    "facet_col",
+    "facet_row",
+];
+
+#[cfg(test)]
+mod layer_unknown_column_message_tests {
+    use super::layer_unknown_column_message;
+
+    const PLAIN: &str =
+        "layer 2: encoding 'y' references unknown column 'v' (not present in that layer's data)";
+
+    /// The published text is the render gate's, for every remedy and both
+    /// spellings: the same `Display` the positional gate's refusal uses.
+    #[test]
+    fn layer_unknown_column_message_publishes_the_gate_text() {
+        let message = |remedy, independent_y| {
+            layer_unknown_column_message(2, "y", "v", remedy, independent_y).expect("a known remedy")
+        };
+        assert_eq!(message("plain", false), PLAIN);
+        assert_eq!(message("plain", true), PLAIN);
+        assert_eq!(
+            message("source", false),
+            format!(
+                "{PLAIN} — this layer reads the chart's transformed rows, not its source data; \
+                 draw 'v' from the source by composing a separate chart with `+` instead"
+            )
+        );
+        assert_eq!(
+            message("source", true),
+            format!(
+                "{PLAIN} — this layer reads the chart's transformed rows, not its source data; \
+                 draw 'v' from the source with fm.LayerChart(base, other, resolve={{\"y\": \
+                 \"independent\"}}) instead"
+            )
+        );
+        let statistic = format!(
+            "{PLAIN} — 'v' is a statistic another layer's mark computes for itself; compute it \
+             in the chart's .transform(...) (e.g. fm.Bin, fm.transform_aggregate) so every layer \
+             reads it, or draw it from its own chart "
+        );
+        assert_eq!(message("statistic", false), format!("{statistic}composed with `+`"));
+        assert_eq!(
+            message("statistic", true),
+            format!("{statistic}with fm.LayerChart(base, other, resolve={{\"y\": \"independent\"}})")
+        );
+    }
+
+    /// Every channel an `Encoding` carries is accepted and written into the
+    /// message as given, so a Python check can voice a missing column on any
+    /// channel, a groupby field on `color` or `text` included. The encoding
+    /// below sets every field by name (no `..Default::default()`), so a
+    /// channel added to `Encoding` fails to compile here until it is set,
+    /// and then fails this test until the published formatter accepts it.
+    #[test]
+    fn layer_unknown_column_message_accepts_every_encoding_channel() {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        let spec = || Some(EncodingSpec { field: "c".into(), ..Default::default() });
+        let every_channel = Encoding {
+            x: spec(),
+            y: spec(),
+            color: spec(),
+            size: spec(),
+            shape: spec(),
+            opacity: spec(),
+            x2: spec(),
+            y2: spec(),
+            text: spec(),
+            tooltip: spec(),
+            tooltip_fields: Some(vec![EncodingSpec { field: "c".into(), ..Default::default() }]),
+            href: spec(),
+            description: spec(),
+            key: spec(),
+            url: spec(),
+            stroke_width: spec(),
+            stroke_opacity: spec(),
+            stroke_dash: spec(),
+            angle: spec(),
+            fill_opacity: spec(),
+        };
+        for (wire, _) in every_channel.channels() {
+            let channel = wire.split('[').next().unwrap_or(&wire);
+            let message = layer_unknown_column_message(1, channel, "c", "statistic", false)
+                .unwrap_or_else(|e| panic!("channel '{channel}' is refused: {e}"));
+            assert!(message.starts_with(&format!("layer 1: encoding '{channel}' references")), "{message}");
+        }
+    }
+
+    /// The Python encode vocabulary beyond the `Encoding` wire names (the
+    /// alias, polar, error, order and facet channels) is accepted too, and
+    /// the message names each channel exactly as the caller wrote it, so a
+    /// missing field on `fill` or `detail` gets the gate's message rather
+    /// than a refusal of the channel name.
+    #[test]
+    fn layer_unknown_column_message_names_each_written_channel_verbatim() {
+        for channel in [
+            "fill", "stroke", "detail", "theta", "theta2", "radius", "radius2", "x_error",
+            "x_error2", "y_error", "y_error2", "order", "facet", "facet_col", "facet_row",
+        ] {
+            let message = layer_unknown_column_message(1, channel, "nope", "plain", false)
+                .unwrap_or_else(|e| panic!("channel '{channel}' is refused: {e}"));
+            assert_eq!(
+                message,
+                format!(
+                    "layer 1: encoding '{channel}' references unknown column 'nope' \
+                     (not present in that layer's data)"
+                )
+            );
+        }
+    }
+
+    /// A channel or remedy outside the vocabulary is refused, not formatted.
+    #[test]
+    fn layer_unknown_column_message_refuses_an_unknown_channel_or_remedy() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let channel = layer_unknown_column_message(1, "colour", "c", "plain", false).unwrap_err();
+            assert!(channel.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(channel.to_string().contains("'colour'"), "{channel}");
+            let remedy = layer_unknown_column_message(1, "x", "c", "typo", false).unwrap_err();
+            assert!(remedy.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(remedy.to_string().contains("'typo'"), "{remedy}");
+        });
+    }
+}

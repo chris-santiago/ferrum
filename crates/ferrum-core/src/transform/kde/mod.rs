@@ -5,7 +5,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::bin::resolve_bin_extent;
+use crate::transform::bin::{resolve_bin_extent, shared_bin_edges, BinSpec};
 use crate::transform::bin_mode::{parse_bin_axis, BinMode};
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
@@ -71,11 +71,12 @@ pub(crate) struct KdeSpec {
     /// output `density` is rescaled per group to match the counts a
     /// histogram binned the same way would show: multiplied by
     /// `n_group × bin_width` (non-cumulative) or the CDF by `n_group`
-    /// (cumulative). `bin_width` is derived PER GROUP via the exact same
-    /// extent-fold/nicing/bin-count routine [`crate::transform::bin::Bin`]
-    /// uses (see [`resolve_bin_extent`] and [`resolve_group_bin_width`]),
-    /// mirroring `Bin::apply_grouped`'s own `shared_extent` gate (reusing
-    /// this spec's existing `shared_extent` field) AND
+    /// (cumulative). `bin_width` is the width the mirrored
+    /// [`crate::transform::bin::Bin`] renders for each group, derived through
+    /// the same routines (see [`resolve_bin_extent`], [`shared_bin_edges`]
+    /// and [`resolve_group_bin_width`]): per group, or once over the pooled
+    /// rows under `Bin::apply_grouped`'s own `shared_extent` gate (reusing
+    /// this spec's existing `shared_extent` field), AND
     /// [`count_scale_extent`]'s facet pin (mirroring `Bin::apply`'s own
     /// `spec.extent` check — see that field's doc).
     ///
@@ -110,11 +111,12 @@ pub(crate) struct KdeSpec {
     /// `BinSpec::extent` (via `bin::global_extent` on a synthetic `BinSpec`
     /// built from this spec's `field`/`count_scale` mode) — never set by
     /// `Kde`'s own constructor, since a user has no direct way to express
-    /// "the histogram's facet-shared bin range." When `Some`, takes absolute
-    /// precedence over `shared_extent` in [`resolve_group_bin_width`]
-    /// (mirroring `Bin::apply`'s own explicit-extent-wins precedence) and is
-    /// used verbatim with no re-nicing. `None` (the default, and always true
-    /// outside a faceted chart) falls back to `shared_extent`'s own gate.
+    /// "the histogram's facet-shared bin range." When `Some`, it is the bin
+    /// extent, used verbatim with no re-nicing (mirroring `Bin::apply`'s own
+    /// explicit-extent-wins precedence): each group's own under an unshared
+    /// `Bin`, the shared edges' extent under `shared_extent` (whose bin count
+    /// is still the pooled one). `None` (the default, and always true outside
+    /// a faceted chart) leaves the extent to the data.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub count_scale_extent: Option<(f64, f64)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -176,21 +178,41 @@ pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64,
 /// its siblings — not just the transforms that declare the field.**
 pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let mode = spec.count_scale.as_ref()?;
-    let synthetic_bin_spec = crate::transform::bin::BinSpec {
+    crate::transform::bin::global_extent(&count_scale_bin_spec(spec, mode), batch)
+}
+
+/// The `Bin` a count-scaled `Kde` mirrors: this spec's field and groupby, the
+/// `count_scale` mode, nicing on (see [`KdeSpec::count_scale`]'s unmirrored
+/// inputs), no explicit extent and no sharing. Each mirror site overrides the
+/// slots its own question sets.
+fn count_scale_bin_spec(spec: &KdeSpec, mode: &BinMode) -> BinSpec {
+    BinSpec {
         field: spec.field.clone(),
         mode: mode.clone(),
         extent: None,
         nice: true,
         cumulative: false,
         shared_extent: false,
-        // Mirrors the real request, per the doc above: the count-scale bin
-        // width must be derived from the same rows the density it scales is.
+        // Mirrors the real request: the count-scale bin width must be derived
+        // from the same rows the density it scales is.
         groupby: spec.groupby.clone(),
         agg_field: None,
         agg: None,
         name: None,
-    };
-    crate::transform::bin::global_extent(&synthetic_bin_spec, batch)
+    }
+}
+
+/// Where a count-scaled group's histogram bin width comes from, mirroring the
+/// grouped `Bin` it is drawn over.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CountScaleBins {
+    /// An unshared `Bin`: each group derives its own width from its own clean
+    /// values, over this pinned extent when there is one (a facet pin).
+    PerGroup(Option<(f64, f64)>),
+    /// A `shared_extent` `Bin`: every group is counted into the one edge set
+    /// [`shared_bin_edges`] computes over the pooled rows, `None` when there
+    /// is nothing to pool.
+    Shared(Option<(f64, f64, usize)>),
 }
 
 /// Refuse a malformed [`KdeSpec::count_scale_extent`] at its consumption
@@ -234,65 +256,71 @@ pub(crate) fn apply_with_context(
     crate::transform::vocabulary::check_declared(KERNELS, "stat_kde", "kernel", &spec.kernel)?;
     validate_count_scale_extent(spec)?;
     if !spec.groupby.is_empty() {
-        // `count_scale`'s bin-edge sharing mirrors `Bin::apply_grouped`'s own
-        // `resolve_shared_extent(spec.extent, spec.shared_extent, ...)` call
-        // exactly, with `count_scale_extent` standing in for `Bin`'s own
-        // `spec.extent` role (an explicit/facet-pinned extent always wins,
-        // regardless of `shared_extent`'s value — see `count_scale_extent`'s
-        // doc): a real histogram only shares one DATA-DERIVED extent across
-        // hue levels when `shared_extent` is set. No wired producer sets it
-        // together with `count_scale` today (`_kde_overlay` hard-codes
-        // `shared_extent=False` to track the real `Bin` on its path — see
-        // `KdeSpec::count_scale`'s doc), so in practice both stay `None` and
-        // each group derives its own extent, exactly like an un-shared `Bin`.
-        // `shared_extent` is otherwise inert when ungrouped (real `Bin`'s
-        // ungrouped `apply()` never consults it either), so it is only
-        // folded in here on the grouped branch.
-        let count_scale_pinned_extent = spec.count_scale.as_ref().and_then(|_| {
-            resolve_shared_extent(
-                spec.count_scale_extent,
-                spec.shared_extent,
-                batch,
-                &spec.field,
-                &spec.groupby,
-            )
-        });
-        return apply_grouped(spec, batch, &spec.groupby, count_scale_pinned_extent, ctx);
+        // `count_scale`'s bin edges mirror `Bin::apply_grouped`: under
+        // `shared_extent` every group is counted into the one edge set
+        // `shared_bin_edges` computes over the pooled rows, with
+        // `count_scale_extent` standing in for `Bin`'s own `spec.extent` (a
+        // facet pin wins as the extent; the count stays the pooled one).
+        // Without it each group derives its own width, over the facet pin when
+        // there is one. `shared_extent` is inert when ungrouped (real `Bin`'s
+        // ungrouped `apply()` never consults it either), so it is only folded
+        // in here on the grouped branch.
+        let count_scale_bins = match &spec.count_scale {
+            Some(mode) if spec.shared_extent => {
+                let shared = BinSpec {
+                    extent: spec.count_scale_extent,
+                    shared_extent: true,
+                    ..count_scale_bin_spec(spec, mode)
+                };
+                CountScaleBins::Shared(shared_bin_edges(&shared, batch, &spec.groupby)?)
+            }
+            Some(_) => CountScaleBins::PerGroup(spec.count_scale_extent),
+            None => CountScaleBins::PerGroup(None),
+        };
+        return apply_grouped(spec, batch, &spec.groupby, count_scale_bins, ctx);
     }
     // `count_scale_extent`'s facet pin mirrors `Bin::apply`'s own
     // `spec.extent` check, which is NOT gated on grouping (unlike
     // `shared_extent`) — an ungrouped, faceted `Kde` must still honor it.
-    let count_scale_pinned_extent = spec.count_scale.as_ref().and(spec.count_scale_extent);
-    apply_one_group(spec, batch, None, count_scale_pinned_extent, ctx, None)
+    let count_scale_bins = CountScaleBins::PerGroup(spec.count_scale.as_ref().and(spec.count_scale_extent));
+    apply_one_group(spec, batch, None, count_scale_bins, ctx, None)
 }
 
-/// Resolve the histogram bin width `Bin` would compute for THIS group's own
-/// clean (non-null/non-NaN) values, given `mode` and an optional pinned
-/// extent (either a facet-pinned `count_scale_extent` or a `shared_extent`
-/// data-derived extent — see `apply()`'s call site for which). Mirrors
-/// `Bin::apply_one_group`'s extent-fold, degenerate-collapse, nice-rounding,
-/// and bin-count decision via [`resolve_bin_extent`] — the SAME per-group
-/// derivation `Bin::apply_grouped` uses (batch F, F-L09-10 fix): a `None`
-/// pinned extent means this group derives its own `(lo, hi)` AND its own
-/// nice target from its own `clean.len()`, exactly like an un-shared `Bin`;
-/// a `Some((lo, hi))` pinned extent is used verbatim with no nicing
-/// (mirroring `Bin::apply_grouped`'s `Cow`-patched explicit-extent path,
-/// which skips `apply_one_group`'s nicing branch since `nice` only applies
-/// when `extent.is_none()`) — bin-count resolution (and hence width) still
-/// depends on THIS group's own `clean.len()` for Sturges/FreedmanDiaconis, so
-/// width can still differ per group even when the extent is pinned. Returns
-/// `Ok(None)` — "nothing to scale by" — for an empty `clean`, rather than a
-/// NaN sentinel; the caller already leaves `n_group=0`'s factor unapplied in
-/// that case since the group's own density is already all-NaN.
+/// Resolve the histogram bin width `Bin` renders for THIS group, given
+/// `mode` and where the group's edges come from (`bins`, see `apply()`'s call
+/// site for which).
+///
+/// [`CountScaleBins::Shared`] is a `shared_extent` `Bin`: every group is
+/// counted into the one edge set [`shared_bin_edges`] computed over the
+/// pooled rows, so the width is that edge set's, the same for every group.
+///
+/// [`CountScaleBins::PerGroup`] is an unshared `Bin`, mirroring its
+/// extent-fold, degenerate-collapse, nice-rounding and bin-count decision via
+/// [`resolve_bin_extent`]: a `None` pinned extent means this group derives
+/// its own `(lo, hi)` AND its own nice target from its own `clean.len()`; a
+/// `Some((lo, hi))` facet pin is used verbatim with no nicing (`nice` only
+/// applies when `extent.is_none()`), and the bin count (and hence width)
+/// still depends on THIS group's own `clean.len()` for
+/// Sturges/FreedmanDiaconis.
+///
+/// Returns `Ok(None)` — "nothing to scale by" — for an empty `clean`, rather
+/// than a NaN sentinel; the caller already leaves `n_group=0`'s factor
+/// unapplied in that case since the group's own density is already all-NaN.
 fn resolve_group_bin_width(
     clean: &[f64],
     mode: &BinMode,
-    pinned_extent: Option<(f64, f64)>,
+    bins: CountScaleBins,
     ctx: &str,
 ) -> PyResult<Option<f64>> {
     if clean.is_empty() {
         return Ok(None);
     }
+    let pinned_extent = match bins {
+        CountScaleBins::Shared(edges) => {
+            return Ok(edges.map(|(lo, hi, n_bins)| (hi - lo) / n_bins as f64));
+        }
+        CountScaleBins::PerGroup(pinned_extent) => pinned_extent,
+    };
     let (lo, hi, should_nice) = match pinned_extent {
         Some((lo, hi)) => (lo, hi, false),
         None => {
@@ -315,12 +343,12 @@ fn apply_one_group(
     spec: &KdeSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
-    count_scale_pinned_extent: Option<(f64, f64)>,
+    count_scale_bins: CountScaleBins,
     warn_ctx: &TransformContext,
     group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     let (grid, density) =
-        compute_one_group(spec, batch, only_indices, count_scale_pinned_extent, warn_ctx, group)?;
+        compute_one_group(spec, batch, only_indices, count_scale_bins, warn_ctx, group)?;
     let out_schema = Arc::new(Schema::new(vec![
         Field::new("value", DataType::Float64, false),
         Field::new("density", DataType::Float64, true),
@@ -346,7 +374,7 @@ fn compute_one_group(
     spec: &KdeSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
-    count_scale_pinned_extent: Option<(f64, f64)>,
+    count_scale_bins: CountScaleBins,
     warn_ctx: &TransformContext,
     group: Option<&str>,
 ) -> PyResult<(Vec<f64>, Vec<f64>)> {
@@ -416,11 +444,12 @@ fn compute_one_group(
     // `KdeSpec::count_scale`'s doc for the normative semantics). `n_group`
     // is this group's own clean (non-null/non-NaN) count — the same
     // null-drop policy `Bin` applies — so it matches the bar-height total a
-    // per-hue histogram would show for this group. `bin_width` is THIS
-    // group's own width (see `resolve_group_bin_width`), not a single
-    // scalar shared across every group.
+    // per-hue histogram would show for this group. `bin_width` is the width
+    // the mirrored `Bin` renders for THIS group (see
+    // `resolve_group_bin_width`): its own under an unshared `Bin`, the one
+    // pooled width under `shared_extent`.
     if let Some(mode) = &spec.count_scale {
-        if let Some(bw) = resolve_group_bin_width(&clean, mode, count_scale_pinned_extent, "stat_kde")? {
+        if let Some(bw) = resolve_group_bin_width(&clean, mode, count_scale_bins, "stat_kde")? {
             let n_group = clean.len() as f64;
             let factor = if spec.cumulative { n_group } else { n_group * bw };
             for d in density.iter_mut() {
@@ -439,7 +468,7 @@ fn apply_grouped(
     spec: &KdeSpec,
     batch: &RecordBatch,
     group_cols: &[String],
-    count_scale_pinned_extent: Option<(f64, f64)>,
+    count_scale_bins: CountScaleBins,
     warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
@@ -472,7 +501,7 @@ fn apply_grouped(
     for (g, ixs) in &partition.groups {
         let label = describe_group_keys(group_cols, g);
         let (values, density) = compute_one_group(
-            &shared_spec, batch, Some(ixs), count_scale_pinned_extent, warn_ctx, Some(&label),
+            &shared_spec, batch, Some(ixs), count_scale_bins, warn_ctx, Some(&label),
         )?;
         let n = values.len();
         all_values.extend(values);
@@ -745,11 +774,12 @@ use crate::transform::core::TransformSpec;
 ///     ``n_group`` when ``cumulative=True``). Accepts the same binning-rule
 ///     vocabulary as ``Bin2D``'s ``bins_x``/``bins_y``: a bin-count rule
 ///     string (``"sturges"`` or ``"fd"``), an ``int`` (fixed bin count), or
-///     a ``float`` (fixed bin width). ``bin_width`` is derived PER GROUP
-///     (mirroring ``Bin``'s own grouped derivation and this spec's
-///     ``shared_extent`` gate), using the same routine ``Bin`` uses — bit
-///     parity with a histogram binned the same way, including per-hue-level
-///     widths when ``shared_extent=False`` (the ``displot`` default).
+///     a ``float`` (fixed bin width). ``bin_width`` is the width ``Bin``
+///     renders for each group (mirroring ``Bin``'s own grouped derivation and
+///     this spec's ``shared_extent`` gate), using the same routine ``Bin``
+///     uses — bit parity with a histogram binned the same way: per-hue-level
+///     widths when ``shared_extent=False`` (the ``displot`` default), one
+///     width over the pooled rows when ``shared_extent=True``.
 ///     Default ``None`` leaves ``density`` unscaled (today's behavior).
 ///
 ///     Parity holds against the histogram ``displot``/``mark_histogram``

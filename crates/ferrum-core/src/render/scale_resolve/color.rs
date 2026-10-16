@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::color::palette;
 use crate::render::RenderError;
 
-use super::domain::{apply_sort_to_domain, locate_field, SortContext};
+use super::domain::{admitted_aux_reads, apply_sort_to_domain, aux_category_union, aux_numeric_union, locate_field, AuxRead, SortContext};
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
@@ -91,6 +91,25 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 ///
 /// `None` (every standalone and faceted caller) reproduces the pre-10-pre-b path
 /// byte-for-byte.
+///
+/// # `layer_reads` — the domain of a layered spec's color
+///
+/// A layered spec's reads of the color channel ([`AuxRead`]): every layer that
+/// draws color, with the field it draws read from the batch it draws. The
+/// auto domain is then their union: the numeric extent
+/// ([`aux_numeric_union`]) or the categories in layer order
+/// ([`aux_category_union`]). Empty for an unlayered spec, which reads the
+/// located column (continuous) or the primary batch (categorical). An
+/// explicit domain and a composite shared domain still win as above.
+///
+/// The scale's kind, continuous or categorical, is decided by the rendering
+/// encoding's field, the establishing layer's (layer 0 when it draws color,
+/// else the first layer that does), read from the batch that layer draws; a
+/// later layer whose own color field reads the other way stays out of the
+/// union ([`admitted_aux_reads`], one
+/// `LayerScaleExcluded` each, returned first among the warnings). Under
+/// `force_categorical` every column reads as categories, so every layer is
+/// admitted.
 #[allow(clippy::too_many_arguments)]
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
@@ -105,11 +124,17 @@ pub fn build_color_scale(
     // find the channel the user wrote (#95). `false` for every unflipped
     // chart → byte-identical.
     coord_flipped: bool,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
     };
-    let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
+    // The column that decides the kind: the establishing layer's, read from
+    // the batch it draws, on a layered spec.
+    let located = layer_reads
+        .first()
+        .and_then(|lead| lead.locate(primary_batch, transform_outputs))
+        .or_else(|| locate_field(&c_enc.field, primary_batch, transform_outputs))
         .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
     let inferred = infer_spec_type(c_enc, located.col.data_type());
@@ -122,28 +147,41 @@ pub fn build_color_scale(
         inferred,
         SpecDataType::Quantitative | SpecDataType::Temporal,
     );
+    let mut exclusions: Vec<crate::render::RenderWarning> = Vec::new();
+    let layer_reads = if force_categorical {
+        layer_reads.to_vec()
+    } else {
+        admitted_aux_reads(layer_reads, "color", !is_continuous_color, primary_batch, transform_outputs, &mut exclusions)
+    };
+    let layer_reads = layer_reads.as_slice();
     if is_continuous_color {
-        if !crate::render::arrow_cast::is_numeric(located.col.data_type()) {
-            return Err(RenderError::EncodingTypeMismatch {
-                channel: "color",
-                expected: "numeric column for quantitative/temporal type",
-                got: format!("{:?}", located.col.data_type()),
-                // "color" is never a positional channel, so `CoordFlip` never
-                // touches it — `user_facing_channel` is identity regardless
-                // (R3). `build_color_scale` has no `ChartSpec`/coord in scope
-                // here, so this is hardcoded rather than threaded for a value
-                // that can never change the rendered message.
-                coord_flipped: false,
-            });
-        }
-        // T3: When faceted (Shared), union the per-panel extent with the global
-        // FINAL_OUTPUT_KEY batch so marks normalize through the same domain as the
-        // global colorbar legend.
-        let panel_extent = numeric_extent(located.col);
-        let data_extent = if facet_shared {
-            union_panel_with_global_extent(panel_extent, &c_enc.field, transform_outputs)
-        } else {
-            panel_extent
+        let continuous_extent = |col: &dyn arrow::array::Array, _: &str| {
+            if !crate::render::arrow_cast::is_numeric(col.data_type()) {
+                return Err(RenderError::EncodingTypeMismatch {
+                    channel: "color",
+                    expected: "numeric column for quantitative/temporal type",
+                    got: format!("{:?}", col.data_type()),
+                    // "color" is never a positional channel, so `CoordFlip` never
+                    // touches it, and `user_facing_channel` is identity
+                    // regardless. `build_color_scale` has no `ChartSpec`/coord in scope
+                    // here, so this is hardcoded rather than threaded for a value
+                    // that can never change the rendered message.
+                    coord_flipped: false,
+                });
+            }
+            Ok(numeric_extent(col))
+        };
+        let panel_extent = continuous_extent(located.col, &c_enc.field)?;
+        // A layered spec's color spans every layer's own column. Otherwise, T3:
+        // when faceted (Shared), union the per-panel extent with the global
+        // FINAL_OUTPUT_KEY batch so marks normalize through the same domain as
+        // the global colorbar legend.
+        let data_extent = match aux_numeric_union(layer_reads, primary_batch, transform_outputs, facet_shared, continuous_extent)? {
+            Some(union) => union,
+            None if facet_shared => {
+                union_panel_with_global_extent(panel_extent, &c_enc.field, transform_outputs)
+            }
+            None => panel_extent,
         };
         // Quantize/Quantile/Threshold/BinOrdinal bucket the value instead of
         // interpolating it. Resolved before the continuous path because they
@@ -161,7 +199,8 @@ pub fn build_color_scale(
         if let Some((buckets, warnings)) =
             build_discretizing_color_scale(c_enc, sample_batch, data_extent, theme)?
         {
-            return Ok((Some(ColorScale::Discretizing(buckets)), warnings));
+            exclusions.extend(warnings);
+            return Ok((Some(ColorScale::Discretizing(buckets)), exclusions));
         }
 
         // D1: honor explicit domain from the scale spec. When the spec carries
@@ -180,7 +219,8 @@ pub fn build_color_scale(
         //   3. None — geometric center falls out from pure-linear normalization
         // Sequential scales always get None (pure-linear).
         let midpoint = scale_diverging_midpoint(c_enc);
-        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), scheme_warnings))
+        exclusions.extend(scheme_warnings);
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), exclusions))
     } else {
         // Every categorical color scale is keyed per row by
         // `col_as_ordinal_category_str`, so the column must be category-readable
@@ -207,7 +247,24 @@ pub fn build_color_scale(
         // every panel assigns the same palette color to the same category string
         // — matching the global legend.  Falls back to `primary_batch` when the
         // key is absent or the field is missing from the global batch.
-        let domain_batch = shared_categorical_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared);
+        //
+        // A layered spec's categories are every layer's own, in layer order
+        // (`layer_reads`); a data-aware sort then aggregates over the first
+        // contributing batch.
+        let (layer_categories, domain_batch) =
+            match aux_category_union(layer_reads, primary_batch, transform_outputs, facet_shared)? {
+                Some((categories, batch)) => (Some(categories), batch),
+                None => (
+                    None,
+                    shared_categorical_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared),
+                ),
+            };
+        let data_categories = |batch| -> Result<Vec<String>, RenderError> {
+            match &layer_categories {
+                Some(categories) => Ok(categories.clone()),
+                None => distinct_values_in_order(batch, &c_enc.field),
+            }
+        };
 
         // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
         // the legend domain by an aggregate, mirroring the positional-axis path.
@@ -254,13 +311,14 @@ pub fn build_color_scale(
                     // domain_batch (global when facet_shared).
                     let mut domain = match super::domain::explicit_ordinal_domain(c_enc) {
                         Some(declared) => declared,
-                        None => distinct_values_in_order(domain_batch, &c_enc.field)?,
+                        None => data_categories(domain_batch)?,
                     };
                     apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings)?;
                     let palette: Cow<'static, [Color]> = Cow::Owned(parsed);
                     // No overflow warning when the user supplied an explicit range;
                     // they own the mapping and repeated colors are intentional.
-                    return Ok((Some(ColorScale::Categorical { domain, palette }), warnings));
+                    exclusions.extend(warnings);
+                    return Ok((Some(ColorScale::Categorical { domain, palette }), exclusions));
                 }
                 Err(bad_entry) => {
                     // #126: all-or-nothing parse refuses rather than falling
@@ -284,11 +342,12 @@ pub fn build_color_scale(
         let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
         let mut domain = match composite_categorical_domain(composite_domain) {
             Some(cats) => cats,
-            None => distinct_values_in_order(domain_batch, &c_enc.field)?,
+            None => data_categories(domain_batch)?,
         };
         apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings)?;
         let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
-        Ok((Some(scale), warnings))
+        exclusions.extend(warnings);
+        Ok((Some(scale), exclusions))
     }
 }
 

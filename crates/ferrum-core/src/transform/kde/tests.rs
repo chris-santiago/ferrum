@@ -1473,22 +1473,16 @@ fn test_kde_count_scale_grouped_sturges_mirrors_bin_per_group_n_bins() {
     }
 }
 
-/// Grouped count-scale, `shared_extent=true` + `Sturges` mode
-/// (quality-review cycle-4 finding A) — the one branch the two tests
-/// above never exercise: `resolve_group_bin_width`'s `Some((lo, hi))`
-/// arm, reached when `multiple in ("stack","fill")` sets `shared_extent`
-/// on both `mark_histogram` and `mark_density`. Group B's own 3 points
-/// span only `[5,7]` — if the extent were (wrongly) still derived
-/// per-group, group B would bin over `[5,7]`, not the shared `[0,9]`;
-/// this test would then still pass by accident unless it also proves
-/// the shared bound is actually reaching `Bin` and `Kde` identically,
-/// which the real-`Bin` oracle does by construction (both read the same
-/// `shared_extent=true` semantics). Sturges still varies `n_bins` (and
-/// hence width) per group SIZE even though the extent is shared — group
-/// A (10 points) and group B (3 points) get different bin counts over
-/// the same `[0,9]` range, pinning both halves of the branch at once.
+/// Grouped count-scale, `shared_extent=true` + `Sturges` mode: the branch a
+/// stacked or filled histogram's density overlay reaches. A shared-extent
+/// `Bin` computes ONE edge set over the pooled rows and counts every group
+/// into it, so group A (10 points over `[0,9]`) and group B (3 points over
+/// `[5,7]` alone) render the same bin width, equal to an ungrouped `Bin`'s
+/// over all the rows. The count-scaled overlay must scale each group by that
+/// one width; a per-group Sturges count over the shared extent (A and B
+/// getting different widths) is the shape this rejects.
 #[test]
-fn test_kde_count_scale_grouped_shared_extent_sturges_mirrors_bin_shared_extent_per_group_n_bins() {
+fn test_kde_count_scale_grouped_shared_extent_sturges_mirrors_bin_shared_edges() {
     use arrow::array::StringArray;
     let schema = Arc::new(Schema::new(vec![
         Field::new("x", DataType::Float64, true),
@@ -1506,12 +1500,11 @@ fn test_kde_count_scale_grouped_shared_extent_sturges_mirrors_bin_shared_extent_
     let group_cols = vec!["g".to_string()];
 
     let widths = actual_bin_widths_per_group(&batch, "x", &group_cols, BinMode::Sturges, true);
-    assert!(
-        (widths["A"] - widths["B"]).abs() > 1e-9,
-        "expected different Sturges n_bins per group even under a shared extent \
-         (A={}, B={}) — otherwise this test can't discriminate the shared-extent, \
-         still-per-group-n_bins shape from either extreme",
-        widths["A"], widths["B"],
+    let pooled_width = actual_bin_width_ungrouped(&batch, "x", BinMode::Sturges, None);
+    assert_eq!(
+        (widths["A"], widths["B"]),
+        (pooled_width, pooled_width),
+        "a shared-extent Bin gives every group the pooled ungrouped bin width"
     );
 
     let unscaled = KdeSpec {
@@ -1874,7 +1867,7 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
             // Ungrouped: one `clean` over every row.
             let bin_width = actual_bin_width_ungrouped(&batch, "x", mode.clone(), pinned);
             let kde_width =
-                resolve_group_bin_width(&xs_vals, &mode, pinned, "stat_kde").unwrap();
+                resolve_group_bin_width(&xs_vals, &mode, CountScaleBins::PerGroup(pinned), "stat_kde").unwrap();
             assert_eq!(
                 kde_width,
                 Some(bin_width),
@@ -1899,7 +1892,7 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
             let widths = widths_by_group_from_bin_output(&bin_out, "g");
             for (g, clean) in [("A", &a), ("B", &b)] {
                 let kde_width =
-                    resolve_group_bin_width(clean, &mode, pinned, "stat_kde").unwrap();
+                    resolve_group_bin_width(clean, &mode, CountScaleBins::PerGroup(pinned), "stat_kde").unwrap();
                 assert_eq!(
                     kde_width,
                     Some(widths[g]),
@@ -1907,6 +1900,25 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
                      must equal the width Bin actually rendered for that group",
                 );
             }
+
+            // Grouped under `shared_extent`: every group is counted into the
+            // edges `shared_bin_edges` computes over the pooled rows, so each
+            // group's width is that one width.
+            let shared_spec = crate::transform::bin::BinSpec { shared_extent: true, ..bin_spec };
+            let shared_out = crate::transform::bin::apply(&shared_spec, &batch).unwrap();
+            let shared_widths = widths_by_group_from_bin_output(&shared_out, "g");
+            let edges = crate::transform::bin::shared_bin_edges(&shared_spec, &batch, &group_cols).unwrap();
+            for (g, clean) in [("A", &a), ("B", &b)] {
+                let kde_width =
+                    resolve_group_bin_width(clean, &mode, CountScaleBins::Shared(edges), "stat_kde").unwrap();
+                assert_eq!(
+                    kde_width,
+                    Some(shared_widths[g]),
+                    "group {g}, shared {mode:?} with extent {pinned:?}: Kde's count_scale width \
+                     must equal the shared width Bin actually rendered",
+                );
+            }
+            assert_eq!(shared_widths["A"], shared_widths["B"], "one shared width, {mode:?} {pinned:?}");
         }
     }
 }
@@ -1917,14 +1929,14 @@ fn resolve_group_bin_width_matches_bin_actual_width_across_the_matrix() {
 /// all-equal case collapses to `Bin`'s unit-width bin (`1.0`) exactly.
 #[test]
 fn test_resolve_group_bin_width_empty_returns_none() {
-    let width = resolve_group_bin_width(&[], &BinMode::Sturges, None, "stat_kde").unwrap();
+    let width = resolve_group_bin_width(&[], &BinMode::Sturges, CountScaleBins::PerGroup(None), "stat_kde").unwrap();
     assert_eq!(width, None, "empty clean column must return None, not a NaN sentinel");
 }
 
 #[test]
 fn test_resolve_group_bin_width_degenerate_all_equal_matches_bin_unit_width() {
     let clean = vec![5.0, 5.0, 5.0, 5.0];
-    let width = resolve_group_bin_width(&clean, &BinMode::Fixed { n: 3 }, None, "stat_kde").unwrap();
+    let width = resolve_group_bin_width(&clean, &BinMode::Fixed { n: 3 }, CountScaleBins::PerGroup(None), "stat_kde").unwrap();
     assert_eq!(width, Some(1.0), "degenerate all-equal field must collapse to Bin's unit-width bin");
 }
 

@@ -16,8 +16,8 @@ use crate::transform::group_key::{
     NullKeyPolicy,
 };
 use crate::transform::numeric_util::{
-    clean_float64_values, clean_float64_values_indexed, coerce_to_float64, grouped_column_extent,
-    resolve_shared_extent,
+    clean_float64_values, clean_float64_values_indexed, coerce_to_float64, grouped_clean_values,
+    grouped_column_extent,
 };
 
 // ── Shared private helpers ────────────────────────────────────────────────────
@@ -75,6 +75,48 @@ pub(crate) fn resolve_bin_extent(
     Ok((lo, hi, n_bins))
 }
 
+/// The `(lo, hi, n_bins)` edges a `shared_extent` grouped `Bin` counts every
+/// group into: the edges an UNGROUPED `Bin` computes over the pooled clean
+/// values of the rows the groups keep (the null-key fold
+/// [`grouped_column_extent`] and [`global_extent`] use). The extent is the
+/// explicit `spec.extent`, else the pooled extent, niced as an ungrouped
+/// `Bin` nices it; the count is the bin-count rule over the pooled values;
+/// both through [`resolve_bin_extent`]. An all-equal pool keeps the
+/// single-unit-bin rule, `(v - 0.5, v + 0.5, 1)`.
+///
+/// `Ok(None)` when there is nothing to pool (no clean value, or a missing or
+/// non-numeric field) and for a malformed explicit extent: each group's own
+/// compute then reports the case exactly as it does without sharing.
+///
+/// Read by `apply_grouped` and by `Kde`'s count-scale width, so a
+/// count-scaled density overlay keeps matching the bars it is drawn over.
+pub(crate) fn shared_bin_edges(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    groupby: &[String],
+) -> PyResult<Option<(f64, f64, usize)>> {
+    let Some(clean) = grouped_clean_values(batch, &spec.field, groupby) else {
+        return Ok(None);
+    };
+    if clean.is_empty() {
+        return Ok(None);
+    }
+    let (lo, hi, should_nice) = match spec.extent {
+        Some((lo, hi)) if lo < hi => (lo, hi, false),
+        Some(_) => return Ok(None),
+        None => {
+            let (lo, hi) = clean
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+            if lo == hi {
+                return Ok(Some((lo - 0.5, lo + 0.5, 1)));
+            }
+            (lo, hi, spec.nice)
+        }
+    };
+    resolve_bin_extent(&clean, &spec.mode, lo, hi, should_nice, "stat_bin").map(Some)
+}
+
 /// 1-D equal-width binning spec.
 ///
 /// The bin-count decision is a typed [`BinMode`] (no overlapping
@@ -93,10 +135,11 @@ pub(crate) struct BinSpec {
     pub extent: Option<(f64, f64)>,
     pub nice: bool,
     pub cumulative: bool,
-    /// When ``true`` and ``groupby`` is set, compute a single global extent
-    /// from all rows before per-group binning so every group shares the same
-    /// bin edges. Required for ``multiple="stack"`` / ``"fill"`` to produce
-    /// aligned bars that can be stacked correctly.
+    /// When ``true`` and ``groupby`` is set, compute one set of bin edges (the
+    /// extent and the bin count) over the pooled rows before per-group
+    /// binning, and count every group into it ([`shared_bin_edges`]).
+    /// Required for ``multiple="stack"`` / ``"fill"`` / ``"dodge"`` to produce
+    /// aligned bars.
     pub shared_extent: bool,
     /// When non-empty, partition input by these columns and emit per-(bin, group)
     /// rows. Output schema gains one column per groupby field after the 4th
@@ -358,7 +401,7 @@ fn apply_one_group(
     only_indices: Option<&[usize]>,
     agg_col: Option<&AggColumn>,
 ) -> PyResult<RecordBatch> {
-    build_bin_batch(compute_one_group(spec, batch, only_indices, agg_col)?)
+    build_bin_batch(compute_one_group(spec, batch, only_indices, agg_col, None)?)
 }
 
 /// This transform's per-group compute: resolve the column, clean/bin the
@@ -367,11 +410,16 @@ fn apply_one_group(
 /// [`build_bin_batch`] for the ungrouped entry point; [`apply_grouped`] calls
 /// this directly per partition and extends its own accumulator `Vec`s from
 /// the typed result.
+///
+/// `shared_edges`, when `Some`, are the `(lo, hi, n_bins)` every group of a
+/// `shared_extent` request is counted into ([`shared_bin_edges`]); this group
+/// then derives no extent or count of its own.
 fn compute_one_group(
     spec: &BinSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     agg_col: Option<&AggColumn>,
+    shared_edges: Option<(f64, f64, usize)>,
 ) -> PyResult<BinColumns> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
@@ -396,32 +444,36 @@ fn compute_one_group(
         return Ok(empty_bin_columns(agg_col.is_some()));
     }
 
-    let (lo, hi) = match spec.extent {
-        Some((a, b)) if a < b => (a, b),
-        Some((a, b)) => return Err(PyValueError::new_err(format!(
-            "stat_bin: extent must satisfy lo < hi; got ({a}, {b})"
-        ))),
+    let (lo, hi, n_bins) = match shared_edges {
+        Some(edges) => edges,
         None => {
-            let (lo, hi) = clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                (a.min(v), b.max(v))
-            });
-            if lo == hi {
-                // Spec §4.1 numeric edge: all-equal → single unit bin. Every
-                // clean row falls in this one bin, so its agg_value (when
-                // requested) aggregates the full `row_idx` set.
-                let agg_value = agg_col.map(|ac| ac.aggregate_rows(&row_idx));
-                return Ok(single_unit_bin_columns(lo, clean.len() as u64, agg_value));
-            }
-            (lo, hi)
+            let (lo, hi) = match spec.extent {
+                Some((a, b)) if a < b => (a, b),
+                Some((a, b)) => return Err(PyValueError::new_err(format!(
+                    "stat_bin: extent must satisfy lo < hi; got ({a}, {b})"
+                ))),
+                None => {
+                    let (lo, hi) = clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                        (a.min(v), b.max(v))
+                    });
+                    if lo == hi {
+                        // Spec §4.1 numeric edge: all-equal → single unit bin. Every
+                        // clean row falls in this one bin, so its agg_value (when
+                        // requested) aggregates the full `row_idx` set.
+                        let agg_value = agg_col.map(|ac| ac.aggregate_rows(&row_idx));
+                        return Ok(single_unit_bin_columns(lo, clean.len() as u64, agg_value));
+                    }
+                    (lo, hi)
+                }
+            };
+            // Optional "nice" rounding of the extent, plus bin-count resolution.
+            // Only nices when extent is auto-derived (not when the caller explicitly
+            // set extent). See `resolve_bin_extent`'s doc for the target-selection
+            // rule (Fixed{n} vs Sturges fallback).
+            let should_nice = spec.nice && spec.extent.is_none();
+            resolve_bin_extent(&clean, &spec.mode, lo, hi, should_nice, "stat_bin")?
         }
     };
-
-    // Optional "nice" rounding of the extent, plus bin-count resolution.
-    // Only nices when extent is auto-derived (not when the caller explicitly
-    // set extent). See `resolve_bin_extent`'s doc for the target-selection
-    // rule (Fixed{n} vs Sturges fallback).
-    let should_nice = spec.nice && spec.extent.is_none();
-    let (lo, hi, n_bins) = resolve_bin_extent(&clean, &spec.mode, lo, hi, should_nice, "stat_bin")?;
 
     let edges: Vec<f64> = (0..=n_bins)
         .map(|i| lo + (hi - lo) * (i as f64) / (n_bins as f64))
@@ -501,10 +553,12 @@ fn compute_one_group(
 /// partition, and concatenate the typed columns into a single batch with the
 /// group columns appended after the 4th field.
 ///
-/// When `spec.shared_extent` is `true` and `spec.extent` is `None`, a global
-/// extent is computed across all rows of the field before per-group binning so
-/// every group produces the same bin edges — required for `multiple="stack"` /
-/// `"fill"` stacking to find matching x-key pairs.
+/// When `spec.shared_extent` is `true`, the edges are computed once, as an
+/// ungrouped `Bin` would compute them over the pooled rows every group keeps
+/// ([`shared_bin_edges`]: the explicit or pooled extent, and one bin count
+/// over the pooled values), and every group is counted into those identical
+/// edges, so `multiple="stack"` / `"fill"` / `"dodge"` find matching bins.
+/// Without it, each group derives its own extent and count.
 fn apply_grouped(
     spec: &BinSpec,
     batch: &RecordBatch,
@@ -522,19 +576,8 @@ fn apply_grouped(
     let partition =
         group_partition_multi(batch, group_cols, "stat_bin", NullKeyPolicy::Skip, warn_ctx)?;
 
-    // When shared_extent=true, inject the global raw extent so every group gets
-    // the same bin edges (required for stack/fill). resolve_shared_extent returns
-    // the explicit extent unchanged when set, else None unless shared is on.
-    let effective_spec: std::borrow::Cow<BinSpec> =
-        match resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field, group_cols) {
-            Some(e) if spec.extent.is_none() => {
-                let mut patched = spec.clone();
-                patched.extent = Some(e);
-                std::borrow::Cow::Owned(patched)
-            }
-            _ => std::borrow::Cow::Borrowed(spec),
-        };
-    let spec_ref: &BinSpec = &effective_spec;
+    let shared_edges =
+        if spec.shared_extent { shared_bin_edges(spec, batch, group_cols)? } else { None };
 
     // Per-group typed columns are extended directly into these accumulators.
     let mut all_starts: Vec<f64> = Vec::new();
@@ -544,7 +587,7 @@ fn apply_grouped(
     let mut all_agg_values: Vec<Option<f64>> = Vec::new();
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for (g, ixs) in &partition.groups {
-        let cols = compute_one_group(spec_ref, batch, Some(ixs), agg_col)?;
+        let cols = compute_one_group(spec, batch, Some(ixs), agg_col, shared_edges)?;
         let n = cols.starts.len();
         all_starts.extend(cols.starts);
         all_ends.extend(cols.ends);
@@ -2599,5 +2642,171 @@ mod tests {
                 "stat_bin: agg_field and agg must both be set, or both omitted"
             );
         });
+    }
+
+    // ── shared_extent: one edge set for every group ─────────────────────────
+
+    /// Group A spans 0..=12 (13 rows), group B spans 1..9 (3 rows): different
+    /// sizes and spans, so a per-group Sturges count or extent would differ.
+    /// A null-keyed row at 100 is binned into no group, so it must not move
+    /// the pooled edges either.
+    fn two_group_batch() -> (RecordBatch, Vec<f64>) {
+        use arrow::array::StringArray;
+        let a: Vec<f64> = (0..=12).map(|i| i as f64).collect();
+        let b = [1.0, 5.0, 9.0];
+        let mut xs = a.clone();
+        xs.extend(b);
+        let mut gs: Vec<Option<&str>> = vec![Some("A"); a.len()];
+        gs.extend([Some("B"); 3]);
+        xs.push(100.0);
+        gs.push(None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(xs.clone())), Arc::new(StringArray::from(gs))],
+        )
+        .unwrap();
+        let pooled = xs[..xs.len() - 1].to_vec();
+        (batch, pooled)
+    }
+
+    fn grouped_spec(mode: BinMode, extent: Option<(f64, f64)>, shared_extent: bool) -> BinSpec {
+        BinSpec {
+            field: "x".into(),
+            mode,
+            extent,
+            nice: true,
+            cumulative: false,
+            shared_extent,
+            groupby: vec!["g".into()],
+            agg_field: None,
+            agg: None,
+            name: None,
+        }
+    }
+
+    /// `(bin_start, bin_end)` per group, in output order, plus each group's
+    /// counts.
+    fn edges_by_group(out: &RecordBatch) -> Vec<(String, Vec<(f64, f64)>, Vec<u64>)> {
+        use arrow::array::StringArray;
+        let starts = col_f64(out, "bin_start");
+        let ends = col_f64(out, "bin_end");
+        let counts = col_u64(out, "count");
+        let gs = out
+            .column(out.schema().index_of("g").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let mut groups: Vec<(String, Vec<(f64, f64)>, Vec<u64>)> = Vec::new();
+        for i in 0..out.num_rows() {
+            let g = gs.value(i).to_string();
+            if groups.last().is_none_or(|(last, _, _)| *last != g) {
+                groups.push((g, Vec::new(), Vec::new()));
+            }
+            let entry = groups.last_mut().unwrap();
+            entry.1.push((starts.value(i), ends.value(i)));
+            entry.2.push(counts.value(i));
+        }
+        groups
+    }
+
+    /// Each value of `values` counted into `edges`, with `Bin`'s rule: bins
+    /// are `[start, end)`, the last edge inclusive.
+    fn count_into(values: &[f64], edges: &[(f64, f64)]) -> Vec<u64> {
+        let mut counts = vec![0u64; edges.len()];
+        for &v in values {
+            let last = edges.len() - 1;
+            let pos = edges.iter().position(|&(s, e)| v >= s && v < e).or((v == edges[last].1).then_some(last));
+            if let Some(pos) = pos {
+                counts[pos] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Under `shared_extent`, every group is counted into the edges an
+    /// ungrouped `Bin` computes over the pooled rows the groups keep, for every
+    /// bin-count rule and for an explicit extent.
+    #[test]
+    fn shared_extent_groups_share_the_pooled_ungrouped_edges() {
+        pyo3::Python::initialize();
+        let (batch, pooled) = two_group_batch();
+        let group_values = |g: &str| -> Vec<f64> {
+            if g == "A" { (0..=12).map(|i| i as f64).collect() } else { vec![1.0, 5.0, 9.0] }
+        };
+        for (mode, extent) in [
+            (BinMode::Sturges, None),
+            (BinMode::FreedmanDiaconis, None),
+            (BinMode::Fixed { n: 3 }, None),
+            (BinMode::Width { w: 2.5 }, None),
+            (BinMode::Sturges, Some((-2.0, 20.0))),
+        ] {
+            let ungrouped = BinSpec { groupby: vec![], ..grouped_spec(mode.clone(), extent, false) };
+            let reference = apply(&ungrouped, &batch_with(pooled.clone())).unwrap();
+            let reference_edges: Vec<(f64, f64)> = (0..reference.num_rows())
+                .map(|i| (col_f64(&reference, "bin_start").value(i), col_f64(&reference, "bin_end").value(i)))
+                .collect();
+
+            let out = apply(&grouped_spec(mode.clone(), extent, true), &batch).unwrap();
+            let groups = edges_by_group(&out);
+            assert_eq!(groups.len(), 2, "{mode:?} {extent:?}");
+            for (g, edges, counts) in &groups {
+                assert_eq!(
+                    edges, &reference_edges,
+                    "{mode:?} {extent:?}: group {g} must use the pooled ungrouped edges"
+                );
+                assert_eq!(
+                    counts,
+                    &count_into(&group_values(g), &reference_edges),
+                    "{mode:?} {extent:?}: group {g} is counted into the shared edges"
+                );
+            }
+        }
+    }
+
+    /// An all-equal pool keeps the single-unit-bin rule, shared by every group.
+    #[test]
+    fn shared_extent_degenerate_pool_shares_one_unit_bin() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+                Arc::new(StringArray::from(vec!["A", "A", "B"])),
+            ],
+        )
+        .unwrap();
+        let out = apply(&grouped_spec(BinMode::Sturges, None, true), &batch).unwrap();
+        let groups = edges_by_group(&out);
+        assert_eq!(
+            groups,
+            vec![
+                ("A".to_string(), vec![(4.5, 5.5)], vec![2]),
+                ("B".to_string(), vec![(4.5, 5.5)], vec![1]),
+            ]
+        );
+    }
+
+    /// Without `shared_extent`, each group still derives its own edges.
+    #[test]
+    fn unshared_groups_keep_their_own_edges() {
+        pyo3::Python::initialize();
+        let (batch, _) = two_group_batch();
+        let out = apply(&grouped_spec(BinMode::Sturges, None, false), &batch).unwrap();
+        let groups = edges_by_group(&out);
+        assert_ne!(groups[0].1, groups[1].1, "unshared groups bin over their own extents");
+        let a = apply(&BinSpec { groupby: vec![], ..grouped_spec(BinMode::Sturges, None, false) }, &batch_with((0..=12).map(|i| i as f64).collect())).unwrap();
+        let a_edges: Vec<(f64, f64)> = (0..a.num_rows())
+            .map(|i| (col_f64(&a, "bin_start").value(i), col_f64(&a, "bin_end").value(i)))
+            .collect();
+        assert_eq!(groups[0].1, a_edges, "group A alone bins as an ungrouped Bin over its rows");
     }
 }

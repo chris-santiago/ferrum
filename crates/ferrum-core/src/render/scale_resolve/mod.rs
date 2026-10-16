@@ -27,6 +27,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::ThemeInputs;
+use crate::spec::encoding::AUXILIARY_SCALE_CHANNELS;
 use crate::scale::discrete::CategoricalPlacement;
 use crate::scale::linear::LinearScale;
 use crate::scale::log::LogScale;
@@ -1558,8 +1559,16 @@ struct AuxiliaryScales {
 /// domain unioned across the composite's leaves, exactly as `leaf_scales`
 /// (x/y) seeds the positional axes. `None` for standalone (flat/facet) renders
 /// reproduces the pre-10-pre-b behavior byte-for-byte.
+///
+/// `chart_encoding` is the authored chart-level encoding `spec`'s layers
+/// inherit (see [`resolve_scales_with_leaf_context`]): a layer binding nothing
+/// on an auxiliary channel draws its binding, so that layer's contribution to
+/// the domain reads it ([`domain::aux_reads`]). `spec.encoding` carries each
+/// channel's establishing binding (`prepare`'s `establishing_encoding`), the
+/// one its kind and its legend come from.
 fn build_auxiliary_scales(
     spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
@@ -1580,24 +1589,31 @@ fn build_auxiliary_scales(
     // 10-pre-b: composite shared color/size domains (None → standalone path).
     let color_domain = leaf_scales.and_then(|c| c.color.as_ref());
     let size_domain = leaf_scales.and_then(|c| c.size.as_ref());
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain, coord_flipped)?;
+    // On a layered spec, every auxiliary channel resolves its auto domain from
+    // every layer that draws it, each reading the field it draws from the
+    // batch it draws, as the positional axes do (`aux_reads`).
+    let layer_reads = |slot: fn(&crate::spec::encoding::Encoding) -> Option<&crate::spec::encoding::EncodingSpec>| {
+        domain::aux_reads(spec.layers.as_deref(), chart_encoding, slot)
+    };
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain, coord_flipped, &layer_reads(|e| e.color.as_ref()))?;
     warnings.extend(color_warns);
-    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain)?;
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain, &layer_reads(|e| e.size.as_ref()))?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped)?;
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &layer_reads(|e| e.shape.as_ref()))?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
     // closure is only here so each call site reads as the channel it resolves
     // rather than repeating the six-argument call.
-    let mut opacity_scale = |channel| -> Result<Option<OpacityScale>, RenderError> {
-        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let mut opacity_scale = |channel: OpacityChannel| -> Result<Option<OpacityScale>, RenderError> {
+        let reads = domain::aux_reads(spec.layers.as_deref(), chart_encoding, |e| channel.slot(e).as_ref());
+        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &reads)?;
         warnings.extend(warns);
         Ok(scale)
     };
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped)?;
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &layer_reads(|e| e.stroke_dash.as_ref()))?;
     warnings.extend(dash_warns);
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }
@@ -1615,6 +1631,7 @@ fn build_auxiliary_scales(
 /// reaches this function and raises them there.
 pub(in crate::render) fn resolve_color_scale(
     spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
@@ -1623,23 +1640,18 @@ pub(in crate::render) fn resolve_color_scale(
         return Ok(None);
     }
     let mut warnings = Vec::new();
-    Ok(build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, None, &mut warnings)?.color)
+    Ok(build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, None, &mut warnings)?.color)
 }
 
-/// The channels [`build_auxiliary_scales`] builds a scale for, in
-/// [`AuxiliaryScales`] field order. Each scale is built once per chart from
-/// the chart's rendering encoding (the chart-level encoding as its first
-/// layer resolves it), never from a later layer's own binding.
-const AUXILIARY_SCALE_CHANNELS: [&str; 7] =
-    ["color", "size", "shape", "opacity", "fill_opacity", "stroke_opacity", "stroke_dash"];
-
-/// `ferrum._core.auxiliary_scale_channels()`: [`AUXILIARY_SCALE_CHANNELS`],
-/// published so Python reads the set of channels Rust scales at chart level
-/// instead of deriving it from its own channel metadata. Registered in
-/// `lib.rs`, typed in `src/ferrum/_core.pyi`.
+/// `ferrum._core.auxiliary_scale_channels()`: the names of
+/// [`AUXILIARY_SCALE_CHANNELS`], the channels [`build_auxiliary_scales`]
+/// builds a scale for, in [`AuxiliaryScales`] field order, published so
+/// Python reads the set of channels Rust scales at chart level instead of
+/// deriving it from its own channel metadata. Registered in `lib.rs`, typed
+/// in `src/ferrum/_core.pyi`.
 #[pyo3::pyfunction]
 pub(crate) fn auxiliary_scale_channels() -> Vec<String> {
-    AUXILIARY_SCALE_CHANNELS.iter().map(|s| s.to_string()).collect()
+    AUXILIARY_SCALE_CHANNELS.iter().map(|channel| channel.name.to_string()).collect()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1790,8 +1802,8 @@ pub(in crate::render) struct LayerScaleCtx<'a> {
     /// The chart's SOURCE schema, taken before any transform ran —
     /// [`PreparedInputs::source_schema`](
     /// crate::render::prepare::PreparedInputs::source_schema). Forwarded to
-    /// [`crate::render::prepare::validate_layer_positional_columns`], which
-    /// reads it only for a layer with no `data_source` of its own.
+    /// [`crate::render::prepare::validate_layer_positional_columns`] with
+    /// `transform_outputs`, to name where a missing column does exist.
     pub(in crate::render) source_schema: &'a Schema,
 }
 
@@ -1854,7 +1866,6 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     // channel it actually draws, not on an inherited opposite channel the
     // mark builder never reads.
     let layer_flipped = crate::spec::coord::flips_positional_channels(layer.coord.as_ref());
-    let source = layer.data_source.is_none().then_some(source_schema);
     let gate_encoding = crate::render::prepare::normalize_rule_tick_own_span(
         layer.encoding.clone(),
         layer.mark,
@@ -1863,10 +1874,11 @@ pub(in crate::render) fn resolve_layer_y_slot_scale(
     );
     crate::render::prepare::validate_layer_positional_columns(
         layer_idx,
+        layer,
         &gate_encoding,
         layer_batch,
         layer_flipped,
-        source,
+        &crate::render::prepare::PipelineBatches { source: source_schema, outputs: transform_outputs },
     )?;
 
     let mut merged_encoding = spec.encoding.clone();
@@ -2386,7 +2398,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
                 let x = build_axis_scale("x", x_enc, x2_enc.or(x_batch.base.as_ref()), pos_fields, &x_batch.batch, transform_outputs, x_pixel_range, &axis_spec, x_shared, x_shared_domain, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     x,
                     dummy_unit_scale(y_pixel_range, false),
@@ -2397,7 +2409,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
                 let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
                 let y = build_axis_scale("y", y_enc, y2_enc.or(y_batch.base.as_ref()), pos_fields, &y_batch.batch, transform_outputs, y_pixel_range, &axis_spec, y_shared, y_shared_domain, &mut warnings)?;
-                let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+                let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
                 return Ok((ResolvedScales::from_axes_and_auxiliary(
                     dummy_unit_scale(x_pixel_range, true),
                     y,
@@ -2476,14 +2488,11 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // data domain; expand=false removes the default 5% inward padding.
     apply_coord_domain_overrides(spec, &mut x, &mut y, x_pixel_range, y_pixel_range);
 
-    // Color/size/shape/opacity scales are primary-batch only. These channels
-    // do not currently participate in cross-layer scale unification: each is
-    // resolved against the chart-level transformed batch (i.e. __final__),
-    // matching Phase 8a behavior. (build_color_scale is the one exception —
-    // it accepts transform_outputs because composite-mark color fields may
-    // live in a named output rather than primary.) FA-5 (force_cat) and T3
-    // (aux_shared) logic lives in `build_auxiliary_scales`.
-    let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+    // The non-positional scales. On a layered spec each spans every layer
+    // that draws it, each read from the batch it draws; an unlayered spec
+    // reads the chart-level batch. FA-5 (force_cat), T3 (aux_shared) and that
+    // per-layer reading live in `build_auxiliary_scales`.
+    let aux = build_auxiliary_scales(spec, chart_encoding, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
 
     Ok((
         ResolvedScales {

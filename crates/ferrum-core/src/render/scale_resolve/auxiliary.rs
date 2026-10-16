@@ -13,7 +13,7 @@ use ferrum_scene::{categorical_slot_dash, STROKE_DASH_LEGACY_SLOTS};
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
-use super::domain::{apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, SortContext};
+use super::domain::{admitted_aux_reads, aux_category_union, aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, AuxRead, SortContext};
 use super::{column_min_max_f64, distinct_values_in_order, infer_spec_type, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, SHAPE_PALETTE};
 
 /// The explicit `domain`/`range` a user's `scale=` puts on a *numeric auxiliary*
@@ -75,6 +75,12 @@ fn scale_spec_kind_name(spec: &ScaleSpec) -> &'static str {
 /// already reassign glyphs/patterns (#123, user ruling Q1), so there is no
 /// range-gated carve-out to mirror. `sort=`, when present, still applies on
 /// top of either source.
+///
+/// `layer_reads` are a layered spec's admitted reads of the channel
+/// ([`AuxRead`]): the data-derived domain is then every drawing layer's
+/// categories in layer order ([`aux_category_union`]), and a data-aware
+/// `sort=` aggregates over the first contributing batch. Empty for an
+/// unlayered spec, which reads `batch`.
 #[allow(clippy::too_many_arguments)]
 fn sorted_categorical_domain(
     encoding: &Encoding,
@@ -85,11 +91,16 @@ fn sorted_categorical_domain(
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     coord_flipped: bool,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
-    let domain_batch = shared_categorical_batch(batch, field, transform_outputs, facet_shared);
-    let mut distinct = match explicit_domain {
-        Some(declared) => declared,
-        None => distinct_values_in_order(domain_batch, field)?,
+    let (layer_categories, domain_batch) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
+        Some((categories, first_batch)) => (Some(categories), first_batch),
+        None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared)),
+    };
+    let mut distinct = match (explicit_domain, layer_categories) {
+        (Some(declared), _) => declared,
+        (None, Some(categories)) => categories,
+        (None, None) => distinct_values_in_order(domain_batch, field)?,
     };
 
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
@@ -109,6 +120,42 @@ fn sorted_categorical_domain(
     Ok((distinct, warnings))
 }
 
+/// The data extent of a numeric auxiliary channel (size, the opacity family)
+/// bound to `field`. On a layered spec (`layer_reads` non-empty) it is the
+/// union over every layer's own column ([`aux_numeric_union`]) that reads as
+/// numbers: the scale is continuous, so a later layer's categorical column
+/// stays out, with one `LayerScaleExcluded` in `warnings`
+/// ([`admitted_aux_reads`]). Otherwise, or when no layer's batch holds its
+/// field, `field` read from `batch`, unioned on a faceted chart with the
+/// all-panels batch so marks scale through the same domain as the legend.
+/// `channel` names the channel in a dtype refusal and an exclusion.
+fn numeric_aux_extent(
+    field: &str,
+    channel: &'static str,
+    batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    facet_shared: bool,
+    layer_reads: &[AuxRead<'_>],
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<(f64, f64), RenderError> {
+    let layer_reads = admitted_aux_reads(layer_reads, channel, false, batch, transform_outputs, warnings);
+    let extent = |col: &dyn arrow::array::Array, field: &str| {
+        column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+            field: field.to_string(),
+            dtype: format!("{:?}", col.data_type()),
+            context: Some(channel),
+        })
+    };
+    if let Some(union) = aux_numeric_union(&layer_reads, batch, transform_outputs, facet_shared, extent)? {
+        return Ok(union);
+    }
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    let panel = extent(col.as_ref(), field)?;
+    Ok(if facet_shared { union_panel_with_global_extent(panel, field, transform_outputs) } else { panel })
+}
+
 /// Build a SizeScale if `encoding.size` is present.
 ///
 /// Honors a user-supplied `scale.range` (Phase 10f); when absent, falls back
@@ -119,16 +166,19 @@ fn sorted_categorical_domain(
 /// that per-panel marks normalize against the same domain as the global legend.
 /// Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
 ///
-/// Returns the scale (if built) and a vec of warnings. Currently emits no
-/// warnings; the `Vec` is returned to match `build_color_scale`/`build_shape_scale`
-/// so `build_auxiliary_scales` can use `warnings.extend(...)` uniformly for all
-/// four channels.
+/// Returns the scale (if built) and a vec of warnings: one
+/// `LayerScaleExcluded` per later layer whose own size field reads as
+/// categories, left out of the domain ([`numeric_aux_extent`]).
 ///
 /// `composite_domain` is the 10-pre-b composite seam: `Some` only for a composite
 /// leaf whose parent shares `size`. Its [`SharedDomain::Numeric`] extent (unioned
 /// across the composition's leaves) replaces the per-leaf `[min, max]` so every
 /// leaf's marks and legend normalize through the same domain. `None` (every
 /// standalone and faceted caller) reproduces the pre-10-pre-b path byte-for-byte.
+///
+/// `layer_reads` are a layered spec's reads of this channel ([`AuxRead`]): the
+/// data extent is then the union over every layer's own column
+/// ([`aux_numeric_union`]). Empty for an unlayered spec, which reads `batch`.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -136,25 +186,21 @@ pub fn build_size_scale(
     facet_shared: bool,
     theme: &ThemeInputs,
     composite_domain: Option<&SharedDomain>,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Option<SizeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(size_enc) = &encoding.size else {
         return Ok((None, Vec::new()));
     };
-    let col = batch
-        .column_by_name(&size_enc.field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: size_enc.field.clone() })?;
-    let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-        field: size_enc.field.clone(),
-        dtype: format!("{:?}", col.data_type()),
-        context: Some("size"),
-    })?;
-    // T3: When faceted (Shared), union the per-panel extent with the global
-    // FINAL_OUTPUT_KEY batch so marks scale through the same domain as the legend.
-    let (min, max) = if facet_shared {
-        union_panel_with_global_extent((min, max), &size_enc.field, transform_outputs)
-    } else {
-        (min, max)
-    };
+    let mut warnings = Vec::new();
+    let (min, max) = numeric_aux_extent(
+        &size_enc.field,
+        "size",
+        batch,
+        transform_outputs,
+        facet_shared,
+        layer_reads,
+        &mut warnings,
+    )?;
     // 10-pre-b: a composite shared size domain (unioned across the composition's
     // leaves) overrides the per-leaf extent. The union already subsumes this
     // leaf's own extent, so overriding is correct.
@@ -175,7 +221,7 @@ pub fn build_size_scale(
         true,
     ));
     let _ = (lo, hi); // bounds now read from inner.pixel_range() via accessors
-    Ok((Some(SizeScale { inner }), Vec::new()))
+    Ok((Some(SizeScale { inner }), warnings))
 }
 
 /// Build a ShapeScale if `encoding.shape` is present.
@@ -190,6 +236,11 @@ pub fn build_size_scale(
 /// the same glyph to the same category string — matching the global shape legend.
 /// Falls back to `batch` when the global batch or field is absent.
 /// Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
+///
+/// `layer_reads` are a layered spec's reads of `shape` ([`AuxRead`]): the
+/// domain is then every drawing layer's categories in layer order. A shape
+/// scale reads every column as categories, so no layer's column conflicts
+/// with it and every read is admitted. Empty for an unlayered spec.
 pub fn build_shape_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -199,6 +250,7 @@ pub fn build_shape_scale(
     // so an authored `sort="-y"` shorthand needs this to find the channel the
     // user wrote (#95). `false` for every unflipped chart → byte-identical.
     coord_flipped: bool,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Option<ShapeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(shape_enc) = &encoding.shape else {
         return Ok((None, Vec::new()));
@@ -224,6 +276,7 @@ pub fn build_shape_scale(
         transform_outputs,
         facet_shared,
         coord_flipped,
+        layer_reads,
     )?;
 
     // #123 D1: an explicit ordinal range assigns glyphs by the named shapes
@@ -290,7 +343,7 @@ pub enum OpacityChannel {
 
 impl OpacityChannel {
     /// This channel's slot on an encoding.
-    fn slot(self, encoding: &Encoding) -> &Option<EncodingSpec> {
+    pub(super) fn slot(self, encoding: &Encoding) -> &Option<EncodingSpec> {
         match self {
             OpacityChannel::Opacity => &encoding.opacity,
             OpacityChannel::Fill => &encoding.fill_opacity,
@@ -342,6 +395,10 @@ impl OpacityChannel {
 /// `[sizes.opacity_min, sizes.opacity_max]`, unless `scale=` carries an explicit
 /// `[lo, hi]` range (spec §4.3).
 ///
+/// `layer_reads`: a layered spec's reads of this channel ([`AuxRead`]), whose
+/// union over every layer's own column is the data extent
+/// ([`aux_numeric_union`]); empty for an unlayered spec, which reads `batch`.
+///
 /// `facet_shared`: when `true` (chart is faceted — these channels have no
 /// independent option), unions `batch`'s extent with the global
 /// `FINAL_OUTPUT_KEY` batch so that per-panel marks normalize against the same
@@ -363,6 +420,7 @@ impl OpacityChannel {
 /// [`OpacityScaleFallback::LiteralAlpha`](crate::render::OpacityScaleFallback::LiteralAlpha)
 /// rather than always claiming the default (data-extent-or-domain-override →
 /// theme-band-or-range-override) linear resolution.
+#[allow(clippy::too_many_arguments)]
 pub fn build_opacity_channel_scale(
     channel: OpacityChannel,
     encoding: &Encoding,
@@ -370,26 +428,21 @@ pub fn build_opacity_channel_scale(
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     theme: &ThemeInputs,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Option<OpacityScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(op_enc) = channel.slot(encoding) else {
         return Ok((None, Vec::new()));
     };
-    let col = batch
-        .column_by_name(&op_enc.field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: op_enc.field.clone() })?;
-    let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-        field: op_enc.field.clone(),
-        dtype: format!("{:?}", col.data_type()),
-        context: Some(channel.context()),
-    })?;
-    // T3: When faceted (Shared), union the per-panel extent with the global
-    // FINAL_OUTPUT_KEY batch so marks scale through the same domain as the legend.
-    let (min, max) = if facet_shared {
-        union_panel_with_global_extent((min, max), &op_enc.field, transform_outputs)
-    } else {
-        (min, max)
-    };
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
+    let (min, max) = numeric_aux_extent(
+        &op_enc.field,
+        channel.context(),
+        batch,
+        transform_outputs,
+        facet_shared,
+        layer_reads,
+        &mut warnings,
+    )?;
     let overrides = linear_overrides(&op_enc.scale);
     // A constant column has no spread to lay across a band; for the two
     // channels whose values are literal alphas that means no scale at all, so
@@ -452,6 +505,14 @@ pub fn build_opacity_channel_scale(
 /// `facet_shared`: when `true`, resolves the domain from the global
 /// `FINAL_OUTPUT_KEY` batch so every panel assigns the same dash to the same
 /// category — matching the global legend. Mirrors [`build_shape_scale`].
+///
+/// `layer_reads` are a layered spec's reads of `stroke_dash` ([`AuxRead`]).
+/// The establishing layer's column, read from the batch it draws, decides
+/// between the categorical scale and the index palette; a later layer whose
+/// column reads the other way is left out, with one `LayerScaleExcluded`
+/// first among the warnings ([`admitted_aux_reads`]), and a categorical
+/// domain is every admitted layer's categories in layer order. Empty for an
+/// unlayered spec, which reads `batch`.
 pub fn build_stroke_dash_scale(
     encoding: &Encoding,
     batch: &RecordBatch,
@@ -460,6 +521,7 @@ pub fn build_stroke_dash_scale(
     // See [`build_shape_scale`]'s `coord_flipped` — the same authored-vs-
     // rendered channel question, same answer (#95).
     coord_flipped: bool,
+    layer_reads: &[AuxRead<'_>],
 ) -> Result<(Option<StrokeDashScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(dash_enc) = &encoding.stroke_dash else {
         return Ok((None, Vec::new()));
@@ -477,19 +539,27 @@ pub fn build_stroke_dash_scale(
             entries: range.iter().map(|v| v.to_string()).collect(),
         });
     }
-    let col = batch
-        .column_by_name(&dash_enc.field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: dash_enc.field.clone() })?;
-    if infer_spec_type(dash_enc, col.data_type()) == crate::spec::encoding::DataType::Quantitative {
+    let col = match layer_reads.first().and_then(|lead| lead.locate(batch, transform_outputs)) {
+        Some(located) => located.col,
+        None => batch
+            .column_by_name(&dash_enc.field)
+            .ok_or_else(|| RenderError::UnknownColumn { name: dash_enc.field.clone() })?
+            .as_ref(),
+    };
+    let categorical =
+        infer_spec_type(dash_enc, col.data_type()) != crate::spec::encoding::DataType::Quantitative;
+    let mut warnings = Vec::new();
+    let layer_reads = admitted_aux_reads(layer_reads, "stroke_dash", categorical, batch, transform_outputs, &mut warnings);
+    if !categorical {
         // Numeric column: palette indices, no categorical resolution.
-        return Ok((None, Vec::new()));
+        return Ok((None, warnings));
     }
 
     // #123 D1: an explicit `scale.domain` wins over the data-derived order —
     // see [`sorted_categorical_domain`]'s doc comment. `stroke_dash` has no
     // explicit-range case to reach here (refused above), so only the domain
     // override threads through.
-    let (distinct, mut warnings) = sorted_categorical_domain(
+    let (distinct, sort_warnings) = sorted_categorical_domain(
         encoding,
         &dash_enc.field,
         explicit_ordinal_domain(dash_enc),
@@ -498,7 +568,9 @@ pub fn build_stroke_dash_scale(
         transform_outputs,
         facet_shared,
         coord_flipped,
+        &layer_reads,
     )?;
+    warnings.extend(sort_warnings);
 
     if distinct.len() > STROKE_DASH_LEGACY_SLOTS {
         warnings.push(crate::render::RenderWarning::StrokeDashPaletteOverflowed {

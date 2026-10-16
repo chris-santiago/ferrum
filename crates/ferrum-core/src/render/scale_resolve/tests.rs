@@ -215,7 +215,7 @@ fn size_scale_defaults_to_theme_point_size_range() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme, None)
+    let (scale, warns) = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme, None, &[])
         .unwrap();
     assert!(warns.is_empty());
     let scale = scale.unwrap();
@@ -268,7 +268,7 @@ fn size_scale_is_unchanged_by_domain_param_substitution() {
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
     let size_scale = |s: &ChartSpec| {
-        build_size_scale(&s.encoding, &batch, &outputs, false, &theme, None).unwrap().0.unwrap()
+        build_size_scale(&s.encoding, &batch, &outputs, false, &theme, None, &[]).unwrap().0.unwrap()
     };
     let (raw, resolved) = (size_scale(&spec), size_scale(&substituted));
     for v in [1.0, 5.0, 10.0] {
@@ -282,7 +282,7 @@ fn size_scale_is_unchanged_by_domain_param_substitution() {
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.shapes.len(), 3);
@@ -336,7 +336,7 @@ fn shape_absent_sort_preserves_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(None);
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     // First-appearance order: cat=0, bird=1, dog=2
@@ -369,7 +369,7 @@ fn shape_sort_ascending_reorders_domain_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("ascending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["bird", "cat", "dog"]);
@@ -401,7 +401,7 @@ fn shape_sort_descending_reorders_domain_reverse_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("descending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "cat", "bird"]);
@@ -440,7 +440,7 @@ fn shape_sort_data_aware_minus_y_orders_by_y_aggregate_descending() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("-y")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected for valid -y sort: {warns:?}");
     // bird has the lowest y-sum (20) → must be last in the descending domain
@@ -472,7 +472,7 @@ fn shape_sort_explicit_array_overrides_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!(["dog", "bird", "cat"])));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "bird", "cat"]);
@@ -508,7 +508,7 @@ fn shape_sort_missing_field_emits_warning_not_panic() {
     let sort_obj = serde_json::json!({"field": "nonexistent_column", "op": "mean", "order": "descending"});
     let spec = make_spec_with_shape_sort(Some(sort_obj));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
     let scale = scale.unwrap();
     // Must emit a SortSpecIgnored warning
     assert!(!warns.is_empty(), "expected SortSpecIgnored warning for missing field");
@@ -598,12 +598,12 @@ fn shape_scale_explicit_domain_reassigns_glyph_assignment() {
     let batch = species_batch();
     let outputs = std::collections::HashMap::new();
     let baseline_spec = make_spec_with_shape_scale(None);
-    let (baseline, _) = build_shape_scale(&baseline_spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (baseline, _) = build_shape_scale(&baseline_spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let baseline = baseline.unwrap();
     assert_eq!(baseline.domain, vec!["cat", "bird", "dog"], "sanity: first-appearance order");
 
     let spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["dog", "bird", "cat"]), None)));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(scale.domain, vec!["dog", "bird", "cat"], "declared domain wins over first-appearance order");
@@ -624,7 +624,7 @@ fn shape_scale_explicit_range_selects_the_named_glyphs() {
         Some(vec!["cat", "bird", "dog"]),
         Some(vec!["square", "cross", "diamond"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
@@ -646,7 +646,7 @@ fn shape_scale_unknown_range_entry_refuses() {
         Some(vec!["cat", "bird", "dog"]),
         Some(vec!["square", "hexagon", "diamond"]),
     )));
-    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "hexagon".to_string() },
@@ -668,7 +668,7 @@ fn shape_scale_non_string_range_entry_refuses_rather_than_silently_dropping() {
     }))
     .expect("ordinal scale spec must deserialize");
     let spec = make_spec_with_shape_scale(Some(scale));
-    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "4".to_string() },
@@ -704,7 +704,7 @@ fn shape_scale_range_shorter_than_domain_cycles() {
         Some(vec!["cat", "bird", "dog", "fox"]),
         Some(vec!["square", "cross"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.lookup("cat"), Some(ShapeKind::Square));
@@ -725,7 +725,7 @@ fn shape_scale_range_with_no_declared_domain_uses_data_order() {
         None,
         Some(vec!["diamond", "cross", "square"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"], "domain falls back to data first-appearance order");
@@ -760,7 +760,7 @@ fn shape_scale_explicit_domain_composes_with_sort() {
     let scale = ordinal_scale(Some(vec!["dog", "bird", "cat"]), None);
     let mut spec = make_spec_with_shape_scale(Some(scale));
     spec.encoding.shape.as_mut().unwrap().sort = Some(serde_json::json!(["dog"]));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(
@@ -780,7 +780,7 @@ fn shape_scale_absent_is_byte_identical_to_pre_123() {
     let batch = species_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_shape_scale(None);
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
@@ -795,13 +795,13 @@ fn stroke_dash_scale_explicit_domain_reassigns_pattern_assignment() {
     let outputs = std::collections::HashMap::new();
     let baseline_spec = make_spec_with_stroke_dash_scale(None);
     let (baseline, _) =
-        build_stroke_dash_scale(&baseline_spec.encoding, &batch, &outputs, false, false).unwrap();
+        build_stroke_dash_scale(&baseline_spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let baseline = baseline.unwrap();
     assert_eq!(baseline.domain, vec!["low", "mid", "high"], "sanity: first-appearance order");
 
     let spec =
         make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["mid", "low", "high"]), None)));
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(scale.domain, vec!["mid", "low", "high"], "declared domain wins over first-appearance order");
@@ -823,7 +823,7 @@ fn stroke_dash_scale_explicit_range_refuses() {
     let batch = appearance_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(None, Some(vec!["a", "b"]))));
-    let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap_err();
+    let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::StrokeDashRangeUnsupported {
@@ -840,7 +840,7 @@ fn stroke_dash_scale_absent_is_byte_identical_to_pre_123() {
     let batch = appearance_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_stroke_dash_scale(None);
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["low", "mid", "high"]);
@@ -861,7 +861,7 @@ fn stroke_dash_scale_explicit_domain_composes_with_sort() {
     let scale = ordinal_scale(Some(vec!["mid", "low", "high"]), None);
     let mut spec = make_spec_with_stroke_dash_scale(Some(scale));
     spec.encoding.stroke_dash.as_mut().unwrap().sort = Some(serde_json::json!(["high"]));
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, false, false, &[]).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(
@@ -1075,6 +1075,7 @@ fn opacity_scale_defaults_to_0_1_to_1_0() {
         &outputs,
         false,
         &theme,
+        &[],
     )
     .unwrap();
     assert!(warns.is_empty());
@@ -7578,13 +7579,13 @@ fn a_chart_data_layer_reaches_only_the_authored_chart_channels() {
 #[test]
 fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
     let batch = make_batch_q_q_n();
-    for (i, name) in AUXILIARY_SCALE_CHANNELS.iter().enumerate() {
-        let field = if matches!(*name, "shape" | "stroke_dash") { "species" } else { "x" };
+    for (i, name) in AUXILIARY_SCALE_CHANNELS.iter().map(|channel| channel.name).enumerate() {
+        let field = if matches!(name, "shape" | "stroke_dash") { "species" } else { "x" };
         let encoding: crate::spec::encoding::Encoding =
-            serde_json::from_value(serde_json::json!({ *name: { "field": field } })).unwrap();
+            serde_json::from_value(serde_json::json!({ name: { "field": field } })).unwrap();
         let spec = ChartSpec { encoding, ..Default::default() };
         let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash } =
-            build_auxiliary_scales(&spec, &batch, &HashMap::new(), &ThemeInputs::default(), None, &mut Vec::new())
+            build_auxiliary_scales(&spec, &spec.encoding, &batch, &HashMap::new(), &ThemeInputs::default(), None, &mut Vec::new())
                 .unwrap();
         let built = [
             color.is_some(),
@@ -7598,7 +7599,7 @@ fn auxiliary_scale_channels_name_each_auxiliary_scale_slot_in_order() {
         let expected: Vec<bool> = (0..built.len()).map(|j| j == i).collect();
         assert_eq!(built.to_vec(), expected, "{name}");
     }
-    assert_eq!(auxiliary_scale_channels(), AUXILIARY_SCALE_CHANNELS.map(String::from));
+    assert_eq!(auxiliary_scale_channels(), AUXILIARY_SCALE_CHANNELS.map(|channel| channel.name.to_string()));
 }
 
 /// With no scheme named, a `Diverging` scale takes the theme's diverging
@@ -7976,4 +7977,297 @@ fn a_layered_center_stack_domain_covers_its_lowest_base() {
         .expect("the layered stack resolves");
     let (lo, _) = scales.y.data_domain().expect("a continuous y");
     assert!(lo <= -3.5, "the lowest base -3.5 is in the layered domain; got {lo}");
+}
+
+// ── chart-level non-positional domains on a layered spec ────────────────────
+
+/// A chart over `g`/`m`/`z` whose two layers each draw their own computed
+/// column from their own output: `agg0` (`mean_z` over 0..2, category `c`
+/// in `p`, `q`) and `agg1` (`mean_z` over 10..20, `c` in `q`, `r`). The
+/// chart-level `channel` binds the raw `z` (the promoted binding); each layer
+/// binds `mean_z` itself, and the rendering encoding is layer 0's merge.
+/// `layer_channel` is each layer's own binding for `channel`, or `None` for a
+/// layer that inherits the chart's.
+fn aux_layered_spec(
+    channel: &str,
+    layer_channel: [Option<serde_json::Value>; 2],
+) -> (ChartSpec, crate::spec::encoding::Encoding) {
+    let positional = serde_json::json!({"x": {"field": "g"}, "y": {"field": "m"}});
+    let with = |base: &serde_json::Value, binding: Option<&serde_json::Value>| {
+        let mut encoding = base.clone();
+        if let Some(binding) = binding {
+            encoding[channel] = binding.clone();
+        }
+        encoding
+    };
+    let chart = with(&positional, Some(&serde_json::json!({"field": "z"})));
+    let layer = |source: &str, binding: Option<&serde_json::Value>| {
+        serde_json::json!({"mark": "point", "data_source": source, "encoding": with(&positional, binding)})
+    };
+    let [own0, own1] = &layer_channel;
+    let spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "data": {"kind": "named", "name": "default"},
+        "mark": "point",
+        "encoding": with(&positional, own0.as_ref().or(Some(&serde_json::json!({"field": "z"})))),
+        "layers": [layer("agg0", own0.as_ref()), layer("agg1", own1.as_ref())],
+    }))
+    .expect("the layered spec deserializes");
+    let chart_encoding = serde_json::from_value(chart).expect("the chart encoding deserializes");
+    (spec, chart_encoding)
+}
+
+/// The primary batch (`z` over 5..6, no `mean_z`) and the two layer outputs.
+fn aux_layered_batches() -> (RecordBatch, HashMap<String, RecordBatch>) {
+    let batch = |g: [&str; 2], m: [f64; 2], extra: (&str, [f64; 2]), c: [&str; 2]| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("g", ArrowDataType::Utf8, false),
+                Field::new("m", ArrowDataType::Float64, false),
+                Field::new(extra.0, ArrowDataType::Float64, false),
+                Field::new("c", ArrowDataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(g.to_vec())),
+                Arc::new(Float64Array::from(m.to_vec())),
+                Arc::new(Float64Array::from(extra.1.to_vec())),
+                Arc::new(StringArray::from(c.to_vec())),
+            ],
+        )
+        .unwrap()
+    };
+    let primary = batch(["a", "b"], [1.0, 2.0], ("z", [5.0, 6.0]), ["s", "s"]);
+    let outputs = HashMap::from([
+        ("agg0".to_string(), batch(["a", "b"], [1.0, 2.0], ("mean_z", [0.0, 2.0]), ["p", "q"])),
+        ("agg1".to_string(), batch(["a", "b"], [1.0, 2.0], ("mean_z", [10.0, 20.0]), ["q", "r"])),
+    ]);
+    (primary, outputs)
+}
+
+fn resolve_aux_layered(spec: &ChartSpec, chart_encoding: &crate::spec::encoding::Encoding) -> ResolvedScales {
+    let (primary, outputs) = aux_layered_batches();
+    resolve_scales_with_leaf_context(
+        spec,
+        chart_encoding,
+        &primary,
+        &outputs,
+        (0.0, 100.0),
+        (0.0, 80.0),
+        &ThemeInputs::default(),
+        None,
+    )
+    .expect("the layered spec resolves")
+    .0
+}
+
+/// Size and the opacity family resolve their domain as the union of every
+/// layer's own computed column, each read from the batch that layer draws,
+/// not from the primary batch (which has no `mean_z`) or from one layer.
+#[test]
+fn a_layered_numeric_aux_domain_is_the_union_of_each_layers_own_column() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z"});
+    for channel in ["size", "opacity", "fill_opacity", "stroke_opacity"] {
+        let (spec, chart_encoding) = aux_layered_spec(channel, [Some(own.clone()), Some(own.clone())]);
+        let scales = resolve_aux_layered(&spec, &chart_encoding);
+        let inner = match channel {
+            "size" => scales.size.map(|s| s.inner),
+            "opacity" => scales.opacity.map(|s| s.inner),
+            "fill_opacity" => scales.fill_opacity.map(|s| s.inner),
+            _ => scales.stroke_opacity.map(|s| s.inner),
+        };
+        let domain = inner.unwrap_or_else(|| panic!("{channel} resolves a scale")).data_domain();
+        assert_eq!(domain, Some((0.0, 20.0)), "{channel}: both layers' mean_z");
+    }
+}
+
+/// A continuous color resolves the same union.
+#[test]
+fn a_layered_continuous_color_domain_is_the_union_of_each_layers_own_column() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "type": "quantitative"});
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), Some(own)]);
+    match resolve_aux_layered(&spec, &chart_encoding).color {
+        Some(ColorScale::Continuous { domain, .. }) => assert_eq!(domain, (0.0, 20.0)),
+        other => panic!("expected a continuous color scale, got {other:?}"),
+    }
+}
+
+/// A categorical color unions the categories each layer draws, in layer order.
+#[test]
+fn a_layered_categorical_color_domain_unions_each_layers_categories_in_order() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "c", "type": "nominal"});
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(own.clone()), Some(own)]);
+    match resolve_aux_layered(&spec, &chart_encoding).color {
+        Some(ColorScale::Categorical { domain, .. }) => assert_eq!(domain, vec!["p", "q", "r"]),
+        other => panic!("expected a categorical color scale, got {other:?}"),
+    }
+}
+
+/// A layer that binds nothing on the channel draws the chart-level field from
+/// its own batch: layer 1 inherits `z`, which its output lacks, so it adds
+/// nothing, while layer 0's own `mean_z` sets the domain. With the inherited
+/// field present in that layer's batch it joins the union.
+#[test]
+fn an_inheriting_layer_reads_the_chart_field_from_its_own_batch() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z"});
+    let (spec, chart_encoding) = aux_layered_spec("size", [Some(own), None]);
+    let domain = resolve_aux_layered(&spec, &chart_encoding).size.unwrap().inner.data_domain();
+    assert_eq!(domain, Some((0.0, 2.0)), "layer 1's batch has no z; layer 0 alone");
+
+    let (primary, mut outputs) = aux_layered_batches();
+    let agg1 = &outputs["agg1"];
+    let renamed = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("g", ArrowDataType::Utf8, false),
+            Field::new("m", ArrowDataType::Float64, false),
+            Field::new("z", ArrowDataType::Float64, false),
+            Field::new("c", ArrowDataType::Utf8, false),
+        ])),
+        agg1.columns().to_vec(),
+    )
+    .unwrap();
+    outputs.insert("agg1".to_string(), renamed);
+    let scales = resolve_scales_with_leaf_context(
+        &spec,
+        &chart_encoding,
+        &primary,
+        &outputs,
+        (0.0, 100.0),
+        (0.0, 80.0),
+        &ThemeInputs::default(),
+        None,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(scales.size.unwrap().inner.data_domain(), Some((0.0, 20.0)), "layer 1 draws the inherited z");
+}
+
+/// An explicit scale domain still wins over the union.
+#[test]
+fn an_explicit_aux_domain_still_wins_over_the_layer_union() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z", "scale": {"type": "linear", "domain": [0.0, 50.0]}});
+    let (spec, chart_encoding) = aux_layered_spec("opacity", [Some(own.clone()), Some(own)]);
+    let domain = resolve_aux_layered(&spec, &chart_encoding).opacity.unwrap().inner.data_domain();
+    assert_eq!(domain, Some((0.0, 50.0)));
+}
+
+/// [`aux_layered_spec`] resolved with its warnings.
+fn resolve_aux_layered_warned(
+    spec: &ChartSpec,
+    chart_encoding: &crate::spec::encoding::Encoding,
+) -> (ResolvedScales, Vec<crate::render::RenderWarning>) {
+    let (primary, outputs) = aux_layered_batches();
+    resolve_scales_with_leaf_context(
+        spec,
+        chart_encoding,
+        &primary,
+        &outputs,
+        (0.0, 100.0),
+        (0.0, 80.0),
+        &ThemeInputs::default(),
+        None,
+    )
+    .expect("the layered spec resolves")
+}
+
+/// The one exclusion warning for layer 1 on `channel`, established by layer 0.
+fn excluded_layer_one(channel: &str) -> Vec<crate::render::RenderWarning> {
+    vec![crate::render::RenderWarning::LayerScaleExcluded {
+        layer: 1,
+        establishing: 0,
+        channel: channel.to_string(),
+        placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+    }]
+}
+
+fn layer_scale_exclusions(warnings: Vec<crate::render::RenderWarning>) -> Vec<crate::render::RenderWarning> {
+    warnings
+        .into_iter()
+        .filter(|w| matches!(w, crate::render::RenderWarning::LayerScaleExcluded { .. }))
+        .collect()
+}
+
+/// A layer whose own color field reads differently from the color scale layer
+/// 0 establishes stays out of its domain, with one `LayerScaleExcluded`, in
+/// both orders: a string field beside a quantitative color, and a numeric field
+/// beside a nominal one.
+#[test]
+fn a_layer_whose_color_type_conflicts_is_excluded_from_the_color_domain_in_both_orders() {
+    pyo3::Python::initialize();
+    let quantitative = serde_json::json!({"field": "mean_z", "type": "quantitative"});
+    let nominal = serde_json::json!({"field": "c"});
+
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(quantitative.clone()), Some(nominal.clone())]);
+    let (scales, warnings) = resolve_aux_layered_warned(&spec, &chart_encoding);
+    match scales.color {
+        Some(ColorScale::Continuous { domain, .. }) => assert_eq!(domain, (0.0, 2.0), "layer 0's column alone"),
+        other => panic!("expected a continuous color scale, got {other:?}"),
+    }
+    assert_eq!(layer_scale_exclusions(warnings), excluded_layer_one("color"));
+
+    let (spec, chart_encoding) = aux_layered_spec("color", [Some(nominal), Some(quantitative)]);
+    let (scales, warnings) = resolve_aux_layered_warned(&spec, &chart_encoding);
+    match scales.color {
+        Some(ColorScale::Categorical { domain, .. }) => assert_eq!(domain, vec!["p", "q"], "layer 0's categories alone"),
+        other => panic!("expected a categorical color scale, got {other:?}"),
+    }
+    assert_eq!(layer_scale_exclusions(warnings), excluded_layer_one("color"));
+}
+
+/// Size and the opacity family are continuous: a later layer's string field
+/// stays out of the domain layer 0's numeric field establishes, with one
+/// `LayerScaleExcluded` per channel.
+#[test]
+fn a_later_layer_with_a_string_field_is_excluded_from_a_numeric_aux_domain() {
+    pyo3::Python::initialize();
+    let numeric = serde_json::json!({"field": "mean_z"});
+    let string = serde_json::json!({"field": "c"});
+    for channel in ["size", "opacity", "fill_opacity", "stroke_opacity"] {
+        let (spec, chart_encoding) = aux_layered_spec(channel, [Some(numeric.clone()), Some(string.clone())]);
+        let (scales, warnings) = resolve_aux_layered_warned(&spec, &chart_encoding);
+        let inner = match channel {
+            "size" => scales.size.map(|s| s.inner),
+            "opacity" => scales.opacity.map(|s| s.inner),
+            "fill_opacity" => scales.fill_opacity.map(|s| s.inner),
+            _ => scales.stroke_opacity.map(|s| s.inner),
+        };
+        assert_eq!(inner.unwrap().data_domain(), Some((0.0, 2.0)), "{channel}: layer 0's column alone");
+        assert_eq!(layer_scale_exclusions(warnings), excluded_layer_one(channel), "{channel}");
+    }
+}
+
+/// Type-compatible layers keep the union and raise no exclusion.
+#[test]
+fn type_compatible_layers_keep_the_union_without_an_exclusion() {
+    pyo3::Python::initialize();
+    let own = serde_json::json!({"field": "mean_z"});
+    let (spec, chart_encoding) = aux_layered_spec("size", [Some(own.clone()), Some(own)]);
+    let (scales, warnings) = resolve_aux_layered_warned(&spec, &chart_encoding);
+    assert_eq!(scales.size.unwrap().inner.data_domain(), Some((0.0, 20.0)));
+    assert!(layer_scale_exclusions(warnings).is_empty());
+}
+
+/// The exclusion's message names a scale, not an axis, on a non-positional
+/// channel; x/y keep the axis wording.
+#[test]
+fn layer_scale_excluded_says_scale_for_a_non_positional_channel() {
+    let warning = |channel: &str| crate::render::RenderWarning::LayerScaleExcluded {
+        layer: 1,
+        establishing: 0,
+        channel: channel.to_string(),
+        placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+    };
+    assert_eq!(
+        warning("color").to_string(),
+        "layer 1: its color scale differs from the one layer 0 establishes the color scale with, \
+         so it stays out of that scale; its marks draw through that scale and may fall outside its legend"
+    );
+    assert_eq!(
+        warning("x").to_string(),
+        "layer 1: its x scale differs from the one layer 0 establishes the x axis with, so it \
+         stays out of that axis; its marks are placed on that axis and may fall outside it"
+    );
 }

@@ -3074,6 +3074,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             position: None,
             name: None,
             independent_y: false,
+            reads_chart_data: false,
             coord: None,
             entry: None,
         }]),
@@ -6305,4 +6306,638 @@ fn a_layer_inheriting_a_re_encoded_chart_field_widens_the_axis() {
     .unwrap();
     let (lo, hi) = prep.provisional_scales.x.data_domain().expect("a continuous x");
     assert!(lo <= 1.0 && hi >= 300.0, "x domain {lo}..{hi} must cover a (1..3) and c (100..300)");
+}
+
+// ── an independent-y layer's y scale is its own ─────────────────────────
+
+/// The y scale a bar's zero anchor puts on the chart encoding, as the wire
+/// carries it.
+fn bar_zero_anchor_scale() -> crate::spec::encoding::ScaleSpec {
+    serde_json::from_value(serde_json::json!({"type": "linear", "zero": true, "systemInjected": true}))
+        .expect("the anchor scale deserializes")
+}
+
+/// A layer binding `y` to `field`, with `scale` as its own.
+fn y_layer(
+    mark: Mark,
+    field: &str,
+    scale: Option<crate::spec::encoding::ScaleSpec>,
+    independent_y: bool,
+) -> crate::spec::layer::Layer {
+    crate::spec::layer::Layer {
+        mark,
+        encoding: Encoding {
+            y: Some(EncodingSpec { field: field.into(), scale, ..Default::default() }),
+            ..Default::default()
+        },
+        independent_y,
+        ..Default::default()
+    }
+}
+
+/// A bar chart whose chart-level `y` binds `v` under the bar's zero anchor,
+/// with `layers` over it.
+fn anchored_bar_chart(layers: Vec<crate::spec::layer::Layer>) -> crate::spec::chart::ChartSpec {
+    crate::spec::chart::ChartSpec {
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec {
+                field: "v".into(),
+                scale: Some(bar_zero_anchor_scale()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        layers: Some(layers),
+        ..Default::default()
+    }
+}
+
+/// An independent-y layer binding the chart's own `y` field does not take
+/// the chart's y scale: the chart's scale belongs to the primary axis, and
+/// the layer's own axis spans its own data. Its own scale, when it has one,
+/// is kept. A shared-axis layer on the same field still inherits the
+/// chart's scale, as `inherit_from` documents.
+#[test]
+fn an_independent_y_layer_keeps_its_own_y_scale_and_never_inherits_the_charts() {
+    let own = || serde_json::from_value(serde_json::json!({"type": "linear", "zero": false})).unwrap();
+    let spec = anchored_bar_chart(vec![]);
+
+    let independent = LayerPrepared::from_chart_and_layer(&spec, &y_layer(Mark::Line, "v", None, true));
+    let y = independent.encoding.y.expect("the layer binds y");
+    assert_eq!(y.field, "v");
+    assert_eq!(y.scale, None, "the chart's anchor scale must not reach an independent-y layer");
+
+    let with_own = LayerPrepared::from_chart_and_layer(&spec, &y_layer(Mark::Line, "v", Some(own()), true));
+    assert_eq!(with_own.encoding.y.unwrap().scale, Some(own()), "its own scale is kept");
+
+    let shared = LayerPrepared::from_chart_and_layer(&spec, &y_layer(Mark::Line, "v", None, false));
+    assert_eq!(
+        shared.encoding.y.unwrap().scale,
+        Some(bar_zero_anchor_scale()),
+        "a shared-axis layer inherits the chart's scale on the same field"
+    );
+}
+
+/// The secondary axis's resolved domain for `layer1` over a bar on `v`,
+/// with `v` spanning 2..4.
+fn secondary_domain_over_anchored_bar(layer1: crate::spec::layer::Layer) -> (f64, f64) {
+    let spec = anchored_bar_chart(vec![y_layer(Mark::Bar, "v", Some(bar_zero_anchor_scale()), false), layer1]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Utf8, false),
+        Field::new("v", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0])),
+        ],
+    )
+    .unwrap();
+    let prep = prepare_render_inputs(
+        &spec,
+        &batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(prep.secondary_y_scales.len(), 1, "one independent-y layer, one secondary axis");
+    prep.secondary_y_scales[0].data_domain().expect("a continuous secondary axis")
+}
+
+/// A bar chart plus an independent-y line on the SAME field: the line's axis
+/// spans its own data (2..4), as `fm.LayerChart(..., resolve={"y":
+/// "independent"})` draws it, not 0..4 from the bar's inherited zero anchor.
+#[test]
+fn an_independent_y_line_on_the_bars_field_spans_its_own_data() {
+    let (lo, hi) = secondary_domain_over_anchored_bar(y_layer(Mark::Line, "v", None, true));
+    assert!(lo > 1.0, "the secondary axis starts near its data's minimum (2), not at 0: {lo}..{hi}");
+    assert!(hi >= 4.0, "{lo}..{hi}");
+}
+
+/// An independent-y bar on the same field still reaches 0, and only through
+/// the anchor scale it carries on its own `y` (the one the Python bar
+/// producer injects); the chart's anchor no longer reaches it.
+#[test]
+fn an_independent_y_bar_reaches_zero_only_through_its_own_anchor() {
+    let (lo, _) =
+        secondary_domain_over_anchored_bar(y_layer(Mark::Bar, "v", Some(bar_zero_anchor_scale()), true));
+    assert_eq!(lo, 0.0, "the bar's own anchor puts 0 in its axis");
+    let (lo, _) = secondary_domain_over_anchored_bar(y_layer(Mark::Bar, "v", None, true));
+    assert!(lo > 1.0, "without its own anchor, the chart's anchor does not reach it: {lo}");
+}
+
+// ── auxiliary scales, legends and titles from the layers that draw them ─────
+
+/// Rows for the drawn-channel cases: `g` in a/b and `k` in p/q (strings),
+/// `v` over 1..10 and `w` over 20..50 (numbers).
+fn drawn_channel_batch() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("k", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 2.0, 4.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 10.0])),
+            Arc::new(Float64Array::from(vec![20.0, 30.0, 40.0, 50.0])),
+        ],
+    )
+    .unwrap()
+}
+
+/// `bindings` with `x`/`y` bound to the batch's `x`/`y` added.
+fn with_xy(bindings: serde_json::Value) -> serde_json::Value {
+    let mut encoding = serde_json::json!({"x": {"field": "x"}, "y": {"field": "y"}});
+    for (channel, binding) in bindings.as_object().expect("bindings are an object") {
+        encoding[channel] = binding.clone();
+    }
+    encoding
+}
+
+/// A layered chart whose chart-level encoding is `chart` plus `x`/`y`, with
+/// one layer per `(mark, own bindings)`.
+fn drawn_channel_spec(chart: serde_json::Value, layers: &[(&str, serde_json::Value)]) -> ChartSpec {
+    let layers: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|(mark, own)| serde_json::json!({"mark": mark, "encoding": own}))
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "mark": layers[0]["mark"],
+        "encoding": with_xy(chart),
+        "layers": layers,
+    }))
+    .expect("the layered spec deserializes")
+}
+
+/// The unlayered chart of one `mark` drawing `bindings` plus `x`/`y`: what a
+/// layer drawing those bindings draws alone.
+fn drawn_channel_alone(mark: &str, bindings: serde_json::Value) -> ChartSpec {
+    serde_json::from_value(serde_json::json!({"mark": mark, "encoding": with_xy(bindings)}))
+        .expect("the flat spec deserializes")
+}
+
+fn drawn_channel_prepared(spec: &ChartSpec) -> PreparedInputs {
+    pyo3::Python::initialize();
+    prepare_render_inputs(
+        spec,
+        &drawn_channel_batch(),
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+    .expect("the spec prepares")
+}
+
+/// The full `prepare → layout → build_scene` render of `spec` over
+/// [`drawn_channel_batch`], with every warning the render reports.
+fn drawn_channel_scene(spec: &ChartSpec) -> (ferrum_scene::SceneGraph, Vec<RenderWarning>) {
+    pyo3::Python::initialize();
+    let theme = crate::layout::ThemeInputs::default();
+    let chart_config = crate::render::chart_config::ChartConfig::default();
+    let crate::render::PipelineOutput { prep, layout, applied, mut warnings } = crate::render::prepare_and_layout(
+        spec,
+        &drawn_channel_batch(),
+        &theme,
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &chart_config,
+        None,
+    )
+    .expect("the spec prepares and lays out");
+    let scene = crate::render::scene_build::build_scene(
+        spec,
+        &prep,
+        &layout,
+        &applied.effective_theme,
+        &crate::render::config::RenderConfig::default(),
+        &mut warnings,
+        &chart_config,
+        None,
+    )
+    .expect("the spec builds a scene");
+    (scene, warnings)
+}
+
+/// Every `LayerScaleExcluded` among `warnings`.
+fn scale_exclusions(warnings: &[RenderWarning]) -> Vec<RenderWarning> {
+    warnings.iter().filter(|w| matches!(w, RenderWarning::LayerScaleExcluded { .. })).cloned().collect()
+}
+
+/// The one exclusion of `layer` from the `channel` scale `establishing` set.
+fn excluded(layer: usize, establishing: usize, channel: &str) -> Vec<RenderWarning> {
+    vec![RenderWarning::LayerScaleExcluded {
+        layer,
+        establishing,
+        channel: channel.to_string(),
+        placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+    }]
+}
+
+/// The `Debug` form of the chart's resolved scale for an auxiliary `channel`
+/// (`"None"` when it resolves none).
+fn aux_scale_debug(scales: &ResolvedScales, channel: &str) -> String {
+    match channel {
+        "color" => format!("{:?}", scales.color),
+        "size" => format!("{:?}", scales.size),
+        "opacity" => format!("{:?}", scales.opacity),
+        "fill_opacity" => format!("{:?}", scales.fill_opacity),
+        "stroke_opacity" => format!("{:?}", scales.stroke_opacity),
+        "shape" => format!("{:?}", scales.shape),
+        "stroke_dash" => format!("{:?}", scales.stroke_dash),
+        other => panic!("{other} resolves no auxiliary scale"),
+    }
+}
+
+/// The scale and every legend input a prepared chart draws for `channel`.
+type DrawnChannelOutputs = (
+    String,
+    Vec<crate::layout::LegendEntry>,
+    Option<String>,
+    Option<crate::layout::ColorbarInput>,
+    Vec<AuxLegendInput>,
+);
+
+fn drawn_channel_outputs(prep: &PreparedInputs, channel: &str) -> DrawnChannelOutputs {
+    (
+        aux_scale_debug(&prep.provisional_scales, channel),
+        prep.legend_entries.clone(),
+        prep.legend_title.clone(),
+        prep.colorbar.clone(),
+        prep.aux_legends.clone(),
+    )
+}
+
+/// Every auxiliary-scale channel with a binding it scales, as `(mark,
+/// channel, binding)`: color both categorical and continuous.
+fn drawn_channel_cases() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    let field = |name: &str| serde_json::json!({"field": name});
+    vec![
+        ("point", "color", field("g")),
+        ("point", "color", serde_json::json!({"field": "v", "type": "quantitative"})),
+        ("point", "size", field("v")),
+        ("point", "opacity", field("v")),
+        ("point", "fill_opacity", field("v")),
+        ("point", "stroke_opacity", field("v")),
+        ("point", "shape", field("g")),
+        ("line", "stroke_dash", field("g")),
+    ]
+}
+
+fn bound(channel: &str, binding: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ channel: binding })
+}
+
+/// A channel only layer 1 draws (neither the chart level nor layer 0 binds
+/// it) gets the scale and the legend layer 1 draws alone, on every
+/// auxiliary-scale channel. Rejects scale existence read off the chart-level
+/// (or layer 0's) encoding, which builds no scale and no legend here.
+#[test]
+fn a_channel_only_a_later_layer_draws_gets_the_scale_and_legend_that_layer_draws_alone() {
+    for (mark, channel, binding) in drawn_channel_cases() {
+        let layered = drawn_channel_spec(
+            serde_json::json!({}),
+            &[(mark, serde_json::json!({})), (mark, bound(channel, &binding))],
+        );
+        let alone = drawn_channel_alone(mark, bound(channel, &binding));
+        let alone_outputs = drawn_channel_outputs(&drawn_channel_prepared(&alone), channel);
+        assert_ne!(alone_outputs.0, "None", "{channel} {binding}: the standalone chart scales it");
+        assert_eq!(
+            drawn_channel_outputs(&drawn_channel_prepared(&layered), channel),
+            alone_outputs,
+            "{channel} {binding}"
+        );
+    }
+}
+
+/// The scene of a chart whose layer 1 alone binds color draws layer 1's
+/// points exactly as that layer draws them alone, and leaves layer 0's points
+/// in the theme's default fill: the scale exists without reaching a layer
+/// that does not draw the channel.
+#[test]
+fn a_later_layers_own_color_draws_its_marks_and_leaves_layer_zero_uncolored() {
+    use ferrum_scene::SceneNode;
+    let color = serde_json::json!({"field": "g"});
+    let layered = drawn_channel_spec(
+        serde_json::json!({}),
+        &[("point", serde_json::json!({})), ("point", bound("color", &color))],
+    );
+    let (scene, _) = drawn_channel_scene(&layered);
+    let (alone, _) = drawn_channel_scene(&drawn_channel_alone("point", bound("color", &color)));
+    let marks = &scene.panels[0].marks;
+    assert_eq!(marks.len(), 2, "one mark batch per layer");
+    assert_eq!(marks[1].nodes, alone.panels[0].marks[0].nodes, "layer 1 draws as it does alone");
+    let mark_color = crate::render::draw::to_scene_color(crate::layout::ThemeInputs::default().colors.mark_color);
+    let layer0_fills: Vec<_> = marks[0]
+        .nodes
+        .iter()
+        .filter_map(|n| if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None })
+        .collect();
+    assert_eq!(layer0_fills, vec![Some(mark_color); 4], "layer 0 binds no color");
+}
+
+/// `stroke_width` draws its column's values as widths through no scale on any
+/// chart, so a layer drawing it alone draws the widths it draws standalone.
+/// A control: there is no scale or legend for it to gain.
+#[test]
+fn a_later_layers_own_stroke_width_draws_as_it_does_alone() {
+    let width = serde_json::json!({"field": "v"});
+    let layered = drawn_channel_spec(
+        serde_json::json!({}),
+        &[("line", serde_json::json!({})), ("line", bound("stroke_width", &width))],
+    );
+    let (scene, _) = drawn_channel_scene(&layered);
+    let (alone, _) = drawn_channel_scene(&drawn_channel_alone("line", bound("stroke_width", &width)));
+    assert_eq!(scene.panels[0].marks[1].nodes, alone.panels[0].marks[0].nodes);
+}
+
+/// The scale's kind: layer 0 sets it when it draws the channel, otherwise the
+/// first layer that does, and a later layer whose column reads the other way
+/// is excluded with one `LayerScaleExcluded`, in both orders. Rejects reading
+/// the kind off a later layer, or off the last drawing layer.
+#[test]
+fn the_first_layer_drawing_color_sets_its_kind_and_a_conflicting_later_layer_is_excluded() {
+    let nominal = serde_json::json!({"field": "g"});
+    let quantitative = serde_json::json!({"field": "v", "type": "quantitative"});
+    let none = serde_json::json!({});
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", none.clone()), ("point", bound("color", &nominal)), ("point", bound("color", &quantitative))],
+    );
+    let (scene, warnings) = drawn_channel_scene(&spec);
+    assert_eq!(scale_exclusions(&warnings), excluded(2, 1, "color"));
+    let prep = drawn_channel_prepared(&spec);
+    match &prep.provisional_scales.color {
+        Some(crate::render::scale_resolve::ColorScale::Categorical { domain, .. }) => {
+            assert_eq!(domain, &vec!["a".to_string(), "b".to_string()]);
+        }
+        other => panic!("layer 1's nominal g establishes a categorical scale: {other:?}"),
+    }
+    assert!(!scene.legend.is_empty());
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", none.clone()), ("point", bound("color", &quantitative)), ("point", bound("color", &nominal))],
+    );
+    let (_, warnings) = drawn_channel_scene(&spec);
+    assert_eq!(scale_exclusions(&warnings), excluded(2, 1, "color"));
+    match &drawn_channel_prepared(&spec).provisional_scales.color {
+        Some(crate::render::scale_resolve::ColorScale::Continuous { domain, .. }) => assert_eq!(*domain, (1.0, 10.0)),
+        other => panic!("layer 1's quantitative v establishes a continuous scale: {other:?}"),
+    }
+
+    // Control: layer 0 draws the channel, so layer 0 establishes it.
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", bound("color", &nominal)), ("point", none.clone()), ("point", bound("color", &quantitative))],
+    );
+    let (_, warnings) = drawn_channel_scene(&spec);
+    assert_eq!(scale_exclusions(&warnings), excluded(2, 0, "color"));
+}
+
+/// The same establishing rule on the other kind-bearing channels: size and
+/// the opacity family are numeric, so a later string column is excluded;
+/// stroke-dash is categorical over a string column and an index palette over
+/// a numeric one, in both orders.
+#[test]
+fn the_first_drawing_layer_sets_the_kind_of_every_kind_bearing_auxiliary_channel() {
+    let none = serde_json::json!({});
+    let numeric = serde_json::json!({"field": "v"});
+    let string = serde_json::json!({"field": "g"});
+    for channel in ["size", "opacity", "fill_opacity", "stroke_opacity"] {
+        let spec = drawn_channel_spec(
+            none.clone(),
+            &[("point", none.clone()), ("point", bound(channel, &numeric)), ("point", bound(channel, &string))],
+        );
+        let (_, warnings) = drawn_channel_scene(&spec);
+        assert_eq!(scale_exclusions(&warnings), excluded(2, 1, channel), "{channel}");
+        let scale = aux_scale_debug(&drawn_channel_prepared(&spec).provisional_scales, channel);
+        assert_ne!(scale, "None", "{channel}");
+    }
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("line", none.clone()), ("line", bound("stroke_dash", &string)), ("line", bound("stroke_dash", &numeric))],
+    );
+    let (_, warnings) = drawn_channel_scene(&spec);
+    assert_eq!(scale_exclusions(&warnings), excluded(2, 1, "stroke_dash"));
+    let dash = drawn_channel_prepared(&spec).provisional_scales.stroke_dash.expect("a categorical dash scale");
+    assert_eq!(dash.domain, vec!["a".to_string(), "b".to_string()]);
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("line", none.clone()), ("line", bound("stroke_dash", &numeric)), ("line", bound("stroke_dash", &string))],
+    );
+    let (_, warnings) = drawn_channel_scene(&spec);
+    assert_eq!(scale_exclusions(&warnings), excluded(2, 1, "stroke_dash"));
+    assert!(drawn_channel_prepared(&spec).provisional_scales.stroke_dash.is_none(), "numeric dash reads indices");
+}
+
+/// A layered chart over [`drawn_channel_batch`] whose named output `agg`
+/// holds, per `groupby`, the mean `x` and `y` and the sum of `v` named
+/// `sum_as`: per `g` the sums are a: 4, b: 12, and per `k` p: 4, q: 12.
+fn drawn_channel_spec_with_output(
+    groupby: &str,
+    sum_as: &str,
+    layers: &[(&str, Option<&str>, serde_json::Value)],
+) -> ChartSpec {
+    use crate::transform::aggregate::{AggFn, AggregateOp, AggregateSpec};
+    use crate::transform::core::TransformSpec;
+    let op = |field: &str, fn_, as_: &str| AggregateOp { field: field.into(), fn_, as_: as_.into() };
+    let layers: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|(mark, source, own)| match source {
+            Some(source) => serde_json::json!({"mark": mark, "data_source": source, "encoding": with_xy(own.clone())}),
+            None => serde_json::json!({"mark": mark, "encoding": own}),
+        })
+        .collect();
+    let mut spec: ChartSpec = serde_json::from_value(serde_json::json!({
+        "mark": layers[0]["mark"],
+        "encoding": with_xy(serde_json::json!({})),
+        "layers": layers,
+    }))
+    .expect("the layered spec deserializes");
+    spec.transforms = vec![TransformSpec::Aggregate(AggregateSpec {
+        ops: vec![op("x", AggFn::Mean, "x"), op("y", AggFn::Mean, "y"), op("v", AggFn::Sum, sum_as)],
+        groupby: vec![groupby.into()],
+        name: Some("agg".into()),
+    })];
+    spec
+}
+
+/// The domain is the union of what every admitted layer draws, each read from
+/// the batch that layer draws: numeric extents, and categories in layer
+/// order. Rejects a domain read from the establishing layer alone, or from
+/// the chart's rows for a layer drawing its own output.
+#[test]
+fn an_auxiliary_domain_is_the_union_over_every_drawing_layer() {
+    let none = serde_json::json!({});
+    let field = |name: &str| serde_json::json!({"field": name});
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", none.clone()), ("point", bound("opacity", &field("v"))), ("point", bound("opacity", &field("w")))],
+    );
+    let opacity = drawn_channel_prepared(&spec).provisional_scales.opacity.expect("an opacity scale");
+    assert_eq!(opacity.inner.data_domain(), Some((1.0, 50.0)));
+
+    for (first, second, want) in [("g", "k", ["a", "b", "p", "q"]), ("k", "g", ["p", "q", "a", "b"])] {
+        let spec = drawn_channel_spec(
+            none.clone(),
+            &[("point", none.clone()), ("point", bound("color", &field(first))), ("point", bound("color", &field(second)))],
+        );
+        match drawn_channel_prepared(&spec).provisional_scales.color {
+            Some(crate::render::scale_resolve::ColorScale::Categorical { domain, .. }) => {
+                assert_eq!(domain, want.map(String::from).to_vec(), "{first} then {second}");
+            }
+            other => panic!("a categorical color: {other:?}"),
+        }
+    }
+
+    // Layer 1 draws `agg`'s sum_v (4..12) and establishes; layer 2 draws the
+    // chart's v (1..10).
+    let spec = drawn_channel_spec_with_output("g", "sum_v", &[
+        ("point", None, none.clone()),
+        ("point", Some("agg"), bound("opacity", &field("sum_v"))),
+        ("point", None, bound("opacity", &field("v"))),
+    ]);
+    let opacity = drawn_channel_prepared(&spec).provisional_scales.opacity.expect("an opacity scale");
+    assert_eq!(opacity.inner.data_domain(), Some((1.0, 12.0)));
+}
+
+/// Shape and stroke-dash read every layer that draws them, not only the
+/// chart-level (or layer 0's) binding: layer 0's `g` and layer 1's `k` make
+/// one domain. Rejects the domain of layer 0's column alone.
+#[test]
+fn shape_and_stroke_dash_domains_read_every_drawing_layer() {
+    let g = serde_json::json!({"field": "g"});
+    let k = serde_json::json!({"field": "k"});
+    let want: Vec<String> = ["a", "b", "p", "q"].map(String::from).to_vec();
+
+    let spec = drawn_channel_spec(
+        serde_json::json!({}),
+        &[("point", bound("shape", &g)), ("point", bound("shape", &k))],
+    );
+    let shape = drawn_channel_prepared(&spec).provisional_scales.shape.expect("a shape scale");
+    assert_eq!(shape.domain, want);
+
+    let spec = drawn_channel_spec(
+        serde_json::json!({}),
+        &[("line", bound("stroke_dash", &g)), ("line", bound("stroke_dash", &k))],
+    );
+    let dash = drawn_channel_prepared(&spec).provisional_scales.stroke_dash.expect("a dash scale");
+    assert_eq!(dash.domain, want);
+}
+
+/// A legend's title is the establishing layer's binding title, else its
+/// field, never a later layer's. Rejects a title read off the last drawing
+/// layer.
+#[test]
+fn a_legend_title_comes_from_the_establishing_layers_binding() {
+    let none = serde_json::json!({});
+    let titled = |field: &str, title: &str| serde_json::json!({"field": field, "title": title});
+    let field = |name: &str| serde_json::json!({"field": name});
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[
+            ("point", none.clone()),
+            ("point", bound("color", &titled("g", "Group"))),
+            ("point", bound("color", &titled("k", "Other"))),
+        ],
+    );
+    assert_eq!(drawn_channel_prepared(&spec).legend_title.as_deref(), Some("Group"));
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", none.clone()), ("point", bound("color", &field("g"))), ("point", bound("color", &titled("k", "Other")))],
+    );
+    assert_eq!(drawn_channel_prepared(&spec).legend_title.as_deref(), Some("g"));
+
+    let spec = drawn_channel_spec(
+        none.clone(),
+        &[("point", none.clone()), ("point", bound("size", &field("v"))), ("point", bound("size", &titled("w", "W")))],
+    );
+    let titles: Vec<Option<String>> = drawn_channel_prepared(&spec)
+        .aux_legends
+        .iter()
+        .map(|block| match block {
+            AuxLegendInput::Size { title, .. } | AuxLegendInput::Shape { title, .. } | AuxLegendInput::StrokeDash { title, .. } => {
+                title.clone()
+            }
+        })
+        .collect();
+    assert_eq!(titles, vec![Some("v".to_string())]);
+}
+
+/// A control: a binding on the chart-level encoding renders the same scene
+/// as the same binding moved onto layer 0's own encoding, on every
+/// auxiliary-scale channel (layer 1 binds it itself in both, so the layers
+/// that draw it are the same).
+#[test]
+fn a_chart_level_binding_renders_as_the_same_binding_on_layer_zero() {
+    for (mark, channel, binding) in drawn_channel_cases() {
+        let own = bound(channel, &binding);
+        let chart_level = drawn_channel_spec(own.clone(), &[(mark, serde_json::json!({})), (mark, own.clone())]);
+        let on_layer_zero = drawn_channel_spec(serde_json::json!({}), &[(mark, own.clone()), (mark, own.clone())]);
+        assert_eq!(drawn_channel_scene(&chart_level).0, drawn_channel_scene(&on_layer_zero).0, "{channel} {binding}");
+    }
+}
+
+/// A control: an independent-y layer keeps its own y scale whether or not it
+/// also draws a color no other layer draws.
+#[test]
+fn an_independent_y_layer_keeps_its_own_y_scale_beside_its_own_color() {
+    let secondary = |own: serde_json::Value| {
+        let mut spec = drawn_channel_spec(
+            serde_json::json!({}),
+            &[("point", serde_json::json!({})), ("point", with_xy(own))],
+        );
+        let layer = &mut spec.layers.as_mut().unwrap()[1];
+        layer.independent_y = true;
+        layer.encoding.y = Some(EncodingSpec { field: "w".into(), ..Default::default() });
+        let prep = drawn_channel_prepared(&spec);
+        assert_eq!(prep.secondary_y_scales.len(), 1);
+        prep.secondary_y_scales[0].data_domain().expect("a continuous secondary axis")
+    };
+    let plain = secondary(serde_json::json!({}));
+    assert!(plain.0 > 10.0, "the secondary axis spans w, not y: {plain:?}");
+    assert_eq!(secondary(serde_json::json!({"color": {"field": "g"}})), plain);
+}
+
+/// The establishing layer's column decides the kind, read from the batch that
+/// layer draws: layer 1 draws `agg`'s `g`, the numeric per-`k` sum of `v`
+/// (4, 12), while the chart's own `g` is strings. So color is continuous over
+/// 4..12 and stroke-dash reads the column as palette indices (no scale).
+/// Rejects locating the field primary-first, which finds the chart's string
+/// `g` and builds a categorical scale for a layer that never draws it.
+#[test]
+fn the_establishing_layers_own_batch_decides_the_kind_over_a_same_named_chart_column() {
+    let none = serde_json::json!({});
+    let g = serde_json::json!({"field": "g"});
+
+    let spec = drawn_channel_spec_with_output("k", "g", &[("point", None, none.clone()), ("point", Some("agg"), bound("color", &g))]);
+    match drawn_channel_prepared(&spec).provisional_scales.color {
+        Some(crate::render::scale_resolve::ColorScale::Continuous { domain, .. }) => assert_eq!(domain, (4.0, 12.0)),
+        other => panic!("agg's numeric g establishes a continuous color: {other:?}"),
+    }
+
+    let spec =
+        drawn_channel_spec_with_output("k", "g", &[("line", None, none.clone()), ("line", Some("agg"), bound("stroke_dash", &g))]);
+    assert!(
+        drawn_channel_prepared(&spec).provisional_scales.stroke_dash.is_none(),
+        "agg's numeric g reads as palette indices"
+    );
 }

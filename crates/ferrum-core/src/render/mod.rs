@@ -146,6 +146,20 @@ pub(crate) struct LayerAxisColumnDetail {
     pub(crate) dtype: String,
 }
 
+/// The remedy [`RenderError::LayerUnknownColumn`] names, by where the
+/// missing column exists for a layer that reads its chart's data
+/// (`prepare::validate_layer_positional_columns` classifies it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingColumnRemedy {
+    /// The column is in the chart's source batch, dropped by the chain the
+    /// layer reads after: draw it from the source in a separate chart.
+    Source,
+    /// The column is in another batch the pipeline produced, a statistic
+    /// another layer's mark computes for itself: compute it in the chart's
+    /// `.transform(...)`, or draw it from its own chart.
+    Statistic,
+}
+
 /// What bound one of a line's width sources: a column (rendered `'name'`),
 /// a constant mark kwarg (rendered as its number), or a `size` conditional
 /// (rendered `fm.when(...)`).
@@ -597,17 +611,19 @@ pub enum RenderError {
     /// (`prepare::validate_layer_positional_columns`) from
     /// `PreparedInputs::coord_flipped`.
     ///
-    /// `in_source` is `true` when this layer has no `data_source` of its own
-    /// (so it reads its chart's pipeline output — `Chart.layer(...)` and
-    /// `SecondaryY(...)` both read the tail this way) AND the missing column
-    /// names a field present in the chart's SOURCE batch, taken before any
-    /// transform ran. Both facts together, not merely "a transform ran
-    /// somewhere": a typo (absent from both the source and the tail) or a
-    /// chain of only named steps (whose tail IS the source, unchanged) does
-    /// not claim the column is reachable by composing a separate chart with
-    /// `+` when it is not there either. `Display` appends the `+` remedy
-    /// only then; a layer with its own `data_source`, or a column the source
-    /// batch never had, keeps the plain message. Set at the one positional
+    /// `remedy` is where the missing column does exist, for a layer that
+    /// reads its chart's data (no `data_source`, or a `data_source` the wire
+    /// flags `reads_chart_data`): in the chart's SOURCE batch, taken before
+    /// any transform ran ([`MissingColumnRemedy::Source`]), else in any other
+    /// batch the pipeline produced ([`MissingColumnRemedy::Statistic`]).
+    /// `None` for a column found nowhere (a typo, or a chain of only named
+    /// steps whose tail IS the source), and for every layer that reads rows
+    /// of its own, such as a `+` operand's branch reader: `Display` then
+    /// keeps the plain message, claiming no remedy that is not true.
+    /// `independent_y` is the layer's own flag and picks how the remedy is
+    /// spelled: `+` for a layer on the shared y axis,
+    /// `fm.LayerChart(..., resolve={"y": "independent"})` for a layer with its
+    /// own y axis (the `SecondaryY(...)` door). Set at the one positional
     /// gate (`prepare::validate_layer_positional_columns`), shared by
     /// `Chart.layer(...)`'s own gate and the `SecondaryY(...)` y-slot
     /// resolution (`scale_resolve::resolve_layer_y_slot_scale`, which runs
@@ -618,7 +634,8 @@ pub enum RenderError {
         channel: &'static str,
         name: String,
         coord_flipped: bool,
-        in_source: bool,
+        remedy: Option<MissingColumnRemedy>,
+        independent_y: bool,
     },
     /// A layer whose mark DRAWS and needs both positional channels has no
     /// binding for one of them — neither on its own encoding nor on the chart
@@ -1323,22 +1340,48 @@ impl std::fmt::Display for RenderError {
                      the layer its own scale with resolve={{\"{channel}\": \"independent\"}}."
                 )
             }
-            Self::LayerUnknownColumn { layer, channel, name, coord_flipped, in_source } => {
+            Self::LayerUnknownColumn {
+                layer,
+                channel,
+                name,
+                coord_flipped,
+                remedy,
+                independent_y,
+            } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
-                if *in_source {
-                    write!(
+                write!(
+                    f,
+                    "layer {layer}: encoding '{channel}' references unknown column '{name}' \
+                     (not present in that layer's data)"
+                )?;
+                match (remedy, independent_y) {
+                    (None, _) => Ok(()),
+                    (Some(MissingColumnRemedy::Source), false) => write!(
                         f,
-                        "layer {layer}: encoding '{channel}' references unknown column '{name}' \
-                         (not present in that layer's data) — this layer reads the chart's \
-                         transformed rows, not its source data; draw '{name}' from the source \
-                         by composing a separate chart with `+` instead"
-                    )
-                } else {
-                    write!(
+                        " — this layer reads the chart's transformed rows, not its source \
+                         data; draw '{name}' from the source by composing a separate chart \
+                         with `+` instead"
+                    ),
+                    (Some(MissingColumnRemedy::Source), true) => write!(
                         f,
-                        "layer {layer}: encoding '{channel}' references unknown column '{name}' \
-                         (not present in that layer's data)"
-                    )
+                        " — this layer reads the chart's transformed rows, not its source \
+                         data; draw '{name}' from the source with fm.LayerChart(base, other, \
+                         resolve={{\"y\": \"independent\"}}) instead"
+                    ),
+                    (Some(MissingColumnRemedy::Statistic), false) => write!(
+                        f,
+                        " — '{name}' is a statistic another layer's mark computes for itself; \
+                         compute it in the chart's .transform(...) (e.g. fm.Bin, \
+                         fm.transform_aggregate) so every layer reads it, or draw it from its own \
+                         chart composed with `+`"
+                    ),
+                    (Some(MissingColumnRemedy::Statistic), true) => write!(
+                        f,
+                        " — '{name}' is a statistic another layer's mark computes for itself; \
+                         compute it in the chart's .transform(...) (e.g. fm.Bin, \
+                         fm.transform_aggregate) so every layer reads it, or draw it from its own \
+                         chart with fm.LayerChart(base, other, resolve={{\"y\": \"independent\"}})"
+                    ),
                 }
             }
             Self::LayerMissingPositionalChannel { layer, mark, channel, coord_flipped } => {
@@ -1635,6 +1678,13 @@ pub enum OpacityScaleFallback {
     /// non-`Linear` (which never populates domain/range overrides) and the
     /// column is otherwise a literal alpha.
     LiteralAlpha,
+}
+
+/// Whether a [`RenderWarning::LayerScaleExcluded`] `channel` names a
+/// positional channel, whose shared scale is an axis, rather than a
+/// non-positional one, whose shared scale is drawn by a legend.
+pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
+    matches!(channel, "x" | "y" | "x2" | "y2")
 }
 
 /// Where a layer left out of the layered axis a caller's scale establishes
@@ -2076,14 +2126,17 @@ pub enum RenderWarning {
     /// spacing; WARN DEGRADED. `entry` is the public call that built the
     /// layer. Raised once per swarm, not per facet panel.
     SwarmOverflowsBand { entry: String, category: String, value: String, reach_px: f64, half_slot_px: f64 },
-    /// A layer of a layered chart was left out of the axis another layer's
-    /// scale establishes on one channel, so its marks draw somewhere other
-    /// than that axis: `placement` says where. `layer` is the excluded
+    /// A layer of a layered chart was left out of the scale another layer
+    /// establishes on one channel, so its marks draw somewhere other than
+    /// that scale's extent: `placement` says where. `layer` is the excluded
     /// layer's position; `establishing` is the position of the layer whose
-    /// scale owns the axis; `channel` is `"x"`/`"y"`. One per excluded layer
-    /// per channel. Which scale establishes the axis, and which layers it
-    /// admits, is the rule `scale_resolve::establishing_caller_scale` and
-    /// `scale_resolve::warn_members_off_caller_scale` decide and document;
+    /// scale owns the channel; `channel` is a positional axis (`"x"`/`"y"`)
+    /// or a chart-level non-positional scale (`"color"`, `"size"`,
+    /// `"opacity"`, `"fill_opacity"`, `"stroke_opacity"`). One per excluded
+    /// layer per channel. Which scale establishes the channel, and which
+    /// layers it admits, is the rule `scale_resolve::establishing_caller_scale`
+    /// and `scale_resolve::warn_members_off_caller_scale` decide for an axis,
+    /// and `scale_resolve::admitted_aux_reads` for a non-positional scale;
     /// this variant only reports what they decided. `layer` and
     /// `establishing` count the way the shared-axis refusal counts:
     /// positions among a flat chart's layers in declaration order, or
@@ -2354,18 +2407,23 @@ impl std::fmt::Display for RenderWarning {
                 )
             }
             RenderWarning::LayerScaleExcluded { layer, establishing, channel, placement } => {
-                let draws = match placement {
-                    ExcludedLayerPlacement::SharedAxis => {
+                let positional = excluded_channel_is_positional(channel);
+                let owner = if positional { "axis" } else { "scale" };
+                let draws = match (placement, positional) {
+                    (ExcludedLayerPlacement::SharedAxis, true) => {
                         "its marks are placed on that axis and may fall outside it"
                     }
-                    ExcludedLayerPlacement::OwnScale => {
+                    (ExcludedLayerPlacement::SharedAxis, false) => {
+                        "its marks draw through that scale and may fall outside its legend"
+                    }
+                    (ExcludedLayerPlacement::OwnScale, _) => {
                         "its marks draw on the layer's own scale, not the labelled axis"
                     }
                 };
                 write!(
                     f,
                     "layer {layer}: its {channel} scale differs from the one layer {establishing} \
-                     establishes the {channel} axis with, so it stays out of that axis; {draws}"
+                     establishes the {channel} {owner} with, so it stays out of that {owner}; {draws}"
                 )
             }
         }

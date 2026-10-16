@@ -88,6 +88,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // How the render reads a column's dtype as categorical, so the Python bar
     // zero-anchor picks the same value channel the bar builders draw along.
     m.add_function(wrap_pyfunction!(render::binding::column_reads_categorical, m)?)?;
+    // The positional gate's unknown-column refusal text, so a Python check
+    // that knows a layer's schema raises the gate's words, not a copy.
+    m.add_function(wrap_pyfunction!(render::binding::layer_unknown_column_message, m)?)?;
     // Wave-4 task 9 (#193): the `bins=` vocabulary gate, published so a figure
     // entry (`displot`) can refuse a malformed `bins=` naming ITSELF rather
     // than the private `Bin` transform it builds — without a second copy of the
@@ -111,7 +114,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `ferrum.encoding.base` reads the list instead of hand-mirroring it.
     m.add_function(wrap_pyfunction!(render::prepare::aux_legend_channels, m)?)?;
     // The channels Rust builds a chart-wide auxiliary scale for
-    // (`render/scale_resolve/mod.rs::AUXILIARY_SCALE_CHANNELS`), published so
+    // (`spec/encoding/mod.rs::AUXILIARY_SCALE_CHANNELS`), published so
     // a layer merge promotes exactly the bindings Rust scales.
     m.add_function(wrap_pyfunction!(render::scale_resolve::auxiliary_scale_channels, m)?)?;
     // #176: the `interpolate=` vocabulary

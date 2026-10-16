@@ -1027,7 +1027,9 @@ def test_a_secondary_y_naming_a_column_the_chain_drops_is_refused():
         (H() + fm.SecondaryY("value", mark="line")).to_svg()
     assert str(exc.value) == (
         "layer 1: encoding 'y' references unknown column 'value' "
-        f"(not present in that layer's data) — {_TAIL_REMEDY}"
+        "(not present in that layer's data) — this layer reads the chart's "
+        "transformed rows, not its source data; draw 'value' from the source "
+        'with fm.LayerChart(base, other, resolve={"y": "independent"}) instead'
     )
 
 
