@@ -56,16 +56,18 @@ pub(in crate::render) fn locate_field<'a>(
 
 /// Where the batch a layer draws lives: the chart's data (the primary batch,
 /// joined on a faceted shared axis by the all-panels batch at
-/// [`FINAL_OUTPUT_KEY`]), or the one named output its `data_source` names.
+/// [`FINAL_OUTPUT_KEY`]), the one named output its `data_source` names, or,
+/// for a member of an overlay group of leaves, the batch that member draws.
 ///
 /// A layer's positional contribution to an axis is read from this batch and
 /// no other: a same-named column in another batch is data the layer never
 /// draws (a stat layer's fitted `y` beside the raw `y`, an operand's own rows
 /// beside the merged frame).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum LayerSource<'a> {
     Chart,
     Output(&'a str),
+    Batch(&'a RecordBatch),
 }
 
 impl<'a> LayerSource<'a> {
@@ -79,10 +81,14 @@ impl<'a> LayerSource<'a> {
         self,
         primary_batch: &'b RecordBatch,
         transform_outputs: &'b HashMap<String, RecordBatch>,
-    ) -> Option<&'b RecordBatch> {
+    ) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
         match self {
             LayerSource::Chart => Some(primary_batch),
             LayerSource::Output(key) => transform_outputs.get(key),
+            LayerSource::Batch(batch) => Some(batch),
         }
     }
 
@@ -91,7 +97,10 @@ impl<'a> LayerSource<'a> {
         field: &str,
         primary_batch: &'b RecordBatch,
         transform_outputs: &'b HashMap<String, RecordBatch>,
-    ) -> Option<LocatedColumn<'b>> {
+    ) -> Option<LocatedColumn<'b>>
+    where
+        'a: 'b,
+    {
         let batch = self.batch(primary_batch, transform_outputs)?;
         let col = batch.column_by_name(field)?;
         Some(LocatedColumn { batch, col: col.as_ref() })
@@ -166,14 +175,17 @@ pub struct AuxRead<'a> {
     binding: &'a crate::spec::encoding::EncodingSpec,
 }
 
-impl AuxRead<'_> {
+impl<'a> AuxRead<'a> {
     /// The column this read draws, in the batch its layer draws; `None` when
     /// that batch lacks the field.
     pub(in crate::render) fn locate<'b>(
         &self,
         primary_batch: &'b RecordBatch,
         transform_outputs: &'b HashMap<String, RecordBatch>,
-    ) -> Option<LocatedColumn<'b>> {
+    ) -> Option<LocatedColumn<'b>>
+    where
+        'a: 'b,
+    {
         self.source.locate(self.field, primary_batch, transform_outputs)
     }
 }
@@ -200,6 +212,42 @@ pub(in crate::render) fn aux_reads<'a>(
     for (index, layer) in layers.unwrap_or_default().iter().enumerate() {
         let Some(binding) = slot(&layer.encoding).or_else(|| slot(chart_encoding)) else { continue };
         reads.push(AuxRead { layer: index, source: LayerSource::of(layer), field: binding.field.as_str(), binding });
+    }
+    reads
+}
+
+/// The reads of an overlay group's auxiliary channel: every member's reads of
+/// the binding `slot` selects, in member order, each read from the batch it
+/// draws and named by the index its layer has in the layer list the members
+/// merged with `+` form (each member's layers in order, an unlayered member
+/// one layer). A layered member reads as [`aux_reads`] reads its layers; an
+/// unlayered one draws its rendering encoding's binding from the batch
+/// holding the field ([`locate_field`]), as its own scale reads it. A member
+/// the field reaches no batch of contributes nothing.
+pub(in crate::render) fn overlay_aux_reads<'a>(
+    members: &[super::LeafResolveInput<'a>],
+    slot: impl Fn(&'a crate::spec::encoding::Encoding) -> Option<&'a crate::spec::encoding::EncodingSpec> + Copy,
+) -> Vec<AuxRead<'a>> {
+    let mut reads: Vec<AuxRead<'a>> = Vec::new();
+    let mut first_layer = 0;
+    for input in members {
+        let (final_batch, transform_outputs) = (input.final_batch, input.transform_outputs);
+        match input.spec.layers.as_deref() {
+            Some(layers) => {
+                for read in aux_reads(Some(layers), &input.spec.encoding, slot) {
+                    let Some(batch) = read.source.batch(final_batch, transform_outputs) else { continue };
+                    reads.push(AuxRead { layer: first_layer + read.layer, source: LayerSource::Batch(batch), ..read });
+                }
+                first_layer += layers.len();
+            }
+            None => {
+                first_layer += 1;
+                let Some(binding) = slot(input.encoding) else { continue };
+                let field = binding.field.as_str();
+                let Some(located) = locate_field(field, final_batch, transform_outputs) else { continue };
+                reads.push(AuxRead { layer: first_layer - 1, source: LayerSource::Batch(located.batch), field, binding });
+            }
+        }
     }
     reads
 }
@@ -285,7 +333,7 @@ pub(in crate::render) fn aux_numeric_union(
 /// contributing batch, which a data-aware `sort=` aggregates over; `None`
 /// when no read's batch holds its field.
 pub(in crate::render) fn aux_category_union<'b>(
-    reads: &[AuxRead<'_>],
+    reads: &[AuxRead<'b>],
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     facet_shared: bool,
@@ -297,7 +345,7 @@ pub(in crate::render) fn aux_category_union<'b>(
             LayerSource::Chart => {
                 super::shared_categorical_batch(primary_batch, read.field, transform_outputs, facet_shared)
             }
-            LayerSource::Output(_) => {
+            LayerSource::Output(_) | LayerSource::Batch(_) => {
                 let Some(batch) = read.source.batch(primary_batch, transform_outputs) else { continue };
                 batch
             }
@@ -359,7 +407,7 @@ fn chart_channel_slots<'a>(spec: &'a ChartSpec, layer: &Layer, channel: &str) ->
 /// [`positional_category_union`]).
 pub(in crate::render) fn locate_seed_field<'a>(
     field: &str,
-    spec: &ChartSpec,
+    spec: &'a ChartSpec,
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
 ) -> Option<LocatedColumn<'a>> {
@@ -1271,6 +1319,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                     take(batch, &mut found)?;
                 }
             }
+            Some(LayerSource::Batch(batch)) => take(batch, &mut found)?,
             Some(LayerSource::Chart) | None => {
                 take(primary_batch, &mut found)?;
                 for (key, batch) in transform_outputs {

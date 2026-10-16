@@ -3905,9 +3905,18 @@ class LayerChart(_ChartLike):
         dedicated branch (one merged flat leaf, per-layer slots resolved
         leaf-locally), not through this overlay-tree method at all.
 
-        Composition-level configure layers are pushed onto each layer via
-        :meth:`_ChartLike._inject_parent_config` before lowering, so they need
-        no separate gate here (mirrors :class:`JointChart`/:class:`ClusterMapChart`).
+        Every member lowers with the one configure list :meth:`_merged_configure`
+        builds -- this composition's own configure layers followed by every
+        member's own list in member order, the same list :meth:`_build_merged`
+        resolves as one Chart-level config -- rather than each member keeping
+        only its own list via :meth:`_ChartLike._inject_parent_config`, so a
+        shared auxiliary scale and its one legend read one config across the
+        whole group, as the merged route already does. Every member also
+        lowers with the PRIMARY member's own ``_theme`` (never its own), the
+        same primary-wins rule :func:`_warn_on_layer_conflicts` already
+        enforces on ``+`` -- called here once per later member against the
+        unmodified original chart, so a later member's own differing theme or
+        facet still warns, even though its clone no longer carries that theme.
 
         The ``title`` becomes a composite *figure* title (root chrome) when
         this ``LayerChart`` is the tree root, or a per-child ``"label"`` when
@@ -3945,12 +3954,21 @@ class LayerChart(_ChartLike):
         resolve_field["x"] = "shared"
         resolve_field["y"] = "shared"
 
-        layers = [self._inject_parent_config(c) for c in self._charts]
-        for c in layers:
+        merged_configure = self._merged_configure()
+        primary_theme = self._charts[0]._theme
+        layers = []
+        for index, c in enumerate(self._charts):
             if not _is_leaf_chart(c):
                 raise ValueError(
                     f"LayerChart: every layer must be a plain Chart, got {type(c).__name__}"
                 )
+            if index > 0:
+                _warn_on_layer_conflicts(self._charts[0], c)
+            new = c._clone()
+            new._configure = list(merged_configure)
+            new._theme = primary_theme
+            layers.append(new)
+        for c in layers:
             # A member produced by `chart + SecondaryY(...)` (GH #71) already
             # carries its own flagged independent-y layer -- this shared-y
             # overlay path forces x/y "shared" across every member above, so
@@ -4061,6 +4079,31 @@ class LayerChart(_ChartLike):
             return self._build_merged().to_svg()
         lowered = self._composite_tree(auto_tooltips=False)
         return lowered.render_svg()
+
+    def _merged_configure(self) -> list:
+        """Return the one configure list every overlay member renders with.
+
+        ``_build_merged``'s ``+`` reduction resolves exactly one Chart-level
+        ``_configure`` list across every layer -- this ``LayerChart``'s own
+        configure layers, then each member's own ``_configure`` in member
+        order (``Chart.__add__`` appends the right operand's list after the
+        left's; :meth:`_inject_parent_config`'s plain-``Chart`` branch then
+        prepends the parent once more at the end). :meth:`_composite_tree`
+        gives every member a clone carrying this same list instead of
+        prepending the parent per member, so a shared auxiliary scale and
+        its one legend resolve against the identical config every member
+        used on the merged route, in either member order, including a
+        member that carries no configure of its own.
+
+        A non-leaf member contributes nothing here -- :meth:`_composite_tree`
+        raises its own typed error for that case right after this is built,
+        so this never needs to read a composition's unrelated
+        ``_configure_layers`` attribute as if it were a layer's own list.
+        """
+        merged = list(getattr(self, "_configure_layers", None) or [])
+        for chart in self._charts:
+            merged.extend(getattr(chart, "_configure", None) or [])
+        return merged
 
     def _build_merged(self):
         """Merge member charts into a single multi-layer Chart via ``+``.

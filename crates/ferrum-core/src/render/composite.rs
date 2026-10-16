@@ -51,29 +51,19 @@ use crate::render::scale_resolve::{
 use crate::render::{ExcludedLayerPlacement, RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
-use crate::spec::encoding::{DataType as SpecDataType, Encoding};
+use crate::spec::encoding::DataType as SpecDataType;
 use crate::layout::facet::ResolveMode;
 
-use arrow::record_batch::RecordBatch;
-use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Public output types
 // ---------------------------------------------------------------------------
 
-/// Already-prepared per-leaf inputs the resolve pass unions over. The caller
-/// (Task 5) builds one per leaf from that leaf's `PreparedInputs`:
-/// `encoding` = the rendering (post-CoordFlip, layer-0-merged) encoding,
-/// `final_batch` = `prep.final_batch()`, `transform_outputs` =
-/// `prep.transform_outputs`. `spec` carries the leaf's layers/facet, which the
-/// domain union consults (layer whisker fields, facet resolve mode).
-pub(crate) struct LeafResolveInput<'a> {
-    pub(crate) spec: &'a ChartSpec,
-    pub(crate) encoding: &'a Encoding,
-    pub(crate) final_batch: &'a RecordBatch,
-    pub(crate) transform_outputs: &'a HashMap<String, RecordBatch>,
-}
+/// Already-prepared per-leaf inputs the resolve pass unions over; homed in
+/// `scale_resolve`'s seam because an overlay group's auxiliary scales are
+/// built there over the same per-member view.
+pub(in crate::render) use crate::render::scale_resolve::LeafResolveInput;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -1099,7 +1089,9 @@ fn numeric_extent_domain(col: &dyn arrow::array::Array) -> SharedDomain {
 mod tests {
     use super::*;
     use crate::spec::composite::CompositeResolve;
-    use crate::spec::encoding::EncodingSpec;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use arrow::record_batch::RecordBatch;
+    use std::collections::HashMap;
     use crate::spec::layer::Layer;
     use crate::spec::mark::Mark;
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};

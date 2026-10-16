@@ -1068,6 +1068,18 @@ pub(crate) struct AuxiliaryScaleChannel {
     slot_mut: fn(&mut Encoding) -> &mut Option<EncodingSpec>,
 }
 
+impl AuxiliaryScaleChannel {
+    /// This channel's binding on `encoding`.
+    pub(crate) fn binding(self, encoding: &Encoding) -> &Option<EncodingSpec> {
+        (self.slot)(encoding)
+    }
+
+    /// This channel's slot on `encoding`, to write.
+    pub(crate) fn binding_mut(self, encoding: &mut Encoding) -> &mut Option<EncodingSpec> {
+        (self.slot_mut)(encoding)
+    }
+}
+
 /// The channels the renderer builds a chart-wide auxiliary scale for, in
 /// `scale_resolve`'s `AuxiliaryScales` field order: the one list the
 /// establishing fill ([`Encoding::take_unbound_auxiliary_scale_channels`])
@@ -1234,6 +1246,12 @@ impl Encoding {
                 own.clone_from((channel.slot)(drawer));
             }
         }
+    }
+
+    /// Whether this encoding binds any auxiliary-scale channel
+    /// ([`AUXILIARY_SCALE_CHANNELS`]).
+    pub(crate) fn binds_an_auxiliary_scale_channel(&self) -> bool {
+        AUXILIARY_SCALE_CHANNELS.iter().any(|channel| (channel.slot)(self).is_some())
     }
 
     /// Overlay channels from `overlay` onto `self`.

@@ -454,6 +454,16 @@ fn resolve_legend_overrides_and_title(
 
 // ── Moved helpers: one `apply_<source>_to_<target>` per config surface ─────
 
+/// `theme` with `chart_config`'s theme overrides applied (pass 13 alone):
+/// the theme a chart's scene resolves its auxiliary scales under, for a
+/// caller that builds them before the leaf's own pipeline runs (an overlay
+/// group's scales).
+pub(in crate::render) fn theme_under_chart_config(theme: &ThemeInputs, chart_config: &ChartConfig) -> ThemeInputs {
+    let mut theme = theme.clone();
+    apply_chart_config_to_theme(&mut theme, chart_config);
+    theme
+}
+
 /// Apply [`ChartConfig`] overrides to a [`ThemeInputs`] clone.
 ///
 /// This implements "configure > theme" precedence (level 3 > level 4–5). It is

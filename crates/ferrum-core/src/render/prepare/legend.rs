@@ -67,6 +67,19 @@ pub(crate) struct ColorLegendBundle {
     pub aux_legends: Vec<AuxLegendInput>,
 }
 
+impl ColorLegendBundle {
+    /// No legend at all: a chart whose legends another chart draws.
+    pub(crate) fn none() -> Self {
+        Self {
+            legend_entries: Vec::new(),
+            colorbar: None,
+            legend_title: None,
+            legend_overrides: LegendPreparedOverrides::default(),
+            aux_legends: Vec::new(),
+        }
+    }
+}
+
 /// The per-channel `legend={...}` specs that address the chart's ONE legend
 /// surface, in precedence order.
 ///

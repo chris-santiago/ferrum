@@ -62,7 +62,9 @@ pub(in crate::render) use self::domain::{
 // Seam vocabulary shared with `render::composite`'s resolve pass — see
 // `seam.rs` for why these live here rather than in `composite` (dependency
 // must point one way: composite → scale_resolve).
-pub(in crate::render) use self::seam::{Channel, LeafScaleContext, SharedDomain};
+pub(in crate::render) use self::seam::{
+    Channel, ConfiguredAuxiliary, LeafResolveInput, LeafScaleContext, MemberChannels, OverlayAuxiliary, OverlayLegends, OverlayMembership, SharedDomain,
+};
 
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{apply_coord_domain_overrides, build_axis_scale, PositionalFields};
@@ -1537,7 +1539,8 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 /// the appearance family (spec §4.3) took it to seven members, past the point
 /// where positional `let (a, b, c, …)` destructuring at the three call sites
 /// reads as anything.
-struct AuxiliaryScales {
+#[derive(Debug, Clone, Default)]
+pub(in crate::render) struct AuxiliaryScales {
     color: Option<ColorScale>,
     size: Option<SizeScale>,
     shape: Option<ShapeScale>,
@@ -1549,16 +1552,19 @@ struct AuxiliaryScales {
 
 /// Build the auxiliary (non-positional) scales for a chart spec.
 ///
-/// Computes `force_cat` and `aux_shared` internally from `spec` so the three
-/// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
-/// push order is: color, size, shape, then the opacity family in
+/// Warning push order is: color, size, shape, then the opacity family in
 /// `opacity`/`fill_opacity`/`stroke_opacity` order, then `stroke_dash`.
 ///
-/// `leaf_scales` is the 10-pre-b composite seam: `Some` only for a composite leaf
-/// whose parent shares `color`/`size`. It seeds the color/size auto path with the
-/// domain unioned across the composite's leaves, exactly as `leaf_scales`
-/// (x/y) seeds the positional axes. `None` for standalone (flat/facet) renders
-/// reproduces the pre-10-pre-b behavior byte-for-byte.
+/// `leaf_scales` is the composite seam, `None` for every standalone (flat or
+/// faceted) render. A leaf of an overlay group that resolves its auxiliary
+/// scales as one chart draws through the group's scales
+/// ([`LeafScaleContext::overlay_group`]), built once over every member by
+/// [`build_overlay_auxiliary_scales`], for every channel the group does not
+/// leave to its members, and builds its own for those it does. Otherwise,
+/// and for those channels, a leaf whose parent shares
+/// `color`/`size` seeds that channel's auto path with the domain unioned
+/// across the composite's leaves, exactly as `leaf_scales` (x/y) seeds the
+/// positional axes.
 ///
 /// `chart_encoding` is the authored chart-level encoding `spec`'s layers
 /// inherit (see [`resolve_scales_with_leaf_context`]): a layer binding nothing
@@ -1575,6 +1581,117 @@ fn build_auxiliary_scales(
     leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<AuxiliaryScales, RenderError> {
+    let composite = CompositeAuxDomains {
+        color: leaf_scales.and_then(|c| c.color.as_ref()),
+        size: leaf_scales.and_then(|c| c.size.as_ref()),
+    };
+    let own = |spec: &ChartSpec, warnings: &mut Vec<crate::render::RenderWarning>| {
+        resolve_auxiliary_scales(
+            spec,
+            primary_batch,
+            transform_outputs,
+            theme,
+            composite,
+            |slot| domain::aux_reads(spec.layers.as_deref(), chart_encoding, slot),
+            warnings,
+        )
+        .map_err(|refusal| refusal.source)
+    };
+    let Some(group) = leaf_scales.and_then(LeafScaleContext::overlay_group) else {
+        return own(spec, warnings);
+    };
+    // The group's scales for the channels it groups; the leaf's own, built
+    // as a standalone leaf builds them, for the channels it leaves to its
+    // members.
+    let mut scales = group.scales_for(theme).clone();
+    let left = group.left_to_members;
+    if left.any() {
+        let mut members_spec = spec.clone();
+        left.members_only(&mut members_spec.encoding);
+        let members = own(&members_spec, warnings)?;
+        if left.color {
+            scales.color = members.color;
+        }
+        if left.size {
+            scales.size = members.size;
+        }
+    }
+    Ok(scales)
+}
+
+/// A refusal resolving one auxiliary channel's scale: the channel (an
+/// [`AUXILIARY_SCALE_CHANNELS`] name) and the error.
+#[derive(Debug)]
+pub(in crate::render) struct AuxScaleRefusal {
+    pub(in crate::render) channel: &'static str,
+    pub(in crate::render) source: RenderError,
+}
+
+/// The auxiliary scales of an `Overlay` group of leaves, resolved as one
+/// layered chart resolves them over its layers: `encoding` carries each
+/// channel's establishing binding (the first member drawing it), and each
+/// domain spans every member's reads of the channel, in member order
+/// ([`domain::overlay_aux_reads`]), under the same establishing-scale rule
+/// ([`domain::admitted_aux_reads`]): a member whose column reads the other
+/// way stays out, with one `LayerScaleExcluded` naming its position.
+///
+/// The group reads as its first member's chart does (its mark, facet, coord
+/// and `params`), the way a layered chart's top level is its first layer's.
+/// `members` is the group in member order and is never empty: an overlay
+/// group has at least two members. A refusal names the channel it resolved,
+/// so the caller can name the member that set that channel up.
+pub(in crate::render) fn build_overlay_auxiliary_scales(
+    members: &[LeafResolveInput<'_>],
+    encoding: &crate::spec::encoding::Encoding,
+    theme: &ThemeInputs,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<AuxiliaryScales, AuxScaleRefusal> {
+    let Some(lead) = members.first() else {
+        return Ok(AuxiliaryScales::default());
+    };
+    let mut spec = ChartSpec { encoding: encoding.clone(), ..lead.spec.clone() };
+    resolve_param_domains(&mut spec);
+    resolve_auxiliary_scales(
+        &spec,
+        lead.final_batch,
+        lead.transform_outputs,
+        theme,
+        CompositeAuxDomains::default(),
+        |slot| domain::overlay_aux_reads(members, slot),
+        warnings,
+    )
+}
+
+impl AuxiliaryScales {
+    /// The color scale, `None` when nothing draws color.
+    pub(in crate::render) fn color(&self) -> Option<&ColorScale> {
+        self.color.as_ref()
+    }
+}
+
+/// The composite-shared `color`/`size` domains a leaf's auto path takes
+/// ([`SharedDomain`]); both `None` outside a sharing composite.
+#[derive(Clone, Copy, Default)]
+struct CompositeAuxDomains<'a> {
+    color: Option<&'a SharedDomain>,
+    size: Option<&'a SharedDomain>,
+}
+
+/// The binding an auxiliary channel reads off an encoding (`|e| e.color.as_ref()`).
+type AuxSlot<'s> = &'s dyn for<'e> Fn(&'e crate::spec::encoding::Encoding) -> Option<&'e crate::spec::encoding::EncodingSpec>;
+
+/// Resolve every auxiliary scale of `spec` from its establishing encoding
+/// (`spec.encoding`), each channel's domain read through `reads` (the reads
+/// of the binding a channel slot selects, in layer order).
+fn resolve_auxiliary_scales<'r>(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &ThemeInputs,
+    composite: CompositeAuxDomains<'_>,
+    reads: impl Fn(AuxSlot<'_>) -> Vec<domain::AuxRead<'r>>,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<AuxiliaryScales, AuxScaleRefusal> {
     // FA-5: area marks always group color discretely; force categorical.
     let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
     // T3: when the chart is faceted, auxiliary non-positional channels (continuous
@@ -1586,34 +1703,34 @@ fn build_auxiliary_scales(
     // `spec.encoding` here is the RENDERED encoding. Same question, same
     // single answer as the positional axes ask in `build_axis_scale`.
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
-    // 10-pre-b: composite shared color/size domains (None → standalone path).
-    let color_domain = leaf_scales.and_then(|c| c.color.as_ref());
-    let size_domain = leaf_scales.and_then(|c| c.size.as_ref());
     // On a layered spec, every auxiliary channel resolves its auto domain from
     // every layer that draws it, each reading the field it draws from the
     // batch it draws, as the positional axes do (`aux_reads`).
-    let layer_reads = |slot: fn(&crate::spec::encoding::Encoding) -> Option<&crate::spec::encoding::EncodingSpec>| {
-        domain::aux_reads(spec.layers.as_deref(), chart_encoding, slot)
-    };
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain, coord_flipped, &layer_reads(|e| e.color.as_ref()))?;
+    let refused = |channel: &'static str| move |source: RenderError| AuxScaleRefusal { channel, source };
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, composite.color, coord_flipped, &reads(&|e| e.color.as_ref()))
+        .map_err(refused("color"))?;
     warnings.extend(color_warns);
-    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain, &layer_reads(|e| e.size.as_ref()))?;
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, &reads(&|e| e.size.as_ref()))
+        .map_err(refused("size"))?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &layer_reads(|e| e.shape.as_ref()))?;
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &reads(&|e| e.shape.as_ref()))
+        .map_err(refused("shape"))?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
     // closure is only here so each call site reads as the channel it resolves
     // rather than repeating the six-argument call.
-    let mut opacity_scale = |channel: OpacityChannel| -> Result<Option<OpacityScale>, RenderError> {
-        let reads = domain::aux_reads(spec.layers.as_deref(), chart_encoding, |e| channel.slot(e).as_ref());
-        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &reads)?;
+    let mut opacity_scale = |channel: OpacityChannel| -> Result<Option<OpacityScale>, AuxScaleRefusal> {
+        let channel_reads = reads(&|e| channel.slot(e).as_ref());
+        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme, &channel_reads)
+            .map_err(refused(channel.context()))?;
         warnings.extend(warns);
         Ok(scale)
     };
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &layer_reads(|e| e.stroke_dash.as_ref()))?;
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, coord_flipped, &reads(&|e| e.stroke_dash.as_ref()))
+        .map_err(refused("stroke_dash"))?;
     warnings.extend(dash_warns);
     Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }

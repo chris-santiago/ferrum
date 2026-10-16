@@ -1218,8 +1218,8 @@ def test_a_sized_line_cut_by_a_break_tapers_with_interpolated_widths_at_each_cut
 # point-only chart. The population is every non-empty set of size consumers
 # drawn from {line, point}, on every route that combines them: one flat
 # chart (`+`), the static overlay composite (`fm.layer(...).to_svg()`, one
-# legend per member leaf), a figure-level legend band shared across
-# `hconcat` leaves, and the interactive scene.
+# shared legend read over every member), a figure-level legend band shared
+# across `hconcat` leaves, and the interactive scene.
 # ---------------------------------------------------------------------------
 
 _SWATCH_MARKS = ("line", "point")
@@ -1336,13 +1336,10 @@ def _legend_swatches(route: str, chart: Any) -> list[tuple[str, float]]:
 def test_size_legend_swatch_follows_every_size_consumer(route: str, marks: tuple[str, ...]) -> None:
     radii = [r for _, r in _scene_legend_swatches(_consumer("point"))]
     swatches = _legend_swatches(route, _combine(route, marks))
-    # Every route draws one shared legend of `len(radii)` entries. The static
-    # overlay composite (`fm.layer`) is a known open defect: it currently
-    # draws one full, overlapping legend per member leaf, stacked at
-    # identical coordinates, so this pins `len(marks) * len(radii)` entries
-    # rather than the deduped count the route should eventually produce.
-    expected = len(marks) * len(radii) if route == "layer" else len(radii)
-    assert len(swatches) == expected, swatches
+    # Every route, including the static overlay composite (`fm.layer`),
+    # resolves the size legend once across every member and draws exactly
+    # `len(radii)` entries, read over every size consumer.
+    assert len(swatches) == len(radii), swatches
     lines_only = set(marks) == {"line"}
     for i, (kind, size) in enumerate(swatches):
         r = radii[i % len(radii)]

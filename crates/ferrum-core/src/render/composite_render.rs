@@ -93,7 +93,7 @@ use super::composite::{
 };
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
-use super::scale_resolve::{ColorScale, LeafScaleContext};
+use super::scale_resolve::{ColorScale, ConfiguredAuxiliary, LeafScaleContext, MemberChannels, OverlayAuxiliary, OverlayMembership};
 use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::axis::AlignAxis;
@@ -351,10 +351,22 @@ pub(crate) fn render_composite_scene(
 
     // Pass 1 (resolve) needs each leaf's transformed data + rendering encoding.
     // Prepare every leaf once with no context (context only seeds scale
-    // resolution, never the transformed data), then union shared domains.
+    // resolution, never the transformed data), then union shared domains. A
+    // member of an overlay group defers the channels the group resolves as
+    // one chart to the group ([`OverlayAuxiliary::unresolved`]): a column the
+    // group's scale excludes is no refusal of that member's own.
+    let overlay_groups_aux = overlay_auxiliary_groups(tree);
+    let mut pass_one: Vec<Option<LeafScaleContext>> = vec![None; n];
+    for group in &overlay_groups_aux {
+        let unresolved = std::sync::Arc::new(OverlayAuxiliary::unresolved(group.left_to_members));
+        for (member, i) in group.members.clone().enumerate() {
+            let overlay = Some(OverlayMembership { group: std::sync::Arc::clone(&unresolved), member });
+            pass_one[i] = Some(LeafScaleContext { overlay, ..LeafScaleContext::default() });
+        }
+    }
     let mut prepared: Vec<prepare::PreparedInputs> = Vec::with_capacity(n);
     for (i, leaf) in leaves.iter().enumerate() {
-        let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.viewport, leaf.chart_config, None)
+        let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.viewport, leaf.chart_config, pass_one[i].as_ref())
             .map_err(|source| CompositeRenderError::LeafRender {
                 kind: "leaf",
                 index: i,
@@ -377,6 +389,11 @@ pub(crate) fn render_composite_scene(
     // axis); leaf warnings follow in leaf pre-order after the pre-passes.
     let mut warnings: Vec<RenderWarning> = Vec::new();
     let mut contexts = resolve_composite_scales(tree, &resolve_inputs, &mut warnings)?;
+    // An overlay group's members are one layered chart: one auxiliary scale
+    // per channel over every member, one legend per channel drawn by the
+    // first member. Planned before any layout is measured, since it decides
+    // which member reserves a legend gutter.
+    plan_overlay_auxiliary(&overlay_groups_aux, leaves, &resolve_inputs, &prepared, &mut contexts, &mut warnings)?;
     drop(resolve_inputs);
     // `prepared` stays alive through the line/ribbon exemption pre-pass below
     // (spec-review cycle-2 fix), which needs each leaf's REAL resolved
@@ -598,7 +615,7 @@ fn render_leaf(
     // a per-panel legend uses. Non-suppressed leaves carry no bundle.
     let bundle = match ctx {
         Some(c) if c.suppress_color_legend || c.suppress_size_legend => {
-            Some(capture_leaf_bundle(leaf, &po)?)
+            Some(capture_leaf_bundle(leaf, &po, c)?)
         }
         _ => None,
     };
@@ -627,12 +644,14 @@ fn render_leaf(
 fn capture_leaf_bundle(
     leaf: &CompositeLeafInput<'_>,
     po: &super::PipelineOutput,
+    ctx: &LeafScaleContext,
 ) -> Result<LeafLegendBundle, RenderError> {
     let color_scale = scene_build::resolve_legend_color_scale(
         leaf.spec,
         &po.prep,
         &po.applied.effective_theme,
         leaf.chart_config,
+        Some(ctx),
     )?;
     // The legend projection (config passes 17–18 and 16) is READ off the
     // pipeline output, not recomputed: `prepare_and_layout` already ran it for
@@ -1008,6 +1027,114 @@ fn plan_overlay_group_walk(
     }
 }
 
+/// An all-leaf `Overlay` group (the [`is_overlay_group`] shape `LayerChart`
+/// lowers to) whose auxiliary scales resolve as one chart: its members' leaf
+/// indices and the channels it leaves to them.
+struct OverlayGroupPlan {
+    members: std::ops::Range<usize>,
+    left_to_members: MemberChannels,
+}
+
+/// Every all-leaf `Overlay` group, in pre-order. A group leaves `color` to
+/// its members when it or an enclosing composite names `color` in its
+/// `resolve` (`resolve.color` or a `legend.color` override), and `size`
+/// likewise: the channel that explicit resolve names keeps its meaning (a
+/// figure-level band, an opt-out), and every other channel is grouped.
+fn overlay_auxiliary_groups(tree: &CompositeNode) -> Vec<OverlayGroupPlan> {
+    fn walk(node: &CompositeNode, named: MemberChannels, leaf_cursor: &mut usize, out: &mut Vec<OverlayGroupPlan>) {
+        match node {
+            CompositeNode::Leaf { .. } => *leaf_cursor += 1,
+            CompositeNode::Hole { .. } => {}
+            CompositeNode::Composite { layout, children, resolve, .. } => {
+                let named = MemberChannels {
+                    color: named.color || resolve.color.is_some() || resolve.legend.color.is_some(),
+                    size: named.size || resolve.size.is_some() || resolve.legend.size.is_some(),
+                };
+                if is_overlay_group(*layout, children) {
+                    out.push(OverlayGroupPlan {
+                        members: *leaf_cursor..*leaf_cursor + children.len(),
+                        left_to_members: named,
+                    });
+                }
+                for child in children {
+                    walk(child, named, leaf_cursor, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(tree, MemberChannels::default(), &mut 0, &mut out);
+    out
+}
+
+/// Resolve the grouped auxiliary channels of every group
+/// [`overlay_auxiliary_groups`] names as one layered chart resolves them over
+/// its layers, and record the result on each member's
+/// [`LeafScaleContext::overlay`]. Each grouped channel's binding is the first
+/// member drawing it, its domain spans every admitted member, and a member
+/// whose column reads the other way is excluded with one `LayerScaleExcluded`
+/// naming its position ([`super::scale_resolve::build_overlay_auxiliary_scales`]).
+/// Every member then draws through those scales, and the first member draws
+/// their legends: one per channel, in its own legend area, as the same layers
+/// merged with `+` draw them. A group none of whose members binds a grouped
+/// channel has nothing to resolve and is left as it is.
+///
+/// A refusal resolving a grouped channel names the member that set that
+/// channel up, the first member binding it.
+fn plan_overlay_auxiliary(
+    groups: &[OverlayGroupPlan],
+    leaves: &[CompositeLeafInput<'_>],
+    inputs: &[LeafResolveInput<'_>],
+    prepared: &[prepare::PreparedInputs],
+    contexts: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), CompositeRenderError> {
+    for OverlayGroupPlan { members, left_to_members } in groups {
+        let start = members.start;
+        let mut encoding = inputs[start].encoding.clone();
+        for member in &inputs[start + 1..members.end] {
+            encoding.take_unbound_auxiliary_scale_channels(member.encoding);
+        }
+        left_to_members.grouped_only(&mut encoding);
+        if !encoding.binds_an_auxiliary_scale_channel() {
+            continue;
+        }
+        let refused = |refusal: super::scale_resolve::AuxScaleRefusal| {
+            let establishing = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS
+                .iter()
+                .find(|channel| channel.name == refusal.channel)
+                .and_then(|channel| members.clone().find(|&i| channel.binding(inputs[i].encoding).is_some()))
+                .unwrap_or(start);
+            CompositeRenderError::LeafRender { kind: "leaf", index: establishing, source: refusal.source }
+        };
+        // Built under the members' theme (the legends `prepare` builds) and
+        // under that theme with their shared chart config (the marks and
+        // legend colors the scene draws); the warnings are the drawn
+        // scales', reported once.
+        let member_inputs = &inputs[members.clone()];
+        let scales = super::scale_resolve::build_overlay_auxiliary_scales(member_inputs, &encoding, leaves[start].theme, &mut Vec::new())
+            .map_err(refused)?;
+        let configured_theme = super::config_apply::theme_under_chart_config(leaves[start].theme, leaves[start].chart_config);
+        let configured = ConfiguredAuxiliary {
+            scales: super::scale_resolve::build_overlay_auxiliary_scales(member_inputs, &encoding, &configured_theme, warnings)
+                .map_err(refused)?,
+            palette: configured_theme.palette,
+        };
+        let layers = prepared[members.clone()].iter().flat_map(|p| p.layers.iter().cloned()).collect();
+        let group = std::sync::Arc::new(OverlayAuxiliary {
+            encoding,
+            scales,
+            configured,
+            layers,
+            left_to_members: *left_to_members,
+        });
+        for (member, i) in members.clone().enumerate() {
+            contexts[i].overlay = Some(OverlayMembership { group: std::sync::Arc::clone(&group), member });
+        }
+    }
+    Ok(())
+}
+
 /// One color-consuming layer inside an Overlay group, for
 /// [`plan_line_ribbon_color_group_exemptions`]'s field/scale-keyed check.
 ///
@@ -1023,6 +1150,12 @@ fn plan_overlay_group_walk(
 /// this correctly (flat spec → its own top-level mark; layered spec → each
 /// real sub-layer), so consulting `prepared[i].layers` handles both shapes
 /// uniformly with no special-casing here.
+///
+/// Read only for a group that leaves `color` to its members (or resolves no
+/// auxiliary channel as one chart): those members' own color scales are in
+/// `prepared[i].provisional_scales.color`. A group that resolves `color` for
+/// all its members has its first member read that color legend over every
+/// member's layers instead, so no exemption is needed there.
 struct ColorConsumer {
     /// Index of this leaf within the group (0-based, group-local).
     member: usize,
@@ -1093,7 +1226,7 @@ fn plan_line_ribbon_color_group_walk(
         CompositeNode::Composite {
             layout, children, ..
         } => {
-            if is_overlay_group(*layout, children) {
+            if is_overlay_group(*layout, children) && !contexts[*leaf_cursor].overlay_groups_channel("color") {
                 let group_start = *leaf_cursor;
                 let members = &prepared[group_start..group_start + children.len()];
 
@@ -1147,7 +1280,9 @@ fn plan_line_ribbon_color_group_walk(
 /// legend for the group's one size field, and the group draws that field as
 /// dots. Groups are read off `layer_of` (each member's position in its group,
 /// unpruned); a member's size consumers are [`prepare::size_drawing_marks`]
-/// over `prepared[j].layers`, the rule the size legend's swatch reads.
+/// over `prepared[j].layers`, the rule the size legend's swatch reads. A
+/// group that resolves `size` for all its members reads the swatch over
+/// every member's layers in its one size legend, so its members are skipped.
 fn plan_size_dot_siblings(
     layer_of: &[Option<usize>],
     prepared: &[prepare::PreparedInputs],
@@ -1158,6 +1293,9 @@ fn plan_size_dot_siblings(
         let (Some(k), Some(size)) = (position, prepared[i].rendering_encoding().size.as_ref()) else {
             continue;
         };
+        if contexts[i].overlay_groups_channel("size") {
+            continue;
+        }
         let start = i - k;
         let members = (start..layer_of.len()).take_while(|&j| layer_of[j] == Some(j - start));
         contexts[i].size_scale_has_non_line_sibling = members.filter(|&j| j != i).any(|j| {
@@ -5279,110 +5417,104 @@ mod tests {
 
     /// `fm.layer(ribbon(color=v:Q), ribbon(color=v:Q))`: both leaves are
     /// desugared `mark_ribbon` (real mark inside `spec.layers`, `point`
-    /// placeholder at the top). Neither is a non-line/ribbon consumer, so
-    /// NEITHER exempts the other — both must warn and both colorbars must
-    /// be suppressed. Before the layers-aware fix, the top-level-mark read
-    /// saw `point` for both, wrongly classified BOTH as "non-line/ribbon
-    /// consumers", and exempted the whole group (spec-review cycle-2
-    /// finding: live `fm.layer(ribbon(v:Q), ribbon(v:Q)).to_svg()` produced
-    /// 0 warnings and TWO surviving colorbars).
+    /// placeholder at the top). Every consumer of the one continuous color
+    /// scale draws a ribbon, so the overlay warns once, as the same layers
+    /// merged warn, and draws no colorbar. A top-level-mark read would see
+    /// `point` for both and draw the colorbar.
     #[test]
-    fn overlay_two_ribbon_leaves_sharing_continuous_color_both_warn_no_colorbars() {
+    fn overlay_two_ribbon_leaves_sharing_continuous_color_warn_once_no_colorbar() {
         let spec = ribbon_layered_spec("c"); // matches xyy2c_batch's "c" column
-        let batch = || xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
-        let h0 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
-        let h1 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
-        let tree = composite(
-            CompositeLayout::Overlay,
-            vec![leaf_node_with(spec.clone(), 0), leaf_node_with(spec, 1)],
+        let batch = xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
+        let (scene, warnings) = overlay_route(&[(spec.clone(), batch.clone()), (spec.clone(), batch.clone())]);
+        let (merged, merged_warnings) = merged_route(&[spec.clone(), spec], &batch);
+        assert_eq!(
+            warnings.iter().filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })).collect::<Vec<_>>(),
+            [&RenderWarning::UnsupportedColorScaleOnMark {
+                marks: vec!["ribbon".to_string()],
+                scale_kind: "continuous".to_string(),
+                suppressed: true,
+            }],
+            "{warnings:?}"
         );
-        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, warnings) =
-            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-        assert_eq!(unsupported_warning_count(&warnings), 2, "both ribbon leaves must warn: {warnings:?}");
+        assert_eq!(warnings, merged_warnings);
+        assert_eq!(scene.legend, merged.legend);
         let gradient_count = scene
             .legend
             .iter()
             .filter(|n| matches!(n, SceneNode::Raw { svg, .. } if svg.contains("linearGradient")))
             .count();
-        assert_eq!(gradient_count, 0, "neither colorbar may survive");
+        assert_eq!(gradient_count, 0, "no colorbar may survive");
     }
 
     /// `fm.layer(line(color=v:Q), ribbon(color=v:Q))`: a line and a
-    /// (desugared) ribbon share the same field. Both are line/ribbon marks,
-    /// so neither exempts the other — both warn.
+    /// (desugared) ribbon share the same field. Every consumer of the one
+    /// continuous scale is a line or a ribbon, so the overlay warns once,
+    /// naming both marks, as the same layers merged warn. A top-level-mark
+    /// read of the ribbon leaf's placeholder `point` would exempt both.
     #[test]
-    fn overlay_line_and_ribbon_leaves_sharing_continuous_color_both_warn() {
+    fn overlay_line_and_ribbon_leaves_sharing_continuous_color_warn_once() {
         let line_spec = line_color_spec();
         let ribbon_spec = ribbon_layered_spec("c"); // matches line_color_spec()'s field ("c", via color_spec())
-        let line_batch = xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
-        let ribbon_batch = xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
-        let h0 = LeafHold { spec: line_spec.clone(), batch: line_batch, ..hold() };
-        let h1 = LeafHold { spec: ribbon_spec.clone(), batch: ribbon_batch, ..hold() };
-        let tree = composite(
-            CompositeLayout::Overlay,
-            vec![leaf_node_with(line_spec, 0), leaf_node_with(ribbon_spec, 1)],
-        );
-        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (_scene, warnings) =
-            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let batch = xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
+        let (scene, warnings) = overlay_route(&[(line_spec.clone(), batch.clone()), (ribbon_spec.clone(), batch.clone())]);
+        let (merged, merged_warnings) = merged_route(&[line_spec, ribbon_spec], &batch);
         assert_eq!(
-            unsupported_warning_count(&warnings), 2,
-            "both line and ribbon must warn — neither is a non-line/ribbon consumer, so \
-             neither can exempt the other (a top-level-mark misread of the ribbon leaf's \
-             placeholder `point` mark would wrongly exempt both): {warnings:?}"
+            warnings.iter().filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })).collect::<Vec<_>>(),
+            [&RenderWarning::UnsupportedColorScaleOnMark {
+                marks: vec!["line".to_string(), "ribbon".to_string()],
+                scale_kind: "continuous".to_string(),
+                suppressed: true,
+            }],
+            "{warnings:?}"
         );
+        assert_eq!(warnings, merged_warnings);
+        assert_eq!(scene.legend, merged.legend);
     }
 
-    /// The reviewer's live probe for the field-keyed correction:
-    /// `fm.layer(line(color=v:Q), point(color=g:N))` — the point sibling
-    /// binds a DIFFERENT field (`g`, nominal) than the line's (`v`,
-    /// continuous). It must NOT exempt the line's inert `v` channel — that
-    /// sibling never paints `v` at all — while `g`'s own categorical legend
-    /// renders untouched (ordinary per-leaf legend building, unaffected by
-    /// this fix either way).
+    /// `fm.layer(line(color=v:Q), point(color=g:N))`: the line establishes
+    /// one continuous color scale on `v`, and the point's categorical `g`
+    /// stays out of it with one `LayerScaleExcluded`. The point draws through
+    /// that scale and never paints `v`, so it does not exempt the line: the
+    /// line's `v` is inert, warns, and its colorbar is suppressed. No `g`
+    /// legend is drawn, since the overlay draws one legend per channel, as
+    /// the same layers merged draw it.
     #[test]
-    fn overlay_line_and_point_on_different_fields_warns_re_v_keeps_g_legend() {
+    fn overlay_line_and_point_on_different_fields_warns_re_v_and_draws_no_g_legend() {
         let line_spec = line_color_spec(); // color field "c" (color_spec()'s field)
         let point_spec = point_color_spec("g", false); // nominal, different field
-        let line_batch = xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
-        let point_schema = Arc::new(Schema::new(vec![
+        let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Float64, false),
             Field::new("g", DataType::Utf8, false),
         ]));
-        let point_batch = RecordBatch::try_new(
-            point_schema,
+        let batch = RecordBatch::try_new(
+            schema,
             vec![
                 Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
                 Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0, 15.0])),
                 Arc::new(arrow::array::StringArray::from(vec!["a", "b", "a", "b"])),
             ],
         )
         .unwrap();
-        let h0 = LeafHold { spec: line_spec.clone(), batch: line_batch, ..hold() };
-        let h1 = LeafHold { spec: point_spec.clone(), batch: point_batch, ..hold() };
-        let tree = composite(
-            CompositeLayout::Overlay,
-            vec![leaf_node_with(line_spec, 0), leaf_node_with(point_spec, 1)],
-        );
-        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, warnings) =
-            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, warnings) = overlay_route(&[(line_spec.clone(), batch.clone()), (point_spec.clone(), batch.clone())]);
+        let (merged, merged_warnings) = merged_route(&[line_spec, point_spec], &batch);
         match warnings.iter().find(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })) {
             Some(RenderWarning::UnsupportedColorScaleOnMark { marks, .. }) => {
                 assert_eq!(marks, &vec!["line".to_string()]);
             }
             _ => panic!("line's inert `v`-equivalent field must still warn even with an unrelated-field sibling: {warnings:?}"),
         }
-        // g's own categorical legend must still render (ordinary per-leaf
-        // legend building — the point leaf's own field, untouched by the
-        // exemption logic either way).
-        let has_g_legend_entry = scene
-            .legend
-            .iter()
-            .any(|n| matches!(n, SceneNode::Text { content, .. } if content == "a" || content == "b"));
-        assert!(has_g_legend_entry, "g's own categorical legend entries must render: {:?}", scene.legend);
+        assert_eq!(layer_exclusions(&warnings).len(), 1, "{warnings:?}");
+        let mut sorted = |w: &[RenderWarning]| {
+            let mut texts: Vec<String> = w.iter().map(|w| format!("{w:?}")).collect();
+            texts.sort();
+            texts
+        };
+        assert_eq!(sorted(&warnings), sorted(&merged_warnings));
+        assert!(legend_texts(&scene).is_empty(), "{:?}", legend_texts(&scene));
+        assert_eq!(scene.legend, merged.legend);
     }
 
     /// Field-keying isolated from scale-kind: `layer(line(v:Q), point(w:Q))`
@@ -6495,10 +6627,15 @@ mod tests {
         // BOTH halves, the merge seam must decline to suppress too. Dropping
         // chrome here would be the exact silent mismatch (chrome describing a
         // rect the marks never used) the retired gate existed to prevent.
-        let tree = composite(
+        // An explicit per-member color resolve keeps each member's own
+        // legend, so both gutters are reserved.
+        let mut tree = composite(
             CompositeLayout::Overlay,
             vec![color_leaf(0), color_leaf(1)],
         );
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.color = Some(RM::Independent);
+        }
         // Labels long enough that each leaf's legend strip hits its
         // half-the-inner-extent cap, so the two plot regions land on opposite
         // halves of the viewport and share no area. Each leaf still lays out
@@ -8219,12 +8356,13 @@ mod tests {
         }
     }
 
-    /// Every member of an overlay draws its own size legend, so a member whose
-    /// only line yields the size to its own `stroke_width=2` draws none: the
-    /// overlay's swatches are exactly the point member's circles, in either
-    /// member order. A member whose line draws the size adds its own block.
+    /// An overlay draws one size legend for its one size scale, and its
+    /// swatch kind is read over every member's layers: beside a point member
+    /// the swatches are circles, whether the line member yields the size to
+    /// its own `stroke_width=2` or draws it, in either member order, as the
+    /// same layers merged draw them.
     #[test]
-    fn an_overlay_member_whose_line_yields_the_size_draws_no_size_legend() {
+    fn an_overlay_draws_one_size_legend_with_swatches_read_over_every_member() {
         let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
         let size_only = |layer: serde_json::Value| {
             let mut s = sized_layers_spec(&[layer]);
@@ -8234,25 +8372,18 @@ mod tests {
         let yielding = || size_only(serde_json::json!({"mark": "line", "mark_style": {"stroke_width": 2.0}}));
         let point = || size_only(serde_json::json!({"mark": "point"}));
         let drawing_line = || size_only(serde_json::json!({"mark": "line"}));
-        let overlay = |specs: [ChartSpec; 2]| {
-            let holds = specs.map(|s| color_hold_with(s, batch.clone(), ThemeInputs::default()));
-            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
-            let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
-            let tree = composite(CompositeLayout::Overlay, vec![leaf(0), leaf(1)]);
-            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-            crate::render::legend_swatches(&scene)
+        let swatches = |members: [ChartSpec; 2]| {
+            let (overlay, _) = overlay_route(&[(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())]);
+            let (merged, _) = merged_route(&members, &batch);
+            assert_eq!(overlay.legend, merged.legend);
+            crate::render::legend_swatches(&overlay)
         };
-        let circles = {
-            let hold = color_hold_with(point(), batch.clone(), ThemeInputs::default());
-            let leaves = [leaf_input(&hold, 300.0, 200.0)];
-            let tree = composite(CompositeLayout::Overlay, vec![CompositeNode::Leaf { spec: Box::new(point()), data: 0, label: None }]);
-            crate::render::legend_swatches(&render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap().0)
-        };
+        let circles = crate::render::legend_swatches(&overlay_route(&[(point(), batch.clone())]).0);
         assert!(!circles.is_empty() && circles.iter().all(|(k, _)| *k == "circle"), "{circles:?}");
-        assert_eq!(overlay([yielding(), point()]), circles);
-        assert_eq!(overlay([point(), yielding()]), circles);
-        // Vacuity control: a drawing line member adds a block of its own.
-        assert_eq!(overlay([drawing_line(), point()]).len(), 2 * circles.len());
+        assert_eq!(swatches([yielding(), point()]), circles);
+        assert_eq!(swatches([point(), yielding()]), circles);
+        assert_eq!(swatches([drawing_line(), point()]), circles);
+        assert_eq!(swatches([point(), drawing_line()]), circles);
     }
 
     /// Every text node of a scene's legend, in order.
@@ -8272,11 +8403,11 @@ mod tests {
     }
 
     /// An aux legend channel bound at chart level or on a leaf's first layer
-    /// only draws the same legend on every composite route: each member of
-    /// an overlay draws its own (size, shape and stroke_dash), and a
-    /// size-shared hconcat bands one size legend. Each cell asserts the
-    /// channel's `title=` reaches the legend; an unbound leaf is the control
-    /// and draws neither the title nor a swatch.
+    /// only draws the same legend on every composite route: an overlay draws
+    /// one legend per channel for its members (size, shape and stroke_dash),
+    /// and a size-shared hconcat bands one size legend. Each cell asserts the
+    /// channel's `title=` reaches the one legend; an unbound leaf is the
+    /// control and draws neither the title nor a swatch.
     #[test]
     fn a_layer_level_aux_binding_draws_its_legend_on_every_composite_route() {
         let batch = RecordBatch::try_new(
@@ -8328,7 +8459,9 @@ mod tests {
             let leaf = |data: usize| CompositeNode::Leaf { spec: Box::new(leaves[data].spec.clone()), data, label: None };
             let mut tree = composite(layout, vec![leaf(0), leaf(1)]);
             if let CompositeNode::Composite { resolve, .. } = &mut tree {
-                resolve.size = Some(RM::Shared);
+                if layout == CompositeLayout::Hconcat {
+                    resolve.size = Some(RM::Shared);
+                }
             }
             let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
             (legend_texts(&scene), crate::render::legend_swatches(&scene))
@@ -8344,10 +8477,7 @@ mod tests {
                 let (layer_texts, layer_swatches) = cell(Placement::Layer0);
                 let (none_texts, none_swatches) = cell(Placement::Nowhere);
                 let titles = chart_texts.iter().filter(|t| *t == "Kind").count();
-                assert!(titles >= 1, "{route} {channel}: {chart_texts:?}");
-                if layout == CompositeLayout::Hconcat {
-                    assert_eq!(titles, 1, "the band draws one size legend: {chart_texts:?}");
-                }
+                assert_eq!(titles, 1, "{route} {channel}: one legend for the channel: {chart_texts:?}");
                 assert!(chart_swatches.len() > none_swatches.len(), "{route} {channel}: {chart_swatches:?}");
                 assert!(!none_texts.iter().any(|t| t == "Kind"), "{route} {channel}: {none_texts:?}");
                 assert_eq!(layer_texts, chart_texts, "{route} {channel}");
@@ -8905,5 +9035,532 @@ mod tests {
         let plan = plan_linear(&children, 10.0, true);
         let merged = merge_children(children, plan, &[false, false]);
         assert_eq!(owners(&merged.scene), vec![("n", Some(&[0][..])), ("m", Some(&[1][..]))]);
+    }
+
+    // -- an overlay group's auxiliary scales and legends -----------------------
+
+    /// `members` as the one layered chart `+` merges them into: each member's
+    /// layers in order (an unlayered member is one layer of its own mark),
+    /// every binding the member's chart level gives a layer written on that
+    /// layer, and the first member's chart level for the rest.
+    fn merged_layers(members: &[ChartSpec]) -> ChartSpec {
+        use crate::spec::layer::Layer;
+        let layers = members
+            .iter()
+            .flat_map(|member| match &member.layers {
+                Some(own) => own
+                    .iter()
+                    .map(|layer| {
+                        let mut layer = layer.clone();
+                        for (channel, slot) in carried_channels() {
+                            if slot(&layer.encoding).is_none() && slot(&member.encoding).is_some() {
+                                layer.inherited_channels.push(channel);
+                            }
+                        }
+                        layer.encoding.inherit_from(&member.encoding);
+                        layer
+                    })
+                    .collect::<Vec<_>>(),
+                None => vec![Layer { mark: member.mark, encoding: member.encoding.clone(), ..Default::default() }],
+            })
+            .collect();
+        let lead = &members[0];
+        ChartSpec {
+            encoding: Encoding { x: lead.encoding.x.clone(), y: lead.encoding.y.clone(), ..Default::default() },
+            layers: Some(layers),
+            ..lead.clone()
+        }
+    }
+
+    /// The non-positional channels a merged layer records as carried from its
+    /// member's chart level, so a carried binding stays a parent's (a line's
+    /// own `stroke_width` still wins over a carried `size`).
+    fn carried_channels() -> [(crate::spec::layer::InheritedChannel, fn(&Encoding) -> &Option<EncodingSpec>); 5] {
+        use crate::spec::layer::InheritedChannel as C;
+        [(C::Color, |e| &e.color), (C::Size, |e| &e.size), (C::Shape, |e| &e.shape), (C::Opacity, |e| &e.opacity), (C::StrokeDash, |e| &e.stroke_dash)]
+    }
+
+    /// The scene and warnings of an `Overlay` of `members`, each over its own
+    /// batch, at the same per-leaf size every route here renders at.
+    fn overlay_route(members: &[(ChartSpec, RecordBatch)]) -> (SceneGraph, Vec<RenderWarning>) {
+        overlay_route_with(members, shared_xy())
+    }
+
+    /// The resolve `LayerChart` lowers an overlay with: shared x and y.
+    fn shared_xy() -> CompositeResolve {
+        CompositeResolve { x: RM::Shared, y: RM::Shared, ..Default::default() }
+    }
+
+    fn overlay_route_with(members: &[(ChartSpec, RecordBatch)], resolve: CompositeResolve) -> (SceneGraph, Vec<RenderWarning>) {
+        try_overlay_route(members, resolve).unwrap()
+    }
+
+    fn try_overlay_route(
+        members: &[(ChartSpec, RecordBatch)],
+        resolve: CompositeResolve,
+    ) -> Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError> {
+        try_overlay_route_configured(members, resolve, &ChartConfig::default())
+    }
+
+    /// [`try_overlay_route`] with every member carrying `chart_config`, as a
+    /// `LayerChart` lowers each member with the one configure list its
+    /// members merge into.
+    fn try_overlay_route_configured(
+        members: &[(ChartSpec, RecordBatch)],
+        resolve: CompositeResolve,
+        chart_config: &ChartConfig,
+    ) -> Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError> {
+        let holds: Vec<LeafHold> = members
+            .iter()
+            .map(|(spec, batch)| LeafHold {
+                chart_config: chart_config.clone(),
+                ..color_hold_with(spec.clone(), batch.clone(), ThemeInputs::default())
+            })
+            .collect();
+        let leaves: Vec<CompositeLeafInput<'_>> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        let mut tree = composite(
+            CompositeLayout::Overlay,
+            members.iter().enumerate().map(|(i, (spec, _))| leaf_node_with(spec.clone(), i)).collect(),
+        );
+        if let CompositeNode::Composite { resolve: r, .. } = &mut tree {
+            *r = resolve;
+        }
+        render_composite_scene(&tree, &leaves, &ThemeInputs::default())
+    }
+
+    /// The scene and warnings of `members` merged into one layered chart over
+    /// `batch` (the route `+` takes), rendered as the one member of an
+    /// overlay so it lays out at the overlay's per-leaf size.
+    fn merged_route(members: &[ChartSpec], batch: &RecordBatch) -> (SceneGraph, Vec<RenderWarning>) {
+        overlay_route(&[(merged_layers(members), batch.clone())])
+    }
+
+    /// A member drawing `mark` over `x`/`y` with the auxiliary bindings `aux`.
+    fn aux_member(mark: Mark, aux: Encoding) -> ChartSpec {
+        let mut spec = scatter_spec();
+        spec.mark = mark;
+        spec.encoding = Encoding { x: spec.encoding.x.clone(), y: spec.encoding.y.clone(), ..aux };
+        spec
+    }
+
+    fn binding(field: &str) -> Option<EncodingSpec> {
+        Some(EncodingSpec { field: field.into(), ..Default::default() })
+    }
+
+    /// `x`, `y`, numeric `v` and `w`, and categorical `g` (a, b, a).
+    fn aux_batch() -> RecordBatch {
+        aux_batch_of(&[1.0, 2.0, 3.0], &[1.0, 2.0, 4.0], &["a", "b", "a"])
+    }
+
+    fn aux_batch_of(xs: &[f64], vs: &[f64], gs: &[&str]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("v", DataType::Float64, false),
+                Field::new("w", DataType::Float64, false),
+                Field::new("g", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(vs.to_vec())),
+                Arc::new(Float64Array::from(vs.iter().map(|v| v * 10.0).collect::<Vec<_>>())),
+                Arc::new(arrow::array::StringArray::from(gs.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// One auxiliary channel's binding of `field`, with the mark that draws it.
+    #[derive(Clone, Copy, Debug)]
+    enum AuxChannel {
+        Color,
+        Size,
+        Shape,
+        StrokeDash,
+        Opacity,
+    }
+
+    impl AuxChannel {
+        /// The channels that draw a legend.
+        const ALL: [AuxChannel; 4] = [AuxChannel::Color, AuxChannel::Size, AuxChannel::Shape, AuxChannel::StrokeDash];
+
+        fn mark(self) -> Mark {
+            match self {
+                AuxChannel::StrokeDash => Mark::Line,
+                _ => Mark::Point,
+            }
+        }
+
+        fn bound(self, field: &str) -> Encoding {
+            self.bound_with(binding(field))
+        }
+
+        fn bound_with(self, spec: Option<EncodingSpec>) -> Encoding {
+            match self {
+                AuxChannel::Color => Encoding { color: spec, ..Default::default() },
+                AuxChannel::Size => Encoding { size: spec, ..Default::default() },
+                AuxChannel::Shape => Encoding { shape: spec, ..Default::default() },
+                AuxChannel::StrokeDash => Encoding { stroke_dash: spec, ..Default::default() },
+                AuxChannel::Opacity => Encoding { opacity: spec, ..Default::default() },
+            }
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                AuxChannel::Color => "color",
+                AuxChannel::Size => "size",
+                AuxChannel::Shape => "shape",
+                AuxChannel::StrokeDash => "stroke_dash",
+                AuxChannel::Opacity => "opacity",
+            }
+        }
+
+        /// The field of the fixtures: categorical `g`, numeric `v` for size
+        /// and opacity.
+        fn field(self) -> &'static str {
+            match self {
+                AuxChannel::Size | AuxChannel::Opacity => "v",
+                _ => "g",
+            }
+        }
+
+        fn member(self, binds: bool) -> ChartSpec {
+            aux_member(self.mark(), if binds { self.bound(self.field()) } else { Encoding::default() })
+        }
+    }
+
+    fn layer_exclusions(warnings: &[RenderWarning]) -> Vec<&RenderWarning> {
+        warnings.iter().filter(|w| matches!(w, RenderWarning::LayerScaleExcluded { .. })).collect()
+    }
+
+    /// Every mark node of every panel, as debug text in sorted order: the
+    /// marks a scene draws, independent of which panel draws them.
+    fn mark_nodes(scene: &SceneGraph) -> Vec<String> {
+        let mut nodes: Vec<String> = scene
+            .panels
+            .iter()
+            .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter().map(|node| format!("{node:?}"))))
+            .collect();
+        nodes.sort();
+        nodes
+    }
+
+    /// An overlay draws one legend per auxiliary channel, in its first
+    /// member's legend area, exactly the legend its layers merged into one
+    /// chart draw (entries, title and position): when both members bind the
+    /// channel, and when only one does, in either member order. A member
+    /// that leaves the channel unbound draws its default. Each overlay is
+    /// compared with the merged scene node for node, and the legend titles
+    /// are counted so one legend per member could not pass.
+    #[test]
+    fn an_overlay_draws_one_legend_per_channel_where_its_layers_merged_draw_it() {
+        let batch = aux_batch();
+        for channel in AuxChannel::ALL {
+            for binds in [[true, true], [false, true], [true, false]] {
+                let members = binds.map(|b| channel.member(b));
+                let (overlay, _) = overlay_route(&[(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())]);
+                let (merged, _) = merged_route(&members, &batch);
+                let titles = legend_texts(&overlay).iter().filter(|t| *t == channel.field()).count();
+                assert_eq!(titles, 1, "{channel:?} {binds:?}: {:?}", legend_texts(&overlay));
+                assert_eq!(overlay.legend, merged.legend, "{channel:?} {binds:?}: the merged route's legend");
+                assert_eq!(mark_nodes(&overlay), mark_nodes(&merged), "{channel:?} {binds:?}: the merged route's marks");
+            }
+        }
+    }
+
+    /// Two members binding the same field over different rows draw one
+    /// legend listing every value either draws, as one chart over both
+    /// members' rows lists them: `a, b` and `b, c` give `a, b, c` for color,
+    /// shape and stroke_dash, and size's legend spans both members' values.
+    /// The marks of every member draw through that one scale: opacity, which
+    /// draws no legend, maps each member's values onto the band its union
+    /// spans, as one chart over both members' rows maps them.
+    #[test]
+    fn an_overlay_legend_spans_every_members_values() {
+        let first = aux_batch_of(&[1.0, 2.0, 3.0], &[1.0, 2.0, 4.0], &["a", "b", "a"]);
+        let second = aux_batch_of(&[1.5, 2.5, 3.5], &[8.0, 9.0, 10.0], &["b", "c", "c"]);
+        let both = arrow::compute::concat_batches(&first.schema(), [&first, &second]).unwrap();
+        for channel in AuxChannel::ALL {
+            let member = channel.member(true);
+            let (overlay, _) = overlay_route(&[(member.clone(), first.clone()), (member.clone(), second.clone())]);
+            let (one_chart, _) = overlay_route(&[(member, both.clone())]);
+            assert_eq!(legend_texts(&overlay), legend_texts(&one_chart), "{channel:?}");
+            if !matches!(channel, AuxChannel::Size) {
+                assert_eq!(legend_texts(&overlay), ["g", "a", "b", "c"], "{channel:?}");
+            }
+        }
+        let opacity = aux_member(Mark::Point, Encoding { opacity: binding("v"), ..Default::default() });
+        let (overlay, _) = overlay_route(&[(opacity.clone(), first), (opacity.clone(), second)]);
+        let (one_chart, _) = overlay_route(&[(opacity, both)]);
+        assert!(legend_texts(&overlay).is_empty(), "no opacity legend exists: {:?}", legend_texts(&overlay));
+        assert_eq!(mark_nodes(&overlay), mark_nodes(&one_chart));
+    }
+
+    /// A member whose column reads the other way than the channel's scale
+    /// (categorical beside numeric) stays out of the one scale with one
+    /// `LayerScaleExcluded` naming it, the first member drawing the channel
+    /// decides the kind, and the overlay draws what its layers merged draw,
+    /// in both member orders, for color, size, opacity and stroke_dash. A
+    /// numeric-only channel (size, opacity) cannot be established on
+    /// categories: both routes refuse the first member's column with the
+    /// same error, naming that member.
+    #[test]
+    fn an_overlay_member_whose_column_conflicts_is_excluded_as_a_merged_layer_is() {
+        let batch = aux_batch();
+        let cases = [
+            (AuxChannel::Color, Mark::Point),
+            (AuxChannel::Size, Mark::Point),
+            (AuxChannel::Opacity, Mark::Point),
+            (AuxChannel::StrokeDash, Mark::Line),
+        ];
+        for (channel, mark) in cases {
+            for fields in [["g", "v"], ["v", "g"]] {
+                let members = fields.map(|f| aux_member(mark, channel.bound(f)));
+                let pair = [(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())];
+                if matches!(channel, AuxChannel::Size | AuxChannel::Opacity) && fields[0] == "g" {
+                    let refusal = |route: Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError>| match route {
+                        Err(CompositeRenderError::LeafRender {
+                            index,
+                            source: RenderError::UnsupportedDtype { field, context, .. },
+                            ..
+                        }) => (index, field, context),
+                        other => panic!("{channel:?} {fields:?}: expected an unsupported-dtype refusal, got {:?}", other.map(|_| ())),
+                    };
+                    let overlay = refusal(try_overlay_route(&pair, shared_xy()));
+                    assert_eq!(overlay, (0, "g".to_string(), Some(channel.name())), "{channel:?}");
+                    assert_eq!(overlay, refusal(try_overlay_route(&[(merged_layers(&members), batch.clone())], shared_xy())));
+                    continue;
+                }
+                let (overlay, overlay_warnings) = overlay_route(&pair);
+                let (merged, merged_warnings) = merged_route(&members, &batch);
+                let excluded = layer_exclusions(&overlay_warnings);
+                assert_eq!(
+                    excluded,
+                    [&RenderWarning::LayerScaleExcluded {
+                        layer: 1,
+                        establishing: 0,
+                        channel: channel.name().to_string(),
+                        placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+                    }],
+                    "{channel:?} {fields:?}: {overlay_warnings:?}"
+                );
+                assert_eq!(excluded, layer_exclusions(&merged_warnings), "{channel:?} {fields:?}");
+                assert_eq!(overlay.legend, merged.legend, "{channel:?} {fields:?}");
+                assert_eq!(mark_nodes(&overlay), mark_nodes(&merged), "{channel:?} {fields:?}");
+            }
+        }
+    }
+
+    /// A chart config's color schemes reach the overlay's one color scale as
+    /// they reach the merged chart's: `scheme=` the categorical palette,
+    /// `sequential_scheme=` and `diverging_scheme=` a continuous ramp. The
+    /// overlay draws the merged route's marks and legend, whichever member
+    /// binds the color and in either member order.
+    #[test]
+    fn an_overlay_draws_its_chart_configs_color_schemes_as_the_merged_route_does() {
+        let batch = aux_batch_of(&[1.0, 2.0, 3.0, 4.0], &[-4.0, 2.0, 4.0, 9.0], &["a", "b", "a", "c"]);
+        let config = |color: crate::render::chart_config::ColorConfigSpec| ChartConfig { color: Some(color), ..Default::default() };
+        let cases = [
+            ("g", config(crate::render::chart_config::ColorConfigSpec { scheme: Some("tableau10".into()), ..Default::default() })),
+            ("x", config(crate::render::chart_config::ColorConfigSpec { sequential_scheme: Some("magma".into()), ..Default::default() })),
+            ("v", config(crate::render::chart_config::ColorConfigSpec { diverging_scheme: Some("rdbu".into()), ..Default::default() })),
+        ];
+        for (field, chart_config) in cases {
+            for binds in [[true, true], [false, true], [true, false]] {
+                let members = binds.map(|b| aux_member(Mark::Point, if b { AuxChannel::Color.bound(field) } else { Encoding::default() }));
+                for order in [[0, 1], [1, 0]] {
+                    let pair = [(members[order[0]].clone(), batch.clone()), (members[order[1]].clone(), batch.clone())];
+                    let (overlay, _) = try_overlay_route_configured(&pair, shared_xy(), &chart_config).unwrap();
+                    let merged_members = [members[order[0]].clone(), members[order[1]].clone()];
+                    let merged = merged_layers(&merged_members);
+                    let (merged, _) = try_overlay_route_configured(&[(merged, batch.clone())], shared_xy(), &chart_config).unwrap();
+                    let (plain, _) = try_overlay_route(&pair, shared_xy()).unwrap();
+                    assert_ne!(mark_nodes(&overlay), mark_nodes(&plain), "{field} {binds:?} {order:?}: the scheme must change the marks");
+                    assert_eq!(overlay.legend, merged.legend, "{field} {binds:?} {order:?}");
+                    assert_eq!(mark_fills(&overlay), mark_fills(&merged), "{field} {binds:?} {order:?}");
+                }
+            }
+        }
+    }
+
+    /// The fill of every mark node, sorted: the colors a scene's marks draw,
+    /// independent of which panel or member draws them.
+    fn mark_fills(scene: &SceneGraph) -> Vec<String> {
+        let mut fills: Vec<String> = scene
+            .panels
+            .iter()
+            .flat_map(|panel| panel.marks.iter().flat_map(|batch| batch.nodes.iter()))
+            .filter_map(|node| match node {
+                SceneNode::Circle { style, .. } => style.fill.map(|c| format!("{c:?}")),
+                _ => None,
+            })
+            .collect();
+        fills.sort();
+        fills
+    }
+
+    /// An overlay's exclusion names the layer by its index in the layer list
+    /// the members merged with `+` form, as the merged route names it: a
+    /// layered member whose second layer binds size on a string column is
+    /// layer 1 when that member comes first and layer 2 after an unlayered
+    /// member, establishing on layer 0 either way.
+    #[test]
+    fn an_overlay_exclusion_names_the_layer_the_merged_route_names() {
+        use crate::spec::layer::Layer;
+        let batch = aux_batch();
+        let mut layered = scatter_spec();
+        layered.layers = Some(vec![
+            Layer { mark: Mark::Point, encoding: AuxChannel::Size.bound("v"), ..Default::default() },
+            Layer { mark: Mark::Point, encoding: AuxChannel::Size.bound("g"), ..Default::default() },
+        ]);
+        let flat = aux_member(Mark::Point, AuxChannel::Size.bound("v"));
+        for (members, layer) in [([layered.clone(), flat.clone()], 1), ([flat, layered], 2)] {
+            let pair = [(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())];
+            let (_, overlay_warnings) = overlay_route(&pair);
+            let (_, merged_warnings) = merged_route(&members, &batch);
+            assert_eq!(
+                layer_exclusions(&overlay_warnings),
+                [&RenderWarning::LayerScaleExcluded {
+                    layer,
+                    establishing: 0,
+                    channel: "size".to_string(),
+                    placement: crate::render::ExcludedLayerPlacement::SharedAxis,
+                }],
+                "{overlay_warnings:?}"
+            );
+            assert_eq!(layer_exclusions(&overlay_warnings), layer_exclusions(&merged_warnings));
+        }
+    }
+
+    /// A refusal resolving a grouped channel names the member that set the
+    /// channel up: a later member's malformed color range refuses as that
+    /// member, not as the group's first.
+    #[test]
+    fn an_overlay_scale_refusal_names_the_member_establishing_the_channel() {
+        let batch = aux_batch();
+        let scale: crate::spec::encoding::ScaleSpec =
+            serde_json::from_value(serde_json::json!({"type": "ordinal", "domain": ["a", "b"], "range": ["#cccccc", "#not-a-color"]}))
+                .unwrap();
+        let malformed = Some(EncodingSpec { field: "g".into(), scale: Some(scale), ..Default::default() });
+        let members = [
+            (aux_member(Mark::Point, AuxChannel::Shape.bound("g")), batch.clone()),
+            (aux_member(Mark::Point, AuxChannel::Color.bound_with(malformed)), batch.clone()),
+        ];
+        match try_overlay_route(&members, shared_xy()) {
+            Err(CompositeRenderError::LeafRender { index, source: RenderError::ColorRangeParseFailure { entry }, .. }) => {
+                assert_eq!((index, entry.as_str()), (1, "#not-a-color"));
+            }
+            other => panic!("expected the second member's color range refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The channel an explicit resolve names is left to the members, and
+    /// every other channel is grouped. An ancestor `size` resolve over an
+    /// overlay binding color and shape leaves it one `g` legend, as the
+    /// overlay alone draws. An overlay `color: independent` keeps one color
+    /// legend per member and draws one shape legend. An ancestor
+    /// `legend.color` override over an overlay binding color and size keeps
+    /// one color legend per member and draws one size legend.
+    #[test]
+    fn an_explicit_resolve_leaves_only_the_channel_it_names_to_the_overlay_members() {
+        let batch = aux_batch();
+        let count = |scene: &SceneGraph, title: &str| legend_texts(scene).iter().filter(|t| *t == title).count();
+        let render = |overlay: CompositeResolve, ancestor: Option<CompositeResolve>, member: Encoding| {
+            let holds: Vec<LeafHold> = (0..3)
+                .map(|_| color_hold_with(aux_member(Mark::Point, member.clone()), batch.clone(), ThemeInputs::default()))
+                .collect();
+            let leaves: Vec<CompositeLeafInput<'_>> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+            let mut layered = composite(CompositeLayout::Overlay, (0..2).map(|i| leaf_node_with(holds[i].spec.clone(), i)).collect());
+            if let CompositeNode::Composite { resolve, .. } = &mut layered {
+                *resolve = overlay;
+            }
+            let (tree, n) = match ancestor {
+                Some(ancestor) => {
+                    let mut tree = composite(CompositeLayout::Hconcat, vec![layered, leaf_node_with(holds[2].spec.clone(), 2)]);
+                    if let CompositeNode::Composite { resolve, .. } = &mut tree {
+                        *resolve = ancestor;
+                    }
+                    (tree, 3)
+                }
+                None => (layered, 2),
+            };
+            render_composite_scene(&tree, &leaves[..n], &ThemeInputs::default()).unwrap().0
+        };
+        let color_shape = Encoding { color: binding("g"), shape: binding("g"), ..Default::default() };
+        let alone = render(shared_xy(), None, color_shape.clone());
+        let size_shared = CompositeResolve { size: Some(RM::Shared), ..Default::default() };
+        let under_size = render(shared_xy(), Some(size_shared), color_shape);
+        assert_eq!(count(&alone, "g"), 1);
+        assert_eq!(count(&under_size, "g"), 2, "the overlay's one g legend and the third leaf's: {:?}", legend_texts(&under_size));
+
+        let color_v_shape_g = Encoding { color: binding("v"), shape: binding("g"), ..Default::default() };
+        let independent_color = render(
+            CompositeResolve { color: Some(RM::Independent), ..shared_xy() },
+            None,
+            color_v_shape_g,
+        );
+        assert_eq!((count(&independent_color, "v"), count(&independent_color, "g")), (2, 1), "{:?}", legend_texts(&independent_color));
+
+        let color_g_size_v = Encoding { color: binding("g"), size: binding("v"), ..Default::default() };
+        let mut legend_override = CompositeResolve::default();
+        legend_override.legend.color = Some(RM::Independent);
+        let overridden = render(shared_xy(), Some(legend_override), color_g_size_v);
+        assert_eq!((count(&overridden, "g"), count(&overridden, "v")), (3, 2), "{:?}", legend_texts(&overridden));
+    }
+
+    /// The one legend's title is the establishing member's binding title,
+    /// else its field: a later member's own title does not replace the
+    /// first drawing member's field, and a first drawing member's title is
+    /// the title, as on the merged route.
+    #[test]
+    fn an_overlay_legend_is_titled_by_the_member_establishing_its_channel() {
+        let batch = aux_batch();
+        let titled = |title: &str| Some(EncodingSpec { field: "g".into(), title: Some(title.into()), ..Default::default() });
+        let cases = [
+            ([aux_member(Mark::Point, Encoding::default()), aux_member(Mark::Point, AuxChannel::Color.bound_with(titled("Group")))], "Group"),
+            ([aux_member(Mark::Point, AuxChannel::Color.bound("g")), aux_member(Mark::Point, AuxChannel::Color.bound_with(titled("Other")))], "g"),
+            ([aux_member(Mark::Point, AuxChannel::Color.bound_with(titled("Group"))), aux_member(Mark::Point, AuxChannel::Color.bound("g"))], "Group"),
+        ];
+        for (members, title) in cases {
+            let (overlay, _) = overlay_route(&[(members[0].clone(), batch.clone()), (members[1].clone(), batch.clone())]);
+            let (merged, _) = merged_route(&members, &batch);
+            assert_eq!(legend_texts(&overlay).first().map(String::as_str), Some(title));
+            assert_eq!(overlay.legend, merged.legend, "{title}");
+        }
+    }
+
+    /// The one-legend rule holds on an overlay whose members keep their own
+    /// y axes too, and an overlay whose composition names an auxiliary scale
+    /// or legend in its `resolve` keeps that meaning: an explicit per-member
+    /// color resolve draws each member's own legend.
+    #[test]
+    fn an_overlay_keeps_one_legend_under_an_independent_y_and_yields_to_an_explicit_aux_resolve() {
+        let batch = aux_batch();
+        let member = || (AuxChannel::Color.member(true), batch.clone());
+        let titles = |scene: &SceneGraph| legend_texts(scene).iter().filter(|t| *t == "g").count();
+        let (independent_y, _) =
+            overlay_route_with(&[member(), member()], CompositeResolve { x: RM::Shared, y: RM::Independent, ..Default::default() });
+        assert_eq!(titles(&independent_y), 1);
+        let (per_member, _) = overlay_route_with(
+            &[member(), member()],
+            CompositeResolve { x: RM::Shared, y: RM::Shared, color: Some(RM::Independent), ..Default::default() },
+        );
+        assert_eq!(titles(&per_member), 2, "an explicit color resolve keeps each member's legend");
+    }
+
+    /// Composites that are not one overlay group draw each leaf's own legend:
+    /// an hconcat or vconcat of two colored leaves draws two, as before.
+    #[test]
+    fn a_concat_of_colored_leaves_keeps_each_leafs_legend() {
+        let batch = aux_batch();
+        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat] {
+            let holds = [0, 1].map(|_| color_hold_with(AuxChannel::Color.member(true), batch.clone(), ThemeInputs::default()));
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let tree = composite(layout, vec![leaf_node_with(holds[0].spec.clone(), 0), leaf_node_with(holds[1].spec.clone(), 1)]);
+            let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            assert_eq!(legend_texts(&scene).iter().filter(|t| *t == "g").count(), 2, "{layout:?}");
+        }
     }
 }

@@ -377,8 +377,8 @@ impl OpacityChannel {
         }
     }
 
-    /// The channel name carried in `UnsupportedDtype`'s `context`.
-    fn context(self) -> &'static str {
+    /// The channel's wire name, carried in `UnsupportedDtype`'s `context`.
+    pub(super) fn context(self) -> &'static str {
         match self {
             OpacityChannel::Opacity => "opacity",
             OpacityChannel::Fill => "fill_opacity",

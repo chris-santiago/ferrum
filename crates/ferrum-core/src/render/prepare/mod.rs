@@ -23,7 +23,8 @@ use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 use crate::transform::swarm::SwarmSpec;
 
 use super::scale_resolve::{apply_sort_to_domain, SortContext};
-use super::scale_resolve::ResolvedScales;
+use super::scale_resolve::{OverlayLegends, ResolvedScales};
+use std::borrow::Cow;
 use super::{RenderError, RenderWarning};
 
 mod extent;
@@ -1404,28 +1405,57 @@ pub fn prepare_render_inputs(
     //
     // Every legend reads its binding off the rendering encoding its scale was
     // built from (`LegendBindings`).
-    let legend_bindings = legend::LegendBindings::new(spec, rendering_encoding);
-    legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, chart_config)?;
-    // The colorbar shows the scale the marks are drawn from, so it is built
-    // from the color scale with `configure_color(domain=, range=)` applied,
-    // which the pipeline applies to `provisional_scales` only after this.
-    let colorbar_color =
-        crate::render::config_apply::configured_color_scale(provisional_scales.color.as_ref(), chart_config)?;
+    //
+    // A leaf of an overlay group that resolves its auxiliary scales as one
+    // chart builds legends as a member of it: the first member builds one
+    // legend set, read as a layered chart reads its legends, from the
+    // group's bindings (plus its own for the channels the group leaves to
+    // its members) over every member's layers; a later member builds only
+    // its own legends of the channels left to the members, against its own
+    // scales of them.
+    let member_scales;
+    let legend_source: Option<(Cow<'_, crate::spec::encoding::Encoding>, &[LayerPrepared], &ResolvedScales)> =
+        match leaf_scales.and_then(|c| c.overlay_legends(rendering_encoding)) {
+            None => Some((Cow::Borrowed(rendering_encoding), layers.as_slice(), &provisional_scales)),
+            Some(OverlayLegends::Composed { encoding, layers: group_layers }) => {
+                Some((Cow::Owned(encoding), group_layers, &provisional_scales))
+            }
+            Some(OverlayLegends::LeftToMembers { encoding, channels }) => {
+                let mut scales = provisional_scales.clone();
+                channels.members_only_scales(&mut scales);
+                member_scales = scales;
+                Some((Cow::Owned(encoding), layers.as_slice(), &member_scales))
+            }
+            Some(OverlayLegends::None) => None,
+        };
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
         legend_title,
         legend_overrides,
         aux_legends,
-    } = legend::build_color_legend(
-        &legend_bindings,
-        &transformed,
-        &provisional_scales,
-        colorbar_color.as_ref(),
-        &layers,
-        leaf_scales,
-        &mut scale_warnings,
-    );
+    } = match legend_source {
+        Some((legend_encoding, legend_layers, legend_scales)) => {
+            let legend_bindings = legend::LegendBindings::new(spec, &legend_encoding);
+            legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, chart_config)?;
+            // The colorbar shows the scale the marks are drawn from, so it is
+            // built from the color scale with `configure_color(domain=,
+            // range=)` applied, which the pipeline applies to
+            // `provisional_scales` only after this.
+            let colorbar_color =
+                crate::render::config_apply::configured_color_scale(legend_scales.color.as_ref(), chart_config)?;
+            legend::build_color_legend(
+                &legend_bindings,
+                &transformed,
+                legend_scales,
+                colorbar_color.as_ref(),
+                legend_layers,
+                leaf_scales,
+                &mut scale_warnings,
+            )
+        }
+        None => legend::ColorLegendBundle::none(),
+    };
 
     Ok(PreparedInputs {
         transform_outputs,

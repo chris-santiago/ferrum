@@ -684,7 +684,7 @@ pub fn build_scene(
     }
 
     // Legend
-    build_legend_decorations(layout, spec, prep, theme, chart_config, &mut legend_nodes)?;
+    build_legend_decorations(layout, spec, prep, theme, chart_config, leaf_scales, &mut legend_nodes)?;
 
     // zindex (B5 unit 3): coarse below/above-marks ordering for the legend,
     // mirroring the axis mechanism. Per-channel `Legend(zindex=...)` wins over
@@ -2333,12 +2333,19 @@ fn build_title(
 /// composite figure-legend band ([`super::composite_render`]), so both build the
 /// legend's color scale through one code path (design §7 facet parity: the
 /// figure legend reuses the same primitives, not a parallel implementation).
+/// A leaf of an overlay group that resolves color for all its members
+/// ([`LeafScaleContext::overlay_groups_channel`]) draws its legend against
+/// the group's color scale, the one every member's marks draw through.
 pub(crate) fn resolve_legend_color_scale(
     spec: &ChartSpec,
     prep: &PreparedInputs,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
+    leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<Option<scale_resolve::ColorScale>, RenderError> {
+    if let Some(group) = leaf_scales.filter(|c| c.overlay_groups_channel("color")).and_then(LeafScaleContext::overlay_group) {
+        return super::config_apply::configured_color_scale(group.scales_for(theme).color(), chart_config);
+    }
     let mut rendering_spec_for_legend = ChartSpec {
         encoding: prep.rendering_encoding().clone(),
         ..spec.clone()
@@ -2369,6 +2376,7 @@ fn build_legend_decorations(
     prep: &PreparedInputs,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
+    leaf_scales: Option<&LeafScaleContext>,
     out: &mut Vec<SceneNode>,
 ) -> Result<(), RenderError> {
     // Nothing to draw when neither a color legend nor any size/shape block is
@@ -2376,7 +2384,7 @@ fn build_legend_decorations(
     if layout.legend.is_none() && layout.aux_legends.is_empty() {
         return Ok(());
     }
-    let color_scale = resolve_legend_color_scale(spec, prep, theme, chart_config)?;
+    let color_scale = resolve_legend_color_scale(spec, prep, theme, chart_config, leaf_scales)?;
     if let Some(legend) = &layout.legend {
         out.extend(marks::legend::build_legend(
             legend,
